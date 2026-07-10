@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // CFO (Grace) P&L visual — SMALL MULTIPLES: one mini line-chart per metric, each with its OWN
 // y-scale, so movement is visible even though Revenue dwarfs everything else. 11 metrics grouped into
@@ -68,15 +68,19 @@ const quarterOf = (m: string) => Math.floor((Number(m.slice(5, 7)) - 1) / 3) + 1
 const quarterKey = (m: string) => `${yearOf(m)}-Q${quarterOf(m)}`;
 const rangeSpan = (rows: PnlRow[]) => (rows.length ? `${monthLabel(rows[0].month)} – ${monthLabel(rows[rows.length - 1].month)}` : "");
 
-type Range = { type: "all" | "thisYear" | "lastYear" } | { type: "quarter"; key: string };
+type Range = { type: "all" | "thisYear" | "lastYear" | "last6" } | { type: "quarter"; key: string };
+type DefaultRange = "all" | "thisYear" | "lastYear" | "last6";
 
-export function CfoFinancials({ endpoint = "/api/director/cfo/pnl" }: { endpoint?: string } = {}) {
+export function CfoFinancials({
+  endpoint = "/api/director/cfo/pnl",
+  defaultRange = "all",
+}: { endpoint?: string; defaultRange?: DefaultRange } = {}) {
   const [rows, setRows] = useState<PnlRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"charts" | "table">("charts");
   const [hover, setHover] = useState<number | null>(null);
   const [pinned, setPinned] = useState<number | null>(null);
-  const [range, setRange] = useState<Range>({ type: "all" });
+  const [range, setRange] = useState<Range>({ type: defaultRange });
   const active = hover ?? pinned; // hover scans; a click pins so the readout stays
 
   useEffect(() => {
@@ -101,8 +105,22 @@ export function CfoFinancials({ endpoint = "/api/director/cfo/pnl" }: { endpoint
     if (range.type === "quarter") return rows.filter((r) => quarterKey(r.month) === range.key);
     if (range.type === "thisYear") return rows.filter((r) => yearOf(r.month) === curYear);
     if (range.type === "lastYear") return rows.filter((r) => yearOf(r.month) === curYear - 1);
+    if (range.type === "last6") return rows.slice(-6);
     return rows;
   }, [rows, range, curYear]);
+
+  // Smart default: when the caller asks for "this year" but the current year has
+  // fewer than 6 closed months, fall back to the trailing-6-month view (YTD is too
+  // thin early in a year). Runs once, on first data load; never fights a manual pick.
+  const didInitDefault = useRef(false);
+  useEffect(() => {
+    if (!rows || rows.length === 0 || didInitDefault.current) return;
+    didInitDefault.current = true;
+    if (defaultRange === "thisYear") {
+      const cy = Math.max(...rows.map((r) => yearOf(r.month)));
+      if (rows.filter((r) => yearOf(r.month) === cy).length < 6) setRange({ type: "last6" });
+    }
+  }, [rows, defaultRange]);
 
   useEffect(() => { setHover(null); setPinned(null); }, [range]);
 
@@ -124,6 +142,7 @@ export function CfoFinancials({ endpoint = "/api/director/cfo/pnl" }: { endpoint
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="flex overflow-hidden rounded-md border border-zinc-200 text-[11px] dark:border-zinc-800">
           <button onClick={() => setRange({ type: "all" })} className={btn(range.type === "all")}>{rows.length} mo</button>
+          <button onClick={() => setRange({ type: "last6" })} className={btn(range.type === "last6")}>Last 6 mo</button>
           <button onClick={() => setRange({ type: "thisYear" })} className={btn(range.type === "thisYear")}>This year</button>
           <button onClick={() => setRange({ type: "lastYear" })} className={btn(range.type === "lastYear")}>Last year</button>
         </div>

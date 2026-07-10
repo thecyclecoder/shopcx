@@ -2,9 +2,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 // ─── Investor update: the plain-language performance story ───────────────────
 // Turns the qb_pnl_snapshots numbers into a narrative a non-financial reader
-// understands: what's working, what needs help, and what we're doing about it.
-// Consumed by the monthly email (renderInvestorEmailHtml) + can back an in-app
-// summary. See docs/brain/lifecycles/investors-area.md.
+// understands: last month at a glance (each metric vs this year's average + high),
+// what's working, what needs help, and what we're doing about it. Everything is
+// framed on the PRIMARY WINDOW — the current calendar year if it has ≥6 closed
+// months, otherwise the trailing 6 months (early in a year YTD is too thin).
+// Consumed by the monthly email (renderInvestorEmailHtml) + SMS. See
+// docs/brain/lifecycles/investors-area.md.
 
 interface Snap {
   month: string;
@@ -17,16 +20,19 @@ interface Snap {
   fixedOpex: number | null;
 }
 
+export interface FocalLine {
+  label: string;
+  sentence: string; // "came in at $46k last month, below the $80k monthly average this year, …"
+}
+
 export interface InvestorPerformance {
-  periodLabel: string; // "the 12 months ending June 2026"
+  periodLabel: string; // "2026 so far (through June)" | "the 6 months ending June 2026"
   latestMonthLabel: string; // "June 2026"
-  ttmRevenue: number;
-  revenueYoYPct: number | null; // trailing-12 vs prior-12
-  ttmProfit: number; // economic profit (adjusted net income), TTM
-  profitDirection: "up" | "down" | "flat" | null;
-  adEfficiencyNow: number | null; // sales generated per $1 of ad spend, TTM
-  adEfficiencyPrior: number | null;
-  refundChargebackPct: number | null; // refunds+chargebacks as % of sales, TTM
+  primaryLabel: string; // "so far this year" | "over the last 6 months"
+  comparisonLabel: string; // "the same period a year earlier" | "the prior 6 months"
+  primaryRevenue: number; // sales over the primary window
+  primaryYoYPct: number | null; // vs the comparable prior window
+  focal: FocalLine[]; // the latest closed month, each metric contextualized
   working: string[];
   needsHelp: string[];
   building: string[];
@@ -34,6 +40,8 @@ export interface InvestorPerformance {
 
 const MONTHS = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const monthName = (m: string) => `${MONTHS[Number(m.slice(5, 7))]} ${m.slice(0, 4)}`;
+const yearOf = (m: string) => Number(m.slice(0, 4));
+const monthNum = (m: string) => Number(m.slice(5, 7));
 const money = (v: number) => {
   const a = Math.abs(Math.round(v));
   const s = v < 0 ? "-" : "";
@@ -43,6 +51,7 @@ const money = (v: number) => {
 };
 const pct = (v: number) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`;
 const sum = (xs: (number | null)[]) => xs.reduce((a: number, x) => a + (x ?? 0), 0);
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /**
  * What we're actively building to move the numbers. Kept as an editable list so
@@ -81,82 +90,129 @@ export async function buildInvestorPerformance(
   }));
 
   const last = snaps[snaps.length - 1];
-  const ttm = snaps.slice(-12);
-  const prior = snaps.length >= 24 ? snaps.slice(-24, -12) : null;
+  const curYear = Math.max(...snaps.map((s) => yearOf(s.month)));
+  const ytd = snaps.filter((s) => yearOf(s.month) === curYear);
 
-  const ttmRevenue = sum(ttm.map((s) => s.revenue));
-  const priorRevenue = prior ? sum(prior.map((s) => s.revenue)) : null;
-  const revenueYoYPct = priorRevenue && priorRevenue !== 0 ? (ttmRevenue - priorRevenue) / priorRevenue : null;
+  // Primary window: this year if it has ≥6 closed months, else the trailing 6.
+  let primary: Snap[];
+  let prior: Snap[];
+  let primaryLabel: string;
+  let comparisonLabel: string;
+  let periodLabel: string;
+  if (ytd.length >= 6) {
+    primary = ytd;
+    const maxMo = Math.max(...ytd.map((s) => monthNum(s.month)));
+    prior = snaps.filter((s) => yearOf(s.month) === curYear - 1 && monthNum(s.month) <= maxMo);
+    primaryLabel = "so far this year";
+    comparisonLabel = "the same period a year earlier";
+    periodLabel = `${curYear} so far (through ${MONTHS[maxMo]})`;
+  } else {
+    primary = snaps.slice(-6);
+    prior = snaps.slice(-12, -6);
+    primaryLabel = "over the last 6 months";
+    comparisonLabel = "the prior 6 months";
+    periodLabel = `the 6 months ending ${monthName(last.month)}`;
+  }
+  const priorHas = prior.length > 0;
+  const multiYear = new Set(primary.map((s) => yearOf(s.month))).size > 1;
+  const monthPhrase = (m: string) => MONTHS[monthNum(m)] + (multiYear ? ` ${yearOf(m)}` : "");
 
-  const ttmProfit = sum(ttm.map((s) => s.adjProfit));
-  const priorProfit = prior ? sum(prior.map((s) => s.adjProfit)) : null;
-  const profitDirection: InvestorPerformance["profitDirection"] =
-    priorProfit === null ? null : ttmProfit > priorProfit * 1.03 ? "up" : ttmProfit < priorProfit * 0.97 ? "down" : "flat";
+  const primaryRevenue = sum(primary.map((s) => s.revenue));
+  const priorRevenue = priorHas ? sum(prior.map((s) => s.revenue)) : null;
+  const primaryYoYPct = priorRevenue && priorRevenue !== 0 ? (primaryRevenue - priorRevenue) / priorRevenue : null;
 
-  const ttmAds = sum(ttm.map((s) => s.ads));
-  const priorAds = prior ? sum(prior.map((s) => s.ads)) : null;
-  const adEfficiencyNow = ttmAds > 0 ? ttmRevenue / ttmAds : null;
-  const adEfficiencyPrior = prior && priorAds && priorAds > 0 && priorRevenue ? priorRevenue / priorAds : null;
+  const primProfit = sum(primary.map((s) => s.adjProfit));
+  const priorProfit = priorHas ? sum(prior.map((s) => s.adjProfit)) : null;
+  const profitDir = priorProfit === null ? null : primProfit > priorProfit * 1.03 ? "up" : primProfit < priorProfit * 0.97 ? "down" : "flat";
 
-  const ttmRC = sum(ttm.map((s) => (s.refunds ?? 0) + (s.chargebacks ?? 0)));
-  const refundChargebackPct = ttmRevenue > 0 ? ttmRC / ttmRevenue : null;
-  const priorRC = prior ? sum(prior.map((s) => (s.refunds ?? 0) + (s.chargebacks ?? 0))) : null;
-  const priorRCPct = prior && priorRevenue ? (priorRC ?? 0) / priorRevenue : null;
+  const primAds = sum(primary.map((s) => s.ads));
+  const priorAds = priorHas ? sum(prior.map((s) => s.ads)) : null;
+  const adEffNow = primAds > 0 ? primaryRevenue / primAds : null;
+  const adEffPrior = priorAds && priorAds > 0 && priorRevenue ? priorRevenue / priorAds : null;
 
-  const ttmFixed = sum(ttm.map((s) => s.fixedOpex));
-  const priorFixed = prior ? sum(prior.map((s) => s.fixedOpex)) : null;
+  const primRC = sum(primary.map((s) => (s.refunds ?? 0) + (s.chargebacks ?? 0)));
+  const rcPct = primaryRevenue > 0 ? primRC / primaryRevenue : null;
+  const priorRC = priorHas ? sum(prior.map((s) => (s.refunds ?? 0) + (s.chargebacks ?? 0))) : null;
+  const priorRCPct = priorHas && priorRevenue ? (priorRC ?? 0) / priorRevenue : null;
 
-  // ── Turn the deltas into plain-language bullets ──
+  const primFixed = sum(primary.map((s) => s.fixedOpex));
+  const priorFixed = priorHas ? sum(prior.map((s) => s.fixedOpex)) : null;
+
+  // ── Last month at a glance: each metric vs this window's average + high ──
+  const focalMetrics: { label: string; get: (s: Snap) => number | null }[] = [
+    { label: "Sales", get: (s) => s.revenue },
+    { label: "Underlying profit", get: (s) => s.adjProfit },
+    { label: "Digital ad spend", get: (s) => s.ads },
+    { label: "Fixed running costs", get: (s) => s.fixedOpex },
+    { label: "Refunds & chargebacks", get: (s) => (s.refunds ?? 0) + (s.chargebacks ?? 0) },
+  ];
+  const focal: FocalLine[] = [];
+  for (const fm of focalMetrics) {
+    const vals = primary.map((s) => ({ m: s.month, v: fm.get(s) })).filter((x): x is { m: string; v: number } => x.v !== null && x.v !== undefined);
+    if (vals.length === 0) continue;
+    const latest = vals[vals.length - 1];
+    const avg = vals.reduce((a, x) => a + x.v, 0) / vals.length;
+    const high = vals.reduce((a, x) => (x.v > a.v ? x : a), vals[0]);
+    const vsAvg = latest.v < avg * 0.97 ? "below" : latest.v > avg * 1.03 ? "above" : "in line with";
+    const isHigh = high.m === latest.m;
+    const tail = isHigh
+      ? ` — a fresh high ${primaryLabel}`
+      : `, and off the ${money(high.v)} high in ${monthPhrase(high.m)}`;
+    focal.push({
+      label: fm.label,
+      sentence: `came in at ${money(latest.v)} last month, ${vsAvg} the ${money(avg)} monthly average ${primaryLabel}${tail}.`,
+    });
+  }
+
+  // ── What's working / needs help, over the primary window ──
   const working: string[] = [];
   const needsHelp: string[] = [];
 
-  if (revenueYoYPct !== null) {
-    (revenueYoYPct >= 0 ? working : needsHelp).push(
-      revenueYoYPct >= 0
-        ? `Sales over the last year came to ${money(ttmRevenue)} — ${pct(revenueYoYPct)} versus the year before.`
-        : `Sales over the last year were ${money(ttmRevenue)}, down ${Math.round(Math.abs(revenueYoYPct) * 100)}% from the year before — the top line needs to re-accelerate.`,
+  if (primaryYoYPct !== null) {
+    (primaryYoYPct >= 0 ? working : needsHelp).push(
+      primaryYoYPct >= 0
+        ? `Sales ${primaryLabel} came to ${money(primaryRevenue)} — up ${Math.round(primaryYoYPct * 100)}% vs ${comparisonLabel}.`
+        : `Sales ${primaryLabel} were ${money(primaryRevenue)}, down ${Math.round(Math.abs(primaryYoYPct) * 100)}% vs ${comparisonLabel} — the top line needs to re-accelerate.`,
     );
   }
-  if (adEfficiencyNow !== null && adEfficiencyPrior !== null) {
-    const better = adEfficiencyNow >= adEfficiencyPrior;
+  if (adEffNow !== null && adEffPrior !== null) {
+    const better = adEffNow >= adEffPrior;
     (better ? working : needsHelp).push(
-      `Every $1 spent on ads brought in about $${adEfficiencyNow.toFixed(2)} in sales${better ? `, up from $${adEfficiencyPrior.toFixed(2)} a year ago — our advertising is working harder.` : `, down from $${adEfficiencyPrior.toFixed(2)} a year ago — ad dollars are stretching less far.`}`,
+      `Every $1 spent on ads brought in about $${adEffNow.toFixed(2)} in sales${better ? `, up from $${adEffPrior.toFixed(2)} — our advertising is working harder.` : `, down from $${adEffPrior.toFixed(2)} — ad dollars are stretching less far.`}`,
     );
   }
-  if (profitDirection) {
-    (profitDirection !== "down" ? working : needsHelp).push(
-      profitDirection === "down"
-        ? `Underlying profit for the year was ${money(ttmProfit)}, softer than the prior year — we're watching the cost lines closely.`
-        : `Underlying profit for the year was ${money(ttmProfit)}, holding ${profitDirection === "up" ? "and improving" : "steady"}.`,
+  if (profitDir) {
+    (profitDir !== "down" ? working : needsHelp).push(
+      profitDir === "down"
+        ? `Underlying profit ${primaryLabel} was ${money(primProfit)}, softer than ${comparisonLabel} — we're watching the cost lines closely.`
+        : `Underlying profit ${primaryLabel} was ${money(primProfit)}, holding ${profitDir === "up" ? "and improving" : "steady"}.`,
     );
   }
-  if (refundChargebackPct !== null) {
-    const improving = priorRCPct !== null && refundChargebackPct < priorRCPct;
-    (improving || refundChargebackPct < 0.03 ? working : needsHelp).push(
-      `Refunds and chargebacks ran at ${(refundChargebackPct * 100).toFixed(1)}% of sales${priorRCPct !== null ? ` (${improving ? "down" : "up"} from ${(priorRCPct * 100).toFixed(1)}% a year ago)` : ""} — ${improving || refundChargebackPct < 0.03 ? "kept in check." : "a line we want to bring down."}`,
+  if (rcPct !== null) {
+    const improving = priorRCPct !== null && rcPct < priorRCPct;
+    (improving || rcPct < 0.03 ? working : needsHelp).push(
+      `Refunds and chargebacks ran at ${(rcPct * 100).toFixed(1)}% of sales${priorRCPct !== null ? ` (${improving ? "down" : "up"} from ${(priorRCPct * 100).toFixed(1)}%, ${comparisonLabel})` : ""} — ${improving || rcPct < 0.03 ? "kept in check." : "a line we want to bring down."}`,
     );
   }
-  if (priorFixed !== null && ttmFixed !== 0) {
-    const leaner = ttmFixed <= priorFixed;
+  if (priorFixed !== null && primFixed !== 0) {
+    const leaner = primFixed <= priorFixed;
     (leaner ? working : needsHelp).push(
       leaner
-        ? `The fixed cost of running the business held at ${money(ttmFixed)} for the year — spending stayed disciplined.`
-        : `Fixed running costs rose to ${money(ttmFixed)} for the year, up from ${money(priorFixed)} — worth keeping an eye on.`,
+        ? `The fixed cost of running the business was ${money(primFixed)} ${primaryLabel} — spending stayed disciplined.`
+        : `Fixed running costs were ${money(primFixed)} ${primaryLabel}, up from ${money(priorFixed)} vs ${comparisonLabel} — worth keeping an eye on.`,
     );
   }
-  if (working.length === 0) working.push(`Sales over the last year came to ${money(ttmRevenue)}.`);
+  if (working.length === 0) working.push(`Sales ${primaryLabel} came to ${money(primaryRevenue)}.`);
   if (needsHelp.length === 0) needsHelp.push("Nothing flashing red this month — the focus is on compounding what's already working.");
 
   return {
-    periodLabel: `the 12 months ending ${monthName(last.month)}`,
+    periodLabel,
     latestMonthLabel: monthName(last.month),
-    ttmRevenue,
-    revenueYoYPct,
-    ttmProfit,
-    profitDirection,
-    adEfficiencyNow,
-    adEfficiencyPrior,
-    refundChargebackPct,
+    primaryLabel,
+    comparisonLabel,
+    primaryRevenue,
+    primaryYoYPct,
+    focal,
     working,
     needsHelp,
     building: INVESTOR_BUILDING,
@@ -175,8 +231,17 @@ function bulletList(items: string[], dot: string): string {
     .join("");
 }
 
-/** The monthly investor email. Non-technical, warm, and honest — a picture of
- *  performance with a one-tap secure link to the live charts. */
+function focalList(items: FocalLine[]): string {
+  return items
+    .map(
+      (f) =>
+        `<tr><td style="padding:7px 0;font-size:15px;line-height:1.55;color:#3f3f46;border-bottom:1px solid #f1efe9;"><strong style="color:#18181b;">${esc(f.label)}</strong> ${esc(f.sentence)}</td></tr>`,
+    )
+    .join("");
+}
+
+/** The monthly investor email. Non-technical, warm, and honest — last month in
+ *  focus, then the picture, with a one-tap secure link to the live charts. */
 export function renderInvestorEmailHtml(opts: {
   firstName?: string | null;
   link: string;
@@ -196,15 +261,18 @@ export function renderInvestorEmailHtml(opts: {
     <div style="padding:8px 32px 4px;">
       <h1 style="font-size:24px;line-height:1.25;color:#18181b;margin:16px 0 10px;font-weight:650;">Where Superfoods stands${hi}</h1>
       <p style="font-size:16px;line-height:1.6;color:#3f3f46;margin:0 0 8px;">
-        Here&rsquo;s an honest snapshot for ${esc(perf.periodLabel)}. Over that stretch the business did
-        <strong>${money(perf.ttmRevenue)}</strong> in sales${perf.revenueYoYPct !== null ? `, <strong>${pct(perf.revenueYoYPct)}</strong> versus the year before` : ""}.
+        Here&rsquo;s an honest snapshot. ${esc(cap(perf.primaryLabel))}, the business did
+        <strong>${money(perf.primaryRevenue)}</strong> in sales${perf.primaryYoYPct !== null ? `, <strong>${pct(perf.primaryYoYPct)}</strong> vs ${esc(perf.comparisonLabel)}` : ""}.
         The full, interactive charts are one tap away — no password to remember.
       </p>
     </div>
     <div style="padding:14px 32px 22px;">${btn}</div>
 
     <div style="padding:4px 32px 4px;">
-      <h2 style="font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:#16a34a;margin:18px 0 4px;">What&rsquo;s working</h2>
+      <h2 style="font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:#57565c;margin:8px 0 6px;">${esc(perf.latestMonthLabel)} at a glance</h2>
+      <table style="border-collapse:collapse;width:100%;">${focalList(perf.focal)}</table>
+
+      <h2 style="font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:#16a34a;margin:22px 0 4px;">What&rsquo;s working</h2>
       <table style="border-collapse:collapse;width:100%;">${bulletList(perf.working, "▲")}</table>
 
       <h2 style="font-size:13px;letter-spacing:0.06em;text-transform:uppercase;color:#d97706;margin:22px 0 4px;">What needs help</h2>
@@ -225,8 +293,8 @@ export function renderInvestorEmailHtml(opts: {
   </div>`;
 }
 
-/** A short 160-char-friendly SMS with the same secure link. */
+/** A short SMS with this-year (or last-6-month) sales + the same secure link. */
 export function renderInvestorSms(perf: InvestorPerformance, link: string): string {
-  const yoy = perf.revenueYoYPct !== null ? ` (${pct(perf.revenueYoYPct)} YoY)` : "";
-  return `Superfoods investor update — ${money(perf.ttmRevenue)} in sales this past year${yoy}. See the full charts: ${link}`;
+  const yoy = perf.primaryYoYPct !== null ? ` (${pct(perf.primaryYoYPct)} vs ${perf.comparisonLabel})` : "";
+  return `Superfoods investor update — ${money(perf.primaryRevenue)} in sales ${perf.primaryLabel}${yoy}. See the full charts: ${link}`;
 }
