@@ -3667,14 +3667,14 @@ export async function verifyActionInDB(
       }
 
       if (action.type === "add_one_time_gift") {
-        // The gift line mirrors locally as a one_time_next_renewal item keyed by
-        // the (Shopify or UUID) variant id. Confirm a one-time line for the
-        // variant landed — that's the outcome the customer was promised.
-        if (!action.variant_id) return true;
-        type OT = Line & { one_time_next_renewal?: boolean };
-        return (items as OT[]).some(i =>
-          i.one_time_next_renewal === true &&
-          String(i.variant_id) === String(action.variant_id));
+        // Handler-authoritative: subAddOneTimeGift verifies its own success across
+        // BACKENDS with different storage shapes (internal → a one_time_next_renewal
+        // line in subscriptions.items; Appstle → a standalone $0 gift ORDER, which
+        // leaves subscriptions.items untouched). A single items-based predicate here
+        // false-negatived on the Appstle path and triggered a self-heal RETRY that
+        // double-delivered the gift (ticket 6a8ddfd9). The handler is idempotent and
+        // returns success only on a real add, so trust it — do not re-derive.
+        return true;
       }
 
       if (action.type === "remove_item") {
