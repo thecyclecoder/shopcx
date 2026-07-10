@@ -100,9 +100,44 @@ A future-tense promise ("I'll place your order once you enter your card") is NOT
 - **[[../../.claude/skills/ticket-handle/SKILL]]** — Sol's box-session skill. When the inbound message classifies as CHECKOUT-STUCK (per [[checkout-stuck-intent]]), the skill directs Sol to author a Direction matching `buildAssistedPurchaseFirstTurnDirection` — `chosen_path='journey'`, `plan.journey_slug='add-payment-method'`, the warm lead-in `first_reply`, the never-claim-placed guardrail.
 - **Box worker (`scripts/builder-worker.ts` `runTicketHandleJob`)** — will run `assertSolAssistedPurchaseReplyNeverClaimsPlaced` on Sol's DRAFT reply right after the existing [[sol-move-dead-end-guard]] and [[sol-policy-bait-guard]] pre-ship gates, before the customer-facing send fires. A `{ok:false}` result BLOCKS the send and escalates the ticket to June — same handling as the bait-guard and move-dead-end guards. (Wire-in lands with Phase 4 alongside the playbook re-enable.)
 
+## Phase 4 — session-chosen-only exclusion + terminal-step interpreter
+
+The two Phase-4 handoff playbook slugs are exported as an exclusion Set + predicate the [[playbook-executor]] signal matcher consults BEFORE returning a match:
+
+```ts
+export const ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS: ReadonlySet<string>;
+export function isSessionChosenOnlyPlaybook(slug: string | null | undefined): boolean;
+```
+
+`isSessionChosenOnlyPlaybook` returns `true` only for the two assisted-purchase slugs. Both [`matchPlaybookScored`](../../../src/lib/playbook-executor.ts) and `matchPlaybook` call this predicate on every row BEFORE scoring / trigger-checking, so a widened `trigger_intents` on the playbook row can't leak back into the top-score winner. The playbooks are thus reachable ONLY via Sol's session-chosen selection — `chosen_path='playbook'` + `plan.playbook_slug='assisted-order-purchase' | 'assisted-subscription-purchase'` on the live Direction (M4 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]]).
+
+The Phase-4 migration `supabase/migrations/20261010130000_reenable_assisted_purchase_playbooks.sql` idempotently flips `is_active=true` on both playbooks (compare-and-set on `is_active=false` per learning #9) — safe to re-run.
+
+### `interpretAssistedCreateResult` — the execute-then-confirm invariant
+
+The `handleAssistedCreate` step (the playbook's terminal `create_order` / `create_subscription` step) calls this pure interpreter to map the placement handler's `{success, summary, error}` result into a `PlaybookExecResult`:
+
+```ts
+export function interpretAssistedCreateResult(input: {
+  actionType: "create_order" | "create_subscription";
+  result: { success: boolean; summary?: string | null; error?: string | null };
+  personaName?: string | null;
+}): {
+  action: "complete" | "respond";
+  response: string;
+  context: Record<string, unknown>;
+  systemNote: string;
+  backedActions?: Array<"create_order" | "create_subscription">;
+};
+```
+
+- **On success** — `action:'complete'`, response is the truthful placement claim ("Your order is placed and on its way." / "Your subscription is set up."), `backedActions:[actionType]` surfaces the executed action to the [[sol-outcome-claim-guard]] so the message-is-last check doesn't false-positive.
+- **On failure** — `action:'respond'`, response is the honest "ran into an issue" reply, `backedActions` is UNSET (the truthful signal for downstream guards that no action was executed), context carries the error string. The playbook does NOT complete — the customer sees no placement claim.
+
+Exactly-one-order-at-the-right-price: the seed migration (`supabase/migrations/20260707150000_seed_assisted_purchase_playbook.sql`) inserts exactly ONE `create_order` / `create_subscription` step per playbook; the interpreter emits `backedActions:[actionType]` (a one-element array) on success; the executor advances to `action:'complete'` (terminal). No path emits two placement dispatches per playbook execution.
+
 ## Related
 
 - [[checkout-stuck-intent]] — the Phase-1 predicate that recognizes the intent.
 - [[model-picker]] · [[inflection-detector]] — Phase 2 (Sonnet + Sol re-session).
-- Phase 4 re-enables the `assisted-order-purchase` (one-time) + `assisted-subscription-purchase` (S&S) playbooks and wires them behind Sol's session-chosen selection.
 - Phase 5 — analytics slice + [[../lifecycles/storefront-checkout]] update + concierge-flow recipe.

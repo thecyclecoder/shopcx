@@ -21,9 +21,11 @@ import {
   ASSISTED_PURCHASE_JOURNEY_SLUG,
   ASSISTED_PURCHASE_LEAD_IN,
   ASSISTED_PURCHASE_PLAYBOOK_SLUGS,
+  ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS,
   ASSISTED_PURCHASE_STAGES,
   assertSolAssistedPurchaseReplyNeverClaimsPlaced,
   buildAssistedPurchaseFirstTurnDirection,
+  isSessionChosenOnlyPlaybook,
 } from "./assisted-purchase-direction";
 
 // ── Bullet 1: blueprint shape ──────────────────────────────────────────────
@@ -220,4 +222,45 @@ test("guard: an empty reply on any stage → PASS (nothing to block)", () => {
     const r = assertSolAssistedPurchaseReplyNeverClaimsPlaced({ stage, firstReply: "" });
     assert.equal(r.ok, true, `empty reply must not trip the guard on stage='${stage}'`);
   }
+});
+
+// ── Phase 4: session-chosen-only exclusion ────────────────────────────────
+
+test("Phase 4: ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS contains exactly the two assisted-purchase slugs", () => {
+  assert.equal(ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS.size, 2);
+  assert.equal(ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS.has("assisted-order-purchase"), true);
+  assert.equal(ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS.has("assisted-subscription-purchase"), true);
+});
+
+test("Phase 4: isSessionChosenOnlyPlaybook returns true for the two assisted-purchase slugs", () => {
+  assert.equal(isSessionChosenOnlyPlaybook("assisted-order-purchase"), true);
+  assert.equal(isSessionChosenOnlyPlaybook("assisted-subscription-purchase"), true);
+});
+
+test("Phase 4: isSessionChosenOnlyPlaybook returns false for every other slug", () => {
+  for (const slug of ["refund", "cancel-with-save", "dunning-recovery", "delivery-followup", ""]) {
+    assert.equal(
+      isSessionChosenOnlyPlaybook(slug),
+      false,
+      `slug='${slug}' must NOT be session-chosen-only (only the two assisted-purchase slugs are)`,
+    );
+  }
+});
+
+test("Phase 4: isSessionChosenOnlyPlaybook returns false for null/undefined", () => {
+  assert.equal(isSessionChosenOnlyPlaybook(null), false);
+  assert.equal(isSessionChosenOnlyPlaybook(undefined), false);
+});
+
+test("Phase 4: the two session-chosen-only slugs match ASSISTED_PURCHASE_PLAYBOOK_SLUGS — the Phase-3 handoff targets", () => {
+  assert.equal(
+    isSessionChosenOnlyPlaybook(ASSISTED_PURCHASE_PLAYBOOK_SLUGS.oneTime),
+    true,
+    "the one-time playbook slug must be session-chosen-only",
+  );
+  assert.equal(
+    isSessionChosenOnlyPlaybook(ASSISTED_PURCHASE_PLAYBOOK_SLUGS.subscribeAndSave),
+    true,
+    "the Subscribe & Save playbook slug must be session-chosen-only",
+  );
 });

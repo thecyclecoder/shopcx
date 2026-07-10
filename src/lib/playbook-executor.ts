@@ -1325,6 +1325,68 @@ async function handleCheckVaultedPm(
 // `ctx.assisted_purchase_params` (Phase 3 wiring populates this from
 // the customer's intent + product picks); the step's `config` supplies
 // defaults (e.g. vendor='internal').
+
+/**
+ * Pure result→response mapper for the assisted-purchase terminal step. Extracted
+ * from [[handleAssistedCreate]] so Phase 4 of
+ * [[../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]
+ * can pin the EXECUTE-THEN-CONFIRM honor invariant directly in tests: the
+ * customer is only told the order is placed AFTER the placement handler returned
+ * `success:true`. On failure, the customer never sees a placement claim — the
+ * ticket returns `action:'respond'` with an honest "ran into an issue" reply and
+ * NO `backedActions` field.
+ *
+ * The truthful-confirmation `backedActions` array is populated with the
+ * `actionType` only on success — that surfaces to the claim-guard so a truthful
+ * "your order is placed" reply doesn't false-positive as an unverified claim.
+ * A failure leaves `backedActions` unset (undefined), which is the truthful
+ * signal for downstream guards ("we did not place the order").
+ */
+export interface AssistedCreateHandlerResult {
+  success: boolean;
+  summary?: string | null;
+  error?: string | null;
+}
+
+export interface AssistedCreateInterpretation {
+  action: "complete" | "respond";
+  response: string;
+  context: Record<string, unknown>;
+  systemNote: string;
+  backedActions?: Array<"create_order" | "create_subscription">;
+}
+
+export function interpretAssistedCreateResult(input: {
+  actionType: "create_order" | "create_subscription";
+  result: AssistedCreateHandlerResult;
+  personaName?: string | null;
+}): AssistedCreateInterpretation {
+  const { actionType, result } = input;
+  if (result.success) {
+    return {
+      action: "complete",
+      response:
+        actionType === "create_order"
+          ? "Your order is placed and on its way. You'll get a confirmation shortly."
+          : "Your subscription is set up. You'll get a confirmation shortly.",
+      context: {
+        assisted_purchase_completed: true,
+        assisted_purchase_result_summary: result.summary ?? null,
+      },
+      systemNote: `[Playbook] ${actionType} — dispatched via directActionHandlers. ${result.summary || ""}`.trim(),
+      // Post-completion truthful confirmation — surface the executed action
+      // to the claim-guard so the response isn't false-positive escalated.
+      backedActions: [actionType],
+    };
+  }
+  const okName = input.personaName ? input.personaName : "our team";
+  return {
+    action: "respond",
+    response: `${okName} ran into an issue finishing this. I've flagged it for a quick review.`,
+    context: { assisted_purchase_last_error: result.error ?? null },
+    systemNote: `[Playbook] ${actionType} — handler failed: ${result.error || "unknown error"}`,
+  };
+}
 async function handleAssistedCreate(
   admin: Admin, wsId: string, tid: string, customer: CustomerData,
   ctx: Record<string, unknown>, step: PlaybookStep,
@@ -1361,30 +1423,25 @@ async function handleAssistedCreate(
     channel: (ctx._channel as string) || "email", sandbox: false,
   };
   const result = await handler(actionCtx, { type: actionType, ...merged });
-  const okName = pers?.name ? pers.name : "our team";
-  if (result.success) {
-    return {
-      action: "complete",
-      response:
-        actionType === "create_order"
-          ? "Your order is placed and on its way. You'll get a confirmation shortly."
-          : "Your subscription is set up. You'll get a confirmation shortly.",
-      context: {
-        assisted_purchase_completed: true,
-        assisted_purchase_result_summary: result.summary,
-      },
-      systemNote: `[Playbook] ${actionType} — dispatched via directActionHandlers. ${result.summary || ""}`.trim(),
-      // Post-completion truthful confirmation — tell the claim-guard
-      // this specific action_type is backed so the response isn't
-      // false-positive escalated.
-      backedActions: [actionType],
-    };
-  }
+  // Phase 4 of [[../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  // The pure interpreter above pins the execute-then-confirm honor invariant in
+  // one place — a placement claim only ships when the handler returned success,
+  // and `backedActions` carries the executed action to the claim-guard.
+  const verdict = interpretAssistedCreateResult({
+    actionType,
+    result: {
+      success: !!result.success,
+      summary: result.summary ?? null,
+      error: result.error ?? null,
+    },
+    personaName: pers?.name ?? null,
+  });
   return {
-    action: "respond",
-    response: `${okName} ran into an issue finishing this. I've flagged it for a quick review.`,
-    context: { assisted_purchase_last_error: result.error || null },
-    systemNote: `[Playbook] ${actionType} — handler failed: ${result.error || "unknown error"}`,
+    action: verdict.action,
+    response: verdict.response,
+    context: verdict.context,
+    systemNote: verdict.systemNote,
+    ...(verdict.backedActions ? { backedActions: verdict.backedActions } : {}),
   };
 }
 
@@ -2561,13 +2618,21 @@ function buildPlaybookSummary(
 export async function matchPlaybook(
   admin: Admin, wsId: string, intent: string, msg: string,
 ): Promise<{ id: string; name: string } | null> {
+  const { isSessionChosenOnlyPlaybook } = await import("@/lib/assisted-purchase-direction");
   const { data: playbooks } = await admin.from("playbooks")
-    .select("id, name, trigger_intents, trigger_patterns")
+    .select("id, name, slug, trigger_intents, trigger_patterns")
     .eq("workspace_id", wsId)
     .eq("is_active", true)
     .order("priority", { ascending: false });
 
   for (const pb of playbooks || []) {
+    // Phase 4 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+    // Assisted-purchase playbooks are session-chosen-only (M4) — the OLD signal matcher over-fired
+    // on `buy` / `reorder` / `create_order` / `subscribe` and started the create-order/create-sub
+    // playbook when Sol hadn't chosen it. The exclusion is at the ACTION POINT (learning #6 —
+    // confirming predicate at the write, not a coarser proxy) so a widened trigger_intents on the
+    // playbook row can't leak back into this matcher.
+    if (isSessionChosenOnlyPlaybook(pb.slug as string | null)) continue;
     // Check intent match
     if ((pb.trigger_intents as string[]).some(ti => intent.toLowerCase().includes(ti.toLowerCase()))) {
       return { id: pb.id, name: pb.name };
@@ -2653,14 +2718,21 @@ export interface PlaybookScoredMatch {
 export async function matchPlaybookScored(
   admin: Admin, wsId: string, intent: string, msg: string,
 ): Promise<PlaybookScoredMatch | null> {
+  const { isSessionChosenOnlyPlaybook } = await import("@/lib/assisted-purchase-direction");
   const { data: playbooks } = await admin.from("playbooks")
-    .select("id, name, trigger_intents, trigger_patterns")
+    .select("id, name, slug, trigger_intents, trigger_patterns")
     .eq("workspace_id", wsId)
     .eq("is_active", true)
     .order("priority", { ascending: false });
 
   let best: PlaybookScoredMatch | null = null;
   for (const pb of playbooks || []) {
+    // Phase 4 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+    // Assisted-purchase playbooks are session-chosen-only (M4) — the OLD scored matcher over-fired
+    // on `buy` / `reorder` / `create_order` / `subscribe` and started the create-order/create-sub
+    // playbook when Sol hadn't chosen it. Skip them BEFORE scoring so a broad trigger_intents on
+    // the playbook row can't leak back into the top-score winner.
+    if (isSessionChosenOnlyPlaybook(pb.slug as string | null)) continue;
     const s = scorePlaybookAgainst(
       { trigger_intents: pb.trigger_intents as string[], trigger_patterns: pb.trigger_patterns as string[] },
       intent, msg,

@@ -85,6 +85,43 @@ export const ASSISTED_PURCHASE_PLAYBOOK_SLUGS = {
   subscribeAndSave: "assisted-subscription-purchase",
 } as const;
 
+/**
+ * The playbook slugs that must ONLY dispatch via Sol's session-chosen selection
+ * (M4 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]]),
+ * NEVER via the old brittle signal matcher (`matchPlaybook` /
+ * `matchPlaybookScored` in [[playbook-executor]]). Phase 4 of
+ * [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+ *
+ * The two assisted-purchase playbooks were originally seeded with broad
+ * `trigger_intents` (`buy`, `reorder`, `create_order`, `subscribe`, …) that
+ * over-fired on any purchase-adjacent language — a customer asking "when can I
+ * reorder?" would inadvertently start the create-order playbook without Sol
+ * choosing it. The signal matcher applies this Set as an exclusion filter so the
+ * two playbooks are only reachable via `chosen_path='playbook'` + a matching
+ * `plan.playbook_slug` on the live Direction, exactly the M4 model the rest of
+ * the CS mechanisms shipped for.
+ *
+ * Kept as an exported `Set` so grep-based verification (`grep
+ * ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS src/`) surfaces every caller
+ * consulting the exclusion — the acceptance token per learning #3.
+ */
+export const ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS: ReadonlySet<string> = new Set([
+  ASSISTED_PURCHASE_PLAYBOOK_SLUGS.oneTime,
+  ASSISTED_PURCHASE_PLAYBOOK_SLUGS.subscribeAndSave,
+]);
+
+/**
+ * Pure predicate the signal matcher consults BEFORE returning a match. Returns
+ * `true` for the assisted-purchase slugs (which must ONLY dispatch via Sol's
+ * session-chosen selection); `false` for every other slug. Case-sensitive by
+ * design — the slug column is a stable normalized identifier per
+ * [[../tables/playbooks]].
+ */
+export function isSessionChosenOnlyPlaybook(slug: string | null | undefined): boolean {
+  if (!slug) return false;
+  return ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS.has(slug);
+}
+
 // ── Turn-1 Direction blueprint ───────────────────────────────────────────────
 
 /**
