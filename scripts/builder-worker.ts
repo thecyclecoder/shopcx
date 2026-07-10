@@ -11323,9 +11323,12 @@ async function runTicketHandleJob(job: Job) {
             // above (bait / claim / honor) still ran against firstReply — the customer output is
             // a CTA carrying that reply as the leadIn, so the invariants hold.
             let launchedStandaloneJourney = false;
-            // sol-closes-ticket-on-resolving-reply: sendOk gates the close decision below. Set true
-            // ONLY when the plain reply is delivered (the fallback send). A launched standalone journey
-            // leaves sendOk=false so the ticket stays OPEN — the journey owns status from here.
+            // sol-closes-ticket-on-resolving-reply: `sendOk` is set true ONLY when the plain reply is
+            // delivered (the fallback send) or an explicit chosen_path='journey' launches. A standalone
+            // journey launch leaves sendOk=false and instead records success on `launchedStandaloneJourney`
+            // — the close decision below (§11441) fires on EITHER signal, so a delivered CTA closes the
+            // ticket regardless of which journey path launched it (a customer reply reopens it; the
+            // journey token carries its own state).
             let sendOk = false;
             // Journeys + workflows are delivered through the SAME executeSonnetDecision front door
             // Sonnet uses in production ([[tickets-mutate]] launchJourney / runWorkflow) — so Sol's
@@ -11438,7 +11441,14 @@ async function runTicketHandleJob(job: Job) {
             // own state across the reopen, and journey COMPLETION fires the real action independently.
             // Workflows are deliberately excluded: runWorkflow self-manages status (res.statusManaged)
             // and may drive multiple steps before it's done.
-            const journeyLaunched = sendOk && (launchedStandaloneJourney || chosenPath === "journey");
+            // A successful launch is the "delivered" signal for EITHER journey path — but the two paths
+            // track it on DIFFERENT flags: the standalone-journey wedge (launch_journey_slug on a
+            // stateless/any path) records success on `launchedStandaloneJourney` and deliberately leaves
+            // `sendOk=false` (§11326), while an explicit chosen_path='journey' records success on `sendOk`.
+            // The old `sendOk && (launchedStandaloneJourney || …)` guard made the standalone branch DEAD
+            // (sendOk is never true there), so a standalone cancel-subscription launch never closed —
+            // ticket 7d030501 / fc54b9fc sat open after the CTA shipped. Close on EITHER launch signal.
+            const journeyLaunched = launchedStandaloneJourney || (sendOk && chosenPath === "journey");
             if (journeyLaunched) {
               try {
                 const { closeTicketOnResolvingReply } = await import("../src/lib/ticket-directions");
