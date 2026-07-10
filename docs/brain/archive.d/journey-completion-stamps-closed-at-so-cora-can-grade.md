@@ -1,0 +1,1 @@
+- **Journey completion stamps closed_at so Cora can grade closed tickets** · verified 2026-07-10 · → [[../lifecycles/ticket-lifecycle]]
