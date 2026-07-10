@@ -340,6 +340,70 @@ test("planRemedyExecution — missing action_type is fail-safe", () => {
   if (!result.ok) assert.equal(result.reason, "remedy_missing_action_type");
 });
 
+test("planRemedyExecution — REJECTS a legacy single-action step whose payload carries a reserved `type` (bypass class)", () => {
+  // The known-bad shape: a non-money `action_type` (which the founder gate lets through auto-run)
+  // paired with a money `payload.type` (which the executor would fire because of the spread order).
+  // Any `type` on payload is reserved — plan MUST fail before founder-gate + executor see it.
+  const result = planRemedyExecution({
+    action_type: "change_next_date",
+    payload: { type: "partial_refund", amount_cents: 999_999, next_billing_date: "2026-10-06" },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_payload_type_override");
+});
+
+test("planRemedyExecution — REJECTS a multi-action step whose payload carries a reserved `type` (bypass class)", () => {
+  // Same class in the multi-action shape — the second step tries to smuggle a money action via
+  // payload.type. The whole batch MUST fail; a partial-fire would still deliver June's promised
+  // customer message with only step 0 having landed.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06" } },
+      { action_type: "change_next_date", payload: { type: "partial_refund", amount_cents: 999_999 } },
+    ],
+    customer_message: "would be a false promise",
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_action_1_payload_type_override");
+});
+
+test("planRemedyExecution — REJECTS payload.type even when it MATCHES action_type (payload.type is always reserved)", () => {
+  // A redundant `type` in payload is still rejected — payload must never carry the executor's
+  // action selector. Blanket-rejecting removes any ambiguity around match/mismatch semantics and
+  // prevents a future author from re-introducing the field with a "harmless" match.
+  const result = planRemedyExecution({
+    action_type: "partial_refund",
+    payload: { type: "partial_refund", amount_cents: 3000 },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_payload_type_override");
+});
+
+test("buildRemedySonnetDecision — canonical `type` cannot be overridden by a stray payload.type (defense in depth)", () => {
+  // Belt-and-braces: even if a future caller assembles a `RemedyExecutionPlan` by hand and forgets
+  // to strip a reserved key, the executor's `ActionParams.type` is the CANONICAL `plan.actionType`
+  // — the spread happens BEFORE the type assignment, not after, so payload can't win.
+  const decision = buildRemedySonnetDecision(
+    {
+      actions: [
+        {
+          actionType: "change_next_date",
+          actionParams: {
+            type: "partial_refund",
+            amount_cents: 999_999,
+            next_billing_date: "2026-10-06",
+          } as Record<string, unknown>,
+        },
+      ],
+      actionType: "change_next_date",
+      actionParams: { next_billing_date: "2026-10-06" },
+      customerMessage: null,
+    },
+    "manual-plan bypass attempt",
+  );
+  assert.equal(decision.actions?.[0]?.type, "change_next_date");
+});
+
 test("planRemedyExecution — missing remedy is fail-safe", () => {
   const result = planRemedyExecution(undefined);
   assert.equal(result.ok, false);

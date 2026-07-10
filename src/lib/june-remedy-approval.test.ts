@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   remedyMoneyAmountCents,
   remedyNeedsFounderApproval,
+  planNeedsFounderApproval,
   buildJuneApprovalPreview,
   DEFAULT_REFUND_APPROVAL_THRESHOLD_CENTS,
   executeApprovedJuneRemedies,
@@ -110,6 +111,75 @@ test("preview: replacement uses 'Send a replacement worth'", () => {
 test("preview: unknown amount reads 'an unspecified amount'", () => {
   const p = buildJuneApprovalPreview({ actionType: "partial_refund", amountCents: null });
   assert.match(p, /Refund an unspecified amount\?/);
+});
+
+// ── planNeedsFounderApproval — same semantics, canonical planned actions ────────────────────────
+
+test("planNeedsFounderApproval: sub-threshold single money action runs autonomously", () => {
+  const g = planNeedsFounderApproval(
+    [{ actionType: "partial_refund", actionParams: { amount_cents: 3000 } }],
+    5000,
+  );
+  assert.equal(g.gated, false);
+  assert.equal(g.amountCents, 3000);
+  assert.equal(g.actionType, "partial_refund");
+  assert.equal(g.moneyLines.length, 1);
+});
+
+test("planNeedsFounderApproval: over-threshold gates", () => {
+  const g = planNeedsFounderApproval(
+    [{ actionType: "partial_refund", actionParams: { amount_cents: 6000 } }],
+    5000,
+  );
+  assert.equal(g.gated, true);
+});
+
+test("planNeedsFounderApproval: unknown amount on ANY money action gates (conservative)", () => {
+  const g = planNeedsFounderApproval(
+    [{ actionType: "partial_refund", actionParams: {} }],
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, null);
+});
+
+test("planNeedsFounderApproval: non-money-only batch runs autonomously", () => {
+  const g = planNeedsFounderApproval(
+    [
+      { actionType: "change_next_date", actionParams: { next_billing_date: "2026-10-06" } },
+      { actionType: "resume", actionParams: {} },
+    ],
+    5000,
+  );
+  assert.equal(g.gated, false);
+  assert.equal(g.moneyLines.length, 0);
+});
+
+test("planNeedsFounderApproval: SUMS money across a multi-action batch (2×$30 gates like a single $60)", () => {
+  const g = planNeedsFounderApproval(
+    [
+      { actionType: "partial_refund", actionParams: { amount_cents: 3000 } },
+      { actionType: "change_next_date", actionParams: { next_billing_date: "2026-10-06" } },
+      { actionType: "redeem_points_as_refund", actionParams: { amount_cents: 3000 } },
+    ],
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, 6000);
+  assert.equal(g.moneyLines.length, 2);
+});
+
+test("planNeedsFounderApproval: the bypass class — a plan whose canonical action_type is non-money never counts as money (executor-canonical wins)", () => {
+  // The whole reason this function exists — the gate reads `plan.actions[].actionType`, the
+  // executor fires `plan.actions[].actionType`, so payload fields CAN'T rename an action into a
+  // different money class. If a bypass attempt reached this point (it shouldn't — plan rejects
+  // payload.type at the extractor), the gate would still faithfully classify by canonical type.
+  const g = planNeedsFounderApproval(
+    [{ actionType: "change_next_date", actionParams: { amount_cents: 999_999 } }],
+    5000,
+  );
+  assert.equal(g.gated, false);
+  assert.equal(g.moneyLines.length, 0);
 });
 
 // ── Phase 3 (multi-action-remedies): gate SUMS money across ALL actions in the batch ──────────
