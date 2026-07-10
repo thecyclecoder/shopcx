@@ -143,15 +143,43 @@ export interface ApplyBoxCsDirectorCallResult {
 // ── Pure planners (unit-tested) ────────────────────────────────────────────────────────────────
 
 /**
+ * One typed direct-action step in a RemedyPlan. `actionType` maps 1:1 to a `directActionHandlers`
+ * key (e.g. `change_next_date` → `subscriptionUpdateNextBillingDate` under the hood); `actionParams`
+ * flows straight into the corresponding `SonnetDecision.actions[i]` bag alongside `type`.
+ */
+export interface RemedyActionStep {
+  actionType: string;
+  actionParams: Record<string, unknown>;
+}
+
+/**
  * A normalized executable plan derived from June's RemedyPlan (`verdict.remedy`). Kept intentionally
- * small — `actionType` maps 1:1 to a `directActionHandlers` key (e.g. `change_next_date` →
- * `subscriptionUpdateNextBillingDate` under the hood), and `actionParams` flows straight into the
- * `SonnetDecision.actions[0]` bag alongside `type`. The customer message is separated from the plan
- * so the ordering invariant (execute → THEN message) is enforced by the caller, not smuggled inside a
- * `response_message` field the executor would deliver on our behalf.
+ * small — `actions` is an ORDERED, non-empty batch of direct-action steps the executor fires in
+ * sequence through `executeSonnetDecision` (which already accepts an `actions[]` array). The customer
+ * message is separated from the plan so the ordering invariant (execute → THEN message) is enforced
+ * by the caller, not smuggled inside a `response_message` field the executor would deliver on our
+ * behalf.
+ *
+ * Multi-action authored by June (Phase 1 of the multi-action-remedies spec): a real fix often needs
+ * several actions (e.g. `partial_refund` + `change_next_date` + `redeem_points`, or
+ * `create_replacement` + `apply_coupon`). A single-action RemedyPlan (the legacy shape:
+ * `{action_type, payload}`) normalizes into `actions: [one]` so nothing regresses. `actionType` /
+ * `actionParams` are back-compat aliases for `actions[0]` — the Phase 2 executor iterates
+ * `actions[]`, so new callers should read from there; the aliases stay to keep the current handler
+ * shape (`planned.plan.actionType`) compiling until Phase 2 lands.
  */
 export interface RemedyExecutionPlan {
+  /** Ordered, non-empty batch of typed direct-action steps. Fire in sequence. */
+  actions: RemedyActionStep[];
+  /**
+   * Back-compat alias for `actions[0].actionType`. Kept during the multi-action migration so the
+   * existing Phase-2 handler code (`planned.plan.actionType`) still compiles; new callers should
+   * iterate `actions` instead.
+   */
   actionType: string;
+  /**
+   * Back-compat alias for `actions[0].actionParams`. See `actionType` above.
+   */
   actionParams: Record<string, unknown>;
   customerMessage: string | null;
 }
@@ -172,10 +200,39 @@ export function extractRemedyCustomerMessage(remedy: Record<string, unknown>): s
 }
 
 /**
- * Plan the executor's next step from June's RemedyPlan. `ok:false` means the plan is malformed and
- * the executor MUST park the job `needs_attention` without touching the customer — no action
+ * Extract a single `{action_type, payload}` step off any object (a legacy top-level remedy OR one
+ * entry inside a multi-action `actions[]`). Returns null when the step is malformed (missing / empty
+ * `action_type`) so the caller can fail the whole plan up-front — a batch with one broken step MUST
+ * NOT be partially fired.
+ */
+function extractActionStep(raw: unknown): RemedyActionStep | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  const actionTypeRaw = obj.action_type;
+  const actionType = typeof actionTypeRaw === "string" ? actionTypeRaw.trim() : "";
+  if (!actionType) return null;
+  const payload =
+    obj.payload && typeof obj.payload === "object" && !Array.isArray(obj.payload)
+      ? (obj.payload as Record<string, unknown>)
+      : {};
+  return { actionType, actionParams: payload };
+}
+
+/**
+ * Plan the executor's ordered batch from June's RemedyPlan. `ok:false` means the plan is malformed
+ * and the executor MUST park the job `needs_attention` without touching the customer — no action
  * signature to fire against, no message to deliver honestly. Pure so the test suite can exercise
  * every branch without a Supabase mock.
+ *
+ * Two authored shapes are accepted (both normalize to the same `actions: RemedyActionStep[]`):
+ *   1. Multi-action (the multi-action-remedies spec — the shape June emits now):
+ *      `{ actions: [{action_type, payload?}, ...], customer_message }`.
+ *      Each step is validated (any malformed step fails the WHOLE plan — no partial fire).
+ *   2. Single-action (the legacy shape kept for back-compat):
+ *      `{ action_type, payload?, customer_message }` → normalizes to `actions: [one]`.
+ *
+ * When BOTH shapes appear on the same remedy, `actions[]` wins (it's the newer, richer authoring
+ * form; the top-level `action_type` was likely a duplicate of `actions[0]`).
  */
 export function planRemedyExecution(
   remedy: Record<string, unknown> | undefined | null,
@@ -183,40 +240,144 @@ export function planRemedyExecution(
   if (!remedy || typeof remedy !== "object" || Array.isArray(remedy)) {
     return { ok: false, reason: "remedy_missing" };
   }
-  const actionTypeRaw = remedy.action_type;
-  const actionType = typeof actionTypeRaw === "string" ? actionTypeRaw.trim() : "";
-  if (!actionType) return { ok: false, reason: "remedy_missing_action_type" };
-  const payload =
-    remedy.payload && typeof remedy.payload === "object" && !Array.isArray(remedy.payload)
-      ? (remedy.payload as Record<string, unknown>)
-      : {};
   const customerMessage = extractRemedyCustomerMessage(remedy);
-  return { ok: true, plan: { actionType, actionParams: payload, customerMessage } };
+
+  // Shape 1 — multi-action `actions[]`. Wins when present + non-empty so a mixed shape (a stray
+  // top-level `action_type` next to an authored `actions`) prefers the ordered batch.
+  if (Array.isArray(remedy.actions) && remedy.actions.length > 0) {
+    const steps: RemedyActionStep[] = [];
+    for (let i = 0; i < remedy.actions.length; i++) {
+      const step = extractActionStep(remedy.actions[i]);
+      if (!step) return { ok: false, reason: `remedy_action_${i}_malformed` };
+      steps.push(step);
+    }
+    return {
+      ok: true,
+      plan: {
+        actions: steps,
+        actionType: steps[0].actionType,
+        actionParams: steps[0].actionParams,
+        customerMessage,
+      },
+    };
+  }
+
+  // Shape 2 — legacy single-action `{action_type, payload}`. Normalize to `actions:[one]` so the
+  // rest of the pipeline never sees the single-vs-multi distinction.
+  const step = extractActionStep(remedy);
+  if (!step) return { ok: false, reason: "remedy_missing_action_type" };
+  return {
+    ok: true,
+    plan: {
+      actions: [step],
+      actionType: step.actionType,
+      actionParams: step.actionParams,
+      customerMessage,
+    },
+  };
 }
 
 /**
  * Build the `SonnetDecision` we hand to `executeSonnetDecision`. Always `action_type:'direct_action'`
- * (the RemedyPlan is a single typed commerce action, e.g. `change_next_date` /
- * `subscriptionUpdateNextBillingDate` / `apply_coupon`); NEVER carries `response_message` (the
- * customer message is delivered AFTER the executor returns success, by `deliverTicketMessage`, not
- * by the executor's own send path — see the execute-then-message invariant in the file header).
- * Pure so the test suite can assert the exact shape.
+ * with the plan's FULL ordered `actions[]` (executeSonnetDecision already accepts a batch and runs
+ * them in sequence); NEVER carries `response_message` (the customer message is delivered AFTER the
+ * executor returns success, by `deliverTicketMessage`, not by the executor's own send path — see the
+ * execute-then-message invariant in the file header). Pure so the test suite can assert the exact
+ * shape.
+ *
+ * Multi-action authoring (Phase 1 of the multi-action-remedies spec): a real fix like
+ * `partial_refund` + `change_next_date` + `redeem_points` lands as three `ActionParams` in
+ * `decision.actions[]`, in the SAME order June authored them, so `executeSonnetDecision` fires them
+ * sequentially. A single-action RemedyPlan is a special case with `actions.length === 1` — same
+ * emit path, no branching.
  */
 export function buildRemedySonnetDecision(
   plan: RemedyExecutionPlan,
   reasoning: string,
 ): SonnetDecision {
-  const { actionType, actionParams } = plan;
-  const params: ActionParams = { type: actionType, ...(actionParams as Partial<ActionParams>) } as ActionParams;
+  const actions: ActionParams[] = plan.actions.map(
+    (step) =>
+      ({
+        type: step.actionType,
+        ...(step.actionParams as Partial<ActionParams>),
+      }) as ActionParams,
+  );
   return {
     reasoning: reasoning?.trim() || "cs-director approve_remedy",
     action_type: "direct_action",
-    actions: [params],
+    actions,
     // NO response_message — we own delivery. Setting response_message here would let
     // executeSonnetDecision deliver via our no-op send fn (a silent drop, but still a foot-gun); the
     // Phase-2 executor's contract is explicit: message flows through deliverTicketMessage AFTER
     // executor success, never through the executor's own send.
   };
+}
+
+// ── Multi-action batch surface (Phase 2 of multi-action-remedies) ──────────────────────────────
+
+/**
+ * A parsed per-action outcome extracted from the executor's sysNote stream. `handleDirectAction`
+ * (src/lib/action-executor.ts) emits one `Action completed: <summary-or-type>` line per successful
+ * action and one `Action failed: <type> — <error>` line per failure BEFORE it calls `escalateTicket`
+ * on any failure. Parsing those lines is how `handleApproveRemedy` knows WHICH actions in June's
+ * batch landed vs which one broke the whole fix — the executor's own return only carries a
+ * coarse-grained `escalated:boolean`, not per-action detail.
+ */
+interface BatchActionEvent {
+  kind: "completed" | "failed";
+  /** The action type or the human-friendly `result.summary` string handleDirectAction chose. */
+  label: string;
+  /** Only present on failures — the `result.error` returned by the direct-action handler. */
+  error?: string;
+}
+
+/**
+ * Parse ONE executor sysNote line into a `BatchActionEvent`, or null when the line isn't a
+ * per-action verdict (e.g. a `[Self-heal]` note or an alias-resolved trace line). Kept pure so the
+ * regex + shape can be exercised without booting the executor.
+ *
+ * Format contract (mirrored to handleDirectAction lines ~3140-3143 in action-executor.ts):
+ *  - success: `Action completed: <summary-or-type>`
+ *  - failure: `Action failed: <type> — <error>`  (em-dash, exact spacing)
+ */
+export function parseBatchEvent(line: string): BatchActionEvent | null {
+  const completed = /^Action completed:\s+(.+)$/i.exec(line);
+  if (completed) return { kind: "completed", label: completed[1].trim() };
+  const failed = /^Action failed:\s+(\S+)\s+[—-]\s+(.+)$/i.exec(line);
+  if (failed) return { kind: "failed", label: failed[1].trim(), error: failed[2].trim() };
+  return null;
+}
+
+/**
+ * Compose the partial-batch summary that gets rolled onto the returned `error` string AND into a
+ * summary internal note when the batch escalates. This is the "surface WHICH action failed + what
+ * DID land" the multi-action-remedies spec's Phase 2 verification calls for — a human eyeballing
+ * the ticket sees the exact partial state in one line instead of reconstructing it from N sysNote
+ * fragments. Pure.
+ */
+export function summarizeRemedyBatchOutcome(
+  plannedActionTypes: string[],
+  events: BatchActionEvent[],
+): { landed: string[]; failed: Array<{ label: string; error?: string }>; oneLine: string } {
+  const landed = events.filter((e) => e.kind === "completed").map((e) => e.label);
+  const failed = events.filter((e) => e.kind === "failed").map((e) => ({ label: e.label, error: e.error }));
+  const total = plannedActionTypes.length;
+  const parts: string[] = [`batch of ${total}`];
+  if (failed.length > 0) {
+    parts.push(
+      `failed: [${failed.map((f) => (f.error ? `${f.label} — ${f.error}` : f.label)).join("; ")}]`,
+    );
+  }
+  if (landed.length > 0) {
+    parts.push(`landed: [${landed.join(", ")}]`);
+  }
+  if (failed.length === 0 && landed.length === 0) {
+    // The executor escalated without a parseable per-action line — surface the whole authored
+    // batch so a human sees exactly what June intended even when the executor's escalate reason
+    // is upstream of the per-action loop (e.g. sandbox mode, an alias miss with no handler).
+    parts.push(`authored: [${plannedActionTypes.join(", ")}]`);
+  }
+  return { landed, failed, oneLine: parts.join("; ") };
 }
 
 // ── Injectable dependency surface (real defaults + test overrides) ─────────────────────────────
@@ -352,6 +513,13 @@ async function handleApproveRemedy(
       };
     }
     const { actionType, customerMessage } = planned.plan;
+    // Multi-action label (Phase 2 of multi-action-remedies): the whole batch, in June's authored
+    // order, surfaced on the tag so logs + log_tail carry the full fix shape (not just actions[0]).
+    const plannedActionTypes = planned.plan.actions.map((a) => a.actionType);
+    const batchLabel =
+      plannedActionTypes.length === 1
+        ? `action=${plannedActionTypes[0]}`
+        : `actions=[${plannedActionTypes.join(", ")}] (${plannedActionTypes.length})`;
 
     // 2. Resolve the ticket from job.instructions (same shape the runner reads at Phase 1). We look
     //    it up here instead of taking it as a parameter to keep the applyBoxCsDirectorCall signature
@@ -419,6 +587,9 @@ async function handleApproveRemedy(
           remedy: verdict.remedy,
           actionType: gate.actionType || actionType,
           amountCents: gate.amountCents,
+          // Phase 3 (multi-action-remedies): thread the per-money-action lines through so the
+          // preview lists each line + SUM, and the card's tool_input surfaces the split.
+          moneyLines: gate.moneyLines,
           reasoning: verdict.reasoning,
         });
         console.log(`${tag} approve_remedy: refund/credit over threshold → parked for founder approval (via ${raised.via})`);
@@ -444,7 +615,14 @@ async function handleApproveRemedy(
     const suppressedSend = async (_msg: string, _sb: boolean): Promise<void> => {
       /* no-op — customer message is delivered by deliverTicketMessage below, only after success */
     };
+    // Capture the executor's per-action sysNote stream so a failed batch can surface WHICH action
+    // failed + what DID land on the returned error string + a summary internal note (Phase 2 of
+    // multi-action-remedies). The delegate still writes each raw line to ticket_messages so the
+    // audit thread's per-line trail is unchanged — the events buffer is a parallel roll-up only.
+    const batchEvents: BatchActionEvent[] = [];
     const sysNote = async (msg: string): Promise<void> => {
+      const parsed = parseBatchEvent(msg);
+      if (parsed) batchEvents.push(parsed);
       try {
         await admin.from("ticket_messages").insert({
           ticket_id: ticketId,
@@ -487,10 +665,17 @@ async function handleApproveRemedy(
       };
     }
 
-    // 7. Failure path: executor escalated (verify failure / action failure). No customer message —
-    //    the whole reason this executor exists is to NOT promise something we didn't do.
+    // 7. Failure path: executor escalated (one or more actions in the batch failed run/verify). No
+    //    customer message — the whole reason this executor exists is to NOT promise something we
+    //    didn't do. Roll the captured per-action events into a partial-batch summary so the runner's
+    //    log_tail names WHICH action failed + what DID land (Phase 2 of multi-action-remedies) —
+    //    without that surface a human eyeballing the ticket has to reconstruct the state from N
+    //    ticket_messages sysNote rows.
     if (executorResult.escalated) {
-      const error = `approve_remedy: action ${actionType} escalated by executor (verify or run failed) — no customer message sent`;
+      const summary = summarizeRemedyBatchOutcome(plannedActionTypes, batchEvents);
+      const error = `approve_remedy: ${batchLabel} escalated by executor (${summary.oneLine}) — no customer message sent`;
+      // Also emit a rolled-up internal note so a human sees the partial-batch state in one place.
+      await sysNote(`Batch escalated — ${summary.oneLine}. No customer message sent.`);
       console.warn(`${tag} ${error}`);
       return {
         ok: false,
@@ -501,20 +686,20 @@ async function handleApproveRemedy(
       };
     }
 
-    // 8. Success path: deliver the customer message. If June did not include one (rare — the prompt
-    //    strongly implies one on approve_remedy, but the shape is Record<string, unknown> so it can
-    //    be missing), we still return ok — the action fired, and the runner's per-verdict internal
-    //    note + ticket transition close the loop.
+    // 8. Success path: EVERY action in the batch verified — deliver the customer message. If June
+    //    did not include one (rare — the prompt strongly implies one on approve_remedy, but the
+    //    shape is Record<string, unknown> so it can be missing), we still return ok — the actions
+    //    fired, and the runner's per-verdict internal note + ticket transition close the loop.
     if (customerMessage) {
       try {
         await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, customerMessage, sandbox);
-        console.log(`${tag} approve_remedy: action=${actionType} ok · customer message delivered`);
+        console.log(`${tag} approve_remedy: ${batchLabel} ok · customer message delivered`);
         return { ok: true, handler: "approve_remedy", message_delivered: true };
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
-        const error = `approve_remedy: action ${actionType} succeeded but delivery threw (${errMsg})`;
+        const error = `approve_remedy: ${batchLabel} succeeded but delivery threw (${errMsg})`;
         console.warn(`${tag} ${error}`);
-        // The action DID fire; the delivery race is a real failure (customer didn't hear back) so
+        // The batch DID fire; the delivery race is a real failure (customer didn't hear back) so
         // we surface it as needs_attention — a human confirms and re-delivers.
         return {
           ok: false,
@@ -526,7 +711,7 @@ async function handleApproveRemedy(
       }
     }
 
-    console.log(`${tag} approve_remedy: action=${actionType} ok · no customer message on remedy (skipped delivery)`);
+    console.log(`${tag} approve_remedy: ${batchLabel} ok · no customer message on remedy (skipped delivery)`);
     return { ok: true, handler: "approve_remedy", message_delivered: false };
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
