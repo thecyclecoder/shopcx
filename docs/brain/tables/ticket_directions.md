@@ -43,6 +43,17 @@ Phase 2 lands the read paths. On the first turn after the Sol session ships, [[.
 2. **Required-outcomes items authored alongside the Direction** — the message-is-last pipeline ([[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] Phase 1) distills the customer's concrete asks into N structured [[ticket_required_outcomes]] rows keyed to the same `ticket_id` (and optionally back-linked via `direction_id`). Downstream: Phase 2's [[../libraries/honor-required-outcomes|honor step]] executes + verifies each item; Phase 3's [[../libraries/sol-outcome-claim-guard|send guard]] blocks any reply asserting an outcome whose backing row isn't `status='verified'`; Phase 4's [[../libraries/outcome-completion-gate|completion gate]] blocks auto-close until every row is verified.
 3. **Supersede (`superseded_at` compare-and-set on NULL)** — a later inflection (customer pivots the ask, downstream execution hits a guardrail and escalates back to Sol) calls `superseDirection(admin, ticket_id)` which stamps `superseded_at = now()` on the live row via a compare-and-set on `superseded_at IS NULL`; a fresh `writeDirection` immediately follows with the new live row.
 
+### Sol-session visibility notes (sol-session-internal-notes)
+
+Every `runTicketHandleJob` box session stamps an **internal note** on the ticket at each session boundary (`stampSolSessionNote` → a `ticket_messages` row with `visibility='internal'`, `author_type='system'` — renders in the ticket's internal-note lane, never reaches the customer). The note is keyed to the box session by the short job id (the same `[handle:xxxxxxxx]` token in the worker logs):
+
+- **Start** — `Sol is reviewing this ticket in session <id>.` — fires *before* the box session runs, so a hang / timeout / crash still leaves a trace.
+- **Complete** — `Sol's session <id> is complete — chosen path: <path>.` (a delivered Direction).
+- **Escalated to a human** — `Sol's session <id> is complete — escalated to a human. Reason: <reason>` (the `needs_human` / policy-gate-not-run path).
+- **Failed** — `Sol's session <id> failed: <detail>` (incomplete direction, `writeDirection` collision, no-verdict over-run, or the outer catch).
+
+Best-effort — a note-insert failure never wedges the job (mirrors the `sol_handled_at` stamp). The gap this closes: a session that punted to `needs_human` (e.g. ticket `977b1510` — customer owed one more unit but fulfilling it would exceed the self-serve exchange cap, so Sol correctly escalated) previously left NO trace on the ticket — from the dashboard it looked like "Sol went in and nothing happened."
+
 ## RLS
 Service-role only (RLS enabled with no policies). Every write goes through `createAdminClient()` from the Phase-2 SDK — per CLAUDE.md's "All writes go through `createAdminClient()`" invariant. No client-side reads.
 
