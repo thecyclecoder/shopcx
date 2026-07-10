@@ -112,3 +112,56 @@ test("reason string names 'severity or actionability' when the resolved-minor ga
     "the audit reason must name the severity/actionability contract",
   );
 });
+
+// ── Terminal-state override: mid-turn wrongness is coaching, not escalation ──
+// Kim SC134360 / b7921d19: score 4 driven entirely by two turn-1 broken_action
+// issues (malformed return + leaked {{label_url}} token), but the $133.80 refund
+// executed and the ticket closed resolved. resolvedByAction must beat the
+// severe-issue force-escalate so a well-resolved ticket is not re-opened.
+test("resolvedByAction beats a severe-issue force-escalate (Kim: turn-1 broken_actions recovered by the refund) → 'none'", () => {
+  const { action, reason } = decideEscalationAction({
+    score: 4,
+    hasSevereIssue: true,
+    customerThreat: false,
+    positivelyClosed: false, // closed via the SDK after a founder-directed refund — no AI positive-close note
+    forceEscalate: true,     // severe issue would normally force silent escalation
+    resolvedByAction: true,
+  });
+  assert.equal(action, "none");
+  assert.match(reason, /terminal|resolved by a verified action|END state|mid-turn/i);
+});
+
+test("resolvedByAction does NOT suppress a customer threat — threat still escalates", () => {
+  const { action } = decideEscalationAction({
+    score: 4,
+    hasSevereIssue: true,
+    customerThreat: true,
+    positivelyClosed: false,
+    forceEscalate: true,
+    resolvedByAction: true,
+  });
+  assert.equal(action, "escalate_silent", "a chargeback/BBB/lawyer threat at the terminal state still escalates even if an action resolved the substantive ask");
+});
+
+test("no resolvedByAction: a severe issue on a non-positively-closed ticket still force-escalates (baseline unchanged)", () => {
+  const { action } = decideEscalationAction({
+    score: 4,
+    hasSevereIssue: true,
+    customerThreat: false,
+    positivelyClosed: false,
+    forceEscalate: true,
+    resolvedByAction: false,
+  });
+  assert.equal(action, "escalate_silent");
+});
+
+test("resolvedByAction omitted (undefined) is treated as false — existing callers unaffected", () => {
+  const { action } = decideEscalationAction({
+    score: 4,
+    hasSevereIssue: true,
+    customerThreat: false,
+    positivelyClosed: false,
+    forceEscalate: true,
+  });
+  assert.equal(action, "escalate_silent");
+});

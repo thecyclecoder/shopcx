@@ -133,6 +133,55 @@ async function hasCleanPositiveClose(admin: Admin, ticketId: string): Promise<bo
   return true;
 }
 
+// The system note the executor writes ONLY on a verified-successful direct action
+// (src/lib/action-executor.ts:473 / 3140, agent-todos/execute.ts — `r.result.success`
+// gates it; a failure writes "Action failed:" instead). Matched as a substring so both
+// the bare and "[System] "-prefixed variants are caught.
+const ACTION_COMPLETED_NOTE = "Action completed:";
+
+/**
+ * Deterministically decide whether the ticket's terminal state was RESOLVED BY A
+ * VERIFIED ACTION — a refund that actually issued, a subscription that actually
+ * cancelled, etc. Mirrors `hasCleanPositiveClose`, but the positive signal is the
+ * executor's `Action completed:` success note rather than the AI's positive-close note,
+ * so it also recognizes a ticket resolved by a founder-directed / agent action + close
+ * that never emitted the AI's own positive-close note (Kim SC134360 / b7921d19: closed
+ * via the tickets SDK after a founder-directed $133.80 refund).
+ *
+ * True only when a `Action completed:` note exists AND nothing reactivated the ticket
+ * since: no reopen/escalation note after it, and no UNANSWERED inbound customer message
+ * after it. This is the terminal-state gate the escalation decision keys on so a severe
+ * issue from the messy middle — later recovered by the action — is graded for coaching
+ * but does NOT reopen the resolved ticket. Escalation keys on the END, not mid-turn.
+ */
+async function hasResolvedActionClose(admin: Admin, ticketId: string): Promise<boolean> {
+  const { data: all } = await admin.from("ticket_messages")
+    .select("direction, author_type, body, visibility, created_at")
+    .eq("ticket_id", ticketId)
+    .order("created_at", { ascending: true });
+  if (!all || all.length === 0) return false;
+
+  // Most recent verified action-completed note timestamp.
+  let actionAt: string | null = null;
+  for (const m of all) {
+    if ((m.body || "").includes(ACTION_COMPLETED_NOTE)) actionAt = m.created_at;
+  }
+  if (!actionAt) return false;
+
+  for (const m of all) {
+    if (m.created_at <= actionAt) continue;
+    // A re-open / escalation note after the action means the ticket was reactivated.
+    if (REOPEN_NOTE_MARKERS.some(marker => (m.body || "").includes(marker))) return false;
+    // An unanswered inbound after the action is a live turn — the customer still needs
+    // something the action didn't settle, so this is not a resolved terminal state.
+    if (m.direction === "inbound") {
+      const answered = all.some(o => o.direction === "outbound" && o.created_at > m.created_at);
+      if (!answered) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Map analyzer issue types to research recipe slugs that can verify
  * whether the AI's claim matches reality. Keep this conservative —
@@ -1074,6 +1123,13 @@ export interface EscalationDecisionInput {
    *  severity / actionability trigger fires unconditionally (silent
    *  escalation). */
   forceEscalate: boolean;
+  /** True when `hasResolvedActionClose` confirms the ticket's terminal state
+   *  was resolved by a VERIFIED executed action (refund issued, sub cancelled,
+   *  …) with the customer not left hanging and no reopen since. Escalation
+   *  keys on whether we got it wrong at the END — so mid-journey severe issues
+   *  that a terminal action recovered are coaching, not escalation. Optional /
+   *  defaults false so pre-existing callers are unaffected. */
+  resolvedByAction?: boolean;
 }
 
 /**
@@ -1096,7 +1152,26 @@ export interface EscalationDecisionInput {
 export function decideEscalationAction(
   input: EscalationDecisionInput,
 ): { action: EscalationAction; reason: string } {
-  const { score, hasSevereIssue, customerThreat, positivelyClosed, forceEscalate } = input;
+  const { score, hasSevereIssue, customerThreat, positivelyClosed, forceEscalate, resolvedByAction } = input;
+
+  // ── Terminal-state override: mid-turn wrongness is coaching, not escalation ──
+  // A ticket whose TERMINAL state was resolved by a verified executed action (a
+  // refund that actually issued, a sub that actually cancelled, …) with the customer
+  // not left hanging and no threat is a GOOD ending — regardless of how bumpy the
+  // path was. Escalation keys on whether we got it wrong at the END, not on a severe
+  // issue from the messy middle that the terminal action already recovered.
+  // Kim SC134360 / b7921d19: score 4 from two turn-1 broken_actions (a malformed return
+  // + a leaked {{label_url}} token), but the $133.80 refund executed and the ticket
+  // closed resolved — Cora's own summary said "ultimately resolved well." Re-opening it
+  // is negative value. The severe issues are still RECORDED for coaching; they just
+  // don't reopen/escalate. customerThreat still always wins (falls through below).
+  if (resolvedByAction && !customerThreat) {
+    return {
+      action: "none",
+      reason:
+        "terminal state resolved by a verified action (refund/cancel/etc.) with the customer not left hanging — mid-journey severe issues are coaching, not escalation; escalation keys on the END state, not mid-turn wrongness",
+    };
+  }
 
   if (forceEscalate) {
     return {
@@ -1188,6 +1263,13 @@ async function applySeverityActions(
   // decisions.
   const positivelyClosed = await hasCleanPositiveClose(admin, ticketId);
 
+  // Terminal-state-resolved-by-a-verified-action signal (Kim SC134360 / b7921d19).
+  // Read alongside positivelyClosed: it recognizes a ticket resolved by a founder-directed
+  // / agent action + close (refund issued, sub cancelled) that never emitted the AI's own
+  // positive-close note. Feeds the terminal-state override in decideEscalationAction so a
+  // mid-journey severe issue the action already recovered stays coaching, not a re-open.
+  const resolvedByAction = await hasResolvedActionClose(admin, ticketId);
+
   // ── Sole-unverified-from-surface positive-close override ──
   // Phase 2 of cora-grades-against-ai-data-surface. When the analyzer's
   // ONLY flag is `unverified_from_surface` (a Phase 1 grader tag for a
@@ -1270,7 +1352,23 @@ async function applySeverityActions(
     customerThreat,
     positivelyClosed,
     forceEscalate,
+    resolvedByAction,
   });
+
+  // Audit the terminal-state suppression so it's reviewable and can never read as a
+  // silent drop. Worded so a later hasCleanPositiveClose()/hasResolvedActionClose() scan
+  // can't mistake it for a reopen or positive-close note.
+  const suppressedByTerminalAction =
+    action === "none" && resolvedByAction && !customerThreat && (hasSevereIssue || score <= 6);
+  if (suppressedByTerminalAction) {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — the ticket's terminal state was resolved by a verified action (customer not left hanging, no threat), so this stays closed for COACHING only; not re-opening over mid-journey issues the resolution already recovered${hasSevereIssue ? ` (would have force-escalated on: ${[...severeTypes].join(", ")})` : ""}. Escalation keys on the END state, not mid-turn wrongness. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+  }
 
   // ── Research & Heal hook ──
   // Severe issues (false_promise / broken_action) are the prime case for
