@@ -93,6 +93,31 @@ export async function listPhaseChecks(phaseId: string): Promise<SpecPhaseCheckRo
 }
 
 /**
+ * verification-checks-source-of-truth — batched `phase_id → [{position, description}]` map (position order)
+ * for the renderer. `renderSpecRow` uses it to emit `### Verification` from the typed rows (the DB object),
+ * falling back to the `verification` column for phases with no rows. Empty map when `phaseIds` is empty.
+ */
+export async function checksByPhaseIdForRender(
+  phaseIds: string[],
+): Promise<Map<string, { description: string }[]>> {
+  const out = new Map<string, { description: string }[]>();
+  if (!phaseIds.length) return out;
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("spec_phase_checks")
+    .select("phase_id, position, description")
+    .in("phase_id", phaseIds)
+    .order("position", { ascending: true });
+  if (error) throw error;
+  for (const r of (data ?? []) as { phase_id: string; position: number; description: string }[]) {
+    const list = out.get(r.phase_id) ?? [];
+    list.push({ description: r.description });
+    out.set(r.phase_id, list);
+  }
+  return out;
+}
+
+/**
  * One row per verification check across every phase of a spec — the rows-first replacement for
  * parsing `## Verification` bullets out of markdown (pm-structured-intent-and-refs Phase 3).
  *
