@@ -580,6 +580,51 @@ export function calcBasePrice(targetPriceCents: number, discountPercent: number)
 }
 
 /**
+ * Decide the Appstle `basePrice` (cents) to set on the NEW line after a single-item portal swap so the
+ * swapped-in product carries the subscriber S&S discount — NOT a flat MSRP. Returns null to leave
+ * Appstle's own value untouched (when we can't safely price the new line).
+ *
+ * Derived from ticket d19c2192 (2026-07-10): a swap to a DIFFERENT-priced product left the new line at
+ * full MSRP because the old grandfathered-preservation branch only fired when the new variant's catalog
+ * price EQUALLED the old one (`newStandardCents === oldStandardCents`). A customer who swapped
+ * Creatine Prime → Amazing Creamer saw/was-quoted $69.95 (0% off) instead of $52.46 (25% subscriber).
+ *
+ * Two cases (base is pre-discount; the Appstle 25% S&S cycle brings the charge to base × (1 − sns)):
+ *   1. GRANDFATHERED PRESERVE — the old line was priced BELOW its own catalog standard AND the new
+ *      variant shares that catalog price (a like-for-like swap): keep the grandfathered charge by
+ *      returning the reverse-engineered old base (`round(oldItemPriceCents / (1 − sns))`).
+ *   2. STANDARD SUBSCRIBER — any other single swap with a known new catalog price: return the new
+ *      variant's catalog MSRP as the base, so the S&S cycle discounts it to the subscriber price.
+ *
+ * `snsPct` defaults to 25 — the same assumption the surrounding portal/heal code already hardcodes.
+ * Per-product `subscribe_discount_pct` awareness ([[appstle-pricing]] `resolveLineSnsPct`) is a
+ * follow-up; this keeps parity with the existing behavior it generalizes. Pure.
+ */
+export function decideSwapNewLineBaseCents(input: {
+  oldItemPriceCents: number | null | undefined;
+  oldStandardCents: number | null | undefined;
+  newStandardCents: number | null | undefined;
+  snsPct?: number;
+}): number | null {
+  const sns = input.snsPct ?? 25;
+  const newStandard = input.newStandardCents;
+  // No catalog price for the swapped-in variant → don't guess; leave Appstle's value.
+  if (!newStandard || newStandard <= 0) return null;
+  const frac = 1 - sns / 100;
+  if (frac <= 0) return newStandard;
+
+  const oldPrice = input.oldItemPriceCents;
+  const oldStandard = input.oldStandardCents;
+  if (oldPrice && oldPrice > 0 && oldStandard && oldStandard > 0) {
+    const effectiveOldBase = Math.round(oldPrice / frac);
+    // Like-for-like swap of a grandfathered line → preserve the grandfathered base.
+    if (effectiveOldBase < oldStandard && newStandard === oldStandard) return effectiveOldBase;
+  }
+  // Otherwise price the new line at its own catalog MSRP (the S&S cycle discounts it).
+  return newStandard;
+}
+
+/**
  * Apply a coupon to a subscription — internal-aware dispatcher.
  *
  * Internal subs: resolve the code through resolveCoupon (internal-wins →
