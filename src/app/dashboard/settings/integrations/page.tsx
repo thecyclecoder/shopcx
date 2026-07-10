@@ -65,6 +65,14 @@ export default function IntegrationsPage() {
             connected: !!data.braintree_connected,
           },
           {
+            slug: "quickbooks",
+            name: "QuickBooks",
+            description: "Monthly P&L → CFO scoreboard (revenue + booked/adjusted profit)",
+            icon: "M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z",
+            iconBg: "bg-teal-600/10",
+            connected: !!data.quickbooks_connected,
+          },
+          {
             slug: "twilio",
             name: "Twilio",
             description: "SMS sender + Verify (checkout OTP login)",
