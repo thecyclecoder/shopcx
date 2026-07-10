@@ -38,7 +38,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
-import { detectMetaCpaWinners, detectMetaCpaLosers, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS } from "@/lib/media-buyer/meta-cpa-signal";
+import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
@@ -596,7 +596,10 @@ export async function runMediaBuyerLoop(
   // ── Read policy + cohort FIRST — the trust gate branches on the policy's signal source. ──
   const [policy, cohort] = await Promise.all([
     loadActivePolicy(opts.workspaceId, opts.metaAdAccountId),
-    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, { metaAdAccountId: null }),
+    // Resolve the cohort for THIS account (per-account row preferred; falls back to a workspace-wide
+    // row inside getEffective). Passing null here was the bug that left a per-account cohort "dormant"
+    // and skipped replenish — so Dahlia's bin never fed Bianca's tests.
+    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, { metaAdAccountId: opts.metaAdAccountId }),
   ]);
 
   // ── Trust gate ────────────────────────────────────────────────────────────
@@ -759,6 +762,16 @@ export async function runMediaBuyerLoop(
     triggeringScorecardId: r.id,
   }));
   }
+
+  // Reactivations — recovered-CPA unpause (Meta attribution lags 24–48h, so a leading-signal trim can be
+  // rescued by late purchases). Only under trust-Meta with a crown CPA set.
+  const reactivations: MetaCpaReactivation[] = useMetaCpa
+    ? await detectMetaCpaReactivations(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        crownMaxCpaCents: policy.crown_max_cpa_cents as number,
+      })
+    : [];
 
   // Winner ad-grain → parent meta_adset_id lookup (for the promote target).
   const winnerAdIds = winners.map((w) => w.metaAdId);
@@ -924,6 +937,22 @@ export async function runMediaBuyerLoop(
       updated_at: nowIso,
     });
   }
+  for (const a of reactivations) {
+    iterationRows.push({
+      workspace_id: opts.workspaceId,
+      meta_ad_account_id: opts.metaAdAccountId,
+      snapshot_date: snapshotDate,
+      level: "adset",
+      object_id: a.targetObjectId,
+      action_type: "unpause",
+      rationale: `Reactivate: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown on adset ${a.targetObjectId} ($${(a.spendCents / 100).toFixed(0)} spend).`,
+      policy_version_id: policy.id,
+      before_status: "PAUSED",
+      after_status: "ACTIVE",
+      status: "decided",
+      updated_at: nowIso,
+    });
+  }
   if (iterationRows.length) {
     const { error } = await admin
       .from("iteration_actions")
@@ -971,6 +1000,24 @@ export async function runMediaBuyerLoop(
         target_level: a.targetLevel,
         target_object_id: a.targetObjectId,
         policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+  }
+  for (const a of reactivations) {
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_reactivated_recovered",
+      specSlug: null,
+      reason: `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`,
+      metadata: {
+        source_meta_ad_id: a.sourceMetaAdId,
+        target_object_id: a.targetObjectId,
+        spend_cents: a.spendCents,
+        cpp_cents: a.cppCents,
+        policy_version_id: policy.id,
         autonomous: true,
       },
     });
