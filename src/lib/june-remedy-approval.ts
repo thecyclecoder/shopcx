@@ -164,6 +164,58 @@ export function remedyNeedsFounderApproval(
 }
 
 /**
+ * The subset of a `RemedyExecutionPlan` action the gate needs — the canonical `actionType` the
+ * executor will fire + the payload it will hand to that handler. Kept structurally minimal so
+ * cs-director can pass its `plan.actions[]` directly with no adapter.
+ */
+export interface PlannedActionForGate {
+  actionType: string;
+  actionParams: Record<string, unknown>;
+}
+
+/**
+ * Decide the founder gate against a NORMALIZED planned batch (the same `plan.actions[]` the
+ * executor will fire). Same semantics as `remedyNeedsFounderApproval` — money actions are summed
+ * across the batch, ANY unknown amount collapses the sum to null (→ gate), non-money-only batches
+ * run autonomously — but it reads the plan's canonical `actionType` for each step instead of the
+ * remedy's raw `action_type`. Closes the payload.type-override bypass class: the sum the gate
+ * asserts is EXACTLY the set of action types the executor will fire.
+ */
+export function planNeedsFounderApproval(
+  actions: readonly PlannedActionForGate[],
+  thresholdCents: number,
+): FounderApprovalDecision {
+  const moneyLines: MoneyActionLine[] = [];
+  for (const step of actions) {
+    if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    moneyLines.push({
+      actionType: step.actionType,
+      amountCents: extractPayloadAmountCents(step.actionParams),
+    });
+  }
+  if (moneyLines.length === 0) {
+    return { gated: false, actionType: null, amountCents: null, moneyLines: [] };
+  }
+  let sum = 0;
+  let anyUnknown = false;
+  for (const line of moneyLines) {
+    if (line.amountCents === null) {
+      anyUnknown = true;
+      break;
+    }
+    sum += line.amountCents;
+  }
+  const amountCents = anyUnknown ? null : sum;
+  const gated = amountCents === null || amountCents > thresholdCents;
+  return {
+    gated,
+    actionType: moneyLines[0].actionType,
+    amountCents,
+    moneyLines,
+  };
+}
+
+/**
  * Compose the plain-language card/SMS-context text the founder reads — simple enough to approve at a
  * glance. Two shapes (Phase 3 of multi-action-remedies):
  *  - SINGLE-line (`moneyLines` omitted OR length ≤ 1): renders the legacy string

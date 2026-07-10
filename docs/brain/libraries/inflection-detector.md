@@ -61,7 +61,7 @@ Any cue hit ⇒ `kind='frustration'` immediately. Frustration wins ties: it runs
 
 ### Checkout-stuck signal
 
-Phase 2 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]. Runs AFTER the frustration arm (so frustration still wins) but BEFORE the playbook-active skip and the drift-score arm — a customer stuck at the Shopify checkout must flag Sol back in even mid-playbook and even without a live Direction. Uses [[checkout-stuck-intent]] `classifyCheckoutStuck` on `newestMessage`; on match, returns `kind='drift'` with `evidence.reason='stage1_checkout_stuck'` and `evidence.cues=[<winning cue id>]`, so the existing `reSessionSol` router supersedes the live Direction and enqueues a new `kind='ticket-handle'` `agent_jobs` row for Sol to author a real assisted-purchase Direction.
+(Part of [[../recipes/checkout-stuck-concierge-flow]].) Runs AFTER the frustration arm (so frustration still wins) but BEFORE the playbook-active skip and the drift-score arm — a customer stuck at the Shopify checkout must flag Sol back in even mid-playbook and even without a live Direction. Uses [[checkout-stuck-intent]] `classifyCheckoutStuck` on `newestMessage`; on match, returns `kind='drift'` with `evidence.reason='stage1_checkout_stuck'` and `evidence.cues=[<winning cue id>]`, so the existing `reSessionSol` router supersedes the live Direction and enqueues a new `kind='ticket-handle'` `agent_jobs` row for Sol to author a real assisted-purchase Direction.
 
 ### Drift signals
 
