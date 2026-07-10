@@ -49,7 +49,7 @@ Captured read-only from the Shoptics DB + live QBO into `fixtures/shoptics-golde
 ## Migration phases + status
 
 - **Phase 0 — Discovery + golden capture.** ✅ This doc + the fixtures.
-- **Phase 1 — Port mappings losslessly.** ⏳ New ShopCX tables (Logistics/CFO owned) + copy the crown-jewel rows 1:1, reconciled by rowcount + checksum.
+- **Phase 1 — Port mappings losslessly.** ✅ 8 workspace-scoped `qb_*` tables (migration `20261011140000_qb_close_mappings.sql`) + Shoptics' UUIDs preserved on copy. All 8 reconciled **rowcount + checksum identical** (`qb_items` 59, `qb_item_bom` 37, `qb_sku_mappings` 117, `qb_external_skus` 351, `qb_account_mappings` 21, `qb_gateway_mappings` 9, `qb_shipping_protection_products` 3, `qb_manual_inventory` 20). Re-runnable via `scripts/_copy-qb-mappings.ts` (upsert, idempotent).
 - **Phase 2 — Reimplement in shadow.** ⏳ Rebuild the mapping resolvers + the close computations in ShopCX (TS/Inngest), reading the same inputs, **posting nothing**. Start with the JournalEntry (most complex, most deterministic, idempotent) → then receipts → then the inventory audit/adjustment.
 - **Phase 3 — Reconcile to zero.** ⏳ Diff shadow output vs `fixtures/.../qbo-entries` line-by-line for the 4 months + a live parallel close. Golden-master CI tests. Gate: $0 variance, CFO sign-off.
 - **Phase 4/5 — Cutover + retire.** 🛑 HELD FOR FOUNDER. One-writer-at-a-time flip (shadow→system-of-record), Shoptics kept as fallback a full cycle, retire only after a clean live close reconciled + signed off. **No QBO writes until then.**
