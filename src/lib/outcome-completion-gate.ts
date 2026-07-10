@@ -51,7 +51,7 @@ export type OutcomeCompletionVerdict =
  * row (executor fired the action but `verifyActionInDB` hasn't confirmed the predicate) is
  * treated the same as `pending` — the message-is-last spec's whole point is that a completion
  * claim requires DB confirmation, not just a handler that returned success. Failed rows are
- * likewise unfinished — a failed action needs human attention, not silent auto-close.
+ * likewise unfinished — a failed action escalates to June, not silent auto-close.
  *
  * Fail-open on an empty list: a ticket with NO required outcomes (customer said "thanks",
  * naked reply-only turn, legacy tickets predating Phase 1) is not held up by this gate.

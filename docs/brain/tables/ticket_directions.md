@@ -43,16 +43,29 @@ Phase 2 lands the read paths. On the first turn after the Sol session ships, [[.
 2. **Required-outcomes items authored alongside the Direction** — the message-is-last pipeline ([[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] Phase 1) distills the customer's concrete asks into N structured [[ticket_required_outcomes]] rows keyed to the same `ticket_id` (and optionally back-linked via `direction_id`). Downstream: Phase 2's [[../libraries/honor-required-outcomes|honor step]] executes + verifies each item; Phase 3's [[../libraries/sol-outcome-claim-guard|send guard]] blocks any reply asserting an outcome whose backing row isn't `status='verified'`; Phase 4's [[../libraries/outcome-completion-gate|completion gate]] blocks auto-close until every row is verified.
 3. **Supersede (`superseded_at` compare-and-set on NULL)** — a later inflection (customer pivots the ask, downstream execution hits a guardrail and escalates back to Sol) calls `superseDirection(admin, ticket_id)` which stamps `superseded_at = now()` on the live row via a compare-and-set on `superseded_at IS NULL`; a fresh `writeDirection` immediately follows with the new live row.
 
-### Sol-session visibility notes (sol-session-internal-notes)
+### Agent-session visibility notes (agent-session-internal-notes)
 
-Every `runTicketHandleJob` box session stamps an **internal note** on the ticket at each session boundary (`stampSolSessionNote` → a `ticket_messages` row with `visibility='internal'`, `author_type='system'` — renders in the ticket's internal-note lane, never reaches the customer). The note is keyed to the box session by the short job id (the same `[handle:xxxxxxxx]` token in the worker logs):
+**All three CS box agents — Sol (`runTicketHandleJob`), Cora (`runTicketAnalyzeJob`), June (`runCsDirectorCallJob`) — stamp an internal note at each session boundary** (`stampAgentSessionNote` → a `ticket_messages` row with `visibility='internal'`, `author_type='system'` — renders in the ticket's internal-note lane, never reaches the customer). The note is keyed to the session by the short job id (the same `[handle|analyze|cs-director:xxxxxxxx]` token in the worker logs). Best-effort — a note-insert failure never wedges the job (mirrors the `sol_handled_at` stamp).
 
-- **Start** — `Sol is reviewing this ticket in session <id>.` — fires *before* the box session runs, so a hang / timeout / crash still leaves a trace.
-- **Complete** — `Sol's session <id> is complete — chosen path: <path>.` (a delivered Direction).
-- **Escalated to a human** — `Sol's session <id> is complete — escalated to a human. Reason: <reason>` (the `needs_human` / policy-gate-not-run path).
-- **Failed** — `Sol's session <id> failed: <detail>` (incomplete direction, `writeDirection` collision, no-verdict over-run, or the outer catch).
+**Sol** (start fires *before* the box session, so a hang / timeout / crash still leaves a trace):
+- **Start** — `Sol is reviewing this ticket in session <id>.`
+- **Complete** — `Sol's session <id> is complete — chosen path: <path>.`
+- **Escalated to June** — `Sol's session <id> is complete — escalated to June (the CS final call). Reason: <reason>` (the `escalate_to_june` verdict, the policy-gate-not-run path, or a guard/honor block on the reply — see § escalate-to-June below).
+- **Failed** — `Sol's session <id> failed: <detail>`.
 
-Best-effort — a note-insert failure never wedges the job (mirrors the `sol_handled_at` stamp). The gap this closes: a session that punted to `needs_human` (e.g. ticket `977b1510` — customer owed one more unit but fulfilling it would exceed the self-serve exchange cap, so Sol correctly escalated) previously left NO trace on the ticket — from the dashboard it looked like "Sol went in and nothing happened."
+**Cora** (QC grader — real grades only; skips stay silent to avoid flooding the lane):
+- **Start** — `Cora (QC grader) is reviewing this ticket in session <id>.`
+- **Complete** — `Cora's session <id> is complete — QC score <n>/10 (issues: …).`
+
+**June** (CS Director — her detailed per-verdict note is the completion-side detail; these are the session-boundary markers):
+- **Start** — `June (CS Director) is reviewing this escalated ticket in session <id>.`
+- **Complete** — `June's session <id> is complete — decision: <decision>; ticket <closed + de-escalated | escalated to the founder … | remedy parked for founder approval …>.`
+
+The gap this closes: a session that escalated (e.g. ticket `977b1510` — customer owed one more unit but fulfilling it would exceed the self-serve exchange cap, so Sol correctly escalated) previously left NO trace on the ticket — from the dashboard it looked like "the agent went in and nothing happened."
+
+### Escalate to June — there is no "needs human" in CS (never-needs-human-escalate-to-june)
+
+When Sol hits a rail she can't resolve within her leash — a judgment call, an approval over her authority, a rail she can't clear, a guard/honor block on her reply, or an edge case (even a legal team reaching out) — she escalates to **June**, the CS Director and the final CS call, via `escalateSolRailHit` ([[../libraries/portal__escalate-sol-rail-hit]]): `escalated_at = now`, `escalated_to = null`, so the [[../inngest/triage-escalations]] cron enqueues a `cs-director-call` (June's review). There is **no "human" fallback** — no human ever does mutations; the only human touch is the founder *approving* something June routes via Eve's SMS. June then either handles the ticket herself (her transition **unescalates + closes** it — [[../libraries/cs-director]] `decideCsDirectorTicketTransition`) or, when she needs the founder (a money call over the approval threshold, or a heads-up), escalates to the founder via the CEO inbox + Eve. Sol's verdict is `escalate_to_june` (legacy `needs_human` still accepted as an alias while boxes pull the new skill).
 
 ## RLS
 Service-role only (RLS enabled with no policies). Every write goes through `createAdminClient()` from the Phase-2 SDK — per CLAUDE.md's "All writes go through `createAdminClient()`" invariant. No client-side reads.

@@ -135,13 +135,13 @@ export interface OutcomeClaimContext {
 /**
  * Pure predicate. For each outcome row whose status is NOT 'verified', check the message for a
  * kind-specific claim pattern. If any match, the reply is BLOCKED — the matched phrase and the
- * row's identity are surfaced so the caller can log the exact reason and rewrite (or hold for
- * needs_human).
+ * row's identity are surfaced so the caller can log the exact reason and rewrite (or escalate
+ * to June).
  *
  * Fail-open on unknown kinds — a kind absent from CLAIM_KIND_PATTERNS produces no patterns to
  * scan, so we can't detect a claim on it. That is the intentional trade: false negatives (a
  * novel action type slips through) are recoverable via the Phase-4 completion gate; false
- * positives (a legit reply on a novel kind is blocked) would strand tickets in needs_human on
+ * positives (a legit reply on a novel kind is blocked) would strand tickets escalated to June on
  * every new action introduction.
  */
 export function assessOutcomeClaims(ctx: OutcomeClaimContext): OutcomeClaimAssessment {

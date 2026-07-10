@@ -441,7 +441,7 @@ export async function closeTicketOnResolvingReply(
  * (documented rule: "message_sent → close; next inbound reopens"). Only `message_sent` closes;
  * `escalated` / `status_managed` / `keep_open` all LEAVE the ticket open — a launched
  * journey/playbook awaits the customer, a clarifying `needs_info` reply expects a follow-up, and
- * a `needs_human` escalation waits on the CS Director. The classifier is the single, shared
+ * an `escalate_to_june` escalation waits on the CS Director. The classifier is the single, shared
  * predicate the box lane's close decision drives from — no parallel taxonomy.
  */
 export type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" | "escalated";
@@ -463,8 +463,8 @@ export type SolBoxTurnAction = "message_sent" | "status_managed" | "keep_open" |
  *    non-box legacy callers + tests. Playbooks are armed reply-gated and still close via the box's
  *    every-message-closes rule.
  *
- * The `escalated` return is reserved for the caller's `needs_human` branch: Sol's box session
- * returns `status:'needs_human'` BEFORE any Direction is written, so no `chosen_path` string is
+ * The `escalated` return is reserved for the caller's escalate-to-June branch: Sol's box session
+ * returns `status:'escalate_to_june'` BEFORE any Direction is written, so no `chosen_path` string is
  * available at classification time — the caller stamps `escalated` from the branch itself. Kept
  * on the taxonomy so tests and future call sites share one vocabulary.
  *
