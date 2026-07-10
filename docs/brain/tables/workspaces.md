@@ -28,6 +28,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `support_email` | `text` | ✓ |  |
 | `sandbox_mode` | `bool` | — | default: `true` |
 | `replacement_threshold_cents` | `int8` | — | default: `0` |
+| `june_refund_approval_threshold_cents` | `int4` | — | default: `5000` ($50). A June ([[../libraries/cs-director]]) money remedy (refund/credit/replacement) STRICTLY ABOVE this routes to a founder SMS approval via Eve's cockpit before it fires; at-or-below runs autonomously. Read by [[../libraries/june-remedy-approval]] `getRefundApprovalThresholdCents`. Migration `20260710120000_june_refund_approval_threshold.sql`. |
 | `appstle_webhook_secret_encrypted` | `text` | ✓ | AES-256-GCM |
 | `appstle_api_key_encrypted` | `text` | ✓ | AES-256-GCM |
 | `auto_close_reply` | `text` | ✓ |  |

@@ -51,12 +51,17 @@ Classification is deterministic (a rail over `tool_name`+`tool_input`) — see [
 
 All WRITES go through [[../libraries/god-mode]] via `createAdminClient()`. Phase-1 exposes only the read primitives + `armSession`/`disarmSession`; Phase-2 lands `openApproval` + `decideApproval` (`approve`/`deny`/`ask`); the plan-scoped hotfix adds `openPlan` (a `risk='plan'` row) + `setActivePlan`/`getActivePlan` on the session. No raw `.from('god_mode_approvals').insert|update` outside the SDK.
 
+## `tool_name='june_remedy'` — parked CS Director money remedies
+
+Beyond the Claude-Code tool-gate vocabulary, one non-tool `tool_name` rides this table: **`june_remedy`** ([[../libraries/june-remedy-approval]] `JUNE_REMEDY_TOOL`). When June's remedy is a refund/credit over `workspaces.june_refund_approval_threshold_cents`, `raiseJuneRemedyApproval` opens a `risk='decision'`, `category='june_refund'` card whose `tool_input` carries the **parked remedy** (`{ ticket_id, remedy, reasoning, action_type, amount_cents, raised_at }`). On the founder's Approve/Deny, the box-worker ~60s sweep `executeApprovedJuneRemedies` fires (or stands down) the remedy and stamps `tool_input.executed_at` for idempotency — **no extra column, no re-fire**. This is the only card type whose decision triggers a downstream *deferred execution* rather than unblocking a live-polling tool call.
+
 ## RLS
 
 Service-role only. Same rationale as [[god_mode_sessions]].
 
 ## Related
 
+- [[../libraries/june-remedy-approval]] — the CS Director founder-approval gate that raises + sweeps `june_remedy` cards.
 - [[god_mode_sessions]] — the parent session.
 - [[workspaces]].`god_mode_pin_hash` — the extra check on destructive approvals.
 - [[../lifecycles/god-mode]] — end-to-end trace including the gate + cockpit rendering.
