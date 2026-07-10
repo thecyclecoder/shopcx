@@ -165,23 +165,55 @@ const COUNTRY_NAME_TO_ISO2: Record<string, string> = {
   "PAPUA NEW GUINEA": "PG",
 };
 
+/** Known-good ISO 3166-1 alpha-2 codes. Derived from the reverse-name-map
+ * values plus a hand-curated extension list so a 2-letter code like "UN"
+ * (which is NOT a real ISO 3166-1 country code — it stranded Evan H.'s
+ * SC132221 replacement) is rejected instead of trusted verbatim. Kept as a
+ * conservative allowlist: adding a country is safer than trusting an
+ * unknown code that Shopify will reject downstream. */
+const KNOWN_ISO2_CODES: ReadonlySet<string> = new Set<string>([
+  ...Object.values(COUNTRY_NAME_TO_ISO2),
+  // Common ISO-2 codes not otherwise present as a target in the reverse map.
+  "AF", "AM", "AZ", "AW", "AX", "AZ", "BJ", "BF", "BI", "BW", "BY", "BZ",
+  "CD", "CF", "CG", "CU", "CV", "DJ", "DM", "ER", "FO", "GA", "GD", "GE",
+  "GI", "GL", "GM", "GN", "GQ", "GY", "HT", "KG", "KY", "LC", "LI", "LR",
+  "LS", "MC", "MD", "MO", "MR", "MV", "MW", "NA", "NC", "NE", "PF", "PW",
+  "RE", "RW", "SB", "SC", "SL", "SM", "SO", "SR", "ST", "SV", "SZ", "TD",
+  "TG", "TJ", "TL", "TM", "TO", "TV", "VA", "VC", "VU", "WS",
+]);
+
+/** Strict normalizer — returns null when the input can't be resolved to a
+ * KNOWN ISO 3166-1 alpha-2 code. This is what the guard-loud callers
+ * (createReplacementOrder) use so a bogus code like "UN" surfaces as a
+ * retryable failure instead of silently stalling at address_confirmed
+ * (Evan H. SC132221, Jun-23 replacement that sat 17 days). */
+export function normalizeCountryToIso2Strict(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const upper = input.trim().toUpperCase();
+  if (!upper) return null;
+
+  // Shopify's US-territory convention — the territory codes ship as US.
+  if (upper === "US" || upper === "PR" || upper === "GU" || upper === "VI" || upper === "AS" || upper === "MP") {
+    return "US";
+  }
+
+  if (/^[A-Z]{2}$/.test(upper)) {
+    return KNOWN_ISO2_CODES.has(upper) ? upper : null;
+  }
+
+  return COUNTRY_NAME_TO_ISO2[upper] || null;
+}
+
 /** Normalize a country identifier to Shopify's ISO 3166-1 alpha-2 country code.
  *
  * Accepts an ISO-2 code ("US"), a full name ("United States"), a common alias
  * ("USA", "UK"), or empty/missing input. Returns "US" as the fallback so the
  * caller always has a valid Shopify countryCode. Folds Shopify's US-territory
- * convention (PR/GU/VI/AS/MP → "US"). */
+ * convention (PR/GU/VI/AS/MP → "US").
+ *
+ * Prefer this when the caller is happy defaulting to US on unresolvable
+ * input (Superfoods is a US-first store); use
+ * [[normalizeCountryToIso2Strict]] when the caller must fail loudly. */
 export function normalizeCountryToIso2(input: string | null | undefined): string {
-  if (!input) return "US";
-  const upper = input.trim().toUpperCase();
-  if (!upper) return "US";
-
-  if (upper === "US" || upper === "PR" || upper === "GU" || upper === "VI" || upper === "AS" || upper === "MP") {
-    return "US";
-  }
-
-  if (/^[A-Z]{2}$/.test(upper)) return upper;
-
-  const iso2 = COUNTRY_NAME_TO_ISO2[upper];
-  return iso2 || "US";
+  return normalizeCountryToIso2Strict(input) || "US";
 }

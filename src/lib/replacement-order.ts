@@ -28,7 +28,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { loggedActionFetch } from "@/lib/appstle-call-log";
-import { normalizeCountryToIso2 } from "@/lib/country-iso2";
+import { normalizeCountryToIso2Strict } from "@/lib/country-iso2";
 
 export interface CreateReplacementInput {
   workspaceId: string;
@@ -67,6 +67,67 @@ export interface CreateReplacementResult {
   replacementId: string;
   shopifyOrderName: string | null;
   error?: string;
+}
+
+/** Shape of the Shopify DraftOrderInput we hand to draftOrderCreate for a
+ * replacement. Kept minimal — just the fields we actually populate. Exposed
+ * so [[buildReplacementDraftOrderInput]] is testable without an HTTP mock. */
+export interface ReplacementDraftOrderInput {
+  customerId: string;
+  lineItems: Array<{ variantId: string; quantity: number }>;
+  shippingAddress: {
+    firstName: string;
+    lastName: string;
+    address1: string;
+    address2: string;
+    city: string;
+    provinceCode: string;
+    zip: string;
+    countryCode: string;
+  };
+  note: string;
+  tags: string[];
+  appliedDiscount: { value: number; valueType: "PERCENTAGE"; title: string };
+}
+
+/**
+ * Pure builder for the Shopify DraftOrderInput. Extracted from
+ * [[createReplacementOrder]] so Phase 2 (multi-item = ONE order with N line
+ * items — SC132221 fragmented Peach Mango + Strawberry Lemonade into TWO
+ * separate free orders) is testable without stubbing Shopify HTTP: hand it
+ * N items and assert `lineItems.length === N` with distinct variant IDs.
+ *
+ * Preserves the one-order-per-call invariant: the caller no longer loops
+ * per-flavor into `createReplacementOrder`; Sonnet hands the FULL item set
+ * once and this builder maps 1:1 into `lineItems`. */
+export function buildReplacementDraftOrderInput(
+  input: Pick<CreateReplacementInput, "items" | "shippingAddress" | "shopifyCustomerId" | "reason" | "ticketId" | "shopifyNote">,
+  resolvedCountryCode: string,
+  siteUrl?: string,
+): ReplacementDraftOrderInput {
+  const site = siteUrl || process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+  const ticketLink = input.ticketId ? `\n\nTicket: ${site}/dashboard/tickets/${input.ticketId}` : "";
+  const noteText = `${input.shopifyNote || "Replacement order"}${ticketLink}`;
+  return {
+    customerId: `gid://shopify/Customer/${input.shopifyCustomerId}`,
+    lineItems: input.items.map(i => ({
+      variantId: `gid://shopify/ProductVariant/${i.variantId}`,
+      quantity: i.quantity,
+    })),
+    shippingAddress: {
+      firstName: input.shippingAddress.firstName || "",
+      lastName: input.shippingAddress.lastName || "",
+      address1: input.shippingAddress.address1,
+      address2: input.shippingAddress.address2 || "",
+      city: input.shippingAddress.city,
+      provinceCode: input.shippingAddress.provinceCode || input.shippingAddress.province || "",
+      zip: input.shippingAddress.zip,
+      countryCode: resolvedCountryCode,
+    },
+    note: noteText,
+    tags: ["replacement", input.reason],
+    appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
+  };
 }
 
 export async function createReplacementOrder(input: CreateReplacementInput): Promise<CreateReplacementResult> {
@@ -114,34 +175,32 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
     };
   }
 
+  // ── 1b. Loud-fail on an unresolvable countryCode ─────────────────
+  // A bogus code like "UN" (what SC132221 produced when the upstream
+  // resolver sliced "United States" to 2 chars) has to fail as
+  // status='failed' + reason_detail here — silently letting Shopify
+  // reject the draft-order call leaves the replacement stalled at
+  // address_confirmed with no surfacing, exactly the 17-day rot
+  // Evan H.'s Jun-23 replacement suffered. The resolver treats an
+  // empty countryCode as "customer address didn't carry one" and
+  // defaults to the store's US; only a non-empty-but-unresolvable
+  // input fails loudly.
+  const rawCountryInput = input.shippingAddress.countryCode ?? "";
+  const strictCountry = normalizeCountryToIso2Strict(rawCountryInput);
+  const resolvedCountry = strictCountry || (rawCountryInput.trim() ? null : "US");
+  if (!resolvedCountry) {
+    const reason = `Unresolvable shipping countryCode ${JSON.stringify(rawCountryInput)} — needs a valid ISO 3166-1 alpha-2 code`;
+    await admin.from("replacements").update({ status: "failed", reason_detail: reason }).eq("id", replacement.id);
+    return { success: false, replacementId: replacement.id, shopifyOrderName: null, error: reason };
+  }
+
   // ── 2. Create + complete the Shopify draft order ──────────────────
   const { shop, accessToken } = await getShopifyCredentials(input.workspaceId);
   const shopifyGqlUrl = `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
-  const ticketLink = input.ticketId ? `\n\nTicket: ${siteUrl}/dashboard/tickets/${input.ticketId}` : "";
-  const noteText = `${input.shopifyNote || "Replacement order"}${ticketLink}`;
-
+  const draftOrderInput = buildReplacementDraftOrderInput(input, resolvedCountry);
   const draftBody = JSON.stringify({
     query: `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name } userErrors { field message } } }`,
-    variables: {
-      input: {
-        customerId: `gid://shopify/Customer/${input.shopifyCustomerId}`,
-        lineItems: input.items.map(i => ({ variantId: `gid://shopify/ProductVariant/${i.variantId}`, quantity: i.quantity })),
-        shippingAddress: {
-          firstName: input.shippingAddress.firstName || "",
-          lastName: input.shippingAddress.lastName || "",
-          address1: input.shippingAddress.address1,
-          address2: input.shippingAddress.address2 || "",
-          city: input.shippingAddress.city,
-          provinceCode: input.shippingAddress.provinceCode || input.shippingAddress.province || "",
-          zip: input.shippingAddress.zip,
-          countryCode: normalizeCountryToIso2(input.shippingAddress.countryCode),
-        },
-        note: noteText,
-        tags: ["replacement", input.reason],
-        appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
-      },
-    },
+    variables: { input: draftOrderInput },
   });
 
   const draftRes = await loggedActionFetch(shopifyGqlUrl, {
