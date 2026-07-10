@@ -64,6 +64,28 @@ async function internalSubUpdateNextBillingDate(workspaceId: string, contractId:
 async function internalSubAddItem(workspaceId: string, contractId: string, variantId: string, quantity: number,) : Promise<ActionResult>
 ```
 
+### `internalSubAddOneTimeGift` — function
+
+```ts
+async function internalSubAddOneTimeGift(
+  workspaceId: string, contractId: string, variantId: string, quantity: number,
+  opts: { free?: boolean; priceCents?: number | null } = {},
+) : Promise<ActionResult>
+```
+
+Append a **one-time** item to the sub's next renewal that ships once then drops off. Always appends a NEW line (never merges) so the gift sits alongside a recurring line for the same variant. `opts.free` defaults **true** → `is_gift:true` ($0 via the [[pricing]] engine); paid → `price_override_cents` from `priceCents` (or omitted → live catalog price). Every line carries `one_time_next_renewal:true`, which the [[../inngest/internal-subscription-renewals]] engine drops after the order ships. Requires the sub be `active`. Called by [[subscription-items]] `subAddOneTimeGift` (internal branch).
+
+### `buildOneTimeGiftItem` — function (pure)
+
+```ts
+function buildOneTimeGiftItem(
+  resolved: ResolvedVariant | null, fallbackVariantId: string, quantity: number,
+  opts: { free?: boolean; priceCents?: number | null } = {},
+) : Item
+```
+
+Pure record builder for the one-time line (free → `is_gift`; paid → `price_override_cents`; quantity floored ≥1; price clamped ≥0). Unit-tested in `internal-subscription.oneTimeGift.test.ts` (7 cases).
+
 ### `internalSubRemoveItem` — function
 
 ```ts
