@@ -27,6 +27,7 @@ import AuthoringChat from "../AuthoringChat";
 import BuildButton from "../BuildButton";
 import PhaseList from "../PhaseList";
 import VerificationCard from "../VerificationCard";
+import SpecPhasesDetail, { type PhaseDetailView } from "../SpecPhasesDetail";
 
 
 const STATUS_LABEL: Record<SpecStatus, string> = { planned: "Planned", in_progress: "In progress", in_testing: "In testing", in_review: "In Review", shipped: "Shipped", deferred: "Deferred", rejected: "Cut" };
@@ -177,6 +178,35 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
   const greenBullets = deriveGreenBullets(phaseChecks.map((c) => c.text), testRun, resolutions, slug);
   const allGreen = greenBullets.length > 0 && greenBullets.every((g) => g.green);
 
+  // spec-detail-shows-phases-and-verifications — build the per-phase detail the page previously dropped:
+  // each phase's why/what/body + its OWN verification checks (grouped by `phasePosition`, which
+  // listSpecPhaseChecks already tags) with live green state (greenBullets is parallel to phaseChecks by
+  // index, so zip them). Pre-render each phase body server-side (trusted internal markdown).
+  const checksByPhase = new Map<number, PhaseDetailView["checks"]>();
+  phaseChecks.forEach((c, i) => {
+    const arr = checksByPhase.get(c.phasePosition) ?? [];
+    arr.push({ text: c.text, kind: c.kind, green: greenBullets[i]?.green ?? false, via: greenBullets[i]?.via ?? null });
+    checksByPhase.set(c.phasePosition, arr);
+  });
+  const phaseDetails: PhaseDetailView[] = specRow
+    ? await Promise.all(
+        [...specRow.phases]
+          .sort((a, b) => a.position - b.position)
+          .map(async (p) => ({
+            position: p.position,
+            title: p.title,
+            status: p.status,
+            built: !!p.build_sha && p.status !== "shipped" && p.status !== "rejected",
+            pr: p.pr,
+            kind: p.kind,
+            why: p.why,
+            what: p.what,
+            bodyHtml: p.body && p.body.trim() ? await marked.parse(preprocessWikilinks(p.body.trim(), specSlugs)) : null,
+            checks: checksByPhase.get(p.position) ?? [],
+          })),
+      )
+    : [];
+
   // The verification test plan is rendered from the ROWS, not lifted out of the body — the detail
   // page's "build detail" article shows the full rendered spec unchanged.
   const verificationHtml = phaseChecks.length
@@ -222,9 +252,13 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
               )}
             </section>
           )}
+          {/* spec-detail-shows-phases-and-verifications — per-phase detail (status, why/what, body, and
+              each phase's own verification checks + green state), the data the page previously flattened. */}
+          <SpecPhasesDetail phases={phaseDetails} />
+
           <details className="mb-4">
             <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
-              Build detail
+              Full spec markdown
             </summary>
             <article
               className="prose prose-sm prose-zinc mt-3 max-w-none prose-headings:font-semibold prose-pre:bg-zinc-900 prose-pre:text-zinc-100 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs"

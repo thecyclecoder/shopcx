@@ -1111,20 +1111,36 @@ export async function appendFixPhases(
     .maybeSingle();
   let pos = (maxRow as { position: number } | null)?.position ?? 0;
   const positions: number[] = [];
+  // verification-checks-source-of-truth — populate the typed `spec_phase_checks` rows for each appended fix
+  // phase too, so a fix phase is a first-class structured object (the display + renderer read the rows, not
+  // just the `verification` text column). Dynamic import avoids any import cycle (matches author-spec).
+  const { upsertPhaseChecks, parseVerificationBlobToChecks } = await import("@/lib/spec-phase-checks-table");
   for (const f of fixes) {
     pos += 1;
-    const { error } = await admin.from("spec_phases").insert({
-      spec_id: specId,
-      position: pos,
-      title: f.title,
-      body: f.body,
-      status: "planned" as Phase,
-      verification: f.verification,
-      kind: "fix",
-      origin_check_keys: f.origin_check_keys,
-    });
-    if (error) throw error;
+    const { data: inserted, error } = await admin
+      .from("spec_phases")
+      .insert({
+        spec_id: specId,
+        position: pos,
+        title: f.title,
+        body: f.body,
+        status: "planned" as Phase,
+        verification: f.verification,
+        kind: "fix",
+        origin_check_keys: f.origin_check_keys,
+      })
+      .select("id")
+      .single();
+    if (error || !inserted) throw error ?? new Error("insert fix phase returned no row");
     positions.push(pos);
+    // Best-effort: derive the typed checks from the fix phase's verification blob. Never fail the fix append
+    // on a checks write (the column remains the fallback render source).
+    try {
+      const checks = parseVerificationBlobToChecks(f.verification);
+      if (checks.length) await upsertPhaseChecks((inserted as { id: string }).id, checks);
+    } catch (e) {
+      console.warn(`[appendFixPhases] checks write failed for ${slug} phase ${pos}: ${(e as Error).message}`);
+    }
   }
   invalidateSpecCache(workspaceId, slug);
   return { appended: positions.length, positions };
