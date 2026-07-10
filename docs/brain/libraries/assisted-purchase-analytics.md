@@ -1,6 +1,6 @@
 # libraries/assisted-purchase-analytics
 
-Pure SQL builder for the concierge-flow funnel slice — Phase 5 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]. Emits the SQL + params vector for one funnel row: **checkout-stuck tickets → assisted-purchase started → order placed** (conversion + recovered revenue), scoped by workspace + time window. Bindable to any parameterized-query transport (an RPC, a direct pg driver, an analytics-tile helper) — kept as pure code so the shape is unit-testable and doesn't need a migration/RPC/view to iterate.
+Pure SQL builder for the concierge-flow funnel slice — part of [[../recipes/checkout-stuck-concierge-flow]]. Emits the SQL + params vector for one funnel row: **checkout-stuck tickets → assisted-purchase started → order placed** (conversion + recovered revenue), scoped by workspace + time window. Bindable to any parameterized-query transport (an RPC, a direct pg driver, an analytics-tile helper) — kept as pure code so the shape is unit-testable and doesn't need a migration/RPC/view to iterate.
 
 **File:** `src/lib/assisted-purchase-analytics.ts` · **Tests:** `src/lib/assisted-purchase-analytics.test.ts`
 
@@ -70,5 +70,4 @@ The wire-in checklist lives at [[../recipes/checkout-stuck-concierge-flow]] § "
 ## Related
 
 - [[assisted-purchase-direction]] — Phase 3 blueprint + Phase 5 fast-default guard.
-- [[../recipes/checkout-stuck-concierge-flow]] — operational recipe.
-- [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]] — driving spec.
+- [[../recipes/checkout-stuck-concierge-flow]] — operational recipe with all signals + guards integrated.

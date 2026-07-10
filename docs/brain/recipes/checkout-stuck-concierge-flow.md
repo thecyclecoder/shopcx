@@ -1,8 +1,6 @@
 # recipes/checkout-stuck-concierge-flow
 
-The reflex playbook: any checkout issue → we concierge the sale. Never dead-end the customer with "try another card / try PayPal / try Shop Pay". Recorded failure mode is Latrina C. (ticket aa0b6697) — Shop Pay OTP never arrived, orchestrator dead-ended her, we lost the sale. This recipe is the fast default.
-
-Consolidated from the five phases of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]] (folded into the brain when the spec ships).
+The reflex playbook: any checkout issue → we concierge the sale. Never dead-end the customer with "try another card / try PayPal / try Shop Pay". Recorded failure mode is Latrina C. (ticket aa0b6697) — Shop Pay OTP never arrived, orchestrator dead-ended her, we lost the sale. This recipe is the fast default, integrated across five phases: classification → routing → Sol's Direction blueprint → playbook placement → analytics measurement.
 
 ## The path
 
@@ -80,8 +78,10 @@ Ratios (`start_rate`, `placement_rate`, `end_to_end_conversion`) are ROUND'd to 
 
 ## Related
 
-- [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]] — the driving spec.
-- [[../libraries/assisted-purchase-direction]] — blueprint + guards (Phase 3, 5).
+- [[../libraries/checkout-stuck-intent]] — classification.
+- [[../libraries/model-picker]] + [[../libraries/inflection-detector]] — routing to Sonnet + Sol re-session.
+- [[../libraries/assisted-purchase-direction]] — blueprint + guards (Phase 3–5).
+- [[../libraries/assisted-purchase-analytics]] — funnel instrumentation (Phase 5).
 - [[../libraries/assisted-purchase-analytics]] — the funnel SQL builder (Phase 5).
 - [[../libraries/checkout-stuck-intent]] — the intent predicate (Phase 1).
 - [[../libraries/model-picker]] · [[../libraries/inflection-detector]] — the Phase-2 routing.
