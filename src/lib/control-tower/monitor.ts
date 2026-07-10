@@ -850,6 +850,17 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // idle_while_work on loop:ai:ticket-analyzer during otherwise-quiet windows. The probe and
             // the cron have to see the same universe of work (standing pattern — siblings:
             // ticket-decision-workprobe-exclude-positive-close, ticket-decision-workprobe-exclude-active-playbook).
+            //
+            // Cron-selection mirror (journey-completion-stamps-closed-at-so-cora-can-grade Fix 1) —
+            // the cron's `find-tickets` gate ALSO requires `closed_at IS NOT NULL AND
+            // sol_handled_at IS NOT NULL` (ticket-analysis-cron.ts:154-155). A closed AI ticket
+            // whose close writer forgot to stamp `closed_at` (the origin bug this spec repairs —
+            // journey completion routes shipped status='closed'+resolved_at but no closed_at) is
+            // permanently invisible to the cron, so counting it as awaited work manufactures a
+            // false idle_while_work on loop:ai:ticket-analyzer even after Phase 1 closes the
+            // source. Same for `sol_handled_at`-null tickets (never touched by Sol → cron skips).
+            // Adding the two `.not(*, "is", null)` filters aligns the probe with the cron's real
+            // selection universe (learning #1: change the durable predicate).
             const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
             const { count } = await admin
               .from("tickets")
@@ -857,6 +868,8 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               .eq("status", "closed")
               .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
+              .not("closed_at", "is", null)
+              .not("sol_handled_at", "is", null)
               .is("last_analyzed_at", null)
               .gte("updated_at", sinceIso)
               .lte("updated_at", graceCutoffIso);
