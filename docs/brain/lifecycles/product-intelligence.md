@@ -1,6 +1,8 @@
 # Product intelligence lifecycle
 
-How a Shopify-synced product becomes a fully-researched, review-analyzed, PDP-ready knowledge asset that the AI orchestrator, KB articles, macros, and storefront PDP all read from. Single source of truth for "what does ShopCX know about each product, and how does that knowledge get built?"
+How a product becomes a fully-researched, review-analyzed, PDP-ready knowledge asset that the AI orchestrator, KB articles, macros, storefront PDP, and now the **ad-creative pipeline** all read from. Single source of truth for "what does ShopCX know about each product, and how does that knowledge get built?" (A product is a first-class ShopCX entity keyed on its own `products.id` UUID — a Shopify sync was its *origin*, not its identity; it lives with or without Shopify, which is being sunset.)
+
+> **Reading it all at once:** the [[../libraries/product-intelligence]] SDK (`getProductIntelligence`) is the single front door that fans out to every structured table below (benefits, ingredient research, ad angles, page content, categorized reviews, media) — built for ad-creative generation. The deprecated ShopGrowth-era `product_intelligence` *blob* table was **dropped** 2026-07-10 (migration `20260710000000`); the Engine's structured tables are canonical.
 
 ## The Engine — the only system
 

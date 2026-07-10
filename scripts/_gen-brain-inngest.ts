@@ -54,7 +54,7 @@ const SUMMARIES: Record<string, string> = {
   "monthly-revenue-snapshot.ts": "Month-end rollup → `monthly_revenue_snapshots`.",
   "order-address-fallback.ts": "Async job: when an order arrives with null ship+bill addresses, pulls `Customer.defaultAddress` from Shopify and backfills. See feedback_address_mirror_rule.",
   "portal-auto-resume.ts": "Resumes paused subs at `pause_resume_at`. Used by cancel-flow pause remedies + crisis Tier 3.",
-  "product-intelligence.ts": "Generates `product_intelligence` rows — competitor analysis, positioning, recommended angles.",
+  "product-intelligence.ts": "Generates the structured product-intelligence surface — product_ingredient_research (mechanism + clinical citations) + product_review_analysis (claim clusters). Read via src/lib/product-intelligence.ts.",
   "refresh-customer-segments.ts": "Recomputes `customers.segments` array for archetype-driven SMS targeting. See PERPETUAL-CAMPAIGNS-SPEC.md.",
   "reseller-discovery.ts": "Weekly Mon 6am CT cron: pulls competitor offers per ASIN from Amazon SP-API → scrapes seller storefronts → upserts `known_resellers`.",
   "returns.ts": "Returns refund pipeline: returns/process-delivery (EasyPost delivered → fire issue-refund) and returns/issue-refund (partial refund OR store credit, close return, email customer).",
