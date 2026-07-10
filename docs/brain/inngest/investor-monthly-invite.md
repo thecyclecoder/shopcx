@@ -25,6 +25,10 @@ Returns `{ workspaces, emailed, texted, errors }`.
 
 In `src/lib/inngest/registered-functions.ts` as `investorMonthlyInvite` (served by `src/app/api/inngest/route.ts`).
 
+## Monitoring
+
+Registered in [[../libraries/control-tower]] `MONITORED_LOOPS` (`id:'investor-monthly-invite'`, `kind:'cron'`, `owner:'platform'`, `expectedCadence:'monthly (0 14 20 * *)'`, `livenessWindowMs:32*DAY`, `registeredAt:'2026-07-10T16:15:05.108Z'`) — monitored for liveness by the [[../inngest/control-tower-monitor]] cron. A beat within 32 days (the full month window + 2-day grace) is green; silence beyond that is amber "awaiting first run" (never-fired grace) or red (stale). On the Control Tower dashboard, appears as a tile under "Monthly crons" pool.
+
 ## Gotchas
 
 - **The email senders enforce sandbox** (`getResendClient(ws, toEmail)`) — a `sandbox_mode` workspace won't email non-member investors. Superfoods prod has sandbox off.
