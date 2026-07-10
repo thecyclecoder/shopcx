@@ -16,13 +16,14 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
-import { SONNET_MODEL } from "@/lib/ai-models";
+import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
-import { insertAnalysis, getLatestForTicket } from "@/lib/ticket-analyses-table";
+import { insertAnalysis, getLatestForTicket, applyAgentRescore } from "@/lib/ticket-analyses-table";
 import { runCheapTriagePass, recordCheapPassClean } from "@/lib/cora-triage-pass";
+import { recordSolMessyTurns, normalizeMessyTurnSignals } from "@/lib/sol-coaching-signal";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -301,6 +302,12 @@ export const GRADER_RUBRIC_BODY = `EVALUATION DIMENSIONS (most damaging first):
   9. Context Respect — did the AI honor grandfathered pricing / VIP status / agent-intervened threads / crisis enrollment?
   10. Resolution Efficiency — simple ask in 1 turn vs 5 turns?
 
+END-RESULT PRIMACY (grade the ENDING first — this governs the score AND whether to escalate):
+  Support is a process. Customers describe things messily and the AI legitimately states a reasonable-but-wrong interim position, then corrects as facts arrive. Judge the ticket by WHERE IT ENDED, not by the messiest point in the middle.
+  • If the ticket ENDED well — the customer's actual ask was resolved and they are not left hanging or upset in their LAST message — then a stumble that was RECOVERED before the end (a contradiction later corrected, a policy mis-stated then fixed, a slow or loopy path, a wrong tool then the right one) is a COACHING NOTE, not a score-sinker and NOT an escalation trigger. Score it in the good-enough band (6-8) with the issue recorded so the pattern can be coached, and do NOT force the ≤5 caps on a mid-turn slip the AI itself recovered from.
+  • Escalate to a human ONLY when the ENDING is unsatisfactory: the customer is unresolved / frustrated / threatening at the close, OR a severe issue SURVIVED to the end and shaped the outcome (a promise the customer is still waiting on that was never kept, a false claim of an action that never happened, a wrong outcome shipped). A severe-typed issue that was caught and corrected before the close is recovered — coach it, don't escalate it.
+  • This mirrors the cheap triage pass in front of you: it flags on TERMINAL failure, not on a messy-but-recovered middle. Hold the same line.
+
 SURFACE-BOUNDED GRADING (READ THIS CAREFULLY — you grade the AI against the data the AI actually had, not against gaps in YOUR own surface):
   You see a conversation window plus whatever context blocks are attached (agent guidance, playbook context, policies, calibration rules). You do NOT see the full product catalog, the full KB, every SKU/variant/flavor, the full order line, or the customer's full history. When the AI makes a specific claim (a product variant name, a flavor, a shipping window, a KB detail, a per-unit price, a cadence, etc.), triage it into one of these three buckets:
     A. CONTRADICTS your surface — the claim disagrees with a fact that IS on your surface. Example: the AI says the per-unit was $30 but the surface shows the customer was charged $25/unit, or the AI cites policy X but the CURRENT POLICIES block above says policy Y. → This is an inaccuracy. Tag it \`inaccuracy\`. HARD CAPS apply.
@@ -440,7 +447,11 @@ export interface PreparedAnalyzerRun {
   userMsg: string;
 }
 
-export type AnalyzeTrigger = "auto_close" | "manual_close" | "reopen_close" | "manual";
+// "low_csat" — the customer completed the CSAT survey (so they said "resolved") but rated us ≤3.
+// A poor rating on a supposedly-resolved ticket is an end-result miss the cheap pass can't see (it
+// runs before the survey), so it forces a DEEP Cora session directly. Like every non-auto_close
+// trigger it BYPASSES the cheap triage pass (only "auto_close" runs it). See enqueueTicketAnalyzeJob.
+export type AnalyzeTrigger = "auto_close" | "manual_close" | "reopen_close" | "manual" | "low_csat";
 
 /**
  * Build a "playbook context" block for the grader. When a ticket has an
@@ -929,30 +940,74 @@ export async function applyAnalyzerVerdict(
     });
   }
 
-  // Insert the analysis row through the SDK. All writes to `ticket_analyses` route through
+  // Persist the verdict through the SDK. All writes to `ticket_analyses` route through
   // insertAnalysis / applyAdminOverride / applyAgentRescore — the guard
   // scripts/_check-ticket-analyses-sdk-compliance.ts CI-reds any raw `.from('ticket_analyses')
   // .insert/.update` outside src/lib/ticket-analyses-table.ts.
-  const { id: insertedId, error: insertErr } = await insertAnalysis({
+  //
+  // Two write modes (requirement: "Cora can override the AI score on a ticket"):
+  //   • OVERRIDE — when the latest existing analysis on this ticket is a CHEAP-PASS row (Haiku
+  //     model, written by [[cora-triage-pass]] recordCheapPassClean), Cora is the authoritative
+  //     grader and OVERRIDES that row in place via applyAgentRescore: her score/summary/issues
+  //     replace the cheap pass's optimistic grade, so the ticket carries ONE grade per handling and
+  //     a stale cheap-pass score never lingers beside Cora's. This is the exact path the low_csat
+  //     trigger needs — the cheap pass graded it clean at close, then a ≤3 rating pulled Cora in to
+  //     correct the record. (admin_score is the SDK's correction column; surfaces read it over the
+  //     raw score, same as a human override.)
+  //   • INSERT — otherwise (no prior grade, or the latest is itself a deep grade) insert a fresh row.
+  const prior = await getLatestForTicket(prepared.ticketId, {
     workspaceId: prepared.workspaceId,
-    ticketId: prepared.ticketId,
-    windowStart: prepared.windowStart,
-    windowEnd: prepared.windowEnd,
-    score: analysis.score,
-    issues: analysis.issues || [],
-    actionItems: analysis.action_items || [],
-    summary: analysis.summary || null,
-    model,
-    inputTokens: inputTokens,
-    outputTokens: outputTokens,
-    costCents: costCents,
-    trigger: prepared.trigger,
-    aiMessageCount: prepared.aiMessageCount,
-    apiBilled: usage?.apiBilled,
+    select: "id, model, score, window_end",
   });
-  if (insertErr) {
-    console.warn(`[ticket-analyzer] insertAnalysis failed (${prepared.ticketId}): ${insertErr}`);
+  const priorIsCheapPass =
+    !!prior &&
+    prior.model === HAIKU_MODEL &&
+    String((prior.window_end as string | null) ?? "") <= prepared.windowEnd;
+
+  let insertedId: string | null = null;
+  if (priorIsCheapPass && typeof prior!.id === "string") {
+    const overrideRes = await applyAgentRescore({
+      analysisId: prior!.id as string,
+      workspaceId: prepared.workspaceId,
+      score: analysis.score,
+      summary: analysis.summary || undefined,
+      issues: analysis.issues || [],
+      source: `cora-deep-override:${prepared.trigger}`,
+    });
+    if (!overrideRes.ok) {
+      console.warn(`[ticket-analyzer] cheap-pass override failed (${prepared.ticketId}): ${overrideRes.error}`);
+    }
+    insertedId = prior!.id as string;
+  } else {
+    const { id, error: insertErr } = await insertAnalysis({
+      workspaceId: prepared.workspaceId,
+      ticketId: prepared.ticketId,
+      windowStart: prepared.windowStart,
+      windowEnd: prepared.windowEnd,
+      score: analysis.score,
+      issues: analysis.issues || [],
+      actionItems: analysis.action_items || [],
+      summary: analysis.summary || null,
+      model,
+      inputTokens: inputTokens,
+      outputTokens: outputTokens,
+      costCents: costCents,
+      trigger: prepared.trigger,
+      aiMessageCount: prepared.aiMessageCount,
+      apiBilled: usage?.apiBilled,
+    });
+    if (insertErr) {
+      console.warn(`[ticket-analyzer] insertAnalysis failed (${prepared.ticketId}): ${insertErr}`);
+    }
+    insertedId = id ?? null;
   }
+
+  // Post Cora's verdict as an INTERNAL note on the ticket so a human reading the thread sees her
+  // analysis inline (score + summary + issue types), not just an escalation side-effect. Worded with
+  // a distinct `[Cora Analysis]` prefix so it can NEVER be mistaken for a positive-close note or a
+  // re-open marker by a later hasCleanPositiveClose() scan (which keys on POSITIVE_CLOSE_NOTE /
+  // REOPEN_NOTE_MARKERS). Best-effort — a note failure must not sink the grade.
+  await postCoraAnalysisNote(admin, prepared.ticketId, analysis, prepared.trigger, insertedId);
 
   // Update ticket.last_analyzed_at
   await admin.from("tickets")
@@ -1224,6 +1279,60 @@ export function decideEscalationAction(
   };
 }
 
+// The analyzer's own issue taxonomy (ISSUE TYPES in GRADER_RUBRIC_BODY) → the shared coaching vocab
+// ([[sol-coaching-signal]] SOL_MESSY_TURN_SIGNALS) so Cora's coaching signals aggregate in June's
+// digest alongside the cheap pass's. Only RECOVERED-stumble classes map; terminal classes
+// (false_promise / broken_action / frustration / unverified_from_surface) are deliberately absent —
+// they either escalate (a bad ending) or aren't a coachable mid-turn slip. An unmapped issue simply
+// contributes no signal. Exported for the unit test.
+const CORA_ISSUE_TO_MESSY_SIGNAL: Record<string, string> = {
+  inaccuracy: "policy_misstate_recovered",
+  drift: "contradiction_recovered",
+  rule_violation: "wrong_tool_recovered",
+  robotic: "tone_miss_recovered",
+  missed_opportunity: "slow_resolution",
+  kb_gap: "repeated_clarification",
+};
+
+export function coraIssuesToMessySignals(issues: Array<{ type: string }>): string[] {
+  return normalizeMessyTurnSignals(
+    (issues || []).map((i) => CORA_ISSUE_TO_MESSY_SIGNAL[i.type]).filter((s): s is string => !!s),
+  );
+}
+
+/**
+ * Post Cora's verdict as an internal `[Cora Analysis]` note on the ticket. Distinct prefix + wording
+ * so a later hasCleanPositiveClose() scan never mistakes it for POSITIVE_CLOSE_NOTE or a
+ * REOPEN_NOTE_MARKER. Best-effort; never throws.
+ */
+async function postCoraAnalysisNote(
+  admin: Admin,
+  ticketId: string,
+  analysis: AnalysisResult,
+  trigger: AnalyzeTrigger,
+  analysisId: string | null,
+): Promise<void> {
+  try {
+    const issueTypes = (analysis.issues || []).map((i) => i.type);
+    const issuesLine = issueTypes.length ? issueTypes.join(", ") : "none";
+    const summary = (analysis.summary || "").trim() || "(no summary)";
+    const body =
+      `[Cora Analysis] Score ${analysis.score}/10` +
+      (trigger === "low_csat" ? " (triggered by a low CSAT rating)" : "") +
+      `. ${summary} — Issues: ${issuesLine}.` +
+      (analysisId ? ` Analysis ${analysisId}.` : "");
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: body.slice(0, 4000),
+    });
+  } catch (err) {
+    console.warn("[ticket-analyzer] postCoraAnalysisNote failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 async function applySeverityActions(
   admin: Admin,
   ticketId: string,
@@ -1331,8 +1440,16 @@ async function applySeverityActions(
     severeTypes.has("inaccuracy") &&
     !severeTypes.has("false_promise") &&
     !severeTypes.has("broken_action");
+  // END-RESULT PRIMACY (Cora dial-in): an `inaccuracy` that was the SOLE severe trigger on a cleanly
+  // positively-closed ticket with no customer-threat is a RECOVERED mid-turn slip — the ending was
+  // satisfactory, so it is coaching material, not a June call. Previously this suppression also
+  // required score ≥ 7; that gate is dropped because the ENDING (positive close + no threat), not the
+  // number, is what decides escalation now. A REAL inaccuracy that FAILED the customer would not
+  // leave them positively closed (or would surface as an unresolved/threat signal), so positivelyClosed
+  // is the honest gate. false_promise / broken_action still escalate — those are ENDING-breaking (the
+  // customer is still owed something), never a recovered slip. customerThreat still always escalates.
   const suppressInaccuracyEscalation =
-    hasSevereIssue && onlyInaccuracySevere && !customerThreat && score >= 7 && positivelyClosed;
+    hasSevereIssue && onlyInaccuracySevere && !customerThreat && positivelyClosed;
 
   // ── Human directive beats the overrides ──
   // A pinned agent guidance note containing an explicit "do not escalate"
@@ -1453,7 +1570,27 @@ async function applySeverityActions(
     });
   }
 
-  if (action === "none") return;
+  // ── Coaching signal on a NO-ESCALATION verdict (Cora dial-in) ──
+  // The ending was satisfactory (no June call), but the MIDDLE may have been messy — a recovered
+  // stumble worth learning from if it recurs. Emit ONE `sol_messy_turns` signal (mapping Cora's own
+  // issue types → the shared coaching vocab) so June can digest repeat patterns and commission a fix.
+  // ONLY on action==='none' — an escalated ticket already reaches June the stronger way, and a flagged
+  // ticket the cheap pass owns never reaches this deep path, so there is no double-count. No-op when
+  // no issue maps to a coachable mid-turn slip. See [[sol-coaching-signal]] + [[cs-director-digest]].
+  if (action === "none") {
+    const coachingSignals = coraIssuesToMessySignals(issues);
+    if (coachingSignals.length > 0) {
+      await recordSolMessyTurns(admin, {
+        workspaceId,
+        ticketId,
+        tier: "cora",
+        signals: coachingSignals,
+        score,
+        summary: analysis.summary || undefined,
+      });
+    }
+    return;
+  }
 
   // ── Respect human-agent closure ──
   // If a human agent already handled this ticket (agent_intervened) or

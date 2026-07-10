@@ -349,6 +349,85 @@ function composePrecedentCalls(rows: DirectorActivityRow[]): CsStoryline[] {
   return out;
 }
 
+/** Read the `sol_messy_turns` coaching signals (from both Cora tiers) in the window. Best-effort. */
+async function readMessyTurnSignals(
+  admin: Admin,
+  workspaceId: string,
+  since: string,
+  until: string,
+): Promise<DirectorActivityRow[]> {
+  try {
+    const { data, error } = await admin
+      .from("director_activity")
+      .select("id, reason, metadata, spec_slug, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("director_function", "cs")
+      .eq("action_kind", "sol_messy_turns")
+      .gte("created_at", since)
+      .lt("created_at", until)
+      .order("created_at", { ascending: true });
+    if (error) {
+      console.warn("[cs-director-digest] sol_messy_turns read failed:", error.message);
+      return [];
+    }
+    return (data ?? []) as DirectorActivityRow[];
+  } catch (err) {
+    console.warn("[cs-director-digest] sol_messy_turns read threw:", err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+/**
+ * Roll up the per-ticket `sol_messy_turns` coaching signals — emitted by BOTH the cheap triage pass
+ * and Cora's deep session ([[sol-coaching-signal]]) — into `early_warning` storylines. Each row's
+ * `metadata.signals` lists the recovered-stumble classes seen on that ticket; we group by CLASS and
+ * count DISTINCT tickets (a class messy on the same ticket across many turns is not a systemic
+ * signal — the ticket-count earns the storyline, mirroring composeEarlyWarnings). A class that
+ * repeats across ≥ RECURRING_PROBLEM_THRESHOLD tickets surfaces with an `add_rule` proposed_action:
+ * the systemic fix for a recurring Sol mid-turn pattern is a codified rule (a sonnet_prompts row)
+ * that catches it earlier, not a leash tweak. Pure + unit-testable.
+ */
+export function composeMessyTurnWarnings(rows: DirectorActivityRow[]): CsStoryline[] {
+  const perClass = new Map<string, { tickets: Set<string>; cheap: number; cora: number }>();
+  for (const r of rows) {
+    const meta = r.metadata ?? {};
+    const ticketId = typeof meta["ticket_id"] === "string" ? (meta["ticket_id"] as string) : r.id;
+    const tier = meta["tier"] === "cheap" || meta["tier"] === "cora" ? (meta["tier"] as string) : null;
+    const signals = Array.isArray(meta["signals"]) ? (meta["signals"] as unknown[]).filter((s): s is string => typeof s === "string") : [];
+    for (const cls of signals) {
+      const bucket = perClass.get(cls) ?? { tickets: new Set<string>(), cheap: 0, cora: 0 };
+      bucket.tickets.add(ticketId);
+      if (tier === "cheap") bucket.cheap++;
+      else if (tier === "cora") bucket.cora++;
+      perClass.set(cls, bucket);
+    }
+  }
+
+  const storylines: CsStoryline[] = [];
+  for (const [cls, bucket] of perClass) {
+    if (bucket.tickets.size < RECURRING_PROBLEM_THRESHOLD) continue;
+    const evidenceBits = [`${bucket.tickets.size} distinct tickets`, `via cheap ${bucket.cheap} · cora ${bucket.cora}`];
+    storylines.push({
+      kind: "early_warning",
+      title: trim(`Recurring Sol stumble: ${cls.replace(/_/g, " ")}`, 160),
+      evidence: trim(evidenceBits.join(" · "), MAX_EVIDENCE_LEN),
+      proposed_action: {
+        type: "add_rule",
+        payload: {
+          kind: "rule",
+          rule_draft: `Sol repeatedly showed the "${cls}" mid-turn pattern (recovered by close) across ${bucket.tickets.size} tickets. Add a rule / instruction that catches this earlier so it stops recurring.`,
+        },
+      },
+    });
+  }
+  storylines.sort((a, b) => {
+    const ac = Number(String(a.evidence).match(/^(\d+)/)?.[1] ?? 0);
+    const bc = Number(String(b.evidence).match(/^(\d+)/)?.[1] ?? 0);
+    return bc - ac;
+  });
+  return storylines;
+}
+
 /**
  * Look for an existing digest row for (workspace, period_start). The composer inserts idempotently
  * against this key so a cron retry never fans out two digests for the same week.
@@ -411,16 +490,18 @@ export async function composeCsDirectorDigest(
     };
   }
 
-  const [verdicts, events, capHits] = await Promise.all([
+  const [verdicts, events, capHits, messyTurns] = await Promise.all([
     readCsDirectorVerdicts(admin, workspaceId, since, until),
     readResolutionEvents(admin, workspaceId, since, until),
     readCapHitCountAndAlarm(admin, workspaceId, since, until),
+    readMessyTurnSignals(admin, workspaceId, since, until),
   ]);
 
   const storylines = [
     ...composeEarlyWarnings(events),
     ...composePrecedentCalls(verdicts),
     ...composeCapHitEscalation(capHits),
+    ...composeMessyTurnWarnings(messyTurns),
   ];
 
   try {

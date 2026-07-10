@@ -25,8 +25,24 @@ test("parses a clean pass (needs_review=false, no signals)", () => {
   const r = parseTriageResult('{"needs_review": false, "signals": [], "score": 9, "summary": "resolved cleanly"}');
   assert.equal(r.needsReview, false);
   assert.deepEqual(r.signals, []);
+  assert.deepEqual(r.coachingSignals, []);
   assert.equal(r.score, 9);
   assert.equal(r.summary, "resolved cleanly");
+});
+
+test("clean ending + recovered messy middle → no review, but coaching_signals surface", () => {
+  const r = parseTriageResult(
+    '{"needs_review": false, "signals": [], "coaching_signals": ["contradiction_recovered", "slow_resolution", "bogus"], "score": 7, "summary": "resolved but bumpy"}',
+  );
+  assert.equal(r.needsReview, false); // recovered messy middle NEVER escalates
+  assert.deepEqual(r.signals, []);
+  assert.deepEqual(r.coachingSignals, ["contradiction_recovered", "slow_resolution"]); // 'bogus' dropped
+});
+
+test("prompt elicits coaching_signals separate from terminal signals", () => {
+  const { system } = buildTriagePrompt("CUSTOMER: hi\nAGENT: hello");
+  assert.match(system, /coaching_signals/);
+  assert.match(system, /RECOVERED/);
 });
 
 test("parses a flagged pass and keeps only known signals", () => {

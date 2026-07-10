@@ -71,6 +71,7 @@ const { data } = await admin.from("ticket_csat")
 
 ## Gotchas
 
+- **A ≤3 rating triggers a Cora deep review.** On the rate path, `POST /api/csat/[ticketId]` fires `analyzeTicket(ticketId, "low_csat")` when `rating <= 3` (best-effort, fire-and-forget). Because CSAT rows only exist for RESOLVED tickets, a ≤3 rating is "customer said resolved but rated us poorly" — an end-result miss the cheap triage pass never saw (it runs before the survey). The `low_csat` trigger bypasses the cheap pass and forces a deep grade, which then OVERRIDES the cheap pass's optimistic score on the ticket. See [[../libraries/ticket-analyzer]] § Cora dial-in.
 - **One row per ticket.** UNIQUE(`ticket_id`) — re-submits update the existing row.
 - **CSAT is gated.** The survey asks "did we resolve your issue?" FIRST. Customer answers "No" → ticket reopens via inbound `ticket_messages` row, gets tagged `csat:reopened`, and NO `ticket_csat` row is created. Only resolved-issue ratings land here. The dashboard infers reopen rate from the tag, not from this table.
 - **Points are awarded once.** `points_awarded > 0` means we've already given them 500 points; re-submit doesn't double-pay.
