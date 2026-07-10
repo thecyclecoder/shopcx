@@ -767,6 +767,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   },
   // ─ Monthly crons (window ~32 days) ─
   {
+    id: "investor-monthly-invite",
+    kind: "cron",
+    owner: "platform",
+    label: "investor-monthly-invite",
+    description: "Auto-proposed monitored loop for the investor-monthly-invite cron (monthly (0 14 20 * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
+    expectedCadence: "monthly (0 14 20 * *)",
+    livenessWindowMs: 32 * DAY,
+    registeredAt: "2026-07-10T16:15:05.108Z",
+  },
+  {
     id: "qb-snapshot-refresh",
     kind: "cron",
     owner: "platform",
