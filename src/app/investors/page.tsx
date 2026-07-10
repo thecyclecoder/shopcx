@@ -57,7 +57,7 @@ async function InvestorsContent() {
         </p>
       </section>
       <section className="inv-charts">
-        <CfoFinancials endpoint="/api/investors/pnl" />
+        <CfoFinancials endpoint="/api/investors/pnl" defaultRange="thisYear" />
       </section>
     </>
   );

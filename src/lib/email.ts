@@ -473,7 +473,7 @@ export async function sendInvestorUpdateEmail({
   if (!client) return { error: "Resend not configured or blocked by sandbox" };
   const { data, error } = await client.resend.emails.send({
     from: `Superfoods Company <support@${client.domain}>`,
-    replyTo: client.supportEmail || `support@${client.domain}`,
+    replyTo: "dylan@superfoodscompany.com", // investor questions route to the founder (later: autonomous CFO)
     to: toEmail,
     subject,
     html,
@@ -506,7 +506,7 @@ export async function sendInvestorLinkEmail({
     </div>`;
   const { data, error } = await client.resend.emails.send({
     from: `Superfoods Company <support@${client.domain}>`,
-    replyTo: client.supportEmail || `support@${client.domain}`,
+    replyTo: "dylan@superfoodscompany.com", // investor questions route to the founder (later: autonomous CFO)
     to: toEmail,
     subject: "Your Superfoods investor link",
     html,

@@ -33,9 +33,10 @@ async function main() {
   const link = generateInvestorMagicLink(DYLAN_ID, DYLAN_EMAIL, WS);
   console.log("\nMagic link:", link);
   console.log("\nPerformance summary:");
-  console.log("  period:", perf.periodLabel);
-  console.log("  TTM revenue:", perf.ttmRevenue, "YoY:", perf.revenueYoYPct);
-  console.log("  working:", perf.working.length, "| needsHelp:", perf.needsHelp.length);
+  console.log("  period:", perf.periodLabel, "|", perf.primaryLabel);
+  console.log("  primary revenue:", perf.primaryRevenue, "YoY:", perf.primaryYoYPct, "vs", perf.comparisonLabel);
+  console.log("  focal lines:", perf.focal.length, "| working:", perf.working.length, "| needsHelp:", perf.needsHelp.length);
+  perf.focal.forEach((f) => console.log("   ·", f.label, f.sentence));
   const sms = renderInvestorSms(perf, link);
   console.log("\nSMS body:\n ", sms, `(${sms.length} chars)`);
 
