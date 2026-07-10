@@ -1,0 +1,57 @@
+/* Scoped shell for the /investors area. Deliberately quiet — the CfoFinancials
+   charts carry the color; this frame is just paper. Light + dark, OS-driven. */
+.inv-root {
+  --inv-bg: #fcfcfb;
+  --inv-card: #ffffff;
+  --inv-bd: #eceae4;
+  --inv-ink: #27262b;
+  --inv-ink2: #57565c;
+  --inv-mut: #9b9a94;
+  min-height: 100vh;
+  background: var(--inv-bg);
+  color: var(--inv-ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.inv-root.dark {
+  --inv-bg: #161615;
+  --inv-card: #1c1c1a;
+  --inv-bd: #2b2b28;
+  --inv-ink: #f2f1ee;
+  --inv-ink2: #b6b5ae;
+  --inv-mut: #6f6e68;
+}
+.inv-shell { max-width: 1120px; margin: 0 auto; padding-left: 20px; padding-right: 20px; }
+.inv-topbar { border-bottom: 1px solid var(--inv-bd); background: var(--inv-bg); }
+.inv-topbar-inner { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+.inv-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -0.01em; }
+.inv-brand-mark {
+  display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px;
+  background: #1baf7a; color: #fff; font-size: 14px; font-weight: 700;
+}
+.inv-brand-sub { color: var(--inv-mut); font-weight: 500; }
+.inv-private {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--inv-mut);
+  border: 1px solid var(--inv-bd); border-radius: 999px; padding: 3px 10px;
+}
+.inv-hero { padding: 34px 0 8px; }
+.inv-hero h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 6px; }
+.inv-hero p { color: var(--inv-ink2); font-size: 15px; margin: 0; max-width: 60ch; }
+.inv-charts { padding: 20px 0 40px; }
+.inv-footer { color: var(--inv-mut); font-size: 12px; padding-top: 24px; padding-bottom: 48px; border-top: 1px solid var(--inv-bd); margin-top: 8px; max-width: 60ch; }
+
+/* Expired / request-a-link surface */
+.inv-gate { max-width: 440px; margin: 12vh auto 0; text-align: center; padding: 0 20px; }
+.inv-gate h1 { font-size: 22px; font-weight: 650; margin: 0 0 8px; letter-spacing: -0.01em; }
+.inv-gate p { color: var(--inv-ink2); font-size: 15px; margin: 0 0 22px; }
+.inv-gate form { display: flex; gap: 8px; }
+.inv-gate input {
+  flex: 1; font: inherit; font-size: 15px; padding: 11px 13px; border-radius: 10px;
+  border: 1px solid var(--inv-bd); background: var(--inv-card); color: var(--inv-ink);
+}
+.inv-gate button {
+  font: inherit; font-weight: 600; font-size: 15px; padding: 11px 18px; border-radius: 10px;
+  border: 0; background: #1baf7a; color: #fff; cursor: pointer;
+}
+.inv-gate button:disabled { opacity: 0.6; cursor: default; }
+.inv-gate .inv-note { margin-top: 16px; font-size: 13px; color: var(--inv-mut); }

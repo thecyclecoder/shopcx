@@ -451,3 +451,66 @@ export async function sendReturnConfirmationEmail({
   if (error) return { error: error.message };
   return {};
 }
+
+/**
+ * Investor monthly update — the full, non-technical performance email with a
+ * one-tap magic link to the live /investors charts. Sends bespoke HTML (built by
+ * src/lib/investor-update.ts renderInvestorEmailHtml) directly, not the ticket
+ * reply wrapper. See docs/brain/lifecycles/investors-area.md.
+ */
+export async function sendInvestorUpdateEmail({
+  workspaceId,
+  toEmail,
+  subject,
+  html,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  subject: string;
+  html: string;
+}): Promise<{ messageId?: string; error?: string }> {
+  const client = await getResendClient(workspaceId, toEmail);
+  if (!client) return { error: "Resend not configured or blocked by sandbox" };
+  const { data, error } = await client.resend.emails.send({
+    from: `Superfoods Company <support@${client.domain}>`,
+    replyTo: client.supportEmail || `support@${client.domain}`,
+    to: toEmail,
+    subject,
+    html,
+  });
+  if (error) return { error: error.message };
+  return { messageId: data?.id };
+}
+
+/**
+ * Short "here's your fresh secure link" email — used by the /investors/expired
+ * self-service request flow. Deliberately minimal.
+ */
+export async function sendInvestorLinkEmail({
+  workspaceId,
+  toEmail,
+  link,
+}: {
+  workspaceId: string;
+  toEmail: string;
+  link: string;
+}): Promise<{ messageId?: string; error?: string }> {
+  const client = await getResendClient(workspaceId, toEmail);
+  if (!client) return { error: "Resend not configured or blocked by sandbox" };
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;text-align:center;">
+      <div style="display:inline-block;width:30px;height:30px;border-radius:8px;background:#1baf7a;color:#fff;line-height:30px;font-weight:700;">S</div>
+      <h1 style="font-size:20px;color:#18181b;margin:18px 0 8px;">Your secure link</h1>
+      <p style="font-size:15px;line-height:1.6;color:#52525b;margin:0 0 24px;">Tap below to open the Superfoods investor update. The link is personal to you — please don't forward it.</p>
+      <a href="${link}" style="display:inline-block;background:#1baf7a;color:#fff;text-decoration:none;font-size:16px;font-weight:600;padding:14px 28px;border-radius:12px;">Open the update →</a>
+    </div>`;
+  const { data, error } = await client.resend.emails.send({
+    from: `Superfoods Company <support@${client.domain}>`,
+    replyTo: client.supportEmail || `support@${client.domain}`,
+    to: toEmail,
+    subject: "Your Superfoods investor link",
+    html,
+  });
+  if (error) return { error: error.message };
+  return { messageId: data?.id };
+}
