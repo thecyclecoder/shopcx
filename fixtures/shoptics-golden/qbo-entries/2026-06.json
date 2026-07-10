@@ -1,0 +1,3795 @@
+{
+  "closing_month": "2026-06",
+  "journalentry_117317": {
+    "JournalEntry": {
+      "Adjustment": false,
+      "TotalAmt": 0,
+      "domain": "QBO",
+      "sparse": false,
+      "Id": "117317",
+      "SyncToken": "1",
+      "MetaData": {
+        "CreateTime": "2026-07-07T09:45:26-07:00",
+        "LastUpdatedTime": "2026-07-07T09:47:37-07:00"
+      },
+      "DocNumber": "SHOPIFY-0626",
+      "TxnDate": "2026-06-30",
+      "CurrencyRef": {
+        "value": "USD",
+        "name": "United States Dollar"
+      },
+      "PrivateNote": "Shopify Monthly Journal Entry - 2026-06",
+      "Line": [
+        {
+          "Id": "34",
+          "Description": "Accessories Online Sales - 2026-06",
+          "Amount": 249.45,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "419",
+              "name": "Online Sales:Accessories Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "35",
+          "Description": "Superfood Tabs Online Sales - 2026-06",
+          "Amount": 81863.14,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "436",
+              "name": "Online Sales:Superfood Tabs Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "36",
+          "Description": "Amazing Coffee Online Sales - 2026-06",
+          "Amount": 79330.16,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "413",
+              "name": "Online Sales:Amazing Coffee Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "37",
+          "Description": "Amazing Creamer Online Sales - 2026-06",
+          "Amount": 23072.93,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "416",
+              "name": "Online Sales:Amazing Creamer Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "38",
+          "Description": "Ashwavana Online Sales - 2026-06",
+          "Amount": 12981,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "417",
+              "name": "Online Sales:Ashwavana Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "39",
+          "Description": "Creatine Prime Online Sales - 2026-06",
+          "Amount": 3917.03,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "1150040009",
+              "name": "Online Sales:Creatine Prime Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "40",
+          "Description": "Gummies Online Sales - 2026-06",
+          "Amount": 811.55,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "513",
+              "name": "Online Sales:Gummies Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "41",
+          "Description": "Shipping Income - 2026-06",
+          "Amount": 10299.56,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "141",
+              "name": "Other Income:Shipping Income"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "42",
+          "Description": "Sales Tax Collected - 2026-06",
+          "Amount": 13904.51,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "181",
+              "name": "Sales Tax Payable"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "43",
+          "Description": "Discounts & Coupons - 2026-06",
+          "Amount": 16492.53,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "140",
+              "name": "Contra Income:Discounts & Coupons"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "44",
+          "Description": "Shopify Payments deposits - 2026-06",
+          "Amount": 158177.78,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "589",
+              "name": "Clearing:Shopify"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "45",
+          "Description": "Shopify Payments transaction fees - 2026-06",
+          "Amount": 4531.44,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "595",
+              "name": "General Business Expenses:Platform Transaction Fees:Shopify Transaction Fees"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "46",
+          "Description": "Refunds - Shopify Payments - 2026-06",
+          "Amount": 4716.21,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "146",
+              "name": "Contra Income:Refunds"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "47",
+          "Description": "Chargebacks - Shopify Payments - 2026-06",
+          "Amount": 892.4,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "58",
+              "name": "Contra Income:Chargebacks"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "48",
+          "Description": "Shopify Payments deductions - 2026-06",
+          "Amount": 10140.05,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "589",
+              "name": "Clearing:Shopify"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "49",
+          "Description": "PayPal deposits - 2026-06",
+          "Amount": 35942.79,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "121",
+              "name": "Clearing:PayPal"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "50",
+          "Description": "PayPal transaction fees - 2026-06",
+          "Amount": 1175.38,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "122",
+              "name": "General Business Expenses:Platform Transaction Fees:PayPal Transaction Fees"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "51",
+          "Description": "Refunds - PayPal - 2026-06",
+          "Amount": 680.42,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "146",
+              "name": "Contra Income:Refunds"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "52",
+          "Description": "PayPal deductions - 2026-06",
+          "Amount": 1855.8,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "121",
+              "name": "Clearing:PayPal"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "53",
+          "Description": "Braintree deposits - 2026-06",
+          "Amount": 15374.77,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "195",
+              "name": "Clearing:Braintree"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "54",
+          "Description": "Braintree transaction fees - 2026-06",
+          "Amount": 827.94,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "64",
+              "name": "General Business Expenses:Platform Transaction Fees:Braintree CC Transaction Fees"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "55",
+          "Description": "Refunds - Braintree - 2026-06",
+          "Amount": 656.42,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "146",
+              "name": "Contra Income:Refunds"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "56",
+          "Description": "Chargebacks - Braintree - 2026-06",
+          "Amount": 101.1,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "58",
+              "name": "Contra Income:Chargebacks"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "57",
+          "Description": "Braintree deductions - 2026-06",
+          "Amount": 1585.46,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "195",
+              "name": "Clearing:Braintree"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "58",
+          "Description": "Walmart deposits - 2026-06",
+          "Amount": 441.46,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "387",
+              "name": "Clearing:Walmart Carried Balances"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "59",
+          "Description": "Ashwavana Online Sales - Internal - 2026-06",
+          "Amount": 494.11,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "417",
+              "name": "Online Sales:Ashwavana Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "60",
+          "Description": "Amazing Coffee Online Sales - Internal - 2026-06",
+          "Amount": 2228.11,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "413",
+              "name": "Online Sales:Amazing Coffee Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "61",
+          "Description": "Superfood Tabs Online Sales - Internal - 2026-06",
+          "Amount": 1067.53,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "436",
+              "name": "Online Sales:Superfood Tabs Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "62",
+          "Description": "Creatine Prime Online Sales - Internal - 2026-06",
+          "Amount": 52.46,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "1150040009",
+              "name": "Online Sales:Creatine Prime Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "63",
+          "Description": "Amazing Creamer Online Sales - Internal - 2026-06",
+          "Amount": 98.63,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "416",
+              "name": "Online Sales:Amazing Creamer Online Sales"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "64",
+          "Description": "Shipping Income - Internal - 2026-06",
+          "Amount": 147.65,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "141",
+              "name": "Other Income:Shipping Income"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "65",
+          "Description": "Sales Tax Collected - Internal - 2026-06",
+          "Amount": 256.18,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Credit",
+            "AccountRef": {
+              "value": "181",
+              "name": "Sales Tax Payable"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "66",
+          "Description": "Discounts & Coupons - Internal - 2026-06",
+          "Amount": 322.06,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "140",
+              "name": "Contra Income:Discounts & Coupons"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "67",
+          "Description": "Internal deposits - 2026-06",
+          "Amount": 4022.61,
+          "DetailType": "JournalEntryLineDetail",
+          "JournalEntryLineDetail": {
+            "PostingType": "Debit",
+            "AccountRef": {
+              "value": "195",
+              "name": "Clearing:Braintree"
+            }
+          },
+          "CustomExtensions": []
+        }
+      ],
+      "TxnTaxDetail": {}
+    },
+    "time": "2026-07-10T10:05:10.815-07:00"
+  },
+  "salesreceipt_117314": {
+    "SalesReceipt": {
+      "domain": "QBO",
+      "sparse": false,
+      "Id": "117314",
+      "SyncToken": "0",
+      "MetaData": {
+        "CreateTime": "2026-07-07T09:44:49-07:00",
+        "LastUpdatedTime": "2026-07-07T09:44:49-07:00"
+      },
+      "CustomField": [],
+      "DocNumber": "AMZ-06-2026",
+      "TxnDate": "2026-06-30",
+      "CurrencyRef": {
+        "value": "USD",
+        "name": "United States Dollar"
+      },
+      "PrivateNote": "Amazon COGS - 2026-06",
+      "Line": [
+        {
+          "Id": "1",
+          "LineNum": 1,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "300",
+              "name": "Amazing Creamer - Vanilla - 30 Count"
+            },
+            "Quantity": 38,
+            "Line": [
+              {
+                "Id": "2",
+                "LineNum": 2,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "203",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 38,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "3",
+                "LineNum": 3,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "248",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 38,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "5",
+          "LineNum": 5,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "304",
+              "name": "Ashwavana - Orange Passion Fruit - 10 Count"
+            },
+            "Quantity": 87,
+            "Line": [
+              {
+                "Id": "6",
+                "LineNum": 6,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "265",
+                    "name": "Components:Ashwavana:IFC - Ashwavana - Orange Passion Fruit - 10 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 87,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "7",
+                "LineNum": 7,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "227",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Orange Passion Fruit"
+                  },
+                  "Qty": 870,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "8",
+                "LineNum": 8,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "254",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Orange Passion Fruit - 10 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 87,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "10",
+          "LineNum": 10,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "307",
+              "name": "Amazing Coffee - Hazelnut - Instant - 30 Count"
+            },
+            "Quantity": 31,
+            "Line": [
+              {
+                "Id": "11",
+                "LineNum": 11,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "202",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Hazelnut - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 31,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "12",
+                "LineNum": 12,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "283",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Hazelnut - Instant - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 31,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "14",
+          "LineNum": 14,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "301",
+              "name": "Amazing Creamer - Salted Caramel - 30 Count"
+            },
+            "Quantity": 54,
+            "Line": [
+              {
+                "Id": "15",
+                "LineNum": 15,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "219",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 54,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "16",
+                "LineNum": 16,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "134",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 54,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "18",
+          "LineNum": 18,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "302",
+              "name": "Amazing Creamer - Cinnamon Roll - 30 Count"
+            },
+            "Quantity": 8,
+            "Line": [
+              {
+                "Id": "19",
+                "LineNum": 19,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "270",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "Qty": 8,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "20",
+                "LineNum": 20,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "264",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 8,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "22",
+          "LineNum": 22,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "308",
+              "name": "Amazing Coffee - Cocoa - KCUPS - 24 Count"
+            },
+            "Quantity": 73,
+            "Line": [
+              {
+                "Id": "23",
+                "LineNum": 23,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "210",
+                    "name": "Components:Amazing Coffee:Pods - Amazing Coffee - Cocoa"
+                  },
+                  "Qty": 1752,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "24",
+                "LineNum": 24,
+                "Description": "Units are KG. .2kg in 24 count box",
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "242",
+                    "name": "Components:Amazing Coffee:Bulk - Amazing Coffee - Cocoa"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 14.6,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "25",
+                "LineNum": 25,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "244",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - KCUPS - 24 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 73,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "27",
+          "LineNum": 27,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "296",
+              "name": "Superfood Tabs - Strawberry Lemonade - 30 Count"
+            },
+            "Quantity": 18,
+            "Line": [
+              {
+                "Id": "28",
+                "LineNum": 28,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "200",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 18,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "29",
+                "LineNum": 29,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "136",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 18,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "31",
+          "LineNum": 31,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "299",
+              "name": "Superfood Tabs - Mixed Berry - 10 Count"
+            },
+            "Quantity": 356,
+            "Line": [
+              {
+                "Id": "32",
+                "LineNum": 32,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "292",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Mixed Berry - 10 Count"
+                  },
+                  "Qty": 356,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "33",
+                "LineNum": 33,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "298",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Mixed Berry - 10 Count"
+                  },
+                  "Qty": 356,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "35",
+          "LineNum": 35,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "294",
+              "name": "Superfood Tabs - Mixed Berry - 30 Count"
+            },
+            "Quantity": 145,
+            "Line": [
+              {
+                "Id": "36",
+                "LineNum": 36,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "137",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 145,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "37",
+                "LineNum": 37,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "7",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "Qty": 145,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "39",
+          "LineNum": 39,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "297",
+              "name": "Superfood Tabs - Peach Mango - 30 Count"
+            },
+            "Quantity": 9,
+            "Line": [
+              {
+                "Id": "40",
+                "LineNum": 40,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "199",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 9,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "41",
+                "LineNum": 41,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "135",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 9,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "43",
+          "LineNum": 43,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "305",
+              "name": "Ashwavana - Strawberry - 30 Count"
+            },
+            "Quantity": 8,
+            "Line": [
+              {
+                "Id": "44",
+                "LineNum": 44,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "229",
+                    "name": "Components:Ashwavana:Gusset - Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 8,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "45",
+                "LineNum": 45,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "228",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Strawberry"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 240,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "46",
+                "LineNum": 46,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "293",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 8,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "48",
+          "LineNum": 48,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "306",
+              "name": "Amazing Coffee - Cocoa - Instant - 30 Count"
+            },
+            "Quantity": 49,
+            "Line": [
+              {
+                "Id": "49",
+                "LineNum": 49,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "243",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Cocoa - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 49,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "50",
+                "LineNum": 50,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "226",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - Instant - 30 Count"
+                  },
+                  "Qty": 49,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Amount": 0,
+          "DetailType": "SubTotalLineDetail",
+          "SubTotalLineDetail": {}
+        }
+      ],
+      "TxnTaxDetail": {
+        "TotalTax": 0
+      },
+      "CustomerRef": {
+        "value": "40",
+        "name": "Amazon Customer"
+      },
+      "BillAddr": {
+        "Id": "104272"
+      },
+      "ShipAddr": {
+        "Id": "104272"
+      },
+      "FreeFormAddress": true,
+      "ShipFromAddr": {
+        "Id": "104827",
+        "Line1": "1101 W 34th St",
+        "Line2": "Austin, TX  78705-1907 USA"
+      },
+      "TotalAmt": 0,
+      "ApplyTaxAfterDiscount": false,
+      "PrintStatus": "NeedToPrint",
+      "EmailStatus": "NotSet",
+      "Balance": 0,
+      "DepositToAccountRef": {
+        "value": "117",
+        "name": "11106 Clearing:Amazon Carried Balances"
+      }
+    },
+    "time": "2026-07-10T10:05:11.402-07:00"
+  },
+  "salesreceipt_117315": {
+    "SalesReceipt": {
+      "domain": "QBO",
+      "sparse": false,
+      "Id": "117315",
+      "SyncToken": "0",
+      "MetaData": {
+        "CreateTime": "2026-07-07T09:44:53-07:00",
+        "LastUpdatedTime": "2026-07-07T09:44:53-07:00"
+      },
+      "CustomField": [],
+      "DocNumber": "SHOP-06-2026",
+      "TxnDate": "2026-06-30",
+      "CurrencyRef": {
+        "value": "USD",
+        "name": "United States Dollar"
+      },
+      "PrivateNote": "Shopify COGS - 2026-06",
+      "Line": [
+        {
+          "Id": "1",
+          "LineNum": 1,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "300",
+              "name": "Amazing Creamer - Vanilla - 30 Count"
+            },
+            "Quantity": 173,
+            "Line": [
+              {
+                "Id": "2",
+                "LineNum": 2,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "203",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 173,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "3",
+                "LineNum": 3,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "248",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 173,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "5",
+          "LineNum": 5,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "258",
+              "name": "Packaged Goods:Gummies:Gummies - Melatonin"
+            },
+            "UnitPrice": 0,
+            "Qty": 37,
+            "ItemAccountRef": {
+              "value": "513",
+              "name": "40600 Online Sales:Gummies Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "6",
+          "LineNum": 6,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "70",
+              "name": "Packaged Goods:Accessories:Accessories - Mixer"
+            },
+            "UnitPrice": 0,
+            "Qty": 8,
+            "ItemAccountRef": {
+              "value": "419",
+              "name": "40100 Online Sales:Accessories Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "7",
+          "LineNum": 7,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "307",
+              "name": "Amazing Coffee - Hazelnut - Instant - 30 Count"
+            },
+            "Quantity": 226,
+            "Line": [
+              {
+                "Id": "8",
+                "LineNum": 8,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "202",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Hazelnut - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 226,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "9",
+                "LineNum": 9,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "283",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Hazelnut - Instant - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 226,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "11",
+          "LineNum": 11,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "301",
+              "name": "Amazing Creamer - Salted Caramel - 30 Count"
+            },
+            "Quantity": 213,
+            "Line": [
+              {
+                "Id": "12",
+                "LineNum": 12,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "219",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 213,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "13",
+                "LineNum": 13,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "134",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 213,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "15",
+          "LineNum": 15,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "96",
+              "name": "Packaged Goods:Accessories:Accessories - Socket"
+            },
+            "UnitPrice": 0,
+            "Qty": 81,
+            "ItemAccountRef": {
+              "value": "419",
+              "name": "40100 Online Sales:Accessories Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "16",
+          "LineNum": 16,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "119",
+              "name": "Packaged Goods:Accessories:Accessories - Tumbler"
+            },
+            "UnitPrice": 0,
+            "Qty": 3,
+            "ItemAccountRef": {
+              "value": "419",
+              "name": "40100 Online Sales:Accessories Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "17",
+          "LineNum": 17,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "302",
+              "name": "Amazing Creamer - Cinnamon Roll - 30 Count"
+            },
+            "Quantity": 56,
+            "Line": [
+              {
+                "Id": "18",
+                "LineNum": 18,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "270",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "Qty": 56,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "19",
+                "LineNum": 19,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "264",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 56,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "21",
+          "LineNum": 21,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "291",
+              "name": "Packaged Goods:Accessories:Accessories - Mug"
+            },
+            "UnitPrice": 0,
+            "Qty": 1,
+            "ItemAccountRef": {
+              "value": "419",
+              "name": "40100 Online Sales:Accessories Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "22",
+          "LineNum": 22,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "308",
+              "name": "Amazing Coffee - Cocoa - KCUPS - 24 Count"
+            },
+            "Quantity": 544,
+            "Line": [
+              {
+                "Id": "23",
+                "LineNum": 23,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "210",
+                    "name": "Components:Amazing Coffee:Pods - Amazing Coffee - Cocoa"
+                  },
+                  "Qty": 13056,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "24",
+                "LineNum": 24,
+                "Description": "Units are KG. .2kg in 24 count box",
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "242",
+                    "name": "Components:Amazing Coffee:Bulk - Amazing Coffee - Cocoa"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 108.8,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "25",
+                "LineNum": 25,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "244",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - KCUPS - 24 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 544,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "27",
+          "LineNum": 27,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "314",
+              "name": "Creatine Prime - Pina Colada - 30 Count"
+            },
+            "Quantity": 19,
+            "Line": [
+              {
+                "Id": "28",
+                "LineNum": 28,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "282",
+                    "name": "Packaged Goods:Creatine Prime:Creatine Prime - Pina Colada - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 19,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "29",
+                "LineNum": 29,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "312",
+                    "name": "Components:Creatine Prime:Gusset - Creatine Prime - Pina Colada"
+                  },
+                  "Qty": 19,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "30",
+                "LineNum": 30,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "309",
+                    "name": "Components:Creatine Prime:Stick Packs - Creatine Prime - Pina Colada"
+                  },
+                  "Qty": 570,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "32",
+          "LineNum": 32,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "296",
+              "name": "Superfood Tabs - Strawberry Lemonade - 30 Count"
+            },
+            "Quantity": 1049,
+            "Line": [
+              {
+                "Id": "33",
+                "LineNum": 33,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "200",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 1049,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "34",
+                "LineNum": 34,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "136",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 1049,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "36",
+          "LineNum": 36,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "294",
+              "name": "Superfood Tabs - Mixed Berry - 30 Count"
+            },
+            "Quantity": 70,
+            "Line": [
+              {
+                "Id": "37",
+                "LineNum": 37,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "137",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 70,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "38",
+                "LineNum": 38,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "7",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "Qty": 70,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "40",
+          "LineNum": 40,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "297",
+              "name": "Superfood Tabs - Peach Mango - 30 Count"
+            },
+            "Quantity": 276,
+            "Line": [
+              {
+                "Id": "41",
+                "LineNum": 41,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "199",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 276,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "42",
+                "LineNum": 42,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "135",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 276,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "44",
+          "LineNum": 44,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "305",
+              "name": "Ashwavana - Strawberry - 30 Count"
+            },
+            "Quantity": 62,
+            "Line": [
+              {
+                "Id": "45",
+                "LineNum": 45,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "229",
+                    "name": "Components:Ashwavana:Gusset - Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 62,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "46",
+                "LineNum": 46,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "228",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Strawberry"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 1860,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "47",
+                "LineNum": 47,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "293",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 62,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "49",
+          "LineNum": 49,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "303",
+              "name": "Ashwavana - Orange Passion Fruit - 30 Count"
+            },
+            "Quantity": 160,
+            "Line": [
+              {
+                "Id": "50",
+                "LineNum": 50,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "230",
+                    "name": "Components:Ashwavana:Gusset - Ashwavana - Orange Passion Fruit - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 160,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "51",
+                "LineNum": 51,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "227",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Orange Passion Fruit"
+                  },
+                  "Qty": 4800,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "52",
+                "LineNum": 52,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "247",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Orange Passion Fruit - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 160,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "54",
+          "LineNum": 54,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "306",
+              "name": "Amazing Coffee - Cocoa - Instant - 30 Count"
+            },
+            "Quantity": 622,
+            "Line": [
+              {
+                "Id": "55",
+                "LineNum": 55,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "243",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Cocoa - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 622,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "56",
+                "LineNum": 56,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "226",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - Instant - 30 Count"
+                  },
+                  "Qty": 622,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "58",
+          "LineNum": 58,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "313",
+              "name": "Creatine Prime - Black Cherry - 30 Count"
+            },
+            "Quantity": 57,
+            "Line": [
+              {
+                "Id": "59",
+                "LineNum": 59,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "278",
+                    "name": "Packaged Goods:Creatine Prime:Creatine Prime - Black Cherry - 30 Count"
+                  },
+                  "Qty": 57,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "60",
+                "LineNum": 60,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "311",
+                    "name": "Components:Creatine Prime:Gusset - Creatine Prime - Black Cherry"
+                  },
+                  "Qty": 57,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "61",
+                "LineNum": 61,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "288",
+                    "name": "Components:Creatine Prime:Stick Packs - Creatine Prime - Black Cherry"
+                  },
+                  "Qty": 1710,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Amount": 0,
+          "DetailType": "SubTotalLineDetail",
+          "SubTotalLineDetail": {}
+        }
+      ],
+      "TxnTaxDetail": {
+        "TotalTax": 0
+      },
+      "CustomerRef": {
+        "value": "30410",
+        "name": "Shopify Customer"
+      },
+      "BillAddr": {
+        "Id": "104243"
+      },
+      "ShipAddr": {
+        "Id": "104243"
+      },
+      "FreeFormAddress": true,
+      "ShipFromAddr": {
+        "Id": "104828",
+        "Line1": "1101 W 34th St",
+        "Line2": "Austin, TX  78705-1907 USA"
+      },
+      "TotalAmt": 0,
+      "ApplyTaxAfterDiscount": false,
+      "PrintStatus": "NeedToPrint",
+      "EmailStatus": "NotSet",
+      "Balance": 0,
+      "DepositToAccountRef": {
+        "value": "589",
+        "name": "11104 Clearing:Shopify"
+      }
+    },
+    "time": "2026-07-10T10:05:12.496-07:00"
+  },
+  "salesreceipt_117316": {
+    "SalesReceipt": {
+      "domain": "QBO",
+      "sparse": false,
+      "Id": "117316",
+      "SyncToken": "0",
+      "MetaData": {
+        "CreateTime": "2026-07-07T09:44:58-07:00",
+        "LastUpdatedTime": "2026-07-07T09:44:58-07:00"
+      },
+      "CustomField": [],
+      "DocNumber": "INT-06-2026",
+      "TxnDate": "2026-06-30",
+      "CurrencyRef": {
+        "value": "USD",
+        "name": "United States Dollar"
+      },
+      "PrivateNote": "Internal COGS - 2026-06",
+      "Line": [
+        {
+          "Id": "1",
+          "LineNum": 1,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "300",
+              "name": "Amazing Creamer - Vanilla - 30 Count"
+            },
+            "Quantity": 2,
+            "Line": [
+              {
+                "Id": "2",
+                "LineNum": 2,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "203",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "3",
+                "LineNum": 3,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "248",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Vanilla - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "5",
+          "LineNum": 5,
+          "Amount": 0,
+          "DetailType": "SalesItemLineDetail",
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "value": "70",
+              "name": "Packaged Goods:Accessories:Accessories - Mixer"
+            },
+            "UnitPrice": 0,
+            "Qty": 7,
+            "ItemAccountRef": {
+              "value": "419",
+              "name": "40100 Online Sales:Accessories Online Sales"
+            },
+            "TaxCodeRef": {
+              "value": "NON"
+            }
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "6",
+          "LineNum": 6,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "307",
+              "name": "Amazing Coffee - Hazelnut - Instant - 30 Count"
+            },
+            "Quantity": 7,
+            "Line": [
+              {
+                "Id": "7",
+                "LineNum": 7,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "202",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Hazelnut - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 7,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "8",
+                "LineNum": 8,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "283",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Hazelnut - Instant - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 7,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "10",
+          "LineNum": 10,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "301",
+              "name": "Amazing Creamer - Salted Caramel - 30 Count"
+            },
+            "Quantity": 2,
+            "Line": [
+              {
+                "Id": "11",
+                "LineNum": 11,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "219",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "12",
+                "LineNum": 12,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "134",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Salted Caramel - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "14",
+          "LineNum": 14,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "302",
+              "name": "Amazing Creamer - Cinnamon Roll - 30 Count"
+            },
+            "Quantity": 1,
+            "Line": [
+              {
+                "Id": "15",
+                "LineNum": 15,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "270",
+                    "name": "Components:Amazing Creamer:Gusset - Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "Qty": 1,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "16",
+                "LineNum": 16,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "264",
+                    "name": "Packaged Goods:Amazing Creamer:Amazing Creamer - Cinnamon Roll - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 1,
+                  "ItemAccountRef": {
+                    "value": "416",
+                    "name": "40300 Online Sales:Amazing Creamer Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "18",
+          "LineNum": 18,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "308",
+              "name": "Amazing Coffee - Cocoa - KCUPS - 24 Count"
+            },
+            "Quantity": 13,
+            "Line": [
+              {
+                "Id": "19",
+                "LineNum": 19,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "210",
+                    "name": "Components:Amazing Coffee:Pods - Amazing Coffee - Cocoa"
+                  },
+                  "Qty": 312,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "20",
+                "LineNum": 20,
+                "Description": "Units are KG. .2kg in 24 count box",
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "242",
+                    "name": "Components:Amazing Coffee:Bulk - Amazing Coffee - Cocoa"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2.6,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "21",
+                "LineNum": 21,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "244",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - KCUPS - 24 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 13,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "23",
+          "LineNum": 23,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "314",
+              "name": "Creatine Prime - Pina Colada - 30 Count"
+            },
+            "Quantity": 3,
+            "Line": [
+              {
+                "Id": "24",
+                "LineNum": 24,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "282",
+                    "name": "Packaged Goods:Creatine Prime:Creatine Prime - Pina Colada - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 3,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "25",
+                "LineNum": 25,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "312",
+                    "name": "Components:Creatine Prime:Gusset - Creatine Prime - Pina Colada"
+                  },
+                  "Qty": 3,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "26",
+                "LineNum": 26,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "309",
+                    "name": "Components:Creatine Prime:Stick Packs - Creatine Prime - Pina Colada"
+                  },
+                  "Qty": 90,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "28",
+          "LineNum": 28,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "296",
+              "name": "Superfood Tabs - Strawberry Lemonade - 30 Count"
+            },
+            "Quantity": 16,
+            "Line": [
+              {
+                "Id": "29",
+                "LineNum": 29,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "200",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 16,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "30",
+                "LineNum": 30,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "136",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Strawberry Lemonade - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 16,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "32",
+          "LineNum": 32,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "294",
+              "name": "Superfood Tabs - Mixed Berry - 30 Count"
+            },
+            "Quantity": 2,
+            "Line": [
+              {
+                "Id": "33",
+                "LineNum": 33,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "137",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "34",
+                "LineNum": 34,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "7",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Mixed Berry - 30 Count"
+                  },
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "36",
+          "LineNum": 36,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "297",
+              "name": "Superfood Tabs - Peach Mango - 30 Count"
+            },
+            "Quantity": 2,
+            "Line": [
+              {
+                "Id": "37",
+                "LineNum": 37,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "199",
+                    "name": "Components:Superfood Tabs:IFC - Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "38",
+                "LineNum": 38,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "135",
+                    "name": "Packaged Goods:Superfood Tabs:Superfood Tabs - Peach Mango - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 2,
+                  "ItemAccountRef": {
+                    "value": "436",
+                    "name": "40700 Online Sales:Superfood Tabs Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "40",
+          "LineNum": 40,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "305",
+              "name": "Ashwavana - Strawberry - 30 Count"
+            },
+            "Quantity": 5,
+            "Line": [
+              {
+                "Id": "41",
+                "LineNum": 41,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "229",
+                    "name": "Components:Ashwavana:Gusset - Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 5,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "42",
+                "LineNum": 42,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "228",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Strawberry"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 150,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "43",
+                "LineNum": 43,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "293",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Strawberry - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 5,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "45",
+          "LineNum": 45,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "303",
+              "name": "Ashwavana - Orange Passion Fruit - 30 Count"
+            },
+            "Quantity": 10,
+            "Line": [
+              {
+                "Id": "46",
+                "LineNum": 46,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "230",
+                    "name": "Components:Ashwavana:Gusset - Ashwavana - Orange Passion Fruit - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 10,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "47",
+                "LineNum": 47,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "227",
+                    "name": "Components:Ashwavana:Stick Packs - Ashwavana - Orange Passion Fruit"
+                  },
+                  "Qty": 300,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "48",
+                "LineNum": 48,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "247",
+                    "name": "Packaged Goods:Ashwavana:Ashwavana - Orange Passion Fruit - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 10,
+                  "ItemAccountRef": {
+                    "value": "417",
+                    "name": "40400 Online Sales:Ashwavana Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "50",
+          "LineNum": 50,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "306",
+              "name": "Amazing Coffee - Cocoa - Instant - 30 Count"
+            },
+            "Quantity": 21,
+            "Line": [
+              {
+                "Id": "51",
+                "LineNum": 51,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "243",
+                    "name": "Components:Amazing Coffee:Gusset - Amazing Coffee - Cocoa - 30 Count"
+                  },
+                  "UnitPrice": 0,
+                  "Qty": 21,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "52",
+                "LineNum": 52,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "226",
+                    "name": "Packaged Goods:Amazing Coffee:Amazing Coffee - Cocoa - Instant - 30 Count"
+                  },
+                  "Qty": 21,
+                  "ItemAccountRef": {
+                    "value": "413",
+                    "name": "40200 Online Sales:Amazing Coffee Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "54",
+          "LineNum": 54,
+          "Amount": 0,
+          "DetailType": "GroupLineDetail",
+          "GroupLineDetail": {
+            "GroupItemRef": {
+              "value": "313",
+              "name": "Creatine Prime - Black Cherry - 30 Count"
+            },
+            "Quantity": 4,
+            "Line": [
+              {
+                "Id": "55",
+                "LineNum": 55,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "278",
+                    "name": "Packaged Goods:Creatine Prime:Creatine Prime - Black Cherry - 30 Count"
+                  },
+                  "Qty": 4,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "56",
+                "LineNum": 56,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "311",
+                    "name": "Components:Creatine Prime:Gusset - Creatine Prime - Black Cherry"
+                  },
+                  "Qty": 4,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              },
+              {
+                "Id": "57",
+                "LineNum": 57,
+                "Amount": 0,
+                "DetailType": "SalesItemLineDetail",
+                "SalesItemLineDetail": {
+                  "ItemRef": {
+                    "value": "288",
+                    "name": "Components:Creatine Prime:Stick Packs - Creatine Prime - Black Cherry"
+                  },
+                  "Qty": 120,
+                  "ItemAccountRef": {
+                    "value": "1150040009",
+                    "name": "40500 Online Sales:Creatine Prime Online Sales"
+                  },
+                  "TaxCodeRef": {
+                    "value": "NON"
+                  }
+                },
+                "CustomExtensions": []
+              }
+            ]
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Amount": 0,
+          "DetailType": "SubTotalLineDetail",
+          "SubTotalLineDetail": {}
+        }
+      ],
+      "TxnTaxDetail": {
+        "TotalTax": 0
+      },
+      "CustomerRef": {
+        "value": "30525",
+        "name": "Internal Customer"
+      },
+      "ShipFromAddr": {
+        "Id": "104829",
+        "Line1": "1101 W 34th St",
+        "Line2": "Austin, TX  78705-1907 USA"
+      },
+      "TotalAmt": 0,
+      "ApplyTaxAfterDiscount": false,
+      "PrintStatus": "NeedToPrint",
+      "EmailStatus": "NotSet",
+      "Balance": 0,
+      "DepositToAccountRef": {
+        "value": "195",
+        "name": "11102 Clearing:Braintree"
+      }
+    },
+    "time": "2026-07-10T10:05:13.558-07:00"
+  },
+  "inventoryadjustment_117313": {
+    "InventoryAdjustment": {
+      "AdjustAccountRef": {
+        "value": "175",
+        "name": "Inventory Shrinkage"
+      },
+      "domain": "QBO",
+      "sparse": false,
+      "Id": "117313",
+      "SyncToken": "4",
+      "MetaData": {
+        "CreateTime": "2026-07-07T09:44:44-07:00",
+        "LastModifiedByRef": {
+          "value": "9341454675270030"
+        },
+        "LastUpdatedTime": "2026-07-08T14:26:03-07:00"
+      },
+      "DocNumber": "2508",
+      "TxnDate": "2026-06-30",
+      "Line": [
+        {
+          "Id": "145",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "203",
+              "name": "Gusset - Amazing Creamer - Vanilla - 30 Count"
+            },
+            "QtyDiff": 14
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "146",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "248",
+              "name": "Amazing Creamer - Vanilla - 30 Count"
+            },
+            "QtyDiff": 14
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "147",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "265",
+              "name": "IFC - Ashwavana - Orange Passion Fruit - 10 Count"
+            },
+            "QtyDiff": -25
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "148",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "254",
+              "name": "Ashwavana - Orange Passion Fruit - 10 Count"
+            },
+            "QtyDiff": -25
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "149",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "227",
+              "name": "Stick Packs - Ashwavana - Orange Passion Fruit"
+            },
+            "QtyDiff": -280
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "150",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "283",
+              "name": "Amazing Coffee - Hazelnut - Instant - 30 Count"
+            },
+            "QtyDiff": -9
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "151",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "202",
+              "name": "Gusset - Amazing Coffee - Hazelnut - 30 Count"
+            },
+            "QtyDiff": -9
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "152",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "219",
+              "name": "Gusset - Amazing Creamer - Salted Caramel - 30 Count"
+            },
+            "QtyDiff": 8
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "153",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "134",
+              "name": "Amazing Creamer - Salted Caramel - 30 Count"
+            },
+            "QtyDiff": 8
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "154",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "270",
+              "name": "Gusset - Amazing Creamer - Cinnamon Roll - 30 Count"
+            },
+            "QtyDiff": 6
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "155",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "264",
+              "name": "Amazing Creamer - Cinnamon Roll - 30 Count"
+            },
+            "QtyDiff": 6
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "156",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "244",
+              "name": "Amazing Coffee - Cocoa - KCUPS - 24 Count"
+            },
+            "QtyDiff": -47
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "157",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "210",
+              "name": "Pods - Amazing Coffee - Cocoa"
+            },
+            "QtyDiff": -1128
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "158",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "242",
+              "name": "Bulk - Amazing Coffee - Cocoa"
+            },
+            "QtyDiff": -10
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "159",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "312",
+              "name": "Gusset - Creatine Prime - Pina Colada"
+            },
+            "QtyDiff": -4
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "160",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "309",
+              "name": "Stick Packs - Creatine Prime - Pina Colada"
+            },
+            "QtyDiff": -120
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "161",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "282",
+              "name": "Creatine Prime - Pina Colada - 30 Count"
+            },
+            "QtyDiff": -4
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "162",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "200",
+              "name": "IFC - Superfood Tabs - Strawberry Lemonade - 30 Count"
+            },
+            "QtyDiff": -116
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "163",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "136",
+              "name": "Superfood Tabs - Strawberry Lemonade - 30 Count"
+            },
+            "QtyDiff": -116
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "164",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "292",
+              "name": "IFC - Superfood Tabs - Mixed Berry - 10 Count"
+            },
+            "QtyDiff": -78
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "165",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "298",
+              "name": "Superfood Tabs - Mixed Berry - 10 Count"
+            },
+            "QtyDiff": -78
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "166",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "7",
+              "name": "IFC - Superfood Tabs - Mixed Berry - 30 Count"
+            },
+            "QtyDiff": 57
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "167",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "137",
+              "name": "Superfood Tabs - Mixed Berry - 30 Count"
+            },
+            "QtyDiff": 57
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "168",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "135",
+              "name": "Superfood Tabs - Peach Mango - 30 Count"
+            },
+            "QtyDiff": -122
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "169",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "199",
+              "name": "IFC - Superfood Tabs - Peach Mango - 30 Count"
+            },
+            "QtyDiff": -122
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "170",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "293",
+              "name": "Ashwavana - Strawberry - 30 Count"
+            },
+            "QtyDiff": 3
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "171",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "228",
+              "name": "Stick Packs - Ashwavana - Strawberry"
+            },
+            "QtyDiff": 90
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "172",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "229",
+              "name": "Gusset - Ashwavana - Strawberry - 30 Count"
+            },
+            "QtyDiff": 3
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "173",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "247",
+              "name": "Ashwavana - Orange Passion Fruit - 30 Count"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "174",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "230",
+              "name": "Gusset - Ashwavana - Orange Passion Fruit - 30 Count"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "175",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "243",
+              "name": "Gusset - Amazing Coffee - Cocoa - 30 Count"
+            },
+            "QtyDiff": -25
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "176",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "226",
+              "name": "Amazing Coffee - Cocoa - Instant - 30 Count"
+            },
+            "QtyDiff": -25
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "177",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "258",
+              "name": "Gummies - Melatonin"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "178",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "70",
+              "name": "Accessories - Mixer"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "179",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "119",
+              "name": "Accessories - Tumbler"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        },
+        {
+          "Id": "180",
+          "DetailType": "ItemAdjustmentLineDetail",
+          "ItemAdjustmentLineDetail": {
+            "ItemRef": {
+              "value": "291",
+              "name": "Accessories - Mug"
+            },
+            "QtyDiff": -1
+          },
+          "CustomExtensions": []
+        }
+      ]
+    },
+    "time": "2026-07-10T10:05:14.307-07:00"
+  }
+}

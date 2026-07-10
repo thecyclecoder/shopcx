@@ -1,0 +1,38 @@
+[
+  {
+    "gateway_name": "braintree",
+    "processor": "braintree"
+  },
+  {
+    "gateway_name": "gift_card",
+    "processor": "gift_card"
+  },
+  {
+    "gateway_name": "manual",
+    "processor": "shopify_payments"
+  },
+  {
+    "gateway_name": "paypal",
+    "processor": "paypal"
+  },
+  {
+    "gateway_name": "PayPal Braintree",
+    "processor": "braintree"
+  },
+  {
+    "gateway_name": "shop_cash",
+    "processor": "shopify_payments"
+  },
+  {
+    "gateway_name": "shop_pay",
+    "processor": "shopify_payments"
+  },
+  {
+    "gateway_name": "shopify_payments",
+    "processor": "shopify_payments"
+  },
+  {
+    "gateway_name": "walmart",
+    "processor": "walmart"
+  }
+]

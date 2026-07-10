@@ -1,0 +1,110 @@
+[
+  {
+    "id": "11f97355-6f64-447b-9b4d-05bd471d319d",
+    "closing_month": "2026-06",
+    "status": "completed_with_errors",
+    "pre_snapshot_at": "2026-07-07T16:44:39.339+00:00",
+    "inventory_adjustment_id": "117313",
+    "amazon_receipt_id": "117314",
+    "amazon_receipt_doc": "AMZ-06-2026",
+    "shopify_receipt_id": "117315",
+    "shopify_receipt_doc": "SHOP-06-2026",
+    "post_snapshot_at": "2026-07-07T16:45:03.48+00:00",
+    "variance_check_passed": false,
+    "variance_details": [
+      {
+        "name": "Bulk - Amazing Coffee - Cocoa",
+        "variance": 0.4
+      }
+    ],
+    "error_message": null,
+    "started_at": "2026-07-07T16:44:34.961+00:00",
+    "completed_at": "2026-07-07T16:45:26.479+00:00",
+    "created_at": "2026-07-07T15:20:05.355902+00:00",
+    "shopify_journal_entry_id": "117317",
+    "shopify_journal_entry_doc": "SHOPIFY-0626",
+    "internal_receipt_id": "117316",
+    "internal_receipt_doc": "INT-06-2026"
+  },
+  {
+    "id": "15920961-92f4-46b9-92f8-7edb52d5036d",
+    "closing_month": "2026-04",
+    "status": "completed_with_errors",
+    "pre_snapshot_at": "2026-05-05T18:57:24.57+00:00",
+    "inventory_adjustment_id": "116626",
+    "amazon_receipt_id": "116627",
+    "amazon_receipt_doc": "AMZ-04-2026",
+    "shopify_receipt_id": "116628",
+    "shopify_receipt_doc": "SHOP-04-2026",
+    "post_snapshot_at": "2026-05-05T18:57:45.156+00:00",
+    "variance_check_passed": false,
+    "variance_details": [
+      {
+        "name": "Bulk - Amazing Coffee - Cocoa",
+        "variance": -0.2
+      }
+    ],
+    "error_message": null,
+    "started_at": "2026-05-05T18:57:19.437+00:00",
+    "completed_at": "2026-05-05T18:58:11.748+00:00",
+    "created_at": "2026-05-05T16:11:23.633742+00:00",
+    "shopify_journal_entry_id": "116629",
+    "shopify_journal_entry_doc": "SHOPIFY-0426",
+    "internal_receipt_id": null,
+    "internal_receipt_doc": null
+  },
+  {
+    "id": "4cb427be-8e8d-4ebd-95dd-245c124f4210",
+    "closing_month": "2026-05",
+    "status": "completed_with_errors",
+    "pre_snapshot_at": "2026-06-09T15:57:38.648+00:00",
+    "inventory_adjustment_id": "117020",
+    "amazon_receipt_id": "117021",
+    "amazon_receipt_doc": "AMZ-05-2026",
+    "shopify_receipt_id": "117022",
+    "shopify_receipt_doc": "SHOP-05-2026",
+    "post_snapshot_at": "2026-06-09T15:57:57.811+00:00",
+    "variance_check_passed": false,
+    "variance_details": [
+      {
+        "name": "Bulk - Amazing Coffee - Cocoa",
+        "variance": -0.2
+      }
+    ],
+    "error_message": null,
+    "started_at": "2026-06-09T15:57:33.949258+00:00",
+    "completed_at": "2026-06-09T15:58:57.131+00:00",
+    "created_at": "2026-06-09T15:57:33.949258+00:00",
+    "shopify_journal_entry_id": "117023",
+    "shopify_journal_entry_doc": "SHOPIFY-0526",
+    "internal_receipt_id": null,
+    "internal_receipt_doc": null
+  },
+  {
+    "id": "50af0517-ba27-45ff-a7cd-adfd0fb8f328",
+    "closing_month": "2026-03",
+    "status": "completed_with_errors",
+    "pre_snapshot_at": "2026-04-01T17:16:03.905+00:00",
+    "inventory_adjustment_id": "116312",
+    "amazon_receipt_id": "116313",
+    "amazon_receipt_doc": "AMZ-03-2026",
+    "shopify_receipt_id": "116314",
+    "shopify_receipt_doc": "SHOP-03-2026",
+    "post_snapshot_at": "2026-04-01T17:16:25.992+00:00",
+    "variance_check_passed": false,
+    "variance_details": [
+      {
+        "name": "Bulk - Amazing Coffee - Cocoa",
+        "variance": 0.8
+      }
+    ],
+    "error_message": null,
+    "started_at": "2026-04-01T17:15:57.63804+00:00",
+    "completed_at": "2026-04-01T17:16:49.785+00:00",
+    "created_at": "2026-04-01T17:15:57.63804+00:00",
+    "shopify_journal_entry_id": "116315",
+    "shopify_journal_entry_doc": "SHOPIFY-0326",
+    "internal_receipt_id": null,
+    "internal_receipt_doc": null
+  }
+]
