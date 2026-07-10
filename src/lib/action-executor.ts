@@ -304,10 +304,12 @@ export function substituteActionParams(
  * row.
  *
  * Safety: only rolls back a redemption whose current status is `active`.
- * The apply_loyalty_coupon internal regen path (line ~1051) mutates the
- * original row to `expired` when it re-mints; leaving that alone here
- * avoids double-refunding a regen sequence — Phase 2 will fold the
- * regen-then-fail edge case in.
+ * The apply_loyalty_coupon internal regen path mutates the original row
+ * to `expired` at claim time (see `claimRegenSpendSlot` below); leaving
+ * that alone here avoids double-refunding a regen sequence and, together
+ * with the Phase-2 compare-and-set claim, keeps a verify-fail→retry from
+ * double-deducting points (spec: loyalty-coupon-apply-self-heal-must-not-
+ * double-deduct-points).
  *
  * Exported for unit tests. Idempotent — if the redemption is already
  * non-active, nothing happens.
@@ -391,6 +393,99 @@ export async function rollbackLoyaltyRedemptionOnApplyFailure(
   await sysNote(
     `[Rollback] apply_loyalty_coupon didn't land — re-credited ${red.points_spent} pts, marked ${code} rolled_back.`,
   );
+}
+
+/**
+ * Phase-2 idempotency gate for the `apply_loyalty_coupon` regen branch
+ * (spec: loyalty-coupon-apply-self-heal-must-not-double-deduct-points).
+ *
+ * Susan D. (member aa8fe19e, ticket d19c2192) was charged 1,500 pts TWICE
+ * within 12s on 2026-07-09 for ONE $15 coupon because the regen branch's
+ * `spendPoints` call fires on every verify-fail→retry. This helper is the
+ * compare-and-set that stops the second spend at its root: a
+ * `status='active' → status='expired'` update predicated on the row still
+ * being `active`. The first regen wins the row and proceeds to mint +
+ * spendPoints; every later retry (which finds the row already `expired`)
+ * matches 0 rows and MUST NOT re-enter mint+spendPoints — instead the
+ * caller invokes `replaySuccessorApply` to re-apply the successor code
+ * that the completed regen produced. One applied coupon = one 1,500-pt
+ * spend, no matter how many verify/heal retries fire.
+ *
+ * Returns true iff this call successfully claimed the regen slot (the row
+ * was still `active` and is now `expired`). False → an earlier regen ran.
+ *
+ * Exported for unit tests. The write is a single narrowed UPDATE — the
+ * whole idempotency guarantee is in the `.eq("status","active")`
+ * predicate on the write itself (rule of thumb: never gate a mutating
+ * write on a coarse proxy; always re-assert the invariant IN the write).
+ */
+export async function claimRegenSpendSlot(
+  admin: { from: (t: string) => { update: (patch: Record<string, unknown>) => { eq: (col: string, val: unknown) => unknown } } },
+  workspaceId: string,
+  origRedemptionId: string,
+): Promise<boolean> {
+  const chain = admin
+    .from("loyalty_redemptions")
+    .update({ status: "expired" })
+    .eq("id", origRedemptionId);
+  const chain2 = (chain as { eq: (col: string, val: unknown) => unknown }).eq("workspace_id", workspaceId);
+  const chain3 = (chain2 as { eq: (col: string, val: unknown) => unknown }).eq("status", "active");
+  const chain4 = (chain3 as { select: (cols: string) => unknown }).select("id");
+  const { data } = (await chain4) as { data: Array<{ id: string }> | null };
+  return Array.isArray(data) && data.length > 0;
+}
+
+/**
+ * Idempotent-replay recovery for `apply_loyalty_coupon` when
+ * `claimRegenSpendSlot` returns false (an earlier regen already ran for
+ * THIS code). Looks up the most-recently-inserted `active` redemption
+ * for the same member+workspace — the successor code that the completed
+ * regen minted — and re-invokes `subscriptionApplyCoupon` against IT.
+ *
+ * The caller sees an ordinary success result if the successor still
+ * applies, so a verify-fail→retry can converge on a clean apply without
+ * the points ledger ever seeing a second spend. Returns a well-formed
+ * ActionResult so the handler can `return await …` directly.
+ *
+ * Exported for unit tests.
+ */
+export async function replaySuccessorApply(
+  ctx: Pick<ActionContext, "admin" | "workspaceId">,
+  contractId: string,
+  memberId: string,
+  origCode: string,
+  initialApplyError: string | undefined,
+): Promise<ActionResult> {
+  const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
+  const { data: successor } = await ctx.admin
+    .from("loyalty_redemptions")
+    .select("discount_code, discount_value")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("member_id", memberId)
+    .eq("status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const successorCode = (successor as { discount_code?: string } | null)?.discount_code;
+  const successorValue = (successor as { discount_value?: number } | null)?.discount_value;
+  if (!successorCode) {
+    return {
+      success: false,
+      error: `Regen already ran for ${origCode} but no active successor redemption found (initial apply error: ${initialApplyError ?? "unknown"})`,
+    };
+  }
+  const r = await subscriptionApplyCoupon(ctx.workspaceId, contractId, successorCode);
+  if (r.success) {
+    return {
+      ...r,
+      summary: `Applied loyalty coupon $${successorValue ?? "?"} off (idempotent replay: ${successorCode})`,
+      couponCode: successorCode,
+    };
+  }
+  return {
+    success: false,
+    error: `Regen already ran for ${origCode}; retry-apply of successor ${successorCode} failed: ${r.error}`,
+  };
 }
 
 /**
@@ -1283,16 +1378,40 @@ export const directActionHandlers: Record<
       const { getShopifyCredentials } = await import("@/lib/shopify-sync");
       const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
 
-      // Find the original redemption to get tier info
+      // Find the original redemption to get tier info. NOTE: `status` is
+      // included in the projection so we can early-out on the Phase-2
+      // idempotency path — a row already flipped from `active` means an
+      // earlier regen for THIS code already ran, and re-entering the
+      // mint+spendPoints below would double-deduct points (spec:
+      // loyalty-coupon-apply-self-heal-must-not-double-deduct-points).
       const { data: orig } = await ctx.admin.from("loyalty_redemptions")
-        .select("id, member_id, discount_value, points_spent")
+        .select("id, member_id, discount_value, points_spent, status")
         .eq("discount_code", code).eq("workspace_id", ctx.workspaceId).single();
       if (!orig) return { success: false, error: `Original coupon not found and apply failed: ${r.error}` };
+
+      // Fast bail: this code's redemption has already been consumed by an
+      // earlier regen. Route to the idempotent replay — one applied coupon
+      // = one spend.
+      if (orig.status !== "active") {
+        return await replaySuccessorApply(ctx, p.contract_id, orig.member_id, code, r.error);
+      }
 
       // Get member
       const { data: member } = await ctx.admin.from("loyalty_members")
         .select("*").eq("id", orig.member_id).single();
       if (!member) return { success: false, error: "Loyalty member not found" };
+
+      // Atomic claim on the regen slot. The compare-and-set
+      // `.eq("status","active")` on the UPDATE itself is the durable
+      // idempotency guarantee — a concurrent regen (or a caller-level
+      // retry that slipped past the read above) whose claim matches 0
+      // rows is redirected to `replaySuccessorApply`. Do this BEFORE the
+      // Shopify mint + spendPoints so the losing caller never spawns a
+      // second discount code and never re-enters spendPoints.
+      const claimed = await claimRegenSpendSlot(ctx.admin, ctx.workspaceId, orig.id);
+      if (!claimed) {
+        return await replaySuccessorApply(ctx, p.contract_id, orig.member_id, code, r.error);
+      }
 
       const settings = await getLoyaltySettings(ctx.workspaceId);
       const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
@@ -1335,7 +1454,8 @@ export const directActionHandlers: Record<
       // Re-read member with updated balance for spendPoints
       const { data: refreshedMember } = await ctx.admin.from("loyalty_members").select("*").eq("id", member.id).single();
 
-      await ctx.admin.from("loyalty_redemptions").update({ status: "expired" }).eq("id", orig.id);
+      // (orig row already flipped to 'expired' by `claimRegenSpendSlot`
+      //  — do NOT re-write here; a duplicate write would just be noise.)
 
       if (refreshedMember) {
         const tiers = getRedemptionTiers(settings);
