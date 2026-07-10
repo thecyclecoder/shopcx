@@ -1,0 +1,1 @@
+- **Return a real 403 for gated storefront blueprint landers** · verified 2026-07-10 · → [[../lifecycles/storefront-checkout]]
