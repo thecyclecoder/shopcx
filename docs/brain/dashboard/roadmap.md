@@ -43,6 +43,7 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/roadmap/PriorityControl.tsx` — component
 - `src/app/dashboard/roadmap/RoadmapFilters.tsx` — component
 - `src/app/dashboard/roadmap/RunningTimer.tsx` — component (client-only island driving the spec-detail "Elapsed:" ticker)
+- `src/app/dashboard/roadmap/SpecPhasesDetail.tsx` — component (per-phase detail on the `[slug]/` page — see below)
 - `src/app/dashboard/roadmap/StatusControl.tsx` — component
 - `src/app/dashboard/roadmap/VerificationCard.tsx` — component
 - `src/app/dashboard/roadmap/WaitTimer.tsx` — component (client-only island driving each open-wait's live duration on the spec-detail timeline)
@@ -73,6 +74,17 @@ row it also paints per-stage timing + open-wait rows off the timecard ledger:
   `useEffect` + 1-second `setInterval` pattern to re-render the elapsed duration once per
   second; a folded spec renders a plain server-rendered `Total: <static duration>` instead of
   mounting `RunningTimer`, so no client tick fires on a terminal spec.
+
+## Spec-detail per-phase view
+
+The `[slug]/` sub-route ([[roadmap/[slug]]]) renders `SpecPhasesDetail.tsx`, which shows each
+phase's OWN detail: status, plain-language why/what, body, and that phase's OWN verification
+checks — grouped by `phasePosition` (the field [[../libraries/spec-phase-checks-table]]
+`listSpecPhaseChecks` already tags each check with) — each check showing its live green/tested
+state. Previously the detail page dropped per-phase body/why/what and flattened all checks into a
+single card; the per-phase grouping keeps a phase's verification with the phase it belongs to.
+The checks are the same typed [[../tables/spec_phase_checks]] rows that are the render source of
+truth for the materialized `### Verification` markdown ([[../libraries/build-spec-materializer]]).
 
 ---
 
