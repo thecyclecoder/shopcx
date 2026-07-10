@@ -204,7 +204,28 @@ export function extractRemedyCustomerMessage(remedy: Record<string, unknown>): s
  * entry inside a multi-action `actions[]`). Returns null when the step is malformed (missing / empty
  * `action_type`) so the caller can fail the whole plan up-front — a batch with one broken step MUST
  * NOT be partially fired.
+ *
+ * `payload.type` is RESERVED — the executor's `ActionParams.type` selects which handler runs, and
+ * the founder gate sums money-action lines by `step.action_type`. If a payload were allowed to carry
+ * a `type` field, a prompt-influenced step could name a non-money `action_type` (e.g.
+ * `change_next_date`) to slip past the founder-gate sum while overriding the executed action into
+ * a money type (e.g. `partial_refund`) via `payload.type`. We reject any step whose payload includes
+ * a `type` key so the plan can only ever name the ONE canonical action type the gate summed on and
+ * the executor will fire.
  */
+/**
+ * True when the raw step's `payload` object carries a reserved `type` key. Separated from
+ * `extractActionStep` so `planRemedyExecution` can surface a distinct rejection reason
+ * (`remedy_action_N_payload_type_override`) that names the exact bypass class instead of the
+ * generic `remedy_action_N_malformed`.
+ */
+function stepPayloadHasReservedType(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const payload = (raw as Record<string, unknown>).payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  return Object.prototype.hasOwnProperty.call(payload, "type");
+}
+
 function extractActionStep(raw: unknown): RemedyActionStep | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const obj = raw as Record<string, unknown>;
@@ -215,6 +236,7 @@ function extractActionStep(raw: unknown): RemedyActionStep | null {
     obj.payload && typeof obj.payload === "object" && !Array.isArray(obj.payload)
       ? (obj.payload as Record<string, unknown>)
       : {};
+  if (Object.prototype.hasOwnProperty.call(payload, "type")) return null;
   return { actionType, actionParams: payload };
 }
 
@@ -247,7 +269,13 @@ export function planRemedyExecution(
   if (Array.isArray(remedy.actions) && remedy.actions.length > 0) {
     const steps: RemedyActionStep[] = [];
     for (let i = 0; i < remedy.actions.length; i++) {
-      const step = extractActionStep(remedy.actions[i]);
+      const rawStep = remedy.actions[i];
+      // Reserved-key check up-front so a type-override attempt on ANY step (even one whose
+      // action_type is well-formed on paper) fails the plan with a distinct reason.
+      if (stepPayloadHasReservedType(rawStep)) {
+        return { ok: false, reason: `remedy_action_${i}_payload_type_override` };
+      }
+      const step = extractActionStep(rawStep);
       if (!step) return { ok: false, reason: `remedy_action_${i}_malformed` };
       steps.push(step);
     }
@@ -264,6 +292,9 @@ export function planRemedyExecution(
 
   // Shape 2 — legacy single-action `{action_type, payload}`. Normalize to `actions:[one]` so the
   // rest of the pipeline never sees the single-vs-multi distinction.
+  if (stepPayloadHasReservedType(remedy)) {
+    return { ok: false, reason: "remedy_payload_type_override" };
+  }
   const step = extractActionStep(remedy);
   if (!step) return { ok: false, reason: "remedy_missing_action_type" };
   return {
@@ -296,11 +327,17 @@ export function buildRemedySonnetDecision(
   reasoning: string,
 ): SonnetDecision {
   const actions: ActionParams[] = plan.actions.map(
-    (step) =>
-      ({
-        type: step.actionType,
+    (step) => {
+      // `type` is set LAST so a stray `type` field on `actionParams` cannot override the canonical
+      // action type the plan (and the founder gate) resolved to. `extractActionStep` already
+      // rejects any payload carrying `type`, so this branch is redundant defense-in-depth: even if
+      // a future caller assembles a `RemedyExecutionPlan` by hand and forgets to strip a reserved
+      // key, the executor still fires the canonical `step.actionType`.
+      return {
         ...(step.actionParams as Partial<ActionParams>),
-      }) as ActionParams,
+        type: step.actionType,
+      } as ActionParams;
+    },
   );
   return {
     reasoning: reasoning?.trim() || "cs-director approve_remedy",
@@ -576,10 +613,14 @@ async function handleApproveRemedy(
     //     ~60s beat) fires it on approve. Everything else (date changes, coupons within limit,
     //     replacements, sub-threshold refunds) runs autonomously below. See [[june-remedy-approval]].
     if (verdict.remedy) {
-      const { getRefundApprovalThresholdCents, remedyNeedsFounderApproval, raiseJuneRemedyApproval } =
+      const { getRefundApprovalThresholdCents, planNeedsFounderApproval, raiseJuneRemedyApproval } =
         await import("@/lib/june-remedy-approval");
       const threshold = await getRefundApprovalThresholdCents(admin, workspaceId);
-      const gate = remedyNeedsFounderApproval(verdict.remedy, threshold);
+      // Gate on the NORMALIZED planned actions (the exact set the executor will fire), not on the
+      // raw remedy. Reading `planned.plan.actions[].actionType` means the money-sum the gate asserts
+      // is guaranteed to match what executes — no payload-side field can name a different action
+      // type than the one gated.
+      const gate = planNeedsFounderApproval(planned.plan.actions, threshold);
       if (gate.gated) {
         const raised = await raiseJuneRemedyApproval(admin, {
           workspaceId,
