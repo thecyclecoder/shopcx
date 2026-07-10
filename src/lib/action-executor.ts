@@ -2482,35 +2482,64 @@ export const directActionHandlers: Record<
     }
     const addr = resolved.address;
 
-    const variantId = p.variant_id || "42614433513645"; // fallback variant (Peach Mango)
-    const quantity = p.quantity || 1;
+    // Phase 2 — multi-item replacement = ONE order with N line items.
+    // Sonnet was previously handing us one variant_id per call; a
+    // 2-flavor replacement (Evan H. SC132221 — Peach Mango + Strawberry
+    // Lemonade) fragmented into TWO free orders (SC134462 + SC134463),
+    // which looked like a duplicate fire, doubled shipping, and made
+    // reconciliation harder. Sonnet now hands the FULL item set in one
+    // call via `items[]`; single-item back-compat via variant_id +
+    // quantity is preserved so no existing prompt breaks.
+    const rawItems: Array<{ variant_id?: string; variantId?: string; quantity?: number; title?: string; variant_title?: string | null }> =
+      Array.isArray(p.items) && p.items.length > 0
+        ? p.items.map(it => ({
+            variant_id: it.variant_id,
+            quantity: it.quantity,
+            title: it.title || undefined,
+            variant_title: it.variant_title,
+          }))
+        : [{ variant_id: p.variant_id || "42614433513645", quantity: p.quantity || 1 }];
 
-    // Resolve variant title for the summary string. Without this the
-    // summary always claimed "Peach Mango" regardless of what variant_id
-    // Sonnet actually passed — surfaced on ticket ffd28680 (Dean, May 7)
-    // where Strawberry Lemonade shipped correctly but the analyzer was
-    // misled by a "2x Peach Mango shipped free" log line.
-    let variantTitle = "item";
-    try {
-      const { data: pv } = await ctx.admin.from("product_variants")
-        .select("title, products(title)")
-        .eq("shopify_variant_id", variantId).maybeSingle();
-      if (pv) {
-        const productTitle = (pv.products as { title?: string } | null)?.title;
-        variantTitle = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || "item");
-      }
-    } catch { /* fall back to "item" */ }
+    // Resolve variant title per item for the Shopify note + summary.
+    // Without this the summary always claimed "Peach Mango" regardless
+    // of what variant_id Sonnet actually passed — surfaced on ticket
+    // ffd28680 (Dean, May 7) where Strawberry Lemonade shipped
+    // correctly but the analyzer was misled by a "2x Peach Mango
+    // shipped free" log line.
+    const resolvedItems: Array<{ variantId: string; quantity: number; title: string }> = [];
+    for (const it of rawItems) {
+      const variantId = String(it.variant_id || it.variantId || "");
+      if (!variantId) continue;
+      const quantity = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
+      let variantTitle = it.title || it.variant_title || "item";
+      try {
+        const { data: pv } = await ctx.admin.from("product_variants")
+          .select("title, products(title)")
+          .eq("shopify_variant_id", variantId).maybeSingle();
+        if (pv) {
+          const productTitle = (pv.products as { title?: string } | null)?.title;
+          variantTitle = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || variantTitle);
+        }
+      } catch { /* fall back to whatever we had */ }
+      resolvedItems.push({ variantId, quantity, title: variantTitle });
+    }
+    if (resolvedItems.length === 0) {
+      return { success: false, error: "create_replacement_order needs at least one item (variant_id or items[])" };
+    }
 
     // Delegate to the canonical helper. It records-first into `replacements`,
     // then creates the Shopify draft + completes it, and stamps the row
     // with the final state. Any caller using this helper guarantees a
     // replacements row exists for every Shopify replacement order.
+    // The helper already loops resolvedItems into DraftOrderInput.lineItems
+    // (see src/lib/replacement-order.ts:129) — so N items produce ONE
+    // Shopify order with N line items, not N separate orders.
     const { createReplacementOrder } = await import("@/lib/replacement-order");
     const r = await createReplacementOrder({
       workspaceId: ctx.workspaceId,
       customerId: ctx.customerId,
       shopifyCustomerId: cust.shopify_customer_id,
-      items: [{ variantId, quantity, title: variantTitle }],
+      items: resolvedItems,
       shippingAddress: {
         firstName: addr.firstName,
         lastName: addr.lastName,
@@ -2530,7 +2559,8 @@ export const directActionHandlers: Record<
     });
 
     if (!r.success) return { success: false, error: r.error || "replacement creation failed" };
-    return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
+    const itemsSummary = resolvedItems.map(i => `${i.quantity}x ${i.title}`).join(" + ");
+    return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${itemsSummary} shipped free` };
   },
 
   // dollar_replacement — Phase 3 $-bearing variant. Ships a replacement

@@ -69,6 +69,67 @@ export interface CreateReplacementResult {
   error?: string;
 }
 
+/** Shape of the Shopify DraftOrderInput we hand to draftOrderCreate for a
+ * replacement. Kept minimal — just the fields we actually populate. Exposed
+ * so [[buildReplacementDraftOrderInput]] is testable without an HTTP mock. */
+export interface ReplacementDraftOrderInput {
+  customerId: string;
+  lineItems: Array<{ variantId: string; quantity: number }>;
+  shippingAddress: {
+    firstName: string;
+    lastName: string;
+    address1: string;
+    address2: string;
+    city: string;
+    provinceCode: string;
+    zip: string;
+    countryCode: string;
+  };
+  note: string;
+  tags: string[];
+  appliedDiscount: { value: number; valueType: "PERCENTAGE"; title: string };
+}
+
+/**
+ * Pure builder for the Shopify DraftOrderInput. Extracted from
+ * [[createReplacementOrder]] so Phase 2 (multi-item = ONE order with N line
+ * items — SC132221 fragmented Peach Mango + Strawberry Lemonade into TWO
+ * separate free orders) is testable without stubbing Shopify HTTP: hand it
+ * N items and assert `lineItems.length === N` with distinct variant IDs.
+ *
+ * Preserves the one-order-per-call invariant: the caller no longer loops
+ * per-flavor into `createReplacementOrder`; Sonnet hands the FULL item set
+ * once and this builder maps 1:1 into `lineItems`. */
+export function buildReplacementDraftOrderInput(
+  input: Pick<CreateReplacementInput, "items" | "shippingAddress" | "shopifyCustomerId" | "reason" | "ticketId" | "shopifyNote">,
+  resolvedCountryCode: string,
+  siteUrl?: string,
+): ReplacementDraftOrderInput {
+  const site = siteUrl || process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
+  const ticketLink = input.ticketId ? `\n\nTicket: ${site}/dashboard/tickets/${input.ticketId}` : "";
+  const noteText = `${input.shopifyNote || "Replacement order"}${ticketLink}`;
+  return {
+    customerId: `gid://shopify/Customer/${input.shopifyCustomerId}`,
+    lineItems: input.items.map(i => ({
+      variantId: `gid://shopify/ProductVariant/${i.variantId}`,
+      quantity: i.quantity,
+    })),
+    shippingAddress: {
+      firstName: input.shippingAddress.firstName || "",
+      lastName: input.shippingAddress.lastName || "",
+      address1: input.shippingAddress.address1,
+      address2: input.shippingAddress.address2 || "",
+      city: input.shippingAddress.city,
+      provinceCode: input.shippingAddress.provinceCode || input.shippingAddress.province || "",
+      zip: input.shippingAddress.zip,
+      countryCode: resolvedCountryCode,
+    },
+    note: noteText,
+    tags: ["replacement", input.reason],
+    appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
+  };
+}
+
 export async function createReplacementOrder(input: CreateReplacementInput): Promise<CreateReplacementResult> {
   const admin = createAdminClient();
 
@@ -136,31 +197,10 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
   // ── 2. Create + complete the Shopify draft order ──────────────────
   const { shop, accessToken } = await getShopifyCredentials(input.workspaceId);
   const shopifyGqlUrl = `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai";
-  const ticketLink = input.ticketId ? `\n\nTicket: ${siteUrl}/dashboard/tickets/${input.ticketId}` : "";
-  const noteText = `${input.shopifyNote || "Replacement order"}${ticketLink}`;
-
+  const draftOrderInput = buildReplacementDraftOrderInput(input, resolvedCountry);
   const draftBody = JSON.stringify({
     query: `mutation($input: DraftOrderInput!) { draftOrderCreate(input: $input) { draftOrder { id name } userErrors { field message } } }`,
-    variables: {
-      input: {
-        customerId: `gid://shopify/Customer/${input.shopifyCustomerId}`,
-        lineItems: input.items.map(i => ({ variantId: `gid://shopify/ProductVariant/${i.variantId}`, quantity: i.quantity })),
-        shippingAddress: {
-          firstName: input.shippingAddress.firstName || "",
-          lastName: input.shippingAddress.lastName || "",
-          address1: input.shippingAddress.address1,
-          address2: input.shippingAddress.address2 || "",
-          city: input.shippingAddress.city,
-          provinceCode: input.shippingAddress.provinceCode || input.shippingAddress.province || "",
-          zip: input.shippingAddress.zip,
-          countryCode: resolvedCountry,
-        },
-        note: noteText,
-        tags: ["replacement", input.reason],
-        appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
-      },
-    },
+    variables: { input: draftOrderInput },
   });
 
   const draftRes = await loggedActionFetch(shopifyGqlUrl, {
