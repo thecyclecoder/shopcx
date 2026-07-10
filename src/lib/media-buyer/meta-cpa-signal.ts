@@ -26,6 +26,8 @@ interface AdsetScorecard {
   id: string;
   object_id: string; // the Meta adset id
   label: string | null;
+  /** CUMULATIVE (lifetime) test spend in cents — Σ meta_insights_daily, NOT a rolling window. The crown
+   *  floor ("$450 in spend") is a verdict floor: an adset that has spent $450 TOTAL has earned a call. */
   spend_cents: number;
   purchases: number;
   revenue_cents: number;
@@ -33,8 +35,19 @@ interface AdsetScorecard {
   snapshot_date: string;
 }
 
-async function latestAdsetScorecards(admin: Admin, workspaceId: string, metaAdAccountId: string): Promise<AdsetScorecard[]> {
-  // The newest snapshot_date carries the current trailing-window aggregate per adset.
+/** How far back "lifetime" reaches — 180d comfortably covers any test adset's whole life (tests are new)
+ *  while bounding the row scan. Cumulative spend, not a rolling verdict window. */
+const LIFETIME_LOOKBACK_DAYS = 180;
+
+/**
+ * The currently-ACTIVE adsets for the account, each with its CUMULATIVE (lifetime) spend / purchases /
+ * revenue summed from [[../../tables/meta_insights_daily]] — Meta's reported numbers. The active set +
+ * scorecard id/label come from the latest [[../../tables/iteration_scorecards_daily]] snapshot; the totals
+ * are overlaid from the full insights history so the crown floor measures cumulative test spend (a $450
+ * verdict floor reached over the test's life), never a rolling 7-day window that a low-budget adset caps
+ * out below.
+ */
+async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, metaAdAccountId: string): Promise<AdsetScorecard[]> {
   const { data: latest } = await admin
     .from("iteration_scorecards_daily")
     .select("snapshot_date")
@@ -46,24 +59,46 @@ async function latestAdsetScorecards(admin: Admin, workspaceId: string, metaAdAc
     .maybeSingle();
   const snapshotDate = (latest as { snapshot_date?: string } | null)?.snapshot_date;
   if (!snapshotDate) return [];
-  const { data } = await admin
+
+  // Active adsets (id + label) from the latest snapshot.
+  const { data: scRows } = await admin
     .from("iteration_scorecards_daily")
-    .select("id, object_id, label, spend_cents, purchases, revenue_cents, atc_rate, snapshot_date")
+    .select("id, object_id, label, atc_rate")
     .eq("workspace_id", workspaceId)
     .eq("meta_ad_account_id", metaAdAccountId)
     .eq("level", "adset")
     .eq("snapshot_date", snapshotDate)
     .eq("effective_status", "ACTIVE");
-  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
-    id: String(r.id),
-    object_id: String(r.object_id),
-    label: (r.label as string | null) ?? null,
-    spend_cents: Number(r.spend_cents ?? 0),
-    purchases: Number(r.purchases ?? 0),
-    revenue_cents: Number(r.revenue_cents ?? 0),
-    atc_rate: r.atc_rate == null ? null : Number(r.atc_rate),
-    snapshot_date: String(r.snapshot_date),
+  const active = ((scRows ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id), object_id: String(r.object_id), label: (r.label as string | null) ?? null, atc_rate: r.atc_rate == null ? null : Number(r.atc_rate),
   }));
+  if (!active.length) return [];
+
+  // Cumulative lifetime totals per active adset from the insights history.
+  const sinceIso = new Date(Date.now() - LIFETIME_LOOKBACK_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const adsetIds = active.map((a) => a.object_id);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents, purchases, revenue_cents")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_ad_account_id", metaAdAccountId)
+    .eq("level", "adset")
+    .in("meta_object_id", adsetIds)
+    .gte("snapshot_date", sinceIso);
+  const life = new Map<string, { spend: number; purch: number; rev: number }>();
+  for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
+    const k = String(r.meta_object_id);
+    const cur = life.get(k) ?? { spend: 0, purch: 0, rev: 0 };
+    cur.spend += Number(r.spend_cents ?? 0);
+    cur.purch += Number(r.purchases ?? 0);
+    cur.rev += Number(r.revenue_cents ?? 0);
+    life.set(k, cur);
+  }
+
+  return active.map((a) => {
+    const l = life.get(a.object_id) ?? { spend: 0, purch: 0, rev: 0 };
+    return { id: a.id, object_id: a.object_id, label: a.label, atc_rate: a.atc_rate, snapshot_date: snapshotDate, spend_cents: l.spend, purchases: l.purch, revenue_cents: l.rev };
+  });
 }
 
 /** Is Meta's reported adset signal fresh enough to act on? (freshness replaces the internal-resolve
@@ -142,7 +177,7 @@ export interface MetaCpaWinnerOptions {
 /** Winners on Meta's reported signal: adsets with CPA ≤ crownMaxCpaCents AND spend ≥ crownMinSpendCents,
  *  ranked by CPA ascending, resolved into the DetectedWinner shape the plan/amplifier consume. */
 export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOptions): Promise<DetectedWinner[]> {
-  const rows = await latestAdsetScorecards(admin, opts.workspaceId, opts.metaAdAccountId);
+  const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
   const qualifying = rows
     .filter((r) => r.purchases > 0 && r.spend_cents >= opts.crownMinSpendCents && r.spend_cents / r.purchases <= opts.crownMaxCpaCents)
     .sort((a, b) => a.spend_cents / a.purchases - b.spend_cents / b.purchases)
@@ -181,7 +216,7 @@ export interface MetaCpaLoserOptions {
  *  either no purchases yet OR a CPA already worse than the crown CPA is clearly not converting. Each
  *  loser cites its dominant child ad so the audit names the creative in decline. */
 export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOptions): Promise<MediaBuyerLoser[]> {
-  const rows = await latestAdsetScorecards(admin, opts.workspaceId, opts.metaAdAccountId);
+  const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
   const losing = rows.filter(
     (r) => r.spend_cents >= opts.earlyTrimMinSpendCents && (r.purchases === 0 || r.spend_cents / r.purchases > opts.crownMaxCpaCents),
   );
