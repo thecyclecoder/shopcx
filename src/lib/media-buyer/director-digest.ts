@@ -14,6 +14,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import type { MediaBuyerPlan } from "@/lib/media-buyer/agent";
 import { getSlackToken, postAsGrowthDirector } from "@/lib/slack";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { getPersona } from "@/lib/agents/personas";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -42,9 +43,10 @@ function composeDigest(accountPlans: AccountPlan[]): { text: string; hasRecommen
     lines.push(`• account ${account.slice(0, 8)} — ${plan.summary}`);
   }
   const total = promote + kill + replenish + fatigue;
+  const mb = getPersona("media-buyer"); // Bianca 🎯 — the media buyer whose calls this digest relays
   const header = total > 0
-    ? `Media Buyer digest — ${promote} to scale, ${kill} to pause, ${replenish} replenish, ${fatigue} refresh across ${cohorts} cohort${cohorts === 1 ? "" : "s"}.`
-    : `Media Buyer digest — no changes recommended this cycle across ${cohorts} cohort${cohorts === 1 ? "" : "s"} (all within policy).`;
+    ? `${mb.emoji} ${mb.name} (Media Buyer) — ${promote} to scale, ${kill} to pause, ${replenish} replenish, ${fatigue} refresh across ${cohorts} cohort${cohorts === 1 ? "" : "s"}.`
+    : `${mb.emoji} ${mb.name} (Media Buyer) — no changes recommended this cycle across ${cohorts} cohort${cohorts === 1 ? "" : "s"} (all within policy).`;
   return { text: [header, ...lines].join("\n"), hasRecommendations: total > 0 };
 }
 
