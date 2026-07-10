@@ -47,6 +47,23 @@ test("distinct-ticket count, not row count — same ticket many rows does NOT re
   assert.deepEqual(out, []); // 3 rows but 1 distinct ticket
 });
 
+test("PR2 ladder: cheap_tier_mishandle on 3 distinct tickets → June gets an add_rule permanent-fix storyline", () => {
+  // The tiered-remediation ladder logs a `cheap_tier_mishandle` (tier:'cheap') signal every time it
+  // re-sessions Sol on a cheap-path mishandle. Once the class recurs, June's digest must roll it up
+  // into an early_warning + add_rule — the "June eventually fixes the Sonnet/Haiku portion" loop.
+  const out = composeMessyTurnWarnings([
+    row("m1", "cheap", ["cheap_tier_mishandle"]),
+    row("m2", "cheap", ["cheap_tier_mishandle"]),
+    row("m3", "cheap", ["cheap_tier_mishandle"]),
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].kind, "early_warning");
+  assert.match(out[0].title, /cheap tier mishandle/);
+  assert.equal(out[0].proposed_action.type, "add_rule");
+  assert.match(out[0].evidence, /3 distinct tickets/);
+  assert.match(out[0].evidence, /cheap 3 · cora 0/);
+});
+
 test("multiple classes are grouped independently; loudest sorts first", () => {
   const rows = [
     row("a", "cora", ["slow_resolution", "tone_miss_recovered"]),

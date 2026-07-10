@@ -19,6 +19,10 @@ Each grader emits ONE `sol_messy_turns` [[../tables/director_activity]] row per 
 
 `contradiction_recovered` · `policy_misstate_recovered` · `slow_resolution` · `repeated_clarification` · `wrong_tool_recovered` · `tone_miss_recovered`
 
+Plus the **tiered-ladder** class (distinct — the recovery is a re-session, not a clean close):
+
+`cheap_tier_mishandle` — the LOW-COST path (Sonnet/Haiku) mishandled a ticket WITHOUT ever calling Sol; Cora caught it on the grade and RE-SESSIONED Sol rather than escalating June (see [[ticket-analyzer]] `decideRemediationTier`). It marks a systemic **cheap-path** gap June should fix at the source. Only ever emitted with `tier:'cheap'`; grouped + counted exactly like the recovered classes, so once it recurs across ≥ threshold tickets June's digest ([[cs-director-digest]] `composeMessyTurnWarnings`) proposes an `add_rule` fix for the Sonnet/Haiku handling.
+
 ## Exports
 
 - `recordSolMessyTurns(admin, { workspaceId, ticketId, tier, signals, score?, summary? })` — emit ONE row. Best-effort, never throws; a no-op when no known signal survives `normalizeMessyTurnSignals` (an empty set is not a pattern worth a row). `directorFunction='cs'` (June owns Sol's coaching objective).
