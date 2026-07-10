@@ -1,0 +1,1 @@
+- **June full SDK power: multi-action remedies (execute the whole fix, gate sums across money actions)** · verified 2026-07-10 · → [[../libraries/cs-director#multi-action-remedies]]
