@@ -13814,6 +13814,9 @@ async function runCsDirectorCallJob(job: Job) {
       needs_attention?: boolean;
       error?: string;
       message_delivered?: boolean;
+      // june-remedy-approval § founder SMS gate — set when a money remedy over the workspace threshold
+      // was PARKED (raised to Dylan via Eve's cockpit) instead of executed; keeps the ticket escalated.
+      awaiting_founder_approval?: boolean;
       // Phase 3 — cs-director-call-phase-2-executor-fires-june-verdicts § Phase 3 handler results.
       spec_slug?: string;
       linkage_ticket_id?: string | null;
@@ -13892,7 +13895,10 @@ async function runCsDirectorCallJob(job: Job) {
     // via the same `ticket_messages` write path every other internal note uses
     // (visibility='internal', author_type='system'). Best-effort — the primary audit trail is
     // `director_activity` above, so a failed insert here never rolls back the completed job.
-    try {
+    // A remedy PARKED for founder approval ([[june-remedy-approval]]) already got its own accurate
+    // internal note from raiseJuneRemedyApproval ("June parked a remedy for founder approval…"); skip
+    // the generic verdict note so the thread doesn't read as if June already executed the refund.
+    if (!applyResult?.awaiting_founder_approval) try {
       const { buildCsDirectorVerdictNote } = await import("../src/lib/cs-director-verdict-note");
       const noteBody = buildCsDirectorVerdictNote({
         decision: verdict.decision,
@@ -13954,7 +13960,10 @@ async function runCsDirectorCallJob(job: Job) {
         ceoUserId,
         now: new Date().toISOString(),
       });
-      if (transition.action_key !== "noop") {
+      // A remedy PARKED for founder approval ([[june-remedy-approval]]) must NOT get the usual
+      // approve_remedy de-escalate/close transition — the ticket stays escalated (raiseJuneRemedyApproval
+      // already stamped escalated_to=owner) until Dylan approves via SMS and the deferred sweep executes.
+      if (transition.action_key !== "noop" && !applyResult?.awaiting_founder_approval) {
         const { error: patchErr, data: patched } = await db
           .from("tickets")
           .update(transition.patch)
@@ -24054,6 +24063,14 @@ async function main() {
           // 5+ min (no more per-approval spam — see nudgeStalePendingApprovals).
           const n = await nudgeStalePendingApprovals(db);
           if (n.nudged) console.log(`[god-mode nudge] texted ${n.nudged} stale approval(s)`);
+          // june-remedy-approval § deferred execution — a founder-approved (or denied) June money remedy
+          // parked in god_mode_approvals gets executed (or noted) here, on the same 60s beat. Idempotent:
+          // each row is stamped tool_input.executed_at so it fires exactly once. Best-effort.
+          const { executeApprovedJuneRemedies } = await import("../src/lib/june-remedy-approval");
+          const jr = await executeApprovedJuneRemedies(db);
+          if (jr.executed || jr.denied) {
+            console.log(`[june-remedy] executed=${jr.executed} denied=${jr.denied}`);
+          }
         } catch (e) {
           console.error("[god-mode reaper] sweep failed (continuing):", e instanceof Error ? e.message : e);
         } finally {

@@ -113,6 +113,13 @@ export interface ApplyBoxCsDirectorCallResult {
   error?: string;
   message_delivered?: boolean;
   /**
+   * `approve_remedy`: the remedy was a refund/credit over the workspace threshold and was PARKED for
+   * founder SMS approval (via [[june-remedy-approval]]) instead of executing. The ticket is held
+   * escalated-to-owner; the runner MUST NOT apply its usual approve_remedy deescalate/close transition
+   * (the parked state is authoritative until the founder decides + the deferred sweep executes).
+   */
+  awaiting_founder_approval?: boolean;
+  /**
    * Phase 3 (`author_spec`): the slug the specs SDK actually landed. Surfaced so the runner's
    * `log_tail` + a downstream Roadmap join can name the authored spec without re-parsing the
    * verdict's `spec_seed` (the LLM may pass a slug shape we normalize before the SDK write).
@@ -394,6 +401,36 @@ async function handleApproveRemedy(
       };
     }
     const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
+
+    // 3b. FOUNDER-APPROVAL GATE (Cora/June dial-in). A refund/credit over the workspace threshold is
+    //     NOT auto-executed — June parks it, raises a plain-language card into Eve's cockpit, and texts
+    //     the founder for a yes/no/ask decision. The deferred sweep (executeApprovedJuneRemedies, box
+    //     ~60s beat) fires it on approve. Everything else (date changes, coupons within limit,
+    //     replacements, sub-threshold refunds) runs autonomously below. See [[june-remedy-approval]].
+    if (verdict.remedy) {
+      const { getRefundApprovalThresholdCents, remedyNeedsFounderApproval, raiseJuneRemedyApproval } =
+        await import("@/lib/june-remedy-approval");
+      const threshold = await getRefundApprovalThresholdCents(admin, workspaceId);
+      const gate = remedyNeedsFounderApproval(verdict.remedy, threshold);
+      if (gate.gated) {
+        const raised = await raiseJuneRemedyApproval(admin, {
+          workspaceId,
+          ticketId,
+          remedy: verdict.remedy,
+          actionType: gate.actionType || actionType,
+          amountCents: gate.amountCents,
+          reasoning: verdict.reasoning,
+        });
+        console.log(`${tag} approve_remedy: refund/credit over threshold → parked for founder approval (via ${raised.via})`);
+        return {
+          ok: true,
+          handler: "approve_remedy",
+          awaiting_founder_approval: true,
+          reason: `awaiting_founder_approval:${raised.via}`,
+          message_delivered: false,
+        };
+      }
+    }
 
     // 4. Build the direct_action SonnetDecision. NO response_message — we own delivery.
     const decision = buildRemedySonnetDecision(planned.plan, verdict.reasoning);
