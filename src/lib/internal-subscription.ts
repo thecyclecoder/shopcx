@@ -229,12 +229,18 @@ async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVaria
   const col = VARIANT_UUID_RE.test(raw) ? "id" : "shopify_variant_id";
   const { data: v } = await admin
     .from("product_variants")
-    .select("id, product_id, title, sku, products(title)")
+    .select("id, product_id, title, sku")
     .eq(col, raw)
     .maybeSingle();
   if (!v) return null;
-  const product = (v.products as { title?: string } | { title?: string }[] | null) || null;
-  const productTitle = Array.isArray(product) ? product[0]?.title : product?.title;
+  // Resolve the product title with a direct lookup rather than a PostgREST
+  // embed — the `products(title)` embed intermittently returned null (the gift
+  // line then displayed as a bare "Gift"), so a two-step read is more reliable.
+  let productTitle: string | undefined;
+  if (v.product_id) {
+    const { data: p } = await admin.from("products").select("title").eq("id", v.product_id).maybeSingle();
+    productTitle = (p?.title as string) || undefined;
+  }
   return {
     id: v.id as string,
     product_id: v.product_id as string,
