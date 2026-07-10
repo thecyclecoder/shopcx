@@ -11,7 +11,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
-import { SONNET_MODEL, OPUS_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
+import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { renderDirectionSystemPrompt, prefixDirectionContextReasoning } from "@/lib/ai-context";
 import type { TicketDirection } from "@/lib/ticket-directions";
 import { buildCustomerTimeline, timelineToText } from "@/lib/customer-timeline";
@@ -23,7 +23,8 @@ import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrown
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
-  opus: OPUS_MODEL,
+  // Founder directive (2026-07-10): the orchestrator NEVER runs on Opus — the tiers are Sonnet + Haiku
+  // (see [[model-picker]]). Opus removed from the orchestrator model map.
   // Phase 3 of docs/brain/specs/sol-cheap-execution-over-ticket-direction.md — the
   // model-picker's fresh-Direction route returns 'haiku' when the ticket has a
   // fresh + high-confidence + stateless Direction, so the orchestrator must

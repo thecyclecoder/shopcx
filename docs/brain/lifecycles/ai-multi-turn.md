@@ -5,7 +5,7 @@ The route → assemble context → generate → confidence-gate → send → aut
 ## Cast
 
 - Pipeline: [[../inngest/unified-ticket-handler]] (entry) + `src/lib/sonnet-orchestrator-v2.ts` (brain) + `src/lib/action-executor.ts` (limbs).
-- Models: [[../integrations/anthropic]] (Haiku + Sonnet + Opus per `src/lib/model-picker.ts`).
+- Models: [[../integrations/anthropic]] (Haiku + Sonnet only — never Opus, per `src/lib/model-picker.ts`; a ticket that needs deeper handling re-sessions to Sol).
 - Embeddings: [[../integrations/openai]] (RAG retrieval over [[../tables/kb_chunks]] + [[../tables/macros]]).
 - Config: [[../tables/ai_channel_config]], [[../tables/ai_personalities]], [[../tables/sonnet_prompts]], [[../tables/policies]], [[../tables/ai_workflows]].
 - Tracking: [[../tables/ai_token_usage]], [[../tables/escalation_gaps]], [[../tables/knowledge_gaps]].
