@@ -98,3 +98,71 @@ export async function enqueueSolFirstTouchForPortalError(
   }
   return { enqueued: true, job_id: (jobRow as { id: string }).id, reason: null };
 }
+
+export interface CoraRemediationEnqueueInput {
+  workspace_id: string;
+  ticket_id: string;
+  /** Cora's grade on the mishandled cheap-tier ticket (for the box-session context + the note). */
+  score?: number;
+  /** The `ticket_analyses.id` that found the mishandle, so the ledger can link the re-session back. */
+  analysis_id?: string | null;
+}
+
+/**
+ * Enqueue a FRESH Sol first-touch ticket-handle session for a ticket the LOW-COST path (Sonnet/Haiku)
+ * mishandled and Sol never took a crack at.
+ *
+ * The tiered-remediation ladder (PR2, [[../../../docs/brain/specs/cora-tiered-remediation-ladder-cheap-fail-resessions-sol-not-june]]):
+ * when Cora's deep grade finds a cheap-tier-handled ticket mishandled and `sol_handled_at IS NULL`,
+ * the ticket does NOT escalate straight to June — that brings Sol's supervisor in one rung too high.
+ * Instead Sol gets a real first-touch box session NOW (this enqueue), and a `cheap_tier_mishandle`
+ * coaching signal is logged so June's digest commissions a permanent fix to the cheap path. Only a
+ * ticket Sol HERSELF handled and Cora still didn't like escalates to June.
+ *
+ * `reason='cora_remediation'` is NOT `portal_error`, so `runTicketHandleJob` runs it as an ordinary
+ * first-touch (rail='first_touch') — Sol re-handles the ticket from scratch with full context. Shares
+ * the same spec_slug dedupe (`ticket-handle-<first-8>`) as the other two enqueue sites so a ticket
+ * never fans out two concurrent Sol sessions.
+ */
+export async function enqueueSolFirstTouchForCoraRemediation(
+  admin: SupabaseClient,
+  input: CoraRemediationEnqueueInput,
+): Promise<EnqueueOutcome> {
+  const slug = specSlugForTicketHandle(input.ticket_id);
+
+  const { data: inflight, error: inflightErr } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", input.workspace_id)
+    .eq("kind", "ticket-handle")
+    .eq("spec_slug", slug)
+    .in("status", LIVE_JOB_STATUSES as unknown as string[])
+    .limit(1);
+  if (inflightErr) throw inflightErr;
+  if ((inflight ?? []).length > 0) {
+    return { enqueued: false, job_id: null, reason: "already_inflight" };
+  }
+
+  const { data: jobRow, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: input.workspace_id,
+      kind: "ticket-handle",
+      spec_slug: slug,
+      status: "queued",
+      instructions: JSON.stringify({
+        ticket_id: input.ticket_id,
+        workspace_id: input.workspace_id,
+        turn_index: 1,
+        reason: "cora_remediation",
+        cheap_tier_score: typeof input.score === "number" ? input.score : null,
+        analysis_id: input.analysis_id ?? null,
+      }),
+    })
+    .select("id")
+    .single();
+  if (error || !jobRow) {
+    return { enqueued: false, job_id: null, reason: "insert_failed" };
+  }
+  return { enqueued: true, job_id: (jobRow as { id: string }).id, reason: null };
+}
