@@ -251,6 +251,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-900/40",
     dot: "bg-blue-500", ring: "bg-blue-50 dark:bg-blue-900/20", accent: "text-blue-600 dark:text-blue-400",
   },
+  "media-buyer": {
+    key: "media-buyer", name: "Bianca", role: "Media Buyer", emoji: "🎯",
+    personality: "Runs the paid-social test loop under Max — launches capped creative tests, reads cost-per-add-to-cart early, promotes proven winners and kills losers scientifically (CPA vs LTV-derived breakeven), replenishes the cohort, and refreshes fatiguing angles. Deterministic + conservative: never acts on untrusted attribution (the sensor-trust gate), only within the active iteration policy, shadow-first then armed under owner veto. Grades her own calls against realized ROAS 3 days later and reports the digest up to Max.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}bianca-media-buyer.jpg?v=1`,
+    chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
+    dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
+  },
   "coverage-register": {
     key: "coverage-register", name: "Cole", role: "Coverage", emoji: "🟦",
     personality: "Catches unregistered loops, proposes the MONITORED_LOOPS entry.",
