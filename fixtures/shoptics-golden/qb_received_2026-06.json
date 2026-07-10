@@ -1,0 +1,5 @@
+{
+  "7": 10725,
+  "203": 1,
+  "_note": "June QB receipts (Bill/Purchase ItemBasedExpenseLineDetail Qty by QBO item id), fetched read-only via ShopCX qboFetch on 2026-07-10. item 203 qty=1 is Bill 117388 CreateTime 2026-07-08 — a BACK-DATED entry posted AFTER the June close, so close-time received[203]=0. Use received[203]=0 to reconcile against the golden close-time InventoryAdjustment."
+}

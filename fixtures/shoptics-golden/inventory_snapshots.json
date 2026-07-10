@@ -1,0 +1,4646 @@
+[
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1813,
+    "snapshot_at": "2026-04-01T17:01:50.014051+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5541,
+    "snapshot_at": "2026-04-01T17:01:50.125352+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 6225,
+    "snapshot_at": "2026-04-01T17:01:50.237144+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 212568,
+    "snapshot_at": "2026-04-01T17:01:50.350943+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4646,
+    "snapshot_at": "2026-04-01T17:01:50.458193+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9216,
+    "snapshot_at": "2026-04-01T17:01:50.566935+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4831,
+    "snapshot_at": "2026-04-01T17:01:50.769339+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6000,
+    "snapshot_at": "2026-04-01T17:01:50.953445+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7129,
+    "snapshot_at": "2026-04-01T17:01:51.064894+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 9103,
+    "snapshot_at": "2026-04-01T17:01:51.185279+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:01:51.315722+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 224510,
+    "snapshot_at": "2026-04-01T17:01:51.443031+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 171660,
+    "snapshot_at": "2026-04-01T17:01:51.536543+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5842,
+    "snapshot_at": "2026-04-01T17:01:51.659547+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5951,
+    "snapshot_at": "2026-04-01T17:01:51.789919+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 201060,
+    "snapshot_at": "2026-04-01T17:01:51.924031+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 204330,
+    "snapshot_at": "2026-04-01T17:01:52.037573+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1694,
+    "snapshot_at": "2026-04-01T17:01:52.145789+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 6140,
+    "snapshot_at": "2026-04-01T17:01:52.281211+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 10622,
+    "snapshot_at": "2026-04-01T17:01:52.400679+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 7670,
+    "snapshot_at": "2026-04-01T17:01:52.483782+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3887,
+    "snapshot_at": "2026-04-01T17:01:52.584719+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5397,
+    "snapshot_at": "2026-04-01T17:01:52.707923+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 352,
+    "snapshot_at": "2026-04-01T17:01:52.826646+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5392,
+    "snapshot_at": "2026-04-01T17:01:52.961748+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 5497,
+    "snapshot_at": "2026-04-01T17:01:53.090803+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 9066,
+    "snapshot_at": "2026-04-01T17:01:53.175904+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 3500,
+    "snapshot_at": "2026-04-01T17:01:53.347098+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 3296,
+    "snapshot_at": "2026-04-01T17:01:53.437425+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 9016,
+    "snapshot_at": "2026-04-01T17:01:53.535277+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 3481,
+    "snapshot_at": "2026-04-01T17:01:53.655365+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 5303,
+    "snapshot_at": "2026-04-01T17:01:53.750141+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5696,
+    "snapshot_at": "2026-04-01T17:01:53.87836+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:01:53.971927+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 7156,
+    "snapshot_at": "2026-04-01T17:01:54.078237+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4701,
+    "snapshot_at": "2026-04-01T17:01:54.200487+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4811,
+    "snapshot_at": "2026-04-01T17:01:54.297895+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 44,
+    "snapshot_at": "2026-04-01T17:01:54.394279+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 286,
+    "snapshot_at": "2026-04-01T17:01:54.504083+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 273,
+    "snapshot_at": "2026-04-01T17:01:54.593361+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 3400,
+    "snapshot_at": "2026-04-01T17:01:54.693353+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 4290,
+    "snapshot_at": "2026-04-01T17:01:54.782788+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 6449,
+    "snapshot_at": "2026-04-01T17:01:54.879248+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1500,
+    "snapshot_at": "2026-04-01T17:02:13.541825+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 6719,
+    "snapshot_at": "2026-04-01T17:02:13.672605+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 6006,
+    "snapshot_at": "2026-04-01T17:02:13.799987+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 180096,
+    "snapshot_at": "2026-04-01T17:02:13.91793+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4388,
+    "snapshot_at": "2026-04-01T17:02:14.009337+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9483,
+    "snapshot_at": "2026-04-01T17:02:14.16026+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 5304,
+    "snapshot_at": "2026-04-01T17:02:14.242226+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6866,
+    "snapshot_at": "2026-04-01T17:02:14.323606+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 8057,
+    "snapshot_at": "2026-04-01T17:02:14.40648+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5559,
+    "snapshot_at": "2026-04-01T17:02:14.49186+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:02:14.592566+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 252670,
+    "snapshot_at": "2026-04-01T17:02:14.683439+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 171060,
+    "snapshot_at": "2026-04-01T17:02:14.776344+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5741,
+    "snapshot_at": "2026-04-01T17:02:14.891017+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5910,
+    "snapshot_at": "2026-04-01T17:02:15.022725+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 198430,
+    "snapshot_at": "2026-04-01T17:02:15.14121+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 203500,
+    "snapshot_at": "2026-04-01T17:02:15.232883+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1197,
+    "snapshot_at": "2026-04-01T17:02:15.342607+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 21019,
+    "snapshot_at": "2026-04-01T17:02:15.424495+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 9528,
+    "snapshot_at": "2026-04-01T17:02:15.515754+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 7664,
+    "snapshot_at": "2026-04-01T17:02:15.919872+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3874,
+    "snapshot_at": "2026-04-01T17:02:16.003523+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5385,
+    "snapshot_at": "2026-04-01T17:02:16.452827+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 239,
+    "snapshot_at": "2026-04-01T17:02:16.554924+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5688,
+    "snapshot_at": "2026-04-01T17:02:16.640653+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 4729,
+    "snapshot_at": "2026-04-01T17:02:16.731549+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 7504,
+    "snapshot_at": "2026-04-01T17:02:16.811165+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 3168,
+    "snapshot_at": "2026-04-01T17:02:16.913778+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 3029,
+    "snapshot_at": "2026-04-01T17:02:17.007885+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 8307,
+    "snapshot_at": "2026-04-01T17:02:17.115354+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 3178,
+    "snapshot_at": "2026-04-01T17:02:17.202361+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 5169,
+    "snapshot_at": "2026-04-01T17:02:17.285278+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5366,
+    "snapshot_at": "2026-04-01T17:02:17.360719+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:02:17.438648+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 7057,
+    "snapshot_at": "2026-04-01T17:02:17.57696+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4601,
+    "snapshot_at": "2026-04-01T17:02:17.652192+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4770,
+    "snapshot_at": "2026-04-01T17:02:17.741423+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:02:17.836289+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 214,
+    "snapshot_at": "2026-04-01T17:02:17.917722+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 1027,
+    "snapshot_at": "2026-04-01T17:02:18.018604+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 1189,
+    "snapshot_at": "2026-04-01T17:02:18.154508+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 4099,
+    "snapshot_at": "2026-04-01T17:02:18.245887+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 5603,
+    "snapshot_at": "2026-04-01T17:02:18.328467+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1813,
+    "snapshot_at": "2026-04-01T17:15:59.020213+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5541,
+    "snapshot_at": "2026-04-01T17:15:59.142691+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 6225,
+    "snapshot_at": "2026-04-01T17:15:59.274698+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 212568,
+    "snapshot_at": "2026-04-01T17:15:59.379754+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4646,
+    "snapshot_at": "2026-04-01T17:15:59.492867+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9216,
+    "snapshot_at": "2026-04-01T17:15:59.611866+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4831,
+    "snapshot_at": "2026-04-01T17:15:59.709325+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6000,
+    "snapshot_at": "2026-04-01T17:15:59.804698+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7129,
+    "snapshot_at": "2026-04-01T17:15:59.920181+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 9103,
+    "snapshot_at": "2026-04-01T17:16:00.025369+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:16:00.141054+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 224510,
+    "snapshot_at": "2026-04-01T17:16:00.261057+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 171660,
+    "snapshot_at": "2026-04-01T17:16:00.377274+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5842,
+    "snapshot_at": "2026-04-01T17:16:00.479461+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5951,
+    "snapshot_at": "2026-04-01T17:16:00.605271+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 201060,
+    "snapshot_at": "2026-04-01T17:16:00.709405+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 204330,
+    "snapshot_at": "2026-04-01T17:16:00.796545+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1694,
+    "snapshot_at": "2026-04-01T17:16:00.889126+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 6140,
+    "snapshot_at": "2026-04-01T17:16:01.011588+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 10622,
+    "snapshot_at": "2026-04-01T17:16:01.114931+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 7670,
+    "snapshot_at": "2026-04-01T17:16:01.232107+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3887,
+    "snapshot_at": "2026-04-01T17:16:01.393124+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5397,
+    "snapshot_at": "2026-04-01T17:16:01.517494+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 352,
+    "snapshot_at": "2026-04-01T17:16:01.62811+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5392,
+    "snapshot_at": "2026-04-01T17:16:01.755934+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 5497,
+    "snapshot_at": "2026-04-01T17:16:01.906359+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 9066,
+    "snapshot_at": "2026-04-01T17:16:02.060585+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 3500,
+    "snapshot_at": "2026-04-01T17:16:02.207137+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 3296,
+    "snapshot_at": "2026-04-01T17:16:02.337414+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 9016,
+    "snapshot_at": "2026-04-01T17:16:02.453826+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 3481,
+    "snapshot_at": "2026-04-01T17:16:02.575539+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 5303,
+    "snapshot_at": "2026-04-01T17:16:02.703246+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5696,
+    "snapshot_at": "2026-04-01T17:16:02.804646+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:16:02.882471+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 7156,
+    "snapshot_at": "2026-04-01T17:16:02.969347+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4701,
+    "snapshot_at": "2026-04-01T17:16:03.09424+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4811,
+    "snapshot_at": "2026-04-01T17:16:03.217505+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 44,
+    "snapshot_at": "2026-04-01T17:16:03.348227+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 286,
+    "snapshot_at": "2026-04-01T17:16:03.465371+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 273,
+    "snapshot_at": "2026-04-01T17:16:03.559234+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 3400,
+    "snapshot_at": "2026-04-01T17:16:03.661908+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 4290,
+    "snapshot_at": "2026-04-01T17:16:03.79292+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 6449,
+    "snapshot_at": "2026-04-01T17:16:03.889785+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1500,
+    "snapshot_at": "2026-04-01T17:16:21.333233+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 6719,
+    "snapshot_at": "2026-04-01T17:16:21.458587+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 6006,
+    "snapshot_at": "2026-04-01T17:16:21.563008+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 180096,
+    "snapshot_at": "2026-04-01T17:16:21.689679+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4388,
+    "snapshot_at": "2026-04-01T17:16:21.776906+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9483,
+    "snapshot_at": "2026-04-01T17:16:21.907947+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 5304,
+    "snapshot_at": "2026-04-01T17:16:22.003655+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6866,
+    "snapshot_at": "2026-04-01T17:16:22.097028+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 8057,
+    "snapshot_at": "2026-04-01T17:16:22.223574+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5559,
+    "snapshot_at": "2026-04-01T17:16:22.358816+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:16:22.443215+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 252670,
+    "snapshot_at": "2026-04-01T17:16:22.557355+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 171060,
+    "snapshot_at": "2026-04-01T17:16:22.667913+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5741,
+    "snapshot_at": "2026-04-01T17:16:22.790801+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5910,
+    "snapshot_at": "2026-04-01T17:16:22.885223+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 198430,
+    "snapshot_at": "2026-04-01T17:16:23.016102+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 203500,
+    "snapshot_at": "2026-04-01T17:16:23.139843+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1197,
+    "snapshot_at": "2026-04-01T17:16:23.240981+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 21019,
+    "snapshot_at": "2026-04-01T17:16:23.346846+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 9528,
+    "snapshot_at": "2026-04-01T17:16:23.493677+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 7664,
+    "snapshot_at": "2026-04-01T17:16:23.570211+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3874,
+    "snapshot_at": "2026-04-01T17:16:23.659727+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5385,
+    "snapshot_at": "2026-04-01T17:16:23.757961+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 239,
+    "snapshot_at": "2026-04-01T17:16:23.848085+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5688,
+    "snapshot_at": "2026-04-01T17:16:23.945945+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 4729,
+    "snapshot_at": "2026-04-01T17:16:24.06754+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 7504,
+    "snapshot_at": "2026-04-01T17:16:24.178484+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 3168,
+    "snapshot_at": "2026-04-01T17:16:24.279059+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 3029,
+    "snapshot_at": "2026-04-01T17:16:24.373346+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 8307,
+    "snapshot_at": "2026-04-01T17:16:24.486739+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 3178,
+    "snapshot_at": "2026-04-01T17:16:24.613086+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 5169,
+    "snapshot_at": "2026-04-01T17:16:24.824337+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5366,
+    "snapshot_at": "2026-04-01T17:16:24.934925+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:16:25.025352+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 7057,
+    "snapshot_at": "2026-04-01T17:16:25.160664+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4601,
+    "snapshot_at": "2026-04-01T17:16:25.300468+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4770,
+    "snapshot_at": "2026-04-01T17:16:25.415657+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-04-01T17:16:25.512106+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 214,
+    "snapshot_at": "2026-04-01T17:16:25.60646+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 1027,
+    "snapshot_at": "2026-04-01T17:16:25.714771+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 1189,
+    "snapshot_at": "2026-04-01T17:16:25.793319+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 4099,
+    "snapshot_at": "2026-04-01T17:16:25.872536+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 5603,
+    "snapshot_at": "2026-04-01T17:16:25.97232+00:00",
+    "raw_payload": {
+      "month": "2026-03",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1500,
+    "snapshot_at": "2026-05-05T18:57:21.385007+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 6719,
+    "snapshot_at": "2026-05-05T18:57:21.453543+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 6006,
+    "snapshot_at": "2026-05-05T18:57:21.555536+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 180096,
+    "snapshot_at": "2026-05-05T18:57:21.636651+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4388,
+    "snapshot_at": "2026-05-05T18:57:21.737769+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9483,
+    "snapshot_at": "2026-05-05T18:57:21.802576+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 5304,
+    "snapshot_at": "2026-05-05T18:57:21.868707+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6866,
+    "snapshot_at": "2026-05-05T18:57:21.926462+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 8057,
+    "snapshot_at": "2026-05-05T18:57:21.984857+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5559,
+    "snapshot_at": "2026-05-05T18:57:22.070769+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-05-05T18:57:22.137915+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 252670,
+    "snapshot_at": "2026-05-05T18:57:22.199513+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 171060,
+    "snapshot_at": "2026-05-05T18:57:22.272436+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5741,
+    "snapshot_at": "2026-05-05T18:57:22.347811+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5910,
+    "snapshot_at": "2026-05-05T18:57:22.436831+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 198430,
+    "snapshot_at": "2026-05-05T18:57:22.562262+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 203500,
+    "snapshot_at": "2026-05-05T18:57:22.628774+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1197,
+    "snapshot_at": "2026-05-05T18:57:22.690264+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 21019,
+    "snapshot_at": "2026-05-05T18:57:22.757513+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 9528,
+    "snapshot_at": "2026-05-05T18:57:22.899717+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 7664,
+    "snapshot_at": "2026-05-05T18:57:22.965109+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3874,
+    "snapshot_at": "2026-05-05T18:57:23.043167+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5385,
+    "snapshot_at": "2026-05-05T18:57:23.125087+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 239,
+    "snapshot_at": "2026-05-05T18:57:23.220892+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5688,
+    "snapshot_at": "2026-05-05T18:57:23.280602+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 4729,
+    "snapshot_at": "2026-05-05T18:57:23.351876+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 7504,
+    "snapshot_at": "2026-05-05T18:57:23.427717+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 3168,
+    "snapshot_at": "2026-05-05T18:57:23.507229+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 3029,
+    "snapshot_at": "2026-05-05T18:57:23.568052+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 8307,
+    "snapshot_at": "2026-05-05T18:57:23.637969+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 3178,
+    "snapshot_at": "2026-05-05T18:57:23.751079+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 5169,
+    "snapshot_at": "2026-05-05T18:57:23.80848+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5366,
+    "snapshot_at": "2026-05-05T18:57:23.874697+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-05-05T18:57:23.942281+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 7057,
+    "snapshot_at": "2026-05-05T18:57:24.007595+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4601,
+    "snapshot_at": "2026-05-05T18:57:24.068977+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4770,
+    "snapshot_at": "2026-05-05T18:57:24.1346+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-05-05T18:57:24.216053+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 214,
+    "snapshot_at": "2026-05-05T18:57:24.286031+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 1027,
+    "snapshot_at": "2026-05-05T18:57:24.352632+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 1189,
+    "snapshot_at": "2026-05-05T18:57:24.420135+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 4099,
+    "snapshot_at": "2026-05-05T18:57:24.48999+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 5603,
+    "snapshot_at": "2026-05-05T18:57:24.558127+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1355,
+    "snapshot_at": "2026-05-05T18:57:41.31171+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5982,
+    "snapshot_at": "2026-05-05T18:57:41.418142+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5686,
+    "snapshot_at": "2026-05-05T18:57:41.533004+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 162576,
+    "snapshot_at": "2026-05-05T18:57:41.605727+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4326,
+    "snapshot_at": "2026-05-05T18:57:41.713789+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9160,
+    "snapshot_at": "2026-05-05T18:57:41.81013+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 5081,
+    "snapshot_at": "2026-05-05T18:57:41.955598+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6665,
+    "snapshot_at": "2026-05-05T18:57:42.083603+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7979,
+    "snapshot_at": "2026-05-05T18:57:42.187886+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5320,
+    "snapshot_at": "2026-05-05T18:57:42.263784+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-05-05T18:57:42.40836+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 244250,
+    "snapshot_at": "2026-05-05T18:57:42.494202+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 168720,
+    "snapshot_at": "2026-05-05T18:57:42.592573+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5677,
+    "snapshot_at": "2026-05-05T18:57:42.664568+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5889,
+    "snapshot_at": "2026-05-05T18:57:42.756227+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 196510,
+    "snapshot_at": "2026-05-05T18:57:42.850397+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 202870,
+    "snapshot_at": "2026-05-05T18:57:42.939232+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 930,
+    "snapshot_at": "2026-05-05T18:57:43.017784+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 3824,
+    "snapshot_at": "2026-05-05T18:57:43.103569+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 9289,
+    "snapshot_at": "2026-05-05T18:57:43.175059+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 6185,
+    "snapshot_at": "2026-05-05T18:57:43.296818+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3866,
+    "snapshot_at": "2026-05-05T18:57:43.404242+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5384,
+    "snapshot_at": "2026-05-05T18:57:43.484646+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 159,
+    "snapshot_at": "2026-05-05T18:57:43.577687+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5687,
+    "snapshot_at": "2026-05-05T18:57:43.658597+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 3992,
+    "snapshot_at": "2026-05-05T18:57:43.749106+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 6774,
+    "snapshot_at": "2026-05-05T18:57:43.840254+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2848,
+    "snapshot_at": "2026-05-05T18:57:43.92576+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2967,
+    "snapshot_at": "2026-05-05T18:57:44.016628+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7984,
+    "snapshot_at": "2026-05-05T18:57:44.08418+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2955,
+    "snapshot_at": "2026-05-05T18:57:44.14836+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4930,
+    "snapshot_at": "2026-05-05T18:57:44.218155+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5165,
+    "snapshot_at": "2026-05-05T18:57:44.33605+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-05-05T18:57:44.402358+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6979,
+    "snapshot_at": "2026-05-05T18:57:44.479853+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4537,
+    "snapshot_at": "2026-05-05T18:57:44.556891+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4749,
+    "snapshot_at": "2026-05-05T18:57:44.62627+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": -2,
+    "snapshot_at": "2026-05-05T18:57:44.703908+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 173,
+    "snapshot_at": "2026-05-05T18:57:44.772789+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 760,
+    "snapshot_at": "2026-05-05T18:57:44.862766+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 984,
+    "snapshot_at": "2026-05-05T18:57:44.948404+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3860,
+    "snapshot_at": "2026-05-05T18:57:45.033606+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 4124,
+    "snapshot_at": "2026-05-05T18:57:45.144682+00:00",
+    "raw_payload": {
+      "month": "2026-04",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1355,
+    "snapshot_at": "2026-06-09T15:57:36.124901+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5982,
+    "snapshot_at": "2026-06-09T15:57:36.176764+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5686,
+    "snapshot_at": "2026-06-09T15:57:36.235096+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 162576,
+    "snapshot_at": "2026-06-09T15:57:36.304286+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4326,
+    "snapshot_at": "2026-06-09T15:57:36.359576+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 9160,
+    "snapshot_at": "2026-06-09T15:57:36.41294+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 5081,
+    "snapshot_at": "2026-06-09T15:57:36.467166+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6665,
+    "snapshot_at": "2026-06-09T15:57:36.544182+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7979,
+    "snapshot_at": "2026-06-09T15:57:36.646532+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5320,
+    "snapshot_at": "2026-06-09T15:57:36.691866+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:36.738749+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 244250,
+    "snapshot_at": "2026-06-09T15:57:36.778989+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 168720,
+    "snapshot_at": "2026-06-09T15:57:36.824271+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5677,
+    "snapshot_at": "2026-06-09T15:57:36.879099+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5889,
+    "snapshot_at": "2026-06-09T15:57:36.927421+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 196510,
+    "snapshot_at": "2026-06-09T15:57:36.983103+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 202870,
+    "snapshot_at": "2026-06-09T15:57:37.040565+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 930,
+    "snapshot_at": "2026-06-09T15:57:37.092982+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 3824,
+    "snapshot_at": "2026-06-09T15:57:37.14658+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 9289,
+    "snapshot_at": "2026-06-09T15:57:37.203601+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 6185,
+    "snapshot_at": "2026-06-09T15:57:37.269161+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3866,
+    "snapshot_at": "2026-06-09T15:57:37.324898+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5384,
+    "snapshot_at": "2026-06-09T15:57:37.385019+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 159,
+    "snapshot_at": "2026-06-09T15:57:37.431253+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5687,
+    "snapshot_at": "2026-06-09T15:57:37.48287+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 3992,
+    "snapshot_at": "2026-06-09T15:57:37.52615+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 6774,
+    "snapshot_at": "2026-06-09T15:57:37.590835+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2848,
+    "snapshot_at": "2026-06-09T15:57:37.637828+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2967,
+    "snapshot_at": "2026-06-09T15:57:37.695122+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7984,
+    "snapshot_at": "2026-06-09T15:57:37.748125+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2955,
+    "snapshot_at": "2026-06-09T15:57:37.799773+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4930,
+    "snapshot_at": "2026-06-09T15:57:37.843284+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 5165,
+    "snapshot_at": "2026-06-09T15:57:37.888359+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:37.976364+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6979,
+    "snapshot_at": "2026-06-09T15:57:38.041377+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4537,
+    "snapshot_at": "2026-06-09T15:57:38.104008+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4749,
+    "snapshot_at": "2026-06-09T15:57:38.224076+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:38.285978+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 173,
+    "snapshot_at": "2026-06-09T15:57:38.34951+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 760,
+    "snapshot_at": "2026-06-09T15:57:38.412512+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 984,
+    "snapshot_at": "2026-06-09T15:57:38.52215+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3860,
+    "snapshot_at": "2026-06-09T15:57:38.581903+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 4124,
+    "snapshot_at": "2026-06-09T15:57:38.633604+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1195,
+    "snapshot_at": "2026-06-09T15:57:55.549239+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5224,
+    "snapshot_at": "2026-06-09T15:57:55.632605+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5391,
+    "snapshot_at": "2026-06-09T15:57:55.720997+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 143376,
+    "snapshot_at": "2026-06-09T15:57:55.801003+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4271,
+    "snapshot_at": "2026-06-09T15:57:55.885852+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 8857,
+    "snapshot_at": "2026-06-09T15:57:55.942885+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4808,
+    "snapshot_at": "2026-06-09T15:57:55.999369+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6432,
+    "snapshot_at": "2026-06-09T15:57:56.080168+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7908,
+    "snapshot_at": "2026-06-09T15:57:56.170357+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5202,
+    "snapshot_at": "2026-06-09T15:57:56.23522+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:56.287394+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 236080,
+    "snapshot_at": "2026-06-09T15:57:56.348716+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 166590,
+    "snapshot_at": "2026-06-09T15:57:56.414324+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5620,
+    "snapshot_at": "2026-06-09T15:57:56.461045+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5871,
+    "snapshot_at": "2026-06-09T15:57:56.50702+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 194800,
+    "snapshot_at": "2026-06-09T15:57:56.548982+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 202330,
+    "snapshot_at": "2026-06-09T15:57:56.591665+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 637,
+    "snapshot_at": "2026-06-09T15:57:56.628603+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 3500,
+    "snapshot_at": "2026-06-09T15:57:56.692569+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 8990,
+    "snapshot_at": "2026-06-09T15:57:56.733471+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 4849,
+    "snapshot_at": "2026-06-09T15:57:56.779093+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3855,
+    "snapshot_at": "2026-06-09T15:57:56.826882+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5384,
+    "snapshot_at": "2026-06-09T15:57:56.887234+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 88,
+    "snapshot_at": "2026-06-09T15:57:56.947652+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5684,
+    "snapshot_at": "2026-06-09T15:57:57.00334+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 3234,
+    "snapshot_at": "2026-06-09T15:57:57.055654+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 5974,
+    "snapshot_at": "2026-06-09T15:57:57.098439+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2553,
+    "snapshot_at": "2026-06-09T15:57:57.146716+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2912,
+    "snapshot_at": "2026-06-09T15:57:57.202499+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7681,
+    "snapshot_at": "2026-06-09T15:57:57.251704+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2682,
+    "snapshot_at": "2026-06-09T15:57:57.293526+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4812,
+    "snapshot_at": "2026-06-09T15:57:57.339084+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 4932,
+    "snapshot_at": "2026-06-09T15:57:57.384144+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:57.424342+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6908,
+    "snapshot_at": "2026-06-09T15:57:57.463836+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4480,
+    "snapshot_at": "2026-06-09T15:57:57.503359+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4731,
+    "snapshot_at": "2026-06-09T15:57:57.54036+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-06-09T15:57:57.583243+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 134,
+    "snapshot_at": "2026-06-09T15:57:57.623478+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 467,
+    "snapshot_at": "2026-06-09T15:57:57.665633+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 660,
+    "snapshot_at": "2026-06-09T15:57:57.703342+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3561,
+    "snapshot_at": "2026-06-09T15:57:57.750422+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 2788,
+    "snapshot_at": "2026-06-09T15:57:57.801643+00:00",
+    "raw_payload": {
+      "month": "2026-05",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1195,
+    "snapshot_at": "2026-07-07T15:20:07.414077+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5224,
+    "snapshot_at": "2026-07-07T15:20:07.47889+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5391,
+    "snapshot_at": "2026-07-07T15:20:07.551942+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 143376,
+    "snapshot_at": "2026-07-07T15:20:07.61221+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4271,
+    "snapshot_at": "2026-07-07T15:20:07.697479+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 8857,
+    "snapshot_at": "2026-07-07T15:20:07.758956+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4808,
+    "snapshot_at": "2026-07-07T15:20:07.837487+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6432,
+    "snapshot_at": "2026-07-07T15:20:07.894659+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7908,
+    "snapshot_at": "2026-07-07T15:20:07.972631+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5202,
+    "snapshot_at": "2026-07-07T15:20:08.027254+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:08.081+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 236080,
+    "snapshot_at": "2026-07-07T15:20:08.142602+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 166590,
+    "snapshot_at": "2026-07-07T15:20:08.198976+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5620,
+    "snapshot_at": "2026-07-07T15:20:08.254208+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5871,
+    "snapshot_at": "2026-07-07T15:20:08.341647+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 194800,
+    "snapshot_at": "2026-07-07T15:20:08.405915+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 202330,
+    "snapshot_at": "2026-07-07T15:20:08.461015+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 637,
+    "snapshot_at": "2026-07-07T15:20:08.512405+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 14225,
+    "snapshot_at": "2026-07-07T15:20:08.577547+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 8990,
+    "snapshot_at": "2026-07-07T15:20:08.656203+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 4849,
+    "snapshot_at": "2026-07-07T15:20:08.714941+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3855,
+    "snapshot_at": "2026-07-07T15:20:08.772522+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5384,
+    "snapshot_at": "2026-07-07T15:20:08.845247+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 88,
+    "snapshot_at": "2026-07-07T15:20:08.904479+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5684,
+    "snapshot_at": "2026-07-07T15:20:08.961052+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 3234,
+    "snapshot_at": "2026-07-07T15:20:09.017353+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 5974,
+    "snapshot_at": "2026-07-07T15:20:09.066768+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2553,
+    "snapshot_at": "2026-07-07T15:20:09.115256+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2912,
+    "snapshot_at": "2026-07-07T15:20:09.163086+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7681,
+    "snapshot_at": "2026-07-07T15:20:09.221207+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2682,
+    "snapshot_at": "2026-07-07T15:20:09.285885+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4812,
+    "snapshot_at": "2026-07-07T15:20:09.417112+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 4932,
+    "snapshot_at": "2026-07-07T15:20:09.481838+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:09.54679+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6908,
+    "snapshot_at": "2026-07-07T15:20:09.592834+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4480,
+    "snapshot_at": "2026-07-07T15:20:09.63915+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4731,
+    "snapshot_at": "2026-07-07T15:20:09.699927+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:09.82609+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 134,
+    "snapshot_at": "2026-07-07T15:20:09.895482+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 467,
+    "snapshot_at": "2026-07-07T15:20:09.9559+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 660,
+    "snapshot_at": "2026-07-07T15:20:10.04466+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3561,
+    "snapshot_at": "2026-07-07T15:20:10.112145+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 2788,
+    "snapshot_at": "2026-07-07T15:20:10.167499+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1060,
+    "snapshot_at": "2026-07-07T15:20:26.084528+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 4507,
+    "snapshot_at": "2026-07-07T15:20:26.152316+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5118,
+    "snapshot_at": "2026-07-07T15:20:26.209649+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 127128,
+    "snapshot_at": "2026-07-07T15:20:26.260775+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4212,
+    "snapshot_at": "2026-07-07T15:20:26.319628+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 8596,
+    "snapshot_at": "2026-07-07T15:20:26.371623+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4609,
+    "snapshot_at": "2026-07-07T15:20:26.425654+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6261,
+    "snapshot_at": "2026-07-07T15:20:26.486984+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7836,
+    "snapshot_at": "2026-07-07T15:20:26.532533+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5090,
+    "snapshot_at": "2026-07-07T15:20:26.578285+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:26.649967+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 229830,
+    "snapshot_at": "2026-07-07T15:20:26.723468+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 164430,
+    "snapshot_at": "2026-07-07T15:20:26.784467+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5559,
+    "snapshot_at": "2026-07-07T15:20:26.857729+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5845,
+    "snapshot_at": "2026-07-07T15:20:26.918008+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 192970,
+    "snapshot_at": "2026-07-07T15:20:26.982358+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 201550,
+    "snapshot_at": "2026-07-07T15:20:27.026357+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 203,
+    "snapshot_at": "2026-07-07T15:20:27.067661+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 14065,
+    "snapshot_at": "2026-07-07T15:20:27.113893+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 8581,
+    "snapshot_at": "2026-07-07T15:20:27.160164+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 3650,
+    "snapshot_at": "2026-07-07T15:20:27.225268+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3839,
+    "snapshot_at": "2026-07-07T15:20:27.271278+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5382,
+    "snapshot_at": "2026-07-07T15:20:27.319708+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 7,
+    "snapshot_at": "2026-07-07T15:20:27.406606+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5680,
+    "snapshot_at": "2026-07-07T15:20:27.453336+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 2517,
+    "snapshot_at": "2026-07-07T15:20:27.498357+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 5297,
+    "snapshot_at": "2026-07-07T15:20:27.544943+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2280,
+    "snapshot_at": "2026-07-07T15:20:27.640486+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2853,
+    "snapshot_at": "2026-07-07T15:20:27.687471+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7420,
+    "snapshot_at": "2026-07-07T15:20:27.741988+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2483,
+    "snapshot_at": "2026-07-07T15:20:27.795981+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4700,
+    "snapshot_at": "2026-07-07T15:20:27.84214+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 4761,
+    "snapshot_at": "2026-07-07T15:20:27.887894+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:27.930174+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6836,
+    "snapshot_at": "2026-07-07T15:20:27.982573+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4419,
+    "snapshot_at": "2026-07-07T15:20:28.032612+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4705,
+    "snapshot_at": "2026-07-07T15:20:28.079228+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T15:20:28.130494+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 96,
+    "snapshot_at": "2026-07-07T15:20:28.188672+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 33,
+    "snapshot_at": "2026-07-07T15:20:28.245661+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 500,
+    "snapshot_at": "2026-07-07T15:20:28.293472+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3152,
+    "snapshot_at": "2026-07-07T15:20:28.357127+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 1589,
+    "snapshot_at": "2026-07-07T15:20:28.420937+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1195,
+    "snapshot_at": "2026-07-07T16:44:36.547526+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 5224,
+    "snapshot_at": "2026-07-07T16:44:36.633624+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5391,
+    "snapshot_at": "2026-07-07T16:44:36.706391+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 143376,
+    "snapshot_at": "2026-07-07T16:44:36.781424+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4271,
+    "snapshot_at": "2026-07-07T16:44:36.849895+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 8857,
+    "snapshot_at": "2026-07-07T16:44:36.916536+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4808,
+    "snapshot_at": "2026-07-07T16:44:37.03598+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6432,
+    "snapshot_at": "2026-07-07T16:44:37.101074+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7908,
+    "snapshot_at": "2026-07-07T16:44:37.172847+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5202,
+    "snapshot_at": "2026-07-07T16:44:37.235967+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:44:37.333891+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 236080,
+    "snapshot_at": "2026-07-07T16:44:37.459841+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 166590,
+    "snapshot_at": "2026-07-07T16:44:37.529578+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5620,
+    "snapshot_at": "2026-07-07T16:44:37.590119+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5871,
+    "snapshot_at": "2026-07-07T16:44:37.666321+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 194800,
+    "snapshot_at": "2026-07-07T16:44:37.722816+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 202330,
+    "snapshot_at": "2026-07-07T16:44:37.773707+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 637,
+    "snapshot_at": "2026-07-07T16:44:37.832873+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 14225,
+    "snapshot_at": "2026-07-07T16:44:37.904581+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 8990,
+    "snapshot_at": "2026-07-07T16:44:38.035908+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 4849,
+    "snapshot_at": "2026-07-07T16:44:38.101034+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3855,
+    "snapshot_at": "2026-07-07T16:44:38.164873+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5384,
+    "snapshot_at": "2026-07-07T16:44:38.224135+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 88,
+    "snapshot_at": "2026-07-07T16:44:38.295595+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5684,
+    "snapshot_at": "2026-07-07T16:44:38.353521+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 3234,
+    "snapshot_at": "2026-07-07T16:44:38.405211+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 5974,
+    "snapshot_at": "2026-07-07T16:44:38.466969+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2553,
+    "snapshot_at": "2026-07-07T16:44:38.51601+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2912,
+    "snapshot_at": "2026-07-07T16:44:38.574197+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7681,
+    "snapshot_at": "2026-07-07T16:44:38.623883+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2682,
+    "snapshot_at": "2026-07-07T16:44:38.681578+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4812,
+    "snapshot_at": "2026-07-07T16:44:38.727277+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 4932,
+    "snapshot_at": "2026-07-07T16:44:38.785254+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:44:38.865023+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6908,
+    "snapshot_at": "2026-07-07T16:44:38.92132+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4480,
+    "snapshot_at": "2026-07-07T16:44:38.965485+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4731,
+    "snapshot_at": "2026-07-07T16:44:39.01006+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:44:39.060241+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 134,
+    "snapshot_at": "2026-07-07T16:44:39.119466+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 467,
+    "snapshot_at": "2026-07-07T16:44:39.177484+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 660,
+    "snapshot_at": "2026-07-07T16:44:39.228649+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3561,
+    "snapshot_at": "2026-07-07T16:44:39.280883+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 2788,
+    "snapshot_at": "2026-07-07T16:44:39.325245+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_pre"
+    }
+  },
+  {
+    "product_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 1059,
+    "snapshot_at": "2026-07-07T16:45:00.883334+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 4507,
+    "snapshot_at": "2026-07-07T16:45:00.966363+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 5118,
+    "snapshot_at": "2026-07-07T16:45:01.04365+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 127128,
+    "snapshot_at": "2026-07-07T16:45:01.118235+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 4212,
+    "snapshot_at": "2026-07-07T16:45:01.22305+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 8596,
+    "snapshot_at": "2026-07-07T16:45:01.299806+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 4609,
+    "snapshot_at": "2026-07-07T16:45:01.360717+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 6261,
+    "snapshot_at": "2026-07-07T16:45:01.444506+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 7836,
+    "snapshot_at": "2026-07-07T16:45:01.519645+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 5090,
+    "snapshot_at": "2026-07-07T16:45:01.612077+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "6f5aef81-1cf2-4044-87b7-2ec3b88464cf",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:45:01.685501+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 229830,
+    "snapshot_at": "2026-07-07T16:45:01.731717+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 164430,
+    "snapshot_at": "2026-07-07T16:45:01.798035+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 5559,
+    "snapshot_at": "2026-07-07T16:45:01.854181+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 5845,
+    "snapshot_at": "2026-07-07T16:45:01.921622+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 192970,
+    "snapshot_at": "2026-07-07T16:45:02.019744+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 201550,
+    "snapshot_at": "2026-07-07T16:45:02.10038+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 203,
+    "snapshot_at": "2026-07-07T16:45:02.182281+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 14065,
+    "snapshot_at": "2026-07-07T16:45:02.233153+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 8581,
+    "snapshot_at": "2026-07-07T16:45:02.286873+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 3650,
+    "snapshot_at": "2026-07-07T16:45:02.347999+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "84a26eb2-0786-49ad-a01d-cfaeef15a7f3",
+    "quantity": 3839,
+    "snapshot_at": "2026-07-07T16:45:02.405876+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c69067cb-e707-4e38-975c-567aace80978",
+    "quantity": 5382,
+    "snapshot_at": "2026-07-07T16:45:02.469193+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "73978129-d91e-45ae-8097-64097c7568e0",
+    "quantity": 7,
+    "snapshot_at": "2026-07-07T16:45:02.534224+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "1f0d3788-8852-41fe-b99a-8859f7741e1b",
+    "quantity": 5680,
+    "snapshot_at": "2026-07-07T16:45:02.582151+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 2517,
+    "snapshot_at": "2026-07-07T16:45:02.62554+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 5297,
+    "snapshot_at": "2026-07-07T16:45:02.667496+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 2280,
+    "snapshot_at": "2026-07-07T16:45:02.716285+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 2853,
+    "snapshot_at": "2026-07-07T16:45:02.755263+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 7420,
+    "snapshot_at": "2026-07-07T16:45:02.79925+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 2483,
+    "snapshot_at": "2026-07-07T16:45:02.844031+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 4700,
+    "snapshot_at": "2026-07-07T16:45:02.887086+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 4761,
+    "snapshot_at": "2026-07-07T16:45:02.949067+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "7665debc-8f0f-4390-93c4-af2a72cac059",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:45:03.002141+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 6836,
+    "snapshot_at": "2026-07-07T16:45:03.047037+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 4419,
+    "snapshot_at": "2026-07-07T16:45:03.090013+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 4705,
+    "snapshot_at": "2026-07-07T16:45:03.150571+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "f11cb739-1466-436e-9b82-6e652a2f16cb",
+    "quantity": 0,
+    "snapshot_at": "2026-07-07T16:45:03.224292+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "03eed3f9-d098-462a-996d-86a3b42115a7",
+    "quantity": 96,
+    "snapshot_at": "2026-07-07T16:45:03.272588+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 33,
+    "snapshot_at": "2026-07-07T16:45:03.319447+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 500,
+    "snapshot_at": "2026-07-07T16:45:03.381431+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 3152,
+    "snapshot_at": "2026-07-07T16:45:03.424686+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  },
+  {
+    "product_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 1589,
+    "snapshot_at": "2026-07-07T16:45:03.467719+00:00",
+    "raw_payload": {
+      "month": "2026-06",
+      "snapshot_type": "month_end_post"
+    }
+  }
+]
