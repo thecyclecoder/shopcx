@@ -1,0 +1,1 @@
+- **Replacement-order robustness: countryCode normalization, multi-item = one order, stall reconcile** · verified 2026-07-10 · → [[../lifecycles/commerce-sdk]]
