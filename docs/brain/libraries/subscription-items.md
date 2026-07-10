@@ -51,6 +51,22 @@ async function appstleRemoveLineItem(workspaceId: string, contractId: string, va
 async function subAddItem(workspaceId: string, contractId: string, variantId: string, quantity: number = 1,) : Promise<
 ```
 
+### `subAddOneTimeGift` — function (internal-aware)
+
+```ts
+async function subAddOneTimeGift(
+  workspaceId: string, contractId: string, variantId: string, quantity = 1,
+  opts: { free?: boolean; priceCents?: number | null } = {},
+): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "appstle" }>
+```
+
+Add a **one-time** item to the sub's NEXT renewal that ships once then **drops off** (never recurs) — the "add a frother as a gift with my next order" / "add a bag to my next order" mechanism. Backs the `add_one_time_gift` direct action ([[action-executor]]) and the [[sol-outcome-claim-guard|add_bag_to_next_order]] outcome kind. `opts.free` defaults **true** (a $0 gift).
+
+- **Internal sub** → native: [[internal-subscription]] `internalSubAddOneTimeGift` appends a one-time line to `subscriptions.items[]`. A free gift is `is_gift:true` (the [[pricing]] engine forces `unit_cents:0`); every one-time line carries `one_time_next_renewal:true`, which the [[../inngest/internal-subscription-renewals]] engine **drops after the order ships** (its "Drop any one_time_next_renewal items now that they've shipped" step). Fully DB-owned — verified end-to-end.
+- **Appstle sub** → `replace-variants-v3` with `newOneTimeVariants` (the native one-time add; `resolveShopifyVariantId` maps a UUID → numeric Shopify variant id first). A **paid** add-on lands as-is (bills at its variant price). A **free** gift additionally zeroes the new one-time line's base price via `zeroAppstleOneTimeLine` (`update-line-item-price` `basePrice=0.00`); **if the $0 cannot be confirmed the add is rolled back** (`oldOneTimeVariants` remove) and the call returns `success:false` — a gift must never silently charge. Callers then fall back to a standalone $0 gift order ([[commerce__replacement|issueReplacement]]).
+
+`free_confirmed` tells the caller whether it may honestly tell the customer "free". **Appstle-free zeroing wants a one-time live confirmation** on a real contract (the one-time-line GID shape isn't yet verified against a live Appstle contract) — the rollback makes an unconfirmed attempt safe, not silent.
+
 ### `subRemoveItem` — function
 
 ```ts

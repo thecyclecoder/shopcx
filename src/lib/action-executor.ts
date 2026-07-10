@@ -75,6 +75,10 @@ export interface ActionParams {
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
+  // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
+  // off after it ships (never recurs). `free` defaults true (a $0 gift); set
+  // false + base_price_cents for a paid one-time add-on (internal only).
+  free?: boolean;
   pause_days?: number | string; // model/journey configs may send "60" as a string — coerce with Number() before use
   // Shipping address — used by update_shipping_address (and as an
   // override on create_replacement_order when the customer wants the
@@ -1041,6 +1045,34 @@ export const directActionHandlers: Record<
     const { subAddItem } = await import("@/lib/subscription-items");
     const r = await subAddItem(ctx.workspaceId, p.contract_id!, p.variant_id!, p.quantity || 1);
     return { ...r, summary: `Added item (qty: ${p.quantity || 1})` };
+  },
+
+  /**
+   * add_one_time_gift — add a ONE-TIME item to the sub's NEXT renewal that
+   * rides one order then drops off (does NOT recur). `free` defaults true (a
+   * $0 goodwill gift, e.g. "add a frother as a gift with my next order"); set
+   * false + base_price_cents for a paid one-time add-on (internal subs).
+   *
+   * Internal-aware via subAddOneTimeGift. On an Appstle sub a FREE gift that
+   * can't be confirmed as $0 is rolled back and returns success:false — a gift
+   * never silently charges the customer; the caller falls back to a $0 order.
+   */
+  add_one_time_gift: async (ctx, p) => {
+    const { subAddOneTimeGift } = await import("@/lib/subscription-items");
+    const free = p.free !== false;
+    const r = await subAddOneTimeGift(ctx.workspaceId, p.contract_id!, p.variant_id!, p.quantity || 1, {
+      free,
+      priceCents: free ? null : (p.base_price_cents ?? null),
+    });
+    const label = free
+      ? (r.free_confirmed ? "free gift" : "gift")
+      : "one-time add-on";
+    return {
+      ...r,
+      summary: r.success
+        ? `Added ${label} (qty: ${p.quantity || 1}) to next renewal [${r.backend}]`
+        : r.error,
+    };
   },
 
   /**
@@ -3445,6 +3477,7 @@ export async function verifyActionInDB(
     }
     case "swap_variant":
     case "add_item":
+    case "add_one_time_gift":
     case "remove_item":
     case "change_quantity":
     case "change_item_quantity":
@@ -3476,6 +3509,17 @@ export async function verifyActionInDB(
       if (action.type === "add_item") {
         if (!action.variant_id) return true;
         return items.some(i => String(i.variant_id) === String(action.variant_id));
+      }
+
+      if (action.type === "add_one_time_gift") {
+        // The gift line mirrors locally as a one_time_next_renewal item keyed by
+        // the (Shopify or UUID) variant id. Confirm a one-time line for the
+        // variant landed — that's the outcome the customer was promised.
+        if (!action.variant_id) return true;
+        type OT = Line & { one_time_next_renewal?: boolean };
+        return (items as OT[]).some(i =>
+          i.one_time_next_renewal === true &&
+          String(i.variant_id) === String(action.variant_id));
       }
 
       if (action.type === "remove_item") {
