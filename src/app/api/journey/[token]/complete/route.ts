@@ -1044,9 +1044,16 @@ export async function POST(
         const { addTicketTag } = await import("@/lib/ticket-tags");
         await addTicketTag(session.ticket_id, "jo:negative");
 
+        // Close contract: status=closed MUST carry closed_at (Cora's 30-min
+        // settle gate at src/lib/inngest/ticket-analysis-cron.ts selects on
+        // `closed_at IS NOT NULL`). Stamp resolved_at, closed_at, updated_at
+        // together so the analyzer can pick this ticket up after the settle.
+        const ts = new Date().toISOString();
         await admin.from("tickets").update({
           status: "closed",
-          resolved_at: new Date().toISOString(),
+          resolved_at: ts,
+          closed_at: ts,
+          updated_at: ts,
           journey_step: 99,
         }).eq("id", session.ticket_id);
 
@@ -1118,9 +1125,14 @@ export async function POST(
         const { addTicketTag } = await import("@/lib/ticket-tags");
         await addTicketTag(session.ticket_id, "jo:positive");
 
+        // Close contract — see the cancelled-outcome branch above for why all
+        // three close-time fields must be stamped together (Cora settle gate).
+        const ts = new Date().toISOString();
         await admin.from("tickets").update({
           status: "closed",
-          resolved_at: new Date().toISOString(),
+          resolved_at: ts,
+          closed_at: ts,
+          updated_at: ts,
           journey_step: 99,
         }).eq("id", session.ticket_id);
       }
@@ -1245,10 +1257,14 @@ export async function POST(
         ticketData?.channel || "email", "Customer declined", null,
       );
     } else {
-      // Already nudged or no entry — close ticket
+      // Already nudged or no entry — close ticket. Close contract: stamp
+      // status, resolved_at, closed_at, updated_at together (Cora settle gate).
+      const ts = new Date().toISOString();
       await admin.from("tickets").update({
         status: "closed",
-        resolved_at: new Date().toISOString(),
+        resolved_at: ts,
+        closed_at: ts,
+        updated_at: ts,
         journey_data: {},
         journey_nudge_count: 0,
       }).eq("id", session.ticket_id);
