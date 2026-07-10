@@ -29,17 +29,25 @@ export async function GET() {
 
   const { data, error } = await admin
     .from("qb_pnl_snapshots")
-    .select("period_month, currency, total_income, net_income, management_fees, adjusted_net_income")
+    .select("period_month, currency, total_income, net_income, management_fees, adjusted_net_income, fixed_opex, digital_advertising, transaction_fees, refunds, chargebacks, discounts_coupons, inventory_adjustments")
     .eq("workspace_id", workspaceId)
     .order("period_month", { ascending: true });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+  const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   const rows = (data ?? []).map((r) => ({
     month: r.period_month as string,
-    revenue: r.total_income === null ? null : Number(r.total_income),
-    netProfit: r.net_income === null ? null : Number(r.net_income),
-    mgmtFees: r.management_fees === null ? null : Number(r.management_fees),
-    netProfitWithAddbacks: r.adjusted_net_income === null ? null : Number(r.adjusted_net_income),
+    revenue: num(r.total_income),
+    netProfit: num(r.net_income),
+    mgmtFees: num(r.management_fees),
+    netProfitWithAddbacks: num(r.adjusted_net_income),
+    fixedOpex: num(r.fixed_opex),
+    digitalAds: num(r.digital_advertising),
+    transactionFees: num(r.transaction_fees),
+    refunds: num(r.refunds),
+    chargebacks: num(r.chargebacks),
+    discountsCoupons: num(r.discounts_coupons),
+    inventoryAdjustments: num(r.inventory_adjustments),
   }));
 
   return NextResponse.json({ currency: data?.[0]?.currency ?? "USD", rows });

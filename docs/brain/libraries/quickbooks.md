@@ -30,8 +30,10 @@ Routes: `GET /api/qbo/connect` (redirect to Intuit, CSRF nonce cookie), `GET /ap
 
 ### P&L
 - `fetchProfitAndLoss(workspaceId, startDate, endDate, admin?)` — pull the accrual ProfitAndLoss report for a date range.
-- `parsePnlRollups(report)` → `PnlRollups` — extract the top-level section totals (keyed by each section's `group`) **plus** `management_fees` (via `findLineAmount`) and the computed `adjusted_net_income = net_income + management_fees`.
-- `findLineAmount(report, matcher)` — recursively find a leaf account line's amount by name regex (used for the Management Fees line inside `OtherExpenses`).
+- `parsePnlRollups(report)` → `PnlRollups` — extract the nine top-level section totals (keyed by each section's `group`) **plus** the name-matched breakout lines: `management_fees` and `adjusted_net_income = net_income + management_fees`; the **variable-cost** lines `digital_advertising` (bridged, see below), `transaction_fees`, and the derived `fixed_opex = total_expenses − OpEx-ad-line − transaction_fees`; and the **contributor** lines `refunds` / `chargebacks` / `discounts_coupons` (stored as positive magnitudes) + `inventory_adjustments` (signed).
+- `findLineAmount` / `findAmountByName(report, matcher)` — recursively find one account's amount by name regex; handles both a leaf `ColData` line **and** a group node (Header + `Summary` total). Used for the management-fee, transaction-fees, and contributor lines.
+- `sumAmountsByName(report, matcher)` — sum **all** accounts whose name matches (does not descend into a matched node, to avoid double-counting a group + its children). Powers the `digital_advertising` **bridge**: pre-2025 ad spend lived in COGS as per-channel accounts (`Ads - Facebook/Amazon/Google/TikTok`), 2025+ consolidated into the OpEx line "60510 Digital Advertising" — `AD_SPEND_MATCHER` spans both so the series is continuous. `fixed_opex` deliberately uses only `OPEX_AD_LINE_MATCHER` (post-2025 line) — never the bridge — since pre-2025 ads were never in `total_expenses`.
+- **Matchers** (module consts): `MANAGEMENT_FEES_MATCHER`, `AD_SPEND_MATCHER` (bridge) / `OPEX_AD_LINE_MATCHER` (fixed-opex net-out), `TRANSACTION_FEES_MATCHER`, `REFUNDS_MATCHER`, `CHARGEBACKS_MATCHER`, `DISCOUNTS_MATCHER`, `INVENTORY_ADJ_MATCHER`. Each is name-based → survives re-nesting, breaks on an account rename.
 - `pnlCurrency(report)` — the report's currency (default `USD`).
 - `lastClosedMonths(n, asOf?)` — the last `n` **fully-elapsed** months oldest→newest (excludes the in-progress month — mid-month QBO P&L is distorted by month-end entries). Each is `{ periodMonth, start, end }`.
 - `snapshotPnlMonth(workspaceId, month, admin?)` — pull one closed month + upsert its [[../tables/qb_pnl_snapshots]] row (on `(workspace_id, period_month)`). Returns the parsed rollups.
@@ -40,16 +42,19 @@ Routes: `GET /api/qbo/connect` (redirect to Intuit, CSRF nonce cookie), `GET /ap
 ## Callers
 
 - `scripts/_backfill-pnl-snapshots.ts` — seeds the last 24 closed months for Superfoods (the Step-1 deliverable).
+- `scripts/_backfill-variable-costs-from-raw.ts` — re-parses the stored `raw` for every snapshot and updates only the 7 breakout columns (digital-ads / txn-fees / fixed-opex / refunds / chargebacks / discounts / inventory-adj). No QBO round-trip; safe to re-run after a matcher change.
 - `scripts/_copy-qbo-connection-from-shoptics.ts` — one-time connection seed (reads shoptics' DB, writes the encrypted [[../tables/quickbooks_connections]] row).
 - `src/app/api/qbo/{connect,callback,disconnect,status}/route.ts` — the OAuth connect card flow.
-- `src/app/api/director/cfo/pnl/route.ts` — feeds the **CFO → Financials** visual ([[../functions/cfo]]): 4 small-multiple charts (Revenue · Net Profit · Mgmt Fees · NP + Addbacks) on Grace's director page (`dashboard/agents/cfo?s=financials`, `src/components/agents/cfo-financials.tsx`), each with its own scale, a period-total headline, range filter (24mo / this year / last year / quarter), and hover/click-pin per-month readout.
-- The recurring monthly snapshot (append the newest closed month) + a **Fixed OpEx** chart (Total Expenses − `60510 Digital Advertising`, since paid ads are variable) + the CEO north-star scoreboard are the next CFO specs.
+- `src/app/api/director/cfo/pnl/route.ts` — feeds the **CFO → Financials** visual ([[../functions/cfo]]): **11 small-multiple charts in 3 sections** on Grace's director page (`dashboard/agents/cfo?s=financials`, `src/components/agents/cfo-financials.tsx`) — **Top Line Stats** (Revenue · Net Profit · NP + Addbacks) · **Drivers** (Fixed OpEx · Digital Ads · Transaction Fees · Mgmt Fees) · **Contributors** (Refunds · Chargebacks · Discounts & Coupons · Inventory Adjustments). Each chart has its own scale, a period-total headline, a range filter (24mo / this year / last year / quarter), and synced hover/click-pin per-month readout.
+- The recurring monthly snapshot (append the newest closed month) + the CEO north-star scoreboard are the next CFO specs.
 
 ## Gotchas
 
 - **Closed months only** (`lastClosedMonths` starts from last month) — never snapshot the current month.
 - **Refresh-token rotation** persisted in `getQboAccessToken` only — see [[../tables/quickbooks_connections]] for the shoptics shared-token caveat.
 - **Two profit lines.** `net_income` is booked-as-is (fiscal-year ≤$0 target); `adjusted_net_income` adds back the management fee. The management-fee line is name-matched — a rename breaks it (surfaces as `management_fees` null).
+- **Variable costs live in OpEx but are pulled out.** Digital ads + platform transaction fees are booked inside `total_expenses` yet scale with sales/ad-buy, so they're extracted and `fixed_opex` is the remainder — the honest cost-to-operate line. Amazon FBA fees are also variable but sit in **COGS**, so they're already outside `fixed_opex` (don't subtract them).
+- **Ad-account bridge asymmetry.** `digital_advertising` sums both the pre-2025 COGS ad accounts and the post-2025 OpEx line (`sumAmountsByName` + `AD_SPEND_MATCHER`) for a continuous series; `fixed_opex` nets out **only** the post-2025 OpEx line. Never bridge `fixed_opex` — the pre-2025 accounts were in COGS, not expenses, so subtracting them double-counts.
 - **No retry/backoff yet** (parity with shoptics). QBO throttle ~500 req/min/realm; the 24-call backfill is well under. Add 429 backoff + a 401-force-refresh-retry if we grow heavier callers.
 
 ## Related

@@ -79,34 +79,78 @@ Return this when:
 
 Return a `remedy` object shaped as a **RemedyPlan** — the Phase-2 executor will fire it through
 `executeSonnetDecision` (the same real executor prod uses; see the `run-orchestrator-action` skill
-for the pattern). Concrete shape lands with Phase 2 (`applyBoxCsDirectorCall`); include at minimum:
+for the pattern). Two shapes are accepted (both normalize to an ordered actions batch):
+
+**Preferred — MULTI-ACTION `actions[]` (a real fix often needs several).** A real fix is often a
+combination — e.g. `partial_refund` + `change_next_date` + `redeem_points_as_refund`, or
+`create_replacement_order` + `apply_coupon`. Author the FULL FIX as an ordered `actions[]` so the
+executor fires every step (in the order you write) and the customer message ships only after ALL
+actions verify. **You are authorized the full SDK** — any of the ~39 direct-action handlers (refund,
+change_next_date, redeem_points_as_refund, apply_coupon, create_replacement_order, pause, resume,
+create_return, dollar_replacement, update_shipping_address, update_customer_info, resend_order, …)
+can appear as a step, in any order needed to fully resolve the ticket.
+
+**State the MINIMAL CORRECT SET — don't pad.** Emit exactly the actions the fix needs; a spurious
+`apply_coupon` or `change_next_date` bolted onto a clean refund is worse than none — it adds an
+action that can fail (the executor's all-or-surface semantics mean the WHOLE batch parks
+`needs_attention` if any step escalates → the customer hears nothing). The right count is what
+makes the customer whole in one verdict; author more only when the fix genuinely needs more.
 
 ```json
 "remedy": {
-  "action_type": "apply_coupon|refund|pause|resume|create_return|loyalty|reply|...",
-  "summary": "one sentence — what you're doing + why the customer needs it",
-  "payload": { /* the action-specific parameters, matching the orchestrator's schema */ },
-  "customer_message": "the plain-text reply the customer receives after the action lands",
+  "actions": [
+    { "action_type": "partial_refund",            "payload": { "amount_cents": 3000, "order_number": "SC131156" } },
+    { "action_type": "change_next_date",          "payload": { "next_billing_date": "2026-10-06", "contract_id": "..." } },
+    { "action_type": "redeem_points_as_refund",   "payload": { "amount_cents": 500 } }
+  ],
+  "summary": "one sentence — what you're doing across the batch + why the customer needs it",
+  "customer_message": "the plain-text reply the customer receives after ALL actions land",
   "confidence": 0.0
 }
 ```
 
+**Legacy — SINGLE-ACTION shape (still supported, normalizes to a one-step batch).** When the fix is
+one action, either shape works — the top-level `{action_type, payload}` is back-compat:
+
+```json
+"remedy": {
+  "action_type": "change_next_date",
+  "summary":     "restore requested next-billing date",
+  "payload":     { "next_billing_date": "2026-10-06", "contract_id": "..." },
+  "customer_message": "…",
+  "confidence": 0.0
+}
+```
+
+**`get_policies` is MANDATORY before any `approve_remedy`.** No exceptions — a remedy MUST be
+evaluated against the active policy set (returns / refunds / consumable-returnability / exception
+ceilings) BEFORE you emit the verdict; this is the same rulebook Sol and the analyzer read, and
+approving a remedy a policy disallows is the exact class the CEO grader penalizes hardest. Run
+`get_policies` (argless = all active, or `{"slug":"<slug>"}` for a specific one) via
+`npx tsx scripts/improve-box-tools.ts get_policies <ticket_id>`.
+
 **Write `customer_message` IN THE CHANNEL PERSONA — never as "June."** June is an internal role; the
 customer only ever hears the workspace's channel voice (e.g. **Suzie**). The message is delivered
-verbatim by `deliverTicketMessage` after the action verifies, so it must read exactly as that persona
-would write it: plain text, no markdown, no "June here", no "the CS Director", no internal-role
-signature. Mirror the customer's language; follow [[../../../docs/brain/customer-voice.md]]. This holds
-on BOTH paths — a remedy June executes directly AND a refund parked for founder approval
-([[../../../docs/brain/libraries/june-remedy-approval.md]]), whose message the deferred sweep delivers
-in the same persona voice after Dylan approves.
+verbatim by `deliverTicketMessage` after ALL actions in the batch verify, so it must read exactly as
+that persona would write it: plain text, no markdown, no "June here", no "the CS Director", no
+internal-role signature. Mirror the customer's language; follow
+[[../../../docs/brain/customer-voice.md]]. This holds on BOTH paths — a remedy June executes
+directly AND a refund parked for founder approval
+([[../../../docs/brain/libraries/june-remedy-approval.md]]), whose message the deferred sweep
+delivers in the same persona voice after Dylan approves.
 
-**Money remedies over the workspace refund threshold are NOT yours to fire.** A `refund` /
-`redeem_points_as_refund` / replacement whose amount is above `workspaces.june_refund_approval_threshold_cents`
-(default $50) routes to the founder for a yes/no/ask SMS decision before it executes — the Phase-2
-executor parks it, texts Dylan via Eve's cockpit, and fires only on his approval. Still emit the
-`approve_remedy` verdict with the full remedy + a persona `customer_message`; the gate is the worker's
-job, not a reason to downgrade to `escalate_founder`. Sub-threshold refunds and all non-money remedies
-run autonomously. See [[../../../docs/brain/libraries/june-remedy-approval.md]].
+**Money remedies whose TOTAL is over the workspace refund threshold are NOT yours to fire.** The
+gate SUMS money across EVERY money action in the batch (`partial_refund` +
+`redeem_points_as_refund` + `create_replacement_order` + `dollar_replacement`) and gates on the
+TOTAL vs `workspaces.june_refund_approval_threshold_cents` (default $50). **This means a
+2×$30 batch behaves identically to a single $60 refund at the gate — you can't split a $60 refund
+into two $30 actions to dodge the gate.** An UNKNOWN amount on ANY money action in the batch also
+gates (never auto-fire a refund we can't size). Over-threshold TOTAL → the Phase-2 executor parks
+the whole batch, texts Dylan via Eve's cockpit (the SMS + card list each money line + the SUM), and
+fires only on his approval. Still emit the `approve_remedy` verdict with the full multi-action
+remedy + a persona `customer_message`; the gate is the worker's job, not a reason to downgrade to
+`escalate_founder`. Sub-threshold sums and non-money-only batches run autonomously. See
+[[../../../docs/brain/libraries/june-remedy-approval.md]].
 
 ### 2. `author_spec` — the ticket surfaces a REPEAT product / analyzer / rule GAP
 

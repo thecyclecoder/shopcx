@@ -28,6 +28,7 @@
  */
 
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -119,7 +120,11 @@ export function normalizeAddress(raw: RawShippingAddress): NormalizedShippingAdd
     province: province,
     provinceCode: province.toUpperCase().slice(0, 2),
     zip: s(a.zip) || s(a.postal_code),
-    countryCode: (country || "US").toUpperCase().slice(0, 2),
+    // Route through normalizeCountryToIso2 so a full-name country like
+    // "United States" resolves to "US" instead of being sliced to "UN"
+    // (the SC132221 stall — the sliced "UN" propagates all the way to
+    // the Shopify draft-order call and gets rejected there).
+    countryCode: normalizeCountryToIso2(country),
   };
 }
 

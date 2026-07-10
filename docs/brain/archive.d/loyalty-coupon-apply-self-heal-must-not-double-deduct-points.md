@@ -1,0 +1,1 @@
+- **Loyalty coupon apply must be idempotent — self-heal retry double-deducts points** · verified 2026-07-10 · → [[../recipes/apply-loyalty-coupon]]

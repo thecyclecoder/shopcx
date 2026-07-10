@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 
 // CFO (Grace) P&L visual — SMALL MULTIPLES: one mini line-chart per metric, each with its OWN
-// y-scale, so movement is visible even though Revenue dwarfs the profit lines. Metrics: Revenue ·
-// Net Profit (booked) · Mgmt Fees · Net Profit with Addbacks, over the last 24 closed months from
-// qb_pnl_snapshots. Palette = dataviz categorical slots 1–4 (validated). Hover is synced across all
-// panels (hovering one month highlights it in every chart).
+// y-scale, so movement is visible even though Revenue dwarfs everything else. 11 metrics grouped into
+// three sections — Top Line Stats (Revenue / Net Profit / NP+Addbacks), Drivers (Fixed OpEx / Digital
+// Ads / Transaction Fees / Mgmt Fees), Contributors (Refunds / Chargebacks / Discounts & Coupons /
+// Inventory Adjustments) — over the last 24 closed months from qb_pnl_snapshots. Palette = dataviz
+// categorical slots 1–8 (validated). Hover is synced across all panels (one month highlights everywhere).
 
 interface PnlRow {
   month: string; // YYYY-MM-01
@@ -14,15 +15,39 @@ interface PnlRow {
   netProfit: number | null;
   mgmtFees: number | null;
   netProfitWithAddbacks: number | null;
+  fixedOpex: number | null;
+  digitalAds: number | null;
+  transactionFees: number | null;
+  refunds: number | null;
+  chargebacks: number | null;
+  discountsCoupons: number | null;
+  inventoryAdjustments: number | null;
 }
 
-type SeriesKey = "revenue" | "netProfit" | "mgmtFees" | "netProfitWithAddbacks";
-interface Metric { key: SeriesKey; label: string; varName: string; zeroBaseline: boolean; note?: string }
+type SeriesKey = "revenue" | "netProfit" | "mgmtFees" | "netProfitWithAddbacks" | "fixedOpex"
+  | "digitalAds" | "transactionFees" | "refunds" | "chargebacks" | "discountsCoupons" | "inventoryAdjustments";
+type Section = "Top Line Stats" | "Drivers" | "Contributors";
+interface Metric { key: SeriesKey; label: string; varName: string; zeroBaseline: boolean; section: Section; note?: string }
 const METRICS: Metric[] = [
-  { key: "revenue", label: "Revenue", varName: "--s1", zeroBaseline: false, note: "Total income" },
-  { key: "netProfit", label: "Net Profit", varName: "--s2", zeroBaseline: true, note: "Booked — steer ≤ $0 / fiscal year" },
-  { key: "mgmtFees", label: "Mgmt Fees", varName: "--s3", zeroBaseline: true, note: "Intercompany addback" },
-  { key: "netProfitWithAddbacks", label: "NP + Addbacks", varName: "--s4", zeroBaseline: true, note: "True economic profit" },
+  // Top Line Stats — the outcomes.
+  { key: "revenue", label: "Revenue", varName: "--s1", zeroBaseline: false, section: "Top Line Stats", note: "Total income" },
+  { key: "netProfit", label: "Net Profit", varName: "--s2", zeroBaseline: true, section: "Top Line Stats", note: "Booked — steer ≤ $0 / fiscal year" },
+  { key: "netProfitWithAddbacks", label: "NP + Addbacks", varName: "--s4", zeroBaseline: true, section: "Top Line Stats", note: "True economic profit (mgmt fees back in)" },
+  // Drivers — the big spend levers.
+  { key: "fixedOpex", label: "Fixed OpEx", varName: "--s5", zeroBaseline: false, section: "Drivers", note: "Total expenses − ads − txn fees" },
+  { key: "digitalAds", label: "Digital Ads", varName: "--s6", zeroBaseline: false, section: "Drivers", note: "Variable — FB / Google / Amazon (bridged pre-2025)" },
+  { key: "transactionFees", label: "Transaction Fees", varName: "--s8", zeroBaseline: false, section: "Drivers", note: "Variable — Amazon / Shopify / PayPal / Braintree" },
+  { key: "mgmtFees", label: "Mgmt Fees", varName: "--s3", zeroBaseline: false, section: "Drivers", note: "Intercompany addback" },
+  // Contributors — the profit bites.
+  { key: "refunds", label: "Refunds", varName: "--s7", zeroBaseline: false, section: "Contributors", note: "Contra-revenue" },
+  { key: "chargebacks", label: "Chargebacks", varName: "--s6", zeroBaseline: false, section: "Contributors", note: "Contra-revenue — disputed payments" },
+  { key: "discountsCoupons", label: "Discounts & Coupons", varName: "--s8", zeroBaseline: false, section: "Contributors", note: "Contra-revenue" },
+  { key: "inventoryAdjustments", label: "Inventory Adjustments", varName: "--s5", zeroBaseline: true, section: "Contributors", note: "Shrinkage + ending-inventory true-up" },
+];
+const SECTIONS: { title: Section; blurb: string }[] = [
+  { title: "Top Line Stats", blurb: "The outcomes" },
+  { title: "Drivers", blurb: "The big spend levers" },
+  { title: "Contributors", blurb: "What bites at profit" },
 ];
 
 const money = (v: number) => {
@@ -91,8 +116,8 @@ export function CfoFinancials() {
   return (
     <div className="cfo-pnl">
       <style>{`
-        .cfo-pnl { --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --grid:#eceae4; --axis:#c9c7c0; --zero:#9b9a94; }
-        .dark .cfo-pnl, :root[data-theme="dark"] .cfo-pnl { --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#12a012; --grid:#2b2b28; --axis:#3a3a37; --zero:#6f6e68; }
+        .cfo-pnl { --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300; --s5:#5a45c0; --s6:#d13b3b; --s7:#c14b86; --s8:#cc5a24; --grid:#eceae4; --axis:#c9c7c0; --zero:#9b9a94; }
+        .dark .cfo-pnl, :root[data-theme="dark"] .cfo-pnl { --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#12a012; --s5:#7d70dd; --s6:#dd4f4f; --s7:#d95f98; --s8:#df6626; --grid:#2b2b28; --axis:#3a3a37; --zero:#6f6e68; }
       `}</style>
 
       {/* filter row (dataviz: filters in one row above the charts) */}
@@ -122,10 +147,20 @@ export function CfoFinancials() {
       {filtered.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-200 p-8 text-center text-sm text-zinc-500 dark:border-zinc-800">No months in this range.</div>
       ) : view === "charts" ? (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {METRICS.map((m) => (
-            <MiniChart key={m.key} metric={m} rows={filtered} active={active} pinned={pinned}
-              onHover={setHover} onPin={(i) => setPinned((p) => (p === i ? null : i))} />
+        <div className="space-y-6">
+          {SECTIONS.map((sec) => (
+            <section key={sec.title}>
+              <div className="mb-2.5 flex items-baseline gap-2 border-b border-zinc-200 pb-1.5 dark:border-zinc-800">
+                <h3 className="text-[13px] font-semibold tracking-tight text-zinc-800 dark:text-zinc-100">{sec.title}</h3>
+                <span className="text-[11px] text-zinc-400">{sec.blurb}</span>
+              </div>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {METRICS.filter((m) => m.section === sec.title).map((m) => (
+                  <MiniChart key={m.key} metric={m} rows={filtered} active={active} pinned={pinned}
+                    onHover={setHover} onPin={(i) => setPinned((p) => (p === i ? null : i))} />
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       ) : (

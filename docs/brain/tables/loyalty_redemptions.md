@@ -59,7 +59,8 @@ const { count } = await admin.from("loyalty_redemptions")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **`status` column values:** `active` (ready to apply), `applied` (landed on subscription, waiting for next charge), `used` (consumed on an order), `expired` (past expiry date or superseded by a regen), `rolled_back` (re-credited after apply failed — Phase 1 of the atomic redeem→apply contract). No CHECK constraint; values are documented in [[../libraries/loyalty]]. The `expired` status is set atomically via `claimRegenSpendSlot` ([[../libraries/action-executor]]) when a regen is about to mint a successor code — this is the compare-and-set guard that gates idempotent `spendPoints` on `apply_loyalty_coupon` retry.
+- **Never mutate `status` directly.** All status changes route through [[../libraries/loyalty]] helpers (`rollbackLoyaltyRedemptionOnApplyFailure` for rollback) or the atomic guard (`claimRegenSpendSlot` for regen). Raw updates bypass the idempotency/atomicity contracts and leave the ledger in drift.
 
 ---
 
