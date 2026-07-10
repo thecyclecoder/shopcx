@@ -46,22 +46,24 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
-- **Shopify `countryCode` requires ISO-2 normalization.** When building the
-  shipping address for a replacement order, the country code must be ISO-2
-  ('US', 'CA') not a full name ('United States'). Normalization is applied
-  by [[shopify-draft-orders]] at the draft order creation points. Cross-link
-  for details on the territory/name → ISO-2 mapping.
+- **Country code normalization is loud on failure.** When resolving the destination address for a replacement, [[country-iso2]] normalizes the countryCode via `normalizeCountryToIso2Strict()` — it maps full names ('United States') and blanks to the customer's/order's/store's real country, and returns `null` for unresolvable inputs like "UN" (the bug from SC132221). A `null` result fails the replacement LOUDLY with `status='failed'` + `reason_detail` — not a silent stall at `address_confirmed`. This prevents the 17-day rot pattern where Shopify silently rejects a bogus code and the replacement never surfaces (see [[replacement-stall]] + ticket 2770a32a).
+
+- **One call, one order, N line items.** `createReplacementOrder` now accepts `input.items[]` with multiple variant IDs, creating ONE Shopify draft order with N line items in a single call. Previously, a 2-flavor replacement fragmented into 2 orders (SC134462 + SC134463). Keep single-item back-compat for existing callers; pass `items: [{ variantId }]` if you have one variant.
 
 ## Status / open work
 
-**Shipped:** Replacement orders send ISO-2 country codes to Shopify (Phase 1).
-All shipping address fields properly normalize before draft order creation.
+**Shipped:**
+- Countrycode normalization with loud failure on unresolvable codes (Phase 1).
+- Multi-item replacement creates one order with N line items (Phase 2).
+- Stalled replacement detection + `superseded` status (Phase 3) — see [[replacement-stall]].
 
 **Known gaps / not yet shipped:**
 - None
 
 **Recent activity:**
-- Country code normalization integrated with createReplacementDraftOrder flow
+- Countrycode normalization tightened; unresolvable codes now fail loudly instead of silently.
+- Multi-item support added to `createReplacementOrder`.
+- Stalled replacement reconciliation integrated via [[replacement-stall]].
 
 **Open questions:** None
 

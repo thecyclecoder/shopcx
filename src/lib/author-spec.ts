@@ -1292,6 +1292,17 @@ export async function authorSpecRowStructured(
 }
 
 /**
+ * `submitSpec` — the canonical, ergonomic name for authoring a spec into the build pipeline
+ * (harden-spec-submission). Identical to `authorSpecRowStructured`: the ONE hardened door every session /
+ * agent / script should call to submit a spec. It runs the Verification + Intent + Parent gates and the
+ * brain-ref auto-suggester, then writes through `upsertSpec` (which now ALSO self-gates as a floor). Prefer
+ * this name in new code and in the [[submit-spec]] skill; `authorSpecRowStructured` remains for existing
+ * callers. NEVER call raw `upsertSpec` to author — it throws `UngatedSpecAuthorError` on empty
+ * verification/intent by design.
+ */
+export const submitSpec = authorSpecRowStructured;
+
+/**
  * Author / re-author a spec to the DB from its markdown body — the DB-only writer every markdown-holding
  * author surface calls. Idempotent: re-running with the same body produces no material change (UPSERT by
  * `(workspace_id, slug)`, phase replacement by `(spec_id, position)`).

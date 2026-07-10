@@ -234,6 +234,103 @@ test("planRemedyExecution — canonical shape", () => {
       contract_id: "contract-1",
     });
     assert.equal(result.plan.customerMessage, "Moved to Oct 6.");
+    // Single-action normalizes into a length-1 actions[] so nothing downstream sees the legacy-vs-
+    // batched distinction (Phase 1 multi-action-remedies).
+    assert.equal(result.plan.actions.length, 1);
+    assert.equal(result.plan.actions[0].actionType, "change_next_date");
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      next_billing_date: "2026-10-06",
+      contract_id: "contract-1",
+    });
+  }
+});
+
+test("planRemedyExecution — multi-action actions[] preserves order and normalizes each step", () => {
+  // The Phase-1 shape June emits for a full fix — e.g. partial_refund + change_next_date +
+  // redeem_points_as_refund fires ALL THREE in the authored order, none of which regresses to a
+  // single top-level action_type.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000, order_number: "SC131156" } },
+      { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+      { action_type: "redeem_points_as_refund", payload: { amount_cents: 500 } },
+    ],
+    customer_message: "Refunded $30, moved your next order to Oct 6, and applied your points.",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 3);
+    assert.equal(result.plan.actions[0].actionType, "partial_refund");
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      amount_cents: 3000,
+      order_number: "SC131156",
+    });
+    assert.equal(result.plan.actions[1].actionType, "change_next_date");
+    assert.deepEqual(result.plan.actions[1].actionParams, {
+      next_billing_date: "2026-10-06",
+      contract_id: "c1",
+    });
+    assert.equal(result.plan.actions[2].actionType, "redeem_points_as_refund");
+    assert.deepEqual(result.plan.actions[2].actionParams, { amount_cents: 500 });
+    // Back-compat aliases point at actions[0] so existing single-action callers still compile.
+    assert.equal(result.plan.actionType, "partial_refund");
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 3000, order_number: "SC131156" });
+    assert.equal(
+      result.plan.customerMessage,
+      "Refunded $30, moved your next order to Oct 6, and applied your points.",
+    );
+  }
+});
+
+test("planRemedyExecution — a malformed step inside actions[] fails the WHOLE plan (no partial fire)", () => {
+  // The invariant: a batch with one broken step (missing action_type) must never partially fire —
+  // stop the line so a human eyeballs the log. If the batch fired the first two of three, June's
+  // customer message would promise a fix she didn't ship.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+      { payload: { next_billing_date: "2026-10-06" } }, // missing action_type
+      { action_type: "redeem_points_as_refund", payload: { amount_cents: 500 } },
+    ],
+    customer_message: "would be a false promise",
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /remedy_action_1_malformed/);
+});
+
+test("planRemedyExecution — an empty actions[] falls through to legacy single-action shape", () => {
+  // Corner case: `actions:[]` alongside a legacy top-level action_type. Empty actions[] cannot be
+  // June's real intent, so we fall back to the legacy shape rather than fail — the whole point of
+  // back-compat is that a stray field can't break a well-formed single-action remedy.
+  const result = planRemedyExecution({
+    actions: [],
+    action_type: "change_next_date",
+    payload: { next_billing_date: "2026-10-06" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 1);
+    assert.equal(result.plan.actions[0].actionType, "change_next_date");
+  }
+});
+
+test("planRemedyExecution — actions[] wins when both shapes appear on the same remedy", () => {
+  // A stray top-level `action_type` next to a real `actions[]` batch must not silently override the
+  // batch (that would fire only the first action + suppress the rest). Prefer the newer, richer
+  // authoring form.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+      { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06" } },
+    ],
+    action_type: "resume",
+    payload: { contract_id: "c1" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 2);
+    assert.equal(result.plan.actions[0].actionType, "partial_refund");
+    assert.equal(result.plan.actions[1].actionType, "change_next_date");
   }
 });
 
@@ -271,6 +368,12 @@ test("extractRemedyCustomerMessage — checks canonical + fallback field names",
 test("buildRemedySonnetDecision — direct_action with actions[0], no response_message", () => {
   const decision = buildRemedySonnetDecision(
     {
+      actions: [
+        {
+          actionType: "change_next_date",
+          actionParams: { next_billing_date: "2026-10-06", contract_id: "contract-1" },
+        },
+      ],
       actionType: "change_next_date",
       actionParams: { next_billing_date: "2026-10-06", contract_id: "contract-1" },
       customerMessage: "Moved to Oct 6.",
@@ -288,9 +391,46 @@ test("buildRemedySonnetDecision — direct_action with actions[0], no response_m
   assert.match(decision.reasoning, /restore requested date/);
 });
 
+test("buildRemedySonnetDecision — multi-action emits the FULL ordered batch (Phase 1)", () => {
+  // executeSonnetDecision already accepts an `actions[]` array and runs them sequentially, so a
+  // multi-action RemedyPlan lands as N ActionParams in the SAME order June authored. This is what
+  // makes "the whole fix in one verdict" work — the executor fires all N, then handleApproveRemedy
+  // messages the customer only if every action verified.
+  const decision = buildRemedySonnetDecision(
+    {
+      actions: [
+        { actionType: "partial_refund", actionParams: { amount_cents: 3000, order_number: "SC131156" } },
+        { actionType: "change_next_date", actionParams: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+        { actionType: "redeem_points_as_refund", actionParams: { amount_cents: 500 } },
+      ],
+      actionType: "partial_refund",
+      actionParams: { amount_cents: 3000, order_number: "SC131156" },
+      customerMessage: "Refunded $30, moved your next order to Oct 6, and applied your points.",
+    },
+    "full fix — 3 actions",
+  );
+  assert.equal(decision.action_type, "direct_action");
+  assert.equal(decision.actions?.length, 3);
+  assert.equal(decision.actions?.[0]?.type, "partial_refund");
+  assert.equal(decision.actions?.[0]?.amount_cents, 3000);
+  assert.equal(decision.actions?.[0]?.order_number, "SC131156");
+  assert.equal(decision.actions?.[1]?.type, "change_next_date");
+  assert.equal(decision.actions?.[1]?.next_billing_date, "2026-10-06");
+  assert.equal(decision.actions?.[1]?.contract_id, "c1");
+  assert.equal(decision.actions?.[2]?.type, "redeem_points_as_refund");
+  assert.equal(decision.actions?.[2]?.amount_cents, 500);
+  // Same ordering invariant as single-action: NO response_message on the decision.
+  assert.equal(decision.response_message, undefined);
+});
+
 test("buildRemedySonnetDecision — falls back to a synthetic reasoning when the input is empty", () => {
   const decision = buildRemedySonnetDecision(
-    { actionType: "resume", actionParams: {}, customerMessage: null },
+    {
+      actions: [{ actionType: "resume", actionParams: {} }],
+      actionType: "resume",
+      actionParams: {},
+      customerMessage: null,
+    },
     "",
   );
   assert.equal(decision.action_type, "direct_action");
@@ -533,6 +673,195 @@ test("Phase 2 — a missing ticket_id in job.instructions parks needs_attention 
   assert.equal(result.ok, false);
   assert.equal(result.needs_attention, true);
   assert.equal(result.reason, "ticket_id_unresolved");
+});
+
+// ── Phase 2 (multi-action-remedies) — execute-ALL-then-message across the batch ────────────────
+
+test("Phase 2 — a 2-action batch runs both actions in ORDER, then delivers the customer message once", async () => {
+  // The multi-action-remedies spec: June's full fix — e.g. partial_refund + change_next_date —
+  // must fire BOTH actions before the customer hears a "we did it" reply. The batch is passed
+  // through executeSonnetDecision ONCE (handleDirectAction iterates internally, in the SAME order
+  // June authored), and only a clean return (`escalated:false` — every action passed verify) lets
+  // us deliver the reply.
+  const events: string[] = [];
+  let executorCalls = 0;
+  const seenDecisions: unknown[] = [];
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async (_ctx, decision, _send, sysNote) => {
+      executorCalls += 1;
+      seenDecisions.push(decision);
+      // Simulate handleDirectAction's per-action sysNote lines (see handleDirectAction success
+      // path in src/lib/action-executor.ts) — this is what our wrapping sysNote parses to build
+      // the partial-batch surface on the failure path.
+      await sysNote(`Action completed: partial_refund`);
+      await sysNote(`Action completed: change_next_date`);
+      events.push("executor:done");
+      return { messageSent: false, escalated: false, closed: false, statusManaged: false };
+    },
+    deliverMessage: async (_admin, _ws, _tid, _channel, msg) => {
+      events.push(`delivery:${msg.slice(0, 24)}`);
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "approve_remedy",
+    reasoning: "in-leash — the full fix is refund + move next date",
+    remedy: {
+      actions: [
+        { action_type: "partial_refund", payload: { amount_cents: 3000, order_number: "SC131156" } },
+        { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+      ],
+      customer_message: "Refunded $30 and moved your next order to Oct 6.",
+    },
+  };
+  const admin = approveRemedyAdmin("ticket-1");
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.message_delivered, true);
+  // The batch is a SINGLE executeSonnetDecision call — handleDirectAction iterates the actions
+  // array internally, which preserves `substituteActionParams` cross-action placeholder resolution
+  // (would break if we split into N separate executor calls).
+  assert.equal(executorCalls, 1);
+  // Ordering: BOTH actions completed before delivery fires — the customer hears nothing before
+  // every action in the batch verified.
+  assert.equal(events[0], "executor:done");
+  assert.match(events[1] ?? "", /^delivery:Refunded \$30/);
+  // The batch shape is exactly what June authored — 2 typed actions in June's authored order, no
+  // response_message (we own delivery).
+  const seen = seenDecisions[0] as {
+    action_type: string;
+    actions?: Array<Record<string, unknown>>;
+    response_message?: string;
+  };
+  assert.equal(seen.action_type, "direct_action");
+  assert.equal(seen.actions?.length, 2);
+  assert.equal(seen.actions?.[0]?.type, "partial_refund");
+  assert.equal(seen.actions?.[0]?.amount_cents, 3000);
+  assert.equal(seen.actions?.[0]?.order_number, "SC131156");
+  assert.equal(seen.actions?.[1]?.type, "change_next_date");
+  assert.equal(seen.actions?.[1]?.next_billing_date, "2026-10-06");
+  assert.equal(seen.actions?.[1]?.contract_id, "c1");
+  assert.equal(seen.response_message, undefined);
+});
+
+test("Phase 2 — a 2-action batch whose 2nd action fails: NO customer message, needs_attention, note surfaces WHICH failed + what landed", async () => {
+  // The partial-batch verification bullet: when action #2 fails, the customer hears NOTHING (no
+  // false promise), the job parks needs_attention, and the surface names WHICH action failed +
+  // what DID land so a human can finish the fix by hand. The batch's per-action `sysNote` lines
+  // (from handleDirectAction) are the ground truth; handleApproveRemedy captures them and rolls
+  // them up onto the returned `error` string + a summary internal note.
+  let deliveryCalled = false;
+  const capturedNotes: string[] = [];
+  // Intercept the ticket_messages insert path so we can assert the SUMMARY note carries the
+  // landed + failed lists (the spec's "note surfaces WHICH action failed + what DID land").
+  const admin = {
+    from(table: string) {
+      if (table === "ticket_messages") {
+        return {
+          insert(row: { body: string }) {
+            capturedNotes.push(row.body);
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+      }
+      return {
+        select(_cols: string) {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                async maybeSingle() {
+                  if (table === "agent_jobs")
+                    return {
+                      data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1" }) },
+                    };
+                  if (table === "tickets")
+                    return { data: { customer_id: "cust-1", channel: "email" } };
+                  if (table === "workspaces") return { data: { sandbox_mode: false } };
+                  return { data: null };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as Admin;
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async (_ctx, _decision, _send, sysNote) => {
+      // Simulate handleDirectAction's success + failure sysNote lines: action #1 landed, action
+      // #2 failed → escalated (see the else-branch at src/lib/action-executor.ts:~3247).
+      await sysNote(`Action completed: partial_refund`);
+      await sysNote(`Action failed: change_next_date — contract not found`);
+      return { messageSent: false, escalated: true, closed: false, statusManaged: false };
+    },
+    deliverMessage: async () => {
+      deliveryCalled = true;
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "approve_remedy",
+    reasoning: "in-leash",
+    remedy: {
+      actions: [
+        { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+        { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+      ],
+      customer_message: "This message must NOT ship — the 2nd action failed.",
+    },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.needs_attention, true);
+  assert.equal(result.reason, "remedy_action_escalated");
+  // The returned error string surfaces BOTH sides of the partial batch so the runner's log_tail
+  // names them explicitly:
+  assert.match(result.error ?? "", /change_next_date/, "error must name the FAILED action");
+  assert.match(result.error ?? "", /partial_refund/, "error must name what DID land");
+  assert.match(result.error ?? "", /no customer message sent/);
+  // The customer heard nothing — the whole point of the invariant (a "we did it" message on a
+  // half-fired batch is the exact false-promise class the derived-from ticket surfaced).
+  assert.equal(deliveryCalled, false);
+  // A summary internal note was written that names the landed + failed sets so a human eyeballing
+  // the ticket sees the partial-batch state at a glance (not just per-line sysNote fragments).
+  const summary = capturedNotes.find((n) =>
+    /partial_refund/.test(n) && /change_next_date/.test(n) && /batch/i.test(n),
+  );
+  assert.ok(summary, `expected a summary note naming both actions + "batch"; captured: ${JSON.stringify(capturedNotes)}`);
+});
+
+test("Phase 2 — a SINGLE-action batch (back-compat) still surfaces the single action_type in success logs", async () => {
+  // Back-compat check: an authored single-action RemedyPlan normalizes to actions.length === 1 in
+  // Phase 1; the Phase-2 execute-ALL-then-message path handles length-1 exactly like the legacy
+  // handler did (one action → one executor call → one deliver). Nothing regresses.
+  let deliveryCalled = false;
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async (_ctx, _decision, _send, sysNote) => {
+      await sysNote(`Action completed: change_next_date`);
+      return { messageSent: false, escalated: false, closed: false, statusManaged: false };
+    },
+    deliverMessage: async () => {
+      deliveryCalled = true;
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "approve_remedy",
+    reasoning: "in-leash",
+    remedy: {
+      action_type: "change_next_date",
+      payload: { next_billing_date: "2026-10-06", contract_id: "c1" },
+      customer_message: "Moved to Oct 6.",
+    },
+  };
+  const admin = approveRemedyAdmin("ticket-1");
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.message_delivered, true);
+  assert.equal(deliveryCalled, true);
 });
 
 test("Phase 2 — executor throw parks needs_attention with reason executor_threw", async () => {

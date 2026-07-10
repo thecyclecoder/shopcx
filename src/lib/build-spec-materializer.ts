@@ -35,7 +35,11 @@ export async function materializeSpec(
 ): Promise<{ path: string; row: SpecRow }> {
   const row = await getSpec(workspaceId, slug);
   if (!row) throw new Error(`materializeSpec: no specs row for workspace ${workspaceId} slug ${slug}`);
-  const body = renderSpecRow(row);
+  // verification-checks-source-of-truth — render `### Verification` from the typed spec_phase_checks rows
+  // (the DB object), column-fallback per phase. Proven checkKey-stable so Vera/green/regression are unchanged.
+  const { checksByPhaseIdForRender } = await import("@/lib/spec-phase-checks-table");
+  const checksByPhaseId = await checksByPhaseIdForRender(row.phases.map((p) => p.id).filter(Boolean));
+  const body = renderSpecRow(row, checksByPhaseId);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `spec-${slug}.md`);
   writeFileSync(path, body, "utf8");
@@ -70,8 +74,20 @@ export function unbuildableReason(row: SpecRow): string {
 /**
  * Pure renderer (no I/O) — joins `specs` + `spec_phases` into the brain-spec markdown the build-spec skill
  * reads. Exported so tests + the brain page can show the exact shape without disk.
+ *
+ * verification-checks-source-of-truth: `### Verification` is rendered FROM the typed `spec_phase_checks`
+ * rows when supplied (`checksByPhaseId`, keyed by `spec_phases.id`, in position order) — the DB objects are
+ * the source of truth and this render just ADDS the `- ` + `### Verification` markdown. Falls back to the
+ * `spec_phases.verification` text column when a phase has no rows (legacy / not-yet-backfilled). Proven
+ * `checkKey`-stable across all 928 phases (scripts/_prove-checkkey-stable-render-flip.ts): `checkKey`
+ * normalizes whitespace, so rendering `- {description}` yields the identical key set Vera/green/regression
+ * already match on. Called without the map (e.g. spec-chat grounding) it renders from the column exactly as
+ * before — fully backward compatible.
  */
-export function renderSpecRow(row: SpecRow): string {
+export function renderSpecRow(
+  row: SpecRow,
+  checksByPhaseId?: Map<string, { description: string }[]>,
+): string {
   const parts: string[] = [];
 
   parts.push(`# ${row.title}`, "");
@@ -102,7 +118,11 @@ export function renderSpecRow(row: SpecRow): string {
     parts.push(`## ${heading}`);
     if (phase.body && phase.body.trim()) parts.push(phase.body.trim());
     parts.push("");
-    if (phase.verification && phase.verification.trim()) {
+    // Prefer the typed checks (the DB object); fall back to the legacy `verification` column.
+    const checks = checksByPhaseId?.get(phase.id)?.filter((c) => c.description && c.description.trim());
+    if (checks && checks.length) {
+      parts.push("### Verification", checks.map((c) => `- ${c.description.trim()}`).join("\n"), "");
+    } else if (phase.verification && phase.verification.trim()) {
       parts.push("### Verification", phase.verification.trim(), "");
     }
   });

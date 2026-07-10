@@ -76,6 +76,8 @@ async function earnPoints(member: LoyaltyMember, points: number, orderId: string
 async function spendPoints(member: LoyaltyMember, points: number, description: string, shopifyDiscountId: string | null,) : Promise<void>
 ```
 
+Deduct points from a member's balance and record a `spending`-type transaction. NOT idempotent by itself — the `apply_loyalty_coupon` handler's self-heal retry path guards this call via `claimRegenSpendSlot` ([[../libraries/action-executor]]) to ensure Shopify verify-fail→retry never double-deducts. Re-fetches the live balance before writing, like `earnPoints`, so safe to loop over the same member object in backfills.
+
 ### `deductPoints` — function
 
 ```ts
@@ -123,7 +125,7 @@ async function deductPoints(member: LoyaltyMember, points: number, orderId: stri
 
 ## Gotchas
 
-- **Never mutate `loyalty_redemptions.status` to `rolled_back` directly.** The atomic contract flow re-credits points AND flips status in the same helper (`rollbackLoyaltyRedemptionOnApplyFailure`). Setting `status = 'rolled_back'` on its own leaves the ledger owing points that were never re-credited — a silent balance drift.
+- **Never mutate `loyalty_redemptions.status` directly except via the exported helpers or `claimRegenSpendSlot`.** The atomic contract flow (`rollbackLoyaltyRedemptionOnApplyFailure`) re-credits points AND flips status to `rolled_back` in the same helper. The idempotency guard (`claimRegenSpendSlot` in [[../libraries/action-executor]]) atomically flips status to `expired` via compare-and-set. Raw updates bypass these atomic contracts and leave the ledger in drift (points owed but not re-credited, or duplicate spends on retry). The `apply_loyalty_coupon` self-heal regen branch (in action-executor.ts) is the ONLY caller that mutates to `expired`; every other status change routes through the helpers.
 - **`earnPoints` instantiates its own admin client**, which is fine in production but breaks in-memory fake-admin tests. When you need a re-credit inline from a code path that must be unit-testable (the rollback helper), write the `adjustment` transaction + the balance update directly against the caller's admin. Same live-read pattern (`select points_balance, points_earned` before the update), just no `createAdminClient()` call.
 
 ---

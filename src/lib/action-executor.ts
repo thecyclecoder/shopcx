@@ -14,6 +14,7 @@ import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
 import { usageCostCents } from "@/lib/ai-usage";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 
 // ── Types ──
 
@@ -304,10 +305,12 @@ export function substituteActionParams(
  * row.
  *
  * Safety: only rolls back a redemption whose current status is `active`.
- * The apply_loyalty_coupon internal regen path (line ~1051) mutates the
- * original row to `expired` when it re-mints; leaving that alone here
- * avoids double-refunding a regen sequence — Phase 2 will fold the
- * regen-then-fail edge case in.
+ * The apply_loyalty_coupon internal regen path mutates the original row
+ * to `expired` at claim time (see `claimRegenSpendSlot` below); leaving
+ * that alone here avoids double-refunding a regen sequence and, together
+ * with the Phase-2 compare-and-set claim, keeps a verify-fail→retry from
+ * double-deducting points (spec: loyalty-coupon-apply-self-heal-must-not-
+ * double-deduct-points).
  *
  * Exported for unit tests. Idempotent — if the redemption is already
  * non-active, nothing happens.
@@ -391,6 +394,99 @@ export async function rollbackLoyaltyRedemptionOnApplyFailure(
   await sysNote(
     `[Rollback] apply_loyalty_coupon didn't land — re-credited ${red.points_spent} pts, marked ${code} rolled_back.`,
   );
+}
+
+/**
+ * Phase-2 idempotency gate for the `apply_loyalty_coupon` regen branch
+ * (spec: loyalty-coupon-apply-self-heal-must-not-double-deduct-points).
+ *
+ * Susan D. (member aa8fe19e, ticket d19c2192) was charged 1,500 pts TWICE
+ * within 12s on 2026-07-09 for ONE $15 coupon because the regen branch's
+ * `spendPoints` call fires on every verify-fail→retry. This helper is the
+ * compare-and-set that stops the second spend at its root: a
+ * `status='active' → status='expired'` update predicated on the row still
+ * being `active`. The first regen wins the row and proceeds to mint +
+ * spendPoints; every later retry (which finds the row already `expired`)
+ * matches 0 rows and MUST NOT re-enter mint+spendPoints — instead the
+ * caller invokes `replaySuccessorApply` to re-apply the successor code
+ * that the completed regen produced. One applied coupon = one 1,500-pt
+ * spend, no matter how many verify/heal retries fire.
+ *
+ * Returns true iff this call successfully claimed the regen slot (the row
+ * was still `active` and is now `expired`). False → an earlier regen ran.
+ *
+ * Exported for unit tests. The write is a single narrowed UPDATE — the
+ * whole idempotency guarantee is in the `.eq("status","active")`
+ * predicate on the write itself (rule of thumb: never gate a mutating
+ * write on a coarse proxy; always re-assert the invariant IN the write).
+ */
+export async function claimRegenSpendSlot(
+  admin: { from: (t: string) => { update: (patch: Record<string, unknown>) => { eq: (col: string, val: unknown) => unknown } } },
+  workspaceId: string,
+  origRedemptionId: string,
+): Promise<boolean> {
+  const chain = admin
+    .from("loyalty_redemptions")
+    .update({ status: "expired" })
+    .eq("id", origRedemptionId);
+  const chain2 = (chain as { eq: (col: string, val: unknown) => unknown }).eq("workspace_id", workspaceId);
+  const chain3 = (chain2 as { eq: (col: string, val: unknown) => unknown }).eq("status", "active");
+  const chain4 = (chain3 as { select: (cols: string) => unknown }).select("id");
+  const { data } = (await chain4) as { data: Array<{ id: string }> | null };
+  return Array.isArray(data) && data.length > 0;
+}
+
+/**
+ * Idempotent-replay recovery for `apply_loyalty_coupon` when
+ * `claimRegenSpendSlot` returns false (an earlier regen already ran for
+ * THIS code). Looks up the most-recently-inserted `active` redemption
+ * for the same member+workspace — the successor code that the completed
+ * regen minted — and re-invokes `subscriptionApplyCoupon` against IT.
+ *
+ * The caller sees an ordinary success result if the successor still
+ * applies, so a verify-fail→retry can converge on a clean apply without
+ * the points ledger ever seeing a second spend. Returns a well-formed
+ * ActionResult so the handler can `return await …` directly.
+ *
+ * Exported for unit tests.
+ */
+export async function replaySuccessorApply(
+  ctx: Pick<ActionContext, "admin" | "workspaceId">,
+  contractId: string,
+  memberId: string,
+  origCode: string,
+  initialApplyError: string | undefined,
+): Promise<ActionResult> {
+  const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
+  const { data: successor } = await ctx.admin
+    .from("loyalty_redemptions")
+    .select("discount_code, discount_value")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("member_id", memberId)
+    .eq("status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const successorCode = (successor as { discount_code?: string } | null)?.discount_code;
+  const successorValue = (successor as { discount_value?: number } | null)?.discount_value;
+  if (!successorCode) {
+    return {
+      success: false,
+      error: `Regen already ran for ${origCode} but no active successor redemption found (initial apply error: ${initialApplyError ?? "unknown"})`,
+    };
+  }
+  const r = await subscriptionApplyCoupon(ctx.workspaceId, contractId, successorCode);
+  if (r.success) {
+    return {
+      ...r,
+      summary: `Applied loyalty coupon $${successorValue ?? "?"} off (idempotent replay: ${successorCode})`,
+      couponCode: successorCode,
+    };
+  }
+  return {
+    success: false,
+    error: `Regen already ran for ${origCode}; retry-apply of successor ${successorCode} failed: ${r.error}`,
+  };
 }
 
 /**
@@ -1283,16 +1379,40 @@ export const directActionHandlers: Record<
       const { getShopifyCredentials } = await import("@/lib/shopify-sync");
       const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
 
-      // Find the original redemption to get tier info
+      // Find the original redemption to get tier info. NOTE: `status` is
+      // included in the projection so we can early-out on the Phase-2
+      // idempotency path — a row already flipped from `active` means an
+      // earlier regen for THIS code already ran, and re-entering the
+      // mint+spendPoints below would double-deduct points (spec:
+      // loyalty-coupon-apply-self-heal-must-not-double-deduct-points).
       const { data: orig } = await ctx.admin.from("loyalty_redemptions")
-        .select("id, member_id, discount_value, points_spent")
+        .select("id, member_id, discount_value, points_spent, status")
         .eq("discount_code", code).eq("workspace_id", ctx.workspaceId).single();
       if (!orig) return { success: false, error: `Original coupon not found and apply failed: ${r.error}` };
+
+      // Fast bail: this code's redemption has already been consumed by an
+      // earlier regen. Route to the idempotent replay — one applied coupon
+      // = one spend.
+      if (orig.status !== "active") {
+        return await replaySuccessorApply(ctx, p.contract_id, orig.member_id, code, r.error);
+      }
 
       // Get member
       const { data: member } = await ctx.admin.from("loyalty_members")
         .select("*").eq("id", orig.member_id).single();
       if (!member) return { success: false, error: "Loyalty member not found" };
+
+      // Atomic claim on the regen slot. The compare-and-set
+      // `.eq("status","active")` on the UPDATE itself is the durable
+      // idempotency guarantee — a concurrent regen (or a caller-level
+      // retry that slipped past the read above) whose claim matches 0
+      // rows is redirected to `replaySuccessorApply`. Do this BEFORE the
+      // Shopify mint + spendPoints so the losing caller never spawns a
+      // second discount code and never re-enters spendPoints.
+      const claimed = await claimRegenSpendSlot(ctx.admin, ctx.workspaceId, orig.id);
+      if (!claimed) {
+        return await replaySuccessorApply(ctx, p.contract_id, orig.member_id, code, r.error);
+      }
 
       const settings = await getLoyaltySettings(ctx.workspaceId);
       const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
@@ -1335,7 +1455,8 @@ export const directActionHandlers: Record<
       // Re-read member with updated balance for spendPoints
       const { data: refreshedMember } = await ctx.admin.from("loyalty_members").select("*").eq("id", member.id).single();
 
-      await ctx.admin.from("loyalty_redemptions").update({ status: "expired" }).eq("id", orig.id);
+      // (orig row already flipped to 'expired' by `claimRegenSpendSlot`
+      //  — do NOT re-write here; a duplicate write would just be noise.)
 
       if (refreshedMember) {
         const tiers = getRedemptionTiers(settings);
@@ -2156,7 +2277,11 @@ export const directActionHandlers: Record<
     }
     const province = (a.province || a.state || "").toUpperCase().slice(0, 2);
     const zip = a.zip || a.postal_code || "";
-    const country = (a.country || a.country_code || "US").toUpperCase().slice(0, 2);
+    // Route through normalizeCountryToIso2 — a stored country of
+    // "United States" was previously sliced to "UN" here, then handed
+    // downstream. That's what stranded SC132221's Jun-23 replacement
+    // for 17 days at address_confirmed.
+    const country = normalizeCountryToIso2(a.country || a.country_code || null);
 
     const summaries: string[] = [];
     let anySuccess = false;
@@ -2477,35 +2602,64 @@ export const directActionHandlers: Record<
     }
     const addr = resolved.address;
 
-    const variantId = p.variant_id || "42614433513645"; // fallback variant (Peach Mango)
-    const quantity = p.quantity || 1;
+    // Phase 2 — multi-item replacement = ONE order with N line items.
+    // Sonnet was previously handing us one variant_id per call; a
+    // 2-flavor replacement (Evan H. SC132221 — Peach Mango + Strawberry
+    // Lemonade) fragmented into TWO free orders (SC134462 + SC134463),
+    // which looked like a duplicate fire, doubled shipping, and made
+    // reconciliation harder. Sonnet now hands the FULL item set in one
+    // call via `items[]`; single-item back-compat via variant_id +
+    // quantity is preserved so no existing prompt breaks.
+    const rawItems: Array<{ variant_id?: string; variantId?: string; quantity?: number; title?: string; variant_title?: string | null }> =
+      Array.isArray(p.items) && p.items.length > 0
+        ? p.items.map(it => ({
+            variant_id: it.variant_id,
+            quantity: it.quantity,
+            title: it.title || undefined,
+            variant_title: it.variant_title,
+          }))
+        : [{ variant_id: p.variant_id || "42614433513645", quantity: p.quantity || 1 }];
 
-    // Resolve variant title for the summary string. Without this the
-    // summary always claimed "Peach Mango" regardless of what variant_id
-    // Sonnet actually passed — surfaced on ticket ffd28680 (Dean, May 7)
-    // where Strawberry Lemonade shipped correctly but the analyzer was
-    // misled by a "2x Peach Mango shipped free" log line.
-    let variantTitle = "item";
-    try {
-      const { data: pv } = await ctx.admin.from("product_variants")
-        .select("title, products(title)")
-        .eq("shopify_variant_id", variantId).maybeSingle();
-      if (pv) {
-        const productTitle = (pv.products as { title?: string } | null)?.title;
-        variantTitle = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || "item");
-      }
-    } catch { /* fall back to "item" */ }
+    // Resolve variant title per item for the Shopify note + summary.
+    // Without this the summary always claimed "Peach Mango" regardless
+    // of what variant_id Sonnet actually passed — surfaced on ticket
+    // ffd28680 (Dean, May 7) where Strawberry Lemonade shipped
+    // correctly but the analyzer was misled by a "2x Peach Mango
+    // shipped free" log line.
+    const resolvedItems: Array<{ variantId: string; quantity: number; title: string }> = [];
+    for (const it of rawItems) {
+      const variantId = String(it.variant_id || it.variantId || "");
+      if (!variantId) continue;
+      const quantity = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
+      let variantTitle = it.title || it.variant_title || "item";
+      try {
+        const { data: pv } = await ctx.admin.from("product_variants")
+          .select("title, products(title)")
+          .eq("shopify_variant_id", variantId).maybeSingle();
+        if (pv) {
+          const productTitle = (pv.products as { title?: string } | null)?.title;
+          variantTitle = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || variantTitle);
+        }
+      } catch { /* fall back to whatever we had */ }
+      resolvedItems.push({ variantId, quantity, title: variantTitle });
+    }
+    if (resolvedItems.length === 0) {
+      return { success: false, error: "create_replacement_order needs at least one item (variant_id or items[])" };
+    }
 
     // Delegate to the canonical helper. It records-first into `replacements`,
     // then creates the Shopify draft + completes it, and stamps the row
     // with the final state. Any caller using this helper guarantees a
     // replacements row exists for every Shopify replacement order.
+    // The helper already loops resolvedItems into DraftOrderInput.lineItems
+    // (see src/lib/replacement-order.ts:129) — so N items produce ONE
+    // Shopify order with N line items, not N separate orders.
     const { createReplacementOrder } = await import("@/lib/replacement-order");
     const r = await createReplacementOrder({
       workspaceId: ctx.workspaceId,
       customerId: ctx.customerId,
       shopifyCustomerId: cust.shopify_customer_id,
-      items: [{ variantId, quantity, title: variantTitle }],
+      items: resolvedItems,
       shippingAddress: {
         firstName: addr.firstName,
         lastName: addr.lastName,
@@ -2525,7 +2679,8 @@ export const directActionHandlers: Record<
     });
 
     if (!r.success) return { success: false, error: r.error || "replacement creation failed" };
-    return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${quantity}x ${variantTitle} shipped free` };
+    const itemsSummary = resolvedItems.map(i => `${i.quantity}x ${i.title}`).join(" + ");
+    return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${itemsSummary} shipped free` };
   },
 
   // dollar_replacement — Phase 3 $-bearing variant. Ships a replacement

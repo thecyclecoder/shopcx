@@ -23,6 +23,14 @@ const STATUS_BADGE: Record<string, string> = {
   shipped: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   completed: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
   denied: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  failed: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  // First-class terminal status for a stalled row that a later
+  // replacement for the same original order already fulfilled — used
+  // on 2026-07-10 to reconcile Evan H.'s Jun-23 SC132221 record
+  // (d73f3103…) after SC134462 + SC134463 shipped the same 2 tabs.
+  // Rendered zinc (not red) — the customer outcome was correct; this
+  // is bookkeeping, not a failure.
+  superseded: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
 };
 
 const FALLBACK_BADGE = "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
