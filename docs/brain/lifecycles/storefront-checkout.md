@@ -101,7 +101,7 @@ Events fired:
 - Email / phone (if not already attached).
 - Shipping address.
 - Billing address (or "same as shipping").
-- [[../integrations/braintree]] Hosted Fields (or Drop-in) for card capture.
+- [[../integrations/braintree]] Hosted Fields (or Drop-in) for card capture — plus PayPal via the Braintree Drop-in / PayPal Vault flow. Vaulted rows land in [[../tables/customer_payment_methods]] with `payment_type` = `credit_card` OR `paypal_account` (the latter carries `paypal_email` instead of `last4` / `card_brand`; see [[../libraries/braintree-customer]] `paypalEmail`). Founder directive (2026-07-10 per [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]): the storefront is NOT card-only — a checkout-stuck customer can pay via PayPal too. When the failing rail is Shopify's Shop Pay OTP, we default to concierging the sale via [[../recipes/checkout-stuck-concierge-flow]] instead of dead-ending them with "try another card / PayPal / Shop Pay".
 
 `braintree-web` SDK runs in the browser, tokenizes the card, returns a `payment_method_nonce`. Card never touches our server.
 
