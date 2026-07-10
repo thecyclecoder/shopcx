@@ -1,0 +1,1 @@
+- **Fix June remedy payload type override bypassing founder gate** · verified 2026-07-10 · → [[../libraries/cs-director]], [[../libraries/june-remedy-approval]]
