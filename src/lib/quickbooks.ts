@@ -259,6 +259,30 @@ export interface PnlRollups {
    * management fee, which net_income has already expensed, to reflect true group economic profit.
    */
   adjusted_net_income: number | null;
+  /**
+   * "60510 Digital Advertising" line (Facebook/Google/Amazon ad spend). A VARIABLE cost that sits
+   * inside the Expenses section — broken out so Fixed OpEx (cost to operate) excludes it.
+   */
+  digital_advertising: number | null;
+  /**
+   * "61508 Platform Transaction Fees" group total (Amazon Seller/Shopify/PayPal/Braintree/Walmart
+   * transaction fees). Also a VARIABLE cost inside Expenses — excluded from Fixed OpEx.
+   */
+  transaction_fees: number | null;
+  /**
+   * Fixed cost to operate = total_expenses − (OpEx-resident Digital Advertising line) − transaction_fees.
+   * Stored (not derived in the UI) because the pre-2025 ad bridge means the ad-spend series ≠ the OpEx
+   * ad line, so this can't be recomputed from `digital_advertising` alone.
+   */
+  fixed_opex: number | null;
+  /** "48300 Refunds" (contra-revenue) — positive magnitude of the profit bite. */
+  refunds: number | null;
+  /** "48100 Chargebacks" (contra-revenue) — positive magnitude. */
+  chargebacks: number | null;
+  /** "48200 Discounts & Coupons" (contra-revenue) — positive magnitude. */
+  discounts_coupons: number | null;
+  /** Inventory adjustments — "53100 Inventory Shrinkage" + "53000 Ending Inventory Adjustment" (COGS). */
+  inventory_adjustments: number | null;
 }
 
 const GROUP_TO_FIELD: Record<string, keyof PnlRollups> = {
@@ -298,8 +322,70 @@ export function findLineAmount(report: any, matcher: RegExp): number | null {
   return walk(report?.Rows?.Row ?? []);
 }
 
+/**
+ * Find an amount by account name — matches EITHER a leaf line (its ColData) OR a nested GROUP (its
+ * Header name + Summary total). Used for the Digital Advertising leaf and the Platform Transaction
+ * Fees group, which carries its total on a Summary row rather than a leaf.
+ */
+export function findAmountByName(report: any, matcher: RegExp): number | null {
+  const walk = (rows: any[]): number | null => {
+    for (const r of rows ?? []) {
+      const headerName = r.Header?.ColData?.[0]?.value;
+      if (headerName && matcher.test(headerName)) {
+        const sum = r.Summary?.ColData ?? [];
+        return toNum(sum[sum.length - 1]?.value);
+      }
+      if (Array.isArray(r.ColData)) {
+        const name = r.ColData[0]?.value ?? "";
+        if (matcher.test(name)) return toNum(r.ColData[r.ColData.length - 1]?.value);
+      }
+      const nested = r.Rows?.Row;
+      if (nested) { const hit = walk(nested); if (hit !== null) return hit; }
+    }
+    return null;
+  };
+  return walk(report?.Rows?.Row ?? []);
+}
+
+/**
+ * Sum the amounts of ALL accounts whose name matches — but do NOT descend into a matched node (so a
+ * group total isn't double-counted with its children). Used for the account-migration BRIDGES: pre-2025
+ * ad spend lived in COGS as several "Ads - {platform}" accounts; in 2025+ it's the single OpEx
+ * "Digital Advertising" line — summing both name-shapes gives one continuous series.
+ */
+export function sumAmountsByName(report: any, matcher: RegExp): number | null {
+  let found = false, sum = 0;
+  const walk = (rows: any[]) => {
+    for (const r of rows ?? []) {
+      const headerName = r.Header?.ColData?.[0]?.value;
+      const leafName = Array.isArray(r.ColData) ? r.ColData[0]?.value ?? "" : "";
+      const name = headerName || leafName;
+      if (name && matcher.test(name)) {
+        const cells = r.Summary?.ColData ?? r.ColData ?? [];
+        const v = toNum(cells[cells.length - 1]?.value);
+        if (v !== null) { sum += v; found = true; }
+        continue; // matched — don't descend (avoid double-counting children)
+      }
+      if (r.Rows?.Row) walk(r.Rows.Row);
+    }
+  };
+  walk(report?.Rows?.Row ?? []);
+  return found ? sum : null;
+}
+
 /** The "82000 Management Fees" intercompany line (PR→TX transfer pricing). */
 const MANAGEMENT_FEES_MATCHER = /management fee/i;
+/** OpEx-resident ad line only ("60510 Digital Advertising") — used for the Fixed OpEx subtraction. */
+const OPEX_AD_LINE_MATCHER = /digital advertising/i;
+/** Ad-spend BRIDGE: the OpEx "Digital Advertising" line OR the pre-2025 COGS "Ads - {platform}" accounts. */
+const AD_SPEND_MATCHER = /digital advertising|(^|\s)ads?\s*-/i;
+/** "61508 Platform Transaction Fees" group (Amazon/Shopify/PayPal/Braintree/Walmart). */
+const TRANSACTION_FEES_MATCHER = /platform transaction fees/i;
+/** Inventory-adjustment BRIDGE: "Inventory Shrinkage" + "Ending Inventory Adjustment" (COGS). */
+const INVENTORY_ADJ_MATCHER = /inventory shrinkage|ending inventory/i;
+const REFUNDS_MATCHER = /\brefunds?\b/i;
+const CHARGEBACKS_MATCHER = /charge\s?backs?/i;
+const DISCOUNTS_MATCHER = /discounts?\s*(&|and)?\s*coupons?|discounts? & coupons?/i;
 
 /**
  * Extract the top-level section rollups from a single-period ProfitAndLoss report. Each top-level
@@ -315,6 +401,8 @@ export function parsePnlRollups(report: any): PnlRollups {
     total_income: null, total_cogs: null, gross_profit: null, total_expenses: null,
     net_operating_income: null, total_other_income: null, total_other_expenses: null,
     net_other_income: null, net_income: null, management_fees: null, adjusted_net_income: null,
+    digital_advertising: null, transaction_fees: null, fixed_opex: null,
+    refunds: null, chargebacks: null, discounts_coupons: null, inventory_adjustments: null,
   };
   for (const row of report?.Rows?.Row ?? []) {
     const field = GROUP_TO_FIELD[row.group];
@@ -326,6 +414,18 @@ export function parsePnlRollups(report: any): PnlRollups {
   if (out.net_income !== null) {
     out.adjusted_net_income = out.net_income + (out.management_fees ?? 0);
   }
+  // Ad spend — bridged across the 2024 (COGS "Ads - X") → 2025 (OpEx "Digital Advertising") migration.
+  out.digital_advertising = sumAmountsByName(report, AD_SPEND_MATCHER);
+  out.transaction_fees = findAmountByName(report, TRANSACTION_FEES_MATCHER);
+  // Fixed OpEx uses only the OpEx-resident ad line (null in 2024, when ads were in COGS).
+  const opexAdLine = findAmountByName(report, OPEX_AD_LINE_MATCHER);
+  out.fixed_opex = out.total_expenses === null ? null : out.total_expenses - (opexAdLine ?? 0) - (out.transaction_fees ?? 0);
+  // Profit bites — refunds/chargebacks/discounts are contra-revenue (negative) → store positive magnitude.
+  const absOf = (v: number | null) => (v === null ? null : Math.abs(v));
+  out.refunds = absOf(findAmountByName(report, REFUNDS_MATCHER));
+  out.chargebacks = absOf(findAmountByName(report, CHARGEBACKS_MATCHER));
+  out.discounts_coupons = absOf(findAmountByName(report, DISCOUNTS_MATCHER));
+  out.inventory_adjustments = sumAmountsByName(report, INVENTORY_ADJ_MATCHER);
   return out;
 }
 
