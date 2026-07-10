@@ -15,9 +15,11 @@ The permanent owner of **the company's numbers** — revenue, margin, cash, CAC,
 ## Mandates (perpetual)
 
 ### Financial data & unit economics — the CEO north-star feed
-Be the single authoritative source for every dollar figure the CEO scoreboard reads. Compute revenue, margin, CAC, LTV, and LTV:CAC live from the real orders/subscriptions/spend data — not a spreadsheet — so the company north star is measured against reality, and reconcile what each director *spends* against what the business *earns*.
+Be the single authoritative source for every dollar figure the CEO scoreboard reads. Pull the real books (QuickBooks P&L) and compute revenue, margin, CAC, LTV, and LTV:CAC — not a spreadsheet — so the company north star is measured against reality, and reconcile what each director *spends* against what the business *earns*.
+- **North star:** **Grow Profits** (primary) + **Grow Revenue** (the floor — too little revenue and G&A eats the profit). Two profit lines: **actual booked `net_income`** (steer ≤ $0 per fiscal year Jan–Dec for US-tax avoidance) and **`adjusted_net_income`** (with the intercompany management-fee addback — true economic profit to grow).
 - **Metric:** every CEO north-star dollar figure traceable to a live query; zero un-sourced numbers on the scoreboard.
-- **Status:** ⏳ **seat opened, feed not yet built.** First spec: stand up the financial-metrics library that computes the CEO north-star inputs (revenue/margin/CAC/LTV) from live data. Owner: cfo · Builder: Ada.
+- **Status:** 🚧 **feed started — QuickBooks P&L snapshotter LIVE.** 24 closed months of monthly P&L snapshotted into [[../tables/qb_pnl_snapshots]] via [[../libraries/quickbooks]] (revenue + booked/adjusted profit), connection seeded from shoptics ([[../tables/quickbooks_connections]]). Next: recurring monthly append + the CFO Financials surface + CEO scoreboard. Owner: cfo · Builder: Ada.
+- **Related:** [[../libraries/quickbooks]] · [[../tables/qb_pnl_snapshots]] · [[../integrations/quickbooks-online]].
 
 ### Cash & margin oversight
 Watch gross + contribution margin and cash position over time; surface a margin slide or a cash-runway concern to the CEO before it becomes a crisis. The financial early-warning system.

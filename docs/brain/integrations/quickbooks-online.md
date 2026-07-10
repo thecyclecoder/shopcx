@@ -1,9 +1,15 @@
 # QuickBooks Online (QBO) — integration skill set
 
 > **Source of this doc:** reverse-engineered from the sibling repo `/Users/admin/Projects/shoptics`
-> (Next.js 14 App Router + Supabase, single-tenant). shopcx does **not** yet have QBO.
-> This page is the implementation reference for porting it. All `file:line` citations point at
-> shoptics paths. Shoptics talks to QBO with **raw `fetch`** — no `intuit-oauth`, no `node-quickbooks` SDK.
+> (Next.js 14 App Router + Supabase, single-tenant). Shoptics talks to QBO with **raw `fetch`** — no
+> `intuit-oauth`, no `node-quickbooks` SDK. This page is the API/auth reference.
+>
+> **Status (2026-07-10): the first slice is LIVE in shopcx** — the reusable core (per-workspace
+> encrypted OAuth connection + one token manager + thin client) + the **ProfitAndLoss** pull that
+> shoptics never had, shipped as the CFO's P&L snapshotter. See [[../libraries/quickbooks]],
+> [[../tables/qb_pnl_snapshots]], [[../tables/quickbooks_connections]]. The connection was seeded by
+> copying shoptics' live token (shoptics → shopcx finance handoff). Still to port: the inventory/COGS/
+> month-end domain (Logistics — [[../functions/logistics]]).
 >
 > The "Porting to shopcx" section at the bottom maps every shoptics-ism onto shopcx conventions
 > (multi-tenant, AES-256-GCM encrypted `_encrypted` columns via `src/lib/crypto.ts`).
