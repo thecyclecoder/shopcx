@@ -143,15 +143,43 @@ export interface ApplyBoxCsDirectorCallResult {
 // ── Pure planners (unit-tested) ────────────────────────────────────────────────────────────────
 
 /**
+ * One typed direct-action step in a RemedyPlan. `actionType` maps 1:1 to a `directActionHandlers`
+ * key (e.g. `change_next_date` → `subscriptionUpdateNextBillingDate` under the hood); `actionParams`
+ * flows straight into the corresponding `SonnetDecision.actions[i]` bag alongside `type`.
+ */
+export interface RemedyActionStep {
+  actionType: string;
+  actionParams: Record<string, unknown>;
+}
+
+/**
  * A normalized executable plan derived from June's RemedyPlan (`verdict.remedy`). Kept intentionally
- * small — `actionType` maps 1:1 to a `directActionHandlers` key (e.g. `change_next_date` →
- * `subscriptionUpdateNextBillingDate` under the hood), and `actionParams` flows straight into the
- * `SonnetDecision.actions[0]` bag alongside `type`. The customer message is separated from the plan
- * so the ordering invariant (execute → THEN message) is enforced by the caller, not smuggled inside a
- * `response_message` field the executor would deliver on our behalf.
+ * small — `actions` is an ORDERED, non-empty batch of direct-action steps the executor fires in
+ * sequence through `executeSonnetDecision` (which already accepts an `actions[]` array). The customer
+ * message is separated from the plan so the ordering invariant (execute → THEN message) is enforced
+ * by the caller, not smuggled inside a `response_message` field the executor would deliver on our
+ * behalf.
+ *
+ * Multi-action authored by June (Phase 1 of the multi-action-remedies spec): a real fix often needs
+ * several actions (e.g. `partial_refund` + `change_next_date` + `redeem_points`, or
+ * `create_replacement` + `apply_coupon`). A single-action RemedyPlan (the legacy shape:
+ * `{action_type, payload}`) normalizes into `actions: [one]` so nothing regresses. `actionType` /
+ * `actionParams` are back-compat aliases for `actions[0]` — the Phase 2 executor iterates
+ * `actions[]`, so new callers should read from there; the aliases stay to keep the current handler
+ * shape (`planned.plan.actionType`) compiling until Phase 2 lands.
  */
 export interface RemedyExecutionPlan {
+  /** Ordered, non-empty batch of typed direct-action steps. Fire in sequence. */
+  actions: RemedyActionStep[];
+  /**
+   * Back-compat alias for `actions[0].actionType`. Kept during the multi-action migration so the
+   * existing Phase-2 handler code (`planned.plan.actionType`) still compiles; new callers should
+   * iterate `actions` instead.
+   */
   actionType: string;
+  /**
+   * Back-compat alias for `actions[0].actionParams`. See `actionType` above.
+   */
   actionParams: Record<string, unknown>;
   customerMessage: string | null;
 }
@@ -172,10 +200,39 @@ export function extractRemedyCustomerMessage(remedy: Record<string, unknown>): s
 }
 
 /**
- * Plan the executor's next step from June's RemedyPlan. `ok:false` means the plan is malformed and
- * the executor MUST park the job `needs_attention` without touching the customer — no action
+ * Extract a single `{action_type, payload}` step off any object (a legacy top-level remedy OR one
+ * entry inside a multi-action `actions[]`). Returns null when the step is malformed (missing / empty
+ * `action_type`) so the caller can fail the whole plan up-front — a batch with one broken step MUST
+ * NOT be partially fired.
+ */
+function extractActionStep(raw: unknown): RemedyActionStep | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  const actionTypeRaw = obj.action_type;
+  const actionType = typeof actionTypeRaw === "string" ? actionTypeRaw.trim() : "";
+  if (!actionType) return null;
+  const payload =
+    obj.payload && typeof obj.payload === "object" && !Array.isArray(obj.payload)
+      ? (obj.payload as Record<string, unknown>)
+      : {};
+  return { actionType, actionParams: payload };
+}
+
+/**
+ * Plan the executor's ordered batch from June's RemedyPlan. `ok:false` means the plan is malformed
+ * and the executor MUST park the job `needs_attention` without touching the customer — no action
  * signature to fire against, no message to deliver honestly. Pure so the test suite can exercise
  * every branch without a Supabase mock.
+ *
+ * Two authored shapes are accepted (both normalize to the same `actions: RemedyActionStep[]`):
+ *   1. Multi-action (the multi-action-remedies spec — the shape June emits now):
+ *      `{ actions: [{action_type, payload?}, ...], customer_message }`.
+ *      Each step is validated (any malformed step fails the WHOLE plan — no partial fire).
+ *   2. Single-action (the legacy shape kept for back-compat):
+ *      `{ action_type, payload?, customer_message }` → normalizes to `actions: [one]`.
+ *
+ * When BOTH shapes appear on the same remedy, `actions[]` wins (it's the newer, richer authoring
+ * form; the top-level `action_type` was likely a duplicate of `actions[0]`).
  */
 export function planRemedyExecution(
   remedy: Record<string, unknown> | undefined | null,
@@ -183,35 +240,72 @@ export function planRemedyExecution(
   if (!remedy || typeof remedy !== "object" || Array.isArray(remedy)) {
     return { ok: false, reason: "remedy_missing" };
   }
-  const actionTypeRaw = remedy.action_type;
-  const actionType = typeof actionTypeRaw === "string" ? actionTypeRaw.trim() : "";
-  if (!actionType) return { ok: false, reason: "remedy_missing_action_type" };
-  const payload =
-    remedy.payload && typeof remedy.payload === "object" && !Array.isArray(remedy.payload)
-      ? (remedy.payload as Record<string, unknown>)
-      : {};
   const customerMessage = extractRemedyCustomerMessage(remedy);
-  return { ok: true, plan: { actionType, actionParams: payload, customerMessage } };
+
+  // Shape 1 — multi-action `actions[]`. Wins when present + non-empty so a mixed shape (a stray
+  // top-level `action_type` next to an authored `actions`) prefers the ordered batch.
+  if (Array.isArray(remedy.actions) && remedy.actions.length > 0) {
+    const steps: RemedyActionStep[] = [];
+    for (let i = 0; i < remedy.actions.length; i++) {
+      const step = extractActionStep(remedy.actions[i]);
+      if (!step) return { ok: false, reason: `remedy_action_${i}_malformed` };
+      steps.push(step);
+    }
+    return {
+      ok: true,
+      plan: {
+        actions: steps,
+        actionType: steps[0].actionType,
+        actionParams: steps[0].actionParams,
+        customerMessage,
+      },
+    };
+  }
+
+  // Shape 2 — legacy single-action `{action_type, payload}`. Normalize to `actions:[one]` so the
+  // rest of the pipeline never sees the single-vs-multi distinction.
+  const step = extractActionStep(remedy);
+  if (!step) return { ok: false, reason: "remedy_missing_action_type" };
+  return {
+    ok: true,
+    plan: {
+      actions: [step],
+      actionType: step.actionType,
+      actionParams: step.actionParams,
+      customerMessage,
+    },
+  };
 }
 
 /**
  * Build the `SonnetDecision` we hand to `executeSonnetDecision`. Always `action_type:'direct_action'`
- * (the RemedyPlan is a single typed commerce action, e.g. `change_next_date` /
- * `subscriptionUpdateNextBillingDate` / `apply_coupon`); NEVER carries `response_message` (the
- * customer message is delivered AFTER the executor returns success, by `deliverTicketMessage`, not
- * by the executor's own send path — see the execute-then-message invariant in the file header).
- * Pure so the test suite can assert the exact shape.
+ * with the plan's FULL ordered `actions[]` (executeSonnetDecision already accepts a batch and runs
+ * them in sequence); NEVER carries `response_message` (the customer message is delivered AFTER the
+ * executor returns success, by `deliverTicketMessage`, not by the executor's own send path — see the
+ * execute-then-message invariant in the file header). Pure so the test suite can assert the exact
+ * shape.
+ *
+ * Multi-action authoring (Phase 1 of the multi-action-remedies spec): a real fix like
+ * `partial_refund` + `change_next_date` + `redeem_points` lands as three `ActionParams` in
+ * `decision.actions[]`, in the SAME order June authored them, so `executeSonnetDecision` fires them
+ * sequentially. A single-action RemedyPlan is a special case with `actions.length === 1` — same
+ * emit path, no branching.
  */
 export function buildRemedySonnetDecision(
   plan: RemedyExecutionPlan,
   reasoning: string,
 ): SonnetDecision {
-  const { actionType, actionParams } = plan;
-  const params: ActionParams = { type: actionType, ...(actionParams as Partial<ActionParams>) } as ActionParams;
+  const actions: ActionParams[] = plan.actions.map(
+    (step) =>
+      ({
+        type: step.actionType,
+        ...(step.actionParams as Partial<ActionParams>),
+      }) as ActionParams,
+  );
   return {
     reasoning: reasoning?.trim() || "cs-director approve_remedy",
     action_type: "direct_action",
-    actions: [params],
+    actions,
     // NO response_message — we own delivery. Setting response_message here would let
     // executeSonnetDecision deliver via our no-op send fn (a silent drop, but still a foot-gun); the
     // Phase-2 executor's contract is explicit: message flows through deliverTicketMessage AFTER

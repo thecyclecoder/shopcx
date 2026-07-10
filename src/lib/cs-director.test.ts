@@ -234,6 +234,103 @@ test("planRemedyExecution — canonical shape", () => {
       contract_id: "contract-1",
     });
     assert.equal(result.plan.customerMessage, "Moved to Oct 6.");
+    // Single-action normalizes into a length-1 actions[] so nothing downstream sees the legacy-vs-
+    // batched distinction (Phase 1 multi-action-remedies).
+    assert.equal(result.plan.actions.length, 1);
+    assert.equal(result.plan.actions[0].actionType, "change_next_date");
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      next_billing_date: "2026-10-06",
+      contract_id: "contract-1",
+    });
+  }
+});
+
+test("planRemedyExecution — multi-action actions[] preserves order and normalizes each step", () => {
+  // The Phase-1 shape June emits for a full fix — e.g. partial_refund + change_next_date +
+  // redeem_points_as_refund fires ALL THREE in the authored order, none of which regresses to a
+  // single top-level action_type.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000, order_number: "SC131156" } },
+      { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+      { action_type: "redeem_points_as_refund", payload: { amount_cents: 500 } },
+    ],
+    customer_message: "Refunded $30, moved your next order to Oct 6, and applied your points.",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 3);
+    assert.equal(result.plan.actions[0].actionType, "partial_refund");
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      amount_cents: 3000,
+      order_number: "SC131156",
+    });
+    assert.equal(result.plan.actions[1].actionType, "change_next_date");
+    assert.deepEqual(result.plan.actions[1].actionParams, {
+      next_billing_date: "2026-10-06",
+      contract_id: "c1",
+    });
+    assert.equal(result.plan.actions[2].actionType, "redeem_points_as_refund");
+    assert.deepEqual(result.plan.actions[2].actionParams, { amount_cents: 500 });
+    // Back-compat aliases point at actions[0] so existing single-action callers still compile.
+    assert.equal(result.plan.actionType, "partial_refund");
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 3000, order_number: "SC131156" });
+    assert.equal(
+      result.plan.customerMessage,
+      "Refunded $30, moved your next order to Oct 6, and applied your points.",
+    );
+  }
+});
+
+test("planRemedyExecution — a malformed step inside actions[] fails the WHOLE plan (no partial fire)", () => {
+  // The invariant: a batch with one broken step (missing action_type) must never partially fire —
+  // stop the line so a human eyeballs the log. If the batch fired the first two of three, June's
+  // customer message would promise a fix she didn't ship.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+      { payload: { next_billing_date: "2026-10-06" } }, // missing action_type
+      { action_type: "redeem_points_as_refund", payload: { amount_cents: 500 } },
+    ],
+    customer_message: "would be a false promise",
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /remedy_action_1_malformed/);
+});
+
+test("planRemedyExecution — an empty actions[] falls through to legacy single-action shape", () => {
+  // Corner case: `actions:[]` alongside a legacy top-level action_type. Empty actions[] cannot be
+  // June's real intent, so we fall back to the legacy shape rather than fail — the whole point of
+  // back-compat is that a stray field can't break a well-formed single-action remedy.
+  const result = planRemedyExecution({
+    actions: [],
+    action_type: "change_next_date",
+    payload: { next_billing_date: "2026-10-06" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 1);
+    assert.equal(result.plan.actions[0].actionType, "change_next_date");
+  }
+});
+
+test("planRemedyExecution — actions[] wins when both shapes appear on the same remedy", () => {
+  // A stray top-level `action_type` next to a real `actions[]` batch must not silently override the
+  // batch (that would fire only the first action + suppress the rest). Prefer the newer, richer
+  // authoring form.
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+      { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06" } },
+    ],
+    action_type: "resume",
+    payload: { contract_id: "c1" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 2);
+    assert.equal(result.plan.actions[0].actionType, "partial_refund");
+    assert.equal(result.plan.actions[1].actionType, "change_next_date");
   }
 });
 
@@ -271,6 +368,12 @@ test("extractRemedyCustomerMessage — checks canonical + fallback field names",
 test("buildRemedySonnetDecision — direct_action with actions[0], no response_message", () => {
   const decision = buildRemedySonnetDecision(
     {
+      actions: [
+        {
+          actionType: "change_next_date",
+          actionParams: { next_billing_date: "2026-10-06", contract_id: "contract-1" },
+        },
+      ],
       actionType: "change_next_date",
       actionParams: { next_billing_date: "2026-10-06", contract_id: "contract-1" },
       customerMessage: "Moved to Oct 6.",
@@ -288,9 +391,46 @@ test("buildRemedySonnetDecision — direct_action with actions[0], no response_m
   assert.match(decision.reasoning, /restore requested date/);
 });
 
+test("buildRemedySonnetDecision — multi-action emits the FULL ordered batch (Phase 1)", () => {
+  // executeSonnetDecision already accepts an `actions[]` array and runs them sequentially, so a
+  // multi-action RemedyPlan lands as N ActionParams in the SAME order June authored. This is what
+  // makes "the whole fix in one verdict" work — the executor fires all N, then handleApproveRemedy
+  // messages the customer only if every action verified.
+  const decision = buildRemedySonnetDecision(
+    {
+      actions: [
+        { actionType: "partial_refund", actionParams: { amount_cents: 3000, order_number: "SC131156" } },
+        { actionType: "change_next_date", actionParams: { next_billing_date: "2026-10-06", contract_id: "c1" } },
+        { actionType: "redeem_points_as_refund", actionParams: { amount_cents: 500 } },
+      ],
+      actionType: "partial_refund",
+      actionParams: { amount_cents: 3000, order_number: "SC131156" },
+      customerMessage: "Refunded $30, moved your next order to Oct 6, and applied your points.",
+    },
+    "full fix — 3 actions",
+  );
+  assert.equal(decision.action_type, "direct_action");
+  assert.equal(decision.actions?.length, 3);
+  assert.equal(decision.actions?.[0]?.type, "partial_refund");
+  assert.equal(decision.actions?.[0]?.amount_cents, 3000);
+  assert.equal(decision.actions?.[0]?.order_number, "SC131156");
+  assert.equal(decision.actions?.[1]?.type, "change_next_date");
+  assert.equal(decision.actions?.[1]?.next_billing_date, "2026-10-06");
+  assert.equal(decision.actions?.[1]?.contract_id, "c1");
+  assert.equal(decision.actions?.[2]?.type, "redeem_points_as_refund");
+  assert.equal(decision.actions?.[2]?.amount_cents, 500);
+  // Same ordering invariant as single-action: NO response_message on the decision.
+  assert.equal(decision.response_message, undefined);
+});
+
 test("buildRemedySonnetDecision — falls back to a synthetic reasoning when the input is empty", () => {
   const decision = buildRemedySonnetDecision(
-    { actionType: "resume", actionParams: {}, customerMessage: null },
+    {
+      actions: [{ actionType: "resume", actionParams: {} }],
+      actionType: "resume",
+      actionParams: {},
+      customerMessage: null,
+    },
     "",
   );
   assert.equal(decision.action_type, "direct_action");
