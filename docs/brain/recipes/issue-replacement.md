@@ -13,28 +13,67 @@ import { createReplacementOrder } from "@/lib/replacement-order";
 ## Signature
 
 ```ts
-async function createReplacementOrder(input: {
-  workspaceId: string;
-  customerId: string;
-  originalOrderId?: string;
-  lineItems: Array<{ shopifyVariantId: string; quantity: number; title?: string }>;
-  shippingAddress: ShippingAddress;
-  reason?: string;
-}): Promise<{ success: boolean; orderId?: string; error?: string }>
+async function createReplacementOrder(input: CreateReplacementInput): Promise<CreateReplacementResult>
 ```
 
-## Minimal example
+`CreateReplacementInput`:
+```ts
+{
+  workspaceId: string;
+  customerId: string;
+  shopifyCustomerId: string;
+  items: Array<{ variantId: string; quantity: number; title?: string }>;
+  shippingAddress: { firstName?: string; lastName?: string; address1: string; address2?: string; city: string; province?: string; provinceCode?: string; zip: string; countryCode?: string };
+  reason: string;
+}
+```
+
+## Minimal example — single item
 
 ```ts
 const result = await createReplacementOrder({
   workspaceId,
   customerId,
-  originalOrderId: originalOrder.id,
-  lineItems: [
-    { shopifyVariantId: "12345678901234", quantity: 1, title: "Mixed Berry Tabs" },
+  shopifyCustomerId: customer.shopify_id,
+  items: [
+    { variantId: "12345678901234", quantity: 1, title: "Mixed Berry Tabs" },
   ],
-  shippingAddress: customer.default_address,
+  shippingAddress: {
+    firstName: customer.first_name,
+    lastName: customer.last_name,
+    address1: customer.default_address.address1,
+    city: customer.default_address.city,
+    zip: customer.default_address.zip,
+    countryCode: customer.default_address.country_code,
+  },
   reason: "Missing items — original order SC129467",
+});
+
+if (!result.success) throw new Error(result.error || "replacement failed");
+```
+
+## Example — multi-item (two-flavor replacement)
+
+One call creates ONE Shopify order with TWO line items (no fragmentation):
+
+```ts
+const result = await createReplacementOrder({
+  workspaceId,
+  customerId,
+  shopifyCustomerId: customer.shopify_id,
+  items: [
+    { variantId: "peach_mango_variant_id", quantity: 1, title: "Peach Mango" },
+    { variantId: "strawberry_lemonade_variant_id", quantity: 1, title: "Strawberry Lemonade" },
+  ],
+  shippingAddress: {
+    firstName: customer.first_name,
+    lastName: customer.last_name,
+    address1: customer.default_address.address1,
+    city: customer.default_address.city,
+    zip: customer.default_address.zip,
+    countryCode: customer.default_address.country_code,
+  },
+  reason: "Replacement — customer owed two flavors",
 });
 
 if (!result.success) throw new Error(result.error || "replacement failed");
