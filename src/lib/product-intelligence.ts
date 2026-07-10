@@ -39,6 +39,26 @@ export interface PIReview {
   published_at: string | null;
 }
 
+export interface ProductOffer {
+  subscribeDiscountPct: number;
+  freeShipping: boolean;
+  quantityBreaks: Array<{ label: string; quantity: number; discount_pct: number }>;
+  /** The best case: SnS × volume compounded (multiplicative). e.g. 25% SnS × 12% (3+) = 34% off. */
+  maxCompoundDiscountPct: number;
+  /** Ad-ready headline, e.g. "Up to 34% off + free shipping (25% Subscribe & Save + up to 12% for 3+ units)". */
+  headline: string;
+  // ── Price-on-static inputs (staticPriceRule) ──────────────────────────────────
+  // A bare MSRP on a static is a HARD NO. The ONLY allowed treatments are:
+  //   (a) MSRP strikethrough → discounted price, with the disclaimer; or
+  //   (b) per-serving cost at the discount vs a $4–8 coffee/latte.
+  // The SDK supplies the numbers; the display rule lives in meta-scaling-methodology.
+  msrpCents: number | null;              // single-unit MSRP (the number you may NEVER show bare)
+  discountedUnitCents: number | null;    // MSRP × (1 − maxCompound%) — the price you show AFTER the strikethrough
+  servingsPerUnit: number | null;
+  perServingCents: number | null;        // discountedUnitCents / servings — e.g. ~$1.50/cup vs a $4–8 latte
+  disclaimer: string;                    // e.g. "with 3+ units on Subscribe & Save"
+}
+
 export interface ProductIntelligence {
   product: Row | null;
   benefits: Row[];
@@ -65,6 +85,11 @@ export interface ProductIntelligence {
   };
   blogPosts: Row[];
   seoKeywords: Row[];
+  /** Store/brand-wide selling points (workspace-level, same for every product): guarantee, 700k customers,
+   *  family-owned, Austin TX, etc. — the "overall selling points" blind spot the product tables don't hold. */
+  store: { brandProofPoints: string[] };
+  /** The computed headline offer from the product's active pricing rule (SnS + volume, compounded). */
+  offer: ProductOffer | null;
   variants: Row[];
   /** Sources that were empty for this product — surfaced, never silently swallowed. */
   gaps: string[];
@@ -164,7 +189,18 @@ export async function getProductIntelligence(
   };
 
   const pageContent = ((pageContentRows.data ?? []) as Row[])[0] ?? null;
+
+  // Store/brand-level selling points (workspace-wide, NOT product-specific — the blind spot: guarantee,
+  // 700k customers, family-owned, based in Austin TX, etc.). Lives in workspaces.social_brand_proof_points
+  // as a newline blob; split to a list. + the computed headline offer from the product's pricing rule.
+  const { data: wsRow } = await admin.from("workspaces").select("social_brand_proof_points").eq("id", workspaceId).maybeSingle();
+  const brandProofPoints = String((wsRow as { social_brand_proof_points?: string } | null)?.social_brand_proof_points ?? "")
+    .split("\n").map((l) => l.replace(/^[-•*]\s*/, "").trim()).filter(Boolean);
+  const offer = await loadOffer(admin, workspaceId, productId, (variants.data ?? []) as Row[]);
+
   const gaps: string[] = [];
+  if (!brandProofPoints.length) gaps.push("workspaces.social_brand_proof_points (no store selling points set)");
+  if (!offer) gaps.push("pricing_rules (no active offer configured)");
   if (!(benefits.data ?? []).length) gaps.push("product_benefit_selections (no curated benefits)");
   if (!(adAngles.data ?? []).length) gaps.push("product_ad_angles (no ready-made hooks — needs generation)");
   if (!pageContent) gaps.push("product_page_content (no published PDP copy)");
@@ -196,8 +232,43 @@ export async function getProductIntelligence(
     blogPosts,
     seoKeywords: (seoKeywords.data ?? []) as Row[],
     variants: (variants.data ?? []) as Row[],
+    store: { brandProofPoints },
+    offer,
     gaps,
   };
+}
+
+/** Compute the ad-ready offer for a product from its active pricing rule + variants. SnS and volume
+ *  discounts compound multiplicatively (the real cart math), and the per-serving cost is at the
+ *  discounted unit price — the two number sets an ad may legally show instead of a bare MSRP. */
+async function loadOffer(admin: Admin, workspaceId: string, productId: string, variants: Row[]): Promise<ProductOffer | null> {
+  const { data: link } = await admin.from("product_pricing_rule").select("pricing_rule_id").eq("workspace_id", workspaceId).eq("product_id", productId).maybeSingle();
+  const ruleId = (link as { pricing_rule_id?: string } | null)?.pricing_rule_id;
+  if (!ruleId) return null;
+  const { data: rule } = await admin.from("pricing_rules").select("subscribe_discount_pct, free_shipping, quantity_breaks").eq("id", ruleId).maybeSingle();
+  if (!rule) return null;
+  const r = rule as { subscribe_discount_pct: number | null; free_shipping: boolean | null; quantity_breaks: Array<{ label: string; quantity: number; discount_pct: number }> | null };
+  const sns = Number(r.subscribe_discount_pct ?? 0);
+  const breaks = Array.isArray(r.quantity_breaks) ? r.quantity_breaks : [];
+  const maxVol = Math.max(0, ...breaks.map((b) => Number(b.discount_pct ?? 0)));
+  const maxQty = breaks.filter((b) => Number(b.discount_pct) === maxVol).map((b) => Number(b.quantity)).sort((a, b) => a - b)[0] ?? 3;
+  const maxCompound = Math.round((1 - (1 - sns / 100) * (1 - maxVol / 100)) * 100); // SnS × volume, compounded
+
+  // Representative single-unit variant (fewest servings) → MSRP + servings for the per-serving math.
+  const priced = variants.map((v) => ({ price: Number(v.price_cents ?? 0), servings: Number(v.servings ?? 0) })).filter((v) => v.price > 0 && v.servings > 0);
+  const single = priced.sort((a, b) => a.servings - b.servings)[0] ?? null;
+  const msrpCents = single?.price ?? null;
+  const servingsPerUnit = single?.servings ?? null;
+  const discountedUnitCents = msrpCents != null ? Math.round(msrpCents * (1 - maxCompound / 100)) : null;
+  const perServingCents = discountedUnitCents != null && servingsPerUnit ? Math.round(discountedUnitCents / servingsPerUnit) : null;
+
+  const parts: string[] = [];
+  if (sns) parts.push(`${sns}% Subscribe & Save`);
+  if (maxVol) parts.push(`up to ${maxVol}% for ${maxQty}+ units`);
+  const headline = `Up to ${maxCompound}% off${r.free_shipping ? " + free shipping" : ""}${parts.length ? ` (${parts.join(" + ")})` : ""}`;
+  const disclaimer = [maxVol ? `${maxQty}+ units` : null, sns ? "on Subscribe & Save" : null].filter(Boolean).join(" ");
+
+  return { subscribeDiscountPct: sns, freeShipping: !!r.free_shipping, quantityBreaks: breaks, maxCompoundDiscountPct: maxCompound, headline, msrpCents, discountedUnitCents, servingsPerUnit, perServingCents, disclaimer };
 }
 
 /** Resolve a product by handle (e.g. "amazing-coffee") → its `products.id`, for callers that only know the slug. */
