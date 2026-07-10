@@ -84,7 +84,10 @@ export async function proxy(request: NextRequest) {
     if (isInvestorsPage) {
       const isEntry = p === "/investors/enter"; // route handler sets the cookie
       const isExpired = p === "/investors/expired"; // request-a-fresh-link surface
-      if (isEntry || isExpired) return NextResponse.next();
+      // Link-preview image must be publicly fetchable so the SMS/email unfurl
+      // shows the branded card (bots have no session cookie).
+      const isPreviewAsset = p.startsWith("/investors/opengraph-image") || p.startsWith("/investors/twitter-image");
+      if (isEntry || isExpired || isPreviewAsset) return NextResponse.next();
       const session = verifyInvestorSession(request.cookies.get(INVESTORS_COOKIE_NAME)?.value);
       if (session) return NextResponse.next();
       const url = request.nextUrl.clone();
