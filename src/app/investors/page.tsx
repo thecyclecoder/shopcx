@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -8,9 +9,28 @@ import {
   verifyInvestorSession,
 } from "@/lib/investors/auth";
 
+// cacheComponents (PPR) is on — the cookie/DB read below is uncached dynamic
+// data, so it MUST live inside a <Suspense> boundary (the static shell renders
+// the fallback; the gated content streams at request time). Reading cookies at
+// the page top level without this fails the prerender + breaks the build.
+export default function InvestorsPage() {
+  return (
+    <Suspense
+      fallback={
+        <section className="inv-hero">
+          <h1>How Superfoods is doing</h1>
+          <p>Loading your update…</p>
+        </section>
+      }
+    >
+      <InvestorsContent />
+    </Suspense>
+  );
+}
+
 // The proxy already gates /investors on a valid cookie, but we re-verify here so a
 // stale/forged cookie can never render the page, and to greet the viewer by name.
-export default async function InvestorsPage() {
+async function InvestorsContent() {
   const cookieStore = await cookies();
   const session = verifyInvestorSession(cookieStore.get(INVESTORS_COOKIE_NAME)?.value);
   if (!session) redirect("/investors/expired");
