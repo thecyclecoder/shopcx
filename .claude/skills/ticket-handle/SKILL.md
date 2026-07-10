@@ -118,6 +118,43 @@ An acknowledgment that pairs the truth with the save path passes ("That order al
 
 **3) Acknowledge the already-shipped order honestly.** You may say "that specific shipment already left and can't be redirected" — the customer deserves the truth. But that acknowledgment must be part of a save path, never the whole reply. Pair it with the address update / replacement / self-service cancel handoff.
 
+### Checkout-stuck → the assisted-purchase Direction blueprint
+
+Phase 3 of [[../../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol.md]]. When the inbound message is CHECKOUT-STUCK — the customer can't check out / the OTP or verification code isn't arriving / they're stuck at the payment or authentication screen / they're asking "how do I finish my order" (per [[../../../docs/brain/libraries/checkout-stuck-intent.md]] `classifyCheckoutStuck`) — you author the **assisted-purchase Direction** and CONCIERGE the sale. The founder directive (2026-07-10): any checkout issue defaults, as fast as possible, to us placing the order for the customer via our Braintree minisite — never a stateless "try another card / try PayPal / try Shop Pay" dead-end.
+
+The blueprint is a **four-stage recipe** ([[../../../docs/brain/libraries/assisted-purchase-direction.md]]):
+
+| # | stage | Sol's turn |
+|---|---|---|
+| 1 | `payment_journey` | Launch the ACTIVE `add-payment-method` journey on our Braintree minisite. Warm honest lead-in. |
+| 2 | `confirm_items` | On the `payment_method_added` signal, ask WHICH items. |
+| 3 | `one_time_vs_ss` | Ask one-time (higher price) vs discounted Subscribe & Save. |
+| 4 | `playbook_handoff` | Hand to `assisted-order-purchase` (one-time) or `assisted-subscription-purchase` (S&S). Only AFTER the executor's placement handler returns `ok:true` may your reply claim the order is placed. |
+
+**Turn 1 Direction (author this shape verbatim on your first-touch for a checkout-stuck ticket):**
+
+```json
+{
+  "chosen_path": "journey",
+  "plan": {
+    "journey_slug": "add-payment-method",
+    "assisted_purchase_stages": ["payment_journey", "confirm_items", "one_time_vs_ss", "playbook_handoff"],
+    "handoff_playbook_slugs": {
+      "one_time": "assisted-order-purchase",
+      "subscribe_and_save": "assisted-subscription-purchase"
+    }
+  },
+  "guardrails": {
+    "never_promise_placed_until_verified": true,
+    "escalate_if": ["customer_asks_for_manager", "any_mention_of_lawyer", "third_pivot_of_ask", "playbook_charge_failed_twice"]
+  }
+}
+```
+
+`first_reply` (warm, honest, no markdown): *"I can just place this for you — no need to fight that screen. Tap below to enter your card securely and I'll take it from there."* (The exact wording is exported as `ASSISTED_PURCHASE_LEAD_IN` in `src/lib/assisted-purchase-direction.ts` — reference it verbatim.)
+
+**The execute-then-confirm honor invariant is machine-enforced.** The worker calls [`assertSolAssistedPurchaseReplyNeverClaimsPlaced`](../../../src/lib/assisted-purchase-direction.ts) on your DRAFT reply right after the policy-bait + move-dead-end guards. A reply that claims the order is placed on ANY stage earlier than `playbook_handoff` — or on `playbook_handoff` without the placement handler having returned `ok:true` — is BLOCKED. The customer never sees the false "it's placed", the Direction stays durable, and the ticket escalates to June. Forbidden phrasings on early stages include: *"I've placed your order"*, *"your order is placed"*, *"your order is on its way"*, *"we've charged your card and placed the order"*, *"payment went through"*. A future-tense promise (*"I'll place your order once you enter your card"*) is fine — that's not a placement claim.
+
 ### Phase 3: honest stateless when no playbook matches
 
 If NO playbook clearly matches the ask, choose `chosen_path='stateless'` (or `'needs_info'` when a specific missing piece blocks the reply). **Never** return `chosen_path='playbook'` with an empty, whitespace-only, or invented `plan.playbook_slug` to satisfy the field — the writer rejects the Direction (`playbook_slug_missing` / `playbook_slug_not_string` / `playbook_slug_unknown`) and this box turn burns for nothing.
