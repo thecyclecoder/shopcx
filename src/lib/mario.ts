@@ -296,6 +296,60 @@ async function readPromoteGateHeldStalls(
   return out;
 }
 
+/** Grace before a Vale-review-failed / missing-verification spec is treated as a stall. Wider than the
+ *  build/promote graces (60 min) so Mario never races a human who is actively re-authoring a bounced spec. */
+const MARIO_REVIEW_VERIFICATION_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * FOURTH candidate source (Vale-review-failed with MISSING verification). A spec that was written to
+ * `public.spec_phases` WITHOUT per-phase verification — the raw-`upsertSpec` bypass that
+ * harden-spec-submission now blocks at the writer, but which produced a real backlog before the floor
+ * landed — sits `vale_pass=false` in `in_review` with null `verification` columns. Vale correctly bounced
+ * it (needs_fix), but no surface re-authors it: it has no build job (the failed-build source misses it) and
+ * its last timecard event is a review bounce, not an open `from → to` transition (the timecard thresholds
+ * miss it). This reads that exact class straight from `specs` + `spec_phases`: `vale_pass=false`, at least
+ * one NON-fix phase with an empty `verification`, aged past the grace window. The caller runs these through
+ * the SAME (b)/(c)/(d) drop filters, then hands the survivors to the M4 agent, whose `verification_repair`
+ * verb re-authors real verification through the gate and re-opens the spec to review. Precisely scoped to
+ * MISSING verification (not every needs_fix) so a spec Vale bounced for a different reason (e.g. bad parent)
+ * is never mis-routed to the verification repair.
+ */
+async function readReviewFailedVerificationStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; age_ms: number }>> {
+  const now = Date.now();
+  const { data: failed, error } = await admin
+    .from("specs")
+    .select("id, slug, status, updated_at")
+    .eq("workspace_id", workspace_id)
+    .eq("vale_pass", false)
+    .limit(500);
+  if (error) throw error;
+  const rows = (failed ?? []) as Array<{ id: string; slug: string; status: string | null; updated_at: string | null }>;
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const s of rows) {
+    // Terminal overrides are dropped later in (d) too, but skip early to save the phase read.
+    if (s.status === "folded" || s.status === "deferred") continue;
+    if (!s.updated_at) continue;
+    const age = now - Date.parse(s.updated_at);
+    if (age <= graceMs) continue;
+    const { data: phases } = await admin
+      .from("spec_phases")
+      .select("verification, kind")
+      .eq("spec_id", s.id);
+    const realPhases = ((phases ?? []) as Array<{ verification: string | null; kind: string | null }>).filter(
+      (p) => p.kind !== "fix",
+    );
+    if (realPhases.length === 0) continue;
+    const anyMissing = realPhases.some((p) => !(p.verification && p.verification.trim()));
+    if (!anyMissing) continue; // Vale bounced for a NON-verification reason → not this class.
+    out.push({ workspace_id, spec_slug: s.slug, age_ms: age });
+  }
+  return out;
+}
+
 /**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
@@ -401,6 +455,31 @@ export async function evaluateStalledSpecs(
         gap_ms: hb.age_ms,
         sla_ms: MARIO_PROMOTE_GATE_GRACE_MS,
         brief: { last_events: [], blocked_by_state: [], current_job_status: "spec_test_issues_loop_guard" },
+      });
+    }
+
+    // (a4) FOURTH candidate source — Vale-review-failed with MISSING verification (see
+    // readReviewFailedVerificationStalls). A spec authored WITHOUT per-phase verification (the raw-upsertSpec
+    // bypass that harden-spec-submission now blocks at the writer) sits in_review with `vale_pass=false` and
+    // null verification columns — Vale correctly bounced it, but nothing re-authors it, so it stalls
+    // invisibly (no build job → the failed-build source misses it; its last event is a review bounce, not an
+    // open transition → the timecard thresholds miss it). Mario's existing `verification_repair` verb re-
+    // authors real per-phase verification through the gate and re-opens it to review. This source surfaces
+    // that class so the M4 agent can propose the repair.
+    const reviewFailed = await readReviewFailedVerificationStalls(admin, ws, MARIO_REVIEW_VERIFICATION_GRACE_MS);
+    for (const rf of reviewFailed) {
+      const key = `${rf.workspace_id}::${rf.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: rf.workspace_id,
+        spec_slug: rf.spec_slug,
+        // Semantic: review STARTED but never PASSED — Vale bounced it for missing verification and it stuck.
+        from_event: "review_started",
+        to_event: "review_passed",
+        gap_ms: rf.age_ms,
+        sla_ms: MARIO_REVIEW_VERIFICATION_GRACE_MS,
+        brief: { last_events: [], blocked_by_state: [], current_job_status: "review_failed_missing_verification" },
       });
     }
   }

@@ -158,6 +158,56 @@ function findRawWrites(rel: string, text: string): Finding[] {
 }
 
 /* ------------------------------------------------------------------------------------------------
+ * harden-spec-submission — author through the GATE, not the raw writer. `upsertSpec` is the low-level
+ * writer; authoring a spec must go through `src/lib/author-spec.ts` (`authorSpecRowStructured` / `submitSpec`
+ * / `authorSpecRowFromMarkdown`) so the Verification + Intent + Parent gates and brain-ref suggester run.
+ * `upsertSpec` now ALSO self-gates at runtime (throws `UngatedSpecAuthorError` on empty verification / spec
+ * intent), so a raw call is a loud runtime failure — this static check is the belt to that suspenders,
+ * catching a new raw caller at CI. The ONLY file allowed to call `upsertSpec` is `author-spec.ts` (the gate
+ * wrapper); `specs-table.ts` (its definition) is out of scan scope already.
+ * --------------------------------------------------------------------------------------------- */
+
+/** Files allowed to call `upsertSpec` directly (the sanctioned gate wrapper). */
+const UPSERT_SPEC_ALLOWED = new Set(["src/lib/author-spec.ts"]);
+
+interface UpsertFinding {
+  file: string;
+  line: number;
+  snippet: string;
+}
+
+/** Scan one file for a direct `upsertSpec(` invocation (not the definition, not a comment/import/type line).
+ *  Tracks `/* *\/` block-comment state + strips `//` line comments so JSDoc prose that merely NAMES upsertSpec
+ *  (e.g. "…via upsertSpec (idempotent)…") is never mistaken for a call. The call regex requires `upsertSpec(`
+ *  with no gap, which real call sites use and prose does not. */
+function findUpsertSpecCalls(rel: string, text: string): UpsertFinding[] {
+  const out: UpsertFinding[] = [];
+  const lines = text.split("\n");
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    let l = lines[i];
+    // Consume/track block comments. If we're inside one, drop everything up to a close on this line.
+    if (inBlock) {
+      const end = l.indexOf("*/");
+      if (end === -1) continue;
+      l = l.slice(end + 2);
+      inBlock = false;
+    }
+    // Strip inline block comments that OPEN and don't close on this line (set state), and closed ones.
+    l = l.replace(/\/\*[\s\S]*?\*\//g, " ");
+    const open = l.indexOf("/*");
+    if (open !== -1) { inBlock = true; l = l.slice(0, open); }
+    // Strip a line comment.
+    const dbl = l.indexOf("//");
+    if (dbl !== -1) l = l.slice(0, dbl);
+    if (/\bimport\b.*upsertSpec/.test(l) || /\btype\b.*upsertSpec/.test(l)) continue; // import/type
+    if (/function\s+upsertSpec\b/.test(l)) continue; // the definition (belt — it's out of scope anyway)
+    if (/\bupsertSpec\(/.test(l)) out.push({ file: rel, line: i + 1, snippet: lines[i].trim().slice(0, 160) });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------------------------------------
  * Main.
  * --------------------------------------------------------------------------------------------- */
 
@@ -171,10 +221,13 @@ function main() {
   const summary = process.argv.includes("--summary");
   const files = scanFiles();
   const all: Finding[] = [];
+  const upsertViolations: UpsertFinding[] = [];
   for (const abs of files) {
     const rel = relative(REPO_ROOT, abs).split("\\").join("/");
     if (SDK_INTERNALS.has(rel)) continue; // the SDK writers — sanctioned by definition
-    all.push(...findRawWrites(rel, readFileSync(abs, "utf8")));
+    const text = readFileSync(abs, "utf8");
+    all.push(...findRawWrites(rel, text));
+    if (!UPSERT_SPEC_ALLOWED.has(rel)) upsertViolations.push(...findUpsertSpecCalls(rel, text));
   }
 
   const violations = all.filter((f) => !isSanctioned(f));
@@ -186,6 +239,23 @@ function main() {
       const tag = isSanctioned(f) ? "ALLOWED" : "VIOLATION";
       console.log(`  [${tag}] ${f.file}:${f.line}  ${f.fn}  .from('${f.table}').${f.verb}()  ${f.snippet}`);
     }
+    console.log(`  upsertSpec direct calls outside author-spec.ts: ${upsertViolations.length}`);
+    for (const u of upsertViolations) console.log(`  [UPSERT] ${u.file}:${u.line}  ${u.snippet}`);
+  }
+
+  if (upsertViolations.length > 0) {
+    console.error(
+      `\n❌ check-pm-sdk-compliance — ${upsertViolations.length} direct \`upsertSpec(\` call(s) outside the gate:\n`,
+    );
+    for (const u of upsertViolations) console.error(`  • ${u.file}:${u.line}  →  ${u.snippet}`);
+    console.error(
+      `\nAuthoring a spec must go through the [[author-spec]] chokepoint — \`authorSpecRowStructured\` /\n` +
+      `\`submitSpec\` (structured) or \`authorSpecRowFromMarkdown\` (markdown) — so the Verification + Intent +\n` +
+      `Parent gates and the brain-ref suggester run. \`upsertSpec\` is the low-level writer (it now ALSO\n` +
+      `self-gates at runtime, throwing UngatedSpecAuthorError on empty verification/intent). Only\n` +
+      `\`src/lib/author-spec.ts\` may call it directly. Retarget this call to \`submitSpec\`.\n`,
+    );
+    process.exit(1);
   }
 
   if (violations.length > 0) {

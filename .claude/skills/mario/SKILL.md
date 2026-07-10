@@ -169,6 +169,18 @@ Match a phase by exact `title` (or 1-based `position`). If it's NOT a malformed 
 bug the fix phases couldn't solve), do NOT repair the verification — propose a `durable_fix_spec` or
 escalate instead.
 
+**Second entry into `verification_repair` — review-failed / MISSING verification (`current_job_status='review_failed_missing_verification'`).**
+A 4th detector source (`readReviewFailedVerificationStalls`) surfaces a different class into the SAME
+`verification_repair` verb: a spec that Vale bounced to `vale_pass=false` because at least one non-fix phase
+has an EMPTY `verification` column (NULL, never authored — not merely malformed), aged past a 60-min grace
+(`MARIO_REVIEW_VERIFICATION_GRACE_MS`). These are the specs authored by a RAW `upsertSpec` bypass before the
+writer self-gate landed (the 4 stuck 2026-07-10 specs) plus any legacy stragglers — Vale bounced them and
+nobody ever re-authored real acceptance checks. When the brief carries this `current_job_status`, propose a
+`verification_repair` verdict supplying REAL observable per-phase `verification` — an actual acceptance check
+per phase, not a placeholder. `applyBoxMario` re-authors the spec through the author-spec gate and re-opens it
+to review. Same shape + same match-by-title rule as above; the only difference is the trigger (missing column,
+not a malformed runtime bullet).
+
 ## Threshold self-tuning — when a false trigger fires
 
 When your investigation concludes the M3 detector fired too aggressively for this
