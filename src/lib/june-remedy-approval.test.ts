@@ -13,6 +13,7 @@ import {
   remedyNeedsFounderApproval,
   buildJuneApprovalPreview,
   DEFAULT_REFUND_APPROVAL_THRESHOLD_CENTS,
+  executeApprovedJuneRemedies,
 } from "./june-remedy-approval";
 
 test("remedyMoneyAmountCents reads amount_cents on a money action", () => {
@@ -109,4 +110,74 @@ test("preview: replacement uses 'Send a replacement worth'", () => {
 test("preview: unknown amount reads 'an unspecified amount'", () => {
   const p = buildJuneApprovalPreview({ actionType: "partial_refund", amountCents: null });
   assert.match(p, /Refund an unspecified amount\?/);
+});
+
+// ── Phase 2 (multi-action-remedies): the parked-path executed_at idempotency stamp is preserved ──
+
+test("executeApprovedJuneRemedies: a card whose tool_input.executed_at is already stamped is SKIPPED (idempotent re-drive)", async () => {
+  // The parked-path idempotency contract: once the box-worker sweep has processed an approved /
+  // denied god_mode_approvals card, it stamps `tool_input.executed_at` and the NEXT sweep must
+  // short-circuit that card without re-firing the remedy (a double-refund would be catastrophic).
+  // Phase 2 of multi-action-remedies extends the batch semantics but MUST NOT weaken this stamp —
+  // the check at the top of the row loop must still guard the mutating branches.
+  //
+  // Stub the .from(...).select(...).eq(...).in(...).limit(...) chain the sweep uses to return one
+  // already-stamped row, plus a lightweight .update() sink so we can assert the guard fires
+  // BEFORE any stampExecuted / executeParkedRemedy call would run.
+  const updateCalls: unknown[] = [];
+  const admin = {
+    from(_table: string) {
+      return {
+        select(_cols: string) {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                in(_c: string, _v: string[]) {
+                  return {
+                    async limit(_n: number) {
+                      return {
+                        data: [
+                          {
+                            id: "approval-1",
+                            workspace_id: "ws-1",
+                            status: "approved",
+                            tool_input: {
+                              ticket_id: "ticket-1",
+                              remedy: {
+                                action_type: "partial_refund",
+                                payload: { amount_cents: 3000 },
+                              },
+                              executed_at: "2026-07-10T12:00:00.000Z",
+                              execution_outcome: "executed",
+                            },
+                          },
+                        ],
+                        error: null,
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update(row: unknown) {
+          return {
+            eq(_col: string, _val: string) {
+              // A stampExecuted call would land here — assert none happen for the guarded row.
+              updateCalls.push(row);
+              return Promise.resolve({ data: null, error: null });
+            },
+          };
+        },
+      };
+    },
+  } as unknown as Parameters<typeof executeApprovedJuneRemedies>[0];
+
+  const counts = await executeApprovedJuneRemedies(admin);
+  // Guarded row was skipped → neither counter incremented AND stampExecuted was NEVER called (the
+  // executed_at stamp is the compare-and-set that prevents a re-fire).
+  assert.equal(counts.executed, 0);
+  assert.equal(counts.denied, 0);
+  assert.equal(updateCalls.length, 0, "stampExecuted must NOT re-fire on an already-stamped card");
 });

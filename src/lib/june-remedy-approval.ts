@@ -365,7 +365,8 @@ async function executeParkedRemedy(
   admin: Admin,
   input: { workspaceId: string; ticketId: string; remedy: Record<string, unknown>; reasoning: string },
 ): Promise<boolean> {
-  const { planRemedyExecution, buildRemedySonnetDecision } = await import("@/lib/cs-director");
+  const { planRemedyExecution, buildRemedySonnetDecision, parseBatchEvent, summarizeRemedyBatchOutcome } =
+    await import("@/lib/cs-director");
   const planned = planRemedyExecution(input.remedy);
   if (!planned.ok) {
     await postInternalNote(admin, input.ticketId, `[cs-director] Founder approved, but the parked remedy was malformed (${planned.reason}) — not fired. Needs a human.`);
@@ -386,11 +387,26 @@ async function executeParkedRemedy(
   const sandbox = (ws as { sandbox_mode?: boolean } | null)?.sandbox_mode === true;
 
   const decision = buildRemedySonnetDecision(planned.plan, input.reasoning);
+  // Multi-action batch label (Phase 2 of multi-action-remedies) — same as handleApproveRemedy so
+  // the founder-approved path surfaces the full fix in one line instead of just actions[0].
+  const plannedActionTypes = planned.plan.actions.map((a) => a.actionType);
+  const batchLabel =
+    plannedActionTypes.length === 1
+      ? `action=${plannedActionTypes[0]}`
+      : `actions=[${plannedActionTypes.join(", ")}] (${plannedActionTypes.length})`;
+
   const { executeSonnetDecision } = await import("@/lib/action-executor");
   const suppressedSend = async (): Promise<void> => {
     /* no-op — customer message delivered only after a clean return, below */
   };
+  // Capture the executor's per-action sysNote stream so a partial batch (some landed, some failed)
+  // is rolled up into ONE partial-batch summary on the failure path (matches handleApproveRemedy's
+  // Phase-2 surface). Each raw line still writes to ticket_messages via postInternalNote so the
+  // per-line trail is unchanged.
+  const batchEvents: ReturnType<typeof parseBatchEvent>[] = [];
   const sysNote = async (msg: string): Promise<void> => {
+    const parsed = parseBatchEvent(msg);
+    if (parsed) batchEvents.push(parsed);
     await postInternalNote(admin, input.ticketId, `[cs-director/founder-approved] ${msg}`);
   };
   const ctx = { admin, workspaceId: input.workspaceId, ticketId: input.ticketId, customerId, channel, sandbox };
@@ -398,21 +414,39 @@ async function executeParkedRemedy(
   try {
     res = await executeSonnetDecision(ctx as never, decision, null, suppressedSend, sysNote);
   } catch (e) {
-    await postInternalNote(admin, input.ticketId, `[cs-director] Founder-approved remedy threw during execution (${e instanceof Error ? e.message : e}). No customer message. Needs a human.`);
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] Founder-approved remedy threw during execution (${e instanceof Error ? e.message : e}). ${batchLabel}. No customer message. Needs a human.`,
+    );
     return false;
   }
   if (res.escalated) {
-    await postInternalNote(admin, input.ticketId, `[cs-director] Founder-approved remedy failed/verify-escalated in the executor. No customer message. Needs a human.`);
+    const summary = summarizeRemedyBatchOutcome(
+      plannedActionTypes,
+      batchEvents.filter((e): e is NonNullable<typeof e> => e != null),
+    );
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] Founder-approved remedy escalated (${summary.oneLine}). ${batchLabel}. No customer message. Needs a human.`,
+    );
     return false;
   }
 
-  // Success → deliver the customer reply (channel persona, never "June") then close + deescalate.
+  // Success → EVERY action verified → deliver the customer reply (channel persona, never "June")
+  // then close + deescalate. The execute-then-message invariant now applies across the batch: no
+  // reply ships until ALL N actions returned success.
   if (planned.plan.customerMessage) {
     try {
       const { deliverTicketMessage } = await import("@/lib/ticket-delivery");
       await deliverTicketMessage(admin, input.workspaceId, input.ticketId, channel, planned.plan.customerMessage, sandbox);
     } catch (e) {
-      await postInternalNote(admin, input.ticketId, `[cs-director] Founder-approved remedy fired but the customer reply failed to send (${e instanceof Error ? e.message : e}). Needs a human to re-deliver.`);
+      await postInternalNote(
+        admin,
+        input.ticketId,
+        `[cs-director] Founder-approved remedy fired (${batchLabel}) but the customer reply failed to send (${e instanceof Error ? e.message : e}). Needs a human to re-deliver.`,
+      );
       return false;
     }
   }
@@ -422,6 +456,10 @@ async function executeParkedRemedy(
   } catch {
     /* close failure is non-fatal — the action + reply already landed */
   }
-  await postInternalNote(admin, input.ticketId, `[cs-director] Founder-approved remedy executed and the customer was updated.`);
+  await postInternalNote(
+    admin,
+    input.ticketId,
+    `[cs-director] Founder-approved remedy executed and the customer was updated. ${batchLabel}.`,
+  );
   return true;
 }

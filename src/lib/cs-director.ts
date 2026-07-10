@@ -313,6 +313,73 @@ export function buildRemedySonnetDecision(
   };
 }
 
+// ── Multi-action batch surface (Phase 2 of multi-action-remedies) ──────────────────────────────
+
+/**
+ * A parsed per-action outcome extracted from the executor's sysNote stream. `handleDirectAction`
+ * (src/lib/action-executor.ts) emits one `Action completed: <summary-or-type>` line per successful
+ * action and one `Action failed: <type> — <error>` line per failure BEFORE it calls `escalateTicket`
+ * on any failure. Parsing those lines is how `handleApproveRemedy` knows WHICH actions in June's
+ * batch landed vs which one broke the whole fix — the executor's own return only carries a
+ * coarse-grained `escalated:boolean`, not per-action detail.
+ */
+interface BatchActionEvent {
+  kind: "completed" | "failed";
+  /** The action type or the human-friendly `result.summary` string handleDirectAction chose. */
+  label: string;
+  /** Only present on failures — the `result.error` returned by the direct-action handler. */
+  error?: string;
+}
+
+/**
+ * Parse ONE executor sysNote line into a `BatchActionEvent`, or null when the line isn't a
+ * per-action verdict (e.g. a `[Self-heal]` note or an alias-resolved trace line). Kept pure so the
+ * regex + shape can be exercised without booting the executor.
+ *
+ * Format contract (mirrored to handleDirectAction lines ~3140-3143 in action-executor.ts):
+ *  - success: `Action completed: <summary-or-type>`
+ *  - failure: `Action failed: <type> — <error>`  (em-dash, exact spacing)
+ */
+export function parseBatchEvent(line: string): BatchActionEvent | null {
+  const completed = /^Action completed:\s+(.+)$/i.exec(line);
+  if (completed) return { kind: "completed", label: completed[1].trim() };
+  const failed = /^Action failed:\s+(\S+)\s+[—-]\s+(.+)$/i.exec(line);
+  if (failed) return { kind: "failed", label: failed[1].trim(), error: failed[2].trim() };
+  return null;
+}
+
+/**
+ * Compose the partial-batch summary that gets rolled onto the returned `error` string AND into a
+ * summary internal note when the batch escalates. This is the "surface WHICH action failed + what
+ * DID land" the multi-action-remedies spec's Phase 2 verification calls for — a human eyeballing
+ * the ticket sees the exact partial state in one line instead of reconstructing it from N sysNote
+ * fragments. Pure.
+ */
+export function summarizeRemedyBatchOutcome(
+  plannedActionTypes: string[],
+  events: BatchActionEvent[],
+): { landed: string[]; failed: Array<{ label: string; error?: string }>; oneLine: string } {
+  const landed = events.filter((e) => e.kind === "completed").map((e) => e.label);
+  const failed = events.filter((e) => e.kind === "failed").map((e) => ({ label: e.label, error: e.error }));
+  const total = plannedActionTypes.length;
+  const parts: string[] = [`batch of ${total}`];
+  if (failed.length > 0) {
+    parts.push(
+      `failed: [${failed.map((f) => (f.error ? `${f.label} — ${f.error}` : f.label)).join("; ")}]`,
+    );
+  }
+  if (landed.length > 0) {
+    parts.push(`landed: [${landed.join(", ")}]`);
+  }
+  if (failed.length === 0 && landed.length === 0) {
+    // The executor escalated without a parseable per-action line — surface the whole authored
+    // batch so a human sees exactly what June intended even when the executor's escalate reason
+    // is upstream of the per-action loop (e.g. sandbox mode, an alias miss with no handler).
+    parts.push(`authored: [${plannedActionTypes.join(", ")}]`);
+  }
+  return { landed, failed, oneLine: parts.join("; ") };
+}
+
 // ── Injectable dependency surface (real defaults + test overrides) ─────────────────────────────
 
 /**
@@ -446,6 +513,13 @@ async function handleApproveRemedy(
       };
     }
     const { actionType, customerMessage } = planned.plan;
+    // Multi-action label (Phase 2 of multi-action-remedies): the whole batch, in June's authored
+    // order, surfaced on the tag so logs + log_tail carry the full fix shape (not just actions[0]).
+    const plannedActionTypes = planned.plan.actions.map((a) => a.actionType);
+    const batchLabel =
+      plannedActionTypes.length === 1
+        ? `action=${plannedActionTypes[0]}`
+        : `actions=[${plannedActionTypes.join(", ")}] (${plannedActionTypes.length})`;
 
     // 2. Resolve the ticket from job.instructions (same shape the runner reads at Phase 1). We look
     //    it up here instead of taking it as a parameter to keep the applyBoxCsDirectorCall signature
@@ -538,7 +612,14 @@ async function handleApproveRemedy(
     const suppressedSend = async (_msg: string, _sb: boolean): Promise<void> => {
       /* no-op — customer message is delivered by deliverTicketMessage below, only after success */
     };
+    // Capture the executor's per-action sysNote stream so a failed batch can surface WHICH action
+    // failed + what DID land on the returned error string + a summary internal note (Phase 2 of
+    // multi-action-remedies). The delegate still writes each raw line to ticket_messages so the
+    // audit thread's per-line trail is unchanged — the events buffer is a parallel roll-up only.
+    const batchEvents: BatchActionEvent[] = [];
     const sysNote = async (msg: string): Promise<void> => {
+      const parsed = parseBatchEvent(msg);
+      if (parsed) batchEvents.push(parsed);
       try {
         await admin.from("ticket_messages").insert({
           ticket_id: ticketId,
@@ -581,10 +662,17 @@ async function handleApproveRemedy(
       };
     }
 
-    // 7. Failure path: executor escalated (verify failure / action failure). No customer message —
-    //    the whole reason this executor exists is to NOT promise something we didn't do.
+    // 7. Failure path: executor escalated (one or more actions in the batch failed run/verify). No
+    //    customer message — the whole reason this executor exists is to NOT promise something we
+    //    didn't do. Roll the captured per-action events into a partial-batch summary so the runner's
+    //    log_tail names WHICH action failed + what DID land (Phase 2 of multi-action-remedies) —
+    //    without that surface a human eyeballing the ticket has to reconstruct the state from N
+    //    ticket_messages sysNote rows.
     if (executorResult.escalated) {
-      const error = `approve_remedy: action ${actionType} escalated by executor (verify or run failed) — no customer message sent`;
+      const summary = summarizeRemedyBatchOutcome(plannedActionTypes, batchEvents);
+      const error = `approve_remedy: ${batchLabel} escalated by executor (${summary.oneLine}) — no customer message sent`;
+      // Also emit a rolled-up internal note so a human sees the partial-batch state in one place.
+      await sysNote(`Batch escalated — ${summary.oneLine}. No customer message sent.`);
       console.warn(`${tag} ${error}`);
       return {
         ok: false,
@@ -595,20 +683,20 @@ async function handleApproveRemedy(
       };
     }
 
-    // 8. Success path: deliver the customer message. If June did not include one (rare — the prompt
-    //    strongly implies one on approve_remedy, but the shape is Record<string, unknown> so it can
-    //    be missing), we still return ok — the action fired, and the runner's per-verdict internal
-    //    note + ticket transition close the loop.
+    // 8. Success path: EVERY action in the batch verified — deliver the customer message. If June
+    //    did not include one (rare — the prompt strongly implies one on approve_remedy, but the
+    //    shape is Record<string, unknown> so it can be missing), we still return ok — the actions
+    //    fired, and the runner's per-verdict internal note + ticket transition close the loop.
     if (customerMessage) {
       try {
         await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, customerMessage, sandbox);
-        console.log(`${tag} approve_remedy: action=${actionType} ok · customer message delivered`);
+        console.log(`${tag} approve_remedy: ${batchLabel} ok · customer message delivered`);
         return { ok: true, handler: "approve_remedy", message_delivered: true };
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
-        const error = `approve_remedy: action ${actionType} succeeded but delivery threw (${errMsg})`;
+        const error = `approve_remedy: ${batchLabel} succeeded but delivery threw (${errMsg})`;
         console.warn(`${tag} ${error}`);
-        // The action DID fire; the delivery race is a real failure (customer didn't hear back) so
+        // The batch DID fire; the delivery race is a real failure (customer didn't hear back) so
         // we surface it as needs_attention — a human confirms and re-delivers.
         return {
           ok: false,
@@ -620,7 +708,7 @@ async function handleApproveRemedy(
       }
     }
 
-    console.log(`${tag} approve_remedy: action=${actionType} ok · no customer message on remedy (skipped delivery)`);
+    console.log(`${tag} approve_remedy: ${batchLabel} ok · no customer message on remedy (skipped delivery)`);
     return { ok: true, handler: "approve_remedy", message_delivered: false };
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
