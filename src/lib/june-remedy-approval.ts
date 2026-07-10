@@ -436,6 +436,135 @@ export async function raiseJuneRemedyApproval(
   return { raised: true, via: "sms_cockpit", approvalId };
 }
 
+/** The decision category for a founder-escalation approval (vs the money-threshold `june_refund`). */
+export const JUNE_FOUNDER_ESCALATION_CATEGORY = "june_founder_escalation";
+
+/**
+ * Plain-language preview for a June escalate_founder approval — works for ANY recommended remedy, not
+ * just money actions. The founder reads this on their phone and taps Approve/Decline. Pure.
+ */
+export function buildFounderApprovalPreview(input: {
+  remedy: Record<string, unknown>;
+  reasoning?: string | null;
+  customerName?: string | null;
+  ticketSubject?: string | null;
+}): string {
+  const remedy = input.remedy || {};
+  const actionType = typeof remedy.action_type === "string" ? remedy.action_type.trim() : "";
+  const payload =
+    remedy.payload && typeof remedy.payload === "object" && !Array.isArray(remedy.payload)
+      ? (remedy.payload as Record<string, unknown>)
+      : {};
+  const who = input.customerName?.trim() ? ` for ${input.customerName.trim()}` : "";
+  const money = remedyMoneyAmountCents(remedy);
+  let action: string;
+  if (money != null) {
+    const verb = actionType === "create_replacement_order" || actionType === "dollar_replacement" ? "Send a replacement worth" : "Refund";
+    action = `${verb} $${(money / 100).toFixed(2)}${who}`;
+  } else if (actionType === "add_one_time_gift") {
+    const free = payload.free !== false;
+    action = `${free ? "Comp a FREE one-time gift" : "Add a one-time item"}${who} on their next order`;
+  } else if (actionType) {
+    action = `Run "${actionType}"${who}`;
+  } else {
+    action = `June's recommended action${who}`;
+  }
+  const subj = input.ticketSubject?.trim() ? ` (re: "${input.ticketSubject.trim()}")` : "";
+  const why = input.reasoning?.trim() ? `\n\nJune: ${input.reasoning.trim().slice(0, 500)}` : "";
+  return `${action}${subj}?${why}`;
+}
+
+/**
+ * Raise an Eve SMS approval for a June `escalate_founder` decision that carries a recommended remedy.
+ *
+ * Unlike `raiseJuneRemedyApproval` (which only gates money actions ABOVE the refund threshold), this
+ * fires for ANY founder escalation with an actionable recommendation — a policy-exception judgment
+ * call, a $0 goodwill gift, anything June kicks upstairs. The founder's directive: "anything June
+ * seeks from me should be a straight-up approval," never a silent dashboard card I have to go hunt.
+ *
+ * Parks the recommended remedy on a `june_remedy` card (so the SAME `executeApprovedJuneRemedies`
+ * sweep executes it on Approve / stands down on Deny), texts the founder immediately, and holds the
+ * ticket escalated to the owner. Best-effort; never throws.
+ */
+export async function raiseFounderApproval(
+  admin: Admin,
+  input: {
+    workspaceId: string;
+    ticketId: string;
+    remedy: Record<string, unknown>;
+    reasoning: string;
+    customerName?: string | null;
+    ticketSubject?: string | null;
+  },
+): Promise<RaiseJuneRemedyResult> {
+  let customerName = input.customerName ?? null;
+  let ticketSubject = input.ticketSubject ?? null;
+  if (!customerName || !ticketSubject) {
+    try {
+      const { data: tk } = await admin
+        .from("tickets")
+        .select("subject, customers(first_name)")
+        .eq("id", input.ticketId)
+        .maybeSingle();
+      const row = tk as { subject?: string | null; customers?: { first_name?: string | null } | null } | null;
+      ticketSubject = ticketSubject || row?.subject || null;
+      customerName = customerName || row?.customers?.first_name || null;
+    } catch {
+      /* best-effort */
+    }
+  }
+  const preview = buildFounderApprovalPreview({ remedy: input.remedy, reasoning: input.reasoning, customerName, ticketSubject });
+  const actionType = typeof input.remedy.action_type === "string" ? input.remedy.action_type.trim() : null;
+  const amountCents = remedyMoneyAmountCents(input.remedy);
+  const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
+
+  let session: { id: string; cockpit_token: string | null } | null = null;
+  try {
+    const { getActiveSession, armSession } = await import("@/lib/god-mode");
+    session = await getActiveSession(admin, input.workspaceId);
+    if (!session && ownerId) session = await armSession(admin, { workspaceId: input.workspaceId, createdBy: ownerId });
+  } catch (e) {
+    console.warn("[june-remedy-approval] founder-escalation cockpit resolution failed:", e instanceof Error ? e.message : e);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await admin
+      .from("tickets")
+      .update({ escalated_at: now, escalated_to: ownerId, escalation_reason: `Awaiting founder approval: ${preview.split("\n")[0]}`, updated_at: now })
+      .eq("id", input.ticketId)
+      .eq("workspace_id", input.workspaceId);
+  } catch (e) {
+    console.warn("[june-remedy-approval] founder-escalation park-ticket failed:", e instanceof Error ? e.message : e);
+  }
+
+  if (!session) {
+    await postInternalNote(admin, input.ticketId, `[cs-director] June escalated to the founder with a recommendation, but no active cockpit to text — left escalated for manual review. ${preview.split("\n")[0]}`);
+    return { raised: true, via: "escalated_no_cockpit" };
+  }
+
+  let approvalId: string | undefined;
+  try {
+    const { openApproval, sendGodModeSMS } = await import("@/lib/god-mode");
+    const card = await openApproval(admin, {
+      sessionId: session.id,
+      workspaceId: input.workspaceId,
+      toolName: JUNE_REMEDY_TOOL,
+      toolInput: { ticket_id: input.ticketId, remedy: input.remedy, reasoning: input.reasoning, action_type: actionType, amount_cents: amountCents, raised_at: now },
+      preview,
+      risk: "decision",
+      category: JUNE_FOUNDER_ESCALATION_CATEGORY,
+    });
+    approvalId = card.id;
+    await sendGodModeSMS(admin, { workspaceId: input.workspaceId, kind: "approval", cockpitToken: session.cockpit_token });
+  } catch (e) {
+    console.warn("[june-remedy-approval] founder-escalation raise/SMS failed:", e instanceof Error ? e.message : e);
+  }
+
+  await postInternalNote(admin, input.ticketId, `[cs-director] June escalated to the founder and texted a one-tap approval. ${preview.split("\n")[0]}`);
+  return { raised: true, via: "sms_cockpit", approvalId };
+}
+
 async function postInternalNote(admin: Admin, ticketId: string, body: string): Promise<void> {
   try {
     await admin.from("ticket_messages").insert({

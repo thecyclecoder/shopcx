@@ -3,6 +3,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch } from "@/lib/appstle-pricing";
 import {
   isInternalSubscription,
@@ -406,15 +407,17 @@ async function resolveShopifyVariantId(variantId: string): Promise<string | null
  *     `is_gift: true` (pricing engine forces $0); the renewal engine drops the
  *     line after it ships. Fully owned by our DB — reliable + verified.
  *
- *   APPSTLE sub → `replace-variants-v3` with `newOneTimeVariants` (the native
- *     one-time add). A PAID add-on lands as-is. A FREE gift additionally zeroes
- *     the new one-time line's base price; if the $0 CANNOT be confirmed the add
- *     is ROLLED BACK (removed) and the call fails — a "gift" must never silently
- *     charge the customer. Callers that need a guaranteed-free delivery on an
- *     Appstle sub can fall back to a standalone $0 gift order (issueReplacement).
+ *   APPSTLE sub → a standalone $0 GIFT ORDER via `issueReplacement` (FREE only).
+ *     Appstle's true one-off endpoint is on membership-admin.appstle.com and 401s
+ *     our Subscriptions key; `replace-variants-v3` `newOneTimeVariants` adds a
+ *     RECURRING $0 line (the ticket 6a8ddfd9 double-frother incident). So the gift
+ *     ships as its own $0 order — never recurs, never charges. Idempotent (skips if
+ *     a gift order for the variant/sub landed in the last hour) so a retry can't
+ *     double-order.
  *
  * `opts.free` defaults true (the gift case). `opts.priceCents` sets an explicit
- * price for a PAID add-on (internal only; omitted → live catalog price).
+ * price for a PAID add-on (INTERNAL only — paid add-ons aren't supported on Appstle
+ * subs, which return an error).
  *
  * Returns `free_confirmed` so the caller only tells the customer "free" when the
  * $0 actually landed. `backend` is `"internal" | "appstle"`.
@@ -436,102 +439,85 @@ export async function subAddOneTimeGift(
     return { ...r, free_confirmed: r.success && free, backend: "internal" };
   }
 
-  // Appstle sub → replace-variants-v3 newOneTimeVariants (+ zero for a free gift).
+  // Appstle sub → a standalone $0 GIFT ORDER (issueReplacement). Appstle's true
+  // one-off endpoint lives on membership-admin.appstle.com and 401s our Subscriptions
+  // API key, and replace-variants-v3 `newOneTimeVariants` adds a RECURRING $0 line
+  // (the ticket 6a8ddfd9 double-frother incident). So an Appstle sub's one-time gift
+  // ships as its OWN $0 order — reliable, never recurs, never charges. FREE only.
+  if (!free) {
+    return { success: false, error: "Paid one-time add-ons aren't supported on Appstle subs — use an internal sub or a charged order.", backend: "appstle" };
+  }
   const shopifyVariantId = await resolveShopifyVariantId(variantId);
   if (!shopifyVariantId) {
     return { success: false, error: `Could not resolve a Shopify variant id for "${variantId}"`, backend: "appstle" };
   }
-  await healOnTouch(workspaceId, contractId);
-  const config = await getAppstleConfig(workspaceId);
-  if (!config) return { success: false, error: "Appstle not configured", backend: "appstle" };
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions").select("id, customer_id").eq("shopify_contract_id", contractId).maybeSingle();
+  if (!sub?.customer_id) return { success: false, error: "Could not resolve the customer for this subscription", backend: "appstle" };
+  const { data: cust } = await admin
+    .from("customers").select("shopify_customer_id, first_name, last_name, default_address").eq("id", sub.customer_id).maybeSingle();
+  if (!cust?.shopify_customer_id) return { success: false, error: "Customer has no Shopify id — can't create a gift order", backend: "appstle" };
 
-  const added = await callReplaceVariants(config.apiKey, {
-    shop: config.shop,
-    contractId: Number(contractId),
-    eventSource: "CUSTOMER_PORTAL",
-    newOneTimeVariants: { [shopifyVariantId]: qty },
-    stopSwapEmails: true,
-  });
-  if (!added.success) return { success: false, error: added.error, backend: "appstle" };
+  // IDEMPOTENCY — a self-heal retry must NOT create a SECOND gift order. A successful
+  // gift lands as `status='created'` with `replacement_order_id` STILL NULL (that UUID
+  // is stamped later on order sync), so we key on STATUS, not the order id: any
+  // NON-FAILED goodwill-gift replacement for this variant on this sub in the last hour
+  // means the gift already went out — skip. (A `failed` row must NOT block a retry.)
+  const { data: priorGifts } = await admin
+    .from("replacements").select("id, items, status, created_at")
+    .eq("subscription_id", sub.id).eq("reason", ONE_TIME_GIFT_REASON)
+    .neq("status", "failed")
+    .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString());
+  const alreadyGifted = (priorGifts || []).some((g) =>
+    Array.isArray(g.items) && (g.items as Array<Record<string, unknown>>).some((it) => String(it.variantId ?? it.variant_id) === shopifyVariantId));
+  if (alreadyGifted) return { success: true, free_confirmed: true, backend: "appstle" };
 
-  // Mirror the one-time line locally (flagged so the UI/reads know it's a gift).
-  await syncItemsAfterMutation(workspaceId, contractId, (items) => [
-    ...items,
-    {
-      variant_id: shopifyVariantId, quantity: qty, title: "", variant_title: "",
-      price_cents: free ? 0 : 0, product_id: "", one_time_next_renewal: true, is_gift: free,
-    },
-  ]);
+  const resolvedAddr = await (await import("@/lib/customer-shipping-address")).resolveCustomerShippingAddress(admin, workspaceId, sub.customer_id, {});
+  const a = resolvedAddr?.address;
+  if (!a?.address1) return { success: false, error: "No shipping address on file — can't create a gift order", backend: "appstle" };
 
-  // Paid add-on: nothing more to do — it bills at its variant price.
-  if (!free) return { success: true, free_confirmed: false, backend: "appstle" };
-
-  // Free gift: zero the new one-time line's base price. If we cannot CONFIRM the
-  // $0, roll the add back so the customer is never charged for a "gift".
-  const zeroed = await zeroAppstleOneTimeLine(workspaceId, contractId, shopifyVariantId, config.apiKey);
-  if (zeroed.success) return { success: true, free_confirmed: true, backend: "appstle" };
-
-  await callReplaceVariants(config.apiKey, {
-    shop: config.shop,
-    contractId: Number(contractId),
-    eventSource: "CUSTOMER_PORTAL",
-    oldOneTimeVariants: [Number(shopifyVariantId)],
-    stopSwapEmails: true,
-  });
-  await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-    items.filter((i) => !(String(i.variant_id) === shopifyVariantId && i.one_time_next_renewal)),
-  );
-  return {
-    success: false,
-    error: `Could not confirm the gift line as $0 (${zeroed.error || "line not found"}); rolled back. Use a $0 gift order instead.`,
-    free_confirmed: false,
-    backend: "appstle",
-  };
-}
-
-/**
- * Set an Appstle one-time line's base price to $0. Resolves the newly-added
- * one-time line's GID off the live contract, then calls the update-line-item
- * price endpoint. Returns success only when the endpoint accepts the $0.
- */
-async function zeroAppstleOneTimeLine(
-  workspaceId: string,
-  contractId: string,
-  shopifyVariantId: string,
-  apiKey: string,
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    const res = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
-      { cache: "no-store" },
-    );
-    if (!res.ok) return { success: false, error: `contract fetch ${res.status}` };
-    const data = await res.json();
-    // One-time add-ons may surface on lines.nodes or a dedicated one-time array
-    // depending on Appstle's contract shape; scan both.
-    const candidates = [
-      ...((data?.lines?.nodes || []) as Array<Record<string, unknown>>),
-      ...((data?.oneTimeProducts || data?.oneTimeLines?.nodes || []) as Array<Record<string, unknown>>),
-    ];
-    const line = candidates.find((l) => {
-      const vid = String((l.variantId as string) || "").split("/").pop();
-      return vid === String(shopifyVariantId) && (l.oneTimePurchase === true || l.oneTime === true || true);
-    });
-    const lineId = line?.id ? String(line.id) : null;
-    if (!lineId) return { success: false, error: "one-time line not found on contract" };
-    const priceRes = await fetch(
-      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${contractId}&lineId=${encodeURIComponent(lineId)}&basePrice=0.00`,
-      { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
-    );
-    if (!priceRes.ok) {
-      const t = await priceRes.text();
-      return { success: false, error: `zero price ${priceRes.status}: ${t.slice(0, 120)}` };
-    }
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: String(err) };
+  // Gift line title (product name) for the order + note.
+  const { data: pv } = await admin.from("product_variants").select("product_id").eq("shopify_variant_id", shopifyVariantId).maybeSingle();
+  let giftTitle = "Gift";
+  if (pv?.product_id) {
+    const { data: p } = await admin.from("products").select("title").eq("id", pv.product_id).maybeSingle();
+    if (p?.title) giftTitle = String(p.title);
   }
+
+  // Country: the shared resolver can hand back a truncated "UN" (from "United
+  // States") which Shopify rejects — and normalizeCountryToIso2 lets "UN" pass (it
+  // matches the 2-letter shape). Derive from the customer's authoritative Shopify
+  // countryCodeV2 / country name instead, normalized to a real ISO2.
+  const da = (cust.default_address as Record<string, unknown> | null) || {};
+  const countryCode = normalizeCountryToIso2(String(da.countryCodeV2 || da.country || a.countryCode || "US"));
+
+  const { issueReplacement } = await import("@/lib/commerce/replacement");
+  const r = await issueReplacement(workspaceId, {
+    customerId: sub.customer_id,
+    shopifyCustomerId: String(cust.shopify_customer_id),
+    items: [{ variantId: shopifyVariantId, quantity: qty, title: giftTitle }],
+    shippingAddress: {
+      firstName: a.firstName || cust.first_name || "",
+      lastName: (a as { lastName?: string }).lastName || cust.last_name || "",
+      address1: a.address1,
+      address2: (a as { address2?: string }).address2,
+      city: a.city,
+      provinceCode: a.provinceCode,
+      zip: a.zip,
+      countryCode,
+    },
+    reason: ONE_TIME_GIFT_REASON,
+    subscriptionId: sub.id,
+    initiatedBy: "script",
+    shopifyNote: `Complimentary one-time gift (${giftTitle} × ${qty}) — goodwill, $0, ships as its own order alongside the next renewal.`,
+  });
+  if (!r.success) return { success: false, error: r.error, backend: "appstle" };
+  return { success: true, free_confirmed: true, backend: "appstle" };
 }
+
+/** Short reason tag for a one-time goodwill gift order (Shopify draft-order tags cap at 40 chars). */
+const ONE_TIME_GIFT_REASON = "goodwill gift";
 
 /** Remove a product variant from a subscription */
 export async function subRemoveItem(
