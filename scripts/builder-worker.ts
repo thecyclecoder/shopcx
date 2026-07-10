@@ -702,7 +702,7 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
 
 // Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
-function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
+function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; input?: string } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
   return new Promise((resolve) => {
     // ada-director-spec-status-cards-fix-tooling-fa6848: redirect stdin from /dev/null. Default `spawn`
     // leaves stdin as an open pipe never written to — the `claude -p` CLI sees that, waits 3s for input,
@@ -711,7 +711,17 @@ function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTime
     // showed up under multiple parked security-review jobs (fa6848a7, 69594acf — same evidence shape).
     // Closing stdin is the CLI's own recommended fix; it's strictly additive — no callers write to stdin
     // (every command is `claude -p prompt …` / git / npx tsc / bash -lc, none of which read from stdin).
-    const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env, stdio: ["ignore", "pipe", "pipe"] });
+    //
+    // EXCEPTION — opts.input: when a caller passes a prompt too large to fit in one argv element
+    // (Linux caps a SINGLE argv string at MAX_ARG_STRLEN = 128KB → `spawn E2BIG`; the CS-Director brief
+    // blew past it, failing every June escalation), we pipe the prompt through stdin instead (no
+    // per-string cap) and `claude -p` reads it from stdin. stdin is a pipe only in that case; the data
+    // is written immediately so the 3s no-stdin wait never triggers.
+    const child = spawn(cmd, args, { cwd: opts.cwd || REPO_DIR, env: opts.env || process.env, stdio: [opts.input != null ? "pipe" : "ignore", "pipe", "pipe"] });
+    if (opts.input != null && child.stdin) {
+      child.stdin.on("error", () => { /* EPIPE if the child exits before reading — best-effort */ });
+      child.stdin.end(opts.input);
+    }
     let out = "";
     let err = "";
     let killed: "idle" | "hardcap" | undefined;
@@ -2081,7 +2091,14 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
         }),
       ]
     : ["--dangerously-skip-permissions"];
-  const args = [...base, ...currentModelArgs(), "-p", augmentedPrompt, ...permissionArgs, "--output-format", "stream-json", "--verbose"];
+  // A single argv element is capped at Linux MAX_ARG_STRLEN (128KB); a brief bigger than that (the
+  // CS-Director's full ticket + resolution-events ledger + customer/subs/orders slice routinely is)
+  // fails the spawn with `spawn E2BIG` — every June escalation was dying here. Over a safe floor,
+  // pass the prompt through stdin (no per-string cap) instead of as the `-p` positional; `claude -p`
+  // with no positional reads the prompt from stdin. Small prompts keep the exact prior argv path.
+  const PROMPT_ARG_MAX_BYTES = 96 * 1024;
+  const promptViaStdin = Buffer.byteLength(augmentedPrompt, "utf8") > PROMPT_ARG_MAX_BYTES;
+  const args = [...base, ...currentModelArgs(), "-p", ...(promptViaStdin ? [] : [augmentedPrompt]), ...permissionArgs, "--output-format", "stream-json", "--verbose"];
   const writer = opts.jobId ? makeChecklistWriter(opts.jobId) : null;
   // Heartbeat (stale-session-reaper): bump last_heartbeat_at on each stream line so the in-loop reaper
   // can tell a LIVE-but-long session from a DEAD one. Keyed on jobId only (independent of the checklist),
@@ -2106,6 +2123,7 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
       idleTimeout: opts.idleTimeout,
       timeout: opts.timeout,
       onLine,
+      input: promptViaStdin ? augmentedPrompt : undefined,
     });
   } finally {
     if (tracksAccountHere && acctHere) acctHere.inFlight--; // release the account slot when the session ends
