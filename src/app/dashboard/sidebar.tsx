@@ -115,6 +115,26 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/storefront/optimizer/tests", label: "Tests", icon: "M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" },
     ],
   },
+  // Logistics: Marco's home — inventory, replenishment, supplier lead-times + the crown-jewel
+  // mapping/inventory views migrated from Shoptics onto our qb_* tables. Owner-facing internal ops.
+  // See docs/brain/functions/logistics.md (Crisis-aware replenishment & allocation doctrine).
+  {
+    label: "Logistics",
+    icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4",
+    collapsible: true,
+    ownerOnly: true,
+    items: [
+      { href: "/dashboard/logistics/replenishment", label: "Replenishment", icon: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" },
+      { href: "/dashboard/logistics/inventory", label: "Inventory", icon: "M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" },
+      { href: "/dashboard/logistics/purchase-orders", label: "Purchase Orders", icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" },
+      { href: "/dashboard/logistics/lead-times", label: "Lead Times", icon: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" },
+      { href: "/dashboard/logistics/suppliers", label: "Suppliers", icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" },
+      { href: "/dashboard/logistics/mappings", label: "Mappings", icon: "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" },
+      // Crisis is Logistics-owned but cross-departmental (Logistics sets allocation policy, CS
+      // executes) — cross-listed here + under Customers. See docs/brain/functions/logistics.md.
+      { href: "/dashboard/crisis", label: "Crisis", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
+    ],
+  },
   {
     label: "Knowledge",
     icon: ICONS.knowledge,
