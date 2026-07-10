@@ -92,7 +92,10 @@ interface CohortsResponse {
 function ModeBadge({ mode }: { mode: "shadow" | "armed" | null }) {
   if (!mode) {
     return (
-      <span className="rounded bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+      <span
+        className="rounded bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+        data-testid="mb-mode-badge"
+      >
         no policy
       </span>
     );
@@ -354,7 +357,16 @@ export default function MediaBuyerCohortsPage() {
                           ) : null}
                         </>
                       ) : (
-                        <span>no arming authorization has been evaluated yet</span>
+                        <>
+                          <span className="font-semibold text-zinc-500 dark:text-zinc-400" data-testid="mb-auth-allowed">
+                            no arming authorization yet
+                          </span>
+                          {" · "}
+                          <span data-testid="mb-auth-fresh">—</span>
+                          <ul className="mt-1 list-disc pl-4 text-xs text-zinc-500" data-testid="mb-auth-reasons">
+                            <li>no authorization has been evaluated for this cohort</li>
+                          </ul>
+                        </>
                       )}
                     </div>
                     {trust ? (

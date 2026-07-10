@@ -19581,6 +19581,22 @@ async function runMediaBuyerJob(job: Job) {
       console.error(`${tag} account=${accountId} threw: ${msg}`);
     }
   }
+  // media-buyer-director-slack-digest Phase 2: the Growth Director (Max) posts ONE digest of this pass's
+  // cohort recommendations into #director-growth-max. The agent never posts directly — delivery lives here,
+  // rolling up all accounts' plans. Non-fatal: a Slack hiccup must not fail the media-buyer pass.
+  try {
+    const { deliverMediaBuyerDigest } = await import("../src/lib/media-buyer/director-digest");
+    const plans = perAccount
+      .filter((r) => r.plan && !r.error)
+      .map((r) => ({ account: r.account, plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan }));
+    if (plans.length) {
+      const digest = await deliverMediaBuyerDigest(a, job.workspace_id, plans);
+      console.log(`${tag} director digest → ${digest.posted ? `posted (${digest.ts})` : `skipped — ${digest.reason}`}`);
+    }
+  } catch (e) {
+    console.error(`${tag} director digest delivery failed (non-fatal):`, e instanceof Error ? e.message : e);
+  }
+
   const anySucceeded = perAccount.some((r) => !r.error);
   await update(job.id, {
     status: anySucceeded ? "completed" : "failed",

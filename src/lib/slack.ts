@@ -146,6 +146,35 @@ export async function postAsAda(
   return { ok: true, ts: result.ts as string };
 }
 
+// Growth Director (Max) identity — the media-buyer digest posts into #director-growth-max AS Max, mirroring
+// how Ada posts into #cto-ada. Sourced from personas.ts so name/avatar never drift (media-buyer-director-slack-digest).
+const MAX = getPersona("growth");
+export const GROWTH_DIRECTOR_SLACK_IDENTITY = { username: MAX.name, icon_url: MAX.avatarUrl };
+
+/**
+ * Post a message AS the Growth Director (Max's name + avatar, chat:write.customize override) — used by the
+ * media-buyer director digest into the founder's #director-growth-max channel (media-buyer-director-slack-digest
+ * Phase 2). Parallel of {@link postAsAda}; returns the posted `ts`.
+ */
+export async function postAsGrowthDirector(
+  token: string,
+  channel: string,
+  blocks: unknown[],
+  text: string,
+  opts?: { thread_ts?: string },
+): Promise<{ ok: boolean; ts?: string }> {
+  const body: Record<string, unknown> = { channel, text, ...GROWTH_DIRECTOR_SLACK_IDENTITY };
+  if (blocks.length) body.blocks = blocks;
+  if (opts?.thread_ts) body.thread_ts = opts.thread_ts;
+  const result = await slackApi(token, "chat.postMessage", body);
+  if (!result.ok) {
+    console.error("[Slack] postAsGrowthDirector error:", result.error);
+    return { ok: false };
+  }
+  beatSlackDelivery(channel);
+  return { ok: true, ts: result.ts as string };
+}
+
 /** Add an emoji reaction to a message (reactions.add) — the 👀 "received, thinking" ack in #cto-ada. */
 export async function addReaction(token: string, channel: string, ts: string, name: string): Promise<boolean> {
   const result = await slackApi(token, "reactions.add", { channel, timestamp: ts, name });
