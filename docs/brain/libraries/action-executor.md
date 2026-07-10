@@ -45,6 +45,32 @@ function pickChargeableVaultedPm(rows: CustomerPaymentMethodRow[] | null | undef
 
 Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM guard (assisted-purchase-playbook spec Phase 1). Picks the customer's chargeable vaulted PM from a set of [[../tables/customer_payment_methods]] rows — prefers `is_default=true` among rows with `status='active'`, else any active row; returns null when no chargeable row exists. Exported so tests can pin the fail-closed branch without a live DB.
 
+### `claimRegenSpendSlot` — function
+
+```ts
+async function claimRegenSpendSlot(
+  admin: { from: (t: string) => { update: (patch: Record<string, unknown>) => { eq: (col: string, val: unknown) => unknown } } },
+  workspaceId: string,
+  origRedemptionId: string,
+): Promise<boolean>
+```
+
+Compare-and-set primitive that gates idempotent coupon regeneration for `apply_loyalty_coupon`. When a Shopify verify fails and the apply handler retries, the original redemption may already have been regenerated and minted to a new code by an earlier retry — this guard detects that and prevents a second spend. Atomically attempts to flip the original `loyalty_redemptions` row from `status='active'` → `status='expired'` (using `.eq('status','active')` as the predicate on the UPDATE itself), returning `true` only if the row was still active. If `false` is returned, the caller — who would have called `spendPoints` — instead routes to `replaySuccessorApply` to apply the successor code without re-spending. Exported for unit testing the atomic claim behavior.
+
+### `replaySuccessorApply` — function
+
+```ts
+async function replaySuccessorApply(
+  ctx: Pick<ActionContext, "admin" | "workspaceId">,
+  contractId: string,
+  memberId: string,
+  origCode: string,
+  initialApplyError: string | undefined,
+): Promise<ActionResult>
+```
+
+Idempotent-replay recovery for `apply_loyalty_coupon` when `claimRegenSpendSlot` returns false (an earlier regen already ran for this code). Looks up the most-recently-inserted `active` loyalty redemption for the same member+workspace — the successor code that the completed regen minted — and re-invokes the coupon apply against that successor code without calling `spendPoints` again. If the successor apply succeeds, the caller sees an ordinary success result, so a verify-fail→retry can converge on a clean apply without a second spend. Returns a well-formed `ActionResult` so the handler can `return await …` directly. Exported for unit testing the fallback logic.
+
 ### `CustomerPaymentMethodRow` — interface
 
 ### `SonnetDecision` — interface
@@ -69,6 +95,8 @@ Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM 
 - **Defect #2 closed: `apply_coupon` / `remove_coupon` (and `apply_loyalty_coupon`'s two internal apply calls) now route through the internal-aware coupon dispatcher — `subscriptionApplyCoupon` / `subscriptionRemoveCoupon` in [[subscription-items]].** An internal (`is_internal=true`) sub goes through `resolveCoupon` → `internalSubApplyDiscount`/`internalSubRemoveDiscount`, which mutate `subscriptions.applied_discounts`; an Appstle sub goes through `healOnTouch` → `applyDiscountWithReplace`/`removeExistingDiscounts`. The LOYALTY-* redirect from `apply_coupon` → `apply_loyalty_coupon` is preserved; that handler owns coupon regeneration self-heal. Missing-`contract_id` is top-guarded on all three handlers so we never URL-interpolate the literal `undefined` on the Appstle branch.
 
 - **`redeem_points` → `apply_loyalty_coupon` is an atomic pair: both succeed (coupon lands + points spent) or neither (points intact).** The executor enforces two mechanisms: (1) **code threading fallback** — `substituteActionParams` (exported). When the next action is `apply_loyalty_coupon` and its `code` is missing / empty / unsubstituted, the executor threads the `couponCode` from a prior successful `redeem_points` result directly; (2) **rollback on apply failure** — `rollbackLoyaltyRedemptionOnApplyFailure` (exported). If the apply handler failed (or self-heal gave up), the executor re-credits the `points_spent` to the member via an `adjustment`-type row in `loyalty_transactions`, flips the `loyalty_redemptions` row from `active` → `rolled_back`, and emits a `[Rollback]` system note for the audit trail. The contract is documented in [[../libraries/loyalty]]; tests are in `src/lib/action-executor.atomic-redeem-apply.test.ts` (11 tests, in-memory fake admin). Precedent: ticket `0a9e4d7f` (Judy — 1,500 points burned, `LOYALTY-15-HC6UFJ` never applied because the redeem→apply chain lacked the `{{coupon_code}}` template).
+
+- **`apply_loyalty_coupon` is idempotent — Shopify verify-fail→retry never double-deducts.** The handler's self-heal path (when the original code is rejected by Shopify) regenerates a new code and retries the apply. Because retries can fire multiple times — a verify failure that triggers self-heal + a caller-level timeout → retry — the regen branch is guarded by `claimRegenSpendSlot(admin, workspaceId, origRedemptionId)` (exported). This atomic compare-and-set (via `.eq('status', 'active')` on the UPDATE) flips the original redemption to `expired` and returns `true` only on the first winner; all competing/retrying callers receive `false` and route to `replaySuccessorApply` instead, which applies the already-minted successor code WITHOUT calling `spendPoints` again. One applied coupon = exactly one 1,500-pt spend, no matter how many verify/heal retries fire (spec: loyalty-coupon-apply-self-heal-must-not-double-deduct-points Phase 2). Idempotency keys on the original discount code + member_id + workspace_id; two distinct coupon applies with different original codes still produce two legitimate spends. Tests: `src/lib/action-executor.apply-loyalty-coupon-double-spend.test.ts` (8 tests covering Susan's multi-retry patterns, verify the single-spend invariant + no-reentry guard + cross-workspace isolation).
 
 - **Both direct-action handler-lookup sites (`executeActionsInline` and `handleDirectAction`) consult the [[../tables/action_handler_aliases]] catalog on a miss before falling through to `Unknown action type`.** The lookup is one-shot via [[action-handler-aliases]] `resolveAlias(ctx.admin, ctx.workspaceId, action.type)`; on a hit we sysNote `alias resolved: {source}→{target}`, rewrite `action.type` to the canonical handler key, and fire the handler as normal. That closes the silent-miss branch for Sonnet's `cancel_subscription` / `refund_partial` / `pause_subscription` / `resume_subscription` near-misses (seeded globally by the Phase-1 migration).
 
