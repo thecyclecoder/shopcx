@@ -40,6 +40,14 @@ async function postAsAda(token: string, channel: string, blocks: unknown[], text
 
 Post a message **as Ada** — her name + avatar — via the `chat:write.customize` override (`ADA_SLACK_IDENTITY` ← `getPersona("platform")`). Used **only** by the `#cto-ada` chat ([[../lifecycles/ada-slack-chat]]); every other caller uses plain `postMessage` and stays "shopcx", so the persona override never leaks to ops alerts / the daily digest. Returns the posted `ts` so an approval card can be `chat.update`d later; `opts.thread_ts` threads the reply.
 
+### `postAsGrowthDirector` — function
+
+```ts
+async function postAsGrowthDirector(token: string, channel: string, blocks: unknown[], text: string, opts?: { thread_ts?: string }) : Promise<{ ok: boolean; ts?: string }>
+```
+
+Post a message **as the Growth Director (Max)** — his name + avatar — via the `chat:write.customize` override (`GROWTH_DIRECTOR_SLACK_IDENTITY` ← `getPersona("growth")`). Used **only** by [[media-buyer-director-digest]] to post rolled-up media-buyer cohort recommendations into `#director-growth-max` ([[../specs/media-buyer-director-slack-digest]] Phase 2). Mirrors the `postAsAda` pattern for director-voice posts that need persona override. Returns the posted `ts` so a caller can update later; `opts.thread_ts` threads the reply.
+
 ### `addReaction` — function
 
 ```ts

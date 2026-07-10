@@ -1,0 +1,1 @@
+- **Media-buyer recommendations delivered by the Growth Director (Max → #director-growth-max)** · verified 2026-07-10 · → [[../libraries/media-buyer-director-digest]]
