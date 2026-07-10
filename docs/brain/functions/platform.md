@@ -24,6 +24,10 @@ AI-driven management of the live Shopify store + theme from inside ShopCX.
 The "actually improve the system" work — the build box + worker ([[../recipes/build-box-setup]]), deploys, CI/tsc gates, and reliability of the platform itself. (Folded into Platform rather than a separate function; promote to its own function only if the surface grows.)
 - **Metric:** build/deploy success rate, green CI, box uptime.
 
+### Platform security {#security}
+Keep merged and pre-merge diffs free of introduced vulnerabilities. The security agent reviews every merged diff (and each pre-merge preview) for genuine vulnerabilities and authors a scoped fix-spec when it finds one — parented HERE. Distinct from reliability (uptime/CI) — this mandate owns "the code we ship isn't exploitable."
+- **Metric:** vulnerabilities caught pre-ship, time-to-close on a flagged vuln, zero known-vuln merges on main.
+
 ## What the live director (Ada) does autonomously — the leash
 
 The mandates above are the function **charter** (the perpetual scope). What the **live Platform/DevOps Director** actually does *without asking* is narrower + concrete — her **leash** ([[../libraries/platform-director]] `LEASH_CATEGORIES` + the escort/grade/coach surfaces), surfaced on her profile as "What she does autonomously" (`DirectorAutonomy`, [[../specs/worker-grading-and-director-management]] P5):

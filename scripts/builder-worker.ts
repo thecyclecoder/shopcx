@@ -21227,8 +21227,12 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
     // authoring model). The agent's proposed `parent` was `extends [[../specs/security-dependency-agent]]` —
     // a prose string pointing at a SPEC, which Vale rejects ("Parent is not a function mandate or goal
     // milestone"), and the old markdown carried no why/what, so EVERY security fix churned Vale forever (the
-    // 3 stuck pr-resolve specs on 2026-07-02). We IGNORE the agent's parent and set a valid platform-security
-    // mandate here; intent → summary, and a plain why/what pair the gate accepts. The vuln detail + fix +
+    // 3 stuck pr-resolve specs on 2026-07-02). We IGNORE the agent's parent and pin the platform-security
+    // mandate here — TYPED (`parentKind:'mandate'` + `parentRef:'platform#security'`) so it resolves against
+    // `### Platform security {#security}` in `docs/brain/functions/platform.md`. (Earlier this prose named a
+    // "platform security mandate" that DIDN'T EXIST as a heading + passed no typed parent, so Vale bounced
+    // every security fix on parent-not-resolvable — the platform-security-mandate hotfix added the heading +
+    // the typed ref.) intent → summary, and a plain why/what pair the gate accepts. The vuln detail + fix +
     // `Fixes:` link live in the phase BODY (where file:line/code is allowed), not in why/what.
     const whereDiff = source.kind === "diff" ? "merged" : "unmerged branch";
     const vBullets = (Array.isArray(s.verification) ? s.verification : []).filter((b) => typeof b === "string" && b.trim());
@@ -21255,9 +21259,9 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
         {
           title,
           summary: (s.intent || `Close the vulnerability the ${whereDiff} diff for ${parentSlug} introduced.`).trim(),
-          owner: String(s.owner || "[[../functions/platform]]"),
+          owner: String(s.owner || "platform"),
           parent:
-            "[[../functions/platform]] — platform security mandate: keep merged and pre-merge diffs free of introduced vulnerabilities",
+            '[[../functions/platform]] — "Platform security" mandate: keep merged + pre-merge diffs free of introduced vulnerabilities.',
           why: `A security review of the ${whereDiff} diff for ${parentSlug} found a genuine vulnerability that must be closed before it ships or stays on main.`,
           what: "A single scoped code fix closes the flagged vulnerability, verified by re-reviewing the diff.",
           blocked_by: [],
@@ -21273,7 +21277,7 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
           ],
         },
         "planned",
-        { intendedStatusSetBy: "security-agent" },
+        { intendedStatusSetBy: "security-agent", parentKind: "mandate", parentRef: "platform#security" },
       );
       if (!ok) {
         console.warn(`[security] structured author returned false for ${slug}`);
