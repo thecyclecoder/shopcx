@@ -38,8 +38,38 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     }
     const topIssues = Object.entries(issueCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
+    // Two volume denominators (cora-grades-every-ai-handled-ticket-not-just-sol):
+    //   • new_tickets     — inbound tickets CREATED today (the day's fresh volume)
+    //   • handled_tickets — tickets whose LAST CUSTOMER MESSAGE is today (can exceed new_tickets:
+    //     older tickets a slow-responder came back to). This is the denominator the score sits under.
+    // Both exclude merged-away duplicates (the survivor carries the conversation) and outbound-only
+    // sends (a ticket with no customer message — e.g. a dunning email — is never a handled convo).
+    // handled_cheap vs handled_sol splits the low-cost autonomous path from the Sol-handled one.
+    const todayIso = todayStart.toISOString();
+    const { data: custToday } = await admin.from("ticket_messages")
+      .select("ticket_id").eq("author_type", "customer").gte("created_at", todayIso);
+    const handledIdSet = Array.from(new Set((custToday || []).map(m => m.ticket_id as string)));
+    let newTickets = 0, handledTickets = 0, handledCheap = 0, handledSol = 0;
+    if (handledIdSet.length) {
+      const { data: htk } = await admin.from("tickets")
+        .select("id, merged_into, created_at, ai_handled_at, sol_handled_at")
+        .eq("workspace_id", workspaceId)
+        .in("id", handledIdSet);
+      for (const t of (htk || []) as Array<{ merged_into: string | null; created_at: string; ai_handled_at: string | null; sol_handled_at: string | null }>) {
+        if (t.merged_into) continue; // merged-away duplicate → the survivor is counted instead
+        handledTickets++;
+        if (t.sol_handled_at) handledSol++;
+        else if (t.ai_handled_at) handledCheap++;
+        if (t.created_at >= todayIso) newTickets++;
+      }
+    }
+
     return NextResponse.json({
       analyzed: rows.length,
+      new_tickets: newTickets,
+      handled_tickets: handledTickets,
+      handled_cheap: handledCheap,
+      handled_sol: handledSol,
       avg_score: avg,
       top_issues: topIssues.map(([type, count]) => ({ type, count })),
       worst_today: rows

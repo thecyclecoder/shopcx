@@ -155,6 +155,8 @@ test("e2e (1): a Sol stateless resolving reply → ticket closed → Cora select
       closed_at: state.ticket.closed_at,
       last_analyzed_at: null,
       sol_handled_at: solHandledAt,
+      ai_handled_at: solHandledAt, // Sol's reply also stamped the universal ai_handled_at
+      last_customer_message_at: solHandledAt, // customer's last message settled (>30min before `now`)
     },
     now,
     null, // no June decision this cycle

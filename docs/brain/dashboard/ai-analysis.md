@@ -15,6 +15,13 @@ Daily AI quality analysis dashboard. Low-score tickets, gap patterns, research-a
 
 **Rendering:** `"use client"` component (client-side state + fetch).
 
+**Today card — two volume denominators + a cheap-vs-Sol split** (`?view=today` on [[../../../src/app/api/workspaces/[id]/ticket-analyses/route]], cora-grades-every-ai-handled-ticket-not-just-sol):
+- **`new_tickets`** — inbound tickets CREATED today (the day's fresh volume).
+- **`handled_tickets`** — tickets whose LAST CUSTOMER MESSAGE is today; can exceed `new_tickets` because a slow-responder returns to an older ticket. This is the denominator the score sits under — the card reads "**N of `handled_tickets` handled tickets graded**".
+- Both **exclude merged-away duplicates** (`merged_into IS NOT NULL` — the survivor carries the conversation) and **outbound-only sends** (a ticket with no customer message, e.g. a dunning email).
+- **`handled_cheap` / `handled_sol`** — of the handled set, how many the low-cost Sonnet/Haiku path carried (`sol_handled_at` null, `ai_handled_at` set) vs needed a Sol session (`sol_handled_at` set). The card shows "(X cheap · Y Sol)".
+- The card now renders whenever there is handled volume, even before any grade lands (previously required `analyzed > 0`).
+
 ## Sub-routes
 
 - `[id]/` → [[ai-analysis/[id]]]

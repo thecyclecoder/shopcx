@@ -1,15 +1,15 @@
 /**
- * Pins the Cora selection gate — Phase 2 of
- * docs/brain/specs/cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence.md
- * (retire the Direction-existence dependency; select on the deterministic tickets.sol_handled_at
- * signal instead) — and the pre-existing Phase 1/2 rules from
- * docs/brain/specs/cora-only-investigates-after-sol-handles-and-ticket-closed-30min-no-reinvestigation.md
- * that stay unchanged (30-min settle + per-cycle dedup + June-decided guard).
+ * Pins the Cora selection gate.
  *
- * The gate now takes `sol_handled_at` on the ticket row (harness-stamped in
- * scripts/builder-worker.ts runTicketHandleJob on box-session completion) instead of a live
- * `ticket_directions` row. Cora's feeder no longer drops a Sol-handled ticket just because the
- * mid-session writeDirection silently failed under a DB outage.
+ * cora-grades-every-ai-handled-ticket-not-just-sol (this change): the gate selects on the
+ * deterministic HANDLED stamps — `ai_handled_at` (any AI tier: Sonnet/Haiku orchestrator, Sol,
+ * journey, playbook — all stamp it in deliverTicketMessage) OR `sol_handled_at` (the Sol-specific
+ * sub-flag). Either present ⇒ we handled it ⇒ grade it, so the cheap autonomous path is graded too,
+ * not just Sol sessions. The old `ai`-tag AND-gate is gone. Settle keys on the LAST CUSTOMER
+ * MESSAGE (not closed_at), and a ticket with NO customer message (outbound-only) is excluded.
+ *
+ * Retains the pre-existing rules: 30-min settle, per-cycle dedup on the handling anchor, and the
+ * June-decided guard (cora-only-investigates-after-sol-handles-and-ticket-closed-30min).
  *
  * Run: npx tsx --test src/lib/inngest/ticket-analysis-cron.gate.test.ts
  */
@@ -21,138 +21,100 @@ const NOW = new Date("2026-07-08T12:00:00.000Z");
 const iso = (d: Date) => d.toISOString();
 const minutesAgo = (n: number) => new Date(NOW.getTime() - n * 60 * 1000);
 
-// ── Phase 2 verification (spec §Phase 2 — Cora selects on sol_handled_at) ──
-
-test("phase2 pass: closed ≥30 min + sol_handled_at set + last_analyzed_at < sol_handled_at → SELECTED (even with NO Direction row)", () => {
-  // Verification bullet #1: this is the exact scenario the spec exists for — a Sol-handled
-  // ticket the mid-session writeDirection failed silently to record. The deterministic
-  // sol_handled_at stamp is the only signal needed.
-  const solHandledAt = minutesAgo(120);
-  const ticket = {
+type GateTicket = Parameters<typeof passesCoraSelectionGate>[0];
+/** Build a ticket that PASSES by default; override per test. Sol-handled 120m ago, customer's
+ *  last message 45m ago (settled), closed, never analyzed. */
+function ticket(over: Partial<GateTicket> = {}): GateTicket {
+  return {
     closed_at: iso(minutesAgo(45)),
-    last_analyzed_at: null,
-    sol_handled_at: iso(solHandledAt),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), true);
-});
-
-test("phase2 skip: closed <30 min ago (in-flight settle window) → NOT SELECTED", () => {
-  // Verification bullet #2: the 30-min settle stays intact so Cora never grades a rapid-fire
-  // conversation still in-flight (customer might still reply 'thanks!' / 'wait, one more thing').
-  const ticket = {
-    closed_at: iso(minutesAgo(29)),
     last_analyzed_at: null,
     sol_handled_at: iso(minutesAgo(120)),
+    ai_handled_at: iso(minutesAgo(120)),
+    last_customer_message_at: iso(minutesAgo(45)),
+    ...over,
   };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+}
+
+// ── The core new behavior: grade the cheap path (ai_handled_at, no Sol) ──
+
+test("CHEAP-HANDLED (ai_handled_at set, sol_handled_at NULL) → SELECTED", () => {
+  // Sonnet/Haiku handled it, Sol never did. This is the whole point — the low-cost autonomous
+  // path must be graded too, not just Sol sessions.
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: null, ai_handled_at: iso(minutesAgo(120)) }), NOW, null), true);
 });
 
-test("phase2 skip: already graded this cycle (last_analyzed_at ≥ sol_handled_at) → NOT SELECTED", () => {
-  // Verification bullet #3: dedup on sol_handled_at (replaces the prior direction.authored_at
-  // dedup). A last_analyzed_at at-or-after sol_handled_at means we already graded THIS Sol
-  // handling — skip. A stale last_analyzed_at from a prior Sol handling (before the latest
-  // sol_handled_at) is fine — that's covered by the "prior cycle" pass test below.
-  const solHandledAt = minutesAgo(120);
-  const analyzedAt = new Date(solHandledAt.getTime() + 60 * 60 * 1000); // 60 min after Sol
-  const ticket = {
-    closed_at: iso(minutesAgo(45)),
-    last_analyzed_at: iso(analyzedAt),
-    sol_handled_at: iso(solHandledAt),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+test("SOL-HANDLED only (sol_handled_at set, ai_handled_at NULL) → SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: iso(minutesAgo(120)), ai_handled_at: null }), NOW, null), true);
 });
 
-test("phase2 skip: sol_handled_at is null (Sol has never handled) → NOT SELECTED", () => {
-  // Verification bullet #4: no Sol turn stamped → not eligible. The 'ai' tag pre-filter alone
-  // is not the Sol-handled signal (it's a coarse cheap pre-filter); sol_handled_at is the
-  // authoritative gate.
-  const ticket = {
-    closed_at: iso(minutesAgo(60)),
-    last_analyzed_at: null,
-    sol_handled_at: null,
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+test("NEITHER stamp (never handled) → NOT SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: null, ai_handled_at: null }), NOW, null), false);
 });
 
-// ── Pre-existing edges from the prior spec that must still hold ──
+// ── Outbound exclusion: no customer message ⇒ not a graded conversation ──
 
-test("skip: closed_at is null (never closed) → NOT SELECTED", () => {
-  const ticket = { closed_at: null, last_analyzed_at: null, sol_handled_at: iso(minutesAgo(120)) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+test("OUTBOUND (ai_handled_at set but NO customer message) → NOT SELECTED", () => {
+  // A dunning email we sent that the customer never replied to. It may carry ai_handled_at, but
+  // with no inbound it is not a handled conversation — must never leak into grading.
+  assert.equal(passesCoraSelectionGate(ticket({ last_customer_message_at: null }), NOW, null), false);
 });
 
-test("pass: closed_at exactly 30 min ago + sol_handled_at set + never analyzed → SELECTED (settle boundary)", () => {
-  const ticket = {
-    closed_at: iso(new Date(NOW.getTime() - CORA_CLOSE_SETTLE_MS)),
-    last_analyzed_at: null,
-    sol_handled_at: iso(minutesAgo(120)),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), true);
+// ── Settle keys on the LAST CUSTOMER MESSAGE, not closed_at ──
+
+test("settle skip: customer's last message <30 min ago (still in-flight) → NOT SELECTED, even if closed long ago", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ closed_at: iso(minutesAgo(200)), last_customer_message_at: iso(minutesAgo(29)) }), NOW, null), false);
 });
 
-test("skip: last_analyzed_at exactly equals sol_handled_at → NOT SELECTED (boundary: still this cycle)", () => {
-  const solHandledAt = minutesAgo(120);
-  const ticket = {
-    closed_at: iso(minutesAgo(45)),
-    last_analyzed_at: iso(solHandledAt),
-    sol_handled_at: iso(solHandledAt),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+test("settle pass: closed only 5 min ago BUT customer last spoke 40 min ago → SELECTED", () => {
+  // The old closed_at settle would have wrongly skipped this; keying on the customer's last
+  // message grades it, since the customer has clearly moved on.
+  assert.equal(passesCoraSelectionGate(ticket({ closed_at: iso(minutesAgo(5)), last_customer_message_at: iso(minutesAgo(40)) }), NOW, null), true);
 });
 
-test("pass: last_analyzed_at from a PRIOR handling cycle (Sol re-handled → sol_handled_at advanced) → SELECTED", () => {
-  // Sol handled ticket 6h ago, Cora graded that cycle. Sol re-handled 2h ago (new close), and
-  // the worker advanced sol_handled_at. Cora must re-grade the new cycle.
-  const priorAnalyzedAt = minutesAgo(360);
-  const newSolHandledAt = minutesAgo(120);
-  const ticket = {
-    closed_at: iso(minutesAgo(45)),
-    last_analyzed_at: iso(priorAnalyzedAt),
-    sol_handled_at: iso(newSolHandledAt),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), true);
+test("settle boundary: customer last message EXACTLY 30 min ago → SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ last_customer_message_at: iso(new Date(NOW.getTime() - CORA_CLOSE_SETTLE_MS)) }), NOW, null), true);
 });
 
-test("skip: garbage closed_at string → NOT SELECTED", () => {
-  const ticket = { closed_at: "not-a-date", last_analyzed_at: null, sol_handled_at: iso(minutesAgo(120)) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), false);
+test("skip: not closed (closed_at null) → NOT SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ closed_at: null }), NOW, null), false);
 });
 
-// ── June-decided guard (pre-existing Phase 2 of the prior spec) — decided_at vs sol_handled_at ──
-
-test("june-guard skip: June decided AFTER sol_handled_at (current cycle already decided) → NOT SELECTED", () => {
-  const solHandledAt = minutesAgo(180);
-  const juneDecidedAt = minutesAgo(90);
-  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null, sol_handled_at: iso(solHandledAt) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, iso(juneDecidedAt)), false);
+test("skip: garbage last_customer_message_at → NOT SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ last_customer_message_at: "not-a-date" }), NOW, null), false);
 });
 
-test("june-guard skip: June decided at EXACTLY sol_handled_at (cycle boundary) → NOT SELECTED", () => {
-  const solHandledAt = minutesAgo(180);
-  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null, sol_handled_at: iso(solHandledAt) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, iso(solHandledAt)), false);
+// ── Dedup on the handling anchor (later of ai/sol) ──
+
+test("dedup skip: already graded this cycle (last_analyzed_at ≥ handling anchor) → NOT SELECTED", () => {
+  const handled = minutesAgo(120);
+  const analyzedAfter = new Date(handled.getTime() + 60 * 60 * 1000);
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: iso(handled), ai_handled_at: iso(handled), last_analyzed_at: iso(analyzedAfter) }), NOW, null), false);
 });
 
-test("june-guard pass: June decided in a PRIOR cycle (Sol re-handled past the decision) → SELECTED", () => {
-  const priorJuneAt = minutesAgo(360);
-  const newSolHandledAt = minutesAgo(120);
-  const ticket = { closed_at: iso(minutesAgo(60)), last_analyzed_at: null, sol_handled_at: iso(newSolHandledAt) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, iso(priorJuneAt)), true);
+test("dedup pass: last_analyzed_at from a PRIOR handling (re-handled → anchor advanced) → SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: iso(minutesAgo(120)), ai_handled_at: iso(minutesAgo(120)), last_analyzed_at: iso(minutesAgo(360)) }), NOW, null), true);
 });
 
-test("june-guard pass: no June decision at all (undecided ticket) → SELECTED", () => {
-  const ticket = { closed_at: iso(minutesAgo(45)), last_analyzed_at: null, sol_handled_at: iso(minutesAgo(180)) };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, null), true);
+test("anchor = LATER of the two stamps: dedup uses the newer handling", () => {
+  // ai_handled_at is newer (re-handled cheaply after an old Sol turn). last_analyzed_at is after
+  // the old Sol turn but before the new ai turn → this new cycle is ungraded → SELECTED.
+  assert.equal(passesCoraSelectionGate(ticket({
+    sol_handled_at: iso(minutesAgo(300)),
+    ai_handled_at: iso(minutesAgo(120)),
+    last_analyzed_at: iso(minutesAgo(240)),
+  }), NOW, null), true);
 });
 
-test("june-guard skip: June-decided this cycle beats a stale last_analyzed_at pass", () => {
-  const solHandledAt = minutesAgo(180);
-  const staleAnalyzedAt = minutesAgo(360);
-  const juneDecidedAt = minutesAgo(90);
-  const ticket = {
-    closed_at: iso(minutesAgo(60)),
-    last_analyzed_at: iso(staleAnalyzedAt),
-    sol_handled_at: iso(solHandledAt),
-  };
-  assert.equal(passesCoraSelectionGate(ticket, NOW, iso(juneDecidedAt)), false);
+// ── June-decided guard (decided_at vs the handling anchor) ──
+
+test("june-guard skip: June decided AFTER the handling anchor (cycle already decided) → NOT SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: iso(minutesAgo(180)), ai_handled_at: iso(minutesAgo(180)) }), NOW, iso(minutesAgo(90))), false);
+});
+
+test("june-guard pass: June decided in a PRIOR cycle (re-handled past it) → SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket({ sol_handled_at: iso(minutesAgo(120)), ai_handled_at: iso(minutesAgo(120)) }), NOW, iso(minutesAgo(360))), true);
+});
+
+test("june-guard pass: no June decision at all → SELECTED", () => {
+  assert.equal(passesCoraSelectionGate(ticket(), NOW, null), true);
 });
