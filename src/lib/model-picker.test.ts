@@ -1,11 +1,11 @@
 /**
  * Unit tests for pickModelFromSignals — the pure decision core of
- * pickOrchestratorModel. Phase 1 verification of
- * docs/brain/specs/model-picker-routes-on-state-not-tags-ltv-stops-buying-opus.md
- * pins: LTV alone no longer trips Opus (the 142-ticket blind Sonnet replay
- * found 78% of Opus tickets downgrade-safe within 1 grade pt; LTV was not
- * the axis that correlated with the genuinely-hard buckets). Pure helper —
- * no network, no DB. Run:
+ * pickOrchestratorModel. Founder directive (2026-07-10): the orchestrator NEVER
+ * runs on Opus. The tiers are SONNET (workhorse) and HAIKU (fresh stateless
+ * Direction fast-path). A "hard" signal (turn>=1, complex tag, crisis, linked
+ * accounts, 2+ subs, recent merge) no longer buys Opus — it stays on SONNET and
+ * only shapes the `reason` string (`hard:<signals>`) for audit + the Sonnet→Sol
+ * escalation decision. Pure helper — no network, no DB. Run:
  *   npx tsx --test src/lib/model-picker.test.ts
  */
 import test from "node:test";
@@ -26,7 +26,7 @@ test("no Opus signals → sonnet (LTV alone must NOT push Opus)", () => {
   assert.equal(pick.reason, "default");
 });
 
-test("turn 1+ still trips Opus (spec: turn 1 didn't close the ticket)", () => {
+test("turn 1+ is a hard signal → Sonnet with hard:turn reason (never Opus)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 2,
     tags: [],
@@ -35,11 +35,11 @@ test("turn 1+ still trips Opus (spec: turn 1 didn't close the ticket)", () => {
     activeSubsCount: 0,
     recentMergesCount: 0,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /^turn>=2/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:turn>=2/);
 });
 
-test("crisis-enrollment still trips Opus (genuinely-hard bucket per replay)", () => {
+test("crisis-enrollment is a hard signal → Sonnet, reason names it (never Opus)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 0,
     tags: [],
@@ -48,11 +48,11 @@ test("crisis-enrollment still trips Opus (genuinely-hard bucket per replay)", ()
     activeSubsCount: 0,
     recentMergesCount: 0,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /crisis-enrollment/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*crisis-enrollment/);
 });
 
-test("linked-accounts still trips Opus (genuinely-hard bucket per replay)", () => {
+test("linked-accounts is a hard signal → Sonnet, reason names it (never Opus)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 0,
     tags: [],
@@ -61,11 +61,11 @@ test("linked-accounts still trips Opus (genuinely-hard bucket per replay)", () =
     activeSubsCount: 0,
     recentMergesCount: 0,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /linked-accounts/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*linked-accounts/);
 });
 
-test("complex tag prefixes (crisis, pb:, j:cancel, fraud) still trip Opus in Phase 1", () => {
+test("complex tag prefixes (crisis, pb:, j:cancel, fraud) are hard signals → Sonnet (never Opus)", () => {
   for (const t of ["crisis", "pb:refund", "j:cancel:hard", "fraud"]) {
     const pick = pickModelFromSignals({
       aiTurnCount: 0,
@@ -75,11 +75,12 @@ test("complex tag prefixes (crisis, pb:, j:cancel, fraud) still trip Opus in Pha
       activeSubsCount: 0,
       recentMergesCount: 0,
     });
-    assert.equal(pick.model, "opus", `tag=${t} must still trip Opus in Phase 1`);
+    assert.equal(pick.model, "sonnet", `tag=${t} must stay on Sonnet (never Opus)`);
+    assert.match(pick.reason, /^hard:tag=/);
   }
 });
 
-test("active subs >= 2 still trips Opus", () => {
+test("active subs >= 2 is a hard signal → Sonnet, reason names it (never Opus)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 0,
     tags: [],
@@ -88,11 +89,11 @@ test("active subs >= 2 still trips Opus", () => {
     activeSubsCount: 3,
     recentMergesCount: 0,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /active-subs=3/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*active-subs=3/);
 });
 
-test("recently-merged still trips Opus", () => {
+test("recently-merged is a hard signal → Sonnet, reason names it (never Opus)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 0,
     tags: [],
@@ -101,12 +102,11 @@ test("recently-merged still trips Opus", () => {
     activeSubsCount: 0,
     recentMergesCount: 1,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /recently-merged/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*recently-merged/);
 });
 
-test("reason string never contains ltv=$… (Phase 1: LTV token removed from ai_token_usage.purpose)", () => {
-  // Even under an all-signals-firing composite reason, no ltv token can slip in.
+test("never routes to Opus even under an all-signals-firing composite (Sonnet, no ltv token)", () => {
   const pick = pickModelFromSignals({
     aiTurnCount: 5,
     tags: ["crisis"],
@@ -115,7 +115,8 @@ test("reason string never contains ltv=$… (Phase 1: LTV token removed from ai_
     activeSubsCount: 2,
     recentMergesCount: 1,
   });
-  assert.equal(pick.model, "opus");
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:/);
   assert.doesNotMatch(pick.reason, /ltv=/);
 });
 
@@ -236,9 +237,10 @@ test("Phase 3: sol_haiku_freshness_hours=null → Sonnet (route disabled per-cha
   assert.equal(pick.model, "sonnet");
 });
 
-test("Phase 3: Opus signal beats a fresh Direction (turn>=1 → Opus, not Haiku)", () => {
-  // A genuinely-hard ticket still pays for reliability — the Haiku route can only
-  // relax the picker from Sonnet → Haiku, never overrule a genuine Opus signal.
+test("Phase 3: a hard signal beats a fresh Direction (turn>=1 → Sonnet hard:, not Haiku)", () => {
+  // A genuinely-hard ticket stays on Sonnet (never Opus, never the Haiku fast-path) —
+  // the Haiku route can only relax the picker from Sonnet → Haiku on a NON-hard ticket,
+  // never overrule a genuine hard signal down to Haiku.
   const nowMs = Date.parse("2026-07-07T12:00:00Z");
   const pick = pickModelFromSignals({
     aiTurnCount: 2,
@@ -253,8 +255,8 @@ test("Phase 3: Opus signal beats a fresh Direction (turn>=1 → Opus, not Haiku)
     solHaikuFreshnessHours: 24,
     nowMs,
   });
-  assert.equal(pick.model, "opus");
-  assert.match(pick.reason, /^turn>=2/);
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:turn>=2/);
 });
 
 test("Phase 3: no Direction (Sol hasn't authored) → Sonnet default preserved", () => {

@@ -2110,7 +2110,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           agentAssigned ? { assigned: true, intervened: st.intervened } : null,
           pick,
           directionActive ? liveDirection : null);
-        await sysNote(admin, tid, `[System] ${pick.model === "opus" ? "Opus" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
+        await sysNote(admin, tid, `[System] ${pick.model === "haiku" ? "Haiku" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
 

@@ -1,10 +1,13 @@
 /**
- * Picks the orchestrator model (Sonnet vs Opus) per ticket. Broad Opus
- * triggers — at our ticket volume even all-Opus is ~$420/mo, well below
- * the cost of a part-time CSR. The aim is reliability, not penny-pinching:
- * Sonnet is reserved for the obviously-trivial first touch.
+ * Picks the orchestrator model per ticket. **Founder directive (2026-07-10): the orchestrator NEVER
+ * runs on Opus.** The tiers are SONNET (the workhorse) and HAIKU (the cheap fast-path for a fresh,
+ * high-confidence, stateless Sol Direction). A ticket that trips a "hard" signal used to buy Opus;
+ * now it stays on Sonnet (Sonnet 5 is more than capable), and a ticket that genuinely needs deeper
+ * handling is re-sessioned to SOL (the box first-touch/re-session router) rather than an Opus middle
+ * tier. See [[checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
  *
- * Signals (any one trips Opus):
+ * "Hard" signals (each still computed + surfaced in `reason` as `hard:<signals>` for audit + to feed
+ * the Sonnet→Sol escalation decision — but they no longer change the MODEL, only the reason):
  *   • ai_turn_count >= 1 — turn 1 didn't close the ticket
  *   • Complex tags: crisis*, pb:*, j:cancel*, wb, dunning:active, fraud
  *   • Active crisis enrollment for this customer
@@ -12,20 +15,12 @@
  *   • Customer has 2+ active subscriptions
  *   • Recently merged into this ticket (sibling row with merged_into=tid in last 24h)
  *
- * LTV alone no longer trips Opus — Phase 1 of
- * docs/brain/specs/model-picker-routes-on-state-not-tags-ltv-stops-buying-opus.md.
- * The 142-ticket blind replay found 78% of Opus tickets downgrade-safe within 1
- * grade pt; crisis-enrollment + linked-accounts (not LTV) were the axes that
- * correlated with the genuinely-hard buckets. A high-value first-touch trivial
- * ticket now runs on Sonnet.
- *
- * Returns { model, reason } so we can stamp `purpose` on ai_token_usage
- * with WHY Opus was chosen — that's how we audit "did Opus actually help?"
+ * Returns { model, reason } so we can stamp `purpose` on ai_token_usage with the routing rationale.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { TicketDirection } from "@/lib/ticket-directions";
 
-export type OrchestratorModel = "sonnet" | "opus" | "haiku";
+export type OrchestratorModel = "sonnet" | "haiku";
 
 export interface ModelPick {
   model: OrchestratorModel;
@@ -67,11 +62,11 @@ const COMPLEX_TAGS_EXACT = ["wb", "dunning:active"];
  * Kept separate from `pickOrchestratorModel` so the routing rule is unit-
  * testable without touching the DB.
  *
- * Order of precedence:
- *   1. Any existing Opus signal (turn>=1, complex tag, crisis, linked accounts, active
- *      subs, recent merge) → Opus. The Direction-driven Haiku route does NOT override
- *      Opus — a genuinely-hard ticket still pays for reliability.
- *   2. No Opus signals BUT a fresh + high-confidence + stateless Direction → Haiku.
+ * Order of precedence (never Opus — see the file header):
+ *   1. Any "hard" signal (turn>=1, complex tag, crisis, linked accounts, active subs, recent
+ *      merge) → SONNET with reason `hard:<signals>`. (Was Opus; the hard signals now only shape
+ *      the reason, not the model. The Haiku fast-path is deliberately NOT taken on a hard ticket.)
+ *   2. No hard signals BUT a fresh + high-confidence + stateless Direction → Haiku.
  *   3. Otherwise → Sonnet (default).
  */
 export function pickModelFromSignals(signals: ModelSignals): ModelPick {
@@ -91,7 +86,13 @@ export function pickModelFromSignals(signals: ModelSignals): ModelPick {
   if (signals.activeSubsCount >= 2) reasons.push(`active-subs=${signals.activeSubsCount}`);
   if (signals.recentMergesCount > 0) reasons.push("recently-merged");
 
-  if (reasons.length > 0) return { model: "opus", reason: reasons.join("+") };
+  // Founder directive (2026-07-10): NEVER route the orchestrator to Opus. A ticket that trips a
+  // hard signal (turn>=1, complex tag, crisis, linked accounts, 2+ subs, recent merge) stays on
+  // SONNET — Sonnet 5 is more than capable, and when a ticket genuinely needs deeper handling the
+  // path is to re-session SOL (the box first-touch/re-session router), not an Opus middle tier. The
+  // reason string is still returned so we can audit which tickets tripped the hard signals and feed
+  // the Sonnet→Sol escalation decision. See [[checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  if (reasons.length > 0) return { model: "sonnet", reason: `hard:${reasons.join("+")}` };
 
   const haiku = pickHaikuFromDirection(signals);
   if (haiku) return haiku;
