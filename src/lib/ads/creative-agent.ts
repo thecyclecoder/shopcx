@@ -16,6 +16,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, type ScoredAngle } from "@/lib/ads/creative-brief";
+import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative } from "@/lib/ads/creative-qa";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
@@ -158,26 +159,28 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
   const stories = await loadTransformationStories(admin, workspaceId, productId);
   const ranked = selectAngles(pi, stories);
 
-  // Skip angle hooks already in the bin for this product (variety, not dupes).
-  const { data: existingCampaigns } = await admin
-    .from("ad_campaigns")
-    .select("product_ad_angles(hook_one_liner)")
-    .eq("workspace_id", workspaceId).eq("product_id", productId);
-  const usedHooks = new Set(
-    ((existingCampaigns ?? []) as Array<{ product_ad_angles?: { hook_one_liner?: string | null } | null }>)
-      .map((c) => (c.product_ad_angles?.hook_one_liner ?? "").toLowerCase().slice(0, 60))
-      .filter(Boolean),
-  );
-  const fresh = ranked.filter((a) => !usedHooks.has(a.hook.toLowerCase().slice(0, 60)));
-  const pool = fresh.length ? fresh : ranked; // if everything's been used, allow refresh from the top
+  // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
+  // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
+  // RETIRED concepts, and for each surviving concept pick a FRESH combination (an untried treatment,
+  // biased toward historically-winning treatments). The learning ledger makes each cycle smarter.
+  const learning = await loadCreativeLearning(admin, workspaceId, productId);
+  const eligible = ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
+  // Prefer concepts with a win (double down), then untested, then lightly-tried — but never a retired one.
+  eligible.sort((a, b) => {
+    const sa = learning.byAngle.get(angleKey(a.hook)); const sb = learning.byAngle.get(angleKey(b.hook));
+    return (Number((sb?.won ?? 0) > 0) - Number((sa?.won ?? 0) > 0)) || ((sa?.tried ?? 0) - (sb?.tried ?? 0)) || (b.acquisitionPower - a.acquisitionPower);
+  });
+  const pool = eligible.length ? eligible : ranked;
 
   for (const angle of pool.slice(0, count)) {
+    const ak = angleKey(angle.hook);
+    const treatment = nextTreatmentFor(ak, learning);
     let landed = false;
     let lastIssues: string[] = [];
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed; attempt++) {
       try {
         const brief = await buildCreativeBrief(pi, angle, stories);
-        const gen = await generateCreative(workspaceId, brief);
+        const gen = await generateCreative(workspaceId, brief, { treatment });
         const verdict = await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         const metaCopy = {
@@ -186,6 +189,12 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
           description: (brief.offer?.perServing ?? brief.offer?.headline ?? "").slice(0, 30),
         };
         const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        // Record the COMBINATION (concept × creative treatment × copy × destination) as pending — the
+        // media buyer stamps its outcome later, feeding the learning flywheel.
+        await recordCombinationGenerated(admin, {
+          workspaceId, productId, angleKey: ak, adCampaignId: campaignId, intent: "explore",
+          elements: { treatment, headline: metaCopy.headline, description: metaCopy.primaryText, cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
+        });
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;
       } catch (err) {
