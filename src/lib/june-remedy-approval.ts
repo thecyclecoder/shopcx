@@ -42,67 +42,171 @@ export const JUNE_REFUND_CATEGORY = "june_refund";
 export const DEFAULT_REFUND_APPROVAL_THRESHOLD_CENTS = 5000;
 
 /**
- * Extract the money amount (cents) a remedy would move, or null if it's not a money action. Checks
- * `amount_cents` then `replacement_amount_cents` in the remedy payload. Pure.
+ * One money-action line extracted from a remedy — the per-action shape the preview builder + the
+ * card's tool_input carry so a human sees each money line separately from the SUM (Phase 3 of
+ * multi-action-remedies). `amountCents` is null when the money action's amount is unknown (e.g. a
+ * `partial_refund` payload with no `amount_cents`) — the gate treats null as "unsizeable → gate".
  */
-export function remedyMoneyAmountCents(remedy: Record<string, unknown> | null | undefined): number | null {
-  if (!remedy || typeof remedy !== "object") return null;
-  const actionType = typeof remedy.action_type === "string" ? remedy.action_type.trim() : "";
-  if (!MONEY_ACTION_TYPES.has(actionType)) return null;
-  const payload =
-    remedy.payload && typeof remedy.payload === "object" && !Array.isArray(remedy.payload)
-      ? (remedy.payload as Record<string, unknown>)
-      : {};
+export interface MoneyActionLine {
+  actionType: string;
+  amountCents: number | null;
+}
+
+/**
+ * Pull the money amount (cents) from ONE payload object — the shared shape used by both a legacy
+ * single-action remedy (`{action_type, payload}`) and each step in a multi-action remedy's
+ * `actions[]`. Checks `amount_cents` first, then `replacement_amount_cents` (dollar_replacement).
+ * Returns null when the field is missing / non-finite. Pure.
+ */
+function extractPayloadAmountCents(payload: Record<string, unknown>): number | null {
   const raw = payload.amount_cents ?? payload.replacement_amount_cents;
   return typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : null;
+}
+
+/**
+ * Walk a remedy and return the ORDERED per-money-action lines June authored. Handles both shapes:
+ *  - Legacy single-action: `{action_type, payload}` → returns 0 or 1 lines.
+ *  - Multi-action (Phase 1+ of multi-action-remedies): `{actions:[{action_type, payload}, ...]}` →
+ *    returns one line PER money action in June's authored order; non-money actions are skipped.
+ * Pure. Used by both remedyMoneyAmountCents (SUM) and the preview builder (per-line list).
+ */
+export function extractRemedyMoneyLines(
+  remedy: Record<string, unknown> | null | undefined,
+): MoneyActionLine[] {
+  if (!remedy || typeof remedy !== "object" || Array.isArray(remedy)) return [];
+  const steps: Record<string, unknown>[] = [];
+  if (Array.isArray(remedy.actions) && remedy.actions.length > 0) {
+    for (const raw of remedy.actions) {
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        steps.push(raw as Record<string, unknown>);
+      }
+    }
+  } else {
+    steps.push(remedy);
+  }
+  const lines: MoneyActionLine[] = [];
+  for (const step of steps) {
+    const actionType = typeof step.action_type === "string" ? step.action_type.trim() : "";
+    if (!MONEY_ACTION_TYPES.has(actionType)) continue;
+    const payload =
+      step.payload && typeof step.payload === "object" && !Array.isArray(step.payload)
+        ? (step.payload as Record<string, unknown>)
+        : {};
+    lines.push({ actionType, amountCents: extractPayloadAmountCents(payload) });
+  }
+  return lines;
+}
+
+/**
+ * Extract the TOTAL money amount (cents) a remedy would move, summed across every money action in
+ * the batch (Phase 3 of multi-action-remedies). Returns null when there are NO money actions AND
+ * when ANY money action has an unknown amount — both cases the gate needs to distinguish from a
+ * finite number (unknown → force gate; none → nothing to gate). Pure.
+ */
+export function remedyMoneyAmountCents(remedy: Record<string, unknown> | null | undefined): number | null {
+  const lines = extractRemedyMoneyLines(remedy);
+  if (lines.length === 0) return null;
+  let sum = 0;
+  for (const line of lines) {
+    // ANY unknown amount collapses the whole sum to null — a refund we can't size cannot be
+    // reported as a number (would silently under-report the fix's true spend). The gate reads
+    // null-amount as "unsizeable → gate" so the founder still sees it.
+    if (line.amountCents === null) return null;
+    sum += line.amountCents;
+  }
+  return sum;
 }
 
 export interface FounderApprovalDecision {
   /** True → do NOT auto-execute; route to the founder. */
   gated: boolean;
+  /** The primary money action (first money line's type). Null when the batch has no money actions. */
   actionType: string | null;
-  /** The money amount in cents (null when unknown — an unknown-amount money action is gated too). */
+  /** The SUMMED money amount in cents across every money action in the batch (null when unknown —
+   *  an unknown amount on ANY money action still gates). */
   amountCents: number | null;
+  /** Ordered per-money-action lines (Phase 3 of multi-action-remedies). Length 0 → no money in the
+   *  batch. Length 1 → legacy single-action shape. Length ≥ 2 → multi-action batch; the preview
+   *  builder lists each line separately from the SUM. */
+  moneyLines: MoneyActionLine[];
 }
 
 /**
- * Decide whether a remedy must go to the founder before executing. A money action whose amount is
- * STRICTLY ABOVE the threshold is gated; a money action with an UNKNOWN amount is ALSO gated (never
- * auto-fire a refund we can't size). Non-money actions and sub-threshold refunds run autonomously.
- * Pure.
+ * Decide whether a remedy must go to the founder before executing. Phase 3 of multi-action-remedies:
+ * the gate SUMS money across every money action in `actions[]` (partial_refund +
+ * redeem_points_as_refund + replacement + dollar_replacement) and gates on the TOTAL vs
+ * `workspaces.june_refund_approval_threshold_cents` — so a fix can't dodge the $50 gate by splitting
+ * a $60 refund into 2×$30. Any UNKNOWN amount on any money action ALSO gates (never auto-fire a
+ * refund we can't size). Non-money-only batches and sub-threshold sums run autonomously. Pure.
  */
 export function remedyNeedsFounderApproval(
   remedy: Record<string, unknown> | null | undefined,
   thresholdCents: number,
 ): FounderApprovalDecision {
-  if (!remedy || typeof remedy !== "object") return { gated: false, actionType: null, amountCents: null };
-  const actionType = typeof remedy.action_type === "string" ? remedy.action_type.trim() : "";
-  if (!MONEY_ACTION_TYPES.has(actionType)) return { gated: false, actionType: actionType || null, amountCents: null };
+  const moneyLines = extractRemedyMoneyLines(remedy);
+  if (moneyLines.length === 0) {
+    const rawActionType =
+      remedy && typeof remedy === "object" && !Array.isArray(remedy) && typeof remedy.action_type === "string"
+        ? remedy.action_type.trim()
+        : "";
+    return { gated: false, actionType: rawActionType || null, amountCents: null, moneyLines: [] };
+  }
   const amountCents = remedyMoneyAmountCents(remedy);
-  // Unknown amount on a money action → gate (conservative). Known amount → gate only when > threshold.
+  // Unknown amount on ANY money action → gate (conservative). Known amounts → gate only when
+  // SUM > threshold. This is what makes 2×$30 behave identically to a single $60 at the gate.
   const gated = amountCents === null || amountCents > thresholdCents;
-  return { gated, actionType, amountCents };
+  return {
+    gated,
+    actionType: moneyLines[0].actionType,
+    amountCents,
+    moneyLines,
+  };
 }
 
 /**
  * Compose the plain-language card/SMS-context text the founder reads — simple enough to approve at a
- * glance ("Refund $48.00 to Susan on 'Wrong price' — <why>"). Pure.
+ * glance. Two shapes (Phase 3 of multi-action-remedies):
+ *  - SINGLE-line (`moneyLines` omitted OR length ≤ 1): renders the legacy string
+ *    "Refund $48.00 to Susan on 'Wrong price'?" that prod SMSes + prior tests rely on.
+ *  - MULTI-line (`moneyLines` length ≥ 2): names the TOTAL up-front (so a 2×$30 split can't hide
+ *    the true spend from the founder) AND lists each money line so the shape of the fix is legible
+ *    without opening the tool_input.
+ * Pure.
  */
 export function buildJuneApprovalPreview(input: {
   actionType: string;
+  /** The SUMMED money amount in cents (or null when unknown). */
   amountCents: number | null;
+  /** Ordered per-money-action lines. Length ≥ 2 triggers the multi-line format. */
+  moneyLines?: MoneyActionLine[];
   customerName?: string | null;
   ticketSubject?: string | null;
   reasoning?: string | null;
 }): string {
   const dollars = input.amountCents != null ? `$${(input.amountCents / 100).toFixed(2)}` : "an unspecified amount";
+  const who = input.customerName?.trim() ? ` to ${input.customerName.trim()}` : "";
+  const subj = input.ticketSubject?.trim() ? ` on "${input.ticketSubject.trim()}"` : "";
+  const why = input.reasoning?.trim() ? `\n\nWhy: ${input.reasoning.trim().slice(0, 400)}` : "";
+
+  const lines = input.moneyLines ?? [];
+  if (lines.length >= 2) {
+    // Multi-action preview: total → per-line list. Each line reads "  • <action_type>: $X.YZ" (or
+    // "an unspecified amount" when null) so the founder sees the split at a glance and can't miss
+    // that the $60 total is really 2×$30 (the exact class the sum-gate defends against).
+    const bullets = lines
+      .map((line) => {
+        const lineDollars =
+          line.amountCents != null ? `$${(line.amountCents / 100).toFixed(2)}` : "an unspecified amount";
+        return `  • ${line.actionType}: ${lineDollars}`;
+      })
+      .join("\n");
+    return `Approve ${dollars} in refunds/credits${who}${subj}?\n${bullets}${why}`;
+  }
+
   const verb =
     input.actionType === "create_replacement_order" || input.actionType === "dollar_replacement"
       ? "Send a replacement worth"
       : "Refund";
-  const who = input.customerName?.trim() ? ` to ${input.customerName.trim()}` : "";
-  const subj = input.ticketSubject?.trim() ? ` on "${input.ticketSubject.trim()}"` : "";
-  const why = input.reasoning?.trim() ? `\n\nWhy: ${input.reasoning.trim().slice(0, 400)}` : "";
   return `${verb} ${dollars}${who}${subj}?${why}`;
 }
 
@@ -161,6 +265,12 @@ export async function raiseJuneRemedyApproval(
     reasoning: string;
     customerName?: string | null;
     ticketSubject?: string | null;
+    /**
+     * Per-money-action lines (Phase 3 of multi-action-remedies). When length ≥ 2 the preview lists
+     * each money line + the summed total so the founder sees a 2×$30 split can't hide the true $60
+     * spend. When omitted / length ≤ 1, the preview renders the legacy single-action string.
+     */
+    moneyLines?: MoneyActionLine[];
   },
 ): Promise<RaiseJuneRemedyResult> {
   // Best-effort enrich the preview with the customer's first name + ticket subject so the founder can
@@ -181,9 +291,14 @@ export async function raiseJuneRemedyApproval(
       /* best-effort — the preview still reads fine without them */
     }
   }
+  // Fall back to walking the remedy for money lines when the caller didn't precompute them (e.g. a
+  // future callsite that has the raw remedy but not the FounderApprovalDecision yet).
+  const moneyLines: MoneyActionLine[] =
+    input.moneyLines && input.moneyLines.length > 0 ? input.moneyLines : extractRemedyMoneyLines(input.remedy);
   const preview = buildJuneApprovalPreview({
     actionType: input.actionType,
     amountCents: input.amountCents,
+    moneyLines,
     customerName,
     ticketSubject,
     reasoning: input.reasoning,
@@ -244,6 +359,10 @@ export async function raiseJuneRemedyApproval(
         reasoning: input.reasoning,
         action_type: input.actionType,
         amount_cents: input.amountCents,
+        // Phase 3 (multi-action-remedies): stash the per-money-action lines so the cockpit UI +
+        // audit surfaces can show the split (2×$30) alongside the SUM without re-walking
+        // remedy.actions[]. JSONB — no schema change on god_mode_approvals.
+        money_lines: moneyLines,
         raised_at: now,
       },
       preview,

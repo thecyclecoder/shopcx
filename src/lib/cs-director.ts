@@ -587,6 +587,9 @@ async function handleApproveRemedy(
           remedy: verdict.remedy,
           actionType: gate.actionType || actionType,
           amountCents: gate.amountCents,
+          // Phase 3 (multi-action-remedies): thread the per-money-action lines through so the
+          // preview lists each line + SUM, and the card's tool_input surfaces the split.
+          moneyLines: gate.moneyLines,
           reasoning: verdict.reasoning,
         });
         console.log(`${tag} approve_remedy: refund/credit over threshold → parked for founder approval (via ${raised.via})`);
