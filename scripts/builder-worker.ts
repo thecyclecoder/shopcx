@@ -11384,6 +11384,27 @@ async function runTicketHandleJob(job: Job) {
               }
             }
 
+            // ── Founder directive (2026-07-10): a delivered JOURNEY closes the ticket too ──
+            // A journey is a self-service CTA the customer completes on the minisite — its lead-in +
+            // button IS the whole first-touch treatment. Nothing in the journey's CTA lifecycle closes
+            // the originating ticket, so before this it sat OPEN indefinitely (cancel-subscription
+            // delivered → ticket never closed: fc54b9fc). Same "every Sol message closes; a customer
+            // reply reopens it" rule playbooks/stateless already follow — the journey token carries its
+            // own state across the reopen, and journey COMPLETION fires the real action independently.
+            // Workflows are deliberately excluded: runWorkflow self-manages status (res.statusManaged)
+            // and may drive multiple steps before it's done.
+            const journeyLaunched = sendOk && (launchedStandaloneJourney || chosenPath === "journey");
+            if (journeyLaunched) {
+              try {
+                const { closeTicketOnResolvingReply } = await import("../src/lib/ticket-directions");
+                await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
+                console.log(`${tag} journey delivered → ticket closed (reply reopens; journey token carries state)`);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                console.warn(`${tag} journey close failed (journey already delivered): ${msg}`);
+              }
+            }
+
             // ── Founder directive (2026-07-09): ARM the chosen mechanism, then CLOSE ──
             // After Sol's opening reply ships, the box (a) arms the playbook Sol chose so it takes
             // over on the customer's NEXT reply (reply-gated, silent — armPlaybook sends nothing;
