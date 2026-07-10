@@ -39,6 +39,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
@@ -985,6 +986,8 @@ export async function runMediaBuyerLoop(
       },
     });
     if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a crowned winner marks its combination WON.
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, adCampaignId: a.sourceAdCampaignId, metaAdsetId: a.targetObjectId, outcome: "won", spendCents: a.spendCents }).catch(() => {});
   }
   for (const a of plan.kill) {
     const r = await recordDirectorActivity(admin, {
@@ -1004,6 +1007,9 @@ export async function runMediaBuyerLoop(
       },
     });
     if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a trimmed laggard marks its combination LOST (so the concept can be re-tried
+    // in a DIFFERENT combination; it only retires after several combinations lose).
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, metaAdsetId: a.targetObjectId, outcome: "lost", spendCents: a.spendCents }).catch(() => {});
   }
   for (const a of reactivations) {
     const r = await recordDirectorActivity(admin, {
@@ -1022,6 +1028,8 @@ export async function runMediaBuyerLoop(
       },
     });
     if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a recovered adset marks its combination REACTIVATED (counts as a win).
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, metaAdsetId: a.targetObjectId, outcome: "reactivated", cppCents: a.cppCents, spendCents: a.spendCents }).catch(() => {});
   }
   // Phase 3 — fatigue-triggered variant spawn. For each fatigue_replenish action,
   // call amplifyWinner (respects MAX_VARIANTS_PER_WINNER + MAX_AMPLIFICATIONS_PER_DAY
