@@ -3,6 +3,10 @@ import {
   SHOWCASE_COOKIE_NAME,
   verifyShowcaseToken,
 } from "@/lib/showcase/auth";
+import {
+  INVESTORS_COOKIE_NAME,
+  verifyInvestorSession,
+} from "@/lib/investors/auth";
 import { type NextRequest, NextResponse } from "next/server";
 
 // HTML-limited bots — mirrors Next 16's internal list
@@ -59,6 +63,33 @@ export async function proxy(request: NextRequest) {
       // Preserve the intended destination so we can bounce back post-unlock.
       url.search = "";
       if (p !== "/showcase") url.searchParams.set("from", p);
+      return NextResponse.redirect(url);
+    }
+  }
+
+  // ── Investors gate (magic-link-gated financial section) ──
+  // Mirror of the showcase gate, surgically scoped to /investors/* and
+  // /api/investors/*. Everything under /investors requires a valid signed
+  // `investors_session` cookie EXCEPT the magic-link entry (/investors/enter,
+  // which mints the cookie) and the /investors/expired request page. The
+  // /api/investors/* handlers do their own cookie auth, so we let them through
+  // (otherwise the supabase flow would auth-gate them to /login). Returns early
+  // so no other route is affected. See src/lib/investors/auth.ts.
+  {
+    const p = request.nextUrl.pathname;
+    if (p === "/api/investors" || p.startsWith("/api/investors/")) {
+      return NextResponse.next();
+    }
+    const isInvestorsPage = p === "/investors" || p.startsWith("/investors/");
+    if (isInvestorsPage) {
+      const isEntry = p === "/investors/enter"; // route handler sets the cookie
+      const isExpired = p === "/investors/expired"; // request-a-fresh-link surface
+      if (isEntry || isExpired) return NextResponse.next();
+      const session = verifyInvestorSession(request.cookies.get(INVESTORS_COOKIE_NAME)?.value);
+      if (session) return NextResponse.next();
+      const url = request.nextUrl.clone();
+      url.pathname = "/investors/expired";
+      url.search = "";
       return NextResponse.redirect(url);
     }
   }

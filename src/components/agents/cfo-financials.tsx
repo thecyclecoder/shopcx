@@ -70,7 +70,7 @@ const rangeSpan = (rows: PnlRow[]) => (rows.length ? `${monthLabel(rows[0].month
 
 type Range = { type: "all" | "thisYear" | "lastYear" } | { type: "quarter"; key: string };
 
-export function CfoFinancials() {
+export function CfoFinancials({ endpoint = "/api/director/cfo/pnl" }: { endpoint?: string } = {}) {
   const [rows, setRows] = useState<PnlRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"charts" | "table">("charts");
@@ -80,11 +80,11 @@ export function CfoFinancials() {
   const active = hover ?? pinned; // hover scans; a click pins so the readout stays
 
   useEffect(() => {
-    fetch("/api/director/cfo/pnl")
+    fetch(endpoint)
       .then((r) => r.json())
       .then((d) => (d.error ? setError(d.error) : setRows(d.rows)))
       .catch(() => setError("Failed to load P&L"));
-  }, []);
+  }, [endpoint]);
 
   // "this year" = the most recent year present in the data (deterministic, never empty).
   const { curYear, quarters } = useMemo(() => {
