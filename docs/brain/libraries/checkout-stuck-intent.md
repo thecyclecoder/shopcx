@@ -47,7 +47,8 @@ The Phase-1 predicate recognizes the intent as its own thing so Phases 2-5 can s
 
 ## Callers
 
-- Phase 2+ will wire this into [[../inngest/unified-ticket-handler]] (routing) and [[model-picker]] (keep on Sonnet). No production caller yet — Phase 1 ships the recognition only.
+- **[[model-picker]] `pickOrchestratorModel` / `pickModelFromSignals`** — Phase 2. The picker computes `isCheckoutStuck` from the newest inbound customer message (passed in as `newestMessage` by [[../inngest/unified-ticket-handler]] § 4). When true, `pickModelFromSignals` short-circuits at the earliest gate to `{ model: "sonnet", reason: "checkout-stuck" }` — no future rule can escalate away from Sonnet, and `ai_token_usage.purpose` surfaces the audit slice cleanly.
+- **[[inflection-detector]] `stage1Classify`** — Phase 2. A checkout-stuck newest message maps to `kind: 'drift'` with `evidence.reason = 'stage1_checkout_stuck'`, which flows through `detectInflection → applyInflectionGate → reSessionSol` unchanged: the live Direction is superseded and a fresh `kind='ticket-handle'` `agent_jobs` row is enqueued so Sol authors a real assisted-purchase Direction. Fires even mid-playbook (a customer stuck at Shopify checkout still needs Sol) and even without a live Direction.
 
 ## Test coverage
 

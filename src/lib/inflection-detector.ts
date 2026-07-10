@@ -23,6 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { classifyCheckoutStuck } from "@/lib/checkout-stuck-intent";
 import { getLiveDirection, incrementResessionCount, superseDirection } from "@/lib/ticket-directions";
 
 // ── public types ──────────────────────────────────────────────────────────────
@@ -192,6 +193,27 @@ function stage1Classify(input: DetectInflectionInput): Stage1Result {
     return {
       kind: "frustration",
       evidence: { stage: 1, reason: "stage1_frustration_cue", cues: frust.cues },
+    };
+  }
+
+  // Phase 2 of [[../specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
+  // A CHECKOUT-STUCK message flags Sol back in even mid-playbook — a customer stuck at the
+  // Shopify checkout while the current playbook is still driving (or a Direction that never
+  // covered the payment lane, per Latrina's aa0b6697 case) needs a fresh assisted-purchase
+  // Direction. We map it to `kind: 'drift'` (rather than a new kind) so the existing
+  // `reSessionSol` router fires unchanged: supersede the live Direction + enqueue a new
+  // ticket-handle box session for Sol. The verdict lands via detectInflection → applyInflectionGate
+  // → reSessionSol just like the multi-signal drift path, and the ledger row stamps
+  // `stage1_checkout_stuck` (via evidence.reason) so the analytics slice can count it.
+  const checkoutStuck = classifyCheckoutStuck(input.newestMessage);
+  if (checkoutStuck.matched) {
+    return {
+      kind: "drift",
+      evidence: {
+        stage: 1,
+        reason: "stage1_checkout_stuck",
+        cues: checkoutStuck.cue ? [checkoutStuck.cue] : [],
+      },
     };
   }
 

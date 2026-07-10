@@ -2104,7 +2104,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         const { loadLiveDirection } = await import("@/lib/ticket-directions");
         const liveDirection = await loadLiveDirection(admin, tid, { workspace_id: wsId });
         const directionActive = !!(liveDirection && !liveDirection.superseded_at);
-        const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null, direction: liveDirection });
+        const pick = await pickOrchestratorModel({ workspaceId: wsId, ticketId: tid, customerId: st.custId || null, direction: liveDirection, newestMessage: msg });
         await sysNote(admin, tid, `[System] Orchestrator model: ${pick.model} (${pick.reason})${directionActive ? " · direction-scoped context" : ""}`);
         const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
           agentAssigned ? { assigned: true, intervened: st.intervened } : null,

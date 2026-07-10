@@ -269,3 +269,81 @@ test("Phase 3: no Direction (Sol hasn't authored) → Sonnet default preserved",
   assert.equal(pick.model, "sonnet");
   assert.equal(pick.reason, "default");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 of checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol.
+// A CHECKOUT-STUCK ticket must stay on Sonnet — earliest gate so a recent auto-
+// merge (recentMergesCount>0, Latrina's aa0b6697 case) can no longer drift the
+// reason string away from `checkout-stuck`, and no future rule can escalate it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("Phase 2: isCheckoutStuck + recentMergesCount>0 → Sonnet with reason=checkout-stuck (Latrina aa0b6697)", () => {
+  const pick = pickModelFromSignals({
+    aiTurnCount: 0,
+    tags: [],
+    crisisCount: 0,
+    linksCount: 0,
+    activeSubsCount: 0,
+    recentMergesCount: 1,
+    isCheckoutStuck: true,
+  });
+  assert.equal(pick.model, "sonnet");
+  assert.equal(pick.reason, "checkout-stuck");
+});
+
+test("Phase 2: isCheckoutStuck overrides every hard signal — stays Sonnet with reason=checkout-stuck", () => {
+  const pick = pickModelFromSignals({
+    aiTurnCount: 5,
+    tags: ["crisis", "pb:refund", "j:cancel:hard", "fraud"],
+    crisisCount: 1,
+    linksCount: 1,
+    activeSubsCount: 2,
+    recentMergesCount: 1,
+    isCheckoutStuck: true,
+  });
+  assert.equal(pick.model, "sonnet");
+  assert.equal(pick.reason, "checkout-stuck");
+});
+
+test("Phase 2: isCheckoutStuck overrides the Haiku fresh-Direction fast-path (Sol still needs to re-session)", () => {
+  const nowMs = Date.parse("2026-07-07T12:00:00Z");
+  const pick = pickModelFromSignals(noOpusSignals({
+    isCheckoutStuck: true,
+    direction: directionAuthoredHoursAgo(nowMs, 1),
+    latestConfidence: 0.95,
+    problemLockinThreshold: 0.7,
+    solHaikuFreshnessHours: 24,
+    nowMs,
+  }));
+  assert.equal(pick.model, "sonnet");
+  assert.equal(pick.reason, "checkout-stuck");
+});
+
+test("Phase 2: isCheckoutStuck=false leaves the picker unchanged (recent-merges still lands as hard:recently-merged)", () => {
+  const pick = pickModelFromSignals({
+    aiTurnCount: 0,
+    tags: [],
+    crisisCount: 0,
+    linksCount: 0,
+    activeSubsCount: 0,
+    recentMergesCount: 1,
+    isCheckoutStuck: false,
+  });
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*recently-merged/);
+});
+
+test("Phase 2: isCheckoutStuck omitted (undefined) behaves like false — backwards compatible", () => {
+  const pick = pickModelFromSignals({
+    aiTurnCount: 0,
+    tags: [],
+    crisisCount: 0,
+    linksCount: 0,
+    activeSubsCount: 0,
+    recentMergesCount: 1,
+    // isCheckoutStuck deliberately omitted
+  });
+  assert.equal(pick.model, "sonnet");
+  assert.match(pick.reason, /^hard:.*recently-merged/);
+  assert.doesNotMatch(pick.reason, /checkout-stuck/);
+});
