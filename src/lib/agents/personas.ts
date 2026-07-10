@@ -259,6 +259,14 @@ export const PERSONAS: Record<string, AgentPersona> = {
     chip: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/30 dark:text-rose-300 dark:border-rose-900/40",
     dot: "bg-rose-500", ring: "bg-rose-50 dark:bg-rose-900/20", accent: "text-rose-600 dark:text-rose-400",
   },
+  "ad-creative": {
+    key: "ad-creative", name: "Dahlia", role: "Ad Creative", emoji: "🎨",
+    personality: "Designs the scroll-stopping static ads that feed Bianca's test loop, under Max. Grounds every creative in product-intelligence (real reviews, ingredient research, verified proof + the offer) so nothing is fabricated — leads on the differentiated acquisition angle (a real transformation, a skeptic-to-believer objection, curiosity), never the commodity 'no-crash' retention truth. Generates via Nano Banana Pro, runs a vision-QA gate on every render (garbled text / bare price / fabricated authenticity caption / cartoon before-after), regenerates on fail, and drops the passers into the ready-to-test bin with a Shopify PDP lander — no human gate, because it's verifiable by construction. Deterministic + tasteful.",
+    pronouns: { subject: "she", object: "her", possessive: "her" },
+    mascotId: "default", avatarUrl: `${AV}dahlia-ad-creative.jpg?v=1`,
+    chip: "bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 dark:bg-fuchsia-900/30 dark:text-fuchsia-300 dark:border-fuchsia-900/40",
+    dot: "bg-fuchsia-500", ring: "bg-fuchsia-50 dark:bg-fuchsia-900/20", accent: "text-fuchsia-600 dark:text-fuchsia-400",
+  },
   "coverage-register": {
     key: "coverage-register", name: "Cole", role: "Coverage", emoji: "🟦",
     personality: "Catches unregistered loops, proposes the MONITORED_LOOPS entry.",

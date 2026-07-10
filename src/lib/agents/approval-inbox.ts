@@ -94,6 +94,10 @@ const KIND_TO_FUNCTION: Record<string, string> = (() => {
   // `dr-content` (Carrie) is a Growth worker — her content-gap flags + build handoffs route UP from
   // Growth (Max), same leash. She reports to Max and escalates real-asset gaps to him.
   if (!m["dr-content"]) m["dr-content"] = "growth";
+  // `ad-creative` (Dahlia) is a Growth worker beside Bianca — she stocks Bianca's ready-to-test bin with
+  // fully-backed, vision-QA'd statics (no human gate; verifiable-by-construction). She raises no approvals
+  // in normal flow, but any escalation routes UP from Growth (Max), same leash as Carrie/Rhea.
+  if (!m["ad-creative"]) m["ad-creative"] = "growth";
   // `sms-marketing` (Margo) is a CMO worker — her send proposals + stale-segment/no-coupon escalations
   // route UP from CMO (Iris auto-approves within her leash when live+autonomous, else the CEO fail-safe).
   if (!m["sms-marketing"]) m["sms-marketing"] = "cmo";

@@ -134,6 +134,7 @@ import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
 import { growthAdSpendGovernorCron, growthAdSpendGovernorSweep } from "@/lib/inngest/growth-ad-spend-governor";
 import { mediaBuyerCadenceCron, mediaBuyerCadenceSweep } from "@/lib/inngest/media-buyer-cadence";
+import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-creative-cadence";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
 import {
   mediaBuyerSelfCorrectingCron,
@@ -305,6 +306,8 @@ export const registeredInngestFunctions = [
   growthAdSpendGovernorSweep,
   mediaBuyerCadenceCron,
   mediaBuyerCadenceSweep,
+  adCreativeCadenceCron,
+  adCreativeCadenceSweep,
   mediaBuyerGradeCron,
   mediaBuyerGradeSweep,
   mediaBuyerSelfCorrectingCron,
