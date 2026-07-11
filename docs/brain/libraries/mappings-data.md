@@ -13,7 +13,7 @@ The qb_* tables (created in `supabase/migrations/20261012150000_qb_mapping_table
 ## Exports
 
 **`loadMappings(workspaceId, admin?) → MappingsView`**
-- Paginates through `qb_items` + `qb_sku_mappings` + `qb_external_skus` + `qb_item_bom` (each read chunks in 1000-row `.range()` pages because PostgREST silently caps `.select()` at 1000; this is the same load-bearing gotcha called out in [[../functions/logistics]] and worked around in [`src/lib/logistics/replenishment-data.ts`](../../../src/lib/logistics/replenishment-data.ts)).
+- Paginates through `qb_items` + `qb_sku_mappings` + `qb_external_skus` + `qb_item_bom` — four inline `.range()` loops with literal `.from()` table names, matching the pattern in [`src/lib/logistics/cover.ts`](../../../src/lib/logistics/cover.ts) so Turbopack can statically analyze each query. Each read chunks in 1000-row pages because PostgREST silently caps `.select()` at 1000; this is the same load-bearing gotcha called out in [[../functions/logistics]].
 - Joins `qb_sku_mappings.external_id + source` → `qb_external_skus` for the title / image / seller_sku display.
 - Groups external refs per item by source, resolves BOM components into names via the item catalog, and returns headline counts (`qbItems`, `activeMappings`, `externalSkus`, `bomEdges`).
 - Sort: finished-goods first, then bundles, then components, then the rest — alpha within each group.

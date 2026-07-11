@@ -51,7 +51,16 @@ async function MappingsContent() {
     .eq("workspace_id", workspaceId).eq("user_id", user.id).single();
   if (!member || member.role !== "owner") redirect("/dashboard");
 
-  const view = await loadMappings(workspaceId, admin);
+  let view;
+  try {
+    view = await loadMappings(workspaceId, admin);
+  } catch (e) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-300">
+        Could not load mappings: {(e as Error).message}.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

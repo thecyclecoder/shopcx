@@ -6,32 +6,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // resolve which external SKUs (Amazon ASIN, 3PL, Shopify, manual) map onto it and
 // list its BOM components. Powers /dashboard/logistics/mappings.
 //
-// Every read is paginated (.range() loop) because PostgREST silently caps `.select()`
-// at 1000 rows; the qb_* tables run into that (measured 2026-07: qb_external_skus
-// approaches the cap once Shopify variants are indexed).
+// Every read below is paginated (.range() loop) because PostgREST silently caps
+// `.select()` at 1000 rows and qb_external_skus approaches that ceiling as Shopify
+// variants are indexed; the same load-bearing gotcha called out in
+// docs/brain/functions/logistics.md and worked around in replenishment-data.ts.
 
 const PAGE = 1000;
-
-/** Return every row for a workspace, paginating past the PostgREST 1000-row cap. */
-async function paginate<T>(
-  admin: SupabaseClient,
-  table: string,
-  columns: string,
-  workspaceId: string,
-): Promise<T[]> {
-  const out: T[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await admin
-      .from(table)
-      .select(columns)
-      .eq("workspace_id", workspaceId)
-      .range(from, from + PAGE - 1);
-    if (error) throw error;
-    const chunk = (data ?? []) as T[];
-    out.push(...chunk);
-    if (chunk.length < PAGE) return out;
-  }
-}
 
 export interface MappingExternalRef {
   externalId: string;
@@ -77,43 +57,96 @@ export interface MappingsView {
   };
 }
 
+interface QbItemRow {
+  id: string;
+  quickbooks_id: string;
+  quickbooks_name: string;
+  sku: string | null;
+  category: string | null;
+  item_type: string;
+  product_category: string | null;
+  image_url: string | null;
+  active: boolean | null;
+}
+interface QbSkuMappingRow {
+  product_id: string;
+  external_id: string;
+  source: string;
+  label: string | null;
+  unit_multiplier: number;
+  active: boolean;
+}
+interface QbExternalSkuRow {
+  external_id: string;
+  source: string;
+  title: string | null;
+  image_url: string | null;
+  seller_sku: string | null;
+}
+interface QbBomRow {
+  parent_id: string;
+  component_id: string;
+  quantity: number;
+}
+
 /** Read the qb_* mapping tables read-only and shape them into a per-item view. */
 export async function loadMappings(workspaceId: string, admin?: SupabaseClient): Promise<MappingsView> {
   const client = admin ?? createAdminClient();
 
-  const [items, mappings, extSkus, bom] = await Promise.all([
-    paginate<{
-      id: string;
-      quickbooks_id: string;
-      quickbooks_name: string;
-      sku: string | null;
-      category: string | null;
-      item_type: string;
-      product_category: string | null;
-      image_url: string | null;
-      active: boolean | null;
-    }>(client, "qb_items", "id, quickbooks_id, quickbooks_name, sku, category, item_type, product_category, image_url, active", workspaceId),
-    paginate<{
-      product_id: string;
-      external_id: string;
-      source: string;
-      label: string | null;
-      unit_multiplier: number;
-      active: boolean;
-    }>(client, "qb_sku_mappings", "product_id, external_id, source, label, unit_multiplier, active", workspaceId),
-    paginate<{
-      external_id: string;
-      source: string;
-      title: string | null;
-      image_url: string | null;
-      seller_sku: string | null;
-    }>(client, "qb_external_skus", "external_id, source, title, image_url, seller_sku", workspaceId),
-    paginate<{
-      parent_id: string;
-      component_id: string;
-      quantity: number;
-    }>(client, "qb_item_bom", "parent_id, component_id, quantity", workspaceId),
-  ]);
+  // Each of the four reads pages past the PostgREST 1000-row cap via .range(). Inline
+  // rather than a generic helper so the .from() literal is statically visible — matches
+  // the pattern in cover.ts and lets Turbopack analyze the query type at build time.
+  const items: QbItemRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client
+      .from("qb_items")
+      .select("id, quickbooks_id, quickbooks_name, sku, category, item_type, product_category, image_url, active")
+      .eq("workspace_id", workspaceId)
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const chunk = (data ?? []) as QbItemRow[];
+    items.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+
+  const mappings: QbSkuMappingRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client
+      .from("qb_sku_mappings")
+      .select("product_id, external_id, source, label, unit_multiplier, active")
+      .eq("workspace_id", workspaceId)
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const chunk = (data ?? []) as QbSkuMappingRow[];
+    mappings.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+
+  const extSkus: QbExternalSkuRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client
+      .from("qb_external_skus")
+      .select("external_id, source, title, image_url, seller_sku")
+      .eq("workspace_id", workspaceId)
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const chunk = (data ?? []) as QbExternalSkuRow[];
+    extSkus.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
+
+  const bom: QbBomRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client
+      .from("qb_item_bom")
+      .select("parent_id, component_id, quantity")
+      .eq("workspace_id", workspaceId)
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const chunk = (data ?? []) as QbBomRow[];
+    bom.push(...chunk);
+    if (chunk.length < PAGE) break;
+  }
 
   // external_id + source → row (the join key for the mapping resolver).
   const extBy = new Map<string, { title: string | null; imageUrl: string | null; sellerSku: string | null }>();
@@ -158,7 +191,7 @@ export async function loadMappings(workspaceId: string, admin?: SupabaseClient):
   }
 
   // Sort: finished-goods + bundles first, then the rest, alpha within a group.
-  const rank = (i: (typeof items)[number]) => {
+  const rank = (i: QbItemRow) => {
     if (i.product_category === "finished_good") return 0;
     if (i.item_type === "bundle") return 1;
     if (i.product_category === "component") return 2;
