@@ -1,0 +1,1 @@
+- **Planner authoring never loses a large multi-spec result** · verified 2026-07-11 · → [[lifecycles/roadmap-build-console]]
