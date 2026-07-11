@@ -28,6 +28,7 @@
     "test:cart-gifts": "tsx --test src/lib/cart-gifts.test.ts",
     "test:offers-renewal": "tsx --test src/lib/offers-renewal.test.ts",
     "test:bundle-cta": "tsx --test src/lib/bundle-cta.test.ts",
+    "test:spec-test-harness-classifier": "tsx --test src/lib/spec-test-harness-classifier.test.ts",
     "test:cleo-blueprint": "tsx --test src/lib/cleo-blueprint.test.ts",
     "test:usage-snapshots": "tsx --test src/lib/usage-snapshots.test.ts",
     "test:box-failed-supersede": "tsx --test src/lib/box-failed-supersede.test.ts",
