@@ -135,20 +135,20 @@ async function ReplenishmentContent() {
               </thead>
               <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                 {data.openPos.map((po) => {
-                  const lead = leadByItem.get(po.itemId);
-                  // ETA: QB DueDate if set, else PO date + measured avg lead. (QB usually leaves DueDate blank.)
-                  const eta = po.dueDate
-                    ? fmtDate(po.dueDate)
-                    : lead
-                    ? fmtDate(new Date(Date.parse(po.poDate) + lead.avgLeadDays * 86_400_000).toISOString().slice(0, 10)) + " (est)"
-                    : "—";
+                  // Resolved in the data layer: our annotation (confirmed) > QB DueDate > measured-lead estimate.
+                  const eta = data.etaByPo[po.poId];
+                  const etaLabel: Record<string, string> = { annotation: "", qb_due_date: "", measured_lead: " (est)", none: "" };
+                  const etaTone = eta?.status === "delayed" ? "text-red-600 dark:text-red-400" : eta?.source === "measured_lead" ? "text-zinc-500 dark:text-zinc-400" : "text-zinc-700 dark:text-zinc-300";
                   return (
                     <tr key={po.poId + po.itemId} className="text-zinc-700 dark:text-zinc-300">
                       <td className="px-4 py-2.5 font-medium text-zinc-900 dark:text-zinc-100">{po.itemName}</td>
                       <td className="px-4 py-2.5">{po.vendor ?? "—"}</td>
                       <td className="px-4 py-2.5 text-right tabular-nums">{po.orderedQty.toLocaleString()}</td>
                       <td className="px-4 py-2.5">{fmtDate(po.poDate)} <span className="text-zinc-400">· {daysAgo(po.poDate)}d ago</span></td>
-                      <td className="px-4 py-2.5">{eta}</td>
+                      <td className={`px-4 py-2.5 ${etaTone}`} title={eta?.note ?? undefined}>
+                        {eta?.date ? fmtDate(eta.date) + (etaLabel[eta.source] ?? "") : "—"}
+                        {eta?.status === "confirmed" && eta.source === "annotation" && <span className="ml-1.5 text-xs text-emerald-600 dark:text-emerald-400">✓ confirmed</span>}
+                      </td>
                     </tr>
                   );
                 })}
