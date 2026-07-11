@@ -30,6 +30,7 @@ import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStat
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
 import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 import { resolveFunctionMandates, type FunctionMandate } from "@/lib/function-mandates";
+import { assertSpecReviewGate } from "@/lib/spec-review-gate";
 import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
@@ -1156,6 +1157,27 @@ export async function authorSpecRowStructured(
     // gates) so a one-off spec never lands with a goal parent Vale will bounce forever. Trusts a declared
     // typed parent / bound milestoneId (see assertValidParent).
     assertValidParent(spec.parent, { milestoneId: opts.milestoneId, parentKind: effectiveParentKind });
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 1 — the DETERMINISTIC spec-review
+    // gate that replaces the Vale LLM lane. Runs the full mechanical checklist Vale used to run (phase-
+    // heading contiguity, Owner resolves to a functions page, Parent resolves via DB lookup, Blocked-by
+    // slugs resolve + acyclic, customer_id table companion plan) and throws `SpecReviewGateError` with
+    // the exact named failure(s). Runs BEFORE `upsertSpec` so a malformed spec never reaches
+    // `public.specs`. See [[spec-review-gate]].
+    await assertSpecReviewGate(workspaceId, {
+      slug,
+      owner: normalizeOwnerSlug(spec.owner),
+      parent: spec.parent,
+      parent_kind: effectiveParentKind ?? null,
+      parent_ref: effectiveParentRef ?? null,
+      blocked_by: spec.blocked_by ?? [],
+      milestone_id: opts.milestoneId ?? null,
+      phases: spec.phases.map((p, i) => ({
+        position: i + 1,
+        title: p.title,
+        body: p.body,
+        verification: phaseBodies[i].verification,
+      })),
+    });
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -1408,6 +1430,26 @@ export async function authorSpecRowFromMarkdown(
     // parentKind, so this catches a markdown-authored one-off forced onto a bare goal). Thrown → caught below
     // → author returns false (the spec never lands), same as any parse defect on this soft path.
     assertValidParent(mdParent, { milestoneId: opts.milestoneId, parentKind: mdEffectiveParentKind });
+
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 1 — deterministic spec-review gate
+    // for the markdown path. Same checklist as the structured path (phase-heading contiguity, Owner /
+    // Parent / Blocked-by resolution, customer_id companion). Runs BEFORE `upsertSpec` so a malformed
+    // markdown-authored spec is rejected at the same rail as the shape gates above.
+    await assertSpecReviewGate(workspaceId, {
+      slug,
+      owner: normalizeOwnerSlug(card.owner ?? ""),
+      parent: mdParent,
+      parent_kind: mdEffectiveParentKind ?? null,
+      parent_ref: mdEffectiveParentRef ?? null,
+      blocked_by: (card.blockedBy ?? []).map((b) => b.slug),
+      milestone_id: opts.milestoneId ?? null,
+      phases: card.phases.map((p, i) => ({
+        position: i + 1,
+        title: p.title,
+        body: phaseBodies[i]?.body ?? "",
+        verification: phaseBodies[i]?.verification ?? null,
+      })),
+    });
 
     const phases: SpecPhaseInput[] = card.phases.map((p, i) => ({
       position: i + 1,
