@@ -29,6 +29,10 @@ import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal 
 // Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
 // AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
 import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
+// dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the least-privilege env stripper the
+// `sandbox: "qc"` branch calls. Kept in src/lib so scripts/ad-creative-qc-guardrails.test.ts can
+// import + assert the exact key set.
+import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -1931,7 +1935,7 @@ interface RunBoxSessionOpts {
   //   an EXPLICIT INTENT MARKER — grep-able, and Phase-3 review can enforce that ONLY
   //   god-mode routes through it. The trust boundary is NOT the env stripping (there is
   //   none vs max), it's the hard per-tool permission gate below (see `permissionGate`).
-  sandbox?: "build" | "max" | "godmode";
+  sandbox?: "build" | "max" | "godmode" | "qc";
   timeout: number;
   idleTimeout?: number;
   // God-mode Phase 2: wire a PreToolUse hook via inline --settings JSON and DO NOT pass
@@ -2044,6 +2048,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   //     sandbox + the pr-resolve worktree (the LLM must not be able to push, mutate prod DB, etc).
   //   "max"  — keep the env, drop ONLY ANTHROPIC_API_KEY so all LLM is Max-billed. Used by every
   //     non-build runner (director / improve / triage / etc — they need read-only DB/crypto creds).
+  //   "qc"   — the LEAST-PRIVILEGE sandbox (dahlia-creative-qc-via-box-session Phase 3 / Fix 1).
+  //     Copies ONLY the QC_CHILD_ALLOWED_ENV_KEYS set (PATH/HOME/LANG/… + CLAUDE_CONFIG_DIR)
+  //     from process.env; every SUPABASE_/GITHUB_/META_/BRAINTREE_/ANTHROPIC_/OPENAI_ / any
+  //     SECRET_RE var is dropped. Used by the ad-creative-qc lane where the child only needs to
+  //     Read one temp JPEG. Pairs with a mandatory PreToolUse gate (opts.permissionGate) that
+  //     denies every non-safe tool call.
   const env: NodeJS.ProcessEnv = {};
   const sb = opts.sandbox ?? "max";
   if (sb === "build") {
@@ -2061,6 +2071,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     // docs/brain/lifecycles/god-mode.md § permission gate.
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
+  } else if (sb === "qc") {
+    // Least-privilege QC sandbox. `buildQcChildEnv` is the sole authority on which env keys
+    // reach the QC child (test in scripts/ad-creative-qc-guardrails.test.ts asserts no secrets
+    // are copied). Anything the QC actually needs comes from opts.extraEnv layered on below
+    // (e.g. AD_CREATIVE_QC_ALLOWED_IMAGE) — the sandbox is fail-safe by omission.
+    Object.assign(env, buildQcChildEnv(process.env));
   } else {
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
@@ -19847,17 +19863,33 @@ async function runAdCreativeJob(job: Job) {
   // non-JSON verdict yields { pass:false } in the box path; a missing ANTHROPIC_API_KEY or a
   // vision-API 5xx yields { pass:false } in the direct path.
   const qcMode = (process.env.DAHLIA_QC_MODE || "box").toLowerCase() === "direct" ? "direct" : "box";
+  // dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the PreToolUse hook that only allows
+  // Read on the exact QC image + TodoWrite (the transparency checklist). Every other tool is
+  // denied by src/lib/ads/creative-qc-sandbox evaluateQcPermission. The hook binary is a
+  // dedicated script so the gate's logic isn't tangled up with the god-mode gate's business.
+  const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
   let qcCounter = 0;
-  const qcDispatcher = async (prompt: string): Promise<{ resultText: string; isError: boolean }> => {
+  const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
     qcCounter++;
     const qcTag = `${tag}[qc#${qcCounter}]`;
     try {
       const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
         configDir: cfg,
         kind: "ad-creative-qc",
-        sandbox: "max",
+        // Phase 3 / Fix 1 — least-privilege env: strip EVERY var except the base OS handful
+        // (PATH/HOME/…). No ANTHROPIC_API_KEY, no SUPABASE_SERVICE_ROLE_KEY, no SUPABASE_DB_URL,
+        // no GITHUB_TOKEN, no META_ACCESS_TOKEN, no OPENAI_API_KEY. See buildQcChildEnv in
+        // src/lib/ads/creative-qc-sandbox.ts.
+        sandbox: "qc",
         timeout: AD_CREATIVE_QC_TIMEOUT_MS,
         idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Phase 3 / Fix 1 — inline PreToolUse hook: allow Read on the ALLOWED image only,
+        // allow TodoWrite (the transparency checklist), deny everything else. Fail-closed on
+        // any unexpected tool shape / env gap.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        // The gate reads the allowed path from this env var. The buildQcChildEnv sandbox does
+        // NOT include this key, so extraEnv (applied AFTER the sandbox) is the only source.
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
       }));
       if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
       return { resultText: run.resultText || "", isError: run.isError };
