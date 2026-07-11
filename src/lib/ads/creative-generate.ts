@@ -18,6 +18,10 @@ export interface GenerateCreativeOpts {
    *  a real review leads; big_claim → the headline claim dominates; authority → proof/certs lead;
    *  advertorial → an editorial story frame. Default: before_after. */
   treatment?: "before_after" | "testimonial" | "big_claim" | "authority" | "advertorial";
+  /** Composition transfer (CEO 2026-07-11): the `designReferenceUrl` is a PROVEN competitor static —
+   *  reuse its winning COMPOSITION (layout/hierarchy/focal structure) but swap in OUR product + copy +
+   *  proof. A static wins on composition, not just its text. */
+  compositionTransfer?: boolean;
 }
 
 const TREATMENT_STEER: Record<NonNullable<GenerateCreativeOpts["treatment"]>, string> = {
@@ -36,7 +40,7 @@ export interface GeneratedCreative {
   expectedCopy: { headline: string; offer: string | null; trust: string };
 }
 
-function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"]): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   const headline = brief.angle.hook;
   const trust = brief.proofStack.slice(0, 4).join(" · ");
   const treatmentClause = treatment ? `\n${TREATMENT_STEER[treatment]}` : "";
@@ -46,7 +50,9 @@ function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: Ge
     : null;
   const offerHeadline = brief.offer?.headline ?? null;
 
-  const refClause = hasDesignRef
+  const refClause = compositionTransfer && hasDesignRef
+    ? "The FIRST image is a PROVEN, high-performing competitor ad. REUSE ITS EXACT WINNING COMPOSITION — the layout, visual hierarchy, focal structure, where imagery vs text sit, the negative space, the scroll-stopping energy. But REPLACE every piece of its CONTENT with OURS: swap the competitor's product for OUR product (from the other provided images), and use OUR headline / proof / offer below. Change everything that identifies the competitor (their brand name, product, logo, claims, any of their text) — copy the STRUCTURE, never their words or marks."
+    : hasDesignRef
     ? "Match the FIRST image's design language (layout energy, typography weight, color system) — the product images follow it."
     : "Clean, premium direct-response e-commerce static; high contrast; mobile-thumb-legible.";
 
@@ -83,7 +89,7 @@ HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and 
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
-  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment);
+  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer);
   // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
   // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
   const imageUrls = [

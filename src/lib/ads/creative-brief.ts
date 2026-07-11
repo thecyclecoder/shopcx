@@ -37,7 +37,7 @@ const HIGH_INTENT = /\b(weight|lbs|pounds|shed|slim|brain fog|foggy|focus|clarit
 
 export interface ScoredAngle {
   hook: string;
-  source: "ad_angle" | "review_cluster" | "transformation" | "benefit" | "ingredient" | "authority";
+  source: "ad_angle" | "review_cluster" | "transformation" | "benefit" | "ingredient" | "authority" | "competitor";
   leadBenefit: string;
   acquisitionPower: number; // 0–10 — cold-scroll stopping power
   retentionTruth: number; // 0–10 — how well the product delivers it (keeps them)
