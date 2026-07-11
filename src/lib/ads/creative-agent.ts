@@ -187,9 +187,25 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
   while (plan.length < count && ei < exploitPool.length) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
   if (!plan.length) for (const a of (eligible.length ? eligible : ranked).slice(0, count)) plan.push({ angle: a, intent: "explore" });
 
-  for (const { angle, intent } of plan) {
+  // Assign a DISTINCT treatment per creative up front — so a batch of the same concept spreads across
+  // treatments (before_after, testimonial, big_claim, …) instead of all landing on the top one. Excludes
+  // both ledger-tried treatments AND treatments already assigned earlier in THIS batch (the in-loop
+  // `learning` snapshot doesn't update between generations, which is what made the last 3 all before_after).
+  const batchUsed = new Map<string, Set<string>>();
+  const planned = plan.map(({ angle, intent }) => {
     const ak = angleKey(angle.hook);
-    const treatment = nextTreatmentFor(ak, learning);
+    const tried = learning.byAngle.get(ak)?.triedTreatments ?? new Set<string>();
+    const used = batchUsed.get(ak) ?? new Set<string>();
+    const excluded = new Set<string>([...tried, ...used]);
+    const treatment = (learning.bestTreatments.find((t) => !excluded.has(t))
+      ?? learning.bestTreatments.find((t) => !used.has(t))
+      ?? nextTreatmentFor(ak, learning)) as (typeof learning.bestTreatments)[number];
+    used.add(treatment); batchUsed.set(ak, used);
+    return { angle, intent, treatment };
+  });
+
+  for (const { angle, intent, treatment } of planned) {
+    const ak = angleKey(angle.hook);
     let landed = false;
     let lastIssues: string[] = [];
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed; attempt++) {
