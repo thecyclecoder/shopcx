@@ -29,6 +29,10 @@ import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal 
 // Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
 // AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
 import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
+// dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the least-privilege env stripper the
+// `sandbox: "qc"` branch calls. Kept in src/lib so scripts/ad-creative-qc-guardrails.test.ts can
+// import + assert the exact key set.
+import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -387,6 +391,12 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
 const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+// dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
+// `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
+// a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
+// burns an attempt) instead of stalling the ad-creative lane on a stuck QC.
+const AD_CREATIVE_QC_TIMEOUT_MS = 6 * 60 * 1000;   // 6 min hard cap
+const AD_CREATIVE_QC_IDLE_MS = 90 * 1000;          // 90s no-output ⇒ hung ⇒ kill
 // media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
 // grading pass. Deterministic-Node; scores media-buyer director_activity rows
 // against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
@@ -1925,7 +1935,7 @@ interface RunBoxSessionOpts {
   //   an EXPLICIT INTENT MARKER — grep-able, and Phase-3 review can enforce that ONLY
   //   god-mode routes through it. The trust boundary is NOT the env stripping (there is
   //   none vs max), it's the hard per-tool permission gate below (see `permissionGate`).
-  sandbox?: "build" | "max" | "godmode";
+  sandbox?: "build" | "max" | "godmode" | "qc";
   timeout: number;
   idleTimeout?: number;
   // God-mode Phase 2: wire a PreToolUse hook via inline --settings JSON and DO NOT pass
@@ -2038,6 +2048,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   //     sandbox + the pr-resolve worktree (the LLM must not be able to push, mutate prod DB, etc).
   //   "max"  — keep the env, drop ONLY ANTHROPIC_API_KEY so all LLM is Max-billed. Used by every
   //     non-build runner (director / improve / triage / etc — they need read-only DB/crypto creds).
+  //   "qc"   — the LEAST-PRIVILEGE sandbox (dahlia-creative-qc-via-box-session Phase 3 / Fix 1).
+  //     Copies ONLY the QC_CHILD_ALLOWED_ENV_KEYS set (PATH/HOME/LANG/… + CLAUDE_CONFIG_DIR)
+  //     from process.env; every SUPABASE_/GITHUB_/META_/BRAINTREE_/ANTHROPIC_/OPENAI_ / any
+  //     SECRET_RE var is dropped. Used by the ad-creative-qc lane where the child only needs to
+  //     Read one temp JPEG. Pairs with a mandatory PreToolUse gate (opts.permissionGate) that
+  //     denies every non-safe tool call.
   const env: NodeJS.ProcessEnv = {};
   const sb = opts.sandbox ?? "max";
   if (sb === "build") {
@@ -2055,6 +2071,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     // docs/brain/lifecycles/god-mode.md § permission gate.
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
+  } else if (sb === "qc") {
+    // Least-privilege QC sandbox. `buildQcChildEnv` is the sole authority on which env keys
+    // reach the QC child (test in scripts/ad-creative-qc-guardrails.test.ts asserts no secrets
+    // are copied). Anything the QC actually needs comes from opts.extraEnv layered on below
+    // (e.g. AD_CREATIVE_QC_ALLOWED_IMAGE) — the sandbox is fail-safe by omission.
+    Object.assign(env, buildQcChildEnv(process.env));
   } else {
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
@@ -19823,9 +19845,70 @@ async function runAdCreativeJob(job: Job) {
   } catch {
     /* not JSON — degrade to workspace-wide top-up */
   }
+  // dahlia-creative-qc-via-box-session Phase 1 — inject the QC dispatcher: each per-creative QC
+  // pass spawns a top-level `claude -p` on Max via runBoxLane (kind='ad-creative-qc', sandbox='max'
+  // so ANTHROPIC_API_KEY is stripped from the spawned env). Fail-closed contract: any spawn error /
+  // cap / timeout / non-JSON verdict surfaces as { isError:true } and qaCreativeViaBoxSession
+  // converts it to { pass:false } so nothing unchecked reaches the bin. Best-effort per QC — a
+  // wall on one account hops via runBoxLane's account failover; all accounts capped surfaces via
+  // the ALL_CAPPED_MARKER path and fails-closed to pass:false (regenerator burns an attempt).
+  //
+  // Phase 2 — DAHLIA_QC_MODE kill-switch:
+  //   'box'    (default, unset also = 'box') — use the claude -p QC session (the Phase 1 dispatcher below).
+  //   'direct' — skip the dispatcher; runAdCreativeLoop falls back to the legacy Opus vision API
+  //              (`qaCreative` in src/lib/ads/creative-qa.ts), unchanged. One env flag flip reverts
+  //              a bad rollout without a redeploy. Any other value is treated as 'box' (safest
+  //              default: fail toward the new path we tested rather than silently regressing).
+  // The fail-closed invariant is preserved on BOTH paths — a session error, cap, timeout, or
+  // non-JSON verdict yields { pass:false } in the box path; a missing ANTHROPIC_API_KEY or a
+  // vision-API 5xx yields { pass:false } in the direct path.
+  const qcMode = (process.env.DAHLIA_QC_MODE || "box").toLowerCase() === "direct" ? "direct" : "box";
+  // dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the PreToolUse hook that only allows
+  // Read on the exact QC image + TodoWrite (the transparency checklist). Every other tool is
+  // denied by src/lib/ads/creative-qc-sandbox evaluateQcPermission. The hook binary is a
+  // dedicated script so the gate's logic isn't tangled up with the god-mode gate's business.
+  const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+  let qcCounter = 0;
+  const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+    qcCounter++;
+    const qcTag = `${tag}[qc#${qcCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-qc",
+        // Phase 3 / Fix 1 — least-privilege env: strip EVERY var except the base OS handful
+        // (PATH/HOME/…). No ANTHROPIC_API_KEY, no SUPABASE_SERVICE_ROLE_KEY, no SUPABASE_DB_URL,
+        // no GITHUB_TOKEN, no META_ACCESS_TOKEN, no OPENAI_API_KEY. See buildQcChildEnv in
+        // src/lib/ads/creative-qc-sandbox.ts.
+        sandbox: "qc",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Phase 3 / Fix 1 — inline PreToolUse hook: allow Read on the ALLOWED image only,
+        // allow TodoWrite (the transparency checklist), deny everything else. Fail-closed on
+        // any unexpected tool shape / env gap.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        // The gate reads the allowed path from this env var. The buildQcChildEnv sandbox does
+        // NOT include this key, so extraEnv (applied AFTER the sandbox) is the only source.
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+      }));
+      if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
+  console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
-    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count });
+    const result = await runAdCreativeLoop(a, {
+      workspaceId: job.workspace_id,
+      productId: instr.product_id,
+      count: instr.count,
+      // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
+      // stockProduct falls through to the legacy qaCreative(...) call unchanged.
+      qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
+    });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
       status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
