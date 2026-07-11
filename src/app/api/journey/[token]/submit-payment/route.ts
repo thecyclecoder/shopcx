@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
 import { inngest } from "@/lib/inngest/client";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 /**
  * POST /api/journey/[token]/submit-payment
@@ -193,14 +194,16 @@ export async function POST(
     // so it wakes an active playbook without being routed as a real customer
     // message (skipping the guard would re-launch this same journey).
     // Guarded by the compare-and-set above → fires at most once per session.
-    await inngest.send({
-      name: "ticket/inbound-message",
-      data: {
-        workspace_id: session.workspace_id,
-        ticket_id: session.ticket_id,
-        message_body: "payment_method_added",
-        channel: "system",
-        is_new_ticket: false,
+    // Sentinel — synthetic wake for the active playbook. No inbound customer msg row to stamp.
+    await dispatchInboundMessage({
+      admin,
+      workspaceId: session.workspace_id,
+      ticketId: session.ticket_id,
+      messageBody: "payment_method_added",
+      channel: "system",
+      isNewTicket: false,
+      dispatchMessageId: null,
+      extra: {
         journey_session_id: session.id,
         payment_method_id: result.paymentMethodId,
       },

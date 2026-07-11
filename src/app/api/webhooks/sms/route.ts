@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { validateTwilioSignature } from "@/lib/twilio";
 import { evaluateRules } from "@/lib/rules-engine";
-import { inngest } from "@/lib/inngest/client";
+import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -113,20 +114,20 @@ export async function POST(request: Request) {
   }
 
   if (ticketId) {
-    // Add message to existing ticket
-    await admin.from("ticket_messages").insert({
+    // Add message to existing ticket — capture the row id so Phase-2 dispatch can stamp intent.
+    const { data: insertedMsg } = await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: messageBody,
       sms_message_id: messageSid || null,
-    });
+    }).select("id").single();
 
     // Reopen if closed/pending
     const { data: ticket } = await admin
       .from("tickets")
-      .select("status, ai_handled, assigned_to")
+      .select("status, ai_handled_at, assigned_to, ai_disabled, do_not_reply")
       .eq("id", ticketId)
       .single();
 
@@ -151,11 +152,10 @@ export async function POST(request: Request) {
       message: { body: messageBody, direction: "inbound", author_type: "customer" },
     });
 
-    // Multi-turn AI: if ticket was AI-handled or unassigned, let AI continue
+    // Multi-turn AI dispatch — Phase 1 of durable-inbound-dispatch-no-silently-lost-ticket-event.
+    // Decide off the reliable dispatch-state fields, not the stale `ai_handled` boolean. See
+    // [[../../../lib/inbound-dispatch-gate]].
     if (ticketData) {
-      const isAutoHandled = ticketData.ai_handled;
-      const isUnassigned = !ticketData.assigned_to;
-
       const { data: aiConfig } = await admin
         .from("ai_channel_config")
         .select("enabled")
@@ -163,16 +163,15 @@ export async function POST(request: Request) {
         .eq("channel", "sms")
         .single();
 
-      if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: {
-            workspace_id: workspaceId,
-            ticket_id: ticketId,
-            message_body: messageBody,
-            channel: "sms",
-            is_new_ticket: false,
-          },
+      if (aiConfig?.enabled && shouldDispatchInboundMessage(ticketData)) {
+        await dispatchInboundMessage({
+          admin,
+          workspaceId,
+          ticketId,
+          messageBody,
+          channel: "sms",
+          isNewTicket: false,
+          dispatchMessageId: insertedMsg?.id ?? null,
         });
       }
     }
@@ -193,14 +192,14 @@ export async function POST(request: Request) {
       .single();
 
     if (ticket) {
-      await admin.from("ticket_messages").insert({
+      const { data: newMsg } = await admin.from("ticket_messages").insert({
         ticket_id: ticket.id,
         direction: "inbound",
         visibility: "external",
         author_type: "customer",
         body: messageBody,
         sms_message_id: messageSid || null,
-      });
+      }).select("id").single();
 
       // Check if AI is enabled for SMS channel
       const { data: aiConfig } = await admin
@@ -220,9 +219,14 @@ export async function POST(request: Request) {
           pending_auto_reply: "AI is drafting a response...",
         }).eq("id", ticket.id);
 
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody, channel: "sms", is_new_ticket: true },
+        await dispatchInboundMessage({
+          admin,
+          workspaceId,
+          ticketId: ticket.id,
+          messageBody,
+          channel: "sms",
+          isNewTicket: true,
+          dispatchMessageId: newMsg?.id ?? null,
         });
       }
 
