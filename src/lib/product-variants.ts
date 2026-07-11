@@ -27,12 +27,13 @@ export interface ProductVariant {
   weight: number | null;
   weight_unit: string | null;
   position: number;
-  inventory_quantity: number | null;
   available: boolean;
 }
 
+// `inventory_quantity` is intentionally absent: on-hand is the canonical inventory_levels
+// table's job (getShopifyOnHandByVariant), never the stale product_variants scalar.
 const SELECT_COLS =
-  "id, workspace_id, product_id, shopify_variant_id, sku, title, option1, option2, option3, price_cents, compare_at_price_cents, image_url, weight, weight_unit, position, inventory_quantity, available";
+  "id, workspace_id, product_id, shopify_variant_id, sku, title, option1, option2, option3, price_cents, compare_at_price_cents, image_url, weight, weight_unit, position, available";
 
 /**
  * Fetch all variants for a product, ordered by position.
