@@ -1,0 +1,1 @@
+- **Register monitored loop: sync-fba-inventory** · verified 2026-07-11 · → [[../inngest/sync-fba-inventory]]
