@@ -30,7 +30,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
-import { getSpecBlockers } from "@/lib/brain-roadmap";
+import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
 import { getSpec as getSpecFromDb } from "@/lib/specs-table";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
@@ -437,7 +437,7 @@ async function readReviewFailedBlockerStalls(
   const now = Date.now();
   const { data: failed, error } = await admin
     .from("specs")
-    .select("id, slug, status, updated_at, body, blocked_by")
+    .select("id, slug, status, updated_at, blocked_by")
     .eq("workspace_id", workspace_id)
     .eq("vale_pass", false)
     .limit(500);
@@ -447,7 +447,6 @@ async function readReviewFailedBlockerStalls(
     slug: string;
     status: string | null;
     updated_at: string | null;
-    body: string | null;
     blocked_by: string[] | null;
   }>;
   const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number; body: string; blocked_by: string[] }> = [];
@@ -461,7 +460,12 @@ async function readReviewFailedBlockerStalls(
     const realPhases = ((phases ?? []) as Array<{ verification: string | null; kind: string | null }>)
       .filter((p) => p.kind !== "fix")
       .map((p) => ({ verification: p.verification }));
-    const body = s.body ?? "";
+    // public.specs has never carried a `body` column — the raw spec markdown is reconstructed from
+    // spec_phases by brain-roadmap.getSpec, which is the SAME string parseSpec used to populate
+    // specs.blocked_by. Comparing against that authoritative source is the whole point of this
+    // fifth-source detector — see [[../../docs/brain/libraries/mario.md]].
+    const spec = await getSpec(s.slug, workspace_id);
+    const body = spec?.raw ?? "";
     const blockedBy = s.blocked_by ?? [];
     if (!shouldSurfaceMissingBlocker({ status: s.status, ageMs: age, graceMs, realPhases, body, blocked_by: blockedBy })) continue;
     out.push({ workspace_id, spec_slug: s.slug, age_ms: age, body, blocked_by: blockedBy });
