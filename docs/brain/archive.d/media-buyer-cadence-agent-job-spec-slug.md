@@ -1,0 +1,1 @@
+- **Add required spec slug to Media Buyer cadence jobs** · verified 2026-07-11 · → [[inngest/media-buyer-cadence]]
