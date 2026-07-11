@@ -112,12 +112,88 @@ async function dismiss(notificationId: string, reason?: string) {
   console.log(`dismissed notification ${notificationId}`);
 }
 
+// ── Plan review + one-shot plan approval ────────────────────────────────────
+//
+// A planner (Pia, kind='plan') proposes N specs as `agent_jobs.pending_actions`. The plan job only
+// resumes + materializes the specs once EVERY action has a decision (roadmap-actions.ts §"Resume only
+// once every action has a decision"). Approving 10 actions one-by-one is the pain these two commands
+// remove: `plan <ref>` renders the proposal (specs + dependency graph) so you can judge it; then
+// `approve-plan <ref>` (or `decline-plan`) dispositions ALL pending actions in one shot.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type PlanAction = { id: string; status?: string; kind?: string; type?: string; [k: string]: unknown };
+type PlanSpec = { slug?: string; owner?: string; title?: string; summary?: string; blocked_by?: string[]; blockedBy?: string[]; phases?: { position?: number; title?: string }[] };
+
+/** Resolve a plan job by its UUID or by the goal slug it plans (kind='plan', spec_slug=goal). */
+async function resolvePlanJob(admin: ReturnType<typeof createAdminClient>, ref: string) {
+  const q = admin.from("agent_jobs").select("id, kind, status, spec_slug, pending_actions").eq("workspace_id", WS);
+  const { data } = UUID_RE.test(ref)
+    ? await q.eq("id", ref).maybeSingle()
+    : await q.eq("kind", "plan").eq("spec_slug", ref).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (!data) throw new Error(`no plan job found for "${ref}" (pass the plan jobId or the goal slug)`);
+  return data as { id: string; kind: string; status: string; spec_slug: string; pending_actions: PlanAction[] | null };
+}
+
+const specOf = (a: PlanAction): PlanSpec => ((a.spec as PlanSpec) || (a.proposed_spec as PlanSpec) || (a.payload as PlanSpec) || (a as unknown as PlanSpec));
+const blockedOf = (s: PlanSpec): string[] => s.blocked_by || s.blockedBy || [];
+
+async function showPlan(ref: string) {
+  const admin = createAdminClient();
+  const job = await resolvePlanJob(admin, ref);
+  const actions = job.pending_actions || [];
+  console.log(`\n=== plan: ${job.spec_slug} ===  job=${job.id}  status=${job.status}  actions=${actions.length}`);
+  const pending = actions.filter((a) => (a.status ?? "pending") === "pending").length;
+  console.log(`decided=${actions.length - pending}  pending=${pending}\n`);
+  for (const a of actions) {
+    const s = specOf(a);
+    const dep = blockedOf(s);
+    console.log(`• [${a.status ?? "pending"}] ${s.slug ?? a.id}  (owner=${s.owner ?? "?"})`);
+    console.log(`    ${s.title ?? ""}`);
+    if (dep.length) console.log(`    ⤷ after: ${dep.join(", ")}`);
+    if (s.summary) console.log(`    ${s.summary.slice(0, 200)}`);
+    for (const p of s.phases || []) console.log(`      P${p.position ?? ""}: ${p.title ?? ""}`);
+  }
+  console.log(`\napprove all: ceo-approvals approve-plan ${job.spec_slug}   ·   decline all: ceo-approvals decline-plan ${job.spec_slug}\n`);
+}
+
+async function decidePlan(ref: string, decision: "approve" | "decline", notes?: string) {
+  const admin = createAdminClient();
+  const uid = await ownerUserId(admin);
+  const job = await resolvePlanJob(admin, ref);
+  const actions = job.pending_actions || [];
+  const pending = actions.filter((a) => (a.status ?? "pending") === "pending");
+  if (!pending.length) {
+    console.log(`plan "${job.spec_slug}" has no pending actions (job status=${job.status}) — nothing to ${decision}.`);
+    return;
+  }
+  console.log(`${decision}-plan ${job.spec_slug} (job=${job.id}) — ${pending.length} pending action(s):`);
+  let last: unknown = null;
+  for (const a of pending) {
+    const res = await approveRoadmapAction(WS, uid, { jobId: job.id, actionId: a.id, decision, notes });
+    const ok = (res as { ok?: boolean }).ok;
+    console.log(`  ${ok ? "✓" : "✗"} ${specOf(a).slug ?? a.id}${ok ? "" : "  ← " + JSON.stringify(res)}`);
+    last = res;
+  }
+  const job2 = await resolvePlanJob(admin, job.id);
+  console.log(`\nplan job now status=${job2.status}${job2.status === "queued_resume" ? " → materializing specs on next worker tick" : ""}`);
+  if (!(last as { ok?: boolean } | null)?.ok) process.exitCode = 1;
+}
+
 (async () => {
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case undefined:
     case "list":
       await list();
+      break;
+    case "plan":
+      await showPlan(rest[0]);
+      break;
+    case "approve-plan":
+      await decidePlan(rest[0], "approve", rest.slice(1).join(" ") || undefined);
+      break;
+    case "decline-plan":
+      await decidePlan(rest[0], "decline", rest.slice(1).join(" ") || undefined);
       break;
     case "approve":
       await decide("approve", rest[0], rest[1], rest.slice(2).join(" ") || undefined);
@@ -129,7 +205,7 @@ async function dismiss(notificationId: string, reason?: string) {
       await dismiss(rest[0], rest.slice(1).join(" ") || undefined);
       break;
     default:
-      console.error(`unknown command: ${cmd}. Use: list | approve <jobId> <actionId> [notes] | decline … | dismiss <notificationId> [reason]`);
+      console.error(`unknown command: ${cmd}. Use: list | plan <ref> | approve-plan <ref> | decline-plan <ref> | approve <jobId> <actionId> [notes] | decline … | dismiss <notificationId> [reason]`);
       process.exit(1);
   }
   process.exit(0);
