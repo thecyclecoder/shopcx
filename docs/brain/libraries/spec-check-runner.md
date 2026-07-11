@@ -52,6 +52,10 @@ Every executor returns `{ ok, evidence }`; the runner turns `ok` into `verdict` 
 
 Once each check declares HOW to run it, "verification" is mechanical: a type-check, a grep, a CI status, a read-only DB probe, a GET, a named unit-test, a build. Reserving the LLM only for what CAN'T be declared (subjective / drift / prose) — the residual routed to `needs_human` — is the same crystallize-the-mechanical move [[operational-rules]] § North star names for every autonomous tool: bound the proxy, own the objective. A deterministic runner IS the bounded proxy; the LLM residual IS the human judgment.
 
+## Phase 3 wiring — how the box calls the runner
+
+`scripts/builder-worker.ts` `runSpecTestJob` invokes `runSpecChecks` in-process BEFORE spawning any Max session and calls `classifyDeterministicRun(results)` on the return. On the post-ship path (NOT a fused pre-merge job), `allResolved === true` means the row is written straight from the runner's verdicts and the LLM lane is skipped entirely. Otherwise, the Max session is spawned with a `residualTexts` scope hint, and `mergeDeterministicWithLlmChecks` fuses the runner's authoritative pass/fail with the LLM's residual on return. Every invocation beats the Control Tower loop `DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID` (ok:true when the runner returned, ok:false when it threw and Vera took over) — the "monitored, not graded" liveness assertion the [[agent-grader]] carve-out on `spec-test` + null `claude_session_id` pairs with.
+
 ## Related
 
 [[spec-phase-checks-executable]] · [[spec-phase-checks-table]] · [[spec-test-runs]] · [[spec-test-harness-classifier]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/spec-test-agent]]

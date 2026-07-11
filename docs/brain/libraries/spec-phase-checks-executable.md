@@ -38,6 +38,10 @@ Pure predicate — no I/O. Runs at the authoring chokepoint so an untypable chec
 
 `isPlainReadonlySql(sql)` — the read-only-SQL guard used by `db_probe_readonly`. Trims + accepts `SELECT` / `WITH` starts; rejects any chained statement (`;` followed by non-whitespace) and any mutating verb / DDL as a whole word (`insert`/`update`/`delete`/`drop`/`alter`/`truncate`/`create`/`grant`/`revoke`/`lock`/`copy`/`merge`/`do`/`call`/`reindex`/`vacuum`/`analyze`/`refresh`/`comment`). Substring-based on purpose — a false positive fails CLOSED into `needs_human`, the safe direction.
 
+## Wired into Vera's box lane
+
+Phase 3 wired [[spec-check-runner]] `runSpecChecks` into `runSpecTestJob` (`scripts/builder-worker.ts`). Every post-ship spec-test job now runs the deterministic runner FIRST and skips the Max session entirely when every check resolves without a `needs_human` residual — a spec whose verification is fully machine-declared verifies with ZERO Max cost. See [[spec-test-runs]] § Deterministic pre-pass for the full lifecycle.
+
 ## Prose is never auto-run
 
 [[spec-phase-checks-table]] `parseVerificationBlobToChecks` stamps `exec_kind: 'needs_human'` on every derived row. Only the structured author path (`checks: [{ exec_kind, params }]`) can opt a check into deterministic execution — the runner ignores anything else. Un-typed prose falls through to the LLM residual, which is the exact safe default that closes the class of "Vera mis-runs a made-up command" (the 2026-07-11 cs-director false regression) the spec cites in § Why.

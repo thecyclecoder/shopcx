@@ -372,6 +372,115 @@ export const defaultExecutors: CheckExecutors = {
   },
 };
 
+// ── Phase 3 policy helpers ───────────────────────────────────────────────────────────────────────
+//
+// Two PURE functions the Vera lane (`runSpecTestJob`) uses to decide whether it needs a Max session
+// at all, and how to fuse the runner's deterministic verdicts with the LLM's scoped residual pass.
+//
+// The rule (spec § Phase 3):
+//   - `runSpecChecks` runs first. If EVERY check resolved (no needs_human) → skip Max entirely,
+//     insert the deterministic checks straight into `spec_test_runs`, let the fold gate run as today
+//     — a spec whose verification is fully machine-declared verifies with ZERO Max cost.
+//   - If any `needs_human` residual remains → spawn the LLM session; on return, MERGE: the
+//     runner's `pass`/`fail` verdicts are AUTHORITATIVE (byte-identical + evidence-backed) and
+//     override any conflicting Max output on the same bullet — the LLM only fills the residual.
+
+import type { SpecTestCheck, SpecTestSummary } from "@/lib/spec-test-runs";
+
+export type SpecTestAgentVerdict = "approved" | "issues" | "needs_human";
+
+export interface DeterministicClassification {
+  /** True when every runner check resolved to `pass` / `fail` — the LLM lane can be skipped. */
+  allResolved: boolean;
+  /** How many checks the runner marked `needs_human` (the residual the LLM must handle). */
+  residualCount: number;
+  /** The `text` of every residual check — the scope for the LLM's scoped pass. */
+  residualTexts: string[];
+  /** Summary derived from the runner's per-check verdicts. Matches `normalizeSpecTest`'s shape. */
+  summary: SpecTestSummary;
+  /** `approved` iff no fails + ≥1 pass; `issues` iff ≥1 fail; else `needs_human`. */
+  agentVerdict: SpecTestAgentVerdict;
+  /** The runner's per-check verdicts as `SpecTestCheck[]` — the exact shape `spec_test_runs.checks` carries. */
+  checks: SpecTestCheck[];
+}
+
+/**
+ * Classify a `runSpecChecks` result into the Phase-3 decision the worker needs:
+ *   allResolved=true   → skip the Max session, write the row deterministically.
+ *   allResolved=false  → spawn Max scoped to `residualTexts`, then `mergeDeterministicWithLlmChecks`.
+ *
+ * The runner's checks are reformatted into `SpecTestCheck` (text · verdict · category · evidence) so
+ * the caller writes them straight into `spec_test_runs.checks` — no shim.
+ */
+export function classifyDeterministicRun(results: CheckResult[]): DeterministicClassification {
+  const checks: SpecTestCheck[] = results.map((r) => ({
+    text: r.text,
+    verdict: r.verdict,
+    category: r.category,
+    evidence: r.evidence,
+  }));
+  const summary: SpecTestSummary = {
+    auto_pass: checks.filter((c) => c.verdict === "pass").length,
+    auto_fail: checks.filter((c) => c.verdict === "fail").length,
+    needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+    inconclusive: 0,
+  };
+  const residual = results.filter((r) => r.verdict === "needs_human");
+  const agentVerdict: SpecTestAgentVerdict =
+    summary.auto_fail > 0 ? "issues" : summary.needs_human === 0 && summary.auto_pass > 0 ? "approved" : "needs_human";
+  return {
+    allResolved: summary.needs_human === 0,
+    residualCount: residual.length,
+    residualTexts: residual.map((r) => r.text),
+    summary,
+    agentVerdict,
+    checks,
+  };
+}
+
+/**
+ * Merge runner + scoped-LLM checks by [[spec-test-runs]] `checkKey` (a stable hash of the description
+ * — survives whitespace / case differences). The runner's `pass`/`fail` verdicts are AUTHORITATIVE
+ * — a would-be `needs_human` from the runner is replaced ONLY by the LLM's verdict; a deterministic
+ * `pass` / `fail` overrides any conflicting Max output on the same bullet.
+ *
+ * Order: runner's positions first (preserved), then any LLM checks that don't match a runner bullet
+ * (defensive — Max is instructed to answer only the residual, but if it drifts we don't silently
+ * drop what it produced).
+ */
+export function mergeDeterministicWithLlmChecks(
+  runner: SpecTestCheck[],
+  llm: SpecTestCheck[],
+): SpecTestCheck[] {
+  const merged: SpecTestCheck[] = [];
+  const llmByKey = new Map<string, SpecTestCheck>();
+  for (const c of llm) llmByKey.set(checkKey(c.text), c);
+  const takenLlm = new Set<string>();
+  for (const r of runner) {
+    const key = checkKey(r.text);
+    // Runner's pass/fail is byte-identical + evidence-backed → authoritative. Only when the runner
+    // punted to needs_human do we adopt the LLM's verdict for the same bullet.
+    if (r.verdict !== "needs_human") {
+      merged.push(r);
+      takenLlm.add(key);
+      continue;
+    }
+    const l = llmByKey.get(key);
+    if (l) {
+      merged.push(l);
+      takenLlm.add(key);
+    } else {
+      // The residual bullet the LLM was scoped to did not come back — keep the runner's
+      // needs_human so the row is still complete + the human queue has something to resolve.
+      merged.push(r);
+    }
+  }
+  for (const l of llm) {
+    if (!takenLlm.has(checkKey(l.text))) merged.push(l);
+  }
+  return merged;
+}
+
 /**
  * DB row loader used by Phase 3's Vera lane wiring. Reads every phase's checks for a spec in one
  * batched select, then interleaves them in phase order (same order the LLM lane sees today, so the

@@ -12,7 +12,14 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runSpecChecks, type CheckExecutors, type LoadedCheck } from "./spec-check-runner";
+import {
+  runSpecChecks,
+  classifyDeterministicRun,
+  mergeDeterministicWithLlmChecks,
+  type CheckExecutors,
+  type LoadedCheck,
+  type CheckResult,
+} from "./spec-check-runner";
 import { checkKey } from "./spec-test-runs";
 
 function makeExecutors(overrides: Partial<CheckExecutors> = {}): CheckExecutors {
@@ -185,6 +192,89 @@ test("a real assertion failure (executor returned ok:false with clean evidence) 
   });
   assert.equal(out.results[0].verdict, "fail");
   assert.match(out.results[0].evidence, /0 matches/);
+});
+
+// ── machine-declared-verification Phase 3 — merge policy ─────────────────────────────────────────
+// The Vera lane's decision helper: skip Max when the runner resolved every check; otherwise merge the
+// runner's authoritative pass/fail with the LLM's scoped residual. Pure — no DB, no LLM.
+
+function makeResult(text: string, verdict: "pass" | "fail" | "needs_human"): CheckResult {
+  return {
+    text,
+    checkKey: checkKey(text),
+    verdict,
+    category: verdict === "needs_human" ? "needs_human" : "auto",
+    evidence: `${verdict} evidence`,
+    exec_kind: verdict === "needs_human" ? "needs_human" : "tsc",
+  };
+}
+
+test("classifyDeterministicRun — every pass → allResolved=true + approved + zero residual", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "pass"), makeResult("b", "pass")]);
+  assert.equal(cls.allResolved, true, "all-auto passes must skip Max");
+  assert.equal(cls.residualCount, 0);
+  assert.equal(cls.agentVerdict, "approved");
+  assert.equal(cls.summary.auto_pass, 2);
+  assert.equal(cls.summary.needs_human, 0);
+  assert.equal(cls.checks.length, 2);
+});
+
+test("classifyDeterministicRun — any needs_human → allResolved=false, LLM must handle residual", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "pass"), makeResult("b", "needs_human")]);
+  assert.equal(cls.allResolved, false);
+  assert.equal(cls.residualCount, 1);
+  assert.deepEqual(cls.residualTexts, ["b"]);
+  assert.equal(cls.agentVerdict, "needs_human", "any residual must NOT auto-approve");
+});
+
+test("classifyDeterministicRun — any fail → verdict=issues (fold gate must NOT run)", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "pass"), makeResult("b", "fail")]);
+  assert.equal(cls.allResolved, true, "no needs_human residual still means allResolved=true");
+  assert.equal(cls.agentVerdict, "issues");
+  assert.equal(cls.summary.auto_fail, 1);
+});
+
+test("mergeDeterministicWithLlmChecks — runner pass wins over an LLM needs_human on the same bullet", () => {
+  const runner: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "the runner passed this", verdict: "pass", evidence: "runner ok" },
+  ];
+  const llm: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "the runner passed this", verdict: "needs_human", evidence: "LLM said unclear" },
+  ];
+  const merged = mergeDeterministicWithLlmChecks(runner, llm);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].verdict, "pass");
+  assert.equal(merged[0].evidence, "runner ok");
+});
+
+test("mergeDeterministicWithLlmChecks — runner needs_human is replaced by the LLM's scoped verdict", () => {
+  const runner: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "subjective bullet", verdict: "needs_human", evidence: "no exec_kind — undeclared prose" },
+  ];
+  const llm: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "subjective bullet", verdict: "pass", evidence: "LLM confirmed" },
+  ];
+  const merged = mergeDeterministicWithLlmChecks(runner, llm);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].verdict, "pass", "the LLM residual must fill in the runner's needs_human");
+  assert.equal(merged[0].evidence, "LLM confirmed");
+});
+
+test("mergeDeterministicWithLlmChecks — LLM only sees residual; drift LLM checks are appended, not silently dropped", () => {
+  const runner: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "a", verdict: "pass", evidence: "runner ok" },
+    { text: "b (residual)", verdict: "needs_human", evidence: "no exec_kind" },
+  ];
+  const llm: import("./spec-test-runs").SpecTestCheck[] = [
+    { text: "b (residual)", verdict: "pass", evidence: "LLM confirmed" },
+    { text: "c (drifted — not in the residual scope)", verdict: "pass", evidence: "LLM added" },
+  ];
+  const merged = mergeDeterministicWithLlmChecks(runner, llm);
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].text, "a");
+  assert.equal(merged[1].text, "b (residual)");
+  assert.equal(merged[1].verdict, "pass");
+  assert.equal(merged[2].text, "c (drifted — not in the residual scope)");
 });
 
 test("results are position-ordered + fully typed (text, checkKey, verdict, category, evidence, exec_kind)", async () => {
