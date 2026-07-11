@@ -65,7 +65,15 @@ For fresh data beyond the preloaded brief, run (the ticket id is in your prompt)
 npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
 ```
 
-Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = list all active, or json_input `{"slug":"<slug>"}` to fetch one). These are READ-ONLY — they never mutate.
+Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = list all active, or json_input `{"slug":"<slug>"}` to fetch one) · `get_link_candidates` · `search_orders` (json_input `{"amount":236.50,"date_from":"…","date_to":"…","email":"…"}`). These are READ-ONLY — they never mutate.
+
+## Account linking is FUNDAMENTAL — check the sibling BEFORE you say "no such account/charge"
+
+A customer often has more than one account (a second email, a re-order under a different address). `get_customer_account` now flags **⚠️ LIKELY SAME-PERSON UNLINKED ACCOUNT(S)** when a high-confidence sibling exists (same street address or phone — a common name alone is NOT enough). When you see that flag, or whenever the customer disputes a subscription / charge / order you can't find on the account in front of you:
+
+1. **Do NOT conclude "you have no active subscription" / "no such charge" from ONE account.** The real sub / order / charge may live on the unlinked sibling. Ticket `db8b3d66` is the scar: Elizabeth's active sub + a real $236.50 charge sat on a same-address second account nobody had linked, so "no active subscription" was locally true but wrong.
+2. **`get_link_candidates`** lists the graded siblings (HIGH = address/phone-corroborated). **`search_orders`** finds a disputed "$X on `<date>`" charge across EVERY customer (`{"amount":236.50,"date_from":"2026-06-29","date_to":"2026-06-30"}`) — use it to locate a charge that isn't on the ticket's own account.
+3. **When a HIGH-confidence sibling is real, PROPOSE linking** (say so in your `context_summary` + `first_reply`) and reason across the linked set — never silently ignore it and never silently auto-link a `previously dismissed` one (re-confirm it). Once you know both accounts are the same person, handle the ask against the WHOLE person (cancel the live sub, refund the real order), not the empty half.
 
 ## Choose ONE `chosen_path`
 

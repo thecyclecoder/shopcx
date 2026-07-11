@@ -107,6 +107,62 @@ export default async function executeToolCallImprove(
     return lines.join("\n");
   }
 
+  // Account linking is FUNDAMENTAL to ticket handling (CLAUDE.md). Both Sol and June can explicitly
+  // pull the graded link candidates for the ticket's customer — a HIGH-confidence unlinked sibling
+  // (shared address / phone) means the real sub/order/charge may live on the OTHER account. Ticket
+  // db8b3d66 is the wedge (a same-address second account, bulk-rejected, hid an active sub).
+  if (name === "get_link_candidates") {
+    const admin = createAdminClient();
+    const cid = await resolveCustomerId(workspaceId, ticket);
+    if (!cid) return "No customer found for this ticket.";
+    const { findUnlinkedMatches } = await import("@/lib/account-matching");
+    const matches = await findUnlinkedMatches(workspaceId, cid, admin);
+    if (!matches.length) return "No unlinked account candidates for this customer.";
+    const lines = matches.map(
+      (m) =>
+        `- ${m.email} — ${m.confidence.toUpperCase()} [${m.signals.join("+")}]${m.previously_rejected ? " (previously dismissed on weaker evidence — re-confirm, don't silently link)" : ""} · id=${m.id}`,
+    );
+    const anyHigh = matches.some((m) => m.confidence === "high");
+    return (
+      (anyHigh
+        ? "HIGH-confidence match(es) present — check the sibling account's subs/orders/charges before concluding \"no such account/charge\", then PROPOSE linking.\n"
+        : "Only low-confidence (name-only) candidates — do NOT link without a stronger signal.\n") + lines.join("\n")
+    );
+  }
+
+  // Cross-customer order/charge search (CS SDK): find an order by exact amount and/or date window,
+  // across EVERY customer in the workspace — the tool for reconciling a "$X charge on <date> with your
+  // descriptor" dispute when it isn't on the ticket's own account (it may be on an unlinked sibling).
+  // Input: { amount_cents?|amount?, date_from?, date_to?, email? }. Read-only.
+  if (name === "search_orders") {
+    const admin = createAdminClient();
+    const amountCents =
+      typeof input.amount_cents === "number"
+        ? Math.round(input.amount_cents)
+        : typeof input.amount === "number"
+          ? Math.round(input.amount * 100)
+          : typeof input.amount === "string" && input.amount.trim()
+            ? Math.round(parseFloat(input.amount) * 100)
+            : null;
+    let q = admin
+      .from("orders")
+      .select("order_number, email, customer_id, total_cents, financial_status, created_at")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (amountCents != null && Number.isFinite(amountCents)) q = q.eq("total_cents", amountCents);
+    if (typeof input.date_from === "string" && input.date_from) q = q.gte("created_at", input.date_from);
+    if (typeof input.date_to === "string" && input.date_to) q = q.lte("created_at", input.date_to);
+    if (typeof input.email === "string" && input.email.trim()) q = q.ilike("email", `%${input.email.trim()}%`);
+    const { data, error } = await q;
+    if (error) return `search_orders failed: ${error.message}`;
+    const rows = (data ?? []) as Array<{ order_number: string; email: string; customer_id: string | null; total_cents: number; financial_status: string; created_at: string }>;
+    if (!rows.length) return "No orders match that amount/date/email across the workspace.";
+    return rows
+      .map((o) => `#${o.order_number} · $${(o.total_cents / 100).toFixed(2)} · ${o.financial_status} · ${o.created_at} · ${o.email} · cid=${o.customer_id ?? "—"}`)
+      .join("\n");
+  }
+
   const custId = await resolveCustomerId(workspaceId, ticket);
   // Product-level tools don't need a resolved customer.
   const customerlessTools = new Set(["get_product_knowledge", "get_product_nutrition"]);
