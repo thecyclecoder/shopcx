@@ -11341,6 +11341,35 @@ async function runTicketHandleJob(job: Job) {
             // so the journey lead-in / workflow preamble is policy-checked before it ships.
             let mechanismManagesStatus = false;
             try {
+              // (0) Link-proposal wedge (plan.link_proposal on ANY chosen_path) — Phase 2 of
+              // account-linking-address-aware-confidence-graded-and-cs-searchable. When Sol / June
+              // named a HIGH-confidence unlinked sibling on the Direction, execute the link FIRST
+              // so the following remedy (playbook / journey / stateless refund) targets the whole
+              // person — the customer_links group — instead of dead-ending on the empty half (the
+              // db8b3d66 scar). The applier is idempotent, refuses low-confidence + needs-reconfirm
+              // silently (guardrails re-asserted at the action point per learning #9), and stamps
+              // its own internal ticket_messages note documenting the cited evidence.
+              const { resolveSolLinkProposal } = await import("../src/lib/ticket-directions");
+              const { applySolLinkProposal } = await import("../src/lib/sol-link-proposal");
+              const linkChoice = await resolveSolLinkProposal(db, workspaceId, ticketId);
+              if (linkChoice) {
+                try {
+                  const linkResult = await applySolLinkProposal(db, {
+                    workspaceId,
+                    ticketId,
+                    ticketCustomerId: linkChoice.ticket_customer_id,
+                    proposal: linkChoice.proposal,
+                  });
+                  console.log(`${tag} sol link_proposal applied: linked=${linkResult.linked} reason=${linkResult.reason} group_id=${linkResult.group_id ?? "-"}`);
+                } catch (linkErr) {
+                  // A failed link does NOT unwind the Direction — the remedy still dispatches on
+                  // the ticket's own customer (surface-level fallback), and a human can retry via
+                  // June's approve_remedy lane. Surface for grep.
+                  const msg = linkErr instanceof Error ? linkErr.message : String(linkErr);
+                  console.warn(`${tag} sol link_proposal application failed: ${msg}`);
+                }
+              }
+
               // (1) Standalone-journey wedge (plan.launch_journey_slug on ANY chosen_path — the
               // move → shipping-address case). Launches via launchJourneyForTicket with firstReply
               // as the CTA lead-in; leaves the ticket open (the journey owns status). See
