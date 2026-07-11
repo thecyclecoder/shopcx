@@ -1,0 +1,1 @@
+- **Account linking is address-aware + confidence-graded, and Sol/June can search it** · verified 2026-07-11 · → [[lifecycles/customer-link-confirmation]]
