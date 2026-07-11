@@ -103,6 +103,14 @@ export function renderSpecRow(
   }
   if (meta.length || row.blocked_by.length) parts.push("");
 
+  // render-spec-row-emits-stored-why-what-intent Phase 1 — surface the plain-language intent the DB already
+  // stores (specs.why / specs.what) so Vale + humans reading the materialized markdown SEE it. A fully-
+  // authored spec whose intent lives only in the columns was being bounced needs_fix for 'missing intent';
+  // this emits the lines directly above the summary so the review agent + humans see the structured intent.
+  if (row.why && row.why.trim()) parts.push(`**Why:** ${row.why.trim()}`);
+  if (row.what && row.what.trim()) parts.push(`**What:** ${row.what.trim()}`);
+  if ((row.why && row.why.trim()) || (row.what && row.what.trim())) parts.push("");
+
   if (row.summary && row.summary.trim()) {
     parts.push(row.summary.trim(), "");
   }
@@ -116,6 +124,10 @@ export function renderSpecRow(
     // stored title already leads with "Phase" (don't double the prefix).
     const heading = /^phase\b/i.test(title) ? title : `Phase ${i + 1} — ${title}`;
     parts.push(`## ${heading}`);
+    // render-spec-row-emits-stored-why-what-intent Phase 1 — per-phase intent from spec_phases.why / .what,
+    // emitted BEFORE the body so the review agent sees the structured intent alongside the technical detail.
+    if (phase.why && phase.why.trim()) parts.push(`**Why:** ${phase.why.trim()}`);
+    if (phase.what && phase.what.trim()) parts.push(`**What:** ${phase.what.trim()}`);
     if (phase.body && phase.body.trim()) parts.push(phase.body.trim());
     parts.push("");
     // Prefer the typed checks (the DB object); fall back to the legacy `verification` column.
