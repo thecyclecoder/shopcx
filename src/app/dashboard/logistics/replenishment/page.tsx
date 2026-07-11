@@ -18,7 +18,7 @@ export default function ReplenishmentPage() {
       <header className="mb-6">
         <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100">Replenishment</h1>
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          Measured supplier lead times + inbound purchase orders, straight from QuickBooks. Days-of-cover joins in as the channel inventory feed lands.
+          Days-of-cover (burn rate vs on-hand) against measured supplier lead times, plus inbound purchase orders — live from the canonical inventory feed + QuickBooks.
         </p>
       </header>
       <Suspense fallback={<div className="animate-pulse text-sm text-zinc-400">Loading live purchase orders…</div>}>
@@ -56,8 +56,70 @@ async function ReplenishmentContent() {
   const daysAgo = (d: string) => Math.round((today - Date.parse(d)) / 86_400_000);
   const leadByItem = new Map(data.leadTimes.map((l) => [l.itemId, l]));
 
+  const fmtNum = (n: number) => Math.round(n).toLocaleString();
+  const fmtMo = (m: number | null) => (m == null ? "—" : `${m.toFixed(1)} mo`);
+  // Reorder status: pipeline cover (incl. inbound POs/FBA-bound cases) vs measured lead time.
+  // If we'd run dry before a fresh PO could land, that's critical; a thin sellable buffer is a warning.
+  const coverStatus = (c: (typeof data.cover)[number], leadMonths?: number) => {
+    const pipe = c.coverPipelineMonths;
+    if (pipe != null && leadMonths != null && pipe < leadMonths) return { label: "Reorder", cls: "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300" };
+    if (c.coverSellableMonths != null && c.coverSellableMonths < 1) return { label: "Low", cls: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300" };
+    return { label: "OK", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" };
+  };
+
   return (
     <div className="space-y-8">
+      {/* Days of cover — the headline reorder signal */}
+      <section>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Days of cover <span className="font-normal normal-case text-zinc-400">— finished-good burn vs on-hand, trailing {data.burnWindow.months}mo</span></h2>
+        {data.cover.length === 0 ? (
+          <p className="text-sm text-zinc-400">No cover data for the tracked finished goods.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="w-full text-sm">
+              <thead className="bg-zinc-50 text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+                <tr>
+                  <th className="px-4 py-2.5 font-medium">Finished good</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Burn / mo</th>
+                  <th className="px-4 py-2.5 text-right font-medium">On-hand</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Cover</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Lead time</th>
+                  <th className="px-4 py-2.5 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {data.cover.map((c) => {
+                  const lead = leadByItem.get(c.finishedGoodQbId);
+                  const st = coverStatus(c, lead?.avgLeadMonths ?? undefined);
+                  return (
+                    <tr key={c.finishedGoodQbId} className="text-zinc-700 dark:text-zinc-300">
+                      <td className="px-4 py-2.5 font-medium text-zinc-900 dark:text-zinc-100">{c.name}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {fmtNum(c.burnPerMonth)}
+                        <span className="ml-1 text-xs text-zinc-400">(S {fmtNum(c.burnShopify)} · I {fmtNum(c.burnInternal)} · A {fmtNum(c.burnAmazon)})</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {fmtNum(c.onHandSellable)}
+                        <span className="ml-1 text-xs text-zinc-400">/ {fmtNum(c.onHandPipeline)} pipe</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums font-medium">
+                        {fmtMo(c.coverSellableMonths)}
+                        <span className="ml-1 text-xs text-zinc-400">/ {fmtMo(c.coverPipelineMonths)}</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">{lead ? `${lead.avgLeadMonths} mo` : "—"}</td>
+                      <td className="px-4 py-2.5"><span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${st.cls}`}>{st.label}</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
+          Burn combines Shopify + internal + Amazon (case-pack multipliers applied) over {data.burnWindow.since} → {data.burnWindow.until}. On-hand is sellable (FBA fulfillable + 3PL) / pipeline (+ FBA-bound cases + inbound). Reconciles exact vs Shopify.
+        </p>
+      </section>
+
       {/* Inbound POs — the live, crisis-relevant signal */}
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Inbound purchase orders</h2>
@@ -136,7 +198,7 @@ async function ReplenishmentContent() {
       </section>
 
       <p className="text-xs text-zinc-400 dark:text-zinc-500">
-        Read live from QuickBooks ({data.poCount} POs · {data.billCount} bills since {data.since}). <span className="text-zinc-500 dark:text-zinc-400">Next: burn rate (Shopify + internal + Amazon with case-pack multipliers) → days-of-cover vs lead time → reorder alerts.</span>
+        Read live from QuickBooks ({data.poCount} POs · {data.billCount} bills since {data.since}). <span className="text-zinc-500 dark:text-zinc-400">Next: crisis-aware allocation — preserve inventory for true subscribers, availability-as-lever, demand flip-flop forecast.</span>
       </p>
     </div>
   );
