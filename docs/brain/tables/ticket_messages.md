@@ -28,6 +28,7 @@ Messages on a ticket. direction (in/out), visibility (public/internal), author_t
 | `resend_email_id` | `text` | ✓ |  |
 | `email_status` | `text` | ✓ |  |
 | `is_ai_guidance` | `bool` | — | default: `false` |
+| `dispatch_pending_at` | `timestamptz` | ✓ | Phase 2 of [[../specs/durable-inbound-dispatch-no-silently-lost-ticket-event]] |
 
 ## Foreign keys
 
