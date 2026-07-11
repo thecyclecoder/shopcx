@@ -81,4 +81,4 @@ Any error path in either the dispatcher or the skill resolves to `pass:false` so
 The regenerator burns an attempt on a fail — cheap compared to a Meta policy reject for a bare-price ad or a cartoon "before".
 
 ## Related
-[[creative-qa]] · [[creative-agent]] · [[../lifecycles/ad-creative]] · [[builder-worker]] (`runAdCreativeJob`, `AD_CREATIVE_QC_TIMEOUT_MS`, `AD_CREATIVE_QC_IDLE_MS`) · [[../reference/meta-scaling-methodology]] (price-on-static + fabrication rules).
+[[creative-qa]] · [[creative-agent]] · [[../lifecycles/ad-creative]] · [[builder-worker]] (`runAdCreativeJob`, `AD_CREATIVE_QC_TIMEOUT_MS`, `AD_CREATIVE_QC_IDLE_MS`) · [[creative-qc-sandbox]] (the three-layer guardrails) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[../reference/meta-scaling-methodology]] (price-on-static + fabrication rules).
