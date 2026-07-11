@@ -15,10 +15,10 @@ Any other value degrades to `box` (safest default — a typo doesn't silently re
 
 ## `qaCreativeViaBoxSession(gen, dispatch) → CreativeQAVerdict` — the default box-session path
 
-The worker builds a `dispatch(prompt) → { resultText, isError }` closure that runs one `claude -p` session on Max (kind `ad-creative-qc`, sandbox `max`, 6-min hard cap / 90s idle) through `runBoxLane` (per-account failover; all accounts capped → fail-closed). The function:
+The worker builds a `dispatch(prompt) → { resultText, isError }` closure that runs one `claude -p` session on Max (kind `ad-creative-qc`, sandbox `qc`, 6-min hard cap / 90s idle) through `runBoxLane` (per-account failover; all accounts capped → fail-closed). The function:
 
 1. Normalizes the buffer to Anthropic's optimal vision size (1568px JPEG, same `sharp` pass as `qaCreative`).
-2. Writes it to `/tmp/creative-qc-<uuid>.jpg` and hands the ABSOLUTE PATH + the exact copy strings (`HEADLINE`, `OFFER`, `TRUST BAR`, `HAS_TRANSFORMATION`) to the `.claude/skills/creative-qc` skill in the prompt.
+2. Writes it to `/tmp/creative-qc-<uuid>.jpg` and hands the ABSOLUTE PATH + the exact copy strings (`HEADLINE`, `OFFER`, `TRUST BAR`, `HAS_TRANSFORMATION`) to the `.claude/skills/creative-qc` skill via [[creative-qc-sandbox]] `buildQcPrompt` (which sanitizes + delimits the untrusted copy fields — Phase 3 / Fix 1 injection defence).
 3. The skill `Read`s the image (Claude Code renders JPEGs visually to the model), judges the five render defects below, and returns the `CreativeQAVerdict` JSON.
 4. The tmpfile is deleted in a `finally` block — best-effort; a leaked jpeg is harmless but noise.
 
@@ -41,4 +41,4 @@ The pre-Phase-1 path: same 1568px JPEG normalization, but the vision pass is a d
 `pass` = all five true. The checks encode the CEO grey-area line (2026-07-10): an AI-generated before/after is allowed, but it must be photorealistic + never captioned as authentic. See [[../reference/meta-scaling-methodology]].
 
 ## Related
-[[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill).
+[[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook).
