@@ -1,0 +1,1 @@
+- **Rebase parked/resumed build worktrees onto current main before repo-wide checks** · verified 2026-07-11 · → [[../lifecycles/spec-goal-branch-pm-flow]]
