@@ -65,7 +65,57 @@ export interface TicketDirectionPlan {
    * confirming-predicate pattern).
    */
   launch_journey_slug?: string;
+  /**
+   * Phase 2 of
+   * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]]. Closes the
+   * loop from detection (Phase 1 — [[account-matching]] `gradeUnlinkedCandidates` +
+   * `hasHighConfidenceUnlinkedMatch`) to action: when Sol (or June) reasons that the ticket's
+   * customer has a HIGH-confidence unlinked sibling carrying the real sub / disputed order, the
+   * Direction NAMES the link as a first-class proposal — the worker executes it via
+   * [[sol-link-proposal]] `applySolLinkProposal` BEFORE dispatching the remedy, so the same-turn
+   * refund / cancel targets the whole person (the linked group) instead of dead-ending on the
+   * empty half (the db8b3d66 scar). Silent auto-links are impossible: the writer rejects a
+   * `previously_rejected` pair unless `reconfirmed: true` is also present, so a weak name-only
+   * bulk rejection stays load-bearing until a supervisor re-affirms the same-person judgement.
+   */
+  link_proposal?: TicketDirectionLinkProposal;
   [k: string]: unknown;
+}
+
+/**
+ * A first-class link proposal Sol (or June) writes onto the Direction — Phase 2 of
+ * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]]. The writer
+ * validates every field against the workspace's own state before the row lands (learning #9 —
+ * the confirming predicate at the action point, not a coarser proxy):
+ *
+ *  - `candidate_customer_id` must be a non-empty string that resolves to a customer in this
+ *    workspace, and cannot equal the ticket's OWN `customer_id`.
+ *  - `confidence` must be `'high'` or `'low'` (mirrors [[account-matching]] `MatchConfidence`).
+ *  - `previously_rejected: true` REQUIRES `reconfirmed: true` alongside it — a bulk name-only
+ *    rejection stays load-bearing until Sol/June re-affirms the same-person judgement on the
+ *    stronger (address / phone) signals now present.
+ *
+ * `signals` + `reason` are advisory (rendered on the applier's internal ticket_messages note so
+ * a human reviewer can retrace the judgement); they are stored verbatim, not validated.
+ */
+export interface TicketDirectionLinkProposal {
+  /** The sibling customer to link INTO the ticket's own customer (both survive; a `customer_links`
+   *  group joins them). Must exist in this workspace and cannot equal the ticket's own customer. */
+  candidate_customer_id: string;
+  /** From [[account-matching]] `gradeUnlinkedCandidates`. Phase-2 auto-execution is HIGH only; a
+   *  `low` proposal is surfaced for June's judgement (never executed silently by the worker). */
+  confidence: "high" | "low";
+  /** Which same-person signals corroborated the judgement — advisory prose for the internal note. */
+  signals?: string[];
+  /** True when a prior `customer_link_rejections` row exists for this pair. When set, `reconfirmed`
+   *  MUST also be `true` or the writer rejects with `link_proposal_needs_reconfirm`. */
+  previously_rejected?: boolean;
+  /** REQUIRED alongside `previously_rejected: true` — the supervisor has explicitly re-affirmed
+   *  the same-person judgement (address newly corroborated, June ruled). Never a default; a
+   *  `previously_rejected` pair whose Direction omits `reconfirmed` is refused. */
+  reconfirmed?: boolean;
+  /** Free-text prose the applier stamps on the internal note — the cited evidence Sol/June saw. */
+  reason?: string;
 }
 
 export interface TicketDirection {
@@ -105,7 +155,14 @@ export class TicketDirectionPlanError extends Error {
     | "journey_slug_unknown"
     | "workflow_tag_missing"
     | "workflow_tag_unknown"
-    | "workflow_tag_not_string";
+    | "workflow_tag_not_string"
+    | "link_proposal_shape_invalid"
+    | "link_proposal_confidence_invalid"
+    | "link_proposal_candidate_missing"
+    | "link_proposal_candidate_not_string"
+    | "link_proposal_candidate_unknown"
+    | "link_proposal_same_customer"
+    | "link_proposal_needs_reconfirm";
   readonly slug?: string;
   constructor(
     code: TicketDirectionPlanError["code"],
@@ -142,7 +199,7 @@ export async function writeDirection(
   },
 ): Promise<TicketDirection> {
   const plan: TicketDirectionPlan = input.plan ?? {};
-  await validatePlanForPath(admin, input.workspace_id, input.chosen_path, plan);
+  await validatePlanForPath(admin, input.workspace_id, input.chosen_path, plan, input.ticket_id);
   const { data, error } = await admin
     .from("ticket_directions")
     .insert({
@@ -184,6 +241,7 @@ async function validatePlanForPath(
   workspace_id: string,
   chosen_path: TicketDirectionPath,
   plan: TicketDirectionPlan,
+  ticket_id: string,
 ): Promise<void> {
   if (chosen_path === "playbook") {
     const rawSlug = plan.playbook_slug;
@@ -294,6 +352,11 @@ async function validatePlanForPath(
   // also launches the standalone address-update journey still routes through this gate. The
   // per-path blocks above no longer early-return, so execution always reaches this gate.
   await validateLaunchJourneySlug(admin, workspace_id, plan);
+  // link_proposal (account-linking-address-aware-confidence-graded-and-cs-searchable Phase 2)
+  // also applies to ALL chosen_paths — a refund `playbook` Direction whose target sub/order lives
+  // on the sibling account, a `stateless` reply that also cements the link, or a `journey` launch
+  // preceded by a link. Same gate as above.
+  await validateLinkProposal(admin, workspace_id, ticket_id, plan);
 }
 
 /**
@@ -339,6 +402,171 @@ async function validateLaunchJourneySlug(
       { slug: raw },
     );
   }
+}
+
+/**
+ * link_proposal plan validator — Phase 2 of
+ * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]]. When Sol names
+ * a HIGH-confidence unlinked sibling on the Direction, the writer confirms the read-time
+ * predicates at the write itself (learning #9 — the confirming predicate at the action point):
+ *
+ *   - `link_proposal` is a plain object (no arrays / no primitives smuggled through).
+ *   - `candidate_customer_id` is a non-empty string, and cannot equal the ticket's OWN
+ *     `customer_id` (a Direction that proposes linking a customer to themselves is refused).
+ *   - The candidate resolves to a customer in this workspace (workspace-scoped — a cross-workspace
+ *     id can never authorize the write).
+ *   - `confidence` is `'high'` or `'low'`; nothing else.
+ *   - `previously_rejected: true` REQUIRES `reconfirmed: true` alongside it — a bulk name-only
+ *     rejection stays load-bearing, and the ONLY path back to a link is Sol/June re-affirming
+ *     the same-person judgement on stronger signals.
+ *
+ * A missing / malformed / same-customer / cross-workspace / unreconfirmed proposal throws
+ * {@link TicketDirectionPlanError} with the candidate id echoed on the exception so the caller
+ * can surface it verbatim in the box-session log.
+ */
+async function validateLinkProposal(
+  admin: Admin,
+  workspace_id: string,
+  ticket_id: string,
+  plan: TicketDirectionPlan,
+): Promise<void> {
+  const lp = plan.link_proposal;
+  if (lp === undefined || lp === null) return;
+  if (typeof lp !== "object" || Array.isArray(lp)) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_shape_invalid",
+      "plan.link_proposal must be an object (candidate_customer_id, confidence, …)",
+    );
+  }
+  const proposal = lp as Partial<TicketDirectionLinkProposal> & Record<string, unknown>;
+  if (proposal.candidate_customer_id === undefined || proposal.candidate_customer_id === null) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_candidate_missing",
+      "plan.link_proposal.candidate_customer_id is required",
+    );
+  }
+  const rawCandidate = proposal.candidate_customer_id;
+  if (typeof rawCandidate !== "string" || rawCandidate.trim().length === 0) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_candidate_not_string",
+      "plan.link_proposal.candidate_customer_id must be a non-empty string",
+    );
+  }
+  const candidateId = rawCandidate.trim();
+  const confidence = proposal.confidence;
+  if (confidence !== "high" && confidence !== "low") {
+    throw new TicketDirectionPlanError(
+      "link_proposal_confidence_invalid",
+      "plan.link_proposal.confidence must be 'high' or 'low'",
+      { slug: candidateId },
+    );
+  }
+  // A pair Sol or June has already tried to reject cannot silently relink — the ONLY path back
+  // is an explicit `reconfirmed: true` in the same proposal. Fail HERE so the row never lands.
+  if (proposal.previously_rejected === true && proposal.reconfirmed !== true) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_needs_reconfirm",
+      "plan.link_proposal names a previously_rejected pair — set reconfirmed:true to re-affirm, otherwise omit the proposal",
+      { slug: candidateId },
+    );
+  }
+
+  // The candidate cannot be the ticket's own customer — a Direction that "links a customer to
+  // themselves" is a nonsense write we refuse at the writer (compare-and-set on the ticket row so
+  // a concurrent unlink doesn't sneak through).
+  const { data: ticketRow, error: ticketErr } = await admin
+    .from("tickets")
+    .select("customer_id")
+    .eq("workspace_id", workspace_id)
+    .eq("id", ticket_id)
+    .maybeSingle();
+  if (ticketErr) throw ticketErr;
+  const ownCustomerId = (ticketRow as { customer_id: string | null } | null)?.customer_id ?? null;
+  if (ownCustomerId && ownCustomerId === candidateId) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_same_customer",
+      "plan.link_proposal.candidate_customer_id equals the ticket's own customer_id",
+      { slug: candidateId },
+    );
+  }
+
+  // The candidate must exist in THIS workspace; a cross-workspace id can never authorize the
+  // proposal (the same workspace-scoped guard playbook/journey/workflow slugs enforce above).
+  const { data: candidate, error: candErr } = await admin
+    .from("customers")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .eq("id", candidateId)
+    .maybeSingle();
+  if (candErr) throw candErr;
+  if (!candidate) {
+    throw new TicketDirectionPlanError(
+      "link_proposal_candidate_unknown",
+      `plan.link_proposal.candidate_customer_id='${candidateId}' does not resolve to a customer in this workspace`,
+      { slug: candidateId },
+    );
+  }
+}
+
+/**
+ * Sol-chosen LINK-PROPOSAL resolver — Phase 2 of
+ * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]].
+ *
+ * The `runTicketHandleJob` worker (and the cs-director-call apply lane) calls this AFTER
+ * `writeDirection` succeeds to decide whether the Direction Sol / June just authored names a
+ * link proposal that should execute BEFORE the remedy dispatches. Returns non-null only when
+ * the live Direction carries a `plan.link_proposal` that already passed the writer's validation
+ * (workspace-scoped candidate, not the ticket's own customer, no unreconfirmed re-link on a
+ * previously_rejected pair). When any of those preconditions fails (no live Direction, no
+ * proposal, or the ticket has since been re-assigned to a different customer), returns null and
+ * the caller proceeds without linking.
+ *
+ * Guards mirror learning #6 (confirming predicate at the action point, not a coarser proxy):
+ *   - Workspace scope re-asserted on both the Direction read and the candidate lookup so a
+ *     cross-workspace slug or a mis-authored Direction on a foreign ticket cannot dispatch.
+ *   - Same-customer re-checked here even though the writer already refuses it (a concurrent
+ *     ticket-customer re-assignment between write and resolve must not authorize a self-link).
+ *   - `previously_rejected: true` without `reconfirmed: true` cannot even reach this point (the
+ *     writer already refused). But we re-assert the invariant here so a callsite bug in a caller
+ *     that bypasses the writer (a raw upsert) still can't silently auto-link.
+ */
+export async function resolveSolLinkProposal(
+  admin: Admin,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<{
+  proposal: TicketDirectionLinkProposal;
+  ticket_customer_id: string;
+  direction_id: string;
+} | null> {
+  const direction = await getLiveDirection(admin, ticket_id, { workspace_id });
+  if (!direction) return null;
+  const raw = direction.plan.link_proposal;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const proposal = raw as TicketDirectionLinkProposal;
+  const candidateId = typeof proposal.candidate_customer_id === "string"
+    ? proposal.candidate_customer_id.trim()
+    : "";
+  if (!candidateId) return null;
+  if (proposal.confidence !== "high" && proposal.confidence !== "low") return null;
+  if (proposal.previously_rejected === true && proposal.reconfirmed !== true) return null;
+
+  const { data: ticketRow, error: ticketErr } = await admin
+    .from("tickets")
+    .select("customer_id")
+    .eq("workspace_id", workspace_id)
+    .eq("id", ticket_id)
+    .maybeSingle();
+  if (ticketErr) throw ticketErr;
+  const ownCustomerId = (ticketRow as { customer_id: string | null } | null)?.customer_id ?? null;
+  if (!ownCustomerId) return null;
+  if (ownCustomerId === candidateId) return null;
+
+  return {
+    proposal: { ...proposal, candidate_customer_id: candidateId },
+    ticket_customer_id: ownCustomerId,
+    direction_id: direction.id,
+  };
 }
 
 /**

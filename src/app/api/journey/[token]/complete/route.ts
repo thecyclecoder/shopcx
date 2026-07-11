@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { subscribeToEmailMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 // POST: Complete a journey session
 export async function POST(
@@ -343,15 +344,15 @@ export async function POST(
           journey_history: updated,
         }).eq("id", session.ticket_id);
 
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: {
-            workspace_id: wsId,
-            ticket_id: session.ticket_id,
-            message_body: "address_confirmed",
-            channel: "system",
-            is_new_ticket: false,
-          },
+        // Sentinel — synthetic wake for an active playbook. No inbound customer msg row to stamp.
+        await dispatchInboundMessage({
+          admin,
+          workspaceId: wsId,
+          ticketId: session.ticket_id,
+          messageBody: "address_confirmed",
+          channel: "system",
+          isNewTicket: false,
+          dispatchMessageId: null,
         });
       }
     }
@@ -475,15 +476,15 @@ export async function POST(
           journey_history: updated2,
         }).eq("id", session.ticket_id);
 
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: {
-            workspace_id: wsId,
-            ticket_id: session.ticket_id,
-            message_body: "items_selected",
-            channel: "system",
-            is_new_ticket: false,
-          },
+        // Sentinel — synthetic wake for an active playbook. No inbound customer msg row to stamp.
+        await dispatchInboundMessage({
+          admin,
+          workspaceId: wsId,
+          ticketId: session.ticket_id,
+          messageBody: "items_selected",
+          channel: "system",
+          isNewTicket: false,
+          dispatchMessageId: null,
         });
       }
     }
@@ -835,15 +836,17 @@ export async function POST(
         author_type: "system", body: "[System] Account linking completed. Re-processing original request with enriched context.",
       });
 
-      await inngest.send({
-        name: "ticket/inbound-message",
-        data: {
-          workspace_id: wsId,
-          ticket_id: session.ticket_id,
-          message_body: originalMsg?.body || "",
-          channel: ticketInfo?.channel || "email",
-          is_new_ticket: false,
-        },
+      // Account-linking re-fire — replays the ORIGINAL inbound customer message with enriched
+      // context; the original message row already has its own dispatch history from the initial
+      // ingest. This is a re-drive event, not a new inbound, so no intent stamp.
+      await dispatchInboundMessage({
+        admin,
+        workspaceId: wsId,
+        ticketId: session.ticket_id,
+        messageBody: originalMsg?.body || "",
+        channel: ticketInfo?.channel || "email",
+        isNewTicket: false,
+        dispatchMessageId: null,
       });
     }
 

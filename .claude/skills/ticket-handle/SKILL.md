@@ -65,7 +65,42 @@ For fresh data beyond the preloaded brief, run (the ticket id is in your prompt)
 npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
 ```
 
-Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = list all active, or json_input `{"slug":"<slug>"}` to fetch one). These are READ-ONLY — they never mutate.
+Tools: `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` · `get_dunning_status` · `get_product_knowledge` (json_input `{"query":"…"}`) · `get_product_nutrition` (json_input `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = list all active, or json_input `{"slug":"<slug>"}` to fetch one) · `get_link_candidates` · `search_orders` (json_input `{"amount":236.50,"date_from":"…","date_to":"…","email":"…"}`). These are READ-ONLY — they never mutate.
+
+## Account linking is FUNDAMENTAL — check the sibling BEFORE you say "no such account/charge"
+
+A customer often has more than one account (a second email, a re-order under a different address). `get_customer_account` now flags **⚠️ LIKELY SAME-PERSON UNLINKED ACCOUNT(S)** when a high-confidence sibling exists (same street address or phone — a common name alone is NOT enough). When you see that flag, or whenever the customer disputes a subscription / charge / order you can't find on the account in front of you:
+
+1. **Do NOT conclude "you have no active subscription" / "no such charge" from ONE account.** The real sub / order / charge may live on the unlinked sibling. Ticket `db8b3d66` is the scar: Elizabeth's active sub + a real $236.50 charge sat on a same-address second account nobody had linked, so "no active subscription" was locally true but wrong.
+2. **`get_link_candidates`** lists the graded siblings (HIGH = address/phone-corroborated). **`search_orders`** finds a disputed "$X on `<date>`" charge across EVERY customer (`{"amount":236.50,"date_from":"2026-06-29","date_to":"2026-06-30"}`) — use it to locate a charge that isn't on the ticket's own account.
+3. **When a HIGH-confidence sibling is real, PROPOSE linking** (say so in your `context_summary` + `first_reply`) and reason across the linked set — never silently ignore it and never silently auto-link a `previously dismissed` one (re-confirm it). Once you know both accounts are the same person, handle the ask against the WHOLE person (cancel the live sub, refund the real order), not the empty half.
+
+### Phase 2 — write the link as a first-class `plan.link_proposal`, then remedy the whole person
+
+Phase 2 of [[../../../docs/brain/specs/account-linking-address-aware-confidence-graded-and-cs-searchable.md]] closes the loop: the link goes on your Direction as a structured field, and the worker EXECUTES it BEFORE dispatching your remedy — so a `playbook_seed_context.order_id` that lives on the sibling account resolves against the whole linked person, not the empty half. This is the durable path from "detection" (Phase 1's ⚠️ block + `get_link_candidates`) to "action".
+
+Author `plan.link_proposal` on ANY `chosen_path` (stateless refund, journey launch, playbook fire — the link runs first regardless):
+
+```json
+"plan": {
+  "playbook_slug": "refund",
+  "playbook_seed_context": { "order_id": "sibling-order-id" },
+  "link_proposal": {
+    "candidate_customer_id": "<sibling's customer_id — from get_link_candidates>",
+    "confidence": "high",
+    "signals": ["name", "address"],
+    "reason": "same street address + disputed $236.50 order lives on sibling"
+  }
+}
+```
+
+**Guards the writer enforces (a failing shape rejects the Direction — do not smuggle around them):**
+
+- `confidence: "high"` is the ONLY confidence that auto-executes; a `low` proposal is preserved on the Direction as surface-only for June's judgement but the worker never links it.
+- `previously_rejected: true` is a **hard gate**: you MUST also set `reconfirmed: true` to authorize the re-link (an explicit re-affirm on the stronger address/phone signal). Without `reconfirmed:true`, the writer refuses with `link_proposal_needs_reconfirm` — a bulk name-only rejection stays load-bearing until Sol/June re-affirms.
+- The `candidate_customer_id` must be a real customer in this workspace and cannot equal the ticket's own `customer_id` (silent rejection at the writer).
+
+When the link applies, the worker stamps an internal `ticket_messages` note citing the confidence + signals + reason, clears the stale `customer_link_rejections` row on a re-confirm, and then runs your `chosen_path` remedy against the linked group. Cite the same evidence (address match, disputed order id, etc.) in your `context_summary` so the audit trail — Direction + note + remedy result — is a single line the CS Director can follow.
 
 ## Choose ONE `chosen_path`
 

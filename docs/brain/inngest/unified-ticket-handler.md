@@ -11,9 +11,13 @@
 - **Retries:** `OUTAGE_SPANNING_RETRIES` (20) — outage-spanning. A Claude/dependency failure throws (see below), so the run retries with exponential backoff out to hours; a 1-hour Anthropic outage parks here and completes on recovery instead of failing-and-dropping. Terminal logic errors throw `NonRetriableError` → still fail fast. ([[../specs/agent-outage-resilience]] Phase 1.)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.ticket_id" }]`
 
+## Dispatch-intent clarity (Phase 2 of durable-inbound-dispatch)
+
+**At the top of every run,** before any gates, [[../libraries/dispatch-inbound-message]] `clearDispatchIntent(admin, ticket_id)` clears any un-cleared `dispatch_pending_at` stamps on this ticket's inbound `ticket_messages` rows. This signals to the Phase-3 backstop cron that the event **was delivered** and the handler **claimed the turn**, regardless of whether the run's outcome (real turn, ai_disabled skip, empty inbound, spam). An un-cleared stamp older than the Phase-3 settle window is therefore an unambiguous LOST send. See [[../specs/durable-inbound-dispatch-no-silently-lost-ticket-event]] for the full durable dispatch flow.
+
 ## Hard gates before the orchestrator
 
-Inside the `resolve` step (right after the ticket row load) the handler short-circuits on two per-ticket flags — both bail before language detection / classification / Sonnet:
+Inside the `resolve` step (right after the ticket row load and dispatch-intent clear) the handler short-circuits on two per-ticket flags — both bail before language detection / classification / Sonnet:
 
 - **`ai_disabled`** — an explicit **human directive** ("Turn off AI on this ticket" button on the ticket detail view). Logs `[System] Skipped — AI is disabled on this ticket by human directive`, returns the `_aiDisabled` sentinel, and the outer function returns `{ skipped: "ai_disabled" }`. Non-propagating on merge — see [[../libraries/ticket-merge]]. Phase 1 of `docs/brain/specs/human-directives-hard-gates-over-ticket-ai.md`.
 - **`do_not_reply`** — filter-set (mailer-daemon, wrong company, spam). Logs the do-not-reply skip note and returns `{ skipped: "do_not_reply" }`.

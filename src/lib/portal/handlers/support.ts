@@ -1,7 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan, logPortalAction } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 /**
  * Portal route: list the customer's support tickets.
@@ -200,19 +200,16 @@ export const supportReply: RouteHandler = async ({ auth, route, req }) => {
       .eq("id", payload.ticketId);
   }
 
-  // Kick the unified ticket handler. Inserting the message alone does
-  // NOT trigger it — the handler fires only on this Inngest event (there
-  // is no DB trigger on ticket_messages). Mirror the email/chat reply
-  // path so Sonnet/agent routing runs exactly the same way.
-  await inngest.send({
-    name: "ticket/inbound-message",
-    data: {
-      workspace_id: auth.workspaceId,
-      ticket_id: payload.ticketId,
-      message_body: body,
-      channel: ticket.channel || "portal",
-      is_new_ticket: false,
-    },
+  // Kick the unified ticket handler via the durable dispatcher — stamps intent on `msg` then
+  // fires the event. Inserting the message alone does NOT trigger the handler.
+  await dispatchInboundMessage({
+    admin,
+    workspaceId: auth.workspaceId,
+    ticketId: payload.ticketId,
+    messageBody: body,
+    channel: ticket.channel || "portal",
+    isNewTicket: false,
+    dispatchMessageId: msg.id,
   });
 
   await logPortalAction({
@@ -261,28 +258,24 @@ export const supportCreate: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: "ticket_insert_failed", message: error?.message }, 500);
   }
 
-  await admin.from("ticket_messages").insert({
+  const { data: createMsg } = await admin.from("ticket_messages").insert({
     ticket_id: ticket.id,
     direction: "inbound",
     visibility: "external",
     author_type: "customer",
     body,
     body_clean: body,
-  });
+  }).select("id").single();
 
-  // Kick the unified ticket handler. Inserting the ticket + message does
-  // NOT trigger it — the handler fires only on this Inngest event (there
-  // is no DB trigger on ticket_messages). Without this, portal-created
-  // tickets sit untouched with no AI ever running on them.
-  await inngest.send({
-    name: "ticket/inbound-message",
-    data: {
-      workspace_id: auth.workspaceId,
-      ticket_id: ticket.id,
-      message_body: body,
-      channel: "portal",
-      is_new_ticket: true,
-    },
+  // Kick the unified ticket handler via the durable dispatcher.
+  await dispatchInboundMessage({
+    admin,
+    workspaceId: auth.workspaceId,
+    ticketId: ticket.id,
+    messageBody: body,
+    channel: "portal",
+    isNewTicket: true,
+    dispatchMessageId: createMsg?.id ?? null,
   });
 
   await logPortalAction({

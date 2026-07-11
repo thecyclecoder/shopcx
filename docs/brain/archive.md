@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Add required spec slug to Media Buyer cadence jobs** · verified 2026-07-11 · → [[inngest/media-buyer-cadence]]
 - **Checkout-stuck → assisted-purchase concierge (fast default): Sol re-entry, Sonnet not Opus, place the order** · verified 2026-07-10 · → [[../recipes/checkout-stuck-concierge-flow]] · lifecycle: [[../lifecycles/storefront-checkout]]
 - **Fix June remedy payload type override bypassing founder gate** · verified 2026-07-10 · → [[../libraries/cs-director]], [[../libraries/june-remedy-approval]]
 - **Journey completion stamps closed_at so Cora can grade closed tickets** · verified 2026-07-10 · → [[../lifecycles/ticket-lifecycle]]

@@ -38,6 +38,11 @@ import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
 import { classifyAndStamp, type NeedsAttentionClass } from "@/lib/agents/needs-attention-classify";
+import {
+  decideCsOwnerRoute,
+  applyCsOwnerRoute,
+  CS_FUNCTION,
+} from "@/lib/agents/needs-attention-route-cs-owner";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -106,6 +111,14 @@ interface ParkedRow {
   log_tail: string | null;
   needs_attention_class: NeedsAttentionClass | null;
   created_at: string;
+  /**
+   * The JSON payload the enqueue path wrote (per-kind params). Phase 3 of
+   * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]] reads
+   * `ticket_id` off it to route a CS-owned park (`ticket-handle` / `ticket-analyze`) to the
+   * CS Director (June) before Platform's backstop reaches the CEO — see
+   * [[needs-attention-route-cs-owner]] `decideCsOwnerRoute`.
+   */
+  instructions: string | null;
 }
 
 interface RoutedLedger {
@@ -671,7 +684,7 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
 
   const { data: parked } = await admin
     .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, error, log_tail, needs_attention_class, created_at")
+    .select("id, workspace_id, kind, spec_slug, error, log_tail, needs_attention_class, created_at, instructions")
     .eq("status", "needs_attention")
     .order("created_at", { ascending: false })
     .limit(500);
@@ -717,6 +730,32 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
       }
       // If the dismiss write failed, fall through to the normal class/backstop path — better to
       // surface late than to silently drop the row.
+    }
+
+    // Phase 3 of account-linking-address-aware-confidence-graded-and-cs-searchable — CS-owned
+    // parks (ticket-handle / ticket-analyze — every kind whose registry owner is 'cs') route to
+    // the CS Director (June) BEFORE Platform's backstop reaches the CEO. The supervisor-owns-its-
+    // layer north-star pattern ([[../operational-rules]]): the owner function rules on its own
+    // park; only after CS can't resolve does it fall through to the CEO fail-safe. The decision
+    // is pure ([[needs-attention-route-cs-owner]] `decideCsOwnerRoute`); the applier enqueues a
+    // `cs-director-call` job for the ticket and stamps a CS-attributed `director_activity` so
+    // the approvals-feed renders `raisedBy: cs`, not Platform (Ada).
+    if (!inLedger && !atCap) {
+      const csDecision = decideCsOwnerRoute(row);
+      if (csDecision.route_to === CS_FUNCTION) {
+        const outcome = await applyCsOwnerRoute(admin, row, csDecision);
+        if (outcome.routed) {
+          chatted.push(row.spec_slug ?? row.id.slice(0, 8));
+          continue;
+        }
+        if (outcome.reason === "already_inflight") {
+          // June's runner is already ruling; leave the parked row for the next sweep (it will
+          // either be terminal by then, or June bounced it back and we can re-enqueue).
+          continue;
+        }
+        // enqueue_failed / no_ticket_id / compare_and_set_lost — fall through to the generic
+        // class dispatch + backstop so the row still surfaces somewhere.
+      }
     }
 
     // planner-gates-build-queue-on-authored-specs Phase 2 — a parked build whose `public.specs`

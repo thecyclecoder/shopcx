@@ -11341,6 +11341,35 @@ async function runTicketHandleJob(job: Job) {
             // so the journey lead-in / workflow preamble is policy-checked before it ships.
             let mechanismManagesStatus = false;
             try {
+              // (0) Link-proposal wedge (plan.link_proposal on ANY chosen_path) — Phase 2 of
+              // account-linking-address-aware-confidence-graded-and-cs-searchable. When Sol / June
+              // named a HIGH-confidence unlinked sibling on the Direction, execute the link FIRST
+              // so the following remedy (playbook / journey / stateless refund) targets the whole
+              // person — the customer_links group — instead of dead-ending on the empty half (the
+              // db8b3d66 scar). The applier is idempotent, refuses low-confidence + needs-reconfirm
+              // silently (guardrails re-asserted at the action point per learning #9), and stamps
+              // its own internal ticket_messages note documenting the cited evidence.
+              const { resolveSolLinkProposal } = await import("../src/lib/ticket-directions");
+              const { applySolLinkProposal } = await import("../src/lib/sol-link-proposal");
+              const linkChoice = await resolveSolLinkProposal(db, workspaceId, ticketId);
+              if (linkChoice) {
+                try {
+                  const linkResult = await applySolLinkProposal(db, {
+                    workspaceId,
+                    ticketId,
+                    ticketCustomerId: linkChoice.ticket_customer_id,
+                    proposal: linkChoice.proposal,
+                  });
+                  console.log(`${tag} sol link_proposal applied: linked=${linkResult.linked} reason=${linkResult.reason} group_id=${linkResult.group_id ?? "-"}`);
+                } catch (linkErr) {
+                  // A failed link does NOT unwind the Direction — the remedy still dispatches on
+                  // the ticket's own customer (surface-level fallback), and a human can retry via
+                  // June's approve_remedy lane. Surface for grep.
+                  const msg = linkErr instanceof Error ? linkErr.message : String(linkErr);
+                  console.warn(`${tag} sol link_proposal application failed: ${msg}`);
+                }
+              }
+
               // (1) Standalone-journey wedge (plan.launch_journey_slug on ANY chosen_path — the
               // move → shipping-address case). Launches via launchJourneyForTicket with firstReply
               // as the CTA lead-in; leaves the ticket open (the journey owns status). See
@@ -23059,6 +23088,54 @@ async function dispatchJob(job: Job) {
     let add = sh("git", ["worktree", "add", "-B", branch!, wt, `origin/${branch}`]);
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
+  }
+  // ⭐ mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks Phase 1: if the branch's
+  // tip is NOT already on top of origin/main, advance the BASE by rebasing onto origin/main BEFORE
+  // the claude run and (crucially) BEFORE the repo-wide check invocation below (`npx tsc --noEmit`
+  // + `_check-table-refs-have-migrations.ts`). This restores the invariant those checks assume —
+  // origin/main HEAD as the reference tree. A build worktree that was cut BEFORE a new
+  // table-creating migration landed on main would otherwise fail check:table-refs-have-migrations
+  // on a stale base whose fix already shipped, stalling the spec on a non-real regression.
+  //
+  // Invariants (see docs/brain/libraries/mario.md): NEVER force-push, NEVER drop WIP commits,
+  // NEVER touch main. Only the branch's LOCAL base is advanced — the follow-up phase push and its
+  // existing rebase-retry (build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2,
+  // below) handle a concurrent sibling push idempotently. A rebase conflict is surfaced as
+  // needs_attention (never a silent drop of WIP), matching the phase-push rebase-retry convention.
+  {
+    // Explicit `git fetch origin main` so origin/main is the freshest tip we compare against (the
+    // top-of-runJob `git fetch origin` already covers this, but being explicit here matches the
+    // spec's steps and stays correct if the top-level fetch ever narrows).
+    sh("git", ["fetch", "origin", "main"], { cwd: wt });
+    const headOnMain =
+      sh("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd: wt }).code === 0;
+    if (!headOnMain) {
+      console.log(
+        `${tag} branch ${branch} is behind origin/main — rebasing onto origin/main BEFORE repo-wide checks (base-only advance; never force-pushes, never drops WIP)`,
+      );
+      const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
+      if (rebase.code !== 0) {
+        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
+        // clean for the reap, then surface needs_attention — the human resolves the divergence
+        // rather than the box silently running repo-wide checks on a stale tree.
+        sh("git", ["rebase", "--abort"], { cwd: wt });
+        await update(job.id, {
+          status: "needs_attention",
+          error:
+            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
+          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
+        });
+        console.error(
+          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
+        );
+        chosenAccount.inFlight--;
+        sh("git", ["worktree", "remove", "--force", wt]);
+        return;
+      }
+      console.log(
+        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+      );
+    }
   }
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
   // Force (-sfn) so a leftover/broken link from a prior run is always replaced.

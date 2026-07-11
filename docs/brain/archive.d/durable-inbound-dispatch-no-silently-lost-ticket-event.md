@@ -1,0 +1,1 @@
+- **Durable inbound dispatch — a ticket/inbound-message event is never silently lost** · verified 2026-07-11 · → [[../lifecycles/ticket-lifecycle]]

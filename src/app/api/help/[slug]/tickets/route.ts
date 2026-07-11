@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 // CORS — this endpoint is meant to be embedded on Shopify storefronts
 // (via the contact-form theme block) and on the help-center subdomain.
@@ -87,18 +87,23 @@ export async function POST(
 
   // Add the message
   if (ticket) {
-    await admin.from("ticket_messages").insert({
+    const { data: helpMsg } = await admin.from("ticket_messages").insert({
       ticket_id: ticket.id,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: message,
-    });
+    }).select("id").single();
 
-    // Unified handler handles routing
-    await inngest.send({
-      name: "ticket/inbound-message",
-      data: { workspace_id: workspace.id, ticket_id: ticket.id, message_body: message, channel: "email", is_new_ticket: true },
+    // Unified handler handles routing — Phase 2 durable dispatch.
+    await dispatchInboundMessage({
+      admin,
+      workspaceId: workspace.id,
+      ticketId: ticket.id,
+      messageBody: message,
+      channel: "email",
+      isNewTicket: true,
+      dispatchMessageId: helpMsg?.id ?? null,
     });
   }
 

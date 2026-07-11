@@ -1,0 +1,1 @@
+- **Mario blocked_by_repair — add a body-named missing blocker + re-open a spec-failed spec** · verified 2026-07-11 · → [[../libraries/mario]]

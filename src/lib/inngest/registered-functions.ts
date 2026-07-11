@@ -79,6 +79,7 @@ import { popupSmsDeliveryFallback } from "@/lib/inngest/popup-sms-delivery-fallb
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
+import { unansweredInboundBackstopCron } from "@/lib/inngest/unanswered-inbound-backstop-cron";
 import { crisisDailyCampaign, crisisAdvanceTier } from "@/lib/inngest/crisis-campaign";
 import { syncInventory } from "@/lib/inngest/sync-inventory";
 import {
@@ -244,6 +245,7 @@ export const registeredInngestFunctions = [
   returnsIssueRefund,
   deliveryNightlyAudit,
   deliverPendingSends,
+  unansweredInboundBackstopCron,
   crisisDailyCampaign,
   crisisAdvanceTier,
   syncInventory,

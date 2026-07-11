@@ -214,16 +214,18 @@ export async function POST(
 
   // First inbound message — only if the CSAT had a comment. Without
   // one, the new ticket starts empty for the agent to open the
-  // conversation with the customer.
+  // conversation with the customer. Capture the row id so Phase-2 dispatch stamps intent on it.
+  let csatMsgId: string | null = null;
   if (hasComment) {
-    await admin.from("ticket_messages").insert({
+    const { data: csatMsg } = await admin.from("ticket_messages").insert({
       ticket_id: ticket.id,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: `<p>${commentText.replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p>`,
       created_at: csat.submitted_at,
-    });
+    }).select("id").single();
+    csatMsgId = csatMsg?.id ?? null;
   }
 
   // System note tying back to the CSAT + the original ticket.
@@ -245,16 +247,15 @@ export async function POST(
   // message for the orchestrator to chew on. No-comment tickets are
   // agent-initiated; the orchestrator has nothing to route.
   if (hasComment) {
-    const { inngest } = await import("@/lib/inngest/client");
-    await inngest.send({
-      name: "ticket/inbound-message",
-      data: {
-        workspace_id: workspaceId,
-        ticket_id: ticket.id,
-        message_body: commentText,
-        channel: srcTicket?.channel || "email",
-        is_new_ticket: true,
-      },
+    const { dispatchInboundMessage } = await import("@/lib/inngest/dispatch-inbound-message");
+    await dispatchInboundMessage({
+      admin,
+      workspaceId,
+      ticketId: ticket.id,
+      messageBody: commentText,
+      channel: srcTicket?.channel || "email",
+      isNewTicket: true,
+      dispatchMessageId: csatMsgId,
     });
   }
 
