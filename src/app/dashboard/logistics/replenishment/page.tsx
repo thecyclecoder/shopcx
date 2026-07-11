@@ -70,8 +70,56 @@ async function ReplenishmentContent() {
     return { label: "OK", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" };
   };
 
+  const c = data.crisis;
+
   return (
     <div className="space-y-8">
+      {/* Crisis-aware allocation forecast — the headline when a stockout crisis is active */}
+      {c && (
+        <section className="rounded-lg border border-red-200 bg-red-50/60 p-5 dark:border-red-900/40 dark:bg-red-950/20">
+          <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="inline-block rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">CRISIS</span>
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{c.name}</h2>
+            {c.restockDate && <span className="text-xs text-zinc-500 dark:text-zinc-400">restock {new Date(c.restockDate + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>}
+            <span className="text-xs text-zinc-400">· {c.enrolled.total.toLocaleString()} enrolled · {c.enrolled.swappedToSwap} on {c.swap.name} · {c.enrolled.autoReadd} auto-re-add · {c.enrolled.cancelled} lost</span>
+          </div>
+
+          {/* Flip-flop forecast */}
+          <div className="mb-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md border border-zinc-200 bg-white/70 p-3 dark:border-zinc-800 dark:bg-zinc-900/40">
+              <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{c.affected.name} <span className="text-zinc-400">(affected)</span></div>
+              <div className="mt-1.5 text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+                <div>Pre-crisis: <strong>{Math.round(c.flip.affectedPreCrisisMo).toLocaleString()}/mo</strong> → now {Math.round(c.flip.affectedDuringMo).toLocaleString()}/mo (OOS)</div>
+                <div className="text-emerald-700 dark:text-emerald-400">Post-restock projected: <strong>{Math.round(c.projection.affectedPostRestockMo).toLocaleString()}/mo</strong> ({Math.round(c.flip.affectedSubsMo).toLocaleString()} subs + acquisition)</div>
+              </div>
+            </div>
+            <div className="rounded-md border border-zinc-200 bg-white/70 p-3 dark:border-zinc-800 dark:bg-zinc-900/40">
+              <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{c.swap.name} <span className="text-zinc-400">(absorbing swap)</span></div>
+              <div className="mt-1.5 text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+                <div>Pre-crisis: {Math.round(c.flip.swapPreCrisisMo).toLocaleString()}/mo → now <strong>{Math.round(c.flip.swapDuringMo).toLocaleString()}/mo</strong> (spiked)</div>
+                <div>Flip-back to {c.affected.name}: <strong>−{Math.round(c.flip.swapFlipOutMo).toLocaleString()}/mo</strong> · true-sub floor {Math.round(c.projection.swapTrueSubsMo).toLocaleString()}/mo (preserve)</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Recommended allocation play */}
+          <div className="text-sm">
+            <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Recommended allocation play</div>
+            <ol className="list-decimal space-y-1.5 pl-5 text-zinc-700 dark:text-zinc-300 marker:text-zinc-400">
+              {c.recommendations.map((rec, i) => <li key={i}>{rec}</li>)}
+            </ol>
+            {c.warnings.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {c.warnings.map((wn, i) => (
+                  <p key={i} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/30 dark:text-amber-300">⚠ {wn}</p>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Flip-flop measured live from crisis enrollments + subscription cadence + storefront orders. Logistics sets the allocation policy; CS executes the customer-facing swaps.</p>
+        </section>
+      )}
+
       {/* Days of cover — the headline reorder signal, split by fulfillment channel */}
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Days of cover <span className="font-normal normal-case text-zinc-400">— burn vs on-hand by fulfillment channel, trailing {data.burnWindow.months}mo</span></h2>

@@ -4,6 +4,7 @@ import { qboFetch } from "@/lib/quickbooks";
 import { matchReceivedLines, openPoLines, rollUpLeadTimes, type QbTxn, type ItemLeadTime, type OpenPoLine } from "./lead-times";
 import { computeCover, type CoverRow } from "./cover";
 import { listSuppliers, listPoAnnotations, type Supplier } from "./suppliers";
+import { loadCrisisForecast, type CrisisForecast } from "./crisis-forecast";
 
 // Server-side loader for the Logistics Replenishment view. Reads live QuickBooks
 // PurchaseOrders + Bills (ShopCX has its own QBO connection — same realm we reconcile
@@ -33,6 +34,7 @@ export interface ReplenishmentData {
   cover: CoverByFinishedGood[];
   suppliers: Supplier[];
   etaByPo: Record<string, ResolvedEta>;
+  crisis: CrisisForecast | null;
   burnWindow: { since: string; until: string; months: number };
   poCount: number;
   billCount: number;
@@ -104,12 +106,13 @@ export async function loadReplenishment(workspaceId: string, since = "2024-01-01
   const until = new Date().toISOString().slice(0, 10);
   const sinceBurn = new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10);
 
-  const [pos, bills, coverRows, suppliers, annotations] = await Promise.all([
+  const [pos, bills, coverRows, suppliers, annotations, crisis] = await Promise.all([
     q("PurchaseOrder"),
     q("Bill"),
     computeCover(admin, workspaceId, [...bundleToFgQbId.keys()].map((b) => ({ bundleQbId: b })), sinceBurn, until, 3),
     listSuppliers(admin, workspaceId),
     listPoAnnotations(admin, workspaceId),
+    loadCrisisForecast(admin, workspaceId).catch(() => null),
   ]);
   const received = matchReceivedLines(pos, bills, itemFilter);
   const leadTimes = rollUpLeadTimes(received);
@@ -141,6 +144,7 @@ export async function loadReplenishment(workspaceId: string, since = "2024-01-01
       .filter((r) => r.finishedGoodQbId),
     suppliers,
     etaByPo,
+    crisis,
     burnWindow: { since: sinceBurn, until, months: 3 },
     poCount: pos.length,
     billCount: bills.length,
