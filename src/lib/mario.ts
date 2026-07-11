@@ -1313,20 +1313,19 @@ async function repairSpecBlockedBy(
   repair: MarioBlockedByRepair,
 ): Promise<boolean> {
   const { getSpec } = await import("@/lib/specs-table");
+  const { getSpec: getSpecFromRoadmap } = await import("@/lib/brain-roadmap");
   const { authorSpecRowStructured } = await import("@/lib/author-spec");
   // Read against the JOB'S spec_slug — never the verdict's — so a slug-mismatched verdict can't hit a
   // sibling spec even before the scope predicate rejects it.
   const cur = await getSpec(workspaceId, jobSpecSlug);
-  // Read the raw specs.body directly: `SpecRow` doesn't expose the markdown body, and the fifth-source
-  // predicate + derived-missing set both consume the current `**Blocked-by:**` line as-of NOW.
-  const { data: sBody, error: bErr } = await admin
-    .from("specs")
-    .select("body")
-    .eq("workspace_id", workspaceId)
-    .eq("slug", jobSpecSlug)
-    .maybeSingle();
-  if (bErr) throw new Error(`repair_blocked_by: read_body_failed: ${bErr.message}`);
-  const body = ((sBody as { body: string | null } | null)?.body) ?? "";
+  // public.specs has never carried a `body` column — the raw spec markdown is reconstructed from
+  // spec_phases by brain-roadmap.getSpec (`serializeSpecRowToMarkdown`), which is the SAME string
+  // parseSpec used to populate specs.blocked_by. The fifth-source predicate + derived-missing set both
+  // consume the current `**Blocked-by:**` line as-of NOW; sourcing from spec_phases keeps the read
+  // consistent with `readReviewFailedBlockerStalls` and stops the `column specs.body does not exist`
+  // crash that took out the mario-stall-cron evaluate-and-enqueue step.
+  const roadmapSpec = await getSpecFromRoadmap(jobSpecSlug, workspaceId);
+  const body = roadmapSpec?.raw ?? "";
 
   // Security gate — pure predicate: reject slug-mismatch, out-of-class spec, or add entries outside the
   // derived missing set. Runs BEFORE any getSpec/author-spec write side-effect below.
