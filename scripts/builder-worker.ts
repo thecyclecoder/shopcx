@@ -44,6 +44,10 @@ import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript
 // Each authored spec is committed to public.specs immediately, so a batch failure never rolls
 // back prior batches.
 import { chunkForAuthoring, PLANNER_AUTHOR_BATCH_SIZE } from "./planner-chunk-authoring";
+// vera-harness-error-is-not-a-code-regression Phase 1 — worker-side belt-and-suspenders reclassifier
+// so a spec-test check with a HARNESS/COMMAND signature (missing npm script, command-not-found,
+// ENOENT) can never survive as a `verdict='fail'` and spawn an unbuildable Bo fix phase.
+import { reclassifyHarnessFails } from "../src/lib/spec-test-harness-classifier";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -12081,7 +12085,7 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
   report: string;
 } {
   const rawChecks = Array.isArray(parsed?.checks) ? (parsed!.checks as unknown[]) : [];
-  const checks: SpecTestCheck[] = rawChecks.map((c) => {
+  const parsedChecks: SpecTestCheck[] = rawChecks.map((c) => {
     const o = (c || {}) as Record<string, unknown>;
     const v = String(o.verdict || "inconclusive");
     const verdict = ["pass", "fail", "needs_human", "inconclusive"].includes(v) ? v : "inconclusive";
@@ -12094,6 +12098,12 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
       screenshot: o.screenshot ? String(o.screenshot) : undefined,
     };
   });
+  // vera-harness-error-is-not-a-code-regression Phase 1 — a `fail` whose evidence carries a
+  // HARNESS/COMMAND signature (missing npm script, command-not-found, ENOENT, missing binary) never
+  // ran an assertion, so it is NOT a code regression. Downgrade it to `needs_human` before summary /
+  // verdict / fix-phase authoring see it, so a broken verification bullet can never wedge the
+  // pipeline via an unbuildable Bo fix phase (the 2026-07-11 cs-director-leash false-regression).
+  const { checks } = reclassifyHarnessFails(parsedChecks);
   const summary: SpecTestSummary = {
     auto_pass: checks.filter((c) => c.verdict === "pass").length,
     auto_fail: checks.filter((c) => c.verdict === "fail").length,
@@ -12258,6 +12268,7 @@ async function runSpecTestJob(job: Job) {
       `🚨 EXTERNAL SIDE-EFFECT FIREWALL (the core Phase-2 safety rule) — drive a flow ONLY if you can PROVE every side effect stays internal. A flow that would call an EXTERNAL API with real effect — Amplifier fulfillment, a Braintree charge/refund, an Appstle mutation, a Resend/Twilio send, a live Meta ad pause — is NOT run; it stays needs_human. Prove it by reading the handler: assert UP TO the external edge and flag the edge itself human (e.g. comp renewal: the fail-closed branch — comp sub + comp_role null → failed type='comp' txn + subscription.comp_renewal_failed event, no order, no advance — is fully internal → SANDBOX; the happy branch's Amplifier handoff is external → that sub-assertion stays needs_human). The toolkit only drives flows in INTERNAL_ONLY_FLOWS and refuses any non-is_test workspace; the is_test tenant also carries NO external credentials. ALWAYS also assert ZERO writes to non-test-workspace rows (the tool's \`isolation.zero_non_test_workspace_writes\`).`,
       `\`needs_human\` is now EXACTLY TWO cases: (a) VISUAL/AESTHETIC judgment (looks good / renders nicely / big enough — human taste is the only instrument; a RENDERED-FACT assertion like "the stamp/chip is present" is a BROWSER check, not this), and (b) an IRREVERSIBLE PROD SIDE-EFFECT with NO already-observable evidence AND NO local-harness/browser/sandbox equivalent (a real SMS/email/charge actually reaching an external carrier/processor, a UI flow that can only be verified by submitting a real customer/billing mutation, or a behavioral flow that CROSSES THE EXTERNAL FIREWALL — the side effect would hit Amplifier/Braintree/Appstle/Resend/Twilio/Meta with real effect). An internal-only behavioral flow on \`is_test\` fixtures is a SANDBOX check (auto), not this. Everything else attempts a non-destructive verification.`,
       `🚨 \`fail\` REQUIRES POSITIVE EVIDENCE OF BREAKAGE — you ran a non-destructive check (incl. a local harness) and OBSERVED the feature doing the wrong thing (a column it claims to select isn't there; a route 500s; a role check returns the wrong status; the harness returned the wrong state). "I couldn't verify this read-only" is NOT a fail. A fault-injection bullet is \`auto\` (pass/fail) whenever the logic is reachable as a local unit; only when it is NOT reachable locally (needs forcing a fault in a live prod runtime path, a mutation, or visual/UX judgment) is it \`needs_human\` (a human can verify it), NEVER \`fail\`. Genuinely undeterminable (missing fixture, ambiguous bullet) → \`inconclusive\`. When the code plainly satisfies a bullet but the runtime path needs a forced fault AND the logic isn't reachable locally, prefer \`needs_human\` with a note ("code present at file:line; not reachable as a local unit, needs forced fault to confirm") over \`fail\`. Only evidence-backed \`fail\`s become regressions / flip the verdict to \`issues\`; \`needs_human\`/\`inconclusive\` never do.`,
+      `🚨 HARNESS/COMMAND FAILURE IS NEVER A CODE \`fail\` (vera-harness-error-is-not-a-code-regression Phase 1) — when a verification bullet names a command whose stderr says \`npm error Missing script\`, \`command not found\`, \`No such file or directory\`/\`ENOENT\`, \`Cannot find module\`/\`Cannot find package\`, or the command exit-1s BEFORE any assertion ran, the command NEVER ran an assertion — the bullet is a broken verification, not a code regression. NEVER record \`verdict='fail'\` for such a check (a \`fail\` spawns a Bo fix phase, and Bo cannot build a phase that fixes a nonexistent shell command — the pipeline wedges; that is the exact 2026-07-11 cs-director-leash false-regression this rule exists to stop). FIRST attempt to map the intended command to the repo's REAL runnable script — e.g. \`npm test src/lib/foo.test.ts\` when \`package.json\` has no \`test\` script but has a matching \`npm run test:<name>\` (grep \`package.json\` \`"scripts"\` for a \`test:*\` entry whose value includes the target file / test name) — and re-run it; if the mapped script now RUNS an assertion, \`pass\`/\`fail\` on that (a real assertion FAIL is a real \`fail\`). If no runnable script maps → classify the check \`needs_human\` (a verification-authoring wart) with the harness stderr as evidence — NEVER \`fail\`. Only a command that RAN and had an assertion FAIL is a real code \`fail\`. (The worker's normalizer also re-classifies a slipped harness-\`fail\` to \`needs_human\` as belt-and-suspenders, but earn the correct verdict at emit time.)`,
       `TIE-BREAKER (replaces "when in doubt → needs_human"): when in doubt, attempt a read-only outcome probe first, then a non-destructive local harness, then (rendered-UI) a browser check, then (internal-only behavioral) a sandbox check; defer to \`needs_human\` ONLY if ALL are impossible OR the flow crosses the external firewall.`,
       `You have the box's QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, GET/read-only endpoint hits, a non-destructive local harness (\`_\`-prefixed scratch \`npx tsx\` script importing pure code from src/), the headless-browser check \`npx tsx scripts/spec-test-browser-check.ts\` (owner-authed, READ-ONLY render assertions + screenshot), and the behavioral sandbox \`npx tsx scripts/spec-test-sandbox.ts\` (drives INTERNAL-ONLY flows on is_test fixtures, asserts, proves isolation — bounded by the external firewall). NEVER mutate REAL prod data, NEVER mark the spec verified/archived, NEVER run a check that hits a real customer/dollar/external API (those are needs_human), NEVER submit a mutating form in the browser, NEVER point the sandbox at a non-is_test workspace.`,
       isPreMerge
