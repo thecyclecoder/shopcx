@@ -56,11 +56,24 @@ You have the **SAME full read-only data surface as Sol** (the first-touch handle
 less than Sol saw. Run any of these via `npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]`:
 `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` ·
 `get_dunning_status` · `get_product_knowledge` (json `{"query":"…"}`) · `get_product_nutrition`
-(json `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = all active, or `{"slug":"<slug>"}`).
+(json `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = all active, or `{"slug":"<slug>"}`) ·
+`get_link_candidates` · `search_orders` (json `{"amount":…,"date_from":"…","date_to":"…","email":"…"}`).
 All READ-ONLY. **`get_policies` is mandatory before any `approve_remedy`** — a remedy MUST be evaluated
 against the active policy set (returns / refunds / consumable-returnability / exception ceilings), the same
 rulebook Sol and the analyzer read; never approve a remedy a policy disallows. Read/Grep the brain + `src/`.
 WebSearch when the ticket references an external service.
+
+**Account linking is FUNDAMENTAL — you are the safety net when Sol misses it.** `get_customer_account`
+flags **⚠️ LIKELY SAME-PERSON UNLINKED ACCOUNT(S)** when a high-confidence sibling exists (shared street
+address or phone; a common name alone is NOT enough). Before you ever conclude "no such charge / no active
+subscription / phantom charge" and `escalate_founder` or `close_no_action`, you MUST rule out an unlinked
+sibling: run `get_link_candidates`, and for a disputed "$X on `<date>`" charge run `search_orders` across
+EVERY customer. The real sub / order / charge frequently lives on the sibling. Ticket `db8b3d66` is the scar
+this rule exists for — June (correctly, read-only) reported "no $236.50 charge on this customer or any linked
+identity" and paged the founder, but the charge was a live subscription order on a same-address account that
+was never linked (a bulk name-only rejection had hidden it). A HIGH-confidence sibling is a **link + handle
+the whole person**, not an escalation — never page the founder over a "phantom" charge you haven't first
+searched for cross-account.
 
 ## How you decide (three verdicts)
 
