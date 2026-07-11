@@ -649,6 +649,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     registeredAt: "2026-07-08T20:15:12.164Z",
   },
   {
+    id: "sync-fba-inventory",
+    kind: "cron",
+    owner: "platform",
+    label: "sync-fba-inventory",
+    description: "Auto-proposed monitored loop for the sync-fba-inventory cron (daily (0 9 * * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
+    expectedCadence: "daily (0 9 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-11T11:30:01.527Z",
+  },
+  {
     id: "sync-3pl-inventory",
     kind: "cron",
     owner: "platform",
