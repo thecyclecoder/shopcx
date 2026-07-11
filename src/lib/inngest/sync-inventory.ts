@@ -9,6 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { writeInventory, type InventoryRow } from "@/lib/inventory/write";
 
 interface VariantNode {
   id: string;
@@ -107,6 +108,11 @@ export const syncInventory = inngest.createFunction(
       await step.run(`sync-${ws.id.slice(0, 8)}`, async () => {
         const { shop, accessToken } = await getShopifyCredentials(ws.id);
         const products = await fetchInventory(shop, accessToken);
+        const today = new Date().toISOString().slice(0, 10);
+        // Canonical dual-write: every Shopify variant's live qty also lands in the
+        // single-source-of-truth inventory_levels (location='shopify'). The JSONB write
+        // below stays as a derived mirror until all readers migrate off it.
+        const canonicalRows: InventoryRow[] = [];
 
         for (const product of products) {
           const shopifyProductId = extractId(product.id);
@@ -174,6 +180,14 @@ export const syncInventory = inngest.createFunction(
             if (changed) totalUpdated++;
           }
 
+          // Canonical: one inventory_levels row per Shopify variant (keyed by variant id).
+          for (const v of variants) {
+            const vid = String(v.id);
+            const qty = inventoryMap.get(vid);
+            if (qty === undefined) continue;
+            canonicalRows.push({ external_ref: vid, sku: (v as Record<string, unknown>).sku as string ?? null, product_id: dbProduct.id, variant_id: vid, on_hand: qty });
+          }
+
           // Servings fan-out: write the product-level metafield down to
           // every variant in product_variants. Variant-level lets future
           // price-per-serving math live entirely on the variant row,
@@ -190,6 +204,9 @@ export const syncInventory = inngest.createFunction(
             }).eq("workspace_id", ws.id).eq("product_id", dbProduct.id);
           }
         }
+
+        // Persist this workspace's Shopify on-hand into the canonical model.
+        await writeInventory(admin, ws.id, "shopify", canonicalRows, today);
       });
     }
 

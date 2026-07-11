@@ -54,6 +54,8 @@ import { amazonSyncOrders, amazonSyncAsins, amazonDailySyncCron } from "@/lib/in
 import { monthlyRevenueSnapshot } from "@/lib/inngest/monthly-revenue-snapshot";
 import { investorMonthlyInvite } from "@/lib/inngest/investor-monthly-invite";
 import { qbSnapshotRefresh } from "@/lib/inngest/qb-snapshot-refresh";
+import { syncFbaInventory } from "@/lib/inngest/sync-fba-inventory";
+import { sync3plInventory } from "@/lib/inngest/sync-3pl-inventory";
 import { metaSyncSpend, metaDailySyncCron } from "@/lib/inngest/meta-sync";
 import { metaSyncPerformance, metaPerformanceDailyCron, metaAttributionRefresh, metaScorecardsRefresh, metaDecisionEngine, metaIterationRun, metaExecuteRecommendation } from "@/lib/inngest/meta-performance";
 import { storefrontExperimentsRefresh, storefrontExperimentsRefreshCron } from "@/lib/inngest/storefront-experiments";
@@ -211,6 +213,8 @@ export const registeredInngestFunctions = [
   amazonSyncOrders,
   amazonSyncAsins,
   amazonDailySyncCron,
+  syncFbaInventory,
+  sync3plInventory,
   monthlyRevenueSnapshot,
   investorMonthlyInvite,
   qbSnapshotRefresh,
