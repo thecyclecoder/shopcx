@@ -4,11 +4,25 @@
  * CLAIMS are true by construction (grounded in [[../product-intelligence]]); what a text-to-image model
  * can still get wrong is the RENDER — garbled/dropped headline text, a bare sticker price, a cartoon
  * "before/after", or a fabricated authenticity caption ("Candid photos from her home"). Those are all
- * VISUAL defects, so we check them with a vision pass (Opus) rather than trusting the prompt.
+ * VISUAL defects, so we check them with a vision pass rather than trusting the prompt.
  *
- * Returns a structured verdict; the agent regenerates on fail (up to a retry cap). See
+ * Two paths, same verdict shape:
+ *   - qaCreative (legacy) — direct Opus vision API call (needs ANTHROPIC_API_KEY). Kept as the
+ *     Phase 2 kill-switch fallback for DAHLIA_QC_MODE=direct.
+ *   - qaCreativeViaBoxSession (Phase 1 default) — spawns a top-level `claude -p` on Max via a
+ *     caller-supplied dispatcher; no ANTHROPIC_API_KEY required. The Node lane
+ *     ([[creative-agent]] runAdCreativeLoop, dispatched by scripts/builder-worker.ts
+ *     runAdCreativeJob) is the only mutator — it regenerates on `pass:false` up to the retry cap,
+ *     then inserts the passer into public.ad_campaigns (status='ready').
+ *
+ * Both fail CLOSED: any dispatch error / unparseable verdict / undecodable image resolves to
+ * `pass:false` so nothing unchecked reaches the bin. See
  * [[../../../docs/brain/reference/meta-scaling-methodology]] (price-on-static + fabrication rules).
  */
+import { randomUUID } from "crypto";
+import { writeFile, unlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import sharp from "sharp";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
@@ -120,4 +134,134 @@ export async function qaCreative(
     for (const [k, v] of Object.entries(checks)) if (!v) issues.push(`failed: ${k}`);
   }
   return { pass, issues, checks };
+}
+
+// ── box-session QC (dahlia-creative-qc-via-box-session Phase 1) ─────────────────────────────────
+// Same verdict shape as qaCreative, but the vision pass is a top-level `claude -p` on Max instead
+// of a direct Opus API call — so the lane never needs an ANTHROPIC_API_KEY and Dahlia's QC works
+// on the box for every product. The `dispatch` callback is injected by the caller
+// (scripts/builder-worker.ts runAdCreativeJob) — it spawns `claude -p` on Max, waits for the JSON
+// verdict, and returns raw text + an error flag. Keeping the spawn out of `src/` follows the
+// existing skill pattern (seed-product, spec-review, …): src/ ships the pure logic; scripts/
+// owns the process boundary.
+
+/** Injected by the caller: run one `claude -p` box session (kind='ad-creative-qc') on Max and
+ *  return its raw result text + an error flag. Implementations MUST unset ANTHROPIC_API_KEY in
+ *  the spawned env (max sandbox) and MUST be fail-closed — a spawn error / cap / timeout MUST
+ *  surface as `isError:true` so qaCreativeViaBoxSession converts it to `pass:false`. */
+export type QcSessionDispatcher = (prompt: string) => Promise<{ resultText: string; isError: boolean }>;
+
+const QA_BOX_SESSION_INSTRUCTION = `Use the creative-qc skill to visually QC ONE rendered ad against the exact copy strings it should contain. You are on Max (no ANTHROPIC_API_KEY). READ the image with the Read tool — Claude Code renders the JPEG visually to you — then judge each of the five render defects and emit ONLY the CreativeQAVerdict JSON (no prose, no code fences, no wrapper).`;
+
+function extractLastJsonObject(text: string): Record<string, unknown> | null {
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const o = JSON.parse(s);
+      return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const whole = tryParse(text.trim());
+  if (whole) return whole;
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (let i = fences.length - 1; i >= 0; i--) {
+    const fenced = tryParse(fences[i][1].trim());
+    if (fenced) return fenced;
+  }
+  const opens: number[] = [];
+  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) opens.push(i);
+  const closes: number[] = [];
+  for (let i = text.indexOf("}"); i >= 0; i = text.indexOf("}", i + 1)) closes.push(i);
+  for (let e = closes.length - 1; e >= 0; e--) {
+    for (const s of opens) {
+      if (s >= closes[e]) break;
+      const parsed = tryParse(text.slice(s, closes[e] + 1));
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+/**
+ * Visually QA a generated creative via a `claude -p` box session on Max. Same verdict contract as
+ * qaCreative (so no downstream consumer changes) but the vision pass runs on Max — no
+ * ANTHROPIC_API_KEY required. Fails CLOSED on every error path (dispatch error, undecodable
+ * image, unparseable verdict, missing checks) → `pass:false` so nothing unchecked reaches the bin.
+ *
+ * The image buffer is normalized (same 1568px JPEG as the direct path) and written to a temp file
+ * whose absolute path is handed to the skill in the prompt. The temp file is deleted after the
+ * session — success or failure. `dispatch` is injected by scripts/builder-worker.ts.
+ */
+export async function qaCreativeViaBoxSession(
+  gen: Pick<GeneratedCreative, "buffer" | "expectedCopy"> & { hasTransformation?: boolean },
+  dispatch: QcSessionDispatcher,
+): Promise<CreativeQAVerdict> {
+  const failClosed = (reason: string): CreativeQAVerdict => ({
+    pass: false,
+    issues: [reason],
+    checks: { headlineExact: false, textLegible: false, noBarePrice: false, noFabricatedPhotoCaption: false, transformationPhotorealistic: false },
+  });
+
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeForVision(gen.buffer);
+  } catch {
+    return failClosed("qa_image_undecodable");
+  }
+
+  const imagePath = join(tmpdir(), `creative-qc-${randomUUID()}.jpg`);
+  try {
+    await writeFile(imagePath, normalized);
+  } catch (err) {
+    return failClosed(`qa_tmpfile_error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  try {
+    const prompt = [
+      QA_BOX_SESSION_INSTRUCTION,
+      "",
+      `IMAGE: ${imagePath}`,
+      `HEADLINE: "${gen.expectedCopy.headline}"`,
+      gen.expectedCopy.offer ? `OFFER: "${gen.expectedCopy.offer}"` : "OFFER: none",
+      `TRUST BAR: "${gen.expectedCopy.trust}"`,
+      `HAS_TRANSFORMATION: ${gen.hasTransformation ? "yes" : "no"}`,
+      "",
+      `Return ONLY the CreativeQAVerdict JSON — { pass, issues, checks: { headlineExact, textLegible, noBarePrice, noFabricatedPhotoCaption, transformationPhotorealistic } }. Any check you cannot confidently judge is false (fail-closed).`,
+    ].join("\n");
+
+    let dispatchResult: { resultText: string; isError: boolean };
+    try {
+      dispatchResult = await dispatch(prompt);
+    } catch (err) {
+      return failClosed(`qa_session_dispatch_error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (dispatchResult.isError) return failClosed("qa_session_error");
+
+    const parsed = extractLastJsonObject(dispatchResult.resultText);
+    if (!parsed) return failClosed("qa_session_unparseable");
+
+    const rawChecks = (parsed.checks && typeof parsed.checks === "object" ? parsed.checks : parsed) as Record<string, unknown>;
+    const checks = {
+      headlineExact: rawChecks.headlineExact === true,
+      textLegible: rawChecks.textLegible === true,
+      noBarePrice: rawChecks.noBarePrice === true,
+      noFabricatedPhotoCaption: rawChecks.noFabricatedPhotoCaption === true,
+      transformationPhotorealistic: rawChecks.transformationPhotorealistic === true,
+    };
+    const allTrue = Object.values(checks).every(Boolean);
+    // A mismatched top-level `pass` (checks all true but pass:false, or vice versa) is treated as
+    // a defect — trust the checks, not the summary.
+    const pass = parsed.pass === true ? allTrue : false;
+    const rawIssues = Array.isArray(parsed.issues) ? (parsed.issues as unknown[]).filter((s): s is string => typeof s === "string") : [];
+    const issues = [...rawIssues];
+    if (!pass && issues.length === 0) {
+      for (const [k, v] of Object.entries(checks)) if (!v) issues.push(`failed: ${k}`);
+      if (parsed.pass === true && !allTrue) issues.push("pass_true_with_failing_checks");
+    }
+    return { pass, issues, checks };
+  } finally {
+    // Best-effort cleanup — a leaked /tmp jpeg is harmless but noise.
+    void unlink(imagePath).catch(() => {});
+  }
 }

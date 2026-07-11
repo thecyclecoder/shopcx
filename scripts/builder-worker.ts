@@ -387,6 +387,12 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
 const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+// dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
+// `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
+// a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
+// burns an attempt) instead of stalling the ad-creative lane on a stuck QC.
+const AD_CREATIVE_QC_TIMEOUT_MS = 6 * 60 * 1000;   // 6 min hard cap
+const AD_CREATIVE_QC_IDLE_MS = 90 * 1000;          // 90s no-output ⇒ hung ⇒ kill
 // media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
 // grading pass. Deterministic-Node; scores media-buyer director_activity rows
 // against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
@@ -19823,9 +19829,35 @@ async function runAdCreativeJob(job: Job) {
   } catch {
     /* not JSON — degrade to workspace-wide top-up */
   }
+  // dahlia-creative-qc-via-box-session Phase 1 — inject the QC dispatcher: each per-creative QC
+  // pass spawns a top-level `claude -p` on Max via runBoxLane (kind='ad-creative-qc', sandbox='max'
+  // so ANTHROPIC_API_KEY is stripped from the spawned env). Fail-closed contract: any spawn error /
+  // cap / timeout / non-JSON verdict surfaces as { isError:true } and qaCreativeViaBoxSession
+  // converts it to { pass:false } so nothing unchecked reaches the bin. Best-effort per QC — a
+  // wall on one account hops via runBoxLane's account failover; all accounts capped surfaces via
+  // the ALL_CAPPED_MARKER path and fails-closed to pass:false (regenerator burns an attempt).
+  let qcCounter = 0;
+  const qcDispatcher = async (prompt: string): Promise<{ resultText: string; isError: boolean }> => {
+    qcCounter++;
+    const qcTag = `${tag}[qc#${qcCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-qc",
+        sandbox: "max",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+      }));
+      if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
-    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count });
+    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count, qcDispatcher });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
       status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
