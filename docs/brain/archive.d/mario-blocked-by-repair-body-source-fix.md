@@ -1,0 +1,1 @@
+- **Mario stall-cron: read the raw spec body from brain-roadmap, not from the non-existent specs.body column** · verified 2026-07-11 · → [[../lifecycles/mario-pipeline-plumbing]]
