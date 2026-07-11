@@ -28,6 +28,33 @@ Address is corroborated **in memory** over the small (≤20) name/phone/email ca
 by id — no unindexed address scan. The grading itself is the pure, unit-pinned `gradeUnlinkedCandidates`
 (`account-matching.test.ts`). `hasHighConfidenceUnlinkedMatch` is the boolean Sol/June act on.
 
+## Phase 2 — the link becomes a first-class Direction proposal Sol / June writes
+
+Phase 2 of [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]] closes the loop
+from detection to action. When Sol / June sees a HIGH-confidence sibling, they NAME the link on their
+Direction as `plan.link_proposal` ([[ticket-directions]] `TicketDirectionLinkProposal`) and the box worker
+executes it BEFORE dispatching the remedy, so a `refund` playbook whose seed context points at an order
+on the sibling account targets the whole person (the linked group), not the empty half.
+
+- **Writer validation** ([[ticket-directions]] `validateLinkProposal`) rejects a malformed / cross-workspace /
+  same-customer / low-confidence-with-different-shape proposal at the write point (Learning #9 — the
+  confirming predicate at the action point). A `previously_rejected: true` proposal MUST carry
+  `reconfirmed: true` or the writer refuses with `link_proposal_needs_reconfirm` — a bulk name-only
+  rejection stays load-bearing until Sol/June re-affirms.
+- **Applier** ([[sol-link-proposal]] `applySolLinkProposal`) is idempotent, refuses `low` (surface-only,
+  never auto-linked) and `needs_reconfirm` silently, and on a re-confirm clears the stale
+  `customer_link_rejections` row so a future weak matcher doesn't reintroduce it. On apply it stamps an
+  internal `ticket_messages` note citing confidence + signals + the reason Sol/June wrote.
+- **Worker wire-in** (`scripts/builder-worker.ts` `runTicketHandleJob`) resolves + applies the proposal as
+  step (0) of the mechanism-dispatch try block — before the standalone-journey wedge, the chosen-path
+  journey/workflow launch, and the stateless send — so any downstream remedy already reads the linked
+  group.
+- **June endorses** (Phase 2 of [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]])
+  when she's the rung in charge by authoring `link_customer_accounts` as the FIRST action in her
+  `approve_remedy` batch (paired with the whole-person refund / cancel / repair actions that follow) —
+  the executor's all-or-surface semantics park the whole batch if the link would fail, so a customer
+  never sees a half-remedy.
+
 ## Where it surfaces
 
 - **Always-loaded customer context** (`sonnet-orchestrator-v2.ts` `get_customer_account`) prints

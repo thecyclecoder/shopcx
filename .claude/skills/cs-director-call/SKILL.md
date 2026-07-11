@@ -75,6 +75,17 @@ was never linked (a bulk name-only rejection had hidden it). A HIGH-confidence s
 the whole person**, not an escalation — never page the founder over a "phantom" charge you haven't first
 searched for cross-account.
 
+**Phase 2 — endorse the link as an ordered remedy action.** When Sol flagged a HIGH-confidence sibling
+but did not yet author the link (or the pair was `previously_rejected` and needs your re-affirm), you
+own the endorsement. Your `approve_remedy` `actions[]` batch is where the link + the whole-person remedy
+travel together: author the `link_customer_accounts` action FIRST (with `high_confidence_reconfirm: true`
++ a `reason` citing the stronger signal you saw — address or phone corroborating the name), then the
+customer-facing remedy targeting the sibling's sub/order (`partial_refund` on the disputed order,
+`change_next_date` / `cancel` on the sibling's live sub, etc.). The executor fires them in order and the
+customer message ships only after ALL actions verify — so a link that would fail (candidate not-in-shell
++ no reconfirm) parks the whole batch instead of leaving a broken half-remedy. Phase 2 spec:
+[[../../../docs/brain/specs/account-linking-address-aware-confidence-graded-and-cs-searchable.md]].
+
 ## How you decide (three verdicts)
 
 ### 1. `approve_remedy` — the right customer-facing fix is CLEAR + IN LEASH

@@ -1276,3 +1276,286 @@ test("classifySolBoxTurnAction: 'message_sent' iff send_ok — across every chos
     }
   }
 });
+
+// ── Phase 2 of account-linking-address-aware-confidence-graded-and-cs-searchable ──
+// writeDirection now validates a new first-class field: plan.link_proposal. The wedge is ticket
+// db8b3d66 — Sol / June names the HIGH-confidence unlinked sibling on the Direction so the
+// worker can execute the link BEFORE the remedy dispatches, and a previously_rejected pair is
+// NEVER silently auto-linked (requires reconfirmed=true). Every guard is pinned here.
+// The dedicated applier tests live in src/lib/sol-link-proposal.test.ts.
+
+interface FakeTicketRow { id: string; workspace_id: string; customer_id: string | null }
+interface FakeCustomerRow { id: string; workspace_id: string }
+
+function makeLinkAdmin(seed: {
+  tickets?: FakeTicketRow[];
+  customers?: FakeCustomerRow[];
+  playbooks?: FakePlaybook[];
+  journeys?: FakeJourney[];
+  nextDirectionId?: string;
+}) {
+  const state = {
+    tickets: (seed.tickets ?? []).map((t) => ({ ...t })),
+    customers: (seed.customers ?? []).map((c) => ({ ...c })),
+    playbooks: (seed.playbooks ?? []).map((p) => ({ ...p })),
+    journeys: (seed.journeys ?? []).map((j) => ({ ...j })),
+    directions: [] as FakeDirectionRow[],
+  };
+  const nextDirectionId = seed.nextDirectionId ?? "dir-link";
+
+  function makeRowsBuilder<T extends Record<string, unknown>>(rows: T[], cols: string[]) {
+    const filters: Record<string, unknown> = {};
+    const builder = {
+      select(_c: string) { return builder; },
+      eq(col: string, val: unknown) { filters[col] = val; return builder; },
+      maybeSingle() {
+        const match = rows.find((p) => {
+          for (const [k, v] of Object.entries(filters)) {
+            if ((p as Record<string, unknown>)[k] !== v) return false;
+          }
+          return true;
+        });
+        if (!match) return Promise.resolve({ data: null, error: null });
+        const projected: Record<string, unknown> = {};
+        for (const c of cols) projected[c] = (match as Record<string, unknown>)[c];
+        return Promise.resolve({ data: projected, error: null });
+      },
+    };
+    return builder;
+  }
+
+  function makeDirectionInsertBuilder() {
+    let payload: Record<string, unknown> = {};
+    const builder = {
+      insert(p: Record<string, unknown>) { payload = p; return builder; },
+      select(_c: string) { return builder; },
+      single() {
+        const row: FakeDirectionRow = {
+          id: nextDirectionId,
+          workspace_id: String(payload.workspace_id),
+          ticket_id: String(payload.ticket_id),
+          intent: String(payload.intent),
+          context_summary: String(payload.context_summary),
+          chosen_path: String(payload.chosen_path),
+          plan: (payload.plan as Record<string, unknown>) ?? {},
+          guardrails: (payload.guardrails as Record<string, unknown>) ?? {},
+          authored_by: String(payload.authored_by),
+          authored_at: "2026-07-11T00:00:00Z",
+          superseded_at: null,
+          resession_count: 0,
+        };
+        state.directions.push(row);
+        return Promise.resolve({ data: row, error: null });
+      },
+    };
+    return builder;
+  }
+
+  const admin = {
+    from(table: string) {
+      if (table === "tickets") return makeRowsBuilder(state.tickets as unknown as Array<Record<string, unknown>>, ["customer_id"]);
+      if (table === "customers") return makeRowsBuilder(state.customers as unknown as Array<Record<string, unknown>>, ["id"]);
+      if (table === "playbooks") return makeRowsBuilder(state.playbooks as unknown as Array<Record<string, unknown>>, ["id"]);
+      if (table === "journey_definitions") return makeRowsBuilder(state.journeys as unknown as Array<Record<string, unknown>>, ["id"]);
+      if (table === "ticket_directions") return makeDirectionInsertBuilder();
+      throw new Error(`unexpected table: ${table}`);
+    },
+  };
+  return { admin: admin as unknown as import("@supabase/supabase-js").SupabaseClient, state };
+}
+
+const OWN = "cust-own";
+const SIB = "cust-sib";
+
+test("plan.link_proposal + missing candidate_customer_id → link_proposal_candidate_missing", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: WS }],
+  });
+  await assert.rejects(
+    () => writeDirection(admin, {
+      workspace_id: WS,
+      ticket_id: TID,
+      intent: "refund",
+      context_summary: "sibling account carries the disputed order",
+      chosen_path: "stateless",
+      plan: { action: "send_stateless_reply", link_proposal: { confidence: "high" } as never },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "link_proposal_candidate_missing");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.link_proposal + previously_rejected without reconfirmed → link_proposal_needs_reconfirm (the NEVER-silent-auto-link guard)", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: WS }],
+  });
+  await assert.rejects(
+    () => writeDirection(admin, {
+      workspace_id: WS,
+      ticket_id: TID,
+      intent: "refund",
+      context_summary: "sibling already rejected once — but the address now corroborates",
+      chosen_path: "stateless",
+      plan: {
+        action: "send_stateless_reply",
+        link_proposal: {
+          candidate_customer_id: SIB,
+          confidence: "high",
+          previously_rejected: true,
+        },
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "link_proposal_needs_reconfirm");
+      assert.equal(err.slug, SIB);
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0, "the row must NEVER land — silent auto-link is forbidden");
+});
+
+test("plan.link_proposal + previously_rejected + reconfirmed=true → row lands (Sol/June explicitly re-affirmed the pair)", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: WS }],
+  });
+  const row = await writeDirection(admin, {
+    workspace_id: WS,
+    ticket_id: TID,
+    intent: "refund",
+    context_summary: "same address; earlier bulk name-only rejection was made on weaker signals",
+    chosen_path: "stateless",
+    plan: {
+      action: "send_stateless_reply",
+      link_proposal: {
+        candidate_customer_id: SIB,
+        confidence: "high",
+        previously_rejected: true,
+        reconfirmed: true,
+        signals: ["name", "address"],
+        reason: "same street address + disputed $236.50 order on sibling",
+      },
+    },
+  });
+  assert.equal(row.chosen_path, "stateless");
+  const savedPlan = row.plan as Record<string, unknown>;
+  const savedProposal = savedPlan.link_proposal as Record<string, unknown>;
+  assert.equal(savedProposal.candidate_customer_id, SIB);
+  assert.equal(savedProposal.reconfirmed, true);
+  assert.equal(state.directions.length, 1);
+});
+
+test("plan.link_proposal + confidence !== 'high'|'low' → link_proposal_confidence_invalid", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: WS }],
+  });
+  await assert.rejects(
+    () => writeDirection(admin, {
+      workspace_id: WS,
+      ticket_id: TID,
+      intent: "refund",
+      context_summary: "…",
+      chosen_path: "stateless",
+      plan: {
+        action: "send_stateless_reply",
+        link_proposal: { candidate_customer_id: SIB, confidence: "medium" as never },
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "link_proposal_confidence_invalid");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.link_proposal + candidate is the ticket's own customer → link_proposal_same_customer", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }],
+  });
+  await assert.rejects(
+    () => writeDirection(admin, {
+      workspace_id: WS,
+      ticket_id: TID,
+      intent: "refund",
+      context_summary: "…",
+      chosen_path: "stateless",
+      plan: {
+        action: "send_stateless_reply",
+        link_proposal: { candidate_customer_id: OWN, confidence: "high" },
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "link_proposal_same_customer");
+      assert.equal(err.slug, OWN);
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.link_proposal + candidate lives in a DIFFERENT workspace → link_proposal_candidate_unknown (cross-workspace guard)", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    // SIB exists but in a different workspace — must not authorize the write.
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: "other-ws" }],
+  });
+  await assert.rejects(
+    () => writeDirection(admin, {
+      workspace_id: WS,
+      ticket_id: TID,
+      intent: "refund",
+      context_summary: "…",
+      chosen_path: "stateless",
+      plan: {
+        action: "send_stateless_reply",
+        link_proposal: { candidate_customer_id: SIB, confidence: "high" },
+      },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof TicketDirectionPlanError);
+      assert.equal(err.code, "link_proposal_candidate_unknown");
+      return true;
+    },
+  );
+  assert.equal(state.directions.length, 0);
+});
+
+test("plan.link_proposal + HIGH + no prior rejection + valid candidate → row lands with the proposal intact", async () => {
+  const { admin, state } = makeLinkAdmin({
+    tickets: [{ id: TID, workspace_id: WS, customer_id: OWN }],
+    customers: [{ id: OWN, workspace_id: WS }, { id: SIB, workspace_id: WS }],
+  });
+  const row = await writeDirection(admin, {
+    workspace_id: WS,
+    ticket_id: TID,
+    intent: "refund",
+    context_summary: "sibling account carries the disputed order",
+    chosen_path: "stateless",
+    plan: {
+      action: "send_stateless_reply",
+      link_proposal: {
+        candidate_customer_id: SIB,
+        confidence: "high",
+        signals: ["name", "address"],
+        reason: "same address, same last name",
+      },
+    },
+  });
+  const savedPlan = row.plan as Record<string, unknown>;
+  const savedProposal = savedPlan.link_proposal as Record<string, unknown>;
+  assert.equal(savedProposal.candidate_customer_id, SIB);
+  assert.equal(savedProposal.confidence, "high");
+  assert.equal(state.directions.length, 1);
+});
