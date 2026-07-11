@@ -45,6 +45,12 @@ const READ_TOOLS = new Set([
   // superseded_by IS NULL). Optional json_input `{"slug":"<slug>"}` narrows to
   // one policy; the argless form lists every active policy for the workspace.
   "get_policies",
+  // Account linking is FUNDAMENTAL to ticket handling. get_link_candidates surfaces graded unlinked
+  // siblings (address/phone-corroborated = high) so Sol/June catch a same-person second account before
+  // concluding "no such account/charge"; search_orders reconciles a disputed "$X on <date>" charge
+  // across EVERY customer (it may live on an unlinked sibling). Both read-only. Ticket db8b3d66.
+  "get_link_candidates",
+  "search_orders",
 ]);
 
 async function main() {

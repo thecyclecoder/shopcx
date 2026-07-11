@@ -1404,11 +1404,25 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     }
   }
 
-  // Unlinked potential matches
+  // Unlinked potential matches — graded (address/phone-corroborated = high). Account linking is
+  // FUNDAMENTAL to ticket handling: a HIGH-confidence unlinked sibling means this customer's real
+  // subscription / order / charge may live on the OTHER account. Sol/June MUST check it before
+  // concluding "no such account / no active subscription / no such charge" (ticket db8b3d66:
+  // Elizabeth's active sub + disputed $236.50 order sat on an unlinked same-address sibling).
   const { findUnlinkedMatches } = await import("@/lib/account-matching");
   const unlinked = await findUnlinkedMatches(wsId, custId, admin);
-  if (unlinked.length) {
-    parts.push(`\nPOTENTIAL UNLINKED ACCOUNTS: ${unlinked.map(m => m.email).join(", ")}`);
+  const high = unlinked.filter((m) => m.confidence === "high");
+  const low = unlinked.filter((m) => m.confidence === "low");
+  if (high.length) {
+    parts.push(
+      `\n⚠️ LIKELY SAME-PERSON UNLINKED ACCOUNT(S) — check before answering "no such account/charge", then PROPOSE LINKING: ` +
+        high
+          .map((m) => `${m.email} [${m.signals.join("+")}${m.previously_rejected ? "; previously dismissed — re-confirm" : ""}]`)
+          .join(", "),
+    );
+  }
+  if (low.length) {
+    parts.push(`\nPOSSIBLE (low-confidence, name-only) unlinked accounts: ${low.map((m) => m.email).join(", ")}`);
   }
 
   return parts.join("\n");

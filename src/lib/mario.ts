@@ -1221,6 +1221,51 @@ async function authorMarioFixSpec(
   );
 }
 
+/** Pure security predicate for `blocked_by_repair` — recompute the fifth-source class as-of NOW and reject
+ *  any verdict that either (a) names a spec_slug different from the Mario job row's spec_slug (the LLM
+ *  can't retarget the repair), (b) points at a spec whose current state no longer fits the missing-blocker
+ *  class per [[shouldSurfaceMissingBlocker]] (folded/deferred, still within grace, a real phase lost its
+ *  verification, the body's `**Blocked-by:**` line was cleared, or every named prerequisite is already on
+ *  the row), or (c) requests any add_blocked_by entry that isn't in the derived missing set (current body
+ *  named prerequisites MINUS current `specs.blocked_by`). Split out of `repairSpecBlockedBy` so the exact
+ *  security contract is unit-testable without a Supabase stub. scope-mario-blocked-by-repair-target Phase 1. */
+export function checkRepairBlockedByScope(input: {
+  jobSpecSlug: string;
+  repair: MarioBlockedByRepair;
+  spec: {
+    status: string | null;
+    updated_at: string | null;
+    body: string;
+    blocked_by: string[];
+    phases: Array<{ kind: string; verification: string | null }>;
+  } | null;
+  graceMs: number;
+  now: number;
+}): { ok: true; missingSet: string[] } | { ok: false; reason: string } {
+  if (input.repair.spec_slug !== input.jobSpecSlug) {
+    return { ok: false, reason: `spec_slug_mismatch: job=${input.jobSpecSlug} verdict=${input.repair.spec_slug}` };
+  }
+  if (!input.spec) return { ok: false, reason: `spec_not_found: ${input.jobSpecSlug}` };
+  const realPhases = input.spec.phases.filter((p) => p.kind !== "fix").map((p) => ({ verification: p.verification }));
+  const ageMs = input.spec.updated_at ? input.now - Date.parse(input.spec.updated_at) : 0;
+  const inClass = shouldSurfaceMissingBlocker({
+    status: input.spec.status,
+    ageMs,
+    graceMs: input.graceMs,
+    realPhases,
+    body: input.spec.body,
+    blocked_by: input.spec.blocked_by,
+  });
+  if (!inClass) return { ok: false, reason: "not_missing_blocker_class" };
+  const namedInBody = extractBlockedBySlugsFromBody(input.spec.body);
+  const currentBlockedBy = new Set(input.spec.blocked_by);
+  const missing = namedInBody.filter((s) => !currentBlockedBy.has(s));
+  const missingSet = new Set(missing);
+  const outOfSet = input.repair.add_blocked_by.filter((s) => !missingSet.has(s));
+  if (outOfSet.length > 0) return { ok: false, reason: `add_not_in_missing_set: ${outOfSet.join(",")}` };
+  return { ok: true, missingSet: missing };
+}
+
 /** Pure decision predicate for `blocked_by_repair` — compute the merged `blocked_by` (UNION of existing +
  *  add) or reject the verdict. ADDITIVE-ONLY: an empty `add_blocked_by` is rejected (Phase-2 verification
  *  bullet 2); a would-be REMOVAL is rejected — the applier never accepts a payload that omits an existing
@@ -1255,12 +1300,53 @@ export function mergeBlockedByForRepair(input: {
  *  the verification repair uses — a content change re-opens the spec to Vale (`markSpecCardBackToReview`
  *  clears `vale_pass` + `vale_review_passed_at`; author-spec.ts). ADDITIVE-ONLY: an empty add-list, or a
  *  payload that would DROP an existing blocker, is rejected at `mergeBlockedByForRepair` and the applier
- *  throws — the caller records the throw on the mario_fired row. */
-async function repairSpecBlockedBy(admin: Admin, workspaceId: string, repair: MarioBlockedByRepair): Promise<boolean> {
+ *  throws — the caller records the throw on the mario_fired row. `jobSpecSlug` is the Mario job row's
+ *  spec_slug (the stall detector's surface target); [[checkRepairBlockedByScope]] rejects any verdict
+ *  whose `spec_slug` differs OR whose `add_blocked_by` names a slug outside the derived missing set
+ *  (current body `**Blocked-by:**` prerequisites MINUS current `specs.blocked_by`) — the deterministic
+ *  service-role worker only applies the exact missing-blocker repair the surfacer surfaced regardless of
+ *  what the LLM verdict or the spec body says (scope-mario-blocked-by-repair-target Phase 1). */
+async function repairSpecBlockedBy(
+  admin: Admin,
+  workspaceId: string,
+  jobSpecSlug: string,
+  repair: MarioBlockedByRepair,
+): Promise<boolean> {
   const { getSpec } = await import("@/lib/specs-table");
   const { authorSpecRowStructured } = await import("@/lib/author-spec");
-  const cur = await getSpec(workspaceId, repair.spec_slug);
-  if (!cur) throw new Error(`repair_blocked_by: spec ${repair.spec_slug} not found`);
+  // Read against the JOB'S spec_slug — never the verdict's — so a slug-mismatched verdict can't hit a
+  // sibling spec even before the scope predicate rejects it.
+  const cur = await getSpec(workspaceId, jobSpecSlug);
+  // Read the raw specs.body directly: `SpecRow` doesn't expose the markdown body, and the fifth-source
+  // predicate + derived-missing set both consume the current `**Blocked-by:**` line as-of NOW.
+  const { data: sBody, error: bErr } = await admin
+    .from("specs")
+    .select("body")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", jobSpecSlug)
+    .maybeSingle();
+  if (bErr) throw new Error(`repair_blocked_by: read_body_failed: ${bErr.message}`);
+  const body = ((sBody as { body: string | null } | null)?.body) ?? "";
+
+  // Security gate — pure predicate: reject slug-mismatch, out-of-class spec, or add entries outside the
+  // derived missing set. Runs BEFORE any getSpec/author-spec write side-effect below.
+  const scope = checkRepairBlockedByScope({
+    jobSpecSlug,
+    repair,
+    spec: cur
+      ? {
+          status: cur.status,
+          updated_at: cur.updated_at,
+          body,
+          blocked_by: cur.blocked_by ?? [],
+          phases: (cur.phases ?? []).map((p) => ({ kind: p.kind, verification: p.verification })),
+        }
+      : null,
+    graceMs: MARIO_REVIEW_VERIFICATION_GRACE_MS,
+    now: Date.now(),
+  });
+  if (!scope.ok) throw new Error(`repair_blocked_by: ${scope.reason}`);
+  if (!cur) throw new Error(`repair_blocked_by: spec ${jobSpecSlug} not found`);
   const decision = mergeBlockedByForRepair({ existing: cur.blocked_by ?? [], add: repair.add_blocked_by });
   if (!decision.ok) throw new Error(`repair_blocked_by: ${decision.reason}`);
 
@@ -1291,9 +1377,12 @@ async function repairSpecBlockedBy(admin: Admin, workspaceId: string, repair: Ma
   const parentRef = hasTypedMandate ? (cur.parent_ref as string) : `${cur.owner}#infra-devops-reliability`;
   const parentProse = cur.parent && cur.parent.includes("mandate") ? cur.parent : `[[../functions/${cur.owner}]] — "Infra & DevOps / reliability" mandate: blocked_by repair.`;
 
+  // Author against the JOB'S spec_slug — the scope predicate already asserted `repair.spec_slug === jobSpecSlug`
+  // so this is defensive belt-and-suspenders: a future refactor that shortcuts the guard still can't reach a
+  // sibling spec through the author-spec write.
   return await authorSpecRowStructured(
     workspaceId,
-    repair.spec_slug,
+    jobSpecSlug,
     {
       title: cur.title,
       summary: cur.summary,
@@ -1582,7 +1671,10 @@ export async function applyBoxMario(
         }
       } else {
         try {
-          blockedByRepaired = await repairSpecBlockedBy(admin, row.workspace_id, verdict.blocked_by_repair);
+          // Pass the Mario job row's spec_slug (the stall detector's surface target) — the repair path
+          // scopes the write to it and rejects any verdict whose `spec_slug` differs
+          // (scope-mario-blocked-by-repair-target Phase 1).
+          blockedByRepaired = await repairSpecBlockedBy(admin, row.workspace_id, row.spec_slug, verdict.blocked_by_repair);
         } catch (e) {
           blockedByRepairError = e instanceof Error ? e.message : String(e);
           console.warn(`[mario] blocked_by_repair FAILED (${verdict.blocked_by_repair.spec_slug}): ${blockedByRepairError}`);
