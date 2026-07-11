@@ -1,0 +1,1 @@
+- **Register monitored loop: sync-3pl-inventory** · verified 2026-07-11 · → [[../libraries/control-tower]]
