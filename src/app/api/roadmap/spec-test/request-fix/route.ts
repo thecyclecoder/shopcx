@@ -28,6 +28,10 @@ import { getLatestSpecTestRuns, checkKey } from "@/lib/spec-test-runs";
 import { getSpec } from "@/lib/specs-table";
 import { authorSpecRowStructured, MissingVerificationError } from "@/lib/author-spec";
 import { markSpecCardForReview } from "@/lib/spec-card-state";
+// vera-harness-error-is-not-a-code-regression Phase 2 — belt-and-suspenders guard: even if a legacy
+// `spec_test_runs` row (or a slipped path) carries a `fail` whose evidence looks like a HARNESS /
+// COMMAND failure, this handler must NEVER author an unbuildable Bo fix phase for it.
+import { isHarnessCommandFailure } from "@/lib/spec-test-harness-classifier";
 
 const isSlug = (s: unknown): s is string => typeof s === "string" && /^[a-z0-9-]+$/i.test(s);
 
@@ -68,14 +72,37 @@ export async function POST(request: Request) {
   if (!isSlug(body.slug)) return NextResponse.json({ error: "slug required" }, { status: 400 });
   const originSlug = body.slug;
 
-  // 1. The trigger gate — only a spec whose latest spec-test is `issues` with ≥1 failing check qualifies.
-  //    Mirrors the legacy `propose_fix` action's precondition.
+  // 1. The trigger gate — only a spec whose latest spec-test is `issues` with ≥1 GENUINE-CODE failing
+  //    check qualifies. Mirrors the legacy `propose_fix` action's precondition.
+  //
+  //    vera-harness-error-is-not-a-code-regression Phase 2 — filter out HARNESS/COMMAND-signature
+  //    fails (missing npm script, command-not-found, ENOENT, missing binary). A harness fail never
+  //    ran an assertion, so it isn't a code regression; authoring a fix phase for it produces an
+  //    unbuildable Bo phase and wedges the pipeline (the 2026-07-11 cs-director-leash-categories
+  //    false-regression). Phase 1's normalizer already downgrades these to `needs_human` before the
+  //    row lands in `spec_test_runs`, but this filter is the belt-and-suspenders on THIS gate — a
+  //    slipped or legacy harness `fail` still surfaces to the owner as a verification-authoring
+  //    wart, NEVER as a Bo fix phase.
   const runs = await getLatestSpecTestRuns(workspaceId);
   const run = runs[originSlug];
-  const failing = (run?.checks ?? []).filter((c) => c.verdict === "fail");
-  if (!run || run.agent_verdict !== "issues" || failing.length === 0) {
+  const allFails = (run?.checks ?? []).filter((c) => c.verdict === "fail");
+  const harnessFails = allFails.filter((c) => isHarnessCommandFailure(c.evidence));
+  const failing = allFails.filter((c) => !isHarnessCommandFailure(c.evidence));
+  if (!run || run.agent_verdict !== "issues" || allFails.length === 0) {
     return NextResponse.json(
       { error: "no regression to fix — the latest spec-test has no failing checks" },
+      { status: 400 },
+    );
+  }
+  if (failing.length === 0) {
+    // Every failing check is a harness/command wart — the correct action is to fix the verification
+    // bullets on the origin spec, NOT to spawn a Bo fix phase Bo can't build.
+    return NextResponse.json(
+      {
+        error:
+          "no genuine code regression to fix — every failing check is a harness/command failure (missing script / command-not-found). Fix the verification bullets on the origin spec instead of authoring a Bo fix phase.",
+        harnessFails: harnessFails.map((c) => ({ text: c.text, evidence: c.evidence ?? null })),
+      },
       { status: 400 },
     );
   }
