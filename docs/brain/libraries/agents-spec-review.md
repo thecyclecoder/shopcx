@@ -1,6 +1,8 @@
 # libraries/agents-spec-review
 
-The **spec-review** library — the typed verdict-applier + enqueue helper behind the box-hosted spec-review agent ([[../specs/spec-review-agent]]). **Vale** reviews every spec that lands in the `in_review` column (the build-pipeline hard-stop ahead of `planned`) against the authoring CHECKLIST and routes each one with a quality verdict; this module is the deterministic Node side that mutates state (the agent is read-only — see `runSpecReviewJob` in `scripts/builder-worker.ts`).
+**Status: RETIRED** — [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]] Phase 1–3.
+
+The **spec-review** library — the typed verdict-applier + enqueue helper behind the NOW-RETIRED box-hosted spec-review agent (Vale). **RETIRED:** spec-review is no longer an LLM agent. The deterministic [[spec-review-gate]] replaced Vale at the authoring chokepoint ([[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]]); a malformed spec is rejected instantly at author-time with the exact named defect, and a well-formed spec passes by construction. The legacy `agents-spec-review.ts` module is a now-inert no-op (every exported function returns the empty shape). Ada's disposition lane ([[agents-spec-dispose]]) no longer consumes Vale-pass signals; specs skip `in_review` entirely and derive `planned`/`in_progress` via the phase rollup. The documentation below is HISTORICAL — it describes the retired Vale agent, kept for operational reference only. Use [[spec-review-gate]] for the active gate.
 
 **File:** `src/lib/agents/spec-review.ts`
 

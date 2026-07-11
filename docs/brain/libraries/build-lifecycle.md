@@ -42,8 +42,7 @@ shipped) shows that hop; this 5-node detail folds it into the Build/SpecTest/Sec
 
 The 5 stages, in order — a spec walks them left to right:
 
-1. **`spec-review`** — Vale's CHECKLIST gate. Active while `vale_pass` is null on an `in_review` spec; done
-   when Vale passes (or the spec has moved past `in_review` at all); needs-attention on a needs_fix verdict.
+1. **`spec-review`** — **RETIRED** ([[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]]) · the deterministic [[../libraries/spec-review-gate]] replaces Vale at authoring time. The legacy Vale LLM stage is no longer used — a malformed spec is rejected instantly at author-time (never reaches `public.specs`), and a well-formed spec passes by construction (no `in_review` waiting-room). The stage now ALWAYS reads as `done` (specs skip `in_review` entirely and derive `planned`/`in_progress` via the phase rollup). Legacy signal for historical reference: `vale_pass` on an `in_review` spec; this status is no longer emitted on new specs.
 2. **`build`** — Build agent accumulating phases on the spec branch. Done once the spec is **built on its
    branch** (`builtOnBranch`): a multi-phase spec where every phase carries a `build_sha` or is terminal
    (`shipped`/`rejected` — the `isSpecAccumulationComplete` condition), a one-shot spec whose build job
@@ -116,9 +115,7 @@ The 5 stages, in order — a spec walks them left to right:
 - **Pure helper — no DB calls.** Every signal comes from `ctx`. Callers are responsible for loading
   `specTestVerdict` / `securityLive` / etc. from their respective DB sources. Phase 2 will add a small
   context-builder that wraps the per-page board loader; this module stays pure.
-- **`valePass` is only consulted when `status === "in_review"`.** A spec past `in_review` has Vale cleared
-  by definition (the build pipeline refuses an in_review spec), so a stale `valePass: false` on a planned/
-  shipped spec never reads as needs-attention.
+- **`valePass` is RETIRED** ([[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]]) — the deterministic authoring-time gate replaced Vale. The `in_review` status is no longer emitted on new specs, and `valePass` is no longer consulted. Legacy specs authored before the gate may carry a stale `valePass: false` on a planned/shipped spec (pre-retirement residue); the spec-review stage now always reads as `done`. The spec-review stage input `valePass` is deprecated; callers should not populate it for new specs.
 - **Per-stage status must agree with the fold gate.** `getAutoFoldEligibleSlugs` and the Security node both
   read `securityCompletedClean` (the same `getSecurityStateBySlug` source) so the Security node and the
   fold gate can never disagree.
