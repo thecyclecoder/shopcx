@@ -62,7 +62,7 @@ export async function getProduct(workspace_id: string, product_id: string) {
   if (!product) throw new Error("product_not_found");
   const { data: variants } = await a
     .from("product_variants")
-    .select("title, option1, option2, available, inventory_quantity, position")
+    .select("title, option1, option2, available, position")
     .eq("workspace_id", workspace_id)
     .eq("product_id", product_id)
     .order("position");
