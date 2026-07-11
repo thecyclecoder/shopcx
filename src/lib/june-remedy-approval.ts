@@ -295,7 +295,7 @@ async function resolveOwnerUserId(admin: Admin, workspaceId: string): Promise<st
 
 export interface RaiseJuneRemedyResult {
   raised: boolean;
-  via: "sms_cockpit" | "escalated_no_cockpit";
+  via: "sms_cockpit" | "escalated_no_cockpit" | "escalated_recommendation_only";
   approvalId?: string;
 }
 
@@ -536,6 +536,25 @@ export async function raiseFounderApproval(
       .eq("workspace_id", input.workspaceId);
   } catch (e) {
     console.warn("[june-remedy-approval] founder-escalation park-ticket failed:", e instanceof Error ? e.message : e);
+  }
+
+  // Executable-remedy guard (founder-approval-executable-guard). A `recommended_remedy` is usually a
+  // `{kind, summary}` SUGGESTION, not an executable `{action_type, payload}` action. Opening a
+  // one-tap `june_remedy` auto-execute card for a non-executable remedy means the
+  // `executeApprovedJuneRemedies` sweep hits `planRemedyExecution` → `remedy_missing_action_type` and
+  // posts "the parked remedy was malformed — Needs a human" the INSTANT the founder taps Approve
+  // (ticket db8b3d66). Don't offer a one-tap approval for something nothing can fire: keep the ticket
+  // escalated-to-owner (already parked above) + the runner's CEO dashboard card, and note the
+  // recommendation for a manual ruling. Uses the SAME `planRemedyExecution` the sweep would, so the
+  // guard matches the executor exactly — it skips iff Approve would have malformed.
+  const { planRemedyExecution } = await import("@/lib/cs-director");
+  if (!planRemedyExecution(input.remedy).ok) {
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] June escalated to the founder with a RECOMMENDATION (not an auto-executable action) — left escalated to owner for a manual ruling; no one-tap approval card (nothing to auto-fire). ${preview.split("\n")[0]}`,
+    );
+    return { raised: true, via: "escalated_recommendation_only" };
   }
 
   if (!session) {
