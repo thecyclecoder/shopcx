@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { validateTwilioSignature } from "@/lib/twilio";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
+import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -126,7 +127,7 @@ export async function POST(request: Request) {
     // Reopen if closed/pending
     const { data: ticket } = await admin
       .from("tickets")
-      .select("status, ai_handled, assigned_to")
+      .select("status, ai_handled_at, assigned_to, ai_disabled, do_not_reply")
       .eq("id", ticketId)
       .single();
 
@@ -151,11 +152,10 @@ export async function POST(request: Request) {
       message: { body: messageBody, direction: "inbound", author_type: "customer" },
     });
 
-    // Multi-turn AI: if ticket was AI-handled or unassigned, let AI continue
+    // Multi-turn AI dispatch — Phase 1 of durable-inbound-dispatch-no-silently-lost-ticket-event.
+    // Decide off the reliable dispatch-state fields, not the stale `ai_handled` boolean. See
+    // [[../../../lib/inbound-dispatch-gate]].
     if (ticketData) {
-      const isAutoHandled = ticketData.ai_handled;
-      const isUnassigned = !ticketData.assigned_to;
-
       const { data: aiConfig } = await admin
         .from("ai_channel_config")
         .select("enabled")
@@ -163,7 +163,7 @@ export async function POST(request: Request) {
         .eq("channel", "sms")
         .single();
 
-      if (aiConfig?.enabled && (isAutoHandled || isUnassigned)) {
+      if (aiConfig?.enabled && shouldDispatchInboundMessage(ticketData)) {
         await inngest.send({
           name: "ticket/inbound-message",
           data: {

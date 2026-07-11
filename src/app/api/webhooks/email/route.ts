@@ -8,6 +8,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
+import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
 
 // Positive close detection moved to unified ticket handler
 // Fetch email body from Resend's receiving API
@@ -259,10 +260,12 @@ export async function POST(request: Request) {
       message: { body: messageBody, direction: "inbound", author_type: "customer" },
     });
 
-    // Unified handler handles all routing including positive close
+    // Unified handler handles all routing including positive close — Phase 1 of
+    // durable-inbound-dispatch-no-silently-lost-ticket-event: decide off the reliable
+    // dispatch-state fields, not the stale `ai_handled` boolean. A closed/pending reopen still
+    // dispatches (the customer resumed the conversation — hand it back to the handler). See
+    // [[../../../lib/inbound-dispatch-gate]].
     if (ticketData) {
-      const isAutoHandled = ticketData.ai_handled;
-      const isUnassigned = !ticketData.assigned_to;
       const channel = ticketData.channel || "email";
 
       // Check if AI is enabled for this channel
@@ -274,7 +277,8 @@ export async function POST(request: Request) {
         .single();
 
       const wasReopenedFromClosed = ticket && (ticket.status === "pending" || ticket.status === "closed");
-      if (aiConfig?.enabled && (isAutoHandled || isUnassigned || wasReopenedFromClosed)) {
+      const gateOk = shouldDispatchInboundMessage(ticketData);
+      if (aiConfig?.enabled && (gateOk || wasReopenedFromClosed)) {
         await inngest.send({
           name: "ticket/inbound-message",
           data: {
