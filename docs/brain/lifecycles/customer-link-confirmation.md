@@ -152,7 +152,9 @@ See feedback "Main account only for marketing decisions" in [[../journeys/README
 | File | Purpose |
 |---|---|
 | `src/lib/customer-links.ts` (if it exists, else inline in shopify-webhooks) | Link CRUD helpers |
-| `src/lib/account-matching.ts` | Fuzzy match heuristics |
+| `src/lib/account-matching.ts` | Fuzzy match heuristics; address-aware confidence grading ([[../libraries/account-matching]]) |
+| `src/lib/sol-link-proposal.ts` | Phase 2: Sol/June's first-class link proposal (write-then-execute) ([[../libraries/sol-link-proposal]]) |
+| `src/lib/agents/needs-attention-route-cs-owner.ts` | Phase 3: Route parked CS-owned jobs to June before CEO ([[../libraries/needs-attention-route-cs-owner]]) |
 | `src/lib/auto-link-customer-from-message.ts` | Message-driven linker |
 | `src/lib/account-linking-journey-builder.ts` | Prepend-step builder |
 | `src/lib/identity-stitch.ts` | Storefront event backfill |
@@ -176,4 +178,4 @@ See feedback "Main account only for marketing decisions" in [[../journeys/README
 
 ## Related
 
-[[ticket-lifecycle]] · [[ai-multi-turn]] · [[social-comment-moderation]] · [[storefront-checkout]] · [[../integrations/meta-graph]] · [[../integrations/shopify]] · [[../tables/customer_links]] · [[../tables/customer_link_rejections]] · [[../tables/meta_sender_customer_links]] · [[../tables/customers]] · [[../inngest/refresh-customer-segments]] · [[../journeys/account-linking]]
+[[ticket-lifecycle]] · [[ai-multi-turn]] · [[social-comment-moderation]] · [[storefront-checkout]] · [[../integrations/meta-graph]] · [[../integrations/shopify]] · [[../libraries/account-matching]] · [[../libraries/sol-link-proposal]] · [[../libraries/needs-attention-route-cs-owner]] · [[../tables/customer_links]] · [[../tables/customer_link_rejections]] · [[../tables/meta_sender_customer_links]] · [[../tables/customers]] · [[../inngest/refresh-customer-segments]] · [[../journeys/account-linking]]
