@@ -1,8 +1,8 @@
 # inngest/spec-review-on-mutate
 
-> **vale-instant-per-spec-review (2026-07-04):** this reactive event is now a **bonus trigger**, not the workhorse. The box **can't reliably send** it (no `INNGEST_EVENT_KEY`; the send is fire-and-forget `.catch(() => {})`), so specs authored on the box silently never fired it. The primary path is now the box's own ~30s reconcile poll (`runSpecReviewEnqueueReaper`). This event still helps for mutations that DO originate where Inngest is configured (the Vercel app). Enqueue is per-spec; see [[../libraries/agents-spec-review]].
+**Status: RETIRED** — [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]] Phase 1–3.
 
-The **reactive trigger** for the box-hosted **spec-review agent** ([[../specs/spec-review-agent]]) — Vale looks at a newly-authored or re-opened `in_review` spec within seconds instead of waiting up to 15 minutes for the [[spec-review-cron]] tick.
+The **RETIRED reactive trigger** for the NOW-CLOSED spec-review agent (Vale). **RETIRED:** the Vale LLM lane and its event infrastructure are gone. The deterministic [[../libraries/spec-review-gate]] replaced Vale at the authoring chokepoint; a malformed spec is rejected instantly at author-time, and a well-formed spec passes by construction. The legacy `src/lib/inngest/spec-review-on-mutate.ts` is a retired stub (registered in `INTENTIONALLY_UNMONITORED_CRONS` in [[../libraries/control-tower/registry]]). The documentation below is HISTORICAL — it describes the retired reactive enqueue trigger, kept for operational reference only.
 
 [[../specs/vale-reactive-spec-review]] Phase 2. Fire-and-forget `spec-review/spec-mutated` events land here from the two mutation chokepoints that create or re-open an `in_review` spec:
 
