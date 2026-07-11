@@ -668,6 +668,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 26 * HOUR,
     registeredAt: "2026-07-11T11:30:01.604Z",
   },
+  {
+    id: "unanswered-inbound-backstop-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "unanswered-inbound-backstop-cron",
+    description: "Auto-proposed monitored loop for the unanswered-inbound-backstop-cron cron (every 5 min (*/5 * * * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
+  },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "research" },
   {
