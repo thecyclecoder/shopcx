@@ -41,6 +41,7 @@
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
     "test:growth-director": "tsx --test src/lib/agents/growth-director.test.ts",
+    "test:cs-director": "tsx --test src/lib/agents/cs-director.test.ts",
     "test:growth-director-brief": "tsx --test src/lib/agents/growth-director-brief.test.ts",
     "test:growth-director-analytical-brief": "tsx --test src/lib/agents/growth-director-analytical-brief.test.ts",
     "test:growth-director-hypotheses": "tsx --test src/lib/agents/growth-director-hypotheses.test.ts",
