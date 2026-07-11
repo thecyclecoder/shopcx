@@ -181,6 +181,35 @@ per phase, not a placeholder. `applyBoxMario` re-authors the spec through the au
 to review. Same shape + same match-by-title rule as above; the only difference is the trigger (missing column,
 not a malformed runtime bullet).
 
+## `blocked_by_repair` — review-failed / MISSING blocked_by (5th source)
+
+A 5th detector source (`readReviewFailedBlockerStalls`, `current_job_status='review_failed_missing_blocker'`)
+surfaces a **complementary** class: a Vale-bounced spec whose real phases ALL have verification (so the 4th
+source correctly ignored it), aged past the same 60-min grace, and whose body's `**Blocked-by:** [[slug]]`
+metadata line names a prerequisite that is ABSENT from the `specs.blocked_by` column. The brief's
+`review_failed_context = { blocked_by, body, vale_needs_fix_reason }` carries the current column, the raw
+body, and Vale's `needs_fix` reason — enough to name which slug(s) the row is missing without re-reading.
+
+Propose `verdict.blocked_by_repair` naming the missing slug(s). The verb is **ADDITIVE-ONLY**: `applyBoxMario`
+(`repairSpecBlockedBy`) UNIONs `add_blocked_by` into the existing `specs.blocked_by`; a payload that would
+DROP an existing blocker, or with an empty `add_blocked_by`, is REJECTED at the mutator boundary (the
+`mergeBlockedByForRepair` predicate). The re-author fires through the same author-spec gate the 4th source's
+verification repair uses, which clears `vale_pass` and re-opens the spec to Vale.
+
+Shape (matches `MarioBlockedByRepair`):
+
+```json
+{
+  "spec_slug": "the-stuck-spec-slug",
+  "add_blocked_by": ["prerequisite-slug-1", "prerequisite-slug-2"],
+  "reasoning": "The body's **Blocked-by:** line names both slugs but the column omits them. Vale's needs_fix reason cites the exact mismatch."
+}
+```
+
+Only name slugs that (a) actually appear in the body's `**Blocked-by:**` line and (b) are absent from
+`review_failed_context.blocked_by`. Never propose a `blocked_by_repair` for a Vale bounce class Vale surfaced
+for a DIFFERENT reason (bad parent, mangled phases, …) — those aren't this verb.
+
 ## Threshold self-tuning — when a false trigger fires
 
 When your investigation concludes the M3 detector fired too aggressively for this
@@ -243,6 +272,7 @@ NEVER wrap it in prose, code fences, or a heading — the runner parses your ter
   },
   "durable_fix_spec": null,
   "verification_repair": null,
+  "blocked_by_repair": null,
   "threshold_adjustment": null,
   "escalate": false,
   "reasoning": "Timecard shows build_done at 14:12, no phase_shipped since. blockedBy fully cleared. No wait status on the live job. The stall is real; the live_fix restores forward progress without destructive intent."
@@ -259,6 +289,13 @@ Fields:
 - **`durable_fix_spec`** (`MarioDurableFixSpec` | `null`) — a critical fix-spec proposal when
   the stall class is recurring. Set alongside a live_fix when both are warranted (patch NOW +
   fix the class permanently).
+- **`verification_repair`** (`MarioVerificationRepair` | `null`) — corrected per-phase
+  verification for the 3rd/4th source classes (malformed / missing verification).
+- **`blocked_by_repair`** (`MarioBlockedByRepair` | `null`) — additive-only union of missing
+  prerequisite slugs into `specs.blocked_by` for the 5th source class (missing blocked_by).
+  An empty `add_blocked_by` is rejected; the loop-guard (`MARIO_LOOP_GUARD_MAX`) skips a
+  same-slug repair at ≥ N prior `mario_fixed` rows in 24h and writes a `mario_loop_guard`
+  escalation instead.
 - **`threshold_adjustment`** (`MarioThresholdAdjustment` | `null`) — the SLA widen for a
   false trigger. Requires a non-empty `reason` — the worker rejects an empty reason.
 - **`escalate`** (bool, REQUIRED) — surface to Ada instead of firing. `true` for a destructive
@@ -304,9 +341,29 @@ Fields:
   "trigger_accurate": false,
   "live_fix": null,
   "durable_fix_spec": null,
+  "verification_repair": null,
+  "blocked_by_repair": null,
   "threshold_adjustment": null,
   "escalate": true,
   "reasoning": "The timecard shows build_done at 12:44 and phase_shipped at 12:57 (well under SLA), but the detector fired anyway. Either the clock is skewed or a timecard event is out of order — I can't decide the correct action without a human read. Conservative default: no mutation."
+}
+```
+
+### 4. Missing blocked_by — `blocked_by_repair`
+```json
+{
+  "trigger_accurate": true,
+  "live_fix": null,
+  "durable_fix_spec": null,
+  "verification_repair": null,
+  "blocked_by_repair": {
+    "spec_slug": "the-stuck-spec",
+    "add_blocked_by": ["prerequisite-slug"],
+    "reasoning": "review_failed_context.body's **Blocked-by:** line names [[prerequisite-slug]]; review_failed_context.blocked_by is []. Additive-only union re-opens to Vale."
+  },
+  "threshold_adjustment": null,
+  "escalate": false,
+  "reasoning": "brief.current_job_status='review_failed_missing_blocker'; review_failed_context confirms the body names one slug the column omits. Additive repair unions it in and re-opens to review."
 }
 ```
 
