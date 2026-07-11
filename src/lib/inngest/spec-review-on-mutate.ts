@@ -1,38 +1,30 @@
 /**
- * spec-review-on-mutate — the REACTIVE trigger for the box-hosted spec-review agent (Vale).
+ * spec-review-on-mutate — RETIRED.
  *
- * [[../specs/vale-reactive-spec-review]] Phase 2: fire-and-forget `spec-review/spec-mutated` events land
- * here from the two mutation chokepoints that create or re-open an `in_review` spec (`author-spec.ts` after
- * a successful `upsertSpec`, and `spec-card-state.ts` `markSpecCardBackToReview` on any send-back). The
- * consumer calls the SAME gated helper the 15-min cron uses (`enqueueSpecReviewIfDue`), so:
+ * Vale's reactive-on-mutation lane is retired ([[../libraries/spec-review-gate]] · [[../specs/retire-vale-
+ * spec-review-becomes-deterministic-authoring-gate]] Phase 2). The DETERMINISTIC gate runs synchronously
+ * inside `authorSpecRowStructured` / `authorSpecRowFromMarkdown`, so there is no separate LLM review
+ * event to enqueue. A well-formed spec is build-eligible on the instant its author call returns; a
+ * malformed spec was rejected in-line by `SpecReviewGateError`.
  *
- *   - a mutation on a spec whose CURRENT content already carries `vale_pass=true` no-ops instantly and for
- *     free (the free SDK check inside the helper is the whole point of the gate — no Max session spins up);
- *   - a mutation that lands fresh/unreviewed content enqueues a `kind='spec-review'` `agent_jobs` row
- *     within seconds instead of up to 15 minutes (the cron becomes a catch-up backstop for dropped events /
- *     cold workspaces / new Inngest syncs — same relationship as spec-test-on-ship + spec-test-cron);
- *   - the `enqueueSpecReviewIfDue` one-in-flight guard makes this idempotent against a racing cron tick
- *     (no pile-up if the two triggers fire close together).
- *
- * Retries: 1 — the enqueue helper is idempotent; a transient DB blip retries once and the 15-min cron
- * backstop covers the rest. Concurrency: `{ limit: 1, key: 'event.data.workspace_id' }` — a burst of
- * mutations in one workspace collapses to one enqueue check at a time (still idempotent), and mutations
- * in other workspaces run in parallel.
+ * Kept as a no-op stub so `registered-functions.ts` still resolves the export; the function's trigger
+ * has been replaced with an unreachable event id so nothing dispatches into it. Phase 3 deletes this
+ * file outright.
  */
 import { inngest } from "@/lib/inngest/client";
-import { enqueueSpecReviewIfDue } from "@/lib/agents/spec-review";
 
+// Retired stub — no consumer, no work.
 export const specReviewOnMutate = inngest.createFunction(
   {
-    id: "spec-review-on-mutate",
-    name: "Spec-review — reactive enqueue on spec create / re-open",
-    retries: 1,
-    concurrency: [{ limit: 1, key: "event.data.workspace_id" }],
-    triggers: [{ event: "spec-review/spec-mutated" }],
+    id: "spec-review-on-mutate-retired",
+    name: "Spec-review on-mutate — RETIRED (deterministic gate at authoring)",
+    retries: 0,
+    concurrency: [{ limit: 1 }],
+    // Unreachable event — the deterministic gate replaces this lane; the emit sites (author-spec) will be
+    // dropped in the same PR.
+    triggers: [{ event: "spec-review/RETIRED-never-fired" }],
   },
-  async ({ event, step }) => {
-    const { workspace_id } = event.data as { workspace_id: string };
-    const result = await step.run("enqueue", () => enqueueSpecReviewIfDue(workspace_id));
-    return { workspace_id, ...result };
+  async () => {
+    return { retired: true };
   },
 );

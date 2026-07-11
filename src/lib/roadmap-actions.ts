@@ -106,29 +106,14 @@ export async function queueRoadmapBuild(
 
   let instructions = typeof opts.instructions === "string" && opts.instructions.trim() ? opts.instructions : null;
 
-  // review-agent Phase 1 — in_review hard-stop: a spec parked in the `in_review` column is awaiting owner
-  // approval and is NOT cleared to build. This is THE guardrail — every build path (BuildButton, Slack
-  // `/build`, the planner, the autonomous chain) routes through this enqueue chokepoint, so an in_review
-  // spec can't be built by ANY caller. Verify/fold (handled above) is exempt; it retires an already-shipped
-  // spec, not a build. The owner approves the spec out of in_review (→ planned) before it's buildable.
-  //
-  // spec-authoring-writes-db-and-worker-materialize Phase 2: read `public.specs.status` directly (the
-  // future-canonical surface, trigger-maintained from `spec_phases`). Falls back to the markdown-overlay
-  // `spec_card_state.status` path when no row exists yet (pre-backfill / unauthored slug).
-  {
-    const { getSpec: getSpecRow } = await import("@/lib/specs-table");
-    const row = await getSpecRow(workspaceId, slug);
-    const statusFromRow = row?.status ?? null;
-    if (statusFromRow === "in_review") {
-      return { ok: false, status: 409, error: "spec is in review — not approved to build yet" };
-    }
-    if (statusFromRow === null) {
-      const reviewSpec = await getSpec(slug, workspaceId);
-      if (reviewSpec?.card.status === "in_review") {
-        return { ok: false, status: 409, error: "spec is in review — not approved to build yet" };
-      }
-    }
-  }
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the LEGACY in_review hard-stop
+  // is RETIRED. Vale's LLM lane is gone; every spec that reaches `public.specs` has already passed the
+  // deterministic authoring gate ([[spec-review-gate]]) synchronously at author time. "reviewed" is TRUE
+  // by construction the instant a row exists, so an in_review refuse would never fire — and even if
+  // legacy DB rows still carry `status='in_review'`, we no longer treat that as unbuildable (the derived
+  // status collapses to `planned`/`in_progress` by the phase rollup). Ada's disposition lane still owns
+  // planned/deferred routing on a fresh spec, but disposition is Ada's judgment call, not a build gate.
+  // The build-gate rails that remain live: `deferred` (owner parked it) + phase-rollup blockers.
 
   // "Build all phases" (build-all-phases-chain Phase 1): queue the spec's FIRST ⏳ phase, tagged
   // chain_phases so the post-merge step (reconcileMergedJobs → queueNextChainedPhase) auto-queues the next
