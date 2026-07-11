@@ -27,10 +27,12 @@
  * WITHOUT hitting the orphan fallthrough (that's the invariant the M4 glance depends on).
  *
  * Cross-references:
- * - [[../agents/approval-inbox]] `KIND_TO_FUNCTION` — the current per-kind shim this replaces
- *   in Phase 2. Any KIND_OWNER_FALLBACK entry named below MUST match the shim's owner.
- * - [[../agents/org-chart]] `ORPHAN_OWNER` — the audit fallthrough Phase 2 rewires through
- *   this registry.
+ * - [[../agents/approval-inbox]] `KIND_TO_FUNCTION_SHIM` — the compact backstop shim Phase 2
+ *   leaves in place for the approval-only kinds that aren't first-class Nodes yet (retired one
+ *   spec at a time). Any KIND_OWNER_FALLBACK entry named below MUST match the shim's owner.
+ * - [[../agents/org-chart]] `ORPHAN_OWNER` + `resolveNodeOwnerOrOrphanDefault` — the audit
+ *   fallthrough Phase 2 rewires through this registry; a miss records an `orphan_seen`
+ *   sighting the orphan-node-self-audit reads via `getOrphanSightings()` below.
  * - [[./registry]] `OWNER_FUNCTIONS` + `MonitoredLoop` — the source of truth for the 5
  *   department seats + every monitored loop's declared owner.
  */
@@ -129,9 +131,10 @@ export type BuilderWorkerKind = (typeof BUILDER_WORKER_KINDS)[number];
 /**
  * Owner-function fallback for a builder-worker kind NOT carried in MONITORED_LOOPS as an
  * `agent-kind` or reactive-with-agentKind entry. These are the director's own sweep passes,
- * standing crons the director owns, and the proposal kinds `KIND_TO_FUNCTION` currently
- * hand-patches (`db_health` / `coverage-register`). Kept in strict sync with the shim in
- * [[../agents/approval-inbox]]; the Phase 3 drift check fails on divergence.
+ * standing crons the director owns, and the proposal kinds `db_health` / `coverage-register`
+ * that raise agent_jobs but run as platform crons. Every entry here is authoritative — the
+ * approval-inbox shim only carries the 2 leftover approval-only kinds that don't yet have
+ * first-class Nodes; the Phase 3 drift check fails if the two disagree.
  *
  * The five OwnerFunction extensions (`cfo` / `logistics` / `ceo`) are honored — the CEO
  * carries her own agent lane (Eve — god-mode), and the audit-only kinds route to Platform.
@@ -373,6 +376,63 @@ export function resolveNodeOwner(nodeId: string): OwnerFunction | null {
   const byAgentKind = NODES_BY_AGENT_KIND.get(nodeId);
   if (byAgentKind) return byAgentKind.owner;
   return null;
+}
+
+/**
+ * Orphan-sightings counter (control-tower-canonical-node-registry P2 — audit hook the
+ * orphan-node-self-audit Phase 1 will consume via `auditOrphanNodes()`). Every time the
+ * legacy `ORPHAN_OWNER='platform'` fallthrough in [[../agents/org-chart]] would silently
+ * default an unknown node to Platform, we route through `resolveNodeOwnerOrOrphanDefault`
+ * INSTEAD, which:
+ *
+ *   1. calls `resolveNodeOwner(nodeId)` — if the registry knows the node, return the real
+ *      owner (no orphan sighting recorded);
+ *   2. otherwise `console.warn` an "orphan node sighted" line so it also shows up in the
+ *      Vercel error feed / local dev output;
+ *   3. increment `orphanSightings.get(nodeId)` — a per-id counter the audit reads.
+ *
+ * The Phase 1 audit (spec: orphan-node-self-audit) will iterate this map, dedupe against
+ * `MONITORED_LOOPS` / `BUILDER_WORKER_KINDS`, and open Approval Requests for the ones that
+ * are genuinely orphaned (a real coverage gap) so Cole's registry gets them registered.
+ */
+const orphanSightings: Map<string, number> = new Map();
+
+/**
+ * Read a snapshot of the orphan-sightings counter. Returns a plain object keyed by the
+ * unregistered nodeId with its sighting count as the value. The audit consumer resets
+ * counts after processing via `resetOrphanSightings()`.
+ */
+export function getOrphanSightings(): Record<string, number> {
+  const snap: Record<string, number> = {};
+  for (const [id, count] of orphanSightings) snap[id] = count;
+  return snap;
+}
+
+/** Clear the orphan-sightings counter (used by the audit after it processes a batch, + by tests). */
+export function resetOrphanSightings(): void {
+  orphanSightings.clear();
+}
+
+/**
+ * The Phase-2 replacement for `ORPHAN_OWNER='platform'` in [[../agents/org-chart]]:
+ *
+ *   • Every call routes through the canonical node registry FIRST — a registered node returns
+ *     its declared owner (never routed as Platform by default).
+ *   • A genuine miss records an `orphan_seen` sighting (console.warn + counter bump) so the
+ *     `orphan-node-self-audit` Phase 1 sweep can surface it, and falls back to the historical
+ *     `platform` default so caller behavior is preserved (the roster never breaks the dashboard).
+ *
+ * `context` is a short label naming the callsite (e.g. `"org-chart:orphan-union"`), embedded
+ * in the warn line so a dev reading Vercel logs can trace where the sighting fired.
+ */
+export function resolveNodeOwnerOrOrphanDefault(nodeId: string, context: string): OwnerFunction {
+  const known = resolveNodeOwner(nodeId);
+  if (known) return known;
+  console.warn(
+    `[node-registry] orphan node sighted (id='${nodeId}', at='${context}') — no registered owner; defaulting to platform`,
+  );
+  orphanSightings.set(nodeId, (orphanSightings.get(nodeId) ?? 0) + 1);
+  return "platform";
 }
 
 /** Return the parent Node for `nodeId`, walking one rung up (null at a root department or miss). */

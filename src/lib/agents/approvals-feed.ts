@@ -21,7 +21,10 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPersona } from "@/lib/agents/personas";
 import { CEO } from "@/lib/agents/approval-router";
-import { inlineApproveActions, ownerFunctionForKind, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
+import { inlineApproveActions, type ApprovalJobRow } from "@/lib/agents/approval-inbox";
+// control-tower-canonical-node-registry P2 — the raising tool's owner comes from the canonical node
+// registry (single source of truth); the feed no longer imports the local shim.
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import type { InboxApprovalAction } from "@/lib/agents/inbox";
 import type { DecidedBy, DecisionOutcome } from "@/lib/agents/approval-decisions";
 
@@ -384,7 +387,7 @@ export async function buildApprovalsFeed(admin: Admin, workspaceId: string): Pro
       createdAt: n.created_at,
       kind,
       typeLabel: pendingTypeLabel(kind, n.title, meta(n, "escalation_kind")),
-      raisedBy: persona(escalatedBy ?? (kind ? ownerFunctionForKind(kind) : null)),
+      raisedBy: persona(escalatedBy ?? (kind ? resolveNodeOwner(kind) : null)),
       routedTo: persona(routedTo),
       decidedByLabel: null,
       autonomous: false,

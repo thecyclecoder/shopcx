@@ -24,11 +24,15 @@ import {
   NODES,
   assertCoverage,
   getNode,
+  getOrphanSightings,
   getParent,
+  resetOrphanSightings,
   resolveNodeOwner,
+  resolveNodeOwnerOrOrphanDefault,
   type OrgNode,
 } from "./node-registry";
 import { MONITORED_LOOPS, WORKER_BOX_ID, type OwnerFunction } from "./registry";
+import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
 
 test("every MONITORED_LOOPS id resolves to a non-null OwnerFunction (Phase 1 verification #1)", () => {
   const misses: string[] = [];
@@ -195,4 +199,77 @@ test("registry snapshot — every director seat has a persona (a MascotId, not u
 test("regression — a cmo-owned agent-kind lane does not silently default to platform", () => {
   const owner = resolveNodeOwner("agent:product-seed");
   assert.equal(owner, "cmo", `product-seed lane must resolve to owner='cmo', got: ${String(owner)}`);
+});
+
+// ── control-tower-canonical-node-registry Phase 2 verification ──────────────────────────────
+
+test("P2 verification #3 — calling resolveNodeOwnerOrOrphanDefault on an unplaced node bumps getOrphanSightings()", () => {
+  resetOrphanSightings();
+  const bogusId = "phase2-fixture-unplaced-node-id";
+  const owner = resolveNodeOwnerOrOrphanDefault(bogusId, "test:phase2-fixture");
+  assert.equal(owner, "platform", "the historical default is preserved so callers don't break");
+  const sightings = getOrphanSightings();
+  assert.equal(sightings[bogusId], 1, `expected exactly 1 sighting for '${bogusId}', got: ${JSON.stringify(sightings)}`);
+  // A second lookup increments again (proves the counter isn't idempotent-per-call — the audit
+  // reads the raw count so it can size the surface).
+  resolveNodeOwnerOrOrphanDefault(bogusId, "test:phase2-fixture");
+  assert.equal(getOrphanSightings()[bogusId], 2);
+});
+
+test("P2 verification #3 — a REGISTERED node does NOT record a sighting", () => {
+  resetOrphanSightings();
+  const owner = resolveNodeOwnerOrOrphanDefault(WORKER_BOX_ID, "test:phase2-registered");
+  assert.equal(owner, "platform");
+  // The box worker IS registered → no sighting bump.
+  assert.equal(getOrphanSightings()[WORKER_BOX_ID], undefined);
+});
+
+test("P2 verification #2 — a fixture kind absent from KIND_TO_FUNCTION_SHIM routes to the CEO seat (fail-safe unchanged)", () => {
+  // ownerFunctionForKind consumes resolveNodeOwner FIRST, then the compact shim in
+  // approval-inbox.ts. A kind absent from BOTH must return null so the approval router falls
+  // through to the CEO — the fail-safe the spec Verification bullet #2 pins.
+  assert.equal(ownerFunctionForKind("phase2-fixture-not-in-registry-not-in-shim"), null);
+  // Sanity: the shim still routes its two carried entries (sms-marketing / growth-voice-angle-approval).
+  assert.equal(ownerFunctionForKind("sms-marketing"), "cmo");
+  assert.equal(ownerFunctionForKind("growth-voice-angle-approval"), "growth");
+  // Sanity: the registry-backed lookups still work through ownerFunctionForKind.
+  assert.equal(ownerFunctionForKind("build"), "platform");
+  assert.equal(ownerFunctionForKind("ticket-handle"), "cs");
+  assert.equal(ownerFunctionForKind("director-grade"), "ceo");
+});
+
+test("P2 — gradeableKindsForFunction owner-scoping now aligns with the canonical registry", () => {
+  // Sanity: Ada's gradeable set includes platform-owned rubrics AND excludes cross-function ones.
+  // The scoping used to go through approval-inbox's `ownerFunctionForKind`; now it consults
+  // resolveNodeOwner directly, so a cross-function worker's owner cannot diverge between the two.
+  const { gradeableKindsForFunction, GRADEABLE_KINDS } = require("@/lib/agents/agent-grader") as {
+    gradeableKindsForFunction: (fn: string) => string[];
+    GRADEABLE_KINDS: string[];
+  };
+  const platform = new Set(gradeableKindsForFunction("platform"));
+  const cs = new Set(gradeableKindsForFunction("cs"));
+  const cmo = new Set(gradeableKindsForFunction("cmo"));
+  const retention = new Set(gradeableKindsForFunction("retention"));
+  // A Platform rubric kind should land in Ada's set, not the CS one.
+  assert.ok(platform.has("build"), "Ada must grade `build`");
+  assert.ok(!cs.has("build"), "June must NOT grade `build`");
+  // A CS rubric kind lands in June's set, not Platform's.
+  assert.ok(cs.has("ticket-improve"), "June must grade `ticket-improve`");
+  assert.ok(!platform.has("ticket-improve"), "Ada must NOT grade `ticket-improve`");
+  // A CMO rubric kind (product-seed) lands in Iris's set, not Platform's.
+  assert.ok(cmo.has("product-seed"), "Iris must grade `product-seed`");
+  assert.ok(!platform.has("product-seed"), "Ada must NOT grade `product-seed`");
+  // A Retention rubric kind (migration-fix) lands in Theo's set, not Platform's.
+  assert.ok(retention.has("migration-fix"), "Theo must grade `migration-fix`");
+  assert.ok(!platform.has("migration-fix"), "Ada must NOT grade `migration-fix`");
+  // Every gradeable kind must belong to AT MOST one director's set (no cross-function drift). A
+  // rubric kind whose owner is unregistered (e.g. `monitor` — a persona of a cron, not an
+  // agent-kind row) belongs to ZERO sets on both the old and new logic, which is the intended
+  // "unowned rubric" behavior — the ungraded-until-registered contract.
+  for (const kind of GRADEABLE_KINDS) {
+    const memberships = ["platform", "growth", "retention", "cs", "cmo"].filter((fn) =>
+      gradeableKindsForFunction(fn).includes(kind),
+    );
+    assert.ok(memberships.length <= 1, `kind '${kind}' must be gradeable by AT MOST one director, got: ${memberships.join(", ")}`);
+  }
 });
