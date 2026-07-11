@@ -16,12 +16,64 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export type SpecPhaseCheckKind = "auto" | "human";
 
+/**
+ * machine-declared-verification Phase 1 — the RUNNABLE kind on `spec_phase_checks.exec_kind` read by
+ * the deterministic Node spec-check runner (Phase 2). Coexists with the coarse `kind` ('auto'|'human')
+ * during the migration window: `kind` stays the display/chip category; `exec_kind` decides EXECUTION.
+ * `needs_human` is the safe default — nothing auto-runs on undeclared / prose / subjective / drift.
+ */
+export type SpecPhaseCheckExecKind =
+  | "tsc"
+  | "grep"
+  | "ci_status"
+  | "http_get"
+  | "db_probe_readonly"
+  | "unit_test"
+  | "build"
+  | "needs_human";
+
+/** Kinds the deterministic runner MAY execute (everything else falls through to needs_human). */
+export const AUTO_TESTABLE_EXEC_KINDS: readonly SpecPhaseCheckExecKind[] = [
+  "tsc",
+  "grep",
+  "ci_status",
+  "http_get",
+  "db_probe_readonly",
+  "unit_test",
+  "build",
+] as const;
+
+export interface GrepCheckParams {
+  pattern: string;
+  path?: string;
+  expect: "present" | "absent";
+}
+export interface HttpGetCheckParams {
+  url: string;
+  expect_status: number;
+}
+export interface DbProbeReadonlyCheckParams {
+  sql: string;
+  expect: unknown;
+}
+export interface UnitTestCheckParams {
+  script: string;
+}
+export type SpecPhaseCheckParams =
+  | GrepCheckParams
+  | HttpGetCheckParams
+  | DbProbeReadonlyCheckParams
+  | UnitTestCheckParams
+  | null;
+
 export interface SpecPhaseCheckRow {
   id: string;
   phase_id: string;
   position: number;
   description: string;
   kind: SpecPhaseCheckKind;
+  exec_kind: SpecPhaseCheckExecKind | null;
+  params: SpecPhaseCheckParams;
   created_at: string;
   updated_at: string;
 }
@@ -30,6 +82,8 @@ export interface SpecPhaseCheckInput {
   position: number;
   description: string;
   kind: SpecPhaseCheckKind;
+  exec_kind?: SpecPhaseCheckExecKind | null;
+  params?: SpecPhaseCheckParams;
 }
 
 /**
@@ -63,10 +117,21 @@ export async function upsertPhaseChecks(phaseId: string, checks: SpecPhaseCheckI
 
   for (const c of checks) {
     const existingId = byPosition.get(c.position);
+    // machine-declared-verification Phase 1 — carry the executable payload (exec_kind + params). Both are
+    // additive/nullable; a caller who does not know the executable kind writes null and the runner treats
+    // it as needs_human (the safe default, same as an undeclared prose check).
+    const execKind: SpecPhaseCheckExecKind | null = c.exec_kind ?? null;
+    const params: SpecPhaseCheckParams = c.params ?? null;
     if (existingId) {
       const { error: uErr } = await admin
         .from("spec_phase_checks")
-        .update({ description: c.description, kind: c.kind, updated_at: new Date().toISOString() })
+        .update({
+          description: c.description,
+          kind: c.kind,
+          exec_kind: execKind,
+          params: params as unknown,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", existingId);
       if (uErr) throw uErr;
     } else {
@@ -75,6 +140,8 @@ export async function upsertPhaseChecks(phaseId: string, checks: SpecPhaseCheckI
         position: c.position,
         description: c.description,
         kind: c.kind,
+        exec_kind: execKind,
+        params: params as unknown,
       });
       if (iErr) throw iErr;
     }
@@ -85,7 +152,7 @@ export async function listPhaseChecks(phaseId: string): Promise<SpecPhaseCheckRo
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("spec_phase_checks")
-    .select("id, phase_id, position, description, kind, created_at, updated_at")
+    .select("id, phase_id, position, description, kind, exec_kind, params, created_at, updated_at")
     .eq("phase_id", phaseId)
     .order("position", { ascending: true });
   if (error) throw error;
@@ -145,7 +212,7 @@ export async function listSpecPhaseChecks(spec: {
   if (phaseIds.length) {
     const { data, error } = await admin
       .from("spec_phase_checks")
-      .select("id, phase_id, position, description, kind, created_at, updated_at")
+      .select("id, phase_id, position, description, kind, exec_kind, params, created_at, updated_at")
       .in("phase_id", phaseIds)
       .order("position", { ascending: true });
     if (error) throw error;
@@ -175,8 +242,14 @@ export async function listSpecPhaseChecks(spec: {
 
 /**
  * Best-effort backfill helper: split a free-text verification blob into per-check rows. Splits on
- * bullet lines (`- ` / `* `); an empty blob returns []. `kind` defaults to `auto` (the safe default —
- * the spec-test agent will re-classify to human when it can't run the check).
+ * bullet lines (`- ` / `* `); an empty blob returns []. `kind` defaults to `auto` (the coarse
+ * display/chip category — the spec-test agent re-classifies to `human` when it can't run it).
+ *
+ * machine-declared-verification Phase 1 — `exec_kind` defaults to `'needs_human'` for un-typed prose
+ * (the deterministic runner NEVER auto-runs a check whose params it did not receive). Only the
+ * structured author path (`checks: [{ exec_kind, params }]`) opts a check into deterministic execution;
+ * prose falls through to the LLM residual, which is the exact safe default that closes the cs-director
+ * `npm test` class (a mistyped command never lands as an auto-testable check).
  */
 export function parseVerificationBlobToChecks(blob: string | null | undefined): SpecPhaseCheckInput[] {
   if (!blob || !blob.trim()) return [];
@@ -185,7 +258,14 @@ export function parseVerificationBlobToChecks(blob: string | null | undefined): 
   const push = () => {
     if (!cur) return;
     const text = cur.join(" ").replace(/\s+/g, " ").trim();
-    if (text) out.push({ position: out.length + 1, description: text, kind: "auto" });
+    if (text)
+      out.push({
+        position: out.length + 1,
+        description: text,
+        kind: "auto",
+        exec_kind: "needs_human",
+        params: null,
+      });
     cur = null;
   };
   for (const raw of blob.split("\n")) {
@@ -204,4 +284,139 @@ export function parseVerificationBlobToChecks(blob: string | null | undefined): 
   }
   push();
   return out;
+}
+
+// ── machine-declared-verification Phase 1 — validateExecutableCheck ──────────────────────────────
+//
+// Pure predicate asserting that a check's (exec_kind, params) pair is a well-formed executable
+// payload the deterministic runner (Phase 2) can execute. Enforced app-layer so the shape doubles
+// as the schema (no jsonb schema constraint — Postgres cannot express "params.expect is
+// 'present'|'absent'"). Called by the author chokepoint and any surface that lands a new check.
+//
+// Rules per spec:
+//   - grep              → { pattern: string, path?: string, expect: 'present'|'absent' }
+//   - http_get          → { url: string, expect_status: number }
+//   - db_probe_readonly → { sql: <plain SELECT / WITH …>, expect: <anything> } — RUNTIME-safe: any
+//                         write / mutating verb rejects up front, closing the mutating-db class.
+//   - unit_test         → { script: <a real package.json script> } — packageScripts must be passed;
+//                         a script name absent from package.json rejects (closes the cs-director
+//                         `npm test` class at authoring, not at runtime).
+//   - tsc / build       → params null (no params needed).
+//   - needs_human       → params null. NEVER auto-run. Accepted so a subjective/drift check has a
+//                         well-formed row; the runner routes it to the LLM residual.
+//   - unknown / null    → rejected.
+
+export type ExecutableCheckValidation = { valid: true } | { valid: false; reason: string };
+
+/**
+ * Reject anything that isn't a plain read-only SELECT / WITH (CTE) statement. Substring-based on
+ * purpose — a false-positive here (e.g. a column literally named "insert_at") fails CLOSED into
+ * `needs_human`, which is the safe direction. The final `;` is tolerated; anything after it is not.
+ */
+export function isPlainReadonlySql(sql: string): boolean {
+  const s = sql.trim().replace(/;\s*$/, "").trim();
+  if (!s) return false;
+  const lower = s.toLowerCase();
+  if (!(lower.startsWith("select") || lower.startsWith("with"))) return false;
+  // any second statement disqualifies (a `;` in the middle chains a second command)
+  if (/;\s*\S/.test(s)) return false;
+  // Word-boundary match on any mutating verb / DDL.
+  const mutating = /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|lock|copy|merge|do|call|reindex|vacuum|analyze|refresh|comment)\b/i;
+  if (mutating.test(s)) return false;
+  return true;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+export function validateExecutableCheck(
+  check: { exec_kind: SpecPhaseCheckExecKind | null | undefined; params?: unknown },
+  ctx?: { packageScripts?: ReadonlySet<string> },
+): ExecutableCheckValidation {
+  const kind = check.exec_kind;
+  if (!kind) return { valid: false, reason: "exec_kind is required" };
+  const params = check.params;
+  switch (kind) {
+    case "tsc":
+    case "build": {
+      if (params !== null && params !== undefined) {
+        return { valid: false, reason: `${kind} takes no params` };
+      }
+      return { valid: true };
+    }
+    case "needs_human": {
+      if (params !== null && params !== undefined) {
+        return { valid: false, reason: "needs_human takes no params (never auto-run)" };
+      }
+      return { valid: true };
+    }
+    case "grep": {
+      if (!isRecord(params)) return { valid: false, reason: "grep requires { pattern, expect } params" };
+      const { pattern, path, expect } = params as Record<string, unknown>;
+      if (typeof pattern !== "string" || !pattern.trim()) {
+        return { valid: false, reason: "grep.pattern must be a non-empty string" };
+      }
+      if (path !== undefined && (typeof path !== "string" || !path.trim())) {
+        return { valid: false, reason: "grep.path (if set) must be a non-empty string" };
+      }
+      if (expect !== "present" && expect !== "absent") {
+        return { valid: false, reason: "grep.expect must be 'present' or 'absent'" };
+      }
+      return { valid: true };
+    }
+    case "ci_status": {
+      if (params !== null && params !== undefined) {
+        return { valid: false, reason: "ci_status takes no params (branch derived by runner)" };
+      }
+      return { valid: true };
+    }
+    case "http_get": {
+      if (!isRecord(params)) return { valid: false, reason: "http_get requires { url, expect_status }" };
+      const { url, expect_status } = params as Record<string, unknown>;
+      if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+        return { valid: false, reason: "http_get.url must be a full http(s):// URL" };
+      }
+      if (typeof expect_status !== "number" || !Number.isInteger(expect_status) ||
+          expect_status < 100 || expect_status > 599) {
+        return { valid: false, reason: "http_get.expect_status must be an HTTP status integer" };
+      }
+      return { valid: true };
+    }
+    case "db_probe_readonly": {
+      if (!isRecord(params)) return { valid: false, reason: "db_probe_readonly requires { sql, expect }" };
+      const { sql } = params as Record<string, unknown>;
+      if (typeof sql !== "string" || !sql.trim()) {
+        return { valid: false, reason: "db_probe_readonly.sql must be a non-empty string" };
+      }
+      if (!isPlainReadonlySql(sql)) {
+        return { valid: false, reason: "db_probe_readonly.sql must be a plain read-only SELECT" };
+      }
+      if (!("expect" in (params as Record<string, unknown>))) {
+        return { valid: false, reason: "db_probe_readonly.expect is required (may be null)" };
+      }
+      return { valid: true };
+    }
+    case "unit_test": {
+      if (!isRecord(params)) return { valid: false, reason: "unit_test requires { script }" };
+      const { script } = params as Record<string, unknown>;
+      if (typeof script !== "string" || !script.trim()) {
+        return { valid: false, reason: "unit_test.script must be a non-empty string" };
+      }
+      // Closes the cs-director `npm test` class at authoring — a script name absent from
+      // package.json is rejected here, not silently mis-run at Vera time.
+      const scripts = ctx?.packageScripts;
+      if (scripts && !scripts.has(script)) {
+        return {
+          valid: false,
+          reason: `unit_test.script "${script}" is not a package.json script`,
+        };
+      }
+      return { valid: true };
+    }
+    default: {
+      const never: never = kind;
+      return { valid: false, reason: `unknown exec_kind: ${String(never)}` };
+    }
+  }
 }
