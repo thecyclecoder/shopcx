@@ -10,6 +10,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { retrieveContext } from "@/lib/rag";
+import { getShopifyOnHandByVariant } from "@/lib/inventory/read";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { renderDirectionSystemPrompt, prefixDirectionContextReasoning } from "@/lib/ai-context";
@@ -1480,10 +1481,11 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     { data: crises },
     { data: workspace },
     ragResults,
+    canonicalOnHand,
   ] = await Promise.all([
     admin.from("products").select("id, title, handle, description").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
-      .select("product_id, title, option1, option2, sku, inventory_quantity, available, position, shopify_variant_id")
+      .select("product_id, title, option1, option2, sku, available, position, shopify_variant_id")
       .eq("workspace_id", wsId)
       .order("position"),
     // An active OOS crisis is the authoritative truth for a variant's stock —
@@ -1496,6 +1498,9 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
       .eq("workspace_id", wsId).eq("status", "active"),
     admin.from("workspaces").select("shopify_primary_domain").eq("id", wsId).maybeSingle(),
     retrieveContext(wsId, searchQuery, 10),
+    // Canonical, live on-hand (single source of truth) — replaces the stale, backfill-only
+    // product_variants.inventory_quantity that caused incident 9a7f9481.
+    getShopifyOnHandByVariant(admin, wsId),
   ]);
 
   // Customer-facing Shopify domain. NOT storefront_domain (that's our own
@@ -1532,12 +1537,15 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
     const list = variantsByProduct.get(v.product_id) || [];
     const productTitle = (titleById.get(v.product_id) || "") as string;
     const crisis = crisisForVariant(productTitle, { shopify_variant_id: (v.shopify_variant_id as string | null) || null, sku: v.sku as string | null });
+    // On-hand from the canonical single source of truth (live), keyed by Shopify variant id;
+    // the legacy product_variants.inventory_quantity scalar is stale and no longer read here.
+    const qty = v.shopify_variant_id != null ? canonicalOnHand.get(String(v.shopify_variant_id)) ?? null : null;
     list.push({
       name: (v.title || v.option1 || "Default") as string,
       sku: v.sku as string | null,
-      qty: v.inventory_quantity as number | null,
-      // An active crisis forces OUT OF STOCK regardless of a stale positive qty.
-      available: !crisis && v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0),
+      qty,
+      // An active crisis still forces OUT OF STOCK — belt-and-suspenders over the live qty.
+      available: !crisis && v.available !== false && (qty == null || qty > 0),
       shopify_variant_id: (v.shopify_variant_id as string | null) || null,
       restock: (crisis?.expected_restock_date as string | null) || null,
     });
@@ -1620,16 +1628,21 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
  * ([[inngest/sync-inventory]]).
  */
 async function checkInventory(admin: Admin, wsId: string, query: string): Promise<string> {
-  const [{ data: products }, { data: variants }, { data: crises }, { data: ws }] = await Promise.all([
+  const [{ data: products }, { data: variants }, { data: crises }, { data: ws }, canonicalOnHand] = await Promise.all([
     admin.from("products").select("id, title, inventory_updated_at").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
-      .select("product_id, title, option1, sku, inventory_quantity, available, position, shopify_variant_id")
+      .select("product_id, title, option1, sku, available, position, shopify_variant_id")
       .eq("workspace_id", wsId).order("position"),
     admin.from("crisis_events")
       .select("affected_product_title, affected_variant_id, affected_sku, expected_restock_date")
       .eq("workspace_id", wsId).eq("status", "active"),
     admin.from("workspaces").select("shipping_protection_title").eq("id", wsId).maybeSingle(),
+    // Canonical, live on-hand (single source of truth), keyed by Shopify variant id.
+    getShopifyOnHandByVariant(admin, wsId),
   ]);
+  // On-hand from canonical inventory_levels, never the stale product_variants scalar.
+  const qtyOf = (v: { shopify_variant_id?: string | null }) =>
+    v.shopify_variant_id != null ? canonicalOnHand.get(String(v.shopify_variant_id)) ?? null : null;
 
   // Exclude virtual / non-shippable products (shipping protection) — they
   // carry junk negative inventory and are never a "missing item".
@@ -1650,13 +1663,15 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
       (v.shopify_variant_id && c.affected_variant_id && String(c.affected_variant_id) === String(v.shopify_variant_id)) ||
       (v.sku && c.affected_sku && c.affected_sku === v.sku) ||
       (c.affected_product_title && productTitle && c.affected_product_title.toLowerCase() === productTitle.toLowerCase()));
-  const isInStock = (productTitle: string, v: { available?: boolean | null; inventory_quantity?: number | null; shopify_variant_id?: string | null; sku?: string | null }) =>
-    !crisisFor(productTitle, v) &&
-    v.available !== false && (v.inventory_quantity == null || v.inventory_quantity > 0);
-  const fmt = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null; inventory_quantity?: number | null; available?: boolean | null; shopify_variant_id?: string | null }) => {
+  const isInStock = (productTitle: string, v: { available?: boolean | null; shopify_variant_id?: string | null; sku?: string | null }) => {
+    const q = qtyOf(v);
+    return !crisisFor(productTitle, v) && v.available !== false && (q == null || q > 0);
+  };
+  const fmt = (productTitle: string, v: { title?: string | null; option1?: string | null; sku?: string | null; available?: boolean | null; shopify_variant_id?: string | null }) => {
     const variantName = (v.title || v.option1 || "").toString();
     const label = variantName && variantName !== "Default Title" ? `${productTitle} — ${variantName}` : productTitle;
-    const qty = v.inventory_quantity == null ? "untracked" : `${v.inventory_quantity}`;
+    const q = qtyOf(v);
+    const qty = q == null ? "untracked" : `${q}`;
     const inStock = isInStock(productTitle, v);
     const crisis = inStock ? undefined : crisisFor(productTitle, v);
     const status = inStock ? "in stock" : "OUT OF STOCK";
