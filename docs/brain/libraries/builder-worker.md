@@ -181,6 +181,22 @@ Every phase build accumulates a commit(-set) onto the persistent per-spec branch
 
 Phases 1 + 2 defend the git-level branch race; Phase 3 defends the row-level queue race. All three run BEFORE any side effect (worktree side effects for phase 1; the push itself for phase 2; the claim gate + worktree add for phase 3), so a wedged state doesn't need a Control-Tower-level backstop for the common case.
 
+## Rebase-onto-main before repo-wide checks ([[../specs/mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks]])
+
+Complement to the phase-push rebase above — this rebase runs on the OTHER side of the build, right after the worktree is set up and BEFORE the claude run + the repo-wide check invocations (`npx tsc --noEmit` and `_check-table-refs-have-migrations.ts`). It restores the invariant those checks assume: origin/main HEAD as the reference tree.
+
+The wedge this exists to prevent: a build worktree that was cut BEFORE a new table-creating migration landed on main fails `check:table-refs-have-migrations` on a stale base whose fix already shipped — a non-real regression Mario would otherwise keep re-enqueuing. Real hit: a parked build resumed on a base cut days before a `create table <t>` migration, spec-test passed on the mocked admin client (the `order_refunds` #1265 class), then the build lane's static rail failed with "`.from('<t>')` has no creating migration" though the migration existed on main.
+
+The gate is the smallest possible advance — three steps, all in-place on the worktree:
+
+1. `git fetch origin main` (belt-and-suspenders against the top-of-run `git fetch origin` narrowing later).
+2. `git merge-base --is-ancestor origin/main HEAD` — if origin/main is already an ancestor of HEAD (the common case, incl. every fresh build), skip. No-op.
+3. Otherwise `git rebase origin/main`. On success, the branch's base is now current main + the branch's own commits replayed on top. On rebase CONFLICT, `git rebase --abort` (leaving the worktree clean for the reap), stamp the job `needs_attention` with the rebase output captured, release the account, force-remove the worktree, and return — a stale-tree repo-wide check would fail on evidence that's not real, so refusing to run it is the point.
+
+Invariants (see [[mario]] — this is Mario's durable pipeline-reliability fix so the stall class cannot recur): NEVER force-push, NEVER drop WIP commits, NEVER touch main. Only the LOCAL base is advanced; the follow-up phase push and its existing rebase-retry (Phase 2 above) handle a concurrent sibling push idempotently.
+
+Layers with the surrounding protections in `runBuildJob`: the fresh + resume paths (both) do an explicit `git fetch origin <branch>` before the worktree add (Phase 1 above) so the branch tip is fresh; this rebase then advances that tip's BASE to current main; the claude run + tsc + `_check-table-refs-have-migrations.ts` (see `scripts/_check-table-refs-have-migrations.ts`) run on the advanced tree; the phase push at end still has the Phase 2 rebase-retry for the sibling-push race.
+
 ## The shared `update(id, patch)` — the `agent_jobs` write chokepoint
 
 Every job kind funnels its status/error/log_tail transitions through `update(id, patch)`. The function is the single seam where a queue-state PATCH becomes real, so both invariants below sit here — no per-lane plumbing.
