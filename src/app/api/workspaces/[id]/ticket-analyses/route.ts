@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { centralDateStr, centralDayWindowUtc, centralTodayStartUtcIso } from "@/lib/central-day";
 
 // GET — rollup of ticket analyses
 //   ?view=today          — today's score + count + recent issues
@@ -18,11 +19,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const admin = createAdminClient();
 
   if (view === "today") {
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    // "Today" = the Central calendar day (WORKSPACE_TZ), NOT the server's UTC day. setHours(0,0,0,0)
+    // on a Vercel (UTC) box snaps the boundary to UTC-midnight, so at ~7 PM+ Central it rolls "today"
+    // to tomorrow and scoops a full extra UTC day of volume. Anchor to Central. See [[central-day]].
+    const todayIsoStart = centralTodayStartUtcIso();
     const { data } = await admin.from("ticket_analyses")
       .select("id, ticket_id, score, admin_score, issues, summary, created_at")
       .eq("workspace_id", workspaceId)
-      .gte("created_at", todayStart.toISOString())
+      .gte("created_at", todayIsoStart)
       .order("created_at", { ascending: false });
 
     const rows = data || [];
@@ -45,7 +49,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     // Both exclude merged-away duplicates (the survivor carries the conversation) and outbound-only
     // sends (a ticket with no customer message — e.g. a dunning email — is never a handled convo).
     // handled_cheap vs handled_sol splits the low-cost autonomous path from the Sol-handled one.
-    const todayIso = todayStart.toISOString();
+    const todayIso = todayIsoStart;
     const { data: custToday } = await admin.from("ticket_messages")
       .select("ticket_id").eq("author_type", "customer").gte("created_at", todayIso);
     const handledIdSet = Array.from(new Set((custToday || []).map(m => m.ticket_id as string)));
@@ -91,8 +95,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     // to bound the query, then we narrow client-side by joined
     // ticket.updated_at so we don't accidentally miss late-analyzed
     // tickets whose analysis sits in a later UTC day.
-    const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
-    const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+    // `date` is a Central calendar day. Bound the query by the Central day window (UTC instants) and
+    // bucket each analysis by the TICKET's close date rendered in Central — NOT a naive .slice(0,10)
+    // of the UTC ISO, which would push an evening-Central ticket into the next calendar day. [[central-day]].
+    const { start: dayStart } = centralDayWindowUtc(date);
     const wideStart = new Date(new Date(dayStart).getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const wideEnd = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const { data } = await admin
@@ -105,7 +111,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
     const inDay = (data || []).filter((r) => {
       const t = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
-      const key = (t || (r.created_at as string)).slice(0, 10);
+      const key = centralDateStr(t || (r.created_at as string));
       return key === date;
     });
 
@@ -132,7 +138,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const byDate: Record<string, { scores: number[]; issues: Record<string, number>; actions: number; corrected: number }> = {};
   for (const r of (data || [])) {
     const ticketUpdatedAt = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
-    const d = (ticketUpdatedAt || (r.created_at as string)).slice(0, 10);
+    // Bucket by the Central calendar day (WORKSPACE_TZ), not a UTC .slice(0,10) — otherwise an
+    // evening-Central close lands in the next day's row and each daily rollup is off by the
+    // UTC-Central offset for late-in-the-day activity. [[central-day]].
+    const d = centralDateStr(ticketUpdatedAt || (r.created_at as string));
     if (!byDate[d]) byDate[d] = { scores: [], issues: {}, actions: 0, corrected: 0 };
     const score = (r.admin_score ?? r.score) as number | null;
     if (score != null) byDate[d].scores.push(score);
