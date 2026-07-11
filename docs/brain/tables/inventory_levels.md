@@ -41,7 +41,11 @@ All via `createAdminClient()` (service role); RLS is member-**read** only.
 ## Gotchas
 
 - **RAW quantities only** — a 2-pack FBA ASIN reports cases, not units; the ×2 multiplier is applied in the read layer, never stored here.
-- **Deprecation in flight:** `product_variants.inventory_quantity` (stale Store B, read by the AI orchestrator) + `products.variants[].inventory_quantity` (fresh Store A) are both being repointed at this table, then dropped. See [[../functions/logistics]] status.
+- **Deprecation in flight — `product_variants.inventory_quantity` (stale "Store B") → this table.** Read helper: [`src/lib/inventory/read.ts`](../../../src/lib/inventory/read.ts) `getShopifyOnHandByVariant` (live on-hand keyed by Shopify variant id).
+  - ✅ **Done:** the customer-facing AI orchestrator ([`sonnet-orchestrator-v2.ts`](../../../src/lib/sonnet-orchestrator-v2.ts) `getProductKnowledge` + `checkInventory`) now reads canonical, not the stale scalar — this was the real bug (incident 9a7f9481: it read Mixed Berry 3,746 while the truth was 0). The active-crisis OOS override stays as belt-and-suspenders.
+  - **Remaining Store-B readers (internal-only, low-harm):** the [`product-variants.ts`](../../../src/lib/product-variants.ts) SDK selects `inventory_quantity` but its consumers (`api/cart`, `cart-gifts`) don't use it; the admin storefront-products page + its variants API display it; `product-intelligence/seed-tools`. Repoint these to `getShopifyOnHandByVariant`.
+  - **Then drop the column — GATED on merge.** The drop hits the shared prod DB, so it must land only AFTER this branch merges to `main` (so prod's SDK/API/admin stop selecting the column) AND the canonical `inventory_levels(shopify)` sync is deployed + running (it's dual-written by [[../inngest/sync-inventory]], live only post-deploy). Do NOT author the drop migration in a pre-merge branch — on merge it would break prod-`main` readers that still select the column.
+  - `products.variants[].inventory_quantity` (fresh "Store A" JSONB) is the portal's availability source and stays as-is for now (it's fresh); a later phase can point the portal at this table too.
 
 ---
 
