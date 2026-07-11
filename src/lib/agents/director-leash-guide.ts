@@ -17,6 +17,7 @@
  */
 import { LEASH_CATEGORIES as PLATFORM_LEASH } from "@/lib/agents/platform-director";
 import { LEASH_CATEGORIES as GROWTH_LEASH } from "@/lib/agents/growth-director";
+import { LEASH_CATEGORIES as CS_LEASH } from "@/lib/agents/cs-director";
 
 export interface LeashLine {
   title: string;
@@ -41,6 +42,7 @@ export interface LeashGuide {
 const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   platform: PLATFORM_LEASH,
   growth: GROWTH_LEASH,
+  cs: CS_LEASH,
 };
 
 /**
@@ -94,6 +96,19 @@ const CATEGORY_COPY: Record<string, LeashLine> = {
   approve_voice_angle: {
     title: "Approve a tested message angle",
     detail: "I approve a messaging angle or voice that's already passed our review checks.",
+  },
+  // ── CS (June) ──
+  approve_remedy_within_ceiling: {
+    title: "Approve a customer remedy inside our refund ceiling",
+    detail: "A bounded make-good — a coupon, a partial refund, a subscription pause, or resending a lost order — inside the refund ceiling you already approved, fired through the same executor a rep would use.",
+  },
+  author_derived_from_ticket_spec: {
+    title: "Author a derived-from-ticket spec for a product fix",
+    detail: "When the same customer problem keeps landing in tickets, I write it up as a spec on the roadmap under CS so we fix the product instead of remedying the ticket again.",
+  },
+  amend_low_blast_sonnet_prompt: {
+    title: "Amend a low-blast conversation rule",
+    detail: "A small tweak to how our conversation AI answers — narrow enough that its blast radius stays inside the CS workflow, never touching billing or a promise to a customer.",
   },
 };
 
