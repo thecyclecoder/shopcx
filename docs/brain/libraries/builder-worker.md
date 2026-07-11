@@ -181,7 +181,7 @@ Every phase build accumulates a commit(-set) onto the persistent per-spec branch
 
 Phases 1 + 2 defend the git-level branch race; Phase 3 defends the row-level queue race. All three run BEFORE any side effect (worktree side effects for phase 1; the push itself for phase 2; the claim gate + worktree add for phase 3), so a wedged state doesn't need a Control-Tower-level backstop for the common case.
 
-## Rebase-onto-main before repo-wide checks ([[../specs/mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks]])
+## Rebase-onto-main before repo-wide checks
 
 Complement to the phase-push rebase above — this rebase runs on the OTHER side of the build, right after the worktree is set up and BEFORE the claude run + the repo-wide check invocations (`npx tsc --noEmit` and `_check-table-refs-have-migrations.ts`). It restores the invariant those checks assume: origin/main HEAD as the reference tree.
 
