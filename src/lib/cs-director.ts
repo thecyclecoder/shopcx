@@ -62,7 +62,7 @@ import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
 
 /**
  * The verdict shape the CS Director emits — mirrors `CsDirectorVerdict` in
@@ -107,7 +107,7 @@ export interface CsDirectorVerdictInput {
  */
 export interface ApplyBoxCsDirectorCallResult {
   ok: boolean;
-  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "noop";
+  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "noop";
   reason?: string;
   needs_attention?: boolean;
   error?: string;
@@ -1217,6 +1217,15 @@ export async function applyBoxCsDirectorCall(
       return handleAuthorSpec(admin, jobId, job.workspace_id, verdict, authorSpecDeps);
     }
     if (verdict.decision === "escalate_founder") return handleEscalateFounder(admin, jobId, job.workspace_id, verdict);
+
+    // close_no_action — nothing to execute here. The runner's `decideCsDirectorTicketTransition`
+    // closes + de-escalates the ticket; June already reasoned it's a correctly-handled no-op with no
+    // in-leash remedy and no founder call. No CEO card, no remedy fire — just a clean handler tag so
+    // the audit/log_tail reads `handler=close_no_action` instead of the generic drift no-op.
+    if (verdict.decision === "close_no_action") {
+      console.log(`[cs-director:${jobId.slice(0, 8)}] close_no_action — no execution; runner closes + de-escalates.`);
+      return { ok: true, handler: "close_no_action" };
+    }
 
     console.log(`[cs-director:${jobId.slice(0, 8)}] no actionable decision ('${String(verdict.decision)}') — clean no-op`);
     return { ok: true, handler: "noop" };
