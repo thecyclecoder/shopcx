@@ -11,3 +11,13 @@
 # Every entry MUST carry a one-line reason so a future reader knows why it's here.
 # Deleting an entry is a fine sanity check — the CI will loudly re-flag it if the
 # ref really is missing a migration.
+
+# QuickBooks logistics-integration tables (Marco). Created + populated by the QB sync OUTSIDE the
+# migration system; all present in prod. Referenced by src/lib/logistics/{cover,replenishment-data,
+# crisis-forecast}.ts. Backfilled creating migrations are owned by logistics (tracked) — allowlisted
+# to unblock the global check; not views/RPCs but genuinely external-sync-created.
+qb_external_skus
+qb_item_bom
+qb_items
+qb_manual_inventory
+qb_sku_mappings
