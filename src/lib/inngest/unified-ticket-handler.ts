@@ -34,6 +34,7 @@ import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThres
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
+import { clearDispatchIntent } from "./dispatch-inbound-message";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -665,6 +666,13 @@ export const unifiedTicketHandler = inngest.createFunction(
     };
     const t0 = new Date().toISOString();
     const admin = createAdminClient();
+
+    // Phase 2 of durable-inbound-dispatch-no-silently-lost-ticket-event: claim the durable
+    // dispatch-intent stamped by [[dispatch-inbound-message]] before we branch on ANY gate. This
+    // event arrived — that is what the intent tracks — so clear it regardless of the outcome
+    // (skip, decline, real turn). An un-cleared stamp older than the Phase-3 settle window is now
+    // the unambiguous "lost send" signal the backstop reconciler acts on.
+    await clearDispatchIntent(admin, tid);
 
     // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw). THE crucial loop —
     // if this handler silently stops, customers go unanswered. (control-tower-complete-coverage P1.)

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
 import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 export async function POST(
   req: NextRequest,
@@ -243,15 +243,15 @@ export async function POST(
       .single();
 
     if (ticket && shouldDispatchInboundMessage(ticket)) {
-      await inngest.send({
-        name: "ticket/inbound-message",
-        data: {
-          workspace_id: workspaceId,
-          ticket_id: ticketId,
-          message_body: message,
-          channel: "chat",
-          is_new_ticket: false,
-        },
+      // Phase 2 durable dispatch — stamps dispatch_pending_at on msg then fires the event.
+      await dispatchInboundMessage({
+        admin,
+        workspaceId,
+        ticketId,
+        messageBody: message,
+        channel: "chat",
+        isNewTicket: false,
+        dispatchMessageId: msg?.id ?? null,
       });
 
       return NextResponse.json({

@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { validateTwilioSignature } from "@/lib/twilio";
 import { evaluateRules } from "@/lib/rules-engine";
-import { inngest } from "@/lib/inngest/client";
 import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -114,15 +114,15 @@ export async function POST(request: Request) {
   }
 
   if (ticketId) {
-    // Add message to existing ticket
-    await admin.from("ticket_messages").insert({
+    // Add message to existing ticket — capture the row id so Phase-2 dispatch can stamp intent.
+    const { data: insertedMsg } = await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: messageBody,
       sms_message_id: messageSid || null,
-    });
+    }).select("id").single();
 
     // Reopen if closed/pending
     const { data: ticket } = await admin
@@ -164,15 +164,14 @@ export async function POST(request: Request) {
         .single();
 
       if (aiConfig?.enabled && shouldDispatchInboundMessage(ticketData)) {
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: {
-            workspace_id: workspaceId,
-            ticket_id: ticketId,
-            message_body: messageBody,
-            channel: "sms",
-            is_new_ticket: false,
-          },
+        await dispatchInboundMessage({
+          admin,
+          workspaceId,
+          ticketId,
+          messageBody,
+          channel: "sms",
+          isNewTicket: false,
+          dispatchMessageId: insertedMsg?.id ?? null,
         });
       }
     }
@@ -193,14 +192,14 @@ export async function POST(request: Request) {
       .single();
 
     if (ticket) {
-      await admin.from("ticket_messages").insert({
+      const { data: newMsg } = await admin.from("ticket_messages").insert({
         ticket_id: ticket.id,
         direction: "inbound",
         visibility: "external",
         author_type: "customer",
         body: messageBody,
         sms_message_id: messageSid || null,
-      });
+      }).select("id").single();
 
       // Check if AI is enabled for SMS channel
       const { data: aiConfig } = await admin
@@ -220,9 +219,14 @@ export async function POST(request: Request) {
           pending_auto_reply: "AI is drafting a response...",
         }).eq("id", ticket.id);
 
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: messageBody, channel: "sms", is_new_ticket: true },
+        await dispatchInboundMessage({
+          admin,
+          workspaceId,
+          ticketId: ticket.id,
+          messageBody,
+          channel: "sms",
+          isNewTicket: true,
+          dispatchMessageId: newMsg?.id ?? null,
         });
       }
 

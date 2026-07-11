@@ -6,9 +6,9 @@ import { cleanEmailBody } from "@/lib/email-cleaner";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
-import { inngest } from "@/lib/inngest/client";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 // Positive close detection moved to unified ticket handler
 // Fetch email body from Resend's receiving API
@@ -214,8 +214,8 @@ export async function POST(request: Request) {
     // Deep clean for AI: strip HTML, signatures, quoted history, noise
     const bodyClean = cleanEmailBody(cleanBody, fromEmail);
 
-    // Add message to existing ticket
-    await admin.from("ticket_messages").insert({
+    // Add message to existing ticket — capture the row id so Phase-2 dispatch can stamp intent.
+    const { data: emailInsertedMsg } = await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
       direction: "inbound",
       visibility: "external",
@@ -223,7 +223,7 @@ export async function POST(request: Request) {
       body: cleanBody,
       body_clean: bodyClean,
       email_message_id: messageId,
-    });
+    }).select("id").single();
 
     // Check if this is a positive confirmation on a smart-tagged ticket
     const { data: ticket } = await admin
@@ -279,15 +279,14 @@ export async function POST(request: Request) {
       const wasReopenedFromClosed = ticket && (ticket.status === "pending" || ticket.status === "closed");
       const gateOk = shouldDispatchInboundMessage(ticketData);
       if (aiConfig?.enabled && (gateOk || wasReopenedFromClosed)) {
-        await inngest.send({
-          name: "ticket/inbound-message",
-          data: {
-            workspace_id: workspaceId,
-            ticket_id: ticketId,
-            message_body: bodyClean,
-            channel: "email",
-            is_new_ticket: false,
-          },
+        await dispatchInboundMessage({
+          admin,
+          workspaceId,
+          ticketId,
+          messageBody: bodyClean,
+          channel: "email",
+          isNewTicket: false,
+          dispatchMessageId: emailInsertedMsg?.id ?? null,
         });
       }
     }
@@ -357,11 +356,11 @@ export async function POST(request: Request) {
             const cleanBody = stripQuotedReply(messageBody) || messageBody;
             const bodyClean = cleanEmailBody(cleanBody, fromEmail);
 
-            await admin.from("ticket_messages").insert({
+            const { data: crisisMsg } = await admin.from("ticket_messages").insert({
               ticket_id: crisisTicket.id,
               direction: "inbound", visibility: "external", author_type: "customer",
               body: cleanBody, body_clean: bodyClean, email_message_id: messageId,
-            });
+            }).select("id").single();
 
             // Reopen if closed/pending
             if (crisisTicket.status === "closed" || crisisTicket.status === "pending") {
@@ -384,16 +383,15 @@ export async function POST(request: Request) {
               body: `[System] Auto-merged inbound email (would have created new ticket). Subject: "${subject}"`,
             });
 
-            // Dispatch to unified handler with crisis context
-            await inngest.send({
-              name: "ticket/inbound-message",
-              data: {
-                workspace_id: workspaceId,
-                ticket_id: crisisTicket.id,
-                message_body: bodyClean || messageBody || subject || "",
-                channel: "email",
-                is_new_ticket: false,
-              },
+            // Dispatch to unified handler with crisis context — Phase 2 durable dispatch.
+            await dispatchInboundMessage({
+              admin,
+              workspaceId,
+              ticketId: crisisTicket.id,
+              messageBody: bodyClean || messageBody || subject || "",
+              channel: "email",
+              isNewTicket: false,
+              dispatchMessageId: crisisMsg?.id ?? null,
             });
 
             return NextResponse.json({ ok: true });
@@ -420,7 +418,7 @@ export async function POST(request: Request) {
 
     if (ticket) {
       const newBodyClean = cleanEmailBody(messageBody, fromEmail);
-      await admin.from("ticket_messages").insert({
+      const { data: newTicketMsg } = await admin.from("ticket_messages").insert({
         ticket_id: ticket.id,
         direction: "inbound",
         visibility: "external",
@@ -428,7 +426,7 @@ export async function POST(request: Request) {
         body: messageBody,
         body_clean: newBodyClean,
         email_message_id: messageId,
-      });
+      }).select("id").single();
 
       await logCustomerEvent({
         workspaceId,
@@ -447,10 +445,15 @@ export async function POST(request: Request) {
         subject: subject || "(No subject)",
       }).catch(() => {});
 
-      // Unified handler handles all routing: journey → workflow → macro → KB → escalate
-      await inngest.send({
-        name: "ticket/inbound-message",
-        data: { workspace_id: workspaceId, ticket_id: ticket.id, message_body: newBodyClean || messageBody || subject || "", channel: "email", is_new_ticket: true },
+      // Unified handler handles all routing — Phase 2 durable dispatch.
+      await dispatchInboundMessage({
+        admin,
+        workspaceId,
+        ticketId: ticket.id,
+        messageBody: newBodyClean || messageBody || subject || "",
+        channel: "email",
+        isNewTicket: true,
+        dispatchMessageId: newTicketMsg?.id ?? null,
       });
 
       // Evaluate rules for new ticket (tags are set, so rules can trigger on them)
