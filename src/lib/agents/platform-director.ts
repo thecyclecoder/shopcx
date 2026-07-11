@@ -45,7 +45,6 @@ import {
   type OrgChartGraph,
 } from "@/lib/agents/approval-router";
 import {
-  ownerFunctionForKind,
   routingOwnerForJobAsync,
   inlineApproveActionId,
   buildApprovalContent,
@@ -54,6 +53,9 @@ import {
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
+// control-tower-canonical-node-registry P2 — routing owner comes from the canonical registry so
+// the platform-director's leash + the approval router agree on every kind by construction.
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import { setSpecStatus } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
@@ -150,7 +152,7 @@ export function platformIsAutoApprover(autonomy: AutonomyMap): boolean {
 
 /** Does an approval raised by `kind` route to the Platform director, given the live chart + flags? */
 export function routesToPlatform(kind: string, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
-  return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === PLATFORM;
+  return resolveApprover(resolveNodeOwner(kind), chart, autonomy) === PLATFORM;
 }
 
 /**
@@ -451,7 +453,7 @@ export async function applyDirectorApproval(
     // One ledger row per approval. For a single action keep its id; for a bundle the row keys on the job
     // (the grader reads approval_decision_id, not the action), so pending_action_id is null.
     pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
-    raisedByFunction: ownerFunctionForKind(target.kind) ?? CEO,
+    raisedByFunction: resolveNodeOwner(target.kind) ?? CEO,
     routedToFunction: PLATFORM,
     decidedBy: "director",
     decision: "approved",
@@ -1711,7 +1713,7 @@ export async function escalateApprovalRequestToCeo(
     agent_job_id: target.id,
     kind: target.kind,
     spec_slug: target.spec_slug ?? null,
-    raised_by_function: ownerFunctionForKind(target.kind) ?? CEO,
+    raised_by_function: resolveNodeOwner(target.kind) ?? CEO,
     routed_to_function: CEO,
     approve_action_id: inlineApproveActionId(target as unknown as ApprovalJobRow),
     deep_link: approvalDeepLink(target.kind, target.spec_slug ?? null),

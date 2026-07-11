@@ -446,7 +446,7 @@ test("routingOwnerForJob: honors routed_to_function_override='ceo' explicitly on
   assert.equal(routingOwnerForJob(job), "ceo");
 });
 
-test("routingOwnerForJob: falls through to KIND_TO_FUNCTION when no valid override is present", () => {
+test("routingOwnerForJob: falls through to the canonical node registry / KIND_TO_FUNCTION_SHIM when no valid override is present", () => {
   const job = {
     kind: "ceo-authorized-out-of-leash",
     pending_actions: [
@@ -459,8 +459,14 @@ test("routingOwnerForJob: falls through to KIND_TO_FUNCTION when no valid overri
       },
     ],
   };
-  // ceo-authorized-out-of-leash is UNMAPPED in KIND_TO_FUNCTION → null → CEO fail-safe.
-  assert.equal(routingOwnerForJob(job), null);
+  // control-tower-canonical-node-registry P2 — `ceo-authorized-out-of-leash` is now a first-class
+  // Node in the canonical registry with owner=`ceo` (Eve's / the founder's own lane), so
+  // ownerFunctionForKind returns "ceo" explicitly. resolveApprover("ceo", …) returns CEO the same
+  // way the historical null fail-safe did — the routing terminus is unchanged, only the
+  // intermediate value is now explicit. The load-bearing invariant this test pins is that a
+  // rejected override doesn't sway routing to Platform; asserting the terminal CEO seat is the
+  // canonical check.
+  assert.equal(routingOwnerForJob(job), "ceo");
 });
 
 // ── secure-destructive-migration-preapproval-boundary ─────────────────────────
@@ -565,9 +571,9 @@ test("(sec)(4) routingOwnerForJob IGNORES routed_to_function_override on every u
         },
       ],
     };
-    // The override MUST NOT be honored. `platform` might coincidentally match KIND_TO_FUNCTION
-    // for some kinds (e.g. build), so assert that the returned value is NOT influenced by the
-    // hand-installed override on kinds where the map default differs.
+    // The override MUST NOT be honored. `platform` might coincidentally match the canonical node
+    // registry's owner for some kinds (e.g. build → agent:build → platform), so assert that the
+    // returned value is NOT influenced by the hand-installed override on kinds where the map default differs.
     const withoutOverride = routingOwnerForJob({ kind, pending_actions: [{ id: "x", type: "apply_migration", status: "pending" }] });
     assert.equal(routingOwnerForJob(job), withoutOverride, `override must not sway routing on kind=${kind}`);
   }
@@ -586,8 +592,10 @@ test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override on a run
       },
     ],
   };
-  // The action type gate rejects the override — falls through to null (CEO fail-safe).
-  assert.equal(routingOwnerForJob(job), null);
+  // The action type gate rejects the override — falls through to the canonical registry's
+  // owner for the raiser (`ceo-authorized-out-of-leash` → owner=`ceo`, control-tower-canonical-
+  // node-registry P2). Both null and "ceo" route to the CEO seat via resolveApprover.
+  assert.equal(routingOwnerForJob(job), "ceo");
 });
 
 test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when action.blastRadius.severity is additive", () => {
@@ -603,7 +611,7 @@ test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when act
       },
     ],
   };
-  assert.equal(routingOwnerForJob(job), null);
+  assert.equal(routingOwnerForJob(job), "ceo");
 });
 
 test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when action.blastRadius.severity is irreversible_destructive", () => {
@@ -619,7 +627,7 @@ test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when act
       },
     ],
   };
-  assert.equal(routingOwnerForJob(job), null);
+  assert.equal(routingOwnerForJob(job), "ceo");
 });
 
 test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when blastRadius is missing entirely (malformed input)", () => {
@@ -629,7 +637,7 @@ test("(sec)(4) routingOwnerForJob IGNORES a routed_to_function_override when bla
       { id: "a1", type: "apply_migration", status: "pending", routed_to_function_override: "platform" },
     ],
   };
-  assert.equal(routingOwnerForJob(job), null);
+  assert.equal(routingOwnerForJob(job), "ceo");
 });
 
 // ── Phase 5: adversarial skeptic pass ─────────────────────────────────────────
