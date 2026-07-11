@@ -110,3 +110,157 @@ test("row with null/empty why/what → no `**Why:**`/`**What:**` line emitted (s
   assert.doesNotMatch(md, /\*\*Why:\*\*/);
   assert.doesNotMatch(md, /\*\*What:\*\*/);
 });
+
+// render-spec-row-emits-stored-why-what-intent Phase 2 — NO DOUBLE EMIT. Some already-shipped specs baked
+// `**Why:**`/`**What:**` into the summary body or phase body as a stopgap (marco-logistics-director-seat,
+// director-chat-in-leash-execution). When the inline stopgap is present, the column-sourced line MUST be
+// skipped so the render carries exactly one of each — never a duplicate.
+function countLines(md: string, prefix: string): number {
+  return md.split("\n").filter((l) => l.startsWith(prefix)).length;
+}
+
+test("summary already leads with **Why:** → do NOT emit the spec-level column Why (no duplicate)", () => {
+  const md = renderSpecRow(
+    rowWith([{ id: "p1", title: "One", body: "b", verification: "- v" }], {
+      why: "column-sourced why",
+      what: null,
+      summary: "**Why:** inline stopgap why\n\nrest of summary",
+    }),
+  );
+  assert.equal(countLines(md, "**Why:**"), 1);
+  assert.match(md, /\*\*Why:\*\* inline stopgap why/);
+  assert.doesNotMatch(md, /\*\*Why:\*\* column-sourced why/);
+});
+
+test("summary already leads with **What:** → do NOT emit the spec-level column What (no duplicate)", () => {
+  const md = renderSpecRow(
+    rowWith([{ id: "p1", title: "One", body: "b", verification: "- v" }], {
+      why: null,
+      what: "column-sourced what",
+      summary: "**What:** inline stopgap what\n\nrest",
+    }),
+  );
+  assert.equal(countLines(md, "**What:**"), 1);
+  assert.match(md, /\*\*What:\*\* inline stopgap what/);
+  assert.doesNotMatch(md, /\*\*What:\*\* column-sourced what/);
+});
+
+test("summary carries inline **Why:** but NOT **What:** → column-sourced What still emits, Why does not", () => {
+  const md = renderSpecRow(
+    rowWith([{ id: "p1", title: "One", body: "b", verification: "- v" }], {
+      why: "column why",
+      what: "column what",
+      summary: "**Why:** inline why\n\nbody",
+    }),
+  );
+  assert.equal(countLines(md, "**Why:**"), 1);
+  assert.equal(countLines(md, "**What:**"), 1);
+  assert.match(md, /\*\*Why:\*\* inline why/);
+  assert.match(md, /\*\*What:\*\* column what/);
+});
+
+test("phase body already leads with **Why:** → do NOT emit the phase-level column Why", () => {
+  const md = renderSpecRow(
+    rowWith([
+      {
+        id: "p1",
+        title: "One",
+        body: "**Why:** inline phase why\n\nphase body",
+        verification: "- v",
+        why: "column phase why",
+        what: null,
+      },
+    ]),
+  );
+  assert.equal(countLines(md, "**Why:**"), 1);
+  assert.match(md, /\*\*Why:\*\* inline phase why/);
+  assert.doesNotMatch(md, /\*\*Why:\*\* column phase why/);
+});
+
+test("phase body already leads with **What:** → do NOT emit the phase-level column What", () => {
+  const md = renderSpecRow(
+    rowWith([
+      {
+        id: "p1",
+        title: "One",
+        body: "**What:** inline phase what",
+        verification: "- v",
+        why: null,
+        what: "column phase what",
+      },
+    ]),
+  );
+  assert.equal(countLines(md, "**What:**"), 1);
+  assert.match(md, /\*\*What:\*\* inline phase what/);
+  assert.doesNotMatch(md, /\*\*What:\*\* column phase what/);
+});
+
+test("column-only intent at both levels → exactly one **Why:**/**What:** at each level (no duplicate)", () => {
+  const md = renderSpecRow(
+    rowWith(
+      [
+        {
+          id: "p1",
+          title: "First",
+          body: "plain phase body no inline intent",
+          verification: "- v",
+          why: "phase why",
+          what: "phase what",
+        },
+        {
+          id: "p2",
+          title: "Second",
+          body: "another plain body",
+          verification: "- v",
+          why: "second phase why",
+          what: "second phase what",
+        },
+      ],
+      { why: "spec why", what: "spec what", summary: "plain summary no inline intent" },
+    ),
+  );
+  // 1 spec-level Why + 2 phase-level Whys = 3 total; same for What.
+  assert.equal(countLines(md, "**Why:**"), 3);
+  assert.equal(countLines(md, "**What:**"), 3);
+});
+
+test("mixed: spec inline, one phase inline, one phase column-only → exactly one line at each locus", () => {
+  const md = renderSpecRow(
+    rowWith(
+      [
+        {
+          id: "p1",
+          title: "First",
+          body: "**Why:** phase-1 inline why\n\nrest",
+          verification: "- v",
+          why: "phase-1 column why (should be skipped)",
+          what: "phase-1 column what",
+        },
+        {
+          id: "p2",
+          title: "Second",
+          body: "plain body",
+          verification: "- v",
+          why: "phase-2 column why",
+          what: "phase-2 column what",
+        },
+      ],
+      {
+        why: "spec column why (should be skipped)",
+        what: "spec column what",
+        summary: "**Why:** spec inline why\n\nrest of summary",
+      },
+    ),
+  );
+  // Spec level: 1 Why (inline wins), 1 What (column emitted).
+  // Phase 1: 1 Why (inline wins), 1 What (column emitted).
+  // Phase 2: 1 Why (column), 1 What (column).
+  // Total: 3 Why, 3 What.
+  assert.equal(countLines(md, "**Why:**"), 3);
+  assert.equal(countLines(md, "**What:**"), 3);
+  assert.doesNotMatch(md, /\*\*Why:\*\* spec column why/);
+  assert.doesNotMatch(md, /\*\*Why:\*\* phase-1 column why/);
+  assert.match(md, /\*\*Why:\*\* spec inline why/);
+  assert.match(md, /\*\*Why:\*\* phase-1 inline why/);
+  assert.match(md, /\*\*Why:\*\* phase-2 column why/);
+});
