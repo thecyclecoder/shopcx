@@ -14,7 +14,7 @@ Daily FBA inventory sync. SP-API `getInventorySummaries` → canonical [[../tabl
 
 ## Downstream events sent
 
-_None._ Emits a control-tower heartbeat.
+_None._ Emits a `sync-fba-inventory-cron` [[../libraries/control-tower]] heartbeat (owner `platform`, for loop-liveness monitoring).
 
 ## Tables written
 
