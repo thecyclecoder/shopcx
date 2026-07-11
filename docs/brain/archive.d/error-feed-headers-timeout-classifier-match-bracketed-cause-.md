@@ -1,0 +1,1 @@
+- **Extend the undici headers-timeout classifier to match Node's bracketed wrapped-error shape** · verified 2026-07-11 · → [[../libraries/control-tower]]
