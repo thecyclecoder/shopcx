@@ -17,6 +17,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, type ScoredAngle } from "@/lib/ads/creative-brief";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
+import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative } from "@/lib/ads/creative-qa";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
@@ -157,7 +158,26 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
   const productTitle = product.title ?? "Product";
 
   const stories = await loadTransformationStories(admin, workspaceId, productId);
-  const ranked = selectAngles(pi, stories);
+  const ownAngles = selectAngles(pi, stories);
+
+  // Pool in PROVEN competitor angles (CEO 2026-07-11): market-validated hooks + their winning GRAPHIC,
+  // ranked by days-running. A few, so they don't crowd our own concepts. Each carries its image so the
+  // generator can do COMPOSITION TRANSFER — reuse the competitor's winning layout, swap in our content.
+  const niche = /coffee/i.test(product.handle) ? "coffee" : "weight";
+  const competitorAngles: ScoredAngle[] = (await getProvenCompetitorAngles(admin, workspaceId, { niche, minDaysRunning: 45, limit: 6 }).catch(() => []))
+    .filter((c) => c.hook)
+    .map((c) => ({
+      hook: c.hook as string,
+      source: "competitor",
+      leadBenefit: c.mechanismClaim ?? "proven competitor angle",
+      acquisitionPower: 9, // proven in market
+      retentionTruth: 5,
+      commodity: false,
+      hasRealPhoto: false,
+      reasons: [`proven competitor ad (${c.daysRunning ?? "?"}d running${c.advertiser ? `, ${c.advertiser}` : ""})`],
+      raw: { imageUrl: c.imageUrl, mechanism: c.mechanismClaim, proof: c.proof } as Record<string, unknown>,
+    }));
+  const ranked = [...competitorAngles, ...ownAngles];
 
   // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
   // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
@@ -211,7 +231,11 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed; attempt++) {
       try {
         const brief = await buildCreativeBrief(pi, angle, stories);
-        const gen = await generateCreative(workspaceId, brief, { treatment });
+        // Competitor-sourced angle → COMPOSITION TRANSFER: pass its winning graphic as the design
+        // reference and instruct Nano Banana to keep the layout but swap in our product/copy/proof.
+        const isCompetitor = angle.source === "competitor";
+        const refUrl = isCompetitor ? (angle.raw?.imageUrl as string | undefined) : undefined;
+        const gen = await generateCreative(workspaceId, brief, { treatment, designReferenceUrl: refUrl, compositionTransfer: isCompetitor && !!refUrl });
         const verdict = await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         const metaCopy = {
