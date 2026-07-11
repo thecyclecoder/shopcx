@@ -259,6 +259,22 @@ export async function loadActivePolicy(
   }
 }
 
+/**
+ * The on/off switch for THIS engine's 4a autonomous ad actions (pause/scale/replenish) — CEO 2026-07-11.
+ * `workspaces.meta_autonomous_actions_enabled`. Default OFF (absent/null/false ⇒ disabled) so the media
+ * buyer (Bianca) is the sole owner of live ad actions; only an explicit `true` re-enables the standalone
+ * engine's autonomous scaling. Flip with: `update workspaces set meta_autonomous_actions_enabled = <bool>`.
+ */
+export async function isMetaAutonomousActionsEnabled(workspaceId: string): Promise<boolean> {
+  const admin = createAdminClient();
+  try {
+    const { data } = await admin.from("workspaces").select("meta_autonomous_actions_enabled").eq("id", workspaceId).maybeSingle();
+    return (data as { meta_autonomous_actions_enabled?: boolean } | null)?.meta_autonomous_actions_enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Recent actions on this account (Phase 4c `iteration_actions`) — for cooldown +
  * graduated-failure (was-recently-scaled, last-pause). Empty when the table is absent. */
 interface RecentAction {
@@ -921,13 +937,18 @@ export async function runDecisionEngine(
   };
   const actionableRows = allRows.filter(passesThreshold);
 
-  // ── 4a — autonomous actions (only when a policy is active) ────────────────────
+  // ── 4a — autonomous actions (only when a policy is active AND the toggle is on) ───────────────────
+  // On/off switch (CEO 2026-07-11): `workspaces.meta_autonomous_actions_enabled`. When OFF, this engine's
+  // 4a autonomous pause/scale/replenish is SKIPPED — the media buyer (Bianca) is the sole owner of live
+  // ad actions, so two systems don't fight over the same account. 4b recommendations + the scorecards +
+  // the executor keep running (Bianca depends on them). Flip it back on with the same column.
   const policy = await loadActivePolicy(p.workspaceId, p.adAccountId);
+  const autonomousEnabled = await isMetaAutonomousActionsEnabled(p.workspaceId);
   let actions: ComputedAction[] = [];
   let escalations: ComputedAction[] = [];
   const counts = ZERO_COUNTS();
 
-  if (policy) {
+  if (policy && autonomousEnabled) {
     const adsetCampaignRows = actionableRows.filter((r) => r.level === "adset" || r.level === "campaign");
     const budgets = await loadBudgets(p.adAccountId, adsetCampaignRows);
     const lookbackDays = Math.max(policy.unpause_lookback_days, Math.ceil(policy.per_object_cooldown_hours / 24), 7);
