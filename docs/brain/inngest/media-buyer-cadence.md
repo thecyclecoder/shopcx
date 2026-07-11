@@ -15,7 +15,7 @@ The daily cadence cron that enqueues the Media Buyer agent across every ACTIVE [
 ### `media-buyer-cadence-sweep`
 - **Trigger:** event `growth/media-buyer-cadence-sweep` (data: `{ workspace_id, trigger? }`)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.workspace_id" }]`, `retries: 1`
-- **What it does:** calls `dispatchMediaBuyerCadence(admin, workspace_id)` which (1) selects every active cohort row for the workspace, (2) reads every `kind='media-buyer'` [[../tables/agent_jobs]] row for the workspace created since the current UTC day's midnight, (3) inserts one new `agent_jobs` row per cohort whose `meta_ad_account_id` pair isn't already covered by an unfinished job today. Each insert carries `instructions = { meta_ad_account_id }` (verbatim from the cohort row) so the [[../libraries/media-buyer-agent]] runner narrows to that account; a workspace-wide cohort writes `meta_ad_account_id: null` so the runner fans out across every connected account. An "unfinished" job is one whose `status` ∈ `queued|claimed|building|needs_input|needs_approval|queued_resume|blocked_on_usage` (the `ACTIVE_MEDIA_BUYER_JOB_STATUSES` set).
+- **What it does:** calls `dispatchMediaBuyerCadence(admin, workspace_id)` which (1) selects every active cohort row for the workspace, (2) reads every `kind='media-buyer'` [[../tables/agent_jobs]] row for the workspace created since the current UTC day's midnight, (3) inserts one new `agent_jobs` row per cohort whose `meta_ad_account_id` pair isn't already covered by an unfinished job today. Each insert carries `instructions = { meta_ad_account_id }` (verbatim from the cohort row) so the [[../libraries/media-buyer-agent]] runner narrows to that account; a workspace-wide cohort writes `meta_ad_account_id: null` so the runner fans out across every connected account. The insert also stamps `spec_slug = mediaBuyerSpecSlug(account)` — a per-cadence-slot key (`media-buyer:<account-id>` per-account, `media-buyer:workspace` workspace-wide) so the `agent_jobs.spec_slug NOT NULL` column is satisfied and the Roadmap rollup index (`agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)`) groups a slot's history. An "unfinished" job is one whose `status` ∈ `queued|claimed|building|needs_input|needs_approval|queued_resume|blocked_on_usage` (the `ACTIVE_MEDIA_BUYER_JOB_STATUSES` set).
 - **Returns** `{ status: "complete", evaluated, dispatched }`.
 
 ## Idempotency
@@ -38,7 +38,7 @@ Downstream side effect from the sweep is a `kind='media-buyer'` [[../tables/agen
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (one `kind='media-buyer'` row per new (workspace, meta_ad_account_id) pair — `instructions = { meta_ad_account_id }`)
+- [[../tables/agent_jobs]] (one `kind='media-buyer'` row per new (workspace, meta_ad_account_id) pair — `instructions = { meta_ad_account_id }`, `spec_slug = media-buyer:<account-id>` or `media-buyer:workspace`)
 - [[../tables/loop_heartbeats]] (its own end-of-run beat)
 
 ## Tables read (not written)

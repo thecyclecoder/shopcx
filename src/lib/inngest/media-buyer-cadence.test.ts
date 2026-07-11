@@ -14,6 +14,7 @@ import {
   dispatchMediaBuyerCadence,
   utcDayStartIso,
   ACTIVE_MEDIA_BUYER_JOB_STATUSES,
+  mediaBuyerSpecSlug,
 } from "./media-buyer-cadence";
 
 // ── Fake admin client (mirrors src/lib/media-buyer/publish-gate.test.ts) ─────
@@ -137,7 +138,26 @@ test("dispatchMediaBuyerCadence — workspace-wide + per-account cohorts → 2 j
   for (const j of jobs) {
     assert.equal(j.kind, "media-buyer");
     assert.equal(j.workspace_id, WS);
+    assert.ok(
+      typeof j.spec_slug === "string" && j.spec_slug.length > 0,
+      `spec_slug must be a non-empty string (NOT NULL column) — got ${String(j.spec_slug)}`,
+    );
   }
+  const slugByAccount = new Map(
+    jobs.map((j) => [
+      JSON.parse(String(j.instructions)).meta_ad_account_id as string | null,
+      j.spec_slug as string,
+    ]),
+  );
+  assert.equal(slugByAccount.get(ACCT_A), `media-buyer:${ACCT_A}`);
+  assert.equal(slugByAccount.get(null), "media-buyer:workspace");
+});
+
+test("mediaBuyerSpecSlug — deterministic per account, distinct workspace-wide bucket", () => {
+  assert.equal(mediaBuyerSpecSlug(null), "media-buyer:workspace");
+  assert.equal(mediaBuyerSpecSlug(ACCT_A), `media-buyer:${ACCT_A}`);
+  assert.notEqual(mediaBuyerSpecSlug(ACCT_A), mediaBuyerSpecSlug(ACCT_B));
+  assert.equal(mediaBuyerSpecSlug(ACCT_A), mediaBuyerSpecSlug(ACCT_A));
 });
 
 test("dispatchMediaBuyerCadence — inactive cohort is IGNORED", async () => {
