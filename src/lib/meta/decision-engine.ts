@@ -90,6 +90,21 @@ export interface IterationPolicy {
    *  iteration_actions / ad_publish_jobs writes) or `armed` (pre-shadow behavior). Fresh
    *  policies default to `shadow`; the flip to `armed` is a separate, audited surface. */
   mode: "shadow" | "armed";
+  /** Media-buyer "trust Meta's reported signal" (CEO 2026-07-10). When true, the runtime detects
+   *  winners/losers on Meta's REPORTED CPA (meta_insights_daily via iteration_scorecards_daily) and the
+   *  sensor-trust gate trusts Meta (freshness, not internal-resolve coverage). See
+   *  [[../../media-buyer/agent]]. */
+  trust_meta_reported_signal: boolean;
+  /** Crown a winner only at Meta-reported CPA (spend/purchases) ≤ this (cents); null = ROAS-floor path. */
+  crown_max_cpa_cents: number | null;
+  /** ...AND ≥ this much Meta spend (cents) — the verdict floor (e.g. 45000 = $450). */
+  crown_min_spend_cents: number | null;
+  /** Trim a loser early once it has ≥ this spend (cents), judged on the LEADING signals below. */
+  early_trim_min_spend_cents: number | null;
+  /** Early trim if cost-per-ATC (spend ÷ add_to_cart) > this (cents) — the primary leading signal. */
+  trim_max_cost_per_atc_cents: number | null;
+  /** ...or if CPM (spend per 1000 impressions) > this (cents) — Meta disfavoring the ad. */
+  trim_max_cpm_cents: number | null;
 }
 
 export type AutonomousActionType =
@@ -230,6 +245,14 @@ export async function loadActivePolicy(
       // Safety branch (media-buyer-shadow-mode Phase 1). Absent column ⇒ shadow — a workspace
       // reading the engine before the migration lands still gets the CEO's safe default.
       mode: p.mode === "armed" ? "armed" : "shadow",
+      // Trust-Meta signal (CEO 2026-07-10). Absent column ⇒ false — pre-migration workspaces keep the
+      // internal-resolve ROAS behavior; only a policy that opts in trusts Meta's reported CPA.
+      trust_meta_reported_signal: p.trust_meta_reported_signal === true,
+      crown_max_cpa_cents: p.crown_max_cpa_cents == null ? null : Number(p.crown_max_cpa_cents),
+      crown_min_spend_cents: p.crown_min_spend_cents == null ? null : Number(p.crown_min_spend_cents),
+      early_trim_min_spend_cents: p.early_trim_min_spend_cents == null ? null : Number(p.early_trim_min_spend_cents),
+      trim_max_cost_per_atc_cents: p.trim_max_cost_per_atc_cents == null ? null : Number(p.trim_max_cost_per_atc_cents),
+      trim_max_cpm_cents: p.trim_max_cpm_cents == null ? null : Number(p.trim_max_cpm_cents),
     };
   } catch {
     return null;

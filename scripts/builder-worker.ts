@@ -4421,10 +4421,11 @@ async function runDbHealthJob(job: Job) {
 //      instructions.entry so the owner has a one-tap remediation path. Never let a MissingVerification
 //      throw escape as a generic "agent produced no verdict" backstop, and never park with a bare
 //      one-word error — a coverage gap left with no explanation reads as unresolved-and-abandoned.
-//   4. When the underlying entry falls through to inferOwner's low-confidence platform placeholder
-//      (see coverage-register-agent.ts inferOwner returning null on unknown ids), the description
-//      already flags "REQUIRES OWNER CONFIRMATION" — no additional gate needed here; the owner sees
-//      the warning in the fix spec body before tapping Build.
+//   4. coverage-register-always-platform (CEO directive, 2026-07): a monitored-loop entry is ALWAYS
+//      `platform`-owned (loop LIVENESS is a platform-reliability concern). inferLoopEntry no longer uses
+//      inferOwner's per-domain guess or a low-confidence "REQUIRES OWNER CONFIRMATION" placeholder — the
+//      owner is platform, every time. The register/exempt bodies carry **Why:**/**What:** intent so they
+//      author cleanly through the intent-gated chokepoint (the upsertSpec self-gate requires spec why/what).
 async function runCoverageRegisterJob(job: Job) {
   const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
   let instr: {
@@ -11322,9 +11323,12 @@ async function runTicketHandleJob(job: Job) {
             // above (bait / claim / honor) still ran against firstReply — the customer output is
             // a CTA carrying that reply as the leadIn, so the invariants hold.
             let launchedStandaloneJourney = false;
-            // sol-closes-ticket-on-resolving-reply: sendOk gates the close decision below. Set true
-            // ONLY when the plain reply is delivered (the fallback send). A launched standalone journey
-            // leaves sendOk=false so the ticket stays OPEN — the journey owns status from here.
+            // sol-closes-ticket-on-resolving-reply: `sendOk` is set true ONLY when the plain reply is
+            // delivered (the fallback send) or an explicit chosen_path='journey' launches. A standalone
+            // journey launch leaves sendOk=false and instead records success on `launchedStandaloneJourney`
+            // — the close decision below (§11441) fires on EITHER signal, so a delivered CTA closes the
+            // ticket regardless of which journey path launched it (a customer reply reopens it; the
+            // journey token carries its own state).
             let sendOk = false;
             // Journeys + workflows are delivered through the SAME executeSonnetDecision front door
             // Sonnet uses in production ([[tickets-mutate]] launchJourney / runWorkflow) — so Sol's
@@ -11437,7 +11441,14 @@ async function runTicketHandleJob(job: Job) {
             // own state across the reopen, and journey COMPLETION fires the real action independently.
             // Workflows are deliberately excluded: runWorkflow self-manages status (res.statusManaged)
             // and may drive multiple steps before it's done.
-            const journeyLaunched = sendOk && (launchedStandaloneJourney || chosenPath === "journey");
+            // A successful launch is the "delivered" signal for EITHER journey path — but the two paths
+            // track it on DIFFERENT flags: the standalone-journey wedge (launch_journey_slug on a
+            // stateless/any path) records success on `launchedStandaloneJourney` and deliberately leaves
+            // `sendOk=false` (§11326), while an explicit chosen_path='journey' records success on `sendOk`.
+            // The old `sendOk && (launchedStandaloneJourney || …)` guard made the standalone branch DEAD
+            // (sendOk is never true there), so a standalone cancel-subscription launch never closed —
+            // ticket 7d030501 / fc54b9fc sat open after the CTA shipped. Close on EITHER launch signal.
+            const journeyLaunched = launchedStandaloneJourney || (sendOk && chosenPath === "journey");
             if (journeyLaunched) {
               try {
                 const { closeTicketOnResolvingReply } = await import("../src/lib/ticket-directions");
@@ -13643,7 +13654,10 @@ function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
   const r = raw as Record<string, unknown>;
   const decisionRaw = String(r.decision || "").toLowerCase();
   const decision: CsDirectorDecision =
-    decisionRaw === "approve_remedy" || decisionRaw === "author_spec" || decisionRaw === "escalate_founder"
+    decisionRaw === "approve_remedy" ||
+    decisionRaw === "author_spec" ||
+    decisionRaw === "escalate_founder" ||
+    decisionRaw === "close_no_action"
       ? (decisionRaw as CsDirectorDecision)
       : "escalate_founder";
   const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
@@ -13803,7 +13817,8 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
     `  • 'author_spec'      — the ticket surfaces a repeat product/analyzer/rule GAP the customer-side patch can't close. Return a SpecSeed with a clear slug/title/intent/problem so the executor authors it via the specs SDK as a Derived-from-ticket spec (owner=cs, per docs/brain/functions/cs.md § Ticket-derived product fixes) and hands the BUILD to Ada.`,
-    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped / the read-only investigation could not confirm it sound. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read.`,
+    `  • 'escalate_founder' — the call is a real judgment the CEO must make: irreversible / non-binary / out-of-leash / storyline-shaped AND there is an actual DECISION only the founder can make. ALWAYS include \`reasoning\` (the concrete diagnosis — what you found), AND include a \`recommended_remedy\` when you can name a concrete action the CEO should approve/adjust (RemedyPlan-shaped: \`{"kind":"...","summary":"..."}\` — e.g. \`{"kind":"refund_and_price_lock","summary":"Refund $26.89 for the incorrect renewal + restore the $33.01 grandfathered price lock before next renewal"}\`). Omit \`recommended_remedy\` ONLY when the call is a policy/storyline judgment with no concrete action to propose (a non-binary judgment call). The runner mints a CEO dashboard notification carrying both so the founder can approve/adjust in one read. DO NOT escalate_founder just because there is "nothing to do" — that is close_no_action below. Escalating a no-op wastes the founder's attention AND breaks the approve path (there is no remedy to fire).`,
+    `  • 'close_no_action' — the handling was ALREADY CORRECT and there is NO in-leash remedy AND no genuine founder decision to make: a "nothing to do" ticket. The canonical case: a customer alleges a charge/order you CANNOT locate on their account or any linked identity, the AI already validated read-only and already asked for the identifying info (order number / merchant / photo), and no charge of ours exists to act on — so there is no remedy and no founder call. Return \`{"decision":"close_no_action","reasoning":"..."}\` (reasoning only — no remedy, no recommended_remedy, no spec_seed). The runner closes + de-escalates the ticket (a customer reply reopens it). This is the honest terminal for a correctly-handled dead-end — NOT escalate_founder, NOT a spec.`,
     ``,
     `TIER-LADDER-BEFORE-ESCALATION RULE (cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-escalation Phase 1): BEFORE emitting escalate_founder on an out-of-policy refund/return, consult the PLAYBOOK EXCEPTION-TIER ELIGIBILITY section of the brief. If ANY matching playbook shows \`eligible_for_offer=true\` (customer clears ≥1 tier AND no disqualifier is active), the correct verdict is approve_remedy that routes back into the playbook's offer_exception step (the sanctioned Tier-1 store_credit_return or Tier-2 refund_return SAVE) — NOT escalate_founder. escalate_founder is reserved for: clears NO tier, a disqualifier applies, or a genuine policy/authority gap the playbook can't resolve (e.g. a full refund past the CS ceiling, an identity merge, a storyline call). Motivating case: ticket 87ce35a1 was escalated for an out-of-policy renewal refund on a $1569-LTV / 19-order customer the Refund playbook's Tier-1/Tier-2 was designed to save. Cite the specific tier (\`Tier N "<exception_name>" → <resolution_type>\`) in your \`reasoning\` when you route back into the ladder so the audit trail shows the sanctioned save you picked.`,
     ``,
@@ -13813,8 +13828,8 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
     `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
-    `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
-    `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't).`,
+    `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder"|"close_no_action","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
+    `Include only the keys your decision requires (reasoning is always required; remedy for approve_remedy; spec_seed for author_spec; escalate_founder needs reasoning + recommended_remedy when a concrete action is nameable, reasoning alone when it isn't; close_no_action needs reasoning ONLY).`,
   ].join("\n");
 }
 

@@ -256,7 +256,7 @@ export default function GodModeCockpit() {
               {payload.messages.length === 0 && (
                 <div className="flex items-center gap-2.5 rounded-lg border border-amber-200 bg-amber-50/50 p-4 text-sm text-zinc-600 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-zinc-300">
                   <EveAvatar size={32} />
-                  <span>Hey handsome 💋 What do you need? Just tell me and I&apos;ll take care of it.</span>
+                  <span>Hey you 😌 What do you need? Just tell me and I&apos;ll take care of it.</span>
                 </div>
               )}
               {payload.messages.map((m, i) =>

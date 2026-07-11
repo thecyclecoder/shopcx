@@ -234,6 +234,13 @@ function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: strin
       const purchaseValue = (r.action_values || []).find((a: any) => a.action_type === "purchase");
       const purchases = purchaseAction ? parseInt(purchaseAction.value, 10) || 0 : 0;
       const revenueCents = purchaseValue ? dollarsToCents(purchaseValue.value) : 0;
+      // Add-to-cart (media-buyer-early-trim-on-cost-per-atc): cost-per-ATC is the strongest LEADING
+      // laggard signal (validated on Amazing Coffee — winners $18–65/ATC, laggards $100–152). Prefer the
+      // aggregated `add_to_cart`, fall back to omni / pixel variants Meta may report instead.
+      const atcAction = (r.actions || []).find((a: any) =>
+        a.action_type === "add_to_cart" || a.action_type === "omni_add_to_cart" || a.action_type === "offsite_conversion.fb_pixel_add_to_cart",
+      );
+      const addToCart = atcAction ? parseInt(atcAction.value, 10) || 0 : 0;
       return {
         workspace_id: p.workspaceId,
         meta_ad_account_id: p.adAccountId,
@@ -246,6 +253,7 @@ function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: strin
         ctr: num(r.ctr),
         cpc_cents: dollarsToCents(r.cpc),
         purchases,
+        add_to_cart: addToCart,
         revenue_cents: revenueCents,
         roas: spendCents > 0 ? revenueCents / spendCents : 0,
         frequency: num(r.frequency),

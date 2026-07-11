@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { centralDateStr, centralDayWindowUtc, centralTodayStartUtcIso } from "@/lib/central-day";
 
 // GET — rollup of ticket analyses
 //   ?view=today          — today's score + count + recent issues
@@ -18,11 +19,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const admin = createAdminClient();
 
   if (view === "today") {
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    // "Today" = the Central calendar day (WORKSPACE_TZ), NOT the server's UTC day. setHours(0,0,0,0)
+    // on a Vercel (UTC) box snaps the boundary to UTC-midnight, so at ~7 PM+ Central it rolls "today"
+    // to tomorrow and scoops a full extra UTC day of volume. Anchor to Central. See [[central-day]].
+    const todayIsoStart = centralTodayStartUtcIso();
     const { data } = await admin.from("ticket_analyses")
       .select("id, ticket_id, score, admin_score, issues, summary, created_at")
       .eq("workspace_id", workspaceId)
-      .gte("created_at", todayStart.toISOString())
+      .gte("created_at", todayIsoStart)
       .order("created_at", { ascending: false });
 
     const rows = data || [];
@@ -38,8 +42,56 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     }
     const topIssues = Object.entries(issueCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
+    // Two volume denominators (cora-grades-every-ai-handled-ticket-not-just-sol):
+    //   • new_tickets     — inbound tickets CREATED today (the day's fresh volume)
+    //   • handled_tickets — tickets whose LAST CUSTOMER MESSAGE is today (can exceed new_tickets:
+    //     older tickets a slow-responder came back to). This is the denominator the score sits under.
+    // Both exclude merged-away duplicates (the survivor carries the conversation) and outbound-only
+    // sends (a ticket with no customer message — e.g. a dunning email — is never a handled convo).
+    // handled_cheap vs handled_sol splits the low-cost autonomous path from the Sol-handled one.
+    const todayIso = todayIsoStart;
+    const { data: custToday } = await admin.from("ticket_messages")
+      .select("ticket_id").eq("author_type", "customer").gte("created_at", todayIso);
+    const handledIdSet = Array.from(new Set((custToday || []).map(m => m.ticket_id as string)));
+    let newTickets = 0, handledTickets = 0, handledCheap = 0, handledSol = 0;
+    // The non-merged handled ticket ids — the true "handled today" population. `graded_handled` below
+    // counts how many of THESE have a grade, so the card reads "N of <handled> graded" honestly. (The
+    // old numerator was `analyzed` = grade rows CREATED today over ANY ticket — a different population,
+    // which produced nonsense like "21 of 16".)
+    const handledTicketIds: string[] = [];
+    if (handledIdSet.length) {
+      const { data: htk } = await admin.from("tickets")
+        .select("id, merged_into, created_at, ai_handled_at, sol_handled_at")
+        .eq("workspace_id", workspaceId)
+        .in("id", handledIdSet);
+      for (const t of (htk || []) as Array<{ id: string; merged_into: string | null; created_at: string; ai_handled_at: string | null; sol_handled_at: string | null }>) {
+        if (t.merged_into) continue; // merged-away duplicate → the survivor is counted instead
+        handledTickets++;
+        handledTicketIds.push(t.id);
+        if (t.sol_handled_at) handledSol++;
+        else if (t.ai_handled_at) handledCheap++;
+        if (t.created_at >= todayIso) newTickets++;
+      }
+    }
+
+    // How many of today's handled tickets carry a grade (a ticket_analyses row) — from ANY time, since
+    // a grade lands ~30 min after the last customer message. This is the honest numerator for the card.
+    let gradedHandled = 0;
+    if (handledTicketIds.length) {
+      const { data: gradedRows } = await admin.from("ticket_analyses")
+        .select("ticket_id")
+        .eq("workspace_id", workspaceId)
+        .in("ticket_id", handledTicketIds);
+      gradedHandled = new Set((gradedRows || []).map(g => g.ticket_id as string)).size;
+    }
+
     return NextResponse.json({
       analyzed: rows.length,
+      graded_handled: gradedHandled,
+      new_tickets: newTickets,
+      handled_tickets: handledTickets,
+      handled_cheap: handledCheap,
+      handled_sol: handledSol,
       avg_score: avg,
       top_issues: topIssues.map(([type, count]) => ({ type, count })),
       worst_today: rows
@@ -61,8 +113,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     // to bound the query, then we narrow client-side by joined
     // ticket.updated_at so we don't accidentally miss late-analyzed
     // tickets whose analysis sits in a later UTC day.
-    const dayStart = new Date(date + "T00:00:00.000Z").toISOString();
-    const dayEnd = new Date(new Date(date + "T00:00:00.000Z").getTime() + 24 * 60 * 60 * 1000).toISOString();
+    // `date` is a Central calendar day. Bound the query by the Central day window (UTC instants) and
+    // bucket each analysis by the TICKET's close date rendered in Central — NOT a naive .slice(0,10)
+    // of the UTC ISO, which would push an evening-Central ticket into the next calendar day. [[central-day]].
+    const { start: dayStart } = centralDayWindowUtc(date);
     const wideStart = new Date(new Date(dayStart).getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const wideEnd = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const { data } = await admin
@@ -75,7 +129,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
     const inDay = (data || []).filter((r) => {
       const t = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
-      const key = (t || (r.created_at as string)).slice(0, 10);
+      const key = centralDateStr(t || (r.created_at as string));
       return key === date;
     });
 
@@ -102,7 +156,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const byDate: Record<string, { scores: number[]; issues: Record<string, number>; actions: number; corrected: number }> = {};
   for (const r of (data || [])) {
     const ticketUpdatedAt = (r as { tickets?: { updated_at?: string } | null }).tickets?.updated_at;
-    const d = (ticketUpdatedAt || (r.created_at as string)).slice(0, 10);
+    // Bucket by the Central calendar day (WORKSPACE_TZ), not a UTC .slice(0,10) — otherwise an
+    // evening-Central close lands in the next day's row and each daily rollup is off by the
+    // UTC-Central offset for late-in-the-day activity. [[central-day]].
+    const d = centralDateStr(ticketUpdatedAt || (r.created_at as string));
     if (!byDate[d]) byDate[d] = { scores: [], issues: {}, actions: 0, corrected: 0 };
     const score = (r.admin_score ?? r.score) as number | null;
     if (score != null) byDate[d].scores.push(score);

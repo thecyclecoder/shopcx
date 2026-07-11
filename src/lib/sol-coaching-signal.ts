@@ -44,6 +44,14 @@ export const SOL_MESSY_TURN_SIGNALS = [
   "repeated_clarification",    // re-asked for info the customer had already given
   "wrong_tool_recovered",      // picked the wrong action/tool first, then the right one
   "tone_miss_recovered",       // an empathy/tone miss that didn't sink the outcome
+  // The tiered-remediation ladder class (distinct from the recovered-by-close classes above): the
+  // LOW-COST path (Sonnet/Haiku) mishandled a ticket WITHOUT ever calling Sol; Cora caught it on
+  // the grade and RE-SESSIONED Sol rather than escalating June (the recovery is the re-session, not
+  // a clean close). It marks a systemic CHEAP-PATH gap June should fix at the source — grouped +
+  // counted like the others, so once it repeats across ≥ threshold tickets June's digest proposes
+  // an add_rule fix for the Sonnet/Haiku handling. Only ever emitted with tier:'cheap'. See
+  // [[ticket-analyzer]] applySeverityActions + [[cs-director-digest]] composeMessyTurnWarnings.
+  "cheap_tier_mishandle",
 ] as const;
 
 export type SolMessyTurnSignal = (typeof SOL_MESSY_TURN_SIGNALS)[number];

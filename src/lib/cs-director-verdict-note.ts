@@ -21,7 +21,7 @@
  * Phase 1 verification + [[../../docs/brain/libraries/cs-director.md]] loop-closure contract.
  */
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
 
 export interface CsDirectorNoteInput {
   decision: CsDirectorDecision;
@@ -43,6 +43,7 @@ const DECISION_LABEL: Record<CsDirectorDecision, string> = {
   approve_remedy: "approve_remedy",
   author_spec: "author_spec",
   escalate_founder: "escalate_founder",
+  close_no_action: "close_no_action",
 };
 
 function normalizeReasoning(raw: string): string {
@@ -121,6 +122,9 @@ export function buildCsDirectorVerdictNote(verdict: CsDirectorNoteInput): string
       if (recommendedLine) lines.push(recommendedLine);
       break;
     }
+    case "close_no_action":
+      lines.push("Outcome: No action needed — handling was already correct and there is no in-leash remedy or founder decision to make. Closed + de-escalated (no founder page).");
+      break;
   }
   return lines.join("\n");
 }

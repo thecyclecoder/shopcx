@@ -43,6 +43,12 @@ function policy(overrides: Partial<IterationPolicy> = {}): IterationPolicy {
     min_budget_floor_cents: 1_000,
     never_pause_object_ids: [],
     mode: "armed",
+    trust_meta_reported_signal: false,
+    crown_max_cpa_cents: null,
+    crown_min_spend_cents: null,
+    early_trim_min_spend_cents: null,
+    trim_max_cost_per_atc_cents: null,
+    trim_max_cpm_cents: null,
     ...overrides,
   };
 }

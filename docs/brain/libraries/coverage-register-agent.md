@@ -6,14 +6,16 @@ The detection→propose-fix agent that closes Control Tower **coverage gaps** au
 
 ## North star — surface-don't-auto-edit
 
-Adding a monitored loop sets an **alerting contract**, so the agent NEVER silently edits `registry.ts`. It proposes the inferred entry; the **owner** confirms the owner-function + cadence/window (or marks the loop intentionally-unmonitored) before the change lands. Mirrors [[repair-agent]]'s surface-don't-auto-build guard — here the fix is fully *mechanical*, so there's no LLM diagnosis, just deterministic inference + an owner gate.
+Adding a monitored loop sets an **alerting contract**, so the agent NEVER silently edits `registry.ts`. It proposes the inferred entry; the **owner** confirms the cadence/window (or marks the loop intentionally-unmonitored) before the change lands. Mirrors [[repair-agent]]'s surface-don't-auto-build guard — here the fix is fully *mechanical*, so there's no LLM diagnosis, just deterministic inference + an owner gate.
+
+**coverage-register-always-platform (CEO directive, 2026-07):** a monitored-loop entry is ALWAYS `platform`-owned. The tile answers "is this cron still ALIVE" — a platform-reliability concern Ada owns — regardless of which function's business the cron serves. So `inferLoopEntry` no longer uses `inferOwner`'s per-domain guess or a low-confidence "REQUIRES OWNER CONFIRMATION" placeholder; the owner is `platform`, confidently, every time, and `isOwnerConfident` is always true. The register/exempt spec bodies carry `**Why:**`/`**What:**` intent so they author through the intent-gated chokepoint (the [[specs-table]] `upsertSpec` self-gate requires spec-level why/what — a null-intent coverage spec used to throw `UngatedSpecAuthorError`).
 
 ## Deterministic inference (no LLM)
 
 Unlike the repair agent, the fix is mechanical — inferred at enqueue time in the deployed monitor:
 - `inferCadence(cronExpr)` → `{ label, windowMs }` — human cadence label + a cadence-derived `livenessWindowMs` (cadence + grace, mirroring the registry conventions: hourly→2h, daily→26h, every-N-min→~4N min, weekly→8d).
-- `inferOwner(loopId)` → `OwnerFunction` — `storefront-`/`meta-`/ads/capi → growth · `ticket-`/escalation/csat → cs · renewal/subscription/dunning/loyalty/journey/return → retention · scorecard/campaign → cmo · else platform.
-- `inferLoopEntry(loopId, cadence)` → the full `InferredLoopEntry` (`id`, `kind:'cron'`, `owner`, `label`, `description`, `expectedCadence`, `livenessWindowMs`, and `registeredAt` for ≥daily crons so they claim the [[control-tower]] `registered_not_firing` newcron grace).
+- `inferOwner(loopId)` → `OwnerFunction | null` — LEGACY domain classifier (`storefront-`/`meta-`/ads/capi → growth · `ticket-`/escalation/csat → cs · renewal/subscription/dunning/loyalty/journey/return → retention · scorecard/campaign → cmo · recognized infra → platform · else null). **No longer decides a loop tile's owner** (coverage-register-always-platform) — kept only for its domain-classification callers.
+- `inferLoopEntry(loopId, cadence)` → the full `InferredLoopEntry` (`id`, `kind:'cron'`, `owner` — **always `platform`**, `label`, `description`, `expectedCadence`, `livenessWindowMs`, and `registeredAt` for ≥daily crons so they claim the [[control-tower]] `registered_not_firing` newcron grace).
 - `renderEntrySnippet(entry)` → the exact TS to paste into `MONITORED_LOOPS` (window in the `N * UNIT` house style). `buildRegisterSpecBody(entry)` / `buildExemptSpecBody(loopId, owner)` → the two single-phase fix-spec markdowns (register the entry · add the `INTENTIONALLY_UNMONITORED_CRONS` exemption), both baked into the job's `instructions`.
 
 ## Trigger — event-driven on the audit (NOT a cron)

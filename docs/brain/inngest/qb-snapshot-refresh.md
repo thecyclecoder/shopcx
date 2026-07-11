@@ -26,6 +26,18 @@ Returns `{ workspaces, monthsRefreshed, errors }`.
 
 `qbSnapshotRefresh` in `src/lib/inngest/registered-functions.ts`.
 
+## Control Tower monitoring
+
+`src/lib/control-tower/registry.ts` — monitored as a cron with:
+- **id:** `"qb-snapshot-refresh"`
+- **kind:** `"cron"`
+- **owner:** `"platform"`
+- **expectedCadence:** `"monthly (0 8 16 * *)"`
+- **livenessWindowMs:** `32 * DAY` (32-day grace for monthly cadence)
+- **registeredAt:** `"2026-07-10T16:15:05.195Z"`
+
+Liveness monitoring surfaces stale or failed monthly refreshes via [[../dashboard/control-tower]].
+
 ## Related
 
 [[../tables/qb_pnl_snapshots]] · [[../libraries/quickbooks]] · [[investor-monthly-invite]] · [[../lifecycles/investors-area]] · [[monthly-revenue-snapshot]]

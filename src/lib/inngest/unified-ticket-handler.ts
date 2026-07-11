@@ -657,8 +657,11 @@ export const unifiedTicketHandler = inngest.createFunction(
   // (agent-outage-resilience Phase 1.)
   { id: "unified-ticket-handler", retries: OUTAGE_SPANNING_RETRIES, concurrency: [{ limit: 1, key: "event.data.ticket_id" }], triggers: [{ event: "ticket/inbound-message" }] },
   async ({ event, step }) => {
-    const { workspace_id: wsId, ticket_id: tid, message_body: msg, channel: ch, is_new_ticket: isNew } = event.data as {
-      workspace_id: string; ticket_id: string; message_body: string; channel: string; is_new_ticket: boolean;
+    // `msg` is `let` (not const) — the image-only-inbound guard below reassigns it to a text
+    // marker when the customer replied with only a photo (an <img>/data-URI strips to empty).
+    let { message_body: msg } = event.data as { message_body: string };
+    const { workspace_id: wsId, ticket_id: tid, channel: ch, is_new_ticket: isNew } = event.data as {
+      workspace_id: string; ticket_id: string; channel: string; is_new_ticket: boolean;
     };
     const t0 = new Date().toISOString();
     const admin = createAdminClient();
@@ -701,8 +704,21 @@ export const unifiedTicketHandler = inngest.createFunction(
     // `msg` makes the AI generate empty responses.
     const stripped = (msg || "").replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
     if (!isNew && stripped.length === 0) {
-      await sysNote(admin, tid, "[System] Empty inbound message — skipping pipeline (would have cancelled in-flight send).");
-      return { status: "skipped", reason: "empty_inbound" };
+      // An image-only reply (a pasted photo / <img> / data:image URI, no caption) strips to an
+      // empty string here — but it is NOT empty. The customer sent a picture expecting a reply.
+      // Skipping it left the photo unanswered and the ticket silently open (susansproviero
+      // 7fee980d). Detect the image and substitute a text MARKER as the newest message so the
+      // orchestrator acknowledges the photo and asks what they need. We do NOT touch the stored
+      // body — the raw image stays for the human dashboard view — and the orchestrator already
+      // strips <img> tags from history, so no base64 blob reaches the model.
+      const { inboundHasImage, IMAGE_ONLY_INBOUND_MARKER } = await import("@/lib/inbound-image-normalize");
+      if (inboundHasImage(msg)) {
+        msg = IMAGE_ONLY_INBOUND_MARKER;
+        await sysNote(admin, tid, "[System] Image-only inbound (photo, no text) — routing to Sol with an image marker instead of skipping.");
+      } else {
+        await sysNote(admin, tid, "[System] Empty inbound message — skipping pipeline (would have cancelled in-flight send).");
+        return { status: "skipped", reason: "empty_inbound" };
+      }
     }
 
     // ── 0b. Bot / contact-form spam short-circuit ──

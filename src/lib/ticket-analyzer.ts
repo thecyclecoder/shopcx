@@ -703,7 +703,7 @@ export async function prepareAnalyzerRun(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked, subject")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -808,7 +808,15 @@ export async function prepareAnalyzerRun(
   // first step of the refund playbook by design.
   const playbookContext = await buildPlaybookContextForGrader(admin, ticket);
 
-  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
+  // Email subject — customers routinely put the whole ask in the subject ("PLEASE Cancel my
+  // Subscription!!!") and leave a footer-only body. Surface it so the grader reads a reply that
+  // correctly addresses the subject as CORRECT, not a non-sequitur to an empty body. See subject-blind-grader.
+  const subjectLine = ((ticket as unknown as { subject?: string | null }).subject || "").replace(/\s+/g, " ").trim();
+  const subjectBlock = subjectLine
+    ? `\n\n--- EMAIL SUBJECT (part of the customer's request — the ask is often HERE, not in the body) ---\n${subjectLine}`
+    : "";
+
+  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}${subjectBlock}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
   return {
     ok: true,
@@ -1300,6 +1308,36 @@ export function coraIssuesToMessySignals(issues: Array<{ type: string }>): strin
   );
 }
 
+/** The remediation route for a mishandled ticket, once Cora has decided it needs re-open action. */
+export type RemediationTier = "escalate_june" | "resession_sol";
+
+/**
+ * The tiered-remediation ladder decision (PR2, pure + unit-testable — pinned in
+ * `ticket-analyzer.tiered-ladder.test.ts`). Called ONLY once `applySeverityActions` has decided the
+ * ticket is mishandled and reopen-worthy (action !== 'none') and has cleared the human/playbook
+ * guards. It routes the reopen ONE RUNG at a time:
+ *
+ *   - `solHandled` (Sol herself took a crack, `sol_handled_at` set) → **escalate_june**. Sol is the
+ *     rung below June; a ticket Sol handled that Cora still didn't like is exactly June's call.
+ *   - `!solHandled && forceEscalate` (the low-cost path handled it, but the verdict is a SEVERE issue
+ *     class — inaccuracy / false_promise / broken_action — or customer threat language) →
+ *     **escalate_june**. A customer-risk case warrants June now; a fresh Sol first-touch would under-respond.
+ *   - `!solHandled && !forceEscalate` (the cheap Sonnet/Haiku path mishandled an ordinary ticket and
+ *     Sol never touched it) → **resession_sol**. Hand DOWN to Sol (the next rung), not UP to June —
+ *     and log a `cheap_tier_mishandle` coaching signal so June's digest commissions a permanent fix.
+ *
+ * This is the CEO → June → Sol ladder: each rung supervises the one directly below it and never
+ * reaches two rungs down (bringing June in on a ticket Sol never handled). See [[../operational-rules]] § North star.
+ */
+export function decideRemediationTier(input: {
+  solHandled: boolean;
+  forceEscalate: boolean;
+}): RemediationTier {
+  if (input.solHandled) return "escalate_june";
+  if (input.forceEscalate) return "escalate_june";
+  return "resession_sol";
+}
+
 /**
  * Post Cora's verdict as an internal `[Cora Analysis]` note on the ticket. Distinct prefix + wording
  * so a later hasCleanPositiveClose() scan never mistakes it for POSITIVE_CLOSE_NOTE or a
@@ -1599,7 +1637,7 @@ async function applySeverityActions(
   // truth — auto-reopening overrides their judgment, frustrates them,
   // and creates churn (close → analyze → reopen → close again loop).
   const { data: tBefore } = await admin.from("tickets")
-    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step, ai_disabled")
+    .select("agent_intervened, status, closed_at, resolved_at, active_playbook_id, playbook_step, ai_disabled, sol_handled_at")
     .eq("id", ticketId).single();
   // Re-check ai_disabled here — a human may have toggled it AFTER the
   // analyzeTicketInner() row-read. Same hard rule as the early guard:
@@ -1647,6 +1685,73 @@ async function applySeverityActions(
       visibility: "internal",
       author_type: "system",
       body: `[Auto-Analysis] Score ${score}/10 — would have ${action === "escalate_with_message" ? "re-opened + escalated" : "re-opened silently"}, but skipped because a playbook is actively handling this ticket (step ${tBefore.playbook_step ?? "?"}). The playbook's stand-firm/exception path is the expected behavior. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
+    });
+    return;
+  }
+
+  // ── Tiered remediation ladder: cheap-tier mishandle RE-SESSIONS Sol, doesn't escalate June ──
+  // The ladder (PR2, cora-tiered-remediation-ladder-cheap-fail-resessions-sol-not-june): if the
+  // LOW-COST path (Sonnet/Haiku) handled this ticket and Sol NEVER took a crack — `sol_handled_at`
+  // IS NULL — a mishandled verdict must NOT go straight to June. June is Sol's supervisor; pulling
+  // her in on a ticket Sol never touched brings her one rung too high, too early. Instead:
+  //   (1) RE-SESSION Sol — enqueue a fresh first-touch box session so the ticket finally gets a real
+  //       Sol Direction + reply (the cheap path punted; Sol is the next rung, not June), and
+  //   (2) LOG a `cheap_tier_mishandle` coaching signal (tier:'cheap') so June's weekly digest rolls
+  //       it up by class and, once it recurs across ≥ threshold tickets, proposes an `add_rule`
+  //       permanent fix for the Sonnet/Haiku handling (composeMessyTurnWarnings in [[cs-director-digest]]).
+  // Only a ticket Sol HERSELF handled (`sol_handled_at` set) and Cora still didn't like falls through
+  // to the June escalation below. EXCEPTION: a `forceEscalate` verdict (a severe issue class —
+  // inaccuracy / false_promise / broken_action — or customer threat language) still escalates June
+  // even on a cheap-handled ticket; those are customer-risk cases where June's judgment is warranted
+  // now and a fresh Sol first-touch would under-respond. This is the CEO → June → Sol ladder: each
+  // rung supervises the one directly below it, never reaches two rungs down. See [[../operational-rules]] § North star.
+  const solHandledAt =
+    (tBefore as unknown as { sol_handled_at?: string | null } | null)?.sol_handled_at ?? null;
+  const remediationTier = decideRemediationTier({ solHandled: !!solHandledAt, forceEscalate });
+  if (remediationTier === "resession_sol") {
+    // Re-open so the re-sessioned Sol picks up an ACTIVE ticket. Deliberately NOT stamping
+    // escalated_at / escalation_reason — we are handing DOWN to Sol, not UP to June.
+    await admin.from("tickets").update({
+      status: "open",
+      updated_at: new Date().toISOString(),
+    }).eq("id", ticketId);
+
+    const { enqueueSolFirstTouchForCoraRemediation } = await import("./portal/enqueue-sol-first-touch");
+    let enqNote = "";
+    try {
+      const enq = await enqueueSolFirstTouchForCoraRemediation(admin, {
+        workspace_id: workspaceId,
+        ticket_id: ticketId,
+        score,
+        analysis_id: analysisId ?? null,
+      });
+      enqNote = enq.enqueued
+        ? ` Re-sessioned Sol (job ${enq.job_id}).`
+        : enq.reason === "already_inflight"
+          ? " Sol session already in flight — not double-enqueued."
+          : ` Sol re-session enqueue failed (${enq.reason}).`;
+    } catch (e) {
+      // Never wedge the grade on an enqueue failure — the signal + note still land, and the ticket
+      // is re-opened so a human / the next inbound turn can pick it up.
+      enqNote = ` Sol re-session enqueue threw (${e instanceof Error ? e.message : String(e)}).`;
+    }
+
+    // Durable coaching signal → June's digest → add_rule permanent fix for the cheap path.
+    await recordSolMessyTurns(admin, {
+      workspaceId,
+      ticketId,
+      tier: "cheap",
+      signals: ["cheap_tier_mishandle"],
+      score,
+      summary: analysis.summary || undefined,
+    });
+
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `[Auto-Analysis] Score ${score}/10 — the low-cost path (Sonnet/Haiku) mishandled this and Sol had not yet handled it. Handing DOWN to Sol, not UP to June.${enqNote} Logged a cheap-tier-mishandle coaching signal so June's digest can commission a permanent fix to the Sonnet/Haiku handling. ${analysisId ? `Analysis ${analysisId}.` : ""}`,
     });
     return;
   }

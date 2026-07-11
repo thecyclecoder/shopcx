@@ -38,6 +38,8 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
+import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
@@ -441,7 +443,9 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   // ── Promote ────────────────────────────────────────────────────────────────
   const promote: MediaBuyerPromoteAction[] = [];
   for (const w of input.winners) {
-    if (w.roas < policy.scale_up_roas_trigger) continue;
+    // Trust-Meta winners are already crowned on CPA upstream — don't re-gate on the ROAS trigger
+    // (Meta first-order ROAS is below any LTV-scaled trigger for a subscription product).
+    if (!policy.trust_meta_reported_signal && w.roas < policy.scale_up_roas_trigger) continue;
     const adsetId = input.metaAdIdToAdsetId.get(w.metaAdId);
     if (!adsetId) continue; // no parent adset resolved — can't scale
     const before = input.budgets.get(adsetId) ?? null;
@@ -489,7 +493,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   const fatigueReplenish: MediaBuyerFatigueReplenishAction[] = [];
   const fatigueMap = input.fatigueByAdsetId ?? new Map<string, number>();
   for (const w of input.winners) {
-    if (w.roas < policy.scale_up_roas_trigger) continue; // only real winners qualify
+    if (!policy.trust_meta_reported_signal && w.roas < policy.scale_up_roas_trigger) continue; // only real winners qualify (trust-Meta already crowned on CPA)
     const adsetId = input.metaAdIdToAdsetId.get(w.metaAdId);
     if (!adsetId) continue;
     const fatigue = fatigueMap.get(adsetId);
@@ -590,51 +594,76 @@ export async function runMediaBuyerLoop(
 ): Promise<RunMediaBuyerResult> {
   const nowMs = opts.nowMs ?? Date.now();
 
-  // ── Sensor-trust gate (media-buyer-sensor-trust-probe Phase 3) ────────────
-  // Before computeMediaBuyerPlan, refuse to grade Media Buyer calls against
-  // untrusted spend/revenue. Load the newest `media_buyer_sensor_trust` snapshot
-  // for (workspace, meta_ad_account_id) — ordered snapshot_date desc, limit 1 —
-  // and enforce (a) present, (b) age ≤ SENSOR_TRUST_MAX_AGE_MS (48h), (c) band !== 'red'.
-  // Any check failing writes ONE `media_buyer_sensor_trust_denied` director_activity
-  // row (metadata cites {reasons, snapshot_date, band, coverage_ratio}) and returns
-  // the SAME dormant summary shape [[docs/brain/libraries/media-buyer-agent]] § Policy
-  // contract already documents for no active policy — zero iteration_actions writes,
-  // zero ad_publish_jobs, no Meta motion. This is the short-circuit the goal's
-  // "shadow-mode winner/loser calls match a human review within tolerance" criterion
-  // hinges on: only trust ROAS numbers once the attribution sensor is provably clean.
-  const latestTrust = await readLatestSensorTrust(admin, opts.workspaceId, opts.metaAdAccountId);
-  const denial = evaluateSensorTrustSnapshot(latestTrust, nowMs);
-  if (denial) {
-    await recordDirectorActivity(admin, {
-      workspaceId: opts.workspaceId,
-      directorFunction: GROWTH_DIRECTOR_FUNCTION,
-      actionKind: "media_buyer_sensor_trust_denied",
-      specSlug: null,
-      reason: `Media Buyer pass skipped — ${denial.reason}`,
-      metadata: {
-        meta_ad_account_id: opts.metaAdAccountId,
-        snapshot_date: denial.snapshot_date,
-        band: denial.band,
-        coverage_ratio: denial.coverage_ratio,
-        reasons: denial.reasons,
-        autonomous: true,
-      },
-    });
-    const dormantPlan = buildSensorTrustDormantPlan(
-      denial,
-      opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
-    );
-    return {
-      plan: dormantPlan,
-      writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] },
-    };
-  }
-
-  // ── Read: policy, cohort, winners, losers, ready-to-test bin ───────────────
+  // ── Read policy + cohort FIRST — the trust gate branches on the policy's signal source. ──
   const [policy, cohort] = await Promise.all([
     loadActivePolicy(opts.workspaceId, opts.metaAdAccountId),
-    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, { metaAdAccountId: null }),
+    // Resolve the cohort for THIS account (per-account row preferred; falls back to a workspace-wide
+    // row inside getEffective). Passing null here was the bug that left a per-account cohort "dormant"
+    // and skipped replenish — so Dahlia's bin never fed Bianca's tests.
+    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, { metaAdAccountId: opts.metaAdAccountId }),
   ]);
+
+  // ── Trust gate ────────────────────────────────────────────────────────────
+  // Before computeMediaBuyerPlan, refuse to act on an untrusted signal.
+  //
+  // TRUST-META path (CEO 2026-07-10): for Meta-based media buying we trust Meta's OWN reported
+  // conversions (meta_insights_daily). Our internal order-match can't resolve Shopify-destined ad
+  // revenue, so the internal-resolve coverage gate is the WRONG gate here — instead gate on Meta-signal
+  // FRESHNESS (a recent adset scorecard for this account). See [[media-buyer-agent]].
+  //
+  // Otherwise (internal-attribution path): the original sensor-trust gate — load the newest
+  // `media_buyer_sensor_trust` snapshot and enforce present + fresh (≤48h) + band !== 'red'.
+  //
+  // Either failure writes ONE dormant director_activity row and returns the dormant summary shape
+  // ([[docs/brain/libraries/media-buyer-agent]] § Policy contract) — zero iteration_actions, zero
+  // ad_publish_jobs, no Meta motion.
+  if (policy?.trust_meta_reported_signal) {
+    const fresh = await hasFreshMetaSignal(admin, opts.workspaceId, opts.metaAdAccountId, nowMs);
+    if (!fresh) {
+      const reason = `no fresh Meta signal — newest adset scorecard for this account is older than ${META_SIGNAL_MAX_AGE_DAYS}d (or absent). Run the insights/scorecard ingest.`;
+      await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: "media_buyer_sensor_trust_denied",
+        specSlug: null,
+        reason: `Media Buyer pass skipped — ${reason}`,
+        metadata: { meta_ad_account_id: opts.metaAdAccountId, trust_source: "meta_reported", reasons: [reason], autonomous: true },
+      });
+      const dormantPlan = buildSensorTrustDormantPlan(
+        { reason, reasons: ["meta_signal_stale"], band: null, snapshot_date: null, coverage_ratio: null },
+        opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
+      );
+      return { plan: dormantPlan, writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] } };
+    }
+  } else {
+    const latestTrust = await readLatestSensorTrust(admin, opts.workspaceId, opts.metaAdAccountId);
+    const denial = evaluateSensorTrustSnapshot(latestTrust, nowMs);
+    if (denial) {
+      await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: "media_buyer_sensor_trust_denied",
+        specSlug: null,
+        reason: `Media Buyer pass skipped — ${denial.reason}`,
+        metadata: {
+          meta_ad_account_id: opts.metaAdAccountId,
+          snapshot_date: denial.snapshot_date,
+          band: denial.band,
+          coverage_ratio: denial.coverage_ratio,
+          reasons: denial.reasons,
+          autonomous: true,
+        },
+      });
+      const dormantPlan = buildSensorTrustDormantPlan(
+        denial,
+        opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
+      );
+      return {
+        plan: dormantPlan,
+        writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] },
+      };
+    }
+  }
 
   // If no policy → dormant plan, one dormancy audit row, no writes.
   if (!policy) {
@@ -660,14 +689,40 @@ export async function runMediaBuyerLoop(
     return { plan: emptyPlan, writes: { iterationActionsInserted: 0, directorActivityRows: 1, publishJobsInserted: 0, amplifiedAdCampaignIds: [] } };
   }
 
-  const winners = await detectWinners(admin, {
-    workspaceId: opts.workspaceId,
-    minRoas: policy.scale_up_roas_trigger,
-    nowMs,
-  });
+  // Winners: TRUST-META path crowns on Meta-reported CPA (spend/purchases ≤ crown CPA at ≥ crown spend);
+  // otherwise the internal-resolve ROAS path. When trust-Meta is on but the CPA knobs are unset, fall
+  // back to the ROAS path so a misconfigured policy degrades safely rather than crowning nothing.
+  const useMetaCpa = policy.trust_meta_reported_signal && policy.crown_max_cpa_cents != null && policy.crown_min_spend_cents != null;
+  const winners = useMetaCpa
+    ? await detectMetaCpaWinners(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        crownMaxCpaCents: policy.crown_max_cpa_cents as number,
+        crownMinSpendCents: policy.crown_min_spend_cents as number,
+      })
+    : await detectWinners(admin, {
+        workspaceId: opts.workspaceId,
+        minRoas: policy.scale_up_roas_trigger,
+        nowMs,
+      });
 
-  // Losers: today's adset-grain scorecards below the policy's roas_floor with enough spend.
   const snapshotDate = opts.snapshotDate ?? new Date(nowMs).toISOString().slice(0, 10);
+
+  // Losers: TRUST-META path trims early on Meta-reported CPA (spent past the early-trim floor with no
+  // purchases or a CPA already worse than crown); otherwise today's adset scorecards below the ROAS floor.
+  let losers: MediaBuyerLoser[];
+  if (useMetaCpa) {
+    losers = await detectMetaCpaLosers(admin, {
+      workspaceId: opts.workspaceId,
+      metaAdAccountId: opts.metaAdAccountId,
+      earlyTrimMinSpendCents: policy.early_trim_min_spend_cents ?? policy.pause_min_spend_cents,
+      // Leading-signal thresholds — defaults derived from the Amazing Coffee laggard analysis (winners
+      // ≤$65/ATC & ≤$60 CPM; laggards ≥$100/ATC & ≥$110 CPM), tunable per policy.
+      trimMaxCostPerAtcCents: policy.trim_max_cost_per_atc_cents ?? 8000, // $80 cost-per-ATC
+      trimMaxCpmCents: policy.trim_max_cpm_cents ?? 10000, // $100 CPM
+      crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000, // converter guard — protect winners-in-progress
+    });
+  } else {
   const { data: loserRows } = await admin
     .from("iteration_scorecards_daily")
     .select("id, level, object_id, roas, spend_cents, effective_status")
@@ -693,7 +748,7 @@ export async function runMediaBuyerLoop(
       if (!adsetToDominantAdId.has(a.meta_adset_id)) adsetToDominantAdId.set(a.meta_adset_id, a.meta_ad_id);
     }
   }
-  const losers: MediaBuyerLoser[] = ((loserRows || []) as Array<{
+  losers = ((loserRows || []) as Array<{
     id: string;
     level: string;
     object_id: string;
@@ -707,6 +762,17 @@ export async function runMediaBuyerLoop(
     spendCents: Number(r.spend_cents ?? 0),
     triggeringScorecardId: r.id,
   }));
+  }
+
+  // Reactivations — recovered-CPA unpause (Meta attribution lags 24–48h, so a leading-signal trim can be
+  // rescued by late purchases). Only under trust-Meta with a crown CPA set.
+  const reactivations: MetaCpaReactivation[] = useMetaCpa
+    ? await detectMetaCpaReactivations(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        crownMaxCpaCents: policy.crown_max_cpa_cents as number,
+      })
+    : [];
 
   // Winner ad-grain → parent meta_adset_id lookup (for the promote target).
   const winnerAdIds = winners.map((w) => w.metaAdId);
@@ -872,6 +938,22 @@ export async function runMediaBuyerLoop(
       updated_at: nowIso,
     });
   }
+  for (const a of reactivations) {
+    iterationRows.push({
+      workspace_id: opts.workspaceId,
+      meta_ad_account_id: opts.metaAdAccountId,
+      snapshot_date: snapshotDate,
+      level: "adset",
+      object_id: a.targetObjectId,
+      action_type: "unpause",
+      rationale: `Reactivate: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown on adset ${a.targetObjectId} ($${(a.spendCents / 100).toFixed(0)} spend).`,
+      policy_version_id: policy.id,
+      before_status: "PAUSED",
+      after_status: "ACTIVE",
+      status: "decided",
+      updated_at: nowIso,
+    });
+  }
   if (iterationRows.length) {
     const { error } = await admin
       .from("iteration_actions")
@@ -904,6 +986,8 @@ export async function runMediaBuyerLoop(
       },
     });
     if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a crowned winner marks its combination WON.
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, adCampaignId: a.sourceAdCampaignId, metaAdsetId: a.targetObjectId, outcome: "won", spendCents: a.spendCents }).catch(() => {});
   }
   for (const a of plan.kill) {
     const r = await recordDirectorActivity(admin, {
@@ -923,6 +1007,29 @@ export async function runMediaBuyerLoop(
       },
     });
     if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a trimmed laggard marks its combination LOST (so the concept can be re-tried
+    // in a DIFFERENT combination; it only retires after several combinations lose).
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, metaAdsetId: a.targetObjectId, outcome: "lost", spendCents: a.spendCents }).catch(() => {});
+  }
+  for (const a of reactivations) {
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_reactivated_recovered",
+      specSlug: null,
+      reason: `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`,
+      metadata: {
+        source_meta_ad_id: a.sourceMetaAdId,
+        target_object_id: a.targetObjectId,
+        spend_cents: a.spendCents,
+        cpp_cents: a.cppCents,
+        policy_version_id: policy.id,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+    // Learning flywheel — a recovered adset marks its combination REACTIVATED (counts as a win).
+    await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, metaAdsetId: a.targetObjectId, outcome: "reactivated", cppCents: a.cppCents, spendCents: a.spendCents }).catch(() => {});
   }
   // Phase 3 — fatigue-triggered variant spawn. For each fatigue_replenish action,
   // call amplifyWinner (respects MAX_VARIANTS_PER_WINNER + MAX_AMPLIFICATIONS_PER_DAY

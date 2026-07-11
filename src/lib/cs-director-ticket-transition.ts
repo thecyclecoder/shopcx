@@ -27,7 +27,7 @@
  * See docs/brain/libraries/cs-director.md loop-closure contract + Phase 2 verification bullet.
  */
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
 
 export type CsDirectorTransitionActionKey =
   | "close_and_deescalate"
@@ -106,6 +106,12 @@ function ceoOwnedEscalationReason(reasoning: string): string {
 export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition {
   switch (input.decision) {
     case "author_spec":
+      return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
+    // close_no_action — June investigated, the handling was already correct, and there is NO
+    // in-leash remedy AND no genuine founder judgment to make (a phantom charge we can't locate
+    // and the customer was already asked for identifying info; a "nothing to do" ticket). Close +
+    // de-escalate + unassign — do NOT page the founder for a no-op. See cs-director § close_no_action.
+    case "close_no_action":
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
     case "approve_remedy":
       if (remedyClosesTicket(input.remedy)) {

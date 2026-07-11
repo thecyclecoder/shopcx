@@ -38,6 +38,21 @@ test("author_spec closes the ticket, clears the escalation, and unassigns", () =
   assert.equal(t.patch.updated_at, NOW);
 });
 
+test("close_no_action closes + de-escalates + unassigns (a correctly-handled no-op, not a founder page)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "close_no_action",
+    reasoning: "Phantom $236.50 charge — no such order on this customer or any linked identity; AI already asked for the order number. No remedy, no founder call.",
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.closed_at, NOW);
+  assert.equal(t.patch.escalated_at, null);
+  assert.equal(t.patch.escalated_to, null);
+  assert.equal(t.patch.escalation_reason, null);
+  assert.equal(t.patch.assigned_to, null);
+});
+
 test("approve_remedy WITH close signal closes + de-escalates the ticket", () => {
   const t = decideCsDirectorTicketTransition({
     decision: "approve_remedy",

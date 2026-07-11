@@ -60,6 +60,17 @@ test("escalate_founder verdict writes note naming June, decision, reasoning, and
   assert.match(note, /Escalated to CEO for hard call:/);
 });
 
+test("close_no_action verdict writes a no-op note (handled correctly, no remedy, no founder page)", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "close_no_action",
+    reasoning: "Phantom $236.50 charge — no such order on this customer or any linked identity; AI already asked for the order number.",
+  });
+  assert.match(note, /Decision: close_no_action/);
+  assert.match(note, /Phantom \$236\.50 charge/);
+  assert.match(note, /No action needed/);
+  assert.match(note, /no founder page/i);
+});
+
 test("empty reasoning is normalized so the note still records the decision", () => {
   const note = buildCsDirectorVerdictNote({
     decision: "author_spec",

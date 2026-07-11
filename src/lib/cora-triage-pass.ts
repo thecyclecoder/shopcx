@@ -83,6 +83,11 @@ export function buildTriagePrompt(transcript: string): { system: string; user: s
     "You are Cora's fast triage classifier for a customer-support conversation that has already CLOSED.",
     "Your ONLY job: decide whether this ticket needs a deeper human-style review, and give a coarse quality score.",
     "",
+    "The transcript may open with a SUBJECT: line — the email subject. Treat it as part of the customer's",
+    "request: email customers often put the ENTIRE ask in the subject ('PLEASE Cancel my Subscription!!!')",
+    "and leave a footer-only body. An AI reply that correctly addresses the SUBJECT is CORRECT even if the",
+    "body itself had no request — do NOT score it low as a non-sequitur.",
+    "",
     "Judge the TERMINAL STATE — how the ticket ENDED — not the messy middle. Support is a process:",
     "customers describe things messily and agents legitimately state a reasonable-but-wrong interim",
     "position, then correct as facts arrive. A stumble on turn 1 that was RECOVERED by the end is NOT",
@@ -173,14 +178,15 @@ export function parseTriageResult(text: string): TriageResult {
  * notes are dropped (they're not the customer-facing exchange); bodies are cleaned of quoted history
  * + signatures. Capped to the most recent MAX_TRANSCRIPT_MESSAGES to keep the call cheap.
  */
-function renderTranscript(
+export function renderTranscript(
   msgs: Array<{ direction: string; author_type: string; visibility: string; body: string | null; body_clean: string | null }>,
+  subject?: string | null,
 ): string {
   const convo = msgs.filter(
     (m) => m.visibility !== "internal" && (m.direction === "inbound" || m.author_type === "ai"),
   );
   const recent = convo.slice(-MAX_TRANSCRIPT_MESSAGES);
-  return recent
+  const body = recent
     .map((m) => {
       const who = m.direction === "inbound" ? "CUSTOMER" : "AGENT";
       const text = (m.body_clean || cleanEmailBody(m.body || "")).replace(/\s+/g, " ").trim();
@@ -188,6 +194,12 @@ function renderTranscript(
     })
     .filter((l) => l.length > `CUSTOMER: `.length)
     .join("\n");
+  // Email customers routinely put the ENTIRE ask in the subject line ("PLEASE Cancel my Subscription!!!")
+  // and leave a footer-only body. Render the subject as the first line so the grader sees the request —
+  // otherwise a correct reply (Sol reads the subject, sends the cancel journey) looks like a non-sequitur
+  // and grades ~1. See subject-blind-grader fix.
+  const subj = (subject || "").replace(/\s+/g, " ").trim();
+  return subj ? `SUBJECT: ${subj}${body ? `\n${body}` : ""}` : body;
 }
 
 /**
@@ -202,7 +214,7 @@ export async function runCheapTriagePass(admin: Admin, ticketId: string): Promis
 
   const { data: ticket } = await admin
     .from("tickets")
-    .select("created_at, closed_at, sol_handled_at, ai_turn_count")
+    .select("created_at, closed_at, sol_handled_at, ai_turn_count, subject")
     .eq("id", ticketId)
     .maybeSingle();
   if (!ticket) return null;
@@ -213,7 +225,7 @@ export async function runCheapTriagePass(admin: Admin, ticketId: string): Promis
     .eq("ticket_id", ticketId)
     .order("created_at", { ascending: true });
   const msgs = rows || [];
-  const transcript = renderTranscript(msgs);
+  const transcript = renderTranscript(msgs, (ticket as { subject?: string | null }).subject);
   if (!transcript) return null; // nothing gradeable — fail open
 
   const { system, user } = buildTriagePrompt(transcript);

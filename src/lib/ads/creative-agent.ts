@@ -16,6 +16,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, type ScoredAngle } from "@/lib/ads/creative-brief";
+import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative } from "@/lib/ads/creative-qa";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
@@ -158,26 +159,43 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
   const stories = await loadTransformationStories(admin, workspaceId, productId);
   const ranked = selectAngles(pi, stories);
 
-  // Skip angle hooks already in the bin for this product (variety, not dupes).
-  const { data: existingCampaigns } = await admin
-    .from("ad_campaigns")
-    .select("product_ad_angles(hook_one_liner)")
-    .eq("workspace_id", workspaceId).eq("product_id", productId);
-  const usedHooks = new Set(
-    ((existingCampaigns ?? []) as Array<{ product_ad_angles?: { hook_one_liner?: string | null } | null }>)
-      .map((c) => (c.product_ad_angles?.hook_one_liner ?? "").toLowerCase().slice(0, 60))
-      .filter(Boolean),
-  );
-  const fresh = ranked.filter((a) => !usedHooks.has(a.hook.toLowerCase().slice(0, 60)));
-  const pool = fresh.length ? fresh : ranked; // if everything's been used, allow refresh from the top
+  // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
+  // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
+  // RETIRED concepts, and for each surviving concept pick a FRESH combination (an untried treatment,
+  // biased toward historically-winning treatments). The learning ledger makes each cycle smarter.
+  const learning = await loadCreativeLearning(admin, workspaceId, productId);
+  const eligible = ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
 
-  for (const angle of pool.slice(0, count)) {
+  // ── Explore/exploit slot allocation (CEO 2026-07-10) ──────────────────────────────────────────────
+  // Keep the bin a MIX so Bianca always has both to launch:
+  //   • EXPLOIT — a fresh COMBINATION of a proven WINNING concept (double down on what converts, but a
+  //     new treatment/execution so we don't just re-run the fatiguing ad).
+  //   • EXPLORE — a fresh, unproven concept (find the NEXT winner before the current one fatigues).
+  // Target a 2:2 split; if there are no winners yet (early days), it's all explore — self-adjusting.
+  const isWon = (a: ScoredAngle) => (learning.byAngle.get(angleKey(a.hook))?.won ?? 0) > 0;
+  const exploitPool = eligible.filter(isWon)
+    .sort((a, b) => (learning.byAngle.get(angleKey(b.hook))?.won ?? 0) - (learning.byAngle.get(angleKey(a.hook))?.won ?? 0));
+  const explorePool = eligible.filter((a) => !isWon(a))
+    .sort((a, b) => ((learning.byAngle.get(angleKey(a.hook))?.tried ?? 0) - (learning.byAngle.get(angleKey(b.hook))?.tried ?? 0)) || (b.acquisitionPower - a.acquisitionPower));
+
+  // Build the slot plan: aim for half exploit / half explore, then backfill from whichever pool has more.
+  const plan: Array<{ angle: ScoredAngle; intent: "exploit" | "explore" }> = [];
+  let ei = 0, xi = 0;
+  const wantExploit = Math.min(Math.floor(count / 2), exploitPool.length);
+  for (let n = 0; n < wantExploit; n++) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
+  while (plan.length < count && xi < explorePool.length) plan.push({ angle: explorePool[xi++], intent: "explore" });
+  while (plan.length < count && ei < exploitPool.length) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
+  if (!plan.length) for (const a of (eligible.length ? eligible : ranked).slice(0, count)) plan.push({ angle: a, intent: "explore" });
+
+  for (const { angle, intent } of plan) {
+    const ak = angleKey(angle.hook);
+    const treatment = nextTreatmentFor(ak, learning);
     let landed = false;
     let lastIssues: string[] = [];
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed; attempt++) {
       try {
         const brief = await buildCreativeBrief(pi, angle, stories);
-        const gen = await generateCreative(workspaceId, brief);
+        const gen = await generateCreative(workspaceId, brief, { treatment });
         const verdict = await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         const metaCopy = {
@@ -186,6 +204,12 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
           description: (brief.offer?.perServing ?? brief.offer?.headline ?? "").slice(0, 30),
         };
         const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        // Record the COMBINATION (concept × creative treatment × copy × destination) as pending — the
+        // media buyer stamps its outcome later, feeding the learning flywheel.
+        await recordCombinationGenerated(admin, {
+          workspaceId, productId, angleKey: ak, adCampaignId: campaignId, intent,
+          elements: { treatment, headline: metaCopy.headline, description: metaCopy.primaryText, cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
+        });
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;
       } catch (err) {

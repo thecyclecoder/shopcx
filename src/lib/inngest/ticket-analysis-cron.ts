@@ -57,56 +57,71 @@ export const CORA_CLOSE_SETTLE_MS = 30 * 60 * 1000;
  * is reviewable in isolation.
  *
  * Cora selects a ticket for analysis only when:
- *   1. Sol has handled it — `tickets.sol_handled_at` is set. The worker stamps this at the box
- *      session's terminal COMPLETED state, so an in-session `writeDirection` failure can't
- *      hide the fact that Sol handled the ticket (Phase 2 of
- *      cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence).
- *   2. The ticket has been closed_at >= {@link CORA_CLOSE_SETTLE_MS} ago (the 30-min settle).
- *   3. It has NOT already been analyzed for THIS Sol handling cycle — dedup on
- *      `sol_handled_at` (a `last_analyzed_at` at-or-after `sol_handled_at` means we already
- *      graded this handling and must skip; a stale `last_analyzed_at` from a prior handling is
- *      fine — Cora may re-grade the new cycle).
- *   4. June (CS Director) has NOT already decided this handling cycle. A `cs_director_call`
- *      `director_activity` row for this ticket with `created_at >= sol_handled_at` closes this
- *      cycle to Cora; the ticket becomes re-eligible only after Sol re-handles (a new inbound
- *      + Sol re-handle + close), which advances `sol_handled_at` past every prior June
- *      decision timestamp.
+ *   1. We HANDLED it — `ai_handled_at` (any AI tier: Sonnet/Haiku orchestrator, Sol, journey,
+ *      playbook — all stamp it in `deliverTicketMessage`) OR `sol_handled_at` (the Sol-specific
+ *      sub-flag) is set. The effective handling anchor is the LATER of the two. This is what makes
+ *      Cora grade the cheap autonomous path too, not just Sol sessions
+ *      (cora-grades-every-ai-handled-ticket-not-just-sol).
+ *   2. The ticket is closed AND its LAST CUSTOMER MESSAGE was >= {@link CORA_CLOSE_SETTLE_MS} ago
+ *      (the settle). Keying settle on the customer's last message (not `closed_at`) means a
+ *      slow-responder or a reopened-then-quiet ticket grades off real customer activity, and we
+ *      never grade while the customer might still be mid-conversation.
+ *   3. There IS a customer message. A ticket with no inbound is an outbound-only send (a dunning
+ *      email the customer never replied to) — not a handled conversation. Excluded here, so an
+ *      outbound `ai_handled_at` stamp never leaks into grading.
+ *   4. It has NOT already been analyzed for THIS handling cycle — dedup on the handling anchor
+ *      (a `last_analyzed_at` at-or-after the anchor means we graded this handling; a stale one
+ *      from a prior handling is fine — Cora may re-grade the new cycle).
+ *   5. June (CS Director) has NOT already decided this handling cycle (`cs_director_call`
+ *      `director_activity` with `created_at >= anchor`); re-eligible only after we re-handle past it.
  *
- * Returns true when the ticket passes; false when any gate fails. The cron caller applies
- * `.stamp last_analyzed_at on the skip so a later updated_at bump can't re-select the same row.
+ * Returns true when the ticket passes; false when any gate fails. The cron caller stamps
+ * `last_analyzed_at` on the skip so a later updated_at bump can't re-select the same row.
  */
 export function passesCoraSelectionGate(
   ticket: {
     closed_at: string | null;
     last_analyzed_at: string | null;
     sol_handled_at: string | null;
+    ai_handled_at: string | null;
+    last_customer_message_at: string | null;
   },
   now: Date,
   latestJuneDecidedAt: string | null = null,
 ): boolean {
-  if (!ticket.sol_handled_at) return false;
+  // Handling anchor = the later of the two handled stamps (either tier having handled it qualifies).
+  const handledAt = laterTimestamp(ticket.ai_handled_at, ticket.sol_handled_at);
+  if (!handledAt) return false;
   if (!ticket.closed_at) return false;
-  const closedMs = new Date(ticket.closed_at).getTime();
-  if (Number.isNaN(closedMs)) return false;
-  if (now.getTime() - closedMs < CORA_CLOSE_SETTLE_MS) return false;
-  const solHandledMs = new Date(ticket.sol_handled_at).getTime();
-  if (Number.isNaN(solHandledMs)) return false;
+  // Must have a real customer message — no inbound ⇒ outbound-only ⇒ not a graded conversation.
+  if (!ticket.last_customer_message_at) return false;
+  const settleMs = new Date(ticket.last_customer_message_at).getTime();
+  if (Number.isNaN(settleMs)) return false;
+  if (now.getTime() - settleMs < CORA_CLOSE_SETTLE_MS) return false;
+  const handledMs = new Date(handledAt).getTime();
+  if (Number.isNaN(handledMs)) return false;
   if (ticket.last_analyzed_at) {
     const analyzedMs = new Date(ticket.last_analyzed_at).getTime();
-    if (!Number.isNaN(analyzedMs) && analyzedMs >= solHandledMs) {
+    if (!Number.isNaN(analyzedMs) && analyzedMs >= handledMs) {
       return false;
     }
   }
   // June already decided this handling cycle → skip. A June decision from a PRIOR cycle
-  // (decided_at < sol_handled_at) is fine: Sol re-handled past it, this is a new cycle that
-  // hasn't been decided yet.
+  // (decided_at < handledAt) is fine: we re-handled past it, this is a new, undecided cycle.
   if (latestJuneDecidedAt) {
     const decidedMs = new Date(latestJuneDecidedAt).getTime();
-    if (!Number.isNaN(decidedMs) && decidedMs >= solHandledMs) {
+    if (!Number.isNaN(decidedMs) && decidedMs >= handledMs) {
       return false;
     }
   }
   return true;
+}
+
+/** The later of two nullable ISO timestamps (null when both are null). */
+function laterTimestamp(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
 }
 
 export const ticketAnalysisCron = inngest.createFunction(
@@ -142,18 +157,23 @@ export const ticketAnalysisCron = inngest.createFunction(
       // there to break. Paired with the applySeverityActions
       // hard-return + the stamp-on-slip guard below.
       //
-      // The 30-min-settled floor is also applied at the source: closed_at IS NOT NULL AND
-      // closed_at <= (now - 30 min). Tickets closed <30 min ago are skipped entirely so Cora
-      // never grades an in-flight window (the customer might still reply "thanks!").
-      const settleCutoff = new Date(Date.now() - CORA_CLOSE_SETTLE_MS).toISOString();
+      // Settle now keys on the LAST CUSTOMER MESSAGE, not closed_at (computed per candidate
+      // below), so we no longer pre-filter on `closed_at <= now-30min` — that filter would drop
+      // a ticket closed 5 min ago whose customer last spoke 40 min ago (gradeable). We still
+      // require the ticket to BE closed (a finished conversation).
       const { data } = await admin.from("tickets")
-        .select("id, workspace_id, last_analyzed_at, updated_at, closed_at, tags, analyzer_locked, sol_handled_at")
+        .select("id, workspace_id, last_analyzed_at, updated_at, closed_at, tags, analyzer_locked, sol_handled_at, ai_handled_at")
         .eq("status", "closed")
         .eq("analyzer_locked", false)
-        .contains("tags", ["ai"])
+        // Grade EVERY AI-handled ticket — the cheap Sonnet/Haiku path AND Sol — not just Sol.
+        // `ai_handled_at` is the universal "we responded" stamp (deliverTicketMessage, all tiers);
+        // `sol_handled_at` is the Sol-specific sub-flag. Either present ⇒ we handled it ⇒ grade it.
+        // The old `.contains(tags,["ai"])` AND-gate wrongly excluded Sol-handled tickets that
+        // lacked the "ai" tag (e.g. journey-delivered), so it is GONE — the handled stamps are
+        // the signal now. Outbound (dunning) sends may carry `ai_handled_at` too, but the
+        // last-customer-message requirement in the gate keeps them out (no inbound = not graded).
+        .or("ai_handled_at.not.is.null,sol_handled_at.not.is.null")
         .not("closed_at", "is", null)
-        .not("sol_handled_at", "is", null)
-        .lte("closed_at", settleCutoff)
         .gte("updated_at", cutoff)
         .order("updated_at", { ascending: false })
         .limit(300);
@@ -166,14 +186,29 @@ export const ticketAnalysisCron = inngest.createFunction(
         tags: string[] | null;
         analyzer_locked: boolean | null;
         sol_handled_at: string | null;
+        ai_handled_at: string | null;
       }>;
       if (!candidates.length) return [];
 
-      // The "Sol handled this ticket" signal is now the deterministic `tickets.sol_handled_at`
-      // column, stamped by the worker on box-session completion (Phase 1 of
-      // cora-grades-on-deterministic-sol-handled-signal-not-brittle-direction-existence). No
-      // more per-run join against ticket_directions — an in-session `writeDirection` failure
-      // no longer starves Cora of Sol-handled tickets to grade.
+      // The "we handled this ticket" signal is the deterministic pair of stamps: `ai_handled_at`
+      // (any AI tier — set in deliverTicketMessage) and `sol_handled_at` (the Sol-specific
+      // sub-flag). No per-run join against ticket_directions — an in-session `writeDirection`
+      // failure no longer starves Cora of tickets to grade, and the cheap Sonnet/Haiku path is
+      // now graded too (cora-grades-every-ai-handled-ticket-not-just-sol).
+
+      // Settle anchor: the LAST CUSTOMER MESSAGE per candidate. One batched read (candidates are
+      // capped at 300) → max(created_at) per ticket. A ticket with NO customer message (an
+      // outbound-only dunning send) is dropped by the gate — never graded unless a customer replies.
+      const candidateIds = candidates.map(t => t.id);
+      const { data: custMsgRows } = await admin.from("ticket_messages")
+        .select("ticket_id, created_at")
+        .in("ticket_id", candidateIds)
+        .eq("author_type", "customer");
+      const lastCustomerMsgByTicket = new Map<string, string>();
+      for (const m of (custMsgRows || []) as Array<{ ticket_id: string; created_at: string }>) {
+        const prev = lastCustomerMsgByTicket.get(m.ticket_id);
+        if (!prev || m.created_at > prev) lastCustomerMsgByTicket.set(m.ticket_id, m.created_at);
+      }
 
       // The June-decided lookup. Load every `cs_director_call` `director_activity` row scoped
       // to the candidate workspaces since the 7-day cutoff; per candidate ticket, keep the
@@ -201,6 +236,8 @@ export const ticketAnalysisCron = inngest.createFunction(
             closed_at: t.closed_at,
             last_analyzed_at: t.last_analyzed_at,
             sol_handled_at: t.sol_handled_at,
+            ai_handled_at: t.ai_handled_at,
+            last_customer_message_at: lastCustomerMsgByTicket.get(t.id) ?? null,
           },
           now,
           juneByTicket.get(t.id) ?? null,

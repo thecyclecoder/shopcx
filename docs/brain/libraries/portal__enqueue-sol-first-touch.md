@@ -28,11 +28,13 @@ Enqueue Sol's first-touch ticket-handle box session for a portal-error ticket. P
 ## Exports
 
 - `enqueueSolFirstTouchForPortalError(admin, input)` → `EnqueueOutcome` — inserts the agent_jobs row.
-- `specSlugForTicketHandle(ticket_id)` → `string` — the deterministic slug the enqueue + dedupe key uses.
+- `enqueueSolFirstTouchForCoraRemediation(admin, {workspace_id, ticket_id, score?, analysis_id?})` → `EnqueueOutcome` — the **tiered-remediation-ladder** sibling (cora-tiered-remediation-ladder-cheap-fail-resessions-sol-not-june). Same `agent_jobs` insert + same `ticket-handle-<first-8>` dedupe, but `instructions.reason='cora_remediation'` (not `portal_error`) so `runTicketHandleJob` runs it as an ordinary first-touch — Sol re-handles from scratch a ticket the cheap Sonnet/Haiku path mishandled and she never touched. Called by [[./ticket-analyzer]] `applySeverityActions` when `decideRemediationTier` returns `resession_sol`. The `cheap_tier_score` + `analysis_id` ride in the instructions for the box-session context + the ledger link.
+- `specSlugForTicketHandle(ticket_id)` → `string` — the deterministic slug the enqueue + dedupe key uses (shared by both enqueue paths so a ticket never fans out two concurrent Sol sessions across the portal + Cora routes).
 
 ## Callers
 
-- `src/app/api/portal/route.ts` — after creating (or reusing) a `portal-action-failed` ticket, the intake calls this helper so Sol's box session opens on the fresh ticket. The customer-facing HTTP response is not wedged on an enqueue miss (best-effort — the auto-heal cron still surfaces the ticket).
+- `src/app/api/portal/route.ts` — after creating (or reusing) a `portal-action-failed` ticket, the intake calls `enqueueSolFirstTouchForPortalError` so Sol's box session opens on the fresh ticket. The customer-facing HTTP response is not wedged on an enqueue miss (best-effort — the auto-heal cron still surfaces the ticket).
+- [[./ticket-analyzer]] `applySeverityActions` — calls `enqueueSolFirstTouchForCoraRemediation` on the ladder's cheap-tier-mishandle rung (re-session Sol instead of escalating June). Best-effort — an enqueue failure never wedges the grade.
 
 ## Related
 

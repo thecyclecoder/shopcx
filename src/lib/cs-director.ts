@@ -62,7 +62,7 @@ import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
 
 /**
  * The verdict shape the CS Director emits — mirrors `CsDirectorVerdict` in
@@ -107,7 +107,7 @@ export interface CsDirectorVerdictInput {
  */
 export interface ApplyBoxCsDirectorCallResult {
   ok: boolean;
-  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "noop";
+  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "noop";
   reason?: string;
   needs_attention?: boolean;
   error?: string;
@@ -1093,7 +1093,8 @@ async function handleAuthorSpec(
 async function handleEscalateFounder(
   admin: Admin,
   jobId: string,
-  _verdict: CsDirectorVerdictInput,
+  workspaceId: string,
+  verdict: CsDirectorVerdictInput,
 ): Promise<ApplyBoxCsDirectorCallResult> {
   const tag = `[cs-director:${jobId.slice(0, 8)}]`;
   try {
@@ -1104,6 +1105,25 @@ async function handleEscalateFounder(
       console.log(
         `${tag} escalate_founder: linkage ticket=${linkage.ticketId.slice(0, 8)}${linkage.triageRunId ? ` triage_run=${linkage.triageRunId.slice(0, 8)}` : ""} — CEO card minted by runner (single writer)`,
       );
+      // Founder directive: "anything June seeks from me should be a straight-up approval." When the
+      // escalation carries a recommended remedy, ALSO raise an Eve SMS approval so the founder taps
+      // Approve/Decline on their phone (executeApprovedJuneRemedies runs it on Approve) — not just a
+      // silent CEO dashboard card. The runner still mints the dashboard card as the durable record.
+      const recommended = verdict.recommended_remedy;
+      if (recommended && typeof recommended === "object" && !Array.isArray(recommended)) {
+        try {
+          const { raiseFounderApproval } = await import("@/lib/june-remedy-approval");
+          const raised = await raiseFounderApproval(admin, {
+            workspaceId,
+            ticketId: linkage.ticketId,
+            remedy: recommended as Record<string, unknown>,
+            reasoning: verdict.reasoning || "June escalated this to you for a call.",
+          });
+          console.log(`${tag} escalate_founder: founder SMS approval ${raised.via} (${raised.approvalId ? raised.approvalId.slice(0, 8) : "no-card"})`);
+        } catch (e) {
+          console.warn(`${tag} escalate_founder: raiseFounderApproval failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      }
     }
     return {
       ok: true,
@@ -1196,7 +1216,16 @@ export async function applyBoxCsDirectorCall(
     if (verdict.decision === "author_spec") {
       return handleAuthorSpec(admin, jobId, job.workspace_id, verdict, authorSpecDeps);
     }
-    if (verdict.decision === "escalate_founder") return handleEscalateFounder(admin, jobId, verdict);
+    if (verdict.decision === "escalate_founder") return handleEscalateFounder(admin, jobId, job.workspace_id, verdict);
+
+    // close_no_action — nothing to execute here. The runner's `decideCsDirectorTicketTransition`
+    // closes + de-escalates the ticket; June already reasoned it's a correctly-handled no-op with no
+    // in-leash remedy and no founder call. No CEO card, no remedy fire — just a clean handler tag so
+    // the audit/log_tail reads `handler=close_no_action` instead of the generic drift no-op.
+    if (verdict.decision === "close_no_action") {
+      console.log(`[cs-director:${jobId.slice(0, 8)}] close_no_action — no execution; runner closes + de-escalates.`);
+      return { ok: true, handler: "close_no_action" };
+    }
 
     console.log(`[cs-director:${jobId.slice(0, 8)}] no actionable decision ('${String(verdict.decision)}') — clean no-op`);
     return { ok: true, handler: "noop" };

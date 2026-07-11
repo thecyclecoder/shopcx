@@ -13,7 +13,20 @@ export interface GenerateCreativeOpts {
   aspectRatio?: NanoBananaAspect; // default "4:5" (Meta feed)
   /** A proven winner to match design language (e.g. the skeptic winner). Passed as the FIRST image. */
   designReferenceUrl?: string;
+  /** Creative treatment/archetype — how the concept is executed. Varies the COMBINATION so a concept can
+   *  be re-tested different ways (CEO 2026-07-10). before_after → the transformation leads; testimonial →
+   *  a real review leads; big_claim → the headline claim dominates; authority → proof/certs lead;
+   *  advertorial → an editorial story frame. Default: before_after. */
+  treatment?: "before_after" | "testimonial" | "big_claim" | "authority" | "advertorial";
 }
+
+const TREATMENT_STEER: Record<NonNullable<GenerateCreativeOpts["treatment"]>, string> = {
+  before_after: "TREATMENT: before/after transformation-led — the two-photo transformation is the hero.",
+  testimonial: "TREATMENT: testimonial-led — a real 5-star customer review + name is the visual hero (photoreal, no fake badges); product secondary.",
+  big_claim: "TREATMENT: big-claim — one bold benefit headline dominates the frame; minimal other elements.",
+  authority: "TREATMENT: authority — lead with the proof stack (3rd-party tested, non-GMO, award, guarantee) as the credibility hero.",
+  advertorial: "TREATMENT: advertorial — an editorial / 'article'-style layout (headline + body-copy feel), not a glossy ad.",
+};
 
 export interface GeneratedCreative {
   buffer: Buffer;
@@ -23,9 +36,10 @@ export interface GeneratedCreative {
   expectedCopy: { headline: string; offer: string | null; trust: string };
 }
 
-function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"]): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   const headline = brief.angle.hook;
   const trust = brief.proofStack.slice(0, 4).join(" · ");
+  const treatmentClause = treatment ? `\n${TREATMENT_STEER[treatment]}` : "";
   // Price: allowed treatments only. Prefer the offer headline; if a number is warranted, per-serving or strikethrough.
   const priceLine = brief.offer
     ? (brief.offer.perServing ?? brief.offer.strikethrough ?? brief.offer.headline)
@@ -49,7 +63,7 @@ function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean): { prompt: str
   }
   if (brief.supportingBenefits.length) bodyBits.push(`Small secondary line reinforcing: ${brief.supportingBenefits.slice(0, 2).join(", ")}.`);
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}
+  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}
 
 HEADLINE (render EXACTLY, correct spelling, no dropped/repeated words): "${headline}" — big, bold, with 1–2 key phrases highlighted in a color block.
 
@@ -69,7 +83,7 @@ HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and 
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
-  const { prompt, expectedCopy } = buildPrompt(brief, hasRef);
+  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment);
   // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
   // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
   const imageUrls = [
