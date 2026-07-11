@@ -58,6 +58,17 @@ export function utcDayStartIso(now: Date = new Date()): string {
   return d.toISOString();
 }
 
+/**
+ * Stable per-cadence-slot `agent_jobs.spec_slug` for a media-buyer job. The column is
+ * `NOT NULL`, so an omitted value blocks the insert (the 2026-07-11 outage). One slug
+ * per workspace-account slot keeps `agent_jobs_slug_idx (workspace_id, spec_slug, ...)`
+ * useful for the Roadmap rollups: `media-buyer:<account-id>` for a per-account cohort,
+ * and `media-buyer:workspace` for a workspace-wide `meta_ad_account_id IS NULL` cohort.
+ */
+export function mediaBuyerSpecSlug(account: string | null): string {
+  return account ? `media-buyer:${account}` : "media-buyer:workspace";
+}
+
 interface CohortRow {
   id: string;
   workspace_id: string;
@@ -118,6 +129,7 @@ export async function dispatchMediaBuyerCadence(
     if (covered.has(key)) continue;
     const { error: insErr } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
+      spec_slug: mediaBuyerSpecSlug(account),
       kind: "media-buyer",
       instructions: JSON.stringify({ meta_ad_account_id: account }),
     });
