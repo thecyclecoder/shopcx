@@ -19,11 +19,13 @@ The transport-specific webhook lands somewhere under `src/app/api/webhooks/...`.
 4. **Match or create the ticket.** Email uses `In-Reply-To` / `References` headers against `tickets.email_message_id`. Chat reuses the widget session's open ticket. Social comments + DMs match by `meta_post_id` + `meta_sender_id`. If nothing matches, a new ticket gets inserted with `status='open'`, `handled_by=null`.
 5. **Persist the message.** A row gets inserted into [[../tables/ticket_messages]] with `direction='inbound'`, `visibility='public'`, `author_type='customer'`, `body` (raw HTML or text), `body_clean` (HTML-stripped, quoted-history removed via `src/lib/email-cleaner.ts`).
 
-Then the handler fires `inngest.send({ name: "ticket/inbound-message", data: { workspace_id, ticket_id, message_body, channel, is_new_ticket }})` and returns 200. From here, durability is Inngest's job.
+Then the handler routes through [[../libraries/dispatch-inbound-message]] `dispatchInboundMessage(...)` which (a) stamps `dispatch_pending_at = now` on the just-inserted `ticket_messages` row (durable intent), then (b) fires the event via `inngest.send({ name: "ticket/inbound-message", data: { workspace_id, ticket_id, message_body, channel, is_new_ticket }})`. The on-disk stamp is what makes a lost send recoverable — see [[../specs/durable-inbound-dispatch-no-silently-lost-ticket-event]] Phases 1–2. The handler returns 200. From here, durability is both Inngest's job AND the durable stamp's on-disk record.
 
 ## Phase 2 — the unified pipeline
 
 [[../inngest/unified-ticket-handler]] picks up the event. Concurrency is keyed on `event.data.ticket_id` with limit 1 — at most one in-flight handler per ticket, which is how we serialize against double-firing customers and webhook retries.
+
+**Dispatch-intent clearance (Phase 2 of durable-inbound-dispatch).** At the top of the run, **before any gates**, [[../libraries/dispatch-inbound-message]] `clearDispatchIntent` clears the `dispatch_pending_at` stamp on this ticket's inbound messages. This signals that the event was delivered and the handler claimed the turn, regardless of the run's outcome. Phase 3 ([[../inngest/unanswered-inbound-backstop-cron]]) uses an un-cleared stamp older than the settle window as a deterministic lost-send signal. See [[../specs/durable-inbound-dispatch-no-silently-lost-ticket-event]] Phase 3.
 
 ### Step 2a — resolve
 
