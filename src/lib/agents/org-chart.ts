@@ -27,6 +27,12 @@ import { MONITORED_LOOPS, agentLoopId, type MonitoredLoop } from "@/lib/control-
 import { getPersona } from "@/lib/agents/personas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAutonomyMap, isAutoApprover, type AutonomyMap } from "@/lib/agents/approval-router";
+// control-tower-canonical-node-registry P2 — the ORPHAN_OWNER='platform' fallthrough now routes
+// through the canonical node registry (a REAL registered node returns its declared owner; a
+// genuine miss `console.warn`s + bumps `getOrphanSightings()` for the orphan-node-self-audit
+// consumer). The `ORPHAN_OWNER` constant stays as the AUDIT HOOK — a caller that hits it means
+// the node is genuinely un-placed; the whole point of the P2 rewire is to surface, not silence.
+import { resolveNodeOwnerOrOrphanDefault } from "@/lib/control-tower/node-registry";
 
 /** Live liveness of a rostered agent (agent-roster-sync Phase 2). */
 export type WorkerStatus =
@@ -118,7 +124,13 @@ const ROSTER_ACTIVE_WINDOW_MS = 7 * DAY;
  */
 const NEVER_FIRED_GRACE_MS = 2 * DAY;
 
-/** Default owner for an unioned orphan lane: the Platform director (Ada) owns the agent fleet. */
+/**
+ * Historical default owner for an unioned orphan lane — the Platform director (Ada) owns the
+ * agent fleet. Kept as a documented CONSTANT of the audit hook; the actual routing now walks
+ * through `resolveNodeOwnerOrOrphanDefault` (control-tower-canonical-node-registry P2), which
+ * returns the canonical registry's owner on a hit and only falls back to this value after
+ * recording an `orphan_seen` sighting the audit consumer reads.
+ */
 const ORPHAN_OWNER = "platform";
 
 /** A director's OWN job kinds — how it "turns on" (its standing pass, its coaching chat, its goal proposals,
@@ -248,8 +260,12 @@ export function buildRoster(directorSlugs: Set<string>, liveKinds: Set<string>):
     if (DIRECTOR_SWEEP_KINDS.has(kind)) continue; // a director grading/coaching the layer below it — not a worker
     seen.add(kind);
     const persona = getPersona(kind);
+    // control-tower-canonical-node-registry P2 — walk the canonical registry FIRST; only truly
+    // orphaned kinds fall back to the historical Platform default, and each such fall records an
+    // `orphan_seen` sighting the orphan-node-self-audit consumes.
+    const owner = resolveNodeOwnerOrOrphanDefault(kind, "org-chart:orphan-union");
     entries.push({
-      owner: ORPHAN_OWNER,
+      owner,
       kind,
       label: persona.role,
       description: persona.personality,

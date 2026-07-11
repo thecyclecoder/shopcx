@@ -26,7 +26,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { MODELS, type ModelTier } from "@/lib/ai-models";
 import { getModelTier, applyModelTierChange } from "@/lib/agent-model-tiers";
 import { MODEL_TIER_PROPOSAL_KIND, APPLY_MODEL_TIER_ACTION_TYPE, type PendingAction } from "@/lib/agent-jobs";
-import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+// control-tower-canonical-node-registry P2 — proposals resolve the TARGET agent's owner through
+// the canonical node registry (single source of truth), so a director's model-tier vote and the
+// approval router agree on every target kind by construction.
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import { resolveApproverLive, loadAutonomyMap, isAutoApprover, CEO } from "@/lib/agents/approval-router";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 
@@ -106,7 +109,7 @@ export async function proposeModelTierChange(
   // The supervisor of the TARGET agent: a worker's owning function resolves UP to its live+autonomous
   // director, else the CEO; a director kind is unmapped ⇒ its own change routes to the CEO. This is the
   // single routing rule for both the auto path and the escalation, so the two never disagree.
-  const routedTo = await resolveApproverLive(ownerFunctionForKind(targetKind));
+  const routedTo = await resolveApproverLive(resolveNodeOwner(targetKind));
 
   // Auto-apply rail: a live+autonomous supervising director may decide its own worker's in-rail change.
   // The CEO seat never "auto-applies" here (it has no proxy above it to be supervised by) — a change
@@ -123,7 +126,7 @@ export async function proposeModelTierChange(
     if (!applied.ok) return { ok: false, error: applied.error || "apply failed" };
     await recordApprovalDecision(admin, {
       workspaceId,
-      raisedByFunction: ownerFunctionForKind(targetKind) ?? CEO,
+      raisedByFunction: resolveNodeOwner(targetKind) ?? CEO,
       routedToFunction: routedTo,
       decidedBy: "director",
       decision: "approved",

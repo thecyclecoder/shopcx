@@ -35,4 +35,4 @@ The "AI entry points" the spec mentions are the hand-registered inline agents (`
 
 ## Related
 
-[[control-tower]] · [[coverage-register-agent]] · [[../specs/control-tower-complete-coverage]] · [[../specs/coverage-auto-register-agent]] · [[../specs/control-tower]] · [[../inngest/control-tower-monitor]] · [[../dashboard/control-tower]] · [[../operational-rules]]
+[[control-tower]] · [[control-tower-node-registry]] — the canonical org tree fusing MONITORED_LOOPS + personas + the builder-worker kind universe; complements this page's CODE↔REGISTRY diff by catching the OTHER dimension of drift (an owner mapping missing from the registry, surfaced by `scripts/_check-node-registry-drift.ts`) · [[coverage-register-agent]] · [[../specs/control-tower-complete-coverage]] · [[../specs/coverage-auto-register-agent]] · [[../specs/control-tower-canonical-node-registry]] · [[../specs/control-tower]] · [[../inngest/control-tower-monitor]] · [[../dashboard/control-tower]] · [[../operational-rules]]
