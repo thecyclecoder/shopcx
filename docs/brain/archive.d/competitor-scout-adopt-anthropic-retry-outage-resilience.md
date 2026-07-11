@@ -1,0 +1,1 @@
+- **Competitor Scout discovery — adopt anthropic-retry so transient Anthropic blips park-and-drain instead of paging** · verified 2026-07-11 · → [[../inngest/competitor-scout]]

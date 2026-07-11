@@ -41,6 +41,7 @@ In-line bounded retry for a Claude call on a **synchronous (non-Inngest) path** 
 - [[ticket-analyzer]] — grader fetch throws instead of returning `grader_http_*`.
 - [[../inngest/ticket-analysis-cron]] — catches `isRetryableThrownError` → **defers** the ticket (leaves `last_analyzed_at` untouched → next */30 tick re-grades on recovery).
 - [[remedy-selector]] — **Phase 3**: `selectRemedies` wraps its Haiku fetch in `withAnthropicRetry` + breaker short-circuit; `generateOpenEndedResponse` (cancel chat) feeds the breaker signal + short-circuits. Both degrade **explicitly** (priority-ordered remedies / escalation reply), never a silent swallow of the first 529.
+- [[competitors]] — `runDiscovery` throws via `throwForAnthropicStatus` / `throwForAnthropicNetworkError` on Anthropic failures; paired with `retries: OUTAGE_SPANNING_RETRIES` on [[../inngest/competitor-scout]], a transient blip parks-and-drains instead of paging Control Tower.
 
 ## Gotchas
 
@@ -49,4 +50,4 @@ In-line bounded retry for a Claude call on a **synchronous (non-Inngest) path** 
 
 ## Related
 
-[[../integrations/anthropic]] · [[unified-ticket-handler]] · [[sonnet-orchestrator-v2]] · [[ticket-analyzer]] · [[../inngest/ticket-analysis-cron]] · [[../specs/agent-outage-resilience]]
+[[../integrations/anthropic]] · [[unified-ticket-handler]] · [[sonnet-orchestrator-v2]] · [[ticket-analyzer]] · [[../inngest/ticket-analysis-cron]] · [[competitors]] · [[../inngest/competitor-scout]] · [[../specs/agent-outage-resilience]]
