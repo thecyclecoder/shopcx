@@ -698,7 +698,9 @@ export function isTransientSupabaseEdgeHandshakeError(message: string | null | u
  * `isTransientSupabaseLogNoise` (Supabase edge 5xx / statement timeout), factored here so
  * the vercel-logs route can reuse it
  * ([[../specs/error-feed-drop-undici-headers-timeout-noise]] — falsely rolled back 2026-07-04,
- * restored here; NOT a mechanical revert since error-feed.ts moved on).
+ * restored here; NOT a mechanical revert since error-feed.ts moved on ·
+ * [[../specs/error-feed-headers-timeout-classifier-match-bracketed-cause-]] — extended to
+ * also accept the bracketed wrapped-error shape Node emits for `new Error('...', { cause })`).
  *
  * Node's undici HTTP client emits `TypeError: fetch failed` with cause
  * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` when an outbound request our server made
@@ -708,17 +710,33 @@ export function isTransientSupabaseEdgeHandshakeError(message: string | null | u
  * fan-out for a single such log churns Platform owners on a healthy loop that already
  * recovered.
  *
- * `true` ONLY when the message carries BOTH the `TypeError: fetch failed` marker AND a
- * `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT` cause substring — the exact and only
- * shape undici emits for this class. A `fetch failed` from any other cause (DNS, TLS, our own
- * code throwing a same-worded TypeError) carries a different cause and stays paged on first
- * sighting. Recurrence-gated like its siblings: a chronic upstream outage still surfaces.
+ * `true` when the message carries BOTH a fetch-failed marker AND a headers-timeout cause
+ * marker, accepting the two wire shapes Node produces for this class:
+ *
+ *   - PLAIN (undici emits it directly):
+ *       `TypeError: fetch failed` + `HeadersTimeoutError` / `UND_ERR_HEADERS_TIMEOUT`.
+ *   - BRACKETED WRAPPED (Node's `util.inspect` on an outer Error wrapping the TypeError with
+ *     `{ cause }` — the shape /api/inngest logs when an Inngest `step.run(...)` fetch trips):
+ *       `[Error [TypeError]: fetch failed] { [cause]: Error: Headers Timeout Error }` —
+ *     the `]` between `TypeError` and `:` breaks the plain substring, and the human-language
+ *     `Headers Timeout Error` (three spaced words) is the underlying Error's `.message`, not
+ *     the class-name `HeadersTimeoutError` or the code `UND_ERR_HEADERS_TIMEOUT`.
+ *
+ * A `fetch failed` from any other cause (DNS, TLS, our own code throwing a same-worded
+ * TypeError) carries a different cause and stays paged on first sighting. Recurrence-gated
+ * like its siblings: a chronic upstream outage still surfaces.
  */
 export function isTransientUndiciHeadersTimeout(message: string | null | undefined): boolean {
   const text = (message ?? "").trim();
   if (!text) return false;
-  if (!text.includes("TypeError: fetch failed")) return false;
-  return text.includes("HeadersTimeoutError") || text.includes("UND_ERR_HEADERS_TIMEOUT");
+  const fetchFailed =
+    text.includes("TypeError: fetch failed") || text.includes("[TypeError]: fetch failed");
+  if (!fetchFailed) return false;
+  return (
+    text.includes("HeadersTimeoutError") ||
+    text.includes("UND_ERR_HEADERS_TIMEOUT") ||
+    text.includes("Headers Timeout Error")
+  );
 }
 
 /**
