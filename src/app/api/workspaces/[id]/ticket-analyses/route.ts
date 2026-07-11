@@ -54,22 +54,40 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       .select("ticket_id").eq("author_type", "customer").gte("created_at", todayIso);
     const handledIdSet = Array.from(new Set((custToday || []).map(m => m.ticket_id as string)));
     let newTickets = 0, handledTickets = 0, handledCheap = 0, handledSol = 0;
+    // The non-merged handled ticket ids — the true "handled today" population. `graded_handled` below
+    // counts how many of THESE have a grade, so the card reads "N of <handled> graded" honestly. (The
+    // old numerator was `analyzed` = grade rows CREATED today over ANY ticket — a different population,
+    // which produced nonsense like "21 of 16".)
+    const handledTicketIds: string[] = [];
     if (handledIdSet.length) {
       const { data: htk } = await admin.from("tickets")
         .select("id, merged_into, created_at, ai_handled_at, sol_handled_at")
         .eq("workspace_id", workspaceId)
         .in("id", handledIdSet);
-      for (const t of (htk || []) as Array<{ merged_into: string | null; created_at: string; ai_handled_at: string | null; sol_handled_at: string | null }>) {
+      for (const t of (htk || []) as Array<{ id: string; merged_into: string | null; created_at: string; ai_handled_at: string | null; sol_handled_at: string | null }>) {
         if (t.merged_into) continue; // merged-away duplicate → the survivor is counted instead
         handledTickets++;
+        handledTicketIds.push(t.id);
         if (t.sol_handled_at) handledSol++;
         else if (t.ai_handled_at) handledCheap++;
         if (t.created_at >= todayIso) newTickets++;
       }
     }
 
+    // How many of today's handled tickets carry a grade (a ticket_analyses row) — from ANY time, since
+    // a grade lands ~30 min after the last customer message. This is the honest numerator for the card.
+    let gradedHandled = 0;
+    if (handledTicketIds.length) {
+      const { data: gradedRows } = await admin.from("ticket_analyses")
+        .select("ticket_id")
+        .eq("workspace_id", workspaceId)
+        .in("ticket_id", handledTicketIds);
+      gradedHandled = new Set((gradedRows || []).map(g => g.ticket_id as string)).size;
+    }
+
     return NextResponse.json({
       analyzed: rows.length,
+      graded_handled: gradedHandled,
       new_tickets: newTickets,
       handled_tickets: handledTickets,
       handled_cheap: handledCheap,

@@ -15,6 +15,7 @@ interface DailyRollup {
 
 interface TodayData {
   analyzed: number;
+  graded_handled?: number;
   new_tickets?: number;
   handled_tickets?: number;
   handled_cheap?: number;
@@ -162,7 +163,7 @@ export default function AIAnalysisPage() {
                     </span>
                     <span className="text-sm text-zinc-400">/ 10</span>
                     <span className="text-sm text-zinc-500">
-                      · {today.analyzed} of {today.handled_tickets ?? today.analyzed} handled ticket{(today.handled_tickets ?? today.analyzed) === 1 ? "" : "s"} graded
+                      · {today.graded_handled ?? today.analyzed} of {today.handled_tickets ?? today.analyzed} handled ticket{(today.handled_tickets ?? today.analyzed) === 1 ? "" : "s"} graded
                     </span>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
