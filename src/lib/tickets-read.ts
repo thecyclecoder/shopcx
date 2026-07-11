@@ -50,12 +50,25 @@ export interface TicketRow {
   escalated_at: string | null;
   escalation_reason: string | null;
   handled_by: string | null;
+  assigned_to: string | null;
+  /** Legacy boolean the widget/live-chat re-dispatch gate reads — distinct from `ai_handled_at`. */
+  ai_handled: boolean | null;
+  ai_handled_at: string | null;
+  sol_handled_at: string | null;
+  ai_disabled: boolean | null;
+  analyzer_locked: boolean | null;
+  do_not_reply: boolean | null;
 }
 
 const TICKET_COLS =
   "id, workspace_id, customer_id, channel, status, subject, tags, created_at, updated_at, closed_at, " +
   "last_customer_reply_at, last_analyzed_at, active_playbook_id, playbook_step, merged_into, " +
-  "escalated_to, escalated_at, escalation_reason, handled_by";
+  "escalated_to, escalated_at, escalation_reason, handled_by, " +
+  // Dispatch-blocking state — an investigation must surface WHY a customer reply may not have been
+  // handled: a human owns it (assigned_to), AI is off (ai_disabled), the analyzer is vetoed
+  // (analyzer_locked), we deliberately don't reply (do_not_reply), or the legacy ai_handled flag the
+  // widget/live-chat re-dispatch gate still reads (distinct from the harness ai_handled_at stamp).
+  "assigned_to, ai_handled, ai_handled_at, sol_handled_at, ai_disabled, analyzer_locked, do_not_reply";
 
 export interface CustomerLite {
   id: string;
