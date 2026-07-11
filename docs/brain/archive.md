@@ -12,9 +12,17 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Checkout-stuck → assisted-purchase concierge (fast default): Sol re-entry, Sonnet not Opus, place the order** · verified 2026-07-10 · → [[../recipes/checkout-stuck-concierge-flow]] · lifecycle: [[../lifecycles/storefront-checkout]]
+- **Fix June remedy payload type override bypassing founder gate** · verified 2026-07-10 · → [[../libraries/cs-director]], [[../libraries/june-remedy-approval]]
 - **Journey completion stamps closed_at so Cora can grade closed tickets** · verified 2026-07-10 · → [[../lifecycles/ticket-lifecycle]]
+- **June full SDK power: multi-action remedies (execute the whole fix, gate sums across money actions)** · verified 2026-07-10 · → [[../libraries/cs-director#multi-action-remedies]]
+- **Loyalty coupon apply must be idempotent — self-heal retry double-deducts points** · verified 2026-07-10 · → [[../recipes/apply-loyalty-coupon]]
 - **Media-buyer armed flip surface** · verified 2026-07-10 · → [[lifecycles/media-buyer-arming]]
 - **Media-buyer recommendations delivered by the Growth Director (Max → #director-growth-max)** · verified 2026-07-10 · → [[../libraries/media-buyer-director-digest]]
+- **Register monitored loop: investor-monthly-invite** · verified 2026-07-10 · → [[../inngest/investor-monthly-invite]]
+- **Register monitored loop: qb-snapshot-refresh** · verified 2026-07-10 · → [[../inngest/qb-snapshot-refresh]]
+- **Replacement-order robustness: countryCode normalization, multi-item = one order, stall reconcile** · verified 2026-07-10 · → [[../lifecycles/commerce-sdk]]
+- **Return a real 403 for gated storefront blueprint landers** · verified 2026-07-10 · → [[../lifecycles/storefront-checkout]]
 - **Builder worktree self-heal reclaims ephemeral (/tmp) branch-pinned worktrees** · verified 2026-07-09 · → [[../libraries/builder-worker]]
 - **Control Tower box tile verifies SHA direction before calling self-update stuck** · verified 2026-07-09 · → [[../libraries/control-tower]]
 - **Control Tower: stop counting internal renewal orders as awaited fraud detector work** · verified 2026-07-09 · → [[../libraries/control-tower]]
