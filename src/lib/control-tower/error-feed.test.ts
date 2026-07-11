@@ -242,6 +242,19 @@ test("isTransientUndiciHeadersTimeout — only 'fetch failed' + HeadersTimeout c
     true,
   );
   assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed [cause]: UND_ERR_HEADERS_TIMEOUT"), true);
+  // The exact wire shape from Control Tower `vercel:694d6c93d00ffabd`: an Inngest
+  // `step.run(...)` fetch call trips undici's headers-timeout, the outer Error wraps the
+  // TypeError with `{ cause }`, and Node's `util.inspect` emits the bracketed wrapped-error
+  // form — the `]` between `TypeError` and `:` breaks the plain `TypeError: fetch failed`
+  // substring, and `Headers Timeout Error` (three spaced words) is the underlying Error's
+  // `.message`, not the class-name `HeadersTimeoutError` or code `UND_ERR_HEADERS_TIMEOUT`
+  // (error-feed-headers-timeout-classifier-match-bracketed-cause-).
+  assert.equal(
+    isTransientUndiciHeadersTimeout(
+      "[Error [TypeError]: fetch failed] { stepId: 'discover', [cause]: Error: Headers Timeout Error }",
+    ),
+    true,
+  );
   // 'fetch failed' from a DIFFERENT cause (DNS/TLS/our own throw) is NOT this class — pages.
   assert.equal(isTransientUndiciHeadersTimeout("TypeError: fetch failed\n  [cause]: getaddrinfo ENOTFOUND api.example.com"), false);
   // The cause without the fetch-failed marker (some unrelated log) is not it either.
