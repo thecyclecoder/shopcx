@@ -33,6 +33,7 @@ import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpecBlockers } from "@/lib/brain-roadmap";
 import { getSpec as getSpecFromDb } from "@/lib/specs-table";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
+import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
 
 type Admin = SupabaseClient;
 
@@ -71,6 +72,17 @@ export interface MarioBrief {
    *  live job) — set to a wait status only when M4 is about to look at a candidate
    *  that just transitioned; the evaluator's own filter would drop a wait status */
   current_job_status: string | null;
+  /** Set ONLY on a fifth-source (Vale-review-failed, missing-blocker class) candidate:
+   *  the current `specs.blocked_by` column, the raw spec body, and Vale's latest
+   *  `needsFixReason` (from [[./spec-investigation]] `whyDidSpecReviewFail`). The M4
+   *  agent uses this to reason about the `blocked_by_repair` verb WITHOUT re-reading
+   *  the spec — mirrors how the failed-build source pre-seeds `current_job_status`.
+   *  Null on every other source. */
+  review_failed_context?: {
+    blocked_by: string[];
+    body: string;
+    vale_needs_fix_reason: string | null;
+  } | null;
 }
 
 /**
@@ -351,6 +363,113 @@ async function readReviewFailedVerificationStalls(
 }
 
 /**
+ * Parse the `**Blocked-by:** [[slug]], [[slug]]` metadata line from a spec body — mirrors
+ * [[./brain-roadmap]] `parseSpec` (the raw prerequisite parser at brain-roadmap.ts:353-361). Only
+ * this exact line counts — a `[[../libraries/...]]` reference elsewhere in the body is NOT a
+ * declared prerequisite. Returns a de-duped array of bare slugs (no `../specs/` prefix, no `.md`
+ * suffix). Exported so the fifth-source predicate below is unit-testable.
+ */
+export function extractBlockedBySlugsFromBody(body: string): string[] {
+  const lines = body.split(/\r?\n/);
+  for (const l of lines) {
+    const bm = l.match(/\*\*Blocked-by:\*\*\s*(.+?)\s*$/i);
+    if (!bm) continue;
+    const slugs: string[] = [];
+    for (const wl of bm[1].matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+      slugs.push(wl[1].trim().replace(/^.*\//, "").replace(/\.md$/, ""));
+    }
+    return [...new Set(slugs)];
+  }
+  return [];
+}
+
+/**
+ * Pure decision predicate — is this Vale-bounced spec row the fifth-source's missing-blocker
+ * class? Fanned out of `readReviewFailedBlockerStalls` so the exact "surface?" logic is unit-
+ * testable without a stubbed Supabase client (mirrors [[./spec-drift]] pickMergedPrFromList's
+ * split of I/O from decision). Returns true ONLY when: (1) not folded/deferred, (2) aged past
+ * the grace, (3) every real (kind='phase') phase has verification (COMPLEMENT of the fourth
+ * source), and (4) the body's `**Blocked-by:**` line names at least one slug absent from
+ * `specs.blocked_by`. Every other Vale bounce class returns false — no double-routing.
+ */
+export function shouldSurfaceMissingBlocker(input: {
+  status: string | null;
+  ageMs: number;
+  graceMs: number;
+  realPhases: Array<{ verification: string | null }>;
+  body: string;
+  blocked_by: string[];
+}): boolean {
+  if (input.status === "folded" || input.status === "deferred") return false;
+  if (input.ageMs <= input.graceMs) return false;
+  if (input.realPhases.length === 0) return false;
+  // COMPLEMENT of the missing-verification class — if ANY real phase lacks verification, the
+  // fourth source owns this candidate. Routing both there would double-fire.
+  const anyMissingVerification = input.realPhases.some(
+    (p) => !(p.verification && p.verification.trim()),
+  );
+  if (anyMissingVerification) return false;
+  const namedPrerequisiteSlugs = extractBlockedBySlugsFromBody(input.body);
+  if (namedPrerequisiteSlugs.length === 0) return false;
+  const currentBlockedBy = new Set(input.blocked_by);
+  return namedPrerequisiteSlugs.some((slug) => !currentBlockedBy.has(slug));
+}
+
+/**
+ * FIFTH candidate source (Vale-review-failed with MISSING blocked_by). Mirror of
+ * `readReviewFailedVerificationStalls` scoped to the COMPLEMENT of that verification class: a
+ * spec sitting `vale_pass=false` in `in_review` whose real (kind='phase') phases ALL have
+ * verification — so the fourth source correctly ignored it — but whose body's `**Blocked-by:**`
+ * metadata line names a prerequisite that is ABSENT from the `specs.blocked_by` column. Vale
+ * bounces this exact class (`needs_fix` — the declared blocker never made it onto the row), but
+ * no surface re-authors the row: it has no build job (the failed-build source misses it) and its
+ * last event is a review bounce, not an open transition (the timecard thresholds miss it). Mario's
+ * Phase-2 `blocked_by_repair` verb (additive union) then re-opens it to review. Precisely scoped
+ * to the missing-blocker class — a spec Vale bounced for a different reason (bad parent, mangled
+ * phases, …) is NOT surfaced here, so the fifth source can never mis-route to the repair. Also
+ * skips a spec with no `**Blocked-by:**` line in its body (no named prerequisite → not this class).
+ */
+async function readReviewFailedBlockerStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; age_ms: number; body: string; blocked_by: string[] }>> {
+  const now = Date.now();
+  const { data: failed, error } = await admin
+    .from("specs")
+    .select("id, slug, status, updated_at, body, blocked_by")
+    .eq("workspace_id", workspace_id)
+    .eq("vale_pass", false)
+    .limit(500);
+  if (error) throw error;
+  const rows = (failed ?? []) as Array<{
+    id: string;
+    slug: string;
+    status: string | null;
+    updated_at: string | null;
+    body: string | null;
+    blocked_by: string[] | null;
+  }>;
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number; body: string; blocked_by: string[] }> = [];
+  for (const s of rows) {
+    if (!s.updated_at) continue;
+    const age = now - Date.parse(s.updated_at);
+    const { data: phases } = await admin
+      .from("spec_phases")
+      .select("verification, kind")
+      .eq("spec_id", s.id);
+    const realPhases = ((phases ?? []) as Array<{ verification: string | null; kind: string | null }>)
+      .filter((p) => p.kind !== "fix")
+      .map((p) => ({ verification: p.verification }));
+    const body = s.body ?? "";
+    const blockedBy = s.blocked_by ?? [];
+    if (!shouldSurfaceMissingBlocker({ status: s.status, ageMs: age, graceMs, realPhases, body, blocked_by: blockedBy })) continue;
+    out.push({ workspace_id, spec_slug: s.slug, age_ms: age, body, blocked_by: blockedBy });
+  }
+  return out;
+}
+
+/**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
  *
@@ -482,6 +601,37 @@ export async function evaluateStalledSpecs(
         brief: { last_events: [], blocked_by_state: [], current_job_status: "review_failed_missing_verification" },
       });
     }
+
+    // (a5) FIFTH candidate source — Vale-review-failed with MISSING blocked_by (see
+    // readReviewFailedBlockerStalls). Complementary scope to (a4): the fourth source owns specs whose
+    // real phases lack verification; the fifth owns specs whose real phases DO have verification but
+    // whose body's `**Blocked-by:**` line names a prerequisite absent from `specs.blocked_by`. Vale
+    // bounces that class (needs_fix — declared blocker never landed on the row), but no surface re-
+    // authors it. Mario's Phase-2 `blocked_by_repair` verb (additive union) does — this source
+    // surfaces the class so the M4 agent can propose it. Pre-seeds `review_failed_context` on the
+    // brief so a survivor already carries current blocked_by + spec body without re-reading; the
+    // needsFixReason is stamped after (b)/(c)/(d) so we only pay per candidate that survives.
+    const blockerFailed = await readReviewFailedBlockerStalls(admin, ws, MARIO_REVIEW_VERIFICATION_GRACE_MS);
+    for (const bf of blockerFailed) {
+      const key = `${bf.workspace_id}::${bf.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: bf.workspace_id,
+        spec_slug: bf.spec_slug,
+        // Semantic: review STARTED but never PASSED — Vale bounced it for a missing blocked_by entry.
+        from_event: "review_started",
+        to_event: "review_passed",
+        gap_ms: bf.age_ms,
+        sla_ms: MARIO_REVIEW_VERIFICATION_GRACE_MS,
+        brief: {
+          last_events: [],
+          blocked_by_state: [],
+          current_job_status: "review_failed_missing_blocker",
+          review_failed_context: { blocked_by: bf.blocked_by, body: bf.body, vale_needs_fix_reason: null },
+        },
+      });
+    }
   }
 
   const survivors: StalledCandidate[] = [];
@@ -509,6 +659,18 @@ export async function evaluateStalledSpecs(
 
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
+    // (e2) For the fifth (missing-blocker) source, stamp Vale's latest needsFixReason so the M4
+    // agent can cite Vale's own bounce reasoning verbatim in the blocked_by_repair proposal.
+    // Only paid for a candidate that survived (b)/(c)/(d), so the cost is bounded.
+    let reviewFailedCtx = c.brief.review_failed_context ?? null;
+    if (reviewFailedCtx) {
+      try {
+        const review = await whyDidSpecReviewFail(c.workspace_id, c.spec_slug);
+        reviewFailedCtx = { ...reviewFailedCtx, vale_needs_fix_reason: review.needsFixReason };
+      } catch {
+        // Ignore — the brief is still useful without the reason.
+      }
+    }
     survivors.push({
       ...c,
       brief: {
@@ -517,6 +679,7 @@ export async function evaluateStalledSpecs(
         // Prefer a live active status; else keep the candidate's pre-seeded status (e.g. `failed` from the
         // failed-build source) so the brief never hides a dead build behind a null.
         current_job_status: currentJobStatus ?? c.brief.current_job_status,
+        review_failed_context: reviewFailedCtx,
       },
     });
   }
