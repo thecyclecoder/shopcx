@@ -52,6 +52,7 @@ declare t text;
 begin
   foreach t in array array['inventory_levels','inventory_snapshots']
   loop
+    execute format($f$drop policy if exists %I_member_read on public.%I$f$, t, t);
     execute format($f$
       create policy %I_member_read on public.%I for select to authenticated
         using (workspace_id in (select workspace_id from public.workspace_members where user_id = auth.uid()));
