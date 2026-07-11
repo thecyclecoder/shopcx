@@ -38,6 +38,7 @@
     "test:goal-member-pr-redrive": "tsx --test src/lib/goal-member-pr-redrive.test.ts",
     "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
     "test:spec-review-gate": "tsx --test src/lib/spec-review-gate.test.ts",
+    "test:derive-status-no-in-review": "tsx --test src/lib/brain-roadmap.derive-status-no-in-review.test.ts",
     "test:security-envelope": "tsx --test src/lib/security-envelope.test.ts",
     "test:premerge-security-retirement": "tsx --test src/lib/premerge-security-retirement.test.ts",
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",

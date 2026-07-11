@@ -31,7 +31,6 @@ import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput
 import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 import { resolveFunctionMandates, type FunctionMandate } from "@/lib/function-mandates";
 import { assertSpecReviewGate } from "@/lib/spec-review-gate";
-import { inngest } from "@/lib/inngest/client";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
 function isPhaseHeading(l: string): boolean {
@@ -1290,14 +1289,10 @@ export async function authorSpecRowStructured(
         e instanceof Error ? e.message : e,
       );
     }
-    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (a fresh
-    // spec always lands in `in_review`; a re-author already re-opens through the writer above). The
-    // consumer routes through the SAME gated `enqueueSpecReviewIfDue`, so a re-author of already-passed
-    // content that leaves `vale_pass=true` no-ops for free (no Max session). Errors swallowed — the 15-min
-    // cron backstop covers a dropped send.
-    void inngest
-      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
-      .catch(() => {});
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the reactive
+    // `spec-review/spec-mutated` kick to Vale's LLM lane is retired. The deterministic gate
+    // ([[spec-review-gate]]) has already run synchronously above; there is no downstream LLM lane
+    // to notify. Nothing to send.
     return true;
   } catch (e) {
     // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
@@ -1540,12 +1535,9 @@ export async function authorSpecRowFromMarkdown(
         verification: phaseBodies[i]?.verification ?? null,
       })),
     });
-    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (same
-    // rationale as the structured path — the gated helper no-ops if the current content already carries
-    // vale_pass=true). Errors swallowed — the 15-min cron backstop covers a dropped send.
-    void inngest
-      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
-      .catch(() => {});
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the reactive kick to Vale's
+    // LLM lane is retired. The deterministic gate ([[spec-review-gate]]) has already run synchronously
+    // above; no downstream LLM lane to notify.
     return true;
   } catch (e) {
     // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
