@@ -8,7 +8,7 @@ The Competitor Scout discovery pass — LLM + web-search identification of a pro
 
 ### `competitor-scout-discover`
 - **Trigger:** event `ads/competitor-scout.discover` `{ workspaceId, productId }`
-- **Retries:** 1
+- **Retries:** `OUTAGE_SPANNING_RETRIES` (from [[../libraries/anthropic-retry]]) — a transient Anthropic blip during discovery is absorbed by Inngest's exponential backoff instead of paging Control Tower. Terminal 4xx (bad request/auth) still fails fast via `NonRetriableError`.
 - Returns `{ skipped }` if `workspaceId`/`productId` missing. Otherwise runs [[../libraries/competitors]] `discoverCompetitors` in one `step.run` → `{ proposed, skippedExisting, candidates }`.
 - Fired by the owner surface `POST /api/ads/competitors { workspaceId, productId }`.
 
@@ -32,6 +32,7 @@ _None._
 
 - **Proposes only** — never `approved`. The owner approves via `/api/ads/competitors/[id]`.
 - Web search resumes through `pause_turn` (≤6 turns, `max_uses: 5`), mirroring the blog writer.
+- **Outage resilience** — the `fetch(api.anthropic.com/v1/messages)` in [[../libraries/competitors]] `runDiscovery` classifies failures through [[../libraries/anthropic-retry]]: a network blip → `throwForAnthropicNetworkError` (`AnthropicDependencyError`, retried), a non-2xx → `throwForAnthropicStatus` (retryable 429/5xx → retried, terminal 4xx → `NonRetriableError`, fail fast). Paired with `OUTAGE_SPANNING_RETRIES` this parks-and-drains a real Anthropic outage instead of surfacing as a Control Tower page.
 
 ---
 

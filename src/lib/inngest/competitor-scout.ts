@@ -13,9 +13,10 @@
  */
 import { inngest } from "./client";
 import { discoverCompetitors } from "@/lib/competitors";
+import { OUTAGE_SPANNING_RETRIES } from "@/lib/anthropic-retry";
 
 export const competitorScoutDiscover = inngest.createFunction(
-  { id: "competitor-scout-discover", retries: 1, triggers: [{ event: "ads/competitor-scout.discover" }] },
+  { id: "competitor-scout-discover", retries: OUTAGE_SPANNING_RETRIES, triggers: [{ event: "ads/competitor-scout.discover" }] },
   async ({ event, step }) => {
     const { workspaceId, productId } = (event.data || {}) as {
       workspaceId?: string;
