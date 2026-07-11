@@ -38,6 +38,12 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // on-disk transcript jsonl for the last assistant message that carries the full envelope. Job
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
+// planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
+// planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
+// per batch, so no single result approaches the size at which the ingestion drop kicked in.
+// Each authored spec is committed to public.specs immediately, so a batch failure never rolls
+// back prior batches.
+import { chunkForAuthoring, PLANNER_AUTHOR_BATCH_SIZE } from "./planner-chunk-authoring";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -8818,17 +8824,15 @@ async function runPlanJob(job: Job) {
       }
     }
 
-    const specList = approved
-      .map((a, i) => {
-        const s = a.spec!;
-        const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
-        const blockedLine = blockers.length ? `\n   blocked_by: ${blockers.join(", ")}` : "";
-        return `${i + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}${blockedLine}`;
-      })
-      .join("\n");
     const declinedNote = declined.length
       ? `\n\nDECLINED branches: ${declined.map((a) => a.spec!.slug).join(", ")} — do NOT re-propose them.`
       : "";
+    const renderSpecListLine = (a: (typeof approved)[number], globalIndex: number): string => {
+      const s = a.spec!;
+      const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+      const blockedLine = blockers.length ? `\n   blocked_by: ${blockers.join(", ")}` : "";
+      return `${globalIndex + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}${blockedLine}`;
+    };
 
     // DB-DRIVEN AUTHORING (planner-authors-specs-to-db): the planner returns the fleshed-out spec BODIES as
     // STRUCTURED JSON in its final message — NOT files on disk. There is no `docs/brain/specs/*.md` write and
@@ -8836,42 +8840,14 @@ async function runPlanJob(job: Job) {
     // author-spec SDK (`authorSpecRowStructured`) from the JSON the planner ACTUALLY produces. This removes the
     // prompt↔authoring mismatch that authored 0 specs (the old prompt asked for files the plan-goal session,
     // bound by its "never write specs / never run git" invariant, never wrote, so the glob found nothing).
-    const prompt = [
-      `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
-      `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
-      `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
-      `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
-      `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
-      `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
-      ``,
-      `Approved specs (author EXACTLY these slugs, no more, no fewer):\n${specList}`,
-      ``,
-      `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
-    ].join("\n");
-
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir, job.id);
-    await meterAgentJob(job, configDir, usage, model);
-    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
-    if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
-      await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
-      return;
-    }
-    const parsed = parseStatus(resultText);
-    console.log(`${tag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
-
-    if (parsed?.status === "needs_input") {
-      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
-      return;
-    }
-    if (isError && !parsed) {
-      await update(job.id, { status: "failed", error: "plan authoring errored" });
-      return;
-    }
-
-    // Author each approved spec STRAIGHT to public.specs + public.spec_phases from the structured JSON the
-    // planner returned — DB-only (no .md on disk, no git glob). The planner's `specs[]` is matched to the
-    // approved actions by slug; an approved slug the planner didn't return is a failure (we never queue a
-    // build for an unauthored spec). A returned spec for a non-approved slug is ignored.
+    //
+    // planner-authoring-survives-large-multi-spec-output Phase 2 — BOUNDED / CHUNKED AUTHORING.
+    // Split the approved specs into batches of at most PLANNER_AUTHOR_BATCH_SIZE per turn so no single
+    // planner result approaches the size at which Phase 1's ingestion drop kicked in (the 62KB, 6-spec
+    // envelope). Each spec is committed to public.specs the moment authorSpecRowStructured returns, so
+    // a batch failure on chunk k+1 leaves the specs from chunks 1..k persisted in review — never rolled
+    // back to zero. Session chains across batches: batch N+1 resumes batch N's session so the planner
+    // keeps its read brain context.
     type PlannerSpecOut = {
       slug?: string;
       summary?: string;
@@ -8881,149 +8857,220 @@ async function runPlanJob(job: Job) {
       blocked_by?: unknown;
       phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string }>;
     };
-    const returnedSpecs: PlannerSpecOut[] = (() => {
-      const obj = extractJson<{ specs?: unknown }>(resultText);
-      return Array.isArray(obj?.specs) ? (obj!.specs as PlannerSpecOut[]) : [];
-    })();
-    // planner-authoring-survives-large-multi-spec-output Phase 1 — capture-full-vs-parse-drop diagnostic.
-    // The stream-json runner concatenates every stdout chunk (shAsync's `out`) with only a tail-cap at
-    // 64MiB, and runBoxSession picks the LAST `type:"result"` event's `result` string as resultText, so
-    // resultText should carry the full envelope. Logging its byte size + the primary-parse count makes
-    // any future truncation loud (and lets an operator confirm on job d5999907's shape that we saw the
-    // 62KB — but extracted 0 specs — with a single log line).
-    console.log(`${tag} planner primary parse: ${returnedSpecs.length} spec(s) from ${resultText.length}B resultText (approved=${approved.length})`);
-    const returnedBySlug = new Map<string, PlannerSpecOut>();
-    for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
-
-    // planner-authoring-survives-large-multi-spec-output Phase 1 — TRANSCRIPT FALLBACK.
-    // When the primary parse of resultText carried fewer approved specs than were requested, the
-    // planner's final assistant message on disk often still carries the full envelope (job d5999907
-    // shipped 6 fully-authored specs but the primary parse yielded 0). Re-scan the session's
-    // transcript jsonl for the LAST assistant message that parses as `{status,specs:[...]}` and
-    // merge any approved slugs recovered there. The primary parse wins on slug collision — the
-    // fallback fills gaps, never overwrites. Recording `transcriptRecovered` (the slugs merged via
-    // the fallback) lets the failure message downstream distinguish an ingestion-dropped spec from
-    // one the planner genuinely never returned.
-    const approvedSlugSet = new Set(approved.map((a) => a.spec!.slug));
-    const missingApprovedBefore = new Set<string>();
-    for (const a of approved) if (!returnedBySlug.has(a.spec!.slug)) missingApprovedBefore.add(a.spec!.slug);
-    const transcriptRecovered = new Set<string>();
-    if (missingApprovedBefore.size > 0 && session) {
-      let recovery: { specs: RecoveredSpec[]; transcriptPath: string | null };
-      try {
-        recovery = recoverSpecsForSession(session);
-      } catch (e) {
-        console.warn(`${tag} transcript fallback threw: ${e instanceof Error ? e.message : e}`);
-        recovery = { specs: [], transcriptPath: null };
-      }
-      if (!recovery.transcriptPath) {
-        console.warn(`${tag} transcript fallback: no jsonl for session ${session} — primary parse stands`);
-      } else if (!recovery.specs.length) {
-        console.warn(`${tag} transcript fallback: transcript at ${recovery.transcriptPath} carried no assistant specs[] envelope`);
-      } else {
-        for (const sp of recovery.specs) {
-          const slug = typeof sp.slug === "string" ? sp.slug : null;
-          if (!slug) continue;
-          if (!approvedSlugSet.has(slug)) continue;
-          if (returnedBySlug.has(slug)) continue;
-          returnedBySlug.set(slug, sp as PlannerSpecOut);
-          transcriptRecovered.add(slug);
-        }
-        console.log(`${tag} transcript fallback: recovered ${transcriptRecovered.size} of ${missingApprovedBefore.size} missed spec(s) from ${recovery.transcriptPath}`);
-      }
-    }
-
     const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+    const batches = chunkForAuthoring(approved, PLANNER_AUTHOR_BATCH_SIZE);
+    console.log(`${tag} planner authoring: ${approved.length} approved spec(s) → ${batches.length} batch(es) of ≤${PLANNER_AUTHOR_BATCH_SIZE}`);
+
+    // Accumulators shared across batches — every author outcome (success + typed failure) rolls up here
+    // so the fail-report and final gates behave identically to the pre-chunking implementation.
     let authored = 0;
     const verificationFailures: string[] = [];
     const emptyBodyFailures: string[] = [];
     const intentFailures: string[] = [];
     const notReturned: string[] = [];
     const milestoneUnresolved: string[] = [];
-    for (const a of approved) {
-      const s = a.spec!;
-      const out = returnedBySlug.get(s.slug);
-      if (!out || !Array.isArray(out.phases) || !out.phases.length) {
-        notReturned.push(s.slug);
+    const transcriptRecovered = new Set<string>();
+    const batchFailures: string[] = [];
+    const perBatchResultBytes: number[] = [];
+    const approvedSlugSet = new Set(approved.map((a) => a.spec!.slug));
+
+    let currentSessionId: string | null = sessionId;
+    let needsInputEmitted = false;
+    let indexOffset = 0;
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const batchTag = `${tag} [batch ${b + 1}/${batches.length}]`;
+      const batchSpecList = batch.map((a, i) => renderSpecListLine(a, indexOffset + i)).join("\n");
+      indexOffset += batch.length;
+      const batchSlugs = batch.map((a) => a.spec!.slug);
+      const batchApprovedSet = new Set(batchSlugs);
+
+      const batchPrompt = [
+        `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
+        `Author BATCH ${b + 1} of ${batches.length} — the planner-authoring flow is bounded (max ${PLANNER_AUTHOR_BATCH_SIZE} specs per turn) so no single result grows past the size that dropped a prior 6-spec envelope. Author EXACTLY the ${batch.length} slug(s) listed in this batch; the remaining approved slugs are handled in other batches.`,
+        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+        `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
+        `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
+        `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
+        `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
+        ``,
+        `Approved specs for THIS batch (author EXACTLY these ${batch.length} slug(s), no more, no fewer):\n${batchSpecList}`,
+        ``,
+        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+      ].join("\n");
+
+      const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, batchPrompt), currentSessionId, wt, configDir, job.id);
+      await meterAgentJob(job, configDir, usage, model);
+      if (session) {
+        currentSessionId = session;
+        await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
+      }
+      if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
+        await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
+        return;
+      }
+      const parsed = parseStatus(resultText);
+      perBatchResultBytes.push(resultText.length);
+      console.log(`${batchTag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError} resultBytes=${resultText.length}`);
+
+      if (parsed?.status === "needs_input") {
+        // A needs_input in any batch propagates to the job — the human answers, the job re-runs.
+        // Already-authored specs from prior batches STAY landed (committed batch-by-batch above).
+        await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
+        needsInputEmitted = true;
+        break;
+      }
+      if (isError && !parsed) {
+        // Plain error in a batch: record it + mark this batch's slugs as not-returned so the
+        // downstream fail-report names them, and continue to the next batch. Previously-authored
+        // specs stay landed — the mandate ("failure on spec k+1 leaves specs 1..k landed").
+        batchFailures.push(`batch ${b + 1}: ${resultText.slice(-500)}`);
+        for (const slug of batchSlugs) notReturned.push(slug);
         continue;
       }
-      // Resolve the milestone (prefer the planner's returned handle, fall back to the approved action's).
-      const milestoneId = resolveMilestoneId(out.milestone) ?? resolveMilestoneId(s.milestone);
-      // RECURRENCE FIX: a spec that NAMES a milestone which doesn't resolve fails LOUDLY — regardless of how
-      // many milestones the goal has. The old `goalForMilestones?.milestones.length &&` precondition meant a
-      // ZERO-milestone goal (proposed with a prose arc, not a `## Decomposition` block) silently authored every
-      // spec with milestone_id=NULL → unlinked → 0% rollup forever (the growth-director bug). The milestone-
-      // materialization step above now creates the referenced milestones from the approved decomposition; if a
-      // named milestone STILL doesn't resolve, refuse to author an orphaned spec rather than swallow it.
-      if ((out.milestone || s.milestone) && !milestoneId) {
-        milestoneUnresolved.push(`${s.slug} (milestone="${out.milestone || s.milestone}")`);
-        continue;
-      }
-      // Blocked-by: approved blockers only (drop declined siblings + self-refs) — the same rule as the
-      // proposal stage, applied to whichever list is authoritative (the approved action carries it).
-      const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
-      // pm-structured-intent-and-refs Phase 1 — extract per-phase intent (why/what) from the planner
-      // JSON. Fall back to the spec-level intent (`out.why`/`out.what`) so a planner that only writes
-      // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
-      const fallbackWhy = String(out.why || "").trim();
-      const fallbackWhat = String(out.what || "").trim();
-      const phases = out.phases.map((p) => ({
-        title: String(p.title || "").trim() || "Phase",
-        body: String(p.body || "").trim(),
-        verification: String(p.verification || "").trim(),
-        why: String(p.why || "").trim() || fallbackWhy,
-        what: String(p.what || "").trim() || fallbackWhat,
-      }));
-      try {
-        // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
-        // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
-        // + binds milestone_id, all via the SDK. Authoring happens BEFORE any build is queued.
-        await markSpecCardForReview(job.workspace_id, s.slug, "planned", { actor: "planner", reason: `planner authored for goal ${goalSlug}` }).catch((e) => {
-          console.warn(`${tag} markSpecCardForReview ${s.slug} failed: ${e instanceof Error ? e.message : e}`);
-        });
-        // pm-structured-intent-and-refs Phase 1 — build the spec-level intent. The planner should emit
-        // both explicitly; fall back to the approved action's `intent` (a one-liner) + a synthesized
-        // "what" from the title if the planner missed either field. If the planner supplied nothing
-        // useful at all the chokepoint gate throws MissingIntentError below (caught + reported).
-        const specWhy = (String(out.why || "").trim() || (s.intent || "").trim()) || "";
-        const specWhat = String(out.what || "").trim();
-        await authorSpecRowStructured(
-          job.workspace_id,
-          s.slug,
-          {
-            title: s.title,
-            summary: out.summary ? String(out.summary).trim() : s.intent || null,
-            owner: s.owner,
-            parent: s.parent,
-            blocked_by: blockers,
-            why: specWhy,
-            what: specWhat,
-            phases,
-          },
-          "planned",
-          { intendedStatusSetBy: "planner", milestoneId },
-        );
-        authored++;
-      } catch (e) {
-        // A spec with no per-phase Verification is untestable, one with an empty-body phase is un-buildable,
-        // and one with no plain-language intent is unreadable — all three fail loudly instead of silently
-        // dropping the spec (and then queueing a build for a spec that never landed or that silently no-ops).
-        if (e instanceof MissingVerificationError) {
-          verificationFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
-        } else if (e instanceof EmptyPhaseBodyError) {
-          emptyBodyFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
-        } else if (e instanceof MissingIntentError) {
-          intentFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
+
+      // Primary parse of THIS batch's result. resultText is bounded (typically ~10-20KB per batch);
+      // the byte size is logged so an operator can confirm the "no single planner result exceeds
+      // the bounded size" invariant from the spec's Phase 2 verification.
+      const returnedSpecs: PlannerSpecOut[] = (() => {
+        const obj = extractJson<{ specs?: unknown }>(resultText);
+        return Array.isArray(obj?.specs) ? (obj!.specs as PlannerSpecOut[]) : [];
+      })();
+      console.log(`${batchTag} planner primary parse: ${returnedSpecs.length} spec(s) from ${resultText.length}B resultText (batch=${batch.length})`);
+      const returnedBySlug = new Map<string, PlannerSpecOut>();
+      for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
+
+      // Phase 1 transcript fallback — still applies per-batch. When the primary parse of a batch
+      // dropped one of the batch's approved slugs, re-scan the session's on-disk transcript for
+      // the last assistant message that carries the missing slug and merge it. Scoped to this
+      // batch's slugs so recovery only fills THIS batch's gaps.
+      const missingInBatchBefore = new Set<string>();
+      for (const a of batch) if (!returnedBySlug.has(a.spec!.slug)) missingInBatchBefore.add(a.spec!.slug);
+      if (missingInBatchBefore.size > 0 && session) {
+        let recovery: { specs: RecoveredSpec[]; transcriptPath: string | null };
+        try {
+          recovery = recoverSpecsForSession(session);
+        } catch (e) {
+          console.warn(`${batchTag} transcript fallback threw: ${e instanceof Error ? e.message : e}`);
+          recovery = { specs: [], transcriptPath: null };
+        }
+        if (!recovery.transcriptPath) {
+          console.warn(`${batchTag} transcript fallback: no jsonl for session ${session} — primary parse stands`);
+        } else if (!recovery.specs.length) {
+          console.warn(`${batchTag} transcript fallback: transcript at ${recovery.transcriptPath} carried no assistant specs[] envelope`);
         } else {
-          console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
+          let merged = 0;
+          for (const sp of recovery.specs) {
+            const slug = typeof sp.slug === "string" ? sp.slug : null;
+            if (!slug) continue;
+            if (!batchApprovedSet.has(slug)) continue; // recovery only fills THIS batch's gaps
+            if (!approvedSlugSet.has(slug)) continue;
+            if (returnedBySlug.has(slug)) continue;
+            returnedBySlug.set(slug, sp as PlannerSpecOut);
+            transcriptRecovered.add(slug);
+            merged++;
+          }
+          console.log(`${batchTag} transcript fallback: recovered ${merged} of ${missingInBatchBefore.size} missed spec(s) from ${recovery.transcriptPath}`);
+        }
+      }
+
+      // Author each of THIS batch's specs. Committed one-by-one to public.specs — a mid-batch
+      // authoring error records the typed failure and moves on to the next spec (identical
+      // behavior to the pre-chunking loop, just bounded to K specs at a time).
+      for (const a of batch) {
+        const s = a.spec!;
+        const out = returnedBySlug.get(s.slug);
+        if (!out || !Array.isArray(out.phases) || !out.phases.length) {
+          notReturned.push(s.slug);
+          continue;
+        }
+        // Resolve the milestone (prefer the planner's returned handle, fall back to the approved action's).
+        const milestoneId = resolveMilestoneId(out.milestone) ?? resolveMilestoneId(s.milestone);
+        // RECURRENCE FIX: a spec that NAMES a milestone which doesn't resolve fails LOUDLY — regardless of how
+        // many milestones the goal has. The old `goalForMilestones?.milestones.length &&` precondition meant a
+        // ZERO-milestone goal (proposed with a prose arc, not a `## Decomposition` block) silently authored every
+        // spec with milestone_id=NULL → unlinked → 0% rollup forever (the growth-director bug). The milestone-
+        // materialization step above now creates the referenced milestones from the approved decomposition; if a
+        // named milestone STILL doesn't resolve, refuse to author an orphaned spec rather than swallow it.
+        if ((out.milestone || s.milestone) && !milestoneId) {
+          milestoneUnresolved.push(`${s.slug} (milestone="${out.milestone || s.milestone}")`);
+          continue;
+        }
+        // Blocked-by: approved blockers only (drop declined siblings + self-refs) — the same rule as the
+        // proposal stage, applied to whichever list is authoritative (the approved action carries it).
+        const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+        // pm-structured-intent-and-refs Phase 1 — extract per-phase intent (why/what) from the planner
+        // JSON. Fall back to the spec-level intent (`out.why`/`out.what`) so a planner that only writes
+        // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
+        const fallbackWhy = String(out.why || "").trim();
+        const fallbackWhat = String(out.what || "").trim();
+        const phases = out.phases.map((p) => ({
+          title: String(p.title || "").trim() || "Phase",
+          body: String(p.body || "").trim(),
+          verification: String(p.verification || "").trim(),
+          why: String(p.why || "").trim() || fallbackWhy,
+          what: String(p.what || "").trim() || fallbackWhat,
+        }));
+        try {
+          // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
+          // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
+          // + binds milestone_id, all via the SDK. Authoring happens BEFORE any build is queued.
+          await markSpecCardForReview(job.workspace_id, s.slug, "planned", { actor: "planner", reason: `planner authored for goal ${goalSlug}` }).catch((e) => {
+            console.warn(`${tag} markSpecCardForReview ${s.slug} failed: ${e instanceof Error ? e.message : e}`);
+          });
+          // pm-structured-intent-and-refs Phase 1 — build the spec-level intent. The planner should emit
+          // both explicitly; fall back to the approved action's `intent` (a one-liner) + a synthesized
+          // "what" from the title if the planner missed either field. If the planner supplied nothing
+          // useful at all the chokepoint gate throws MissingIntentError below (caught + reported).
+          const specWhy = (String(out.why || "").trim() || (s.intent || "").trim()) || "";
+          const specWhat = String(out.what || "").trim();
+          await authorSpecRowStructured(
+            job.workspace_id,
+            s.slug,
+            {
+              title: s.title,
+              summary: out.summary ? String(out.summary).trim() : s.intent || null,
+              owner: s.owner,
+              parent: s.parent,
+              blocked_by: blockers,
+              why: specWhy,
+              what: specWhat,
+              phases,
+            },
+            "planned",
+            { intendedStatusSetBy: "planner", milestoneId },
+          );
+          authored++;
+        } catch (e) {
+          // A spec with no per-phase Verification is untestable, one with an empty-body phase is un-buildable,
+          // and one with no plain-language intent is unreadable — all three fail loudly instead of silently
+          // dropping the spec (and then queueing a build for a spec that never landed or that silently no-ops).
+          if (e instanceof MissingVerificationError) {
+            verificationFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else if (e instanceof EmptyPhaseBodyError) {
+            emptyBodyFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else if (e instanceof MissingIntentError) {
+            intentFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else {
+            console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
+          }
         }
       }
     }
-    if (verificationFailures.length || emptyBodyFailures.length || intentFailures.length || notReturned.length || milestoneUnresolved.length) {
+
+    // If any batch emitted needs_input above, we returned into the DB status; skip the rest.
+    if (needsInputEmitted) return;
+
+    if (perBatchResultBytes.length) {
+      const maxBytes = perBatchResultBytes.reduce((m, n) => (n > m ? n : m), 0);
+      console.log(`${tag} planner authoring: bounded-size check — max per-batch resultText was ${maxBytes}B across ${perBatchResultBytes.length} batch(es), authored=${authored} of ${approved.length}`);
+    }
+
+    if (batchFailures.length || verificationFailures.length || emptyBodyFailures.length || intentFailures.length || notReturned.length || milestoneUnresolved.length) {
       const reasons: string[] = [];
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
       if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
@@ -9045,6 +9092,12 @@ async function runPlanJob(job: Job) {
         reasons.push(`planner did not return a spec body — ${parts.join("; ")}`);
       }
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
+      if (batchFailures.length) reasons.push(`${batchFailures.length} batch(es) errored — ${batchFailures.join(" || ")}`);
+      // planner-authoring-survives-large-multi-spec-output Phase 2 — partial progress in log_tail.
+      // Even on failure the specs already committed to public.specs during prior batches stay
+      // landed; the log line reports "authored X of Y" instead of rolling back to zero. The final
+      // gates below (getSpec + queueRoadmapBuild) still run against the landed set and only queue
+      // builds for slugs that actually reached the DB.
       await update(job.id, {
         status: "failed",
         error: `planner authoring failed — ${reasons.join("; ")}`,
