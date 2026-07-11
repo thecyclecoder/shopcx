@@ -818,6 +818,20 @@ export interface MarioVerificationRepair {
   reasoning: string;
 }
 
+/** A repair of a spec's MISSING blocked_by entry — the fifth candidate source (Vale-review-failed with
+ *  a `**Blocked-by:** [[foo]]` metadata line whose slug never made it onto the `specs.blocked_by` column).
+ *  ADDITIVE-ONLY: the verb names slugs to UNION into the existing column; the applier NEVER removes an
+ *  existing blocker (a removal would silently drop a real prerequisite). An empty `add_blocked_by` is
+ *  rejected at the mutator boundary. `applyBoxMario` re-authors the spec through the author-spec gate with
+ *  the merged list, which reopens it to Vale (clears `vale_pass`). */
+export interface MarioBlockedByRepair {
+  spec_slug: string;
+  /** The slugs to UNION into `specs.blocked_by`. Must be non-empty; each must be a bare slug (no
+   *  `../specs/` prefix, no `.md` suffix). */
+  add_blocked_by: string[];
+  reasoning: string;
+}
+
 /** The self-tuning widen Mario proposes when a false trigger fires — Phase 3 gates on a non-empty reason. */
 export interface MarioThresholdAdjustment {
   from_event: string;
@@ -836,6 +850,7 @@ export interface MarioVerdict {
   live_fix: MarioLiveFix | null;
   durable_fix_spec: MarioDurableFixSpec | null;
   verification_repair: MarioVerificationRepair | null;
+  blocked_by_repair: MarioBlockedByRepair | null;
   threshold_adjustment: MarioThresholdAdjustment | null;
   escalate: boolean;
   reasoning: string;
@@ -852,6 +867,7 @@ export const MARIO_CONSERVATIVE_DEFAULT_VERDICT: MarioVerdict = {
   live_fix: null,
   durable_fix_spec: null,
   verification_repair: null,
+  blocked_by_repair: null,
   threshold_adjustment: null,
   escalate: true,
   reasoning: "unparseable verdict",
@@ -936,6 +952,22 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
     }
   }
 
+  let blocked_by_repair: MarioBlockedByRepair | null = null;
+  if (r.blocked_by_repair && typeof r.blocked_by_repair === "object") {
+    const b = r.blocked_by_repair as Record<string, unknown>;
+    const spec_slug = typeof b.spec_slug === "string" ? b.spec_slug : "";
+    const rawAdd = Array.isArray(b.add_blocked_by) ? b.add_blocked_by : [];
+    const add_blocked_by = rawAdd
+      .map((s) => (typeof s === "string" ? s.trim() : ""))
+      // Strip a caller-side `../specs/` prefix / `.md` suffix so a wikilink-shaped input matches the
+      // bare-slug expectation on `specs.blocked_by`.
+      .map((s) => s.replace(/^.*\//, "").replace(/\.md$/, ""))
+      .filter((s) => s.length > 0);
+    if (spec_slug && add_blocked_by.length > 0) {
+      blocked_by_repair = { spec_slug, add_blocked_by: [...new Set(add_blocked_by)], reasoning: typeof b.reasoning === "string" ? b.reasoning : "" };
+    }
+  }
+
   let threshold_adjustment: MarioThresholdAdjustment | null = null;
   if (r.threshold_adjustment && typeof r.threshold_adjustment === "object") {
     const t = r.threshold_adjustment as Record<string, unknown>;
@@ -953,7 +985,7 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
     }
   }
 
-  return { trigger_accurate, live_fix, durable_fix_spec, verification_repair, threshold_adjustment, escalate, reasoning };
+  return { trigger_accurate, live_fix, durable_fix_spec, verification_repair, blocked_by_repair, threshold_adjustment, escalate, reasoning };
 }
 
 /** The result `applyBoxMario` hands back to the runner. */
@@ -1182,6 +1214,95 @@ async function authorMarioFixSpec(
     },
     "planned",
     { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef: `${MARIO_DIRECTOR_FUNCTION}#${MARIO_FIX_MANDATE_SLUG}` },
+  );
+}
+
+/** Pure decision predicate for `blocked_by_repair` — compute the merged `blocked_by` (UNION of existing +
+ *  add) or reject the verdict. ADDITIVE-ONLY: an empty `add_blocked_by` is rejected (Phase-2 verification
+ *  bullet 2); a would-be REMOVAL is rejected — the applier never accepts a payload that omits an existing
+ *  blocker (verification bullet 2's "drop existing blocker → rejected"). Returns `{ ok: false }` when the
+ *  merged set would drop an entry or the add-list is empty; else `{ ok: true, merged }`. Split out of
+ *  `repairSpecBlockedBy` so the exact contract is unit-testable without a Supabase stub. */
+export function mergeBlockedByForRepair(input: {
+  existing: string[];
+  add: string[];
+}): { ok: true; merged: string[] } | { ok: false; reason: "empty_add" | "would_drop_existing" } {
+  const trimmedAdd = input.add.map((s) => (typeof s === "string" ? s.trim() : "")).filter((s) => s.length > 0);
+  if (trimmedAdd.length === 0) return { ok: false, reason: "empty_add" };
+  const existingSet = new Set(input.existing);
+  const merged = [...input.existing];
+  for (const s of trimmedAdd) {
+    if (!existingSet.has(s)) {
+      merged.push(s);
+      existingSet.add(s);
+    }
+  }
+  // Belt-and-suspenders: the union CAN'T drop an existing entry by construction, but re-assert it so a
+  // future refactor that swaps to a replace-style payload is caught at the predicate boundary, not silently
+  // in prod.
+  for (const s of input.existing) {
+    if (!merged.includes(s)) return { ok: false, reason: "would_drop_existing" };
+  }
+  return { ok: true, merged };
+}
+
+/** Repair a spec's MISSING blocked_by entry (the fifth candidate source class). Re-authors the spec with
+ *  the merged `blocked_by` (UNION of existing + verdict.add_blocked_by) via the SAME author-spec gate that
+ *  the verification repair uses — a content change re-opens the spec to Vale (`markSpecCardBackToReview`
+ *  clears `vale_pass` + `vale_review_passed_at`; author-spec.ts). ADDITIVE-ONLY: an empty add-list, or a
+ *  payload that would DROP an existing blocker, is rejected at `mergeBlockedByForRepair` and the applier
+ *  throws — the caller records the throw on the mario_fired row. */
+async function repairSpecBlockedBy(admin: Admin, workspaceId: string, repair: MarioBlockedByRepair): Promise<boolean> {
+  const { getSpec } = await import("@/lib/specs-table");
+  const { authorSpecRowStructured } = await import("@/lib/author-spec");
+  const cur = await getSpec(workspaceId, repair.spec_slug);
+  if (!cur) throw new Error(`repair_blocked_by: spec ${repair.spec_slug} not found`);
+  const decision = mergeBlockedByForRepair({ existing: cur.blocked_by ?? [], add: repair.add_blocked_by });
+  if (!decision.ok) throw new Error(`repair_blocked_by: ${decision.reason}`);
+
+  // No content delta → no re-open → skip. A caller passing an add-list that's already a subset of the
+  // existing blocked_by (a no-op) shouldn't waste an author-spec write or a mario_fixed row.
+  const same =
+    decision.merged.length === (cur.blocked_by ?? []).length &&
+    decision.merged.every((s) => (cur.blocked_by ?? []).includes(s));
+  if (same) return false;
+
+  // Real (kind='phase') phases only — mirrors repairSpecVerification: the auto-generated fix phases are
+  // never re-authored through this path (they'd be rebuilt on the next spec-test fail if still needed).
+  const realPhases = (cur.phases ?? []).filter((p) => p.kind !== "fix");
+  if (realPhases.length === 0) throw new Error("repair_blocked_by: no non-fix phases to re-author");
+  const phases = realPhases.map((p) => ({
+    title: p.title,
+    // Intent gate needs non-empty why/what per phase — same fallback shape as repairSpecVerification so a
+    // spec authored before the intent gate landed can still round-trip.
+    why: (p.why && p.why.trim()) || cur.why || `Phase ${p.position} of ${cur.title}.`,
+    what: (p.what && p.what.trim()) || cur.what || cur.title,
+    body: (p.body && p.body.trim()) || p.title,
+    // Preserve current verification — the Verification gate throws on empty; this repair is scoped to
+    // blocked_by, never touches per-phase verification (that's the fourth source's verb).
+    verification: p.verification ?? "",
+  }));
+
+  const hasTypedMandate = cur.parent_kind === "mandate" && typeof cur.parent_ref === "string" && cur.parent_ref.includes("#");
+  const parentRef = hasTypedMandate ? (cur.parent_ref as string) : `${cur.owner}#infra-devops-reliability`;
+  const parentProse = cur.parent && cur.parent.includes("mandate") ? cur.parent : `[[../functions/${cur.owner}]] — "Infra & DevOps / reliability" mandate: blocked_by repair.`;
+
+  return await authorSpecRowStructured(
+    workspaceId,
+    repair.spec_slug,
+    {
+      title: cur.title,
+      summary: cur.summary,
+      owner: cur.owner,
+      parent: parentProse,
+      why: cur.why ?? cur.title,
+      what: cur.what ?? cur.title,
+      blocked_by: decision.merged,
+      autoBuild: true,
+      phases,
+    },
+    "planned",
+    { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef },
   );
 }
 
@@ -1425,6 +1546,46 @@ export async function applyBoxMario(
       }
     }
 
+    // Blocked-by repair — additive-only union that re-opens the spec to Vale (fifth-source class). Gated
+    // on live + the SAME 24h loop-guard: at ≥ MARIO_LOOP_GUARD_MAX prior mario_fixed rows for THIS slug,
+    // skip the repair + write a mario_loop_guard escalation instead ("same-class re-bounce" per the spec).
+    let blockedByRepaired = false;
+    let blockedByRepairError: string | null = null;
+    let blockedByLoopGuardTriggered = false;
+    if (verdict.blocked_by_repair && mode === "live") {
+      if (priorFixes >= loopGuardMax) {
+        blockedByLoopGuardTriggered = true;
+        try {
+          const { recordDirectorActivity } = await import("@/lib/director-activity");
+          await recordDirectorActivity(admin, {
+            workspaceId: row.workspace_id,
+            directorFunction: MARIO_DIRECTOR_FUNCTION,
+            actionKind: "mario_loop_guard",
+            specSlug: row.spec_slug,
+            reason: `oscillation risk: ${priorFixes} prior mario_fixed row(s) in 24h ≥ MARIO_LOOP_GUARD_MAX=${loopGuardMax}. blocked_by_repair skipped; escalating.`,
+            metadata: {
+              actor: MARIO_ACTOR,
+              job_id: jobId,
+              prior_fixes: priorFixes,
+              loop_guard_max: loopGuardMax,
+              proposed_action: "blocked_by_repair",
+              proposed_target: verdict.blocked_by_repair.spec_slug,
+              proposed_add_blocked_by: verdict.blocked_by_repair.add_blocked_by,
+            },
+          });
+        } catch (e) {
+          console.warn("[mario] blocked_by_repair loop-guard record failed:", e instanceof Error ? e.message : e);
+        }
+      } else {
+        try {
+          blockedByRepaired = await repairSpecBlockedBy(admin, row.workspace_id, verdict.blocked_by_repair);
+        } catch (e) {
+          blockedByRepairError = e instanceof Error ? e.message : String(e);
+          console.warn(`[mario] blocked_by_repair FAILED (${verdict.blocked_by_repair.spec_slug}): ${blockedByRepairError}`);
+        }
+      }
+    }
+
     // Threshold self-tune — Phase 3 gate: only when trigger_accurate=false AND reason is non-empty.
     let thresholdWidened = false;
     if (
@@ -1446,7 +1607,7 @@ export async function applyBoxMario(
     // lets him self-service the built-but-unmerged class, a true escalation is rare — but when it happens
     // it reaches his supervisor.
     let escalatedToAda = false;
-    if (verdict.escalate && !fixExecuted && !verificationRepaired && mode === "live") {
+    if (verdict.escalate && !fixExecuted && !verificationRepaired && !blockedByRepaired && mode === "live") {
       try {
         escalatedToAda = await surfaceMarioEscalationToAda(admin, row.workspace_id, row.spec_slug, verdict.reasoning ?? "", jobId);
       } catch (e) {
@@ -1480,6 +1641,9 @@ export async function applyBoxMario(
         durable_spec_author_error: durableSpecAuthorError,
         verification_repaired: verificationRepaired,
         verification_repair_error: verificationRepairError,
+        blocked_by_repaired: blockedByRepaired,
+        blocked_by_repair_error: blockedByRepairError,
+        blocked_by_loop_guard_triggered: blockedByLoopGuardTriggered,
         threshold_widened: thresholdWidened,
         loop_guard_triggered: loopGuardTriggered,
       },
@@ -1505,6 +1669,31 @@ export async function applyBoxMario(
         });
       } catch (e) {
         console.warn("[mario] mario_fixed record failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // On a successful blocked_by_repair, ALSO record `mario_fixed` — same rationale: the loop-guard's 24h
+    // count feeds the "same-class re-bounce → escalate" gate. Without this row, a repair that landed but
+    // didn't stick (Vale bounces the re-authored spec for a different missing blocker) would re-fire the
+    // same repair every sweep with no ceiling.
+    if (blockedByRepaired && verdict.blocked_by_repair) {
+      try {
+        await recordDirectorActivity(admin, {
+          workspaceId: row.workspace_id,
+          directorFunction: MARIO_DIRECTOR_FUNCTION,
+          actionKind: "mario_fixed",
+          specSlug: row.spec_slug,
+          reason: (verdict.blocked_by_repair.reasoning ?? "").slice(0, 4000),
+          metadata: {
+            actor: MARIO_ACTOR,
+            job_id: jobId,
+            action: "blocked_by_repair",
+            target: { spec_slug: verdict.blocked_by_repair.spec_slug },
+            add_blocked_by: verdict.blocked_by_repair.add_blocked_by,
+          },
+        });
+      } catch (e) {
+        console.warn("[mario] mario_fixed (blocked_by_repair) record failed:", e instanceof Error ? e.message : e);
       }
     }
 
