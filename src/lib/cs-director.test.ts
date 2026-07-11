@@ -245,6 +245,18 @@ test("planRemedyExecution — canonical shape", () => {
   }
 });
 
+test("planRemedyExecution — a {kind, summary} recommendation is NON-executable (the founder-approval guard's condition)", () => {
+  // escalate_founder's recommended_remedy is a human suggestion shape, never {action_type}. This is
+  // EXACTLY the shape raiseFounderApproval must NOT open a one-tap auto-execute card for — approving
+  // it would malform (ticket db8b3d66). The guard keys on planRemedyExecution(remedy).ok being false.
+  const result = planRemedyExecution({
+    kind: "acknowledge_and_request_info",
+    summary: "Ask the customer for the order number / merchant on the $236.50 charge we can't locate.",
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_missing_action_type");
+});
+
 test("planRemedyExecution — multi-action actions[] preserves order and normalizes each step", () => {
   // The Phase-1 shape June emits for a full fix — e.g. partial_refund + change_next_date +
   // redeem_points_as_refund fires ALL THREE in the authored order, none of which regresses to a
