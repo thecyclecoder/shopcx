@@ -50,7 +50,7 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
  * words for a non-engineer founder — what the director does on its own, in the first person. Keep a line
  * here for each category any director's `LEASH_CATEGORIES` can contain.
  */
-const CATEGORY_COPY: Record<string, LeashLine> = {
+export const CATEGORY_COPY: Record<string, LeashLine> = {
   // ── Platform (Ada) ──
   error_fix: {
     title: "Ship a fix for a confirmed bug",
