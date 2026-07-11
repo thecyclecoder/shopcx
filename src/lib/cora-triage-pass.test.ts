@@ -11,7 +11,45 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTriagePrompt, parseTriageResult, TRIAGE_SIGNALS } from "./cora-triage-pass";
+import { buildTriagePrompt, parseTriageResult, renderTranscript, TRIAGE_SIGNALS } from "./cora-triage-pass";
+
+// subject-blind-grader: email customers routinely put the whole ask in the SUBJECT ("PLEASE Cancel
+// my Subscription!!!") and leave a footer-only body. The grader must see the subject or a correct
+// reply (Sol reads the subject → sends the cancel journey) looks like a non-sequitur and grades ~1.
+test("renderTranscript surfaces the subject as the first line (the ask lives there)", () => {
+  const t = renderTranscript(
+    [{ direction: "inbound", author_type: "customer", visibility: "external", body: "Sent from my iPhone", body_clean: "Sent from my iPhone" }],
+    "PLEASE Cancel my Subscription!!!!!!!!",
+  );
+  assert.match(t, /^SUBJECT: PLEASE Cancel my Subscription/);
+});
+
+test("renderTranscript yields a gradeable transcript even when the BODY is a footer-only non-request", () => {
+  // The 5ed8270a case: subject carries the ask, body is just a disclaimer footer.
+  const t = renderTranscript(
+    [
+      { direction: "inbound", author_type: "customer", visibility: "external", body: "This e-mail is intended solely for the addressee.", body_clean: "This e-mail is intended solely for the addressee." },
+      { direction: "outbound", author_type: "ai", visibility: "external", body: "We'd hate to see you go — click below to cancel.", body_clean: "We'd hate to see you go — click below to cancel." },
+    ],
+    "Cancel my subscription",
+  );
+  assert.match(t, /SUBJECT: Cancel my subscription/);
+  assert.match(t, /AGENT: We'd hate to see you go/);
+});
+
+test("renderTranscript omits the SUBJECT line when there is no subject", () => {
+  const t = renderTranscript(
+    [{ direction: "inbound", author_type: "customer", visibility: "external", body: "where is my order", body_clean: "where is my order" }],
+    null,
+  );
+  assert.ok(!t.includes("SUBJECT:"));
+  assert.match(t, /CUSTOMER: where is my order/);
+});
+
+test("prompt tells the classifier the ask may be in the SUBJECT line", () => {
+  const { system } = buildTriagePrompt("SUBJECT: cancel\nCUSTOMER: (footer)");
+  assert.match(system, /SUBJECT/);
+});
 
 test("prompt keys on TERMINAL state, not the messy middle", () => {
   const { system, user } = buildTriagePrompt("CUSTOMER: hi\nAGENT: hello");

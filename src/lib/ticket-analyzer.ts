@@ -703,7 +703,7 @@ export async function prepareAnalyzerRun(
   const admin = createAdminClient();
 
   const { data: ticket } = await admin.from("tickets")
-    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked")
+    .select("id, workspace_id, status, channel, tags, ai_turn_count, escalation_reason, last_analyzed_at, created_at, customer_id, active_playbook_id, playbook_step, playbook_context, do_not_reply, merged_into, ai_disabled, analyzer_locked, subject")
     .eq("id", ticketId).maybeSingle();
   if (!ticket) return { ok: false, reason: "ticket_not_found" };
 
@@ -808,7 +808,15 @@ export async function prepareAnalyzerRun(
   // first step of the refund playbook by design.
   const playbookContext = await buildPlaybookContextForGrader(admin, ticket);
 
-  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
+  // Email subject — customers routinely put the whole ask in the subject ("PLEASE Cancel my
+  // Subscription!!!") and leave a footer-only body. Surface it so the grader reads a reply that
+  // correctly addresses the subject as CORRECT, not a non-sequitur to an empty body. See subject-blind-grader.
+  const subjectLine = ((ticket as unknown as { subject?: string | null }).subject || "").replace(/\s+/g, " ").trim();
+  const subjectBlock = subjectLine
+    ? `\n\n--- EMAIL SUBJECT (part of the customer's request — the ask is often HERE, not in the body) ---\n${subjectLine}`
+    : "";
+
+  const userMsg = `Grade this conversation window. The window covers ${windowStart} → ${windowEnd}.${guidanceBlock ? `\n\n--- AGENT GUIDANCE (binding directives from a human agent for this ticket — the AI was expected to follow these; grade with these as the ground truth, not your default judgment) ---\n${guidanceBlock}` : ""}${playbookContext ? `\n\n--- PLAYBOOK CONTEXT ---\n${playbookContext}` : ""}${subjectBlock}\n\n--- CONVERSATION ---\n${conversation}\n\nReturn the JSON only.`;
 
   return {
     ok: true,
