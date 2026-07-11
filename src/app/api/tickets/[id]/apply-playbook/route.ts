@@ -85,26 +85,19 @@ export async function POST(
     body: `${agentName} applied playbook "${playbook.name}"${context?.trim() ? ` with context: "${context.trim()}"` : ""}.`,
   });
 
-  // Fire the playbook via the Inngest SDK client.
-  //
-  // This previously POSTed to `https://inn.gs/e` with an
-  // `Authorization: Bearer <key>` header — but that endpoint 404s
-  // (Inngest's event API wants the key in the URL PATH: `/e/<key>`).
-  // The 404 was swallowed by the bare `catch`, so a freshly-applied
-  // playbook silently sat at step 0 until the customer next replied.
-  // `inngest.send` formats the request correctly (and no-ops cleanly
-  // in dev). Verified 2026-06-17: raw `/e` + Bearer → HTTP 404; SDK → 200.
+  // Fire the playbook wake sentinel via the Phase-2 durable dispatcher — sentinel body
+  // "playbook-apply" is a synthetic wake for the newly-applied playbook, no inbound customer msg
+  // row exists, so intent is not stamped.
   try {
-    const { inngest } = await import("@/lib/inngest/client");
-    await inngest.send({
-      name: "ticket/inbound-message",
-      data: {
-        ticket_id: ticketId,
-        workspace_id: ticket.workspace_id,
-        message_body: "playbook-apply",
-        channel: ticket.channel || "email",
-        is_new_ticket: false,
-      },
+    const { dispatchInboundMessage } = await import("@/lib/inngest/dispatch-inbound-message");
+    await dispatchInboundMessage({
+      admin,
+      workspaceId: ticket.workspace_id,
+      ticketId,
+      messageBody: "playbook-apply",
+      channel: ticket.channel || "email",
+      isNewTicket: false,
+      dispatchMessageId: null,
     });
   } catch (err) {
     // Non-fatal — playbook will execute on next inbound message.

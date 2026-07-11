@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
 import { verifyMetaWebhookSignature } from "@/lib/meta";
 import { ingestSocialComment } from "@/lib/social-comment-ingest";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 // GET: Meta webhook verification (hub.verify_token challenge).
 //
@@ -187,14 +187,14 @@ export async function POST(request: Request) {
           .maybeSingle();
 
         if (existingTicket) {
-          await admin.from("ticket_messages").insert({
+          const { data: metaExistingMsg } = await admin.from("ticket_messages").insert({
             ticket_id: existingTicket.id,
             direction: "inbound",
             visibility: "external",
             author_type: "customer",
             body: messageText,
             meta_message_id: messageId,
-          });
+          }).select("id").single();
 
           await admin.from("tickets").update({
             status: "open",
@@ -202,15 +202,14 @@ export async function POST(request: Request) {
             last_customer_reply_at: new Date().toISOString(),
           }).eq("id", existingTicket.id);
 
-          await inngest.send({
-            name: "ticket/inbound-message",
-            data: {
-              workspace_id: workspaceId,
-              ticket_id: existingTicket.id,
-              message_body: messageText,
-              channel: "meta_dm",
-              is_new_ticket: false,
-            },
+          await dispatchInboundMessage({
+            admin,
+            workspaceId,
+            ticketId: existingTicket.id,
+            messageBody: messageText,
+            channel: "meta_dm",
+            isNewTicket: false,
+            dispatchMessageId: metaExistingMsg?.id ?? null,
           });
         } else {
           // Meta DMs arrive with just a PSID — no name, no email.
@@ -293,24 +292,23 @@ export async function POST(request: Request) {
           }).select("id").single();
 
           if (ticket) {
-            await admin.from("ticket_messages").insert({
+            const { data: metaNewMsg } = await admin.from("ticket_messages").insert({
               ticket_id: ticket.id,
               direction: "inbound",
               visibility: "external",
               author_type: "customer",
               body: messageText,
               meta_message_id: messageId,
-            });
+            }).select("id").single();
 
-            await inngest.send({
-              name: "ticket/inbound-message",
-              data: {
-                workspace_id: workspaceId,
-                ticket_id: ticket.id,
-                message_body: messageText,
-                channel: "meta_dm",
-                is_new_ticket: true,
-              },
+            await dispatchInboundMessage({
+              admin,
+              workspaceId,
+              ticketId: ticket.id,
+              messageBody: messageText,
+              channel: "meta_dm",
+              isNewTicket: true,
+              dispatchMessageId: metaNewMsg?.id ?? null,
             });
           }
         }

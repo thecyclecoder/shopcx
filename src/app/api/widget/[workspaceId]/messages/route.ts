@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
+import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
+import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
 
 export async function POST(
   req: NextRequest,
@@ -231,27 +232,26 @@ export async function POST(
     .single();
 
   if (aiConfig?.enabled) {
-    // Check ticket assignment — only trigger AI if unassigned or AI-handled
+    // Phase 1 of durable-inbound-dispatch-no-silently-lost-ticket-event: decide off the reliable
+    // dispatch-state fields (ai_handled_at is the universal handling anchor stamped by
+    // deliverTicketMessage), NOT the stale `ai_handled` boolean that let ticket c4889020's follow-up
+    // slip past the gate. See [[../../../lib/inbound-dispatch-gate]].
     const { data: ticket } = await admin
       .from("tickets")
-      .select("assigned_to, ai_handled")
+      .select("assigned_to, ai_handled_at, ai_disabled, do_not_reply")
       .eq("id", ticketId)
       .single();
 
-    const isAutoHandled = ticket?.ai_handled;
-    const isUnassigned = !ticket?.assigned_to && !isAutoHandled;
-
-    // Trigger AI for: AI-handled, workflow-handled, journey-handled, or unassigned
-    if (isAutoHandled || isUnassigned) {
-      await inngest.send({
-        name: "ticket/inbound-message",
-        data: {
-          workspace_id: workspaceId,
-          ticket_id: ticketId,
-          message_body: message,
-          channel: "chat",
-          is_new_ticket: false,
-        },
+    if (ticket && shouldDispatchInboundMessage(ticket)) {
+      // Phase 2 durable dispatch — stamps dispatch_pending_at on msg then fires the event.
+      await dispatchInboundMessage({
+        admin,
+        workspaceId,
+        ticketId,
+        messageBody: message,
+        channel: "chat",
+        isNewTicket: false,
+        dispatchMessageId: msg?.id ?? null,
       });
 
       return NextResponse.json({
