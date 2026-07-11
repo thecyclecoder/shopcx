@@ -33,6 +33,11 @@ import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-upda
 // `sandbox: "qc"` branch calls. Kept in src/lib so scripts/ad-creative-qc-guardrails.test.ts can
 // import + assert the exact key set.
 import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
+// planner-authoring-survives-large-multi-spec-output Phase 1 — transcript fallback for runPlanJob:
+// when a large multi-spec planner envelope's PRIMARY parse drops specs, re-scan the session's
+// on-disk transcript jsonl for the last assistant message that carries the full envelope. Job
+// d5999907 was recovered by hand this way; this makes it automatic.
+import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -8880,8 +8885,53 @@ async function runPlanJob(job: Job) {
       const obj = extractJson<{ specs?: unknown }>(resultText);
       return Array.isArray(obj?.specs) ? (obj!.specs as PlannerSpecOut[]) : [];
     })();
+    // planner-authoring-survives-large-multi-spec-output Phase 1 — capture-full-vs-parse-drop diagnostic.
+    // The stream-json runner concatenates every stdout chunk (shAsync's `out`) with only a tail-cap at
+    // 64MiB, and runBoxSession picks the LAST `type:"result"` event's `result` string as resultText, so
+    // resultText should carry the full envelope. Logging its byte size + the primary-parse count makes
+    // any future truncation loud (and lets an operator confirm on job d5999907's shape that we saw the
+    // 62KB — but extracted 0 specs — with a single log line).
+    console.log(`${tag} planner primary parse: ${returnedSpecs.length} spec(s) from ${resultText.length}B resultText (approved=${approved.length})`);
     const returnedBySlug = new Map<string, PlannerSpecOut>();
     for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
+
+    // planner-authoring-survives-large-multi-spec-output Phase 1 — TRANSCRIPT FALLBACK.
+    // When the primary parse of resultText carried fewer approved specs than were requested, the
+    // planner's final assistant message on disk often still carries the full envelope (job d5999907
+    // shipped 6 fully-authored specs but the primary parse yielded 0). Re-scan the session's
+    // transcript jsonl for the LAST assistant message that parses as `{status,specs:[...]}` and
+    // merge any approved slugs recovered there. The primary parse wins on slug collision — the
+    // fallback fills gaps, never overwrites. Recording `transcriptRecovered` (the slugs merged via
+    // the fallback) lets the failure message downstream distinguish an ingestion-dropped spec from
+    // one the planner genuinely never returned.
+    const approvedSlugSet = new Set(approved.map((a) => a.spec!.slug));
+    const missingApprovedBefore = new Set<string>();
+    for (const a of approved) if (!returnedBySlug.has(a.spec!.slug)) missingApprovedBefore.add(a.spec!.slug);
+    const transcriptRecovered = new Set<string>();
+    if (missingApprovedBefore.size > 0 && session) {
+      let recovery: { specs: RecoveredSpec[]; transcriptPath: string | null };
+      try {
+        recovery = recoverSpecsForSession(session);
+      } catch (e) {
+        console.warn(`${tag} transcript fallback threw: ${e instanceof Error ? e.message : e}`);
+        recovery = { specs: [], transcriptPath: null };
+      }
+      if (!recovery.transcriptPath) {
+        console.warn(`${tag} transcript fallback: no jsonl for session ${session} — primary parse stands`);
+      } else if (!recovery.specs.length) {
+        console.warn(`${tag} transcript fallback: transcript at ${recovery.transcriptPath} carried no assistant specs[] envelope`);
+      } else {
+        for (const sp of recovery.specs) {
+          const slug = typeof sp.slug === "string" ? sp.slug : null;
+          if (!slug) continue;
+          if (!approvedSlugSet.has(slug)) continue;
+          if (returnedBySlug.has(slug)) continue;
+          returnedBySlug.set(slug, sp as PlannerSpecOut);
+          transcriptRecovered.add(slug);
+        }
+        console.log(`${tag} transcript fallback: recovered ${transcriptRecovered.size} of ${missingApprovedBefore.size} missed spec(s) from ${recovery.transcriptPath}`);
+      }
+    }
 
     const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
@@ -8978,7 +9028,22 @@ async function runPlanJob(job: Job) {
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
       if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
       if (intentFailures.length) reasons.push(`missing plain-language why/what: ${intentFailures.join(" | ")}`);
-      if (notReturned.length) reasons.push(`planner did not return a spec body for: ${notReturned.join(", ")}`);
+      if (notReturned.length) {
+        // planner-authoring-survives-large-multi-spec-output Phase 1 — distinguish
+        // GENUINELY-MISSING (planner never authored a body for the slug — not in resultText AND
+        // not in the transcript fallback either) from INGESTION-DROPPED (the transcript carried
+        // the slug but the fallback couldn't parse it back into the expected shape). Both end up
+        // in `notReturned` here — the fallback either merged the slug into returnedBySlug (which
+        // takes it out of notReturned before we get here) or it didn't (which is the ingestion-
+        // dropped case). Any recovered-then-still-invalid slug lives in transcriptRecovered ∩
+        // notReturned; everything else is a true miss.
+        const ingestionDropped = notReturned.filter((s) => transcriptRecovered.has(s));
+        const genuinelyMissing = notReturned.filter((s) => !transcriptRecovered.has(s));
+        const parts: string[] = [];
+        if (genuinelyMissing.length) parts.push(`genuinely missing (planner never authored): ${genuinelyMissing.join(", ")}`);
+        if (ingestionDropped.length) parts.push(`ingestion-dropped (transcript had it but re-parse still failed): ${ingestionDropped.join(", ")}`);
+        reasons.push(`planner did not return a spec body — ${parts.join("; ")}`);
+      }
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
       await update(job.id, {
         status: "failed",
