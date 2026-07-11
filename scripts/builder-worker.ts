@@ -19836,6 +19836,17 @@ async function runAdCreativeJob(job: Job) {
   // converts it to { pass:false } so nothing unchecked reaches the bin. Best-effort per QC — a
   // wall on one account hops via runBoxLane's account failover; all accounts capped surfaces via
   // the ALL_CAPPED_MARKER path and fails-closed to pass:false (regenerator burns an attempt).
+  //
+  // Phase 2 — DAHLIA_QC_MODE kill-switch:
+  //   'box'    (default, unset also = 'box') — use the claude -p QC session (the Phase 1 dispatcher below).
+  //   'direct' — skip the dispatcher; runAdCreativeLoop falls back to the legacy Opus vision API
+  //              (`qaCreative` in src/lib/ads/creative-qa.ts), unchanged. One env flag flip reverts
+  //              a bad rollout without a redeploy. Any other value is treated as 'box' (safest
+  //              default: fail toward the new path we tested rather than silently regressing).
+  // The fail-closed invariant is preserved on BOTH paths — a session error, cap, timeout, or
+  // non-JSON verdict yields { pass:false } in the box path; a missing ANTHROPIC_API_KEY or a
+  // vision-API 5xx yields { pass:false } in the direct path.
+  const qcMode = (process.env.DAHLIA_QC_MODE || "box").toLowerCase() === "direct" ? "direct" : "box";
   let qcCounter = 0;
   const qcDispatcher = async (prompt: string): Promise<{ resultText: string; isError: boolean }> => {
     qcCounter++;
@@ -19855,9 +19866,17 @@ async function runAdCreativeJob(job: Job) {
       return { resultText: "", isError: true };
     }
   };
+  console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
-    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count, qcDispatcher });
+    const result = await runAdCreativeLoop(a, {
+      workspaceId: job.workspace_id,
+      productId: instr.product_id,
+      count: instr.count,
+      // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
+      // stockProduct falls through to the legacy qaCreative(...) call unchanged.
+      qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
+    });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
       status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
