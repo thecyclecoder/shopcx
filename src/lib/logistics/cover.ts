@@ -11,14 +11,21 @@ export interface CoverRow {
   bundleQbId: string;
   name: string;
   sku: string | null;
-  burnPerMonth: number;
-  burnAmazon: number;
-  burnShopify: number;
+  burnPerMonth: number;      // total finished units/mo across channels
+  // Fulfillment channels are NOT fungible: 3PL (Amplifier) stock ships the Shopify
+  // storefront + internal/subscriber orders; FBA stock ships Amazon only. Cover is
+  // therefore computed per channel — a blended number hides a storefront stockout while
+  // Amazon stock sits full (exactly the Mixed Berry crisis).
+  burnStorefront: number;    // Shopify + internal — fulfilled from the 3PL
+  burnAmazon: number;        // fulfilled from FBA
+  burnShopify: number;       // sub-split of burnStorefront, for reporting
   burnInternal: number;
-  onHandSellable: number; // FBA fulfillable + non-FBA-bound 3PL + manual
-  onHandPipeline: number; // + FBA inbound + 3PL cases staged for FBA
-  coverSellableMonths: number | null;
-  coverPipelineMonths: number | null;
+  onHandStorefront: number;  // 3PL non-FBA-bound + manual — the subscriber-serving pool
+  onHandAmazon: number;      // FBA fulfillable
+  onHandAmazonPipeline: number; // + FBA inbound + 3PL cases staged for FBA
+  coverStorefrontMonths: number | null;      // ⭐ the subscriber-protecting signal
+  coverAmazonMonths: number | null;
+  coverAmazonPipelineMonths: number | null;
 }
 
 // For burn, EVERY matched line depletes inventory. We only special-case our own internal
@@ -145,15 +152,22 @@ export async function computeCover(
     }
     const fComp = fCompByBundle.get(id);
     const manualOnHand = (manualByProduct.get(id) ?? 0) + (fComp ? manualByProduct.get(fComp) ?? 0 : 0);
-    const burnPerMonth = (burnAmz + burnShop + burnInt) / months;
-    const onHandSellable = fbaFulfill + tpl3 + manualOnHand;
-    const onHandPipeline = onHandSellable + fbaInbound + tplFbaBound;
+
+    // Per-channel monthly burn + non-fungible on-hand pools
+    const burnStorefront = (burnShop + burnInt) / months; // Shopify + internal → served by 3PL
+    const burnAmazon = burnAmz / months;                  // → served by FBA
+    const burnPerMonth = burnStorefront + burnAmazon;
+    const onHandStorefront = tpl3 + manualOnHand;         // 3PL non-FBA-bound + manual
+    const onHandAmazon = fbaFulfill;                       // FBA fulfillable
+    const onHandAmazonPipeline = fbaFulfill + fbaInbound + tplFbaBound; // + inbound + FBA-bound cases
     out.push({
       bundleQbId: id, name: bundle.quickbooks_name, sku: bundle.sku,
-      burnPerMonth, burnAmazon: burnAmz / months, burnShopify: burnShop / months, burnInternal: burnInt / months,
-      onHandSellable, onHandPipeline,
-      coverSellableMonths: burnPerMonth > 0 ? onHandSellable / burnPerMonth : null,
-      coverPipelineMonths: burnPerMonth > 0 ? onHandPipeline / burnPerMonth : null,
+      burnPerMonth, burnStorefront, burnAmazon,
+      burnShopify: burnShop / months, burnInternal: burnInt / months,
+      onHandStorefront, onHandAmazon, onHandAmazonPipeline,
+      coverStorefrontMonths: burnStorefront > 0 ? onHandStorefront / burnStorefront : null,
+      coverAmazonMonths: burnAmazon > 0 ? onHandAmazon / burnAmazon : null,
+      coverAmazonPipelineMonths: burnAmazon > 0 ? onHandAmazonPipeline / burnAmazon : null,
     });
   }
   return out;

@@ -36,7 +36,7 @@ All via `createAdminClient()` (service role); RLS is member-**read** only.
 
 ## Readers
 
-- [`src/lib/logistics/cover.ts`](../../../src/lib/logistics/cover.ts) `computeCover` — on-hand for days-of-cover: FBA fulfillable + non-FBA-bound 3PL + manual = **sellable**; + FBA inbound + 3PL cases staged for FBA = **pipeline**. Rolls raw levels up to finished goods via `qb_sku_mappings` multipliers (`FBA-` prefixed 3PL refs = staged-for-FBA cases).
+- [`src/lib/logistics/cover.ts`](../../../src/lib/logistics/cover.ts) `computeCover` — on-hand for days-of-cover, **split by fulfillment channel (the pools are NOT fungible):** non-FBA-bound 3PL + manual = **storefront** supply (ships Shopify + internal/subscriber); FBA fulfillable = **Amazon** supply; FBA inbound + `FBA-`prefixed 3PL cases = Amazon *pipeline* only. Rolls raw levels up to finished goods via `qb_sku_mappings` multipliers. See [[../functions/logistics]] § crisis-aware doctrine for why the storefront/Amazon split is load-bearing.
 
 ## Gotchas
 
