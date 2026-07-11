@@ -1,4 +1,21 @@
 /**
+ * Portal mutation guards.
+ *
+ * Two independent guards live here — every subscription-mutating portal route
+ * runs the first through the dispatcher (`MUTATION_GATED_ROUTES`); replace-
+ * variants runs both.
+ *
+ *   1. First-delivery gate (`canMutateSubscription`) — every mutation blocked
+ *      until the sub's first order is delivered (anti-gaming).
+ *   2. Suppressed-variant gate (`assertNewVariantsSelectable`) — a specific
+ *      variant that is IN STOCK but NOT selectable for new portal choice
+ *      (crisis availability lever — we're pulling that variant off the portal
+ *      to preserve inventory for existing renewers). Existing sub lines on
+ *      that variant are UNAFFECTED; only NEW selection is blocked. See
+ *      [[docs/brain/libraries/portal__mutation-guard]].
+ *
+ * First-delivery gate details follow.
+ *
  * First-delivery mutation gate.
  *
  * Customers can't modify a subscription (swap / qty / add / remove / change
@@ -216,4 +233,86 @@ export async function canMutateSubscription(
     console.warn("[mutation-guard] EasyPost lookup failed, allowing:", e instanceof Error ? e.message : e);
     return { allowed: true, state: "delivered" };
   }
+}
+
+// ─────────────────── Suppressed-variant guard ───────────────────
+//
+// A crisis availability lever: a variant that is IN STOCK but must not be
+// selectable via any portal flavor-change / swap / add-line path. The
+// `inventory_quantity > 0` UI filter can't hide it, and Shopify admin
+// deactivation would break renewals billed against that variant — so the list
+// lives in `workspaces.portal_config.suppressed_variant_ids` (JSONB array of
+// Shopify variant id strings) and every portal path that could newly SELECT
+// a variant reads it: [[handlers/bootstrap]] filters the catalog it returns
+// to the UI, and [[handlers/replace-variants]] server-side rejects a crafted
+// request naming a suppressed variant so hiding-in-the-UI isn't the only bar.
+//
+// HARD INVARIANT: this ONLY blocks new selection. Existing subscription lines
+// already on a suppressed variant are unchanged; their renewals still bill
+// against that variant. Callers must not use this set to filter subscription
+// LINES (`contract.lines`) — only NEW `newVariants` / `newOneTimeVariants`
+// choices and the catalog surfaced for add/swap.
+
+/** Strip a `gid://shopify/ProductVariant/123` prefix down to `123`. */
+function stripGid(v: string): string {
+  return v.includes("/") ? (v.split("/").pop() || v) : v;
+}
+
+/**
+ * Pure predicate — given the variant IDs a caller is about to select and the
+ * per-workspace suppressed set, return the offending IDs. Extracted from the
+ * async guard so the failing state ("SC-TABS-SL-2 / 42614433480877 is
+ * rejected") is unit-testable without touching Supabase.
+ */
+export function findSuppressedNewVariants(
+  variantIds: Array<string | number>,
+  suppressed: Set<string>,
+): string[] {
+  if (!suppressed.size) return [];
+  const out: string[] = [];
+  for (const raw of variantIds) {
+    const id = stripGid(String(raw ?? "").trim());
+    if (id && suppressed.has(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Read the workspace's suppressed-variant set. Consumed by
+ * [[handlers/bootstrap]] to filter the swap/add catalog it returns to the
+ * portal UI, and by [[handlers/replace-variants]] via
+ * `assertNewVariantsSelectable`.
+ */
+export async function getSuppressedVariantIds(workspaceId: string): Promise<Set<string>> {
+  const admin = createAdminClient();
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("portal_config")
+    .eq("id", workspaceId)
+    .single();
+  const cfg = (ws?.portal_config as { suppressed_variant_ids?: unknown } | null) || null;
+  const raw = Array.isArray(cfg?.suppressed_variant_ids) ? cfg.suppressed_variant_ids : [];
+  const out = new Set<string>();
+  for (const v of raw) {
+    const s = stripGid(String(v ?? "").trim());
+    if (s) out.add(s);
+  }
+  return out;
+}
+
+/**
+ * Server-side gate for `replaceVariants` / add-line: reject a request that
+ * targets any suppressed variant, no matter what the UI showed. Returns
+ * `{ ok: true }` when nothing was blocked (including the fast-path where no
+ * suppression list is configured), or `{ ok: false, blocked }` naming the
+ * offending variant ids so the caller can surface a stable 4xx.
+ */
+export async function assertNewVariantsSelectable(
+  workspaceId: string,
+  variantIds: Array<string | number>,
+): Promise<{ ok: true } | { ok: false; blocked: string[] }> {
+  if (!variantIds.length) return { ok: true };
+  const suppressed = await getSuppressedVariantIds(workspaceId);
+  const blocked = findSuppressedNewVariants(variantIds, suppressed);
+  return blocked.length ? { ok: false, blocked } : { ok: true };
 }

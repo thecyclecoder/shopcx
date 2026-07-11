@@ -4,6 +4,10 @@ import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
 import { isInternalSubscription } from "@/lib/internal-subscription";
+// Server-side "not selectable for new choice" gate — the UI catalog filter in
+// [[bootstrap]] hides these, but a crafted request that names a suppressed
+// variant directly must still be rejected. See [[../mutation-guard]].
+import { assertNewVariantsSelectable } from "@/lib/portal/mutation-guard";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -119,6 +123,26 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
 
   const hasAnyChange = !!oldLineId || oldVariants.length > 0 || oldOneTimeVariants.length > 0 || !!newVariants || !!newOneTimeVariants;
   if (!hasAnyChange) return jsonErr({ error: "no_changes" }, 400);
+
+  // Reject any target variant on the workspace's suppressed-for-new-choice
+  // list — the catalog builder ([[bootstrap]]) hides them from the UI, but
+  // this closes the crafted-request hole and returns a stable 4xx the portal
+  // can surface. Only NEW selection is blocked; existing lines targeting a
+  // suppressed variant (e.g. a current SL subscriber) still bill on renewal.
+  const newVariantIdsForSuppressionCheck = [
+    ...(newVariants ? Object.keys(newVariants) : []),
+    ...(newOneTimeVariants ? Object.keys(newOneTimeVariants) : []),
+  ];
+  if (newVariantIdsForSuppressionCheck.length) {
+    const selectable = await assertNewVariantsSelectable(auth.workspaceId, newVariantIdsForSuppressionCheck);
+    if (!selectable.ok) {
+      return jsonErr({
+        error: "variant_not_selectable",
+        detail: "One or more variants are not currently selectable via the portal.",
+        variantIds: selectable.blocked,
+      }, 400);
+    }
+  }
 
   // Guardrail: prevent removing all regular products
   const looksLikeRegularRemoval = !!oldLineId || oldVariants.length > 0;
