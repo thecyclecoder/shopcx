@@ -37,7 +37,7 @@ const HIGH_INTENT = /\b(weight|lbs|pounds|shed|slim|brain fog|foggy|focus|clarit
 
 export interface ScoredAngle {
   hook: string;
-  source: "ad_angle" | "review_cluster" | "transformation" | "benefit";
+  source: "ad_angle" | "review_cluster" | "transformation" | "benefit" | "ingredient" | "authority";
   leadBenefit: string;
   acquisitionPower: number; // 0–10 — cold-scroll stopping power
   retentionTruth: number; // 0–10 — how well the product delivers it (keeps them)
@@ -80,13 +80,27 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
     out.push(scoreAngle(str(a.hook_one_liner), str(a.lead_benefit_anchor), "ad_angle", 5, a));
   }
   // Transformation stories → their own high-acquisition angles (real person, real number, real photo).
-  // A story WITH a before/after photo is the strongest — boost it so a photo-backed transformation leads.
-  for (const r of transformationStories.slice(0, 8)) {
+  // Capped so a corpus full of weight-loss reviews can't crowd EVERY other concept out of the pool.
+  for (const r of transformationStories.slice(0, 5)) {
     const line = str(r.smart_quote) || str(r.body).slice(0, 90);
     const a = scoreAngle(line, "Weight loss (real customer transformation)", "transformation", 6, r as unknown as Row);
     if ((r.images ?? []).length) { a.acquisitionPower = Math.min(10, a.acquisitionPower + 2); a.hasRealPhoto = true; a.reasons.push("has a REAL before/after photo (strongest — leads over a photoless number)"); }
     out.push(a);
   }
+  // Ingredient / mechanism angles — "the ingredient that does X / how it actually works". A DIFFERENT
+  // concept from a transformation story (the ingredient-breakdown creative is a real winner for us).
+  for (const ir of (pi.ingredientResearch as Row[]).slice(0, 4)) {
+    const hook = str(ir.benefit_headline) || str(ir.mechanism_explanation).slice(0, 80);
+    if (hook) out.push(scoreAngle(hook, "Ingredient / mechanism", "ingredient", 5, ir));
+  }
+  // Authority / proof angles — nutritionist / 3rd-party-tested / award / guarantee credibility.
+  const p = pi.product as Row | null;
+  const authorityPoints = [
+    ...(((p?.awards as string[] | null) ?? [])),
+    ...(((p?.certifications as string[] | null) ?? [])),
+    ...pi.store.brandProofPoints,
+  ].filter(Boolean).slice(0, 4);
+  for (const pt of authorityPoints) out.push(scoreAngle(str(pt), "Authority / proof", "authority", 5));
   // Review clusters → retentionTruth signal (frequency), and a couple as candidate angles.
   const clusters = ((pi.reviewAnalysis as Row | null)?.top_benefits as Array<{ benefit: string; frequency?: number }> | undefined) ?? [];
   const maxFreq = Math.max(1, ...clusters.map((c) => Number(c.frequency ?? 0)));
@@ -102,10 +116,25 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
     const prev = byHook.get(k);
     if (!prev || a.acquisitionPower > prev.acquisitionPower) byHook.set(k, a);
   }
-  return [...byHook.values()].sort((a, b) =>
+  const ranked = [...byHook.values()].sort((a, b) =>
     b.acquisitionPower - a.acquisitionPower
     || (Number(b.hasRealPhoto) - Number(a.hasRealPhoto)) // among ties, a real before/after wins
     || b.retentionTruth - a.retentionTruth);
+
+  // DIVERSIFY (CEO 2026-07-11): round-robin across concept TYPES (source) so the top of the pool spans
+  // transformation + ingredient + authority + ad_angle + review_cluster — instead of 8 weight-loss
+  // reviews crowding everything else out. Groups lead by their strongest angle; then we take one per
+  // group per round. Keeps acquisition ranking WITHIN a concept while guaranteeing concept variety across.
+  const bySource = new Map<ScoredAngle["source"], ScoredAngle[]>();
+  for (const a of ranked) { const g = bySource.get(a.source) ?? []; g.push(a); bySource.set(a.source, g); }
+  const groups = [...bySource.values()].sort((g1, g2) => g2[0].acquisitionPower - g1[0].acquisitionPower);
+  const diversified: ScoredAngle[] = [];
+  for (let i = 0; diversified.length < ranked.length; i++) {
+    let added = false;
+    for (const g of groups) if (g[i]) { diversified.push(g[i]); added = true; }
+    if (!added) break;
+  }
+  return diversified;
 }
 
 // ── Brief ────────────────────────────────────────────────────────────────────
