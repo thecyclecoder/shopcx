@@ -648,6 +648,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 26 * HOUR,
     registeredAt: "2026-07-08T20:15:12.164Z",
   },
+  {
+    id: "sync-fba-inventory",
+    kind: "cron",
+    owner: "platform",
+    label: "sync-fba-inventory",
+    description: "Auto-proposed monitored loop for the sync-fba-inventory cron (daily (0 9 * * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
+    expectedCadence: "daily (0 9 * * *)",
+    livenessWindowMs: 26 * HOUR,
+    registeredAt: "2026-07-11T11:30:01.527Z",
+  },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "research" },
   {
