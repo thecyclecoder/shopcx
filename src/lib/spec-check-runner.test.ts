@@ -16,6 +16,7 @@ import {
   runSpecChecks,
   classifyDeterministicRun,
   mergeDeterministicWithLlmChecks,
+  buildGrepArgv,
   type CheckExecutors,
   type LoadedCheck,
   type CheckResult,
@@ -305,6 +306,24 @@ test("mergeDeterministicWithLlmChecks — LLM only sees residual; drift LLM chec
   assert.equal(merged[1].text, "b (residual)");
   assert.equal(merged[1].verdict, "pass");
   assert.equal(merged[2].text, "c (drifted — not in the residual scope)");
+});
+
+test("buildGrepArgv places `--` before the user-controlled path (rg option-injection belt)", () => {
+  // Regression pin for harden-deterministic-grep-check-paths: even a validator-passed path must
+  // be argv-separated from the pattern by `--` so ripgrep cannot re-parse it as a flag or a
+  // `--pre=`-style preprocessor. Pattern goes via `-e`; path goes after `--`; both are covered.
+  const withPath = buildGrepArgv({ pattern: "PRESENT", path: "src/lib", expect: "present" });
+  assert.deepEqual(withPath, ["-e", "PRESENT", "--", "src/lib"]);
+
+  const noPath = buildGrepArgv({ pattern: "PRESENT", expect: "present" });
+  assert.deepEqual(noPath, ["-e", "PRESENT", "--", "."]);
+
+  // A pattern that itself starts with `-` still lands under `-e`, so rg treats it as data.
+  const dashPattern = buildGrepArgv({ pattern: "-not-a-flag", path: "src/lib", expect: "present" });
+  assert.equal(dashPattern[0], "-e");
+  assert.equal(dashPattern[1], "-not-a-flag");
+  assert.equal(dashPattern[2], "--");
+  assert.equal(dashPattern[3], "src/lib");
 });
 
 test("results are position-ordered + fully typed (text, checkKey, verdict, category, evidence, exec_kind)", async () => {

@@ -350,6 +350,52 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Reject any grep.path a spec author could weaponize into ripgrep option/preprocessor injection or
+ * repo escape — an absolute path, a NUL-embedded path, a `..` segment that traverses outside the
+ * repo, an option-looking leading '-', or empty-after-normalization. The runner also passes the
+ * value after an argv `--` separator (see `defaultExecutors.grep` in [[spec-check-runner]]), but
+ * this predicate is the primary gate: a rejected path never reaches spawn at all.
+ */
+export function validateGrepPath(path: unknown): ExecutableCheckValidation {
+  if (typeof path !== "string") {
+    return { valid: false, reason: "grep.path (if set) must be a non-empty string" };
+  }
+  const trimmed = path.trim();
+  if (!trimmed) {
+    return { valid: false, reason: "grep.path (if set) must be a non-empty string" };
+  }
+  if (trimmed.includes("\0")) {
+    return { valid: false, reason: "grep.path must not contain NUL" };
+  }
+  if (trimmed.startsWith("-")) {
+    return {
+      valid: false,
+      reason: "grep.path must not start with '-' (would be parsed by ripgrep as an option/preprocessor)",
+    };
+  }
+  if (trimmed.startsWith("/")) {
+    return { valid: false, reason: "grep.path must be repo-relative, not absolute" };
+  }
+  // Normalize .. traversal against a virtual repo root — any segment that pops above the root
+  // rejects. Splits on '/' (POSIX) so a Windows-style '\\' inside a path stays a data character
+  // and is still refused later by rg as a non-existent file, not silently traversed.
+  const segments = trimmed.split("/");
+  let depth = 0;
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      depth--;
+      if (depth < 0) {
+        return { valid: false, reason: "grep.path must not traverse outside the repo (has '..' above root)" };
+      }
+      continue;
+    }
+    depth++;
+  }
+  return { valid: true };
+}
+
 export function validateExecutableCheck(
   check: { exec_kind: SpecPhaseCheckExecKind | null | undefined; params?: unknown },
   ctx?: { packageScripts?: ReadonlySet<string> },
@@ -377,8 +423,13 @@ export function validateExecutableCheck(
       if (typeof pattern !== "string" || !pattern.trim()) {
         return { valid: false, reason: "grep.pattern must be a non-empty string" };
       }
-      if (path !== undefined && (typeof path !== "string" || !path.trim())) {
-        return { valid: false, reason: "grep.path (if set) must be a non-empty string" };
+      if (path !== undefined) {
+        // grep.path flows into `rg` as a raw argument, so treat it as an untrusted capability
+        // boundary — a spec-authored value must be a safe repo-relative path and can NEVER be
+        // parsable by ripgrep as an option/preprocessor. `--` in the argv (see the executor)
+        // is defense-in-depth; this predicate is the first gate.
+        const pathCheck = validateGrepPath(path);
+        if (!pathCheck.valid) return pathCheck;
       }
       if (expect !== "present" && expect !== "absent") {
         return { valid: false, reason: "grep.expect must be 'present' or 'absent'" };
