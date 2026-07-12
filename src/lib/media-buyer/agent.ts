@@ -614,6 +614,19 @@ export async function readCurrentTestCohortSize(
 export interface RunMediaBuyerOptions {
   workspaceId: string;
   metaAdAccountId: string;
+  /**
+   * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 3 —
+   * the product this pass is scoped to. The dispatcher (`runMediaBuyerLoopForAccount`)
+   * enumerates every active cohort per account and calls the runner ONCE per
+   * `(account, productId)` tuple — a null-product cohort runs once (the pre-Phase-2
+   * shape, preserved so Superfood Tabs is untouched). Passing `productId` here:
+   *   • routes the cohort read to the per-product row (per-product ceiling +
+   *     adset are enforced by `getEffectiveMediaBuyerTestCohort`), and
+   *   • flows into `listReadyToTest` + `readCurrentTestCohortSize` so the
+   *     replenish only picks THIS product's ready creative and only counts
+   *     THIS product's live tests (anti-cross-contamination core, Phase 2).
+   */
+  productId?: string | null;
   cohortTargetCount?: number;
   snapshotDate?: string;
   /** Override "now" — tests pin this so the winner window is deterministic. */
@@ -629,6 +642,20 @@ export interface RunMediaBuyerResult {
     /** Phase 3 — new `ad_campaigns` rows spawned by fatigue-triggered amplifyWinner calls. */
     amplifiedAdCampaignIds: string[];
   };
+}
+
+/**
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 3 —
+ * one entry per (account, product) pass the dispatcher ran. `productId` names
+ * WHICH cohort was resolved (null = the account's null-product default cohort,
+ * or the "no active cohort" fallback for an unconfigured account). `error` is
+ * populated when the per-product pass threw so the outer lane can still see
+ * every product's result without one bad product hiding the others.
+ */
+export interface RunMediaBuyerAccountPass {
+  productId: string | null;
+  result: RunMediaBuyerResult;
+  error?: string;
 }
 
 /**
@@ -654,12 +681,17 @@ export async function runMediaBuyerLoop(
   const nowMs = opts.nowMs ?? Date.now();
 
   // ── Read policy + cohort FIRST — the trust gate branches on the policy's signal source. ──
+  // Phase 3: resolve the cohort for THIS (account, product) tuple. The dispatcher passes
+  // `productId` from the enumerated `media_buyer_test_cohorts` row so a shared account's
+  // product-A pass reads A's cohort (per-product ceiling + adset), a product-B pass reads
+  // B's. A null `productId` falls back to the null-product account default (Superfood Tabs
+  // today) — the pre-Phase-2 shape is preserved.
   const [policy, cohort] = await Promise.all([
     loadActivePolicy(opts.workspaceId, opts.metaAdAccountId),
-    // Resolve the cohort for THIS account (per-account row preferred; falls back to a workspace-wide
-    // row inside getEffective). Passing null here was the bug that left a per-account cohort "dormant"
-    // and skipped replenish — so Dahlia's bin never fed Bianca's tests.
-    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, { metaAdAccountId: opts.metaAdAccountId }),
+    getEffectiveMediaBuyerTestCohort(admin, opts.workspaceId, {
+      metaAdAccountId: opts.metaAdAccountId,
+      productId: opts.productId ?? null,
+    }),
   ]);
 
   // ── Trust gate ────────────────────────────────────────────────────────────
@@ -1201,6 +1233,119 @@ export async function runMediaBuyerLoop(
   if (heartbeat.recorded) writes.directorActivityRows += 1;
 
   return { plan, writes };
+}
+
+// ── Per-account (account × product) fan-out (Phase 3) ────────────────────────
+
+/**
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 3 —
+ * enumerate the ACTIVE `media_buyer_test_cohorts.product_id` values for one
+ * (workspace, account). The result is the fan-out list the dispatcher iterates:
+ * one entry per active cohort. A null-product cohort surfaces as null (the
+ * account default — Superfood Tabs today). An account with NO active cohort
+ * returns `[null]` so the dispatcher still emits ONE dormant heartbeat pass
+ * (never a silent no-op).
+ *
+ * Deterministic ordering: product ids are sorted ascending, with the null-product
+ * default LAST — so the pass ordering is stable across runs.
+ */
+export async function readActiveCohortProductIds(
+  admin: Admin,
+  args: { workspaceId: string; metaAdAccountId: string },
+): Promise<Array<string | null>> {
+  const { data, error } = await admin
+    .from("media_buyer_test_cohorts")
+    .select("id, product_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_account_id", args.metaAdAccountId)
+    .eq("is_active", true);
+  if (error) throw new Error(`media_buyer_test_cohorts read failed: ${error.message}`);
+
+  const productIds: (string | null)[] = ((data ?? []) as Array<{ product_id: string | null }>)
+    .map((r) => r.product_id ?? null)
+    .sort((a, b) => {
+      if (a === b) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a < b ? -1 : 1;
+    });
+  // Defensive dedupe — the Phase-1 (workspace, account, product_id) partial
+  // unique index guarantees uniqueness in prod, but the dispatcher never trusts
+  // the DB shape blindly.
+  const seen = new Set<string>();
+  const unique: (string | null)[] = [];
+  for (const pid of productIds) {
+    const key = pid ?? "__null__";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(pid);
+  }
+  // No active cohort at all → still run one pass so the dormant heartbeat lands.
+  if (unique.length === 0) unique.push(null);
+  return unique;
+}
+
+/**
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 3 —
+ * enumerate the active `media_buyer_test_cohorts` rows for one (workspace,
+ * account) and run `runMediaBuyerLoop` ONCE per active cohort. In Bianca's
+ * shared-account setup (Amazing Coffee + Creamer in one account) this produces
+ * TWO passes with distinct `productId`s; in Superfood Tabs's single-product
+ * setup the null-product cohort produces ONE pass with `productId=null` (the
+ * pre-Phase-2 shape, preserved).
+ *
+ * When no active cohort exists for the account (a workspace hasn't opted into
+ * the autonomous go-live yet), still runs ONE pass with `productId=null` so
+ * the runner's sensor-trust / no-active-policy / no-active-cohort dormant
+ * audit rows still emit — the dispatch heartbeat proves the lane ran.
+ *
+ * Per-pass errors are caught and returned in the result array; the caller
+ * (box worker media-buyer lane) reports one row per (account, product) tuple
+ * so a single product's failure never hides another product's progress.
+ */
+export async function runMediaBuyerLoopForAccount(
+  admin: Admin,
+  opts: Omit<RunMediaBuyerOptions, "productId">,
+): Promise<RunMediaBuyerAccountPass[]> {
+  const productIds = await readActiveCohortProductIds(admin, {
+    workspaceId: opts.workspaceId,
+    metaAdAccountId: opts.metaAdAccountId,
+  });
+
+  const passes: RunMediaBuyerAccountPass[] = [];
+  for (const productId of productIds) {
+    try {
+      const result = await runMediaBuyerLoop(admin, { ...opts, productId });
+      passes.push({ productId, result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      passes.push({
+        productId,
+        result: {
+          plan: {
+            policyActive: false,
+            policyVersionId: null,
+            cohortConfigured: false,
+            cohortTargetCount: opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET,
+            currentTestCohortSize: 0,
+            promote: [],
+            kill: [],
+            replenish: [],
+            fatigueReplenish: [],
+            summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,
+          },
+          writes: {
+            iterationActionsInserted: 0,
+            directorActivityRows: 0,
+            publishJobsInserted: 0,
+            amplifiedAdCampaignIds: [],
+          },
+        },
+        error: msg,
+      });
+    }
+  }
+  return passes;
 }
 
 /**

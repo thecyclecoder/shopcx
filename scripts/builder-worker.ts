@@ -20087,23 +20087,40 @@ async function runMediaBuyerJob(job: Job) {
     return;
   }
 
-  const { runMediaBuyerLoop } = await import("../src/lib/media-buyer/agent");
-  const perAccount: Array<{ account: string; plan: unknown; writes: unknown; error?: string }> = [];
+  // media-buyer-product-scoped-test-rail Phase 3 — fan out over every active
+  // (account × product) cohort. `runMediaBuyerLoopForAccount` enumerates the
+  // account's active `media_buyer_test_cohorts` rows and runs one pass per row,
+  // so a shared account with product A + product B produces TWO passes (each
+  // scoped to its own adset + ceiling + ready-to-test bin). A null-product
+  // cohort (Superfood Tabs today) runs once as before. An account with no
+  // active cohort still runs one pass with productId=null so the dormant
+  // heartbeat lands (the "audit trail proves the pass ran" invariant).
+  const { runMediaBuyerLoopForAccount } = await import("../src/lib/media-buyer/agent");
+  const perAccount: Array<{ account: string; productId: string | null; plan: unknown; writes: unknown; error?: string }> = [];
   for (const accountId of accountIds) {
+    let passes: Awaited<ReturnType<typeof runMediaBuyerLoopForAccount>>;
     try {
-      const result = await runMediaBuyerLoop(a, {
+      passes = await runMediaBuyerLoopForAccount(a, {
         workspaceId: job.workspace_id,
         metaAdAccountId: accountId,
         cohortTargetCount: instr.cohort_target_count,
       });
-      perAccount.push({ account: accountId, plan: result.plan, writes: result.writes });
-      console.log(
-        `${tag} account=${accountId.slice(0, 8)} → promote=${result.plan.promote.length} kill=${result.plan.kill.length} replenish=${result.plan.replenish.length} (policyActive=${result.plan.policyActive})`,
-      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      perAccount.push({ account: accountId, plan: null, writes: null, error: msg });
-      console.error(`${tag} account=${accountId} threw: ${msg}`);
+      perAccount.push({ account: accountId, productId: null, plan: null, writes: null, error: msg });
+      console.error(`${tag} account=${accountId} dispatch threw: ${msg}`);
+      continue;
+    }
+    for (const pass of passes) {
+      if (pass.error) {
+        perAccount.push({ account: accountId, productId: pass.productId, plan: null, writes: null, error: pass.error });
+        console.error(`${tag} account=${accountId} product=${pass.productId ?? "null"} threw: ${pass.error}`);
+        continue;
+      }
+      perAccount.push({ account: accountId, productId: pass.productId, plan: pass.result.plan, writes: pass.result.writes });
+      console.log(
+        `${tag} account=${accountId.slice(0, 8)} product=${pass.productId ? pass.productId.slice(0, 8) : "null"} → promote=${pass.result.plan.promote.length} kill=${pass.result.plan.kill.length} replenish=${pass.result.plan.replenish.length} (policyActive=${pass.result.plan.policyActive})`,
+      );
     }
   }
   // media-buyer-director-slack-digest Phase 2: the Growth Director (Max) posts ONE digest of this pass's
