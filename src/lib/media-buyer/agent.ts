@@ -49,8 +49,16 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 const GROWTH_DIRECTOR_FUNCTION = "growth";
 
-/** Default number of live creatives the Media Buyer keeps in the test cohort at any time. */
-export const DEFAULT_TEST_COHORT_TARGET = 3;
+/**
+ * Default number of live creatives the Media Buyer keeps in the test cohort at any time.
+ *
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 —
+ * raised 3 → 4 to give each PER-PRODUCT cohort its own 4-live-test target. The
+ * count is now scoped by `ad_campaigns.product_id` (see `readCurrentTestCohortSize`),
+ * so a shared Meta ad account carries 4 live tests per product, not one shared
+ * budget/topline across two products in the same account.
+ */
+export const DEFAULT_TEST_COHORT_TARGET = 4;
 
 /**
  * media-buyer-sensor-trust-probe Phase 3 — the freshness cap on a sensor-trust snapshot.
@@ -550,6 +558,57 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   };
 }
 
+// ── Per-product live-test cohort size (Phase 2) ──────────────────────────────
+
+/**
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 —
+ * count the ACTIVE `origin='media-buyer-test'` publish jobs currently live for
+ * ONE product. The runner reads `cohort.productId` and calls this; the count
+ * feeds `computeMediaBuyerPlan`'s deficit calculation so each per-product cohort
+ * is capped by its OWN target (default 4) and never by another product's live
+ * tests in the same shared Meta ad account.
+ *
+ * Behaviour:
+ *   • productId = <uuid> → count only jobs whose `ad_campaigns.product_id`
+ *     equals this product. A shared account's product-A pass counts only A's
+ *     live tests, never B's — the anti-cross-contamination guard.
+ *   • productId = null → count every workspace-scoped live test job. This
+ *     preserves the pre-Phase-2 shape for the null-product default cohort
+ *     (Superfood Tabs today).
+ *
+ * Two queries: (1) enumerate live job campaign_ids; (2) filter those campaign
+ * ids to the product via `ad_campaigns.product_id`. Small enough per pass; the
+ * product-filter is a `.in(...)` over the live-job set, not a workspace-wide
+ * scan.
+ */
+export async function readCurrentTestCohortSize(
+  admin: Admin,
+  args: { workspaceId: string; productId: string | null },
+): Promise<number> {
+  const { data: liveJobsRaw } = await admin
+    .from("ad_publish_jobs")
+    .select("id, campaign_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
+    .eq("publish_active", true)
+    .eq("publish_status", "published");
+  const liveJobs = (liveJobsRaw ?? []) as Array<{ id: string; campaign_id: string | null }>;
+  if (!args.productId) return liveJobs.length;
+
+  const campaignIds = liveJobs
+    .map((j) => j.campaign_id)
+    .filter((id): id is string => !!id);
+  if (!campaignIds.length) return 0;
+
+  const { data: matchingCampaigns } = await admin
+    .from("ad_campaigns")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .in("id", campaignIds)
+    .eq("product_id", args.productId);
+  return (matchingCampaigns ?? []).length;
+}
+
 // ── Runner orchestrator ───────────────────────────────────────────────────────
 
 export interface RunMediaBuyerOptions {
@@ -821,15 +880,24 @@ export async function runMediaBuyerLoop(
   }
 
   // Ready-to-test bin + current cohort size (count of ACTIVE origin='media-buyer-test' jobs).
-  const { readyToTest } = await listReadyToTest(admin, { workspaceId: opts.workspaceId });
-  const { data: liveTestAds } = await admin
-    .from("ad_publish_jobs")
-    .select("id")
-    .eq("workspace_id", opts.workspaceId)
-    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
-    .eq("publish_active", true)
-    .eq("publish_status", "published");
-  const currentTestCohortSize = (liveTestAds ?? []).length;
+  // [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 —
+  // both reads are PRODUCT-SCOPED via `cohort.productId`:
+  //   • `listReadyToTest` filters `ad_campaigns.product_id = cohort.productId` so
+  //     product B's ready creative can never be selected for product A's cohort.
+  //   • `readCurrentTestCohortSize` counts only the live test ads whose parent
+  //     campaign carries this product's id, so a shared Meta ad account gives
+  //     each product its own live-test-target-of-4 (not one shared count).
+  // A null-product default cohort (Superfood Tabs today) omits both filters, so
+  // its pre-Phase-2 shape is preserved.
+  const cohortProductId = cohort?.productId ?? null;
+  const { readyToTest } = await listReadyToTest(admin, {
+    workspaceId: opts.workspaceId,
+    productId: cohortProductId,
+  });
+  const currentTestCohortSize = await readCurrentTestCohortSize(admin, {
+    workspaceId: opts.workspaceId,
+    productId: cohortProductId,
+  });
 
   // ── Compute the plan ──────────────────────────────────────────────────────
   const plan = computeMediaBuyerPlan({

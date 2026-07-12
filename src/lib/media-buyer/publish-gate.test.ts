@@ -397,6 +397,72 @@ test("getEffectiveMediaBuyerTestCohort — two active cohorts in one account und
   assert.equal(forC!.testMetaAdsetId, ADSET_DEFAULT);
 });
 
+test("Phase 2 — evaluateMediaBuyerTestPublish routes the ceiling read to the product-specific cohort: a projected daily OVER A's ceiling REFUSES over_ceiling; the same amount UNDER B's separate ceiling ALLOWS", async () => {
+  // Amazing Coffee + Creamer share one Meta ad account today. Each product has
+  // its own adset + ceiling; the anti-cross-contamination guard says the ceiling
+  // read must land on the product-specific cohort, not the null-product default.
+  const PRODUCT_A = "prod-A";
+  const PRODUCT_B = "prod-B";
+  const ADSET_A = "6100000000A";
+  const ADSET_B = "6100000000B";
+  const CEIL_A = 40000; // $400/day
+  const CEIL_B = 80000; // $800/day
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      cohortRow({
+        id: "cohort-A",
+        meta_ad_account_id: ACCT,
+        product_id: PRODUCT_A,
+        test_meta_adset_id: ADSET_A,
+        daily_test_ceiling_cents: CEIL_A,
+      }),
+      cohortRow({
+        id: "cohort-B",
+        meta_ad_account_id: ACCT,
+        product_id: PRODUCT_B,
+        test_meta_adset_id: ADSET_B,
+        daily_test_ceiling_cents: CEIL_B,
+      }),
+    ],
+    dashboard_notifications: [],
+    director_activity: [],
+  });
+
+  // A projected $500/day — ABOVE A's $400 ceiling — is refused for product A.
+  const projected = 50000;
+  const refuseA = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_A,
+    metaAdsetId: ADSET_A,
+    projectedDailyCents: projected,
+  });
+  assert.equal(refuseA.allowed, false);
+  if (!refuseA.allowed) {
+    assert.equal(refuseA.reason, "over_ceiling");
+    assert.equal(refuseA.ceilingCents, CEIL_A);
+    assert.equal(refuseA.projectedDailyCents, projected);
+    // Absolute proof the read landed on A's cohort — not the null-product default.
+    assert.equal(refuseA.cohort?.productId, PRODUCT_A);
+  }
+
+  // The SAME projected $500/day — UNDER B's $800 ceiling — is allowed for product B,
+  // in the same account. B's cohort is a separate row with its own ceiling.
+  const allowB = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_B,
+    metaAdsetId: ADSET_B,
+    projectedDailyCents: projected,
+  });
+  assert.equal(allowB.allowed, true);
+  if (allowB.allowed) {
+    assert.equal(allowB.ceilingCents, CEIL_B);
+    assert.equal(allowB.projectedDailyCents, projected);
+    assert.equal(allowB.cohort.productId, PRODUCT_B);
+  }
+});
+
 test("getEffectiveMediaBuyerTestCohort — omitting productId (or passing null) preserves the pre-product-scoped resolution (null-product account default)", async () => {
   // Superfood Tabs today: no product dimension on the caller. The resolver must
   // return the null-product account default so nothing regresses.

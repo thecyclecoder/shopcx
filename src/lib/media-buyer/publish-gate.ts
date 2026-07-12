@@ -153,6 +153,14 @@ export type MediaBuyerTestRefusalReason =
 export interface MediaBuyerTestGateInput {
   workspaceId: string;
   metaAdAccountId: string | null;
+  /**
+   * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 —
+   * the ad's target product. Passed through to `getEffectiveMediaBuyerTestCohort`
+   * so the ceiling read is scoped to the per-product cohort (Amazing Coffee vs
+   * Creamer in the same account, etc.). Omitting it (or null) falls back to the
+   * null-product account default, preserving Superfood Tabs's pre-Phase-2 shape.
+   */
+  productId?: string | null;
   metaAdsetId: string;
   /** The daily budget in cents the ad set WILL carry after this publish (Meta ABO). */
   projectedDailyCents: number;
@@ -226,6 +234,7 @@ export async function evaluateMediaBuyerTestPublish(
 ): Promise<MediaBuyerTestGateResult> {
   const cohort = await getEffectiveMediaBuyerTestCohort(admin, input.workspaceId, {
     metaAdAccountId: input.metaAdAccountId,
+    productId: input.productId ?? null,
   });
   if (!cohort) {
     return {
