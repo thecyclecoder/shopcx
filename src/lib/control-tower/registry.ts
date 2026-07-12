@@ -35,6 +35,8 @@
  *                  apart from the AI inline agents. (control-tower-complete-coverage P1.)
  */
 
+import { extractCronExpr, meanCadenceMsFromSets, parseCronExpr } from "./cron-parse";
+
 export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reactive";
 
 /**
@@ -383,7 +385,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Spec-test QA enqueue",
     description: "Daily enqueue of box QA over shipped-unverified specs.",
     expectedCadence: "daily (45 10 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     outputAssertion: "spec-test-persisted",
   },
   {
@@ -402,7 +404,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Migration integrity sweep",
     description: "Daily back-audit of never-audited internal subs.",
     expectedCadence: "daily (30 4 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
   },
   {
     id: "internal-subscription-renewal-cron",
@@ -411,7 +413,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Internal subscription renewals",
     description: "Daily fan-out of due internal-subscription renewals.",
     expectedCadence: "daily (0 9 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     // renewal-integrity (overdue subs never advanced) + outcome-distribution (the cron ran +
     // each decline "routed correctly" but the per-cycle outcome mix is systemically broken / spiking).
     outputAssertions: ["renewal-integrity", "renewal-outcome-distribution"],
@@ -423,7 +425,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Social scheduler planner",
     description: "Daily organic-social calendar planner (rolling 7-day window).",
     expectedCadence: "daily (0 9 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
   },
   {
     id: "control-tower-monitor",
@@ -431,8 +433,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     owner: "platform",
     label: "Control Tower monitor",
     description: "The watchdog itself — so a dead monitor is visible too.",
-    expectedCadence: "every 15 min (*/15 * * * *)",
-    livenessWindowMs: 45 * MIN,
+    // Pinned to MONITOR_TICK_FLOOR_MS (5 min) — the smallest cadence the registry accepts,
+    // and the tick that gates cron_freshness alerting resolution (monitor-cadence-scaled-liveness-window P1).
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
     personaKind: "monitor", // Tao — surfaces this cron as a Platform worker on the org view (agent-roster-sync P1)
   },
   {
@@ -446,7 +450,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Node ancestry mirror",
     description: "Nightly sync of the canonical node registry into public.node_ancestry — the DB primitive that gates claim_agent_job on the kill-switch cascade.",
     expectedCadence: "nightly (15 3 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
   },
   {
     id: "supabase-log-poll-cron",
@@ -526,7 +530,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "DB Health — size / growth / index sweep",
     description: "Box job: snapshots per-table size+stats, flags unbounded growth / missing+unused indexes / bloat, proposes the fix.",
     expectedCadence: "daily (box job)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
   },
@@ -535,8 +539,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // Every remaining `inngest.createFunction` cron, registered so the dashboard shows
   // them all + the watchdog catches any that go stale. Window = cadence + grace.
   // ─ Sub-minute / minute crons (window ~10 min) ─
-  { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "deploy-guardian" /* Reva — surfaces under Ada in the agents roster (agent-roster-sync source 2) */ },
+  { id: "claude-status-poll-cron", kind: "cron", owner: "platform", label: "Claude status poll", description: "Polls status.claude.com for the Claude API + Claude Code components → drives the Claude-down breaker.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  { id: "deploy-guardian-cron", kind: "cron", owner: "platform", label: "Deploy guardian", description: "Evaluates each auto-merged deploy's canary watch over its window → healthy/regressed/unsure verdict (deploy-health-rollback-guardian).", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN, personaKind: "deploy-guardian" /* Reva — surfaces under Ada in the agents roster (agent-roster-sync source 2) */ },
   // Reva's canary-INVESTIGATION box-session (reva-box-session-causal-rollback). The deploy-guardian
   // cron above fires a kind='deploy-review' job when a canary window closes non-healthy; the job is a
   // read-only diff walk on Max → typed revert/keep verdict (builder-worker.ts runDeployReviewJob). Same
@@ -571,10 +575,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
   // heartbeat has a MONITORED_LOOPS entry, and personaKind:'mario' merges the beats into
   // Mario's org-chart card (same pattern as deploy-guardian-cron ⇒ Reva above).
-  { id: "mario-stall-cron", kind: "cron", owner: "platform", label: "Mario stall detector", description: "Per-minute detector tick: evaluates timecard-based stall candidates against mario_thresholds and enqueues one kind='mario' box job per surviving stall (mario-stall-detector-cron-and-thresholds).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN, personaKind: "mario" /* Mario — surfaces under Ada in the agents roster (agent-roster-sync source 2) */, registeredAt: "2026-07-08T00:00:00Z" },
-  { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
-  { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every minute (* * * * *)", livenessWindowMs: 10 * MIN },
+  { id: "mario-stall-cron", kind: "cron", owner: "platform", label: "Mario stall detector", description: "Per-minute detector tick: evaluates timecard-based stall candidates against mario_thresholds and enqueues one kind='mario' box job per surviving stall (mario-stall-detector-cron-and-thresholds).", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN, personaKind: "mario" /* Mario — surfaces under Ada in the agents roster (agent-roster-sync source 2) */, registeredAt: "2026-07-08T00:00:00Z" },
+  { id: "deliver-pending-sends", kind: "cron", owner: "cs", label: "Deliver pending sends", description: "Delivers due pending outbound ticket messages (the delay-then-send queue).", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  { id: "marketing-text-campaign-send-tick", kind: "cron", owner: "cmo", label: "SMS campaign send tick", description: "Drains scheduled marketing-text campaign sends.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
+  { id: "meta-capi-dispatch-cron", kind: "cron", owner: "growth", label: "Meta CAPI dispatch", description: "Dispatches queued Meta Conversions API events.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   // ─ Every-5-min crons (window ~20 min) ─
   { id: "today-sync", kind: "cron", owner: "growth", label: "Today sync (Amazon + Meta)", description: "Keeps today's Amazon + Meta spend/order snapshots fresh.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
   { id: "ticket-unsnooze", kind: "cron", owner: "cs", label: "Ticket unsnooze", description: "Wakes snoozed tickets whose snooze window has passed.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN },
@@ -630,8 +634,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
-  { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   {
     id: "acquisition-research-cadence-cron",
     kind: "cron",
@@ -639,7 +643,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Acquisition research cadence",
     description: "Daily re-scan of approved competitors → promote category-sweep finds + materialize ad gaps + re-analyze landers. One of Rhea's research loops.",
     expectedCadence: "daily (0 10 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-25T14:30:03.155Z",
     personaKind: "research", // Rhea — the acquisition-research crons merge into one Rhea worker under Max/Growth
   },
@@ -659,18 +663,18 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     registeredAt: "2026-07-03T00:00:00Z",
     personaKind: "research",
   },
-  { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "auto-blog-generate", kind: "cron", owner: "cmo", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "amazon-daily-sync", kind: "cron", owner: "growth", label: "Amazon daily sync", description: "Daily sync of the last 3 days of Amazon orders/spend.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "tickets-auto-archive", kind: "cron", owner: "cs", label: "Tickets auto-archive", description: "Archives stale resolved tickets.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "auto-blog-generate", kind: "cron", owner: "cmo", label: "Auto blog generator", description: "Daily SEO blog/content generation pass.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR },
   // daily-digest-channel spec, Phase 1: one aggregated FYI post/day to #daily-digest (build/ship recap +
   // dunning + notable ad-perf + ops-warning counts). registeredAt graces the first-tick window (newcron-grace).
-  { id: "daily-digest-cron", kind: "cron", owner: "platform", label: "Daily digest", description: "One aggregated FYI post/day to #daily-digest — build/ship recap + dunning + notable ad-perf shifts + non-critical ops-warning counts, replacing the retired per-event FYI pings.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
+  { id: "daily-digest-cron", kind: "cron", owner: "platform", label: "Daily digest", description: "One aggregated FYI post/day to #daily-digest — build/ship recap + dunning + notable ad-perf shifts + non-critical ops-warning counts, replacing the retired per-event FYI pings.", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
   // director-loop-grading spec, Phase 1: the Platform/DevOps Director's standing cadence — a daily cron
   // enqueueing the platform-director agent_jobs kind so escorting + watching happen on a reliable beat,
   // not only on inbound approvals. registeredAt graces the first-tick window (newcron-grace).
-  { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
-  { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
+  { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
+  { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
   {
     id: "blueprint-build-submit-cron",
@@ -679,7 +683,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "blueprint-build-submit-cron",
     description: "Auto-proposed monitored loop for the blueprint-build-submit-cron cron (daily (15 11 * * *)). Confirm the owner-function + cadence/window.",
     expectedCadence: "daily (15 11 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-08T20:15:12.164Z",
   },
   {
@@ -689,7 +693,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "sync-fba-inventory",
     description: "Auto-proposed monitored loop for the sync-fba-inventory cron (daily (0 9 * * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
     expectedCadence: "daily (0 9 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-11T11:30:01.527Z",
   },
   {
@@ -699,7 +703,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "sync-3pl-inventory",
     description: "Auto-proposed monitored loop for the sync-3pl-inventory cron (daily (0 9 * * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
     expectedCadence: "daily (0 9 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-11T11:30:01.604Z",
   },
   {
@@ -711,8 +715,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every 5 min (*/5 * * * *)",
     livenessWindowMs: 20 * MIN,
   },
-  { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "research" },
+  { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR, personaKind: "research" },
   {
     id: "creative-finder-video-process",
     kind: "cron",
@@ -720,40 +724,40 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "Creative finder (video)",
     description: "Daily drain of the video-creative backlog the 9:00 sweep parks — downloads + frames + transcribes competitor video ads. One of Rhea's research loops.",
     expectedCadence: "daily (30 9 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     personaKind: "research",
     registeredAt: "2026-06-24T15:00:08.171Z",
   },
-  { id: "crisis-daily-campaign", kind: "cron", owner: "cmo", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "demographics-enrich-batch", kind: "cron", owner: "growth", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "daily-analysis-report-cron", kind: "cron", owner: "platform", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "director-recap-cron", kind: "cron", owner: "platform", label: "Director EOD recap", description: "Posts the end-of-day director standup recap to the #directors board + Daily Summaries.", expectedCadence: "daily (0 23 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "crisis-daily-campaign", kind: "cron", owner: "cmo", label: "Crisis campaign tick", description: "Advances active crisis-comms campaigns.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "demographics-enrich-batch", kind: "cron", owner: "growth", label: "Demographics enrich batch", description: "Daily customer-demographics enrichment batch.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "daily-analysis-report-cron", kind: "cron", owner: "platform", label: "Daily analysis report", description: "Builds the daily AI ops/analysis report.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "director-recap-cron", kind: "cron", owner: "platform", label: "Director EOD recap", description: "Posts the end-of-day director standup recap to the #directors board + Daily Summaries.", expectedCadence: "daily (0 23 * * *)", livenessWindowMs: 30 * HOUR },
   // cs-director-storyline-digests-to-founder-with-bidirectional-reply Phase 1 — weekly composer that
   // rolls the CS Director's cs-director-call verdicts + recurring resolution-event problem patterns
   // into ONE cs_director_digests row per (workspace, week) instead of paging on every escalation.
-  { id: "cs-director-digest-composer", kind: "cron", owner: "cs", label: "CS Director storyline digest composer", description: "Weekly: composes a cs_director_digests row per workspace from recent cs-director-call verdicts + recurring ticket_resolution_events problem patterns.", expectedCadence: "weekly (0 14 * * 1)", livenessWindowMs: 8 * DAY, registeredAt: "2026-07-07T12:00:00Z" },
-  { id: "daily-order-snapshot", kind: "cron", owner: "platform", label: "Daily order snapshot", description: "Pre-computes the prior day's order snapshot.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "daily-order-snapshot-self-heal", kind: "cron", owner: "platform", label: "Order snapshot self-heal", description: "Back-fills any missing daily order snapshots.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "delivery-nightly-audit", kind: "cron", owner: "retention", label: "Delivery nightly audit", description: "Audits shipment delivery state nightly.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "featured-review-cards", kind: "cron", owner: "cmo", label: "Featured review cards", description: "Refreshes featured-review card generation.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "fraud-nightly-scan", kind: "cron", owner: "platform", label: "Fraud nightly scan", description: "Nightly batch fraud re-scan across recent orders.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "klaviyo-engagement-sync", kind: "cron", owner: "cmo", label: "Klaviyo engagement sync", description: "Daily Klaviyo engagement metrics sync.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "marketing-coupon-auto-disable", kind: "cron", owner: "cmo", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "meta-performance-daily", kind: "cron", owner: "growth", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "cs-director-digest-composer", kind: "cron", owner: "cs", label: "CS Director storyline digest composer", description: "Weekly: composes a cs_director_digests row per workspace from recent cs-director-call verdicts + recurring ticket_resolution_events problem patterns.", expectedCadence: "weekly (0 14 * * 1)", livenessWindowMs: 9 * DAY, registeredAt: "2026-07-07T12:00:00Z" },
+  { id: "daily-order-snapshot", kind: "cron", owner: "platform", label: "Daily order snapshot", description: "Pre-computes the prior day's order snapshot.", expectedCadence: "daily (0 6 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "daily-order-snapshot-self-heal", kind: "cron", owner: "platform", label: "Order snapshot self-heal", description: "Back-fills any missing daily order snapshots.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "delivery-nightly-audit", kind: "cron", owner: "retention", label: "Delivery nightly audit", description: "Audits shipment delivery state nightly.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "featured-review-cards", kind: "cron", owner: "cmo", label: "Featured review cards", description: "Refreshes featured-review card generation.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "fraud-nightly-scan", kind: "cron", owner: "platform", label: "Fraud nightly scan", description: "Nightly batch fraud re-scan across recent orders.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "klaviyo-engagement-sync", kind: "cron", owner: "cmo", label: "Klaviyo engagement sync", description: "Daily Klaviyo engagement metrics sync.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "marketing-coupon-auto-disable", kind: "cron", owner: "cmo", label: "Marketing coupon auto-disable", description: "Auto-disables expired/over-budget marketing coupons.", expectedCadence: "daily (0 10 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "meta-performance-daily", kind: "cron", owner: "growth", label: "Meta performance pipeline", description: "Daily Meta ad performance iteration pipeline.", expectedCadence: "daily (30 11 * * *)", livenessWindowMs: 30 * HOUR },
   // growth-ad-spend-rail spec, Phase 3: daily SUPERVISOR pass on the ad-DOLLAR proxy. Fans out
   // one `growth/ad-spend-governor-sweep` event per workspace with ≥1 ad_spend_budgets row; each
   // pass rolls up daily_meta_ad_spend over the rolling window vs the ceiling and ESCALATES on a
   // 2-day trend over via platform-director.escalateDiagnosisToCeo (escalationKind='ad_spend_ceiling')
   // + a growth-owned director_activity row. NEVER pauses or throttles a campaign.
   // registeredAt graces the first-tick window (newcron-grace).
-  { id: "growth-ad-spend-governor-cron", kind: "cron", owner: "growth", label: "Growth ad-spend governor", description: "Daily fan-out: reads each effective ad_spend_budgets row vs the rolling daily_meta_ad_spend sum → escalates a 2-day trend over the ceiling (loop-guarded, never auto-throttles).", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-30T12:00:00Z" },
+  { id: "growth-ad-spend-governor-cron", kind: "cron", owner: "growth", label: "Growth ad-spend governor", description: "Daily fan-out: reads each effective ad_spend_budgets row vs the rolling daily_meta_ad_spend sum → escalates a 2-day trend over the ceiling (loop-guarded, never auto-throttles).", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-30T12:00:00Z" },
   // media-buyer-daily-cadence-cron spec, Phase 1: daily fan-out that enqueues one
   // kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per
   // workspace (workspace-wide + per-account). Same-UTC-day re-fires are a no-op.
   // registeredAt graces the first-tick window (newcron-grace); shadow-default under
   // the goals/autonomous-media-buyer-supervision M2 policy → no Meta writes.
-  { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
-  { id: "ad-creative-cadence-cron", kind: "cron", owner: "growth", label: "Ad creative daily cadence", description: "Daily fan-out: enqueues one kind='ad-creative' agent_jobs row per intelligence-backed product whose ready-to-test bin is below the floor, so Dahlia keeps Bianca's bin stocked.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-10T11:00:00Z" },
+  { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
+  { id: "ad-creative-cadence-cron", kind: "cron", owner: "growth", label: "Ad creative daily cadence", description: "Daily fan-out: enqueues one kind='ad-creative' agent_jobs row per intelligence-backed product whose ready-to-test bin is below the floor, so Dahlia keeps Bianca's bin stocked.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-10T11:00:00Z" },
   { id: "budget-watch-cron", kind: "cron", owner: "growth", label: "Ad budget increase tripwire (SMS)", description: "Every ~10min: checks each active meta_ad_account's total live daily budget (Meta ground truth) and SMSes the founder on any increase — the spend runaway tripwire.", expectedCadence: "every 10 min (*/10 * * * *)", livenessWindowMs: 40 * 60 * 1000, registeredAt: "2026-07-10T18:00:00Z" },
   // media-buyer-grade-daily-cron spec, Phase 1: daily fan-out that enqueues one
   // kind='media-buyer-grade' agent_jobs row per workspace with ≥1 UNGRADED settled
@@ -761,17 +765,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // (M4 "Graded + self-correcting" milestone). Idempotent — the media_buyer_action_grades
   // UNIQUE on director_activity_id collapses re-runs. registeredAt graces the first-tick
   // window (newcron-grace).
-  { id: "media-buyer-grade-cron", kind: "cron", owner: "growth", label: "Media buyer grader daily", description: "Daily fan-out: enqueues one kind='media-buyer-grade' agent_jobs row per workspace with ≥1 ungraded settled (≥3d) Media Buyer director_activity row.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-09T14:00:00Z" },
+  { id: "media-buyer-grade-cron", kind: "cron", owner: "growth", label: "Media buyer grader daily", description: "Daily fan-out: enqueues one kind='media-buyer-grade' agent_jobs row per workspace with ≥1 ungraded settled (≥3d) Media Buyer director_activity row.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-09T14:00:00Z" },
   // media-buyer-self-correcting-mode-revert spec Phase 1: daily sweep that flips an
   // armed cohort back to `shadow` when its 14-day `media_buyer_action_grades` rolling
   // per-day average sits < 5 for a trailing streak of ≥ 7 days (≥2 graded actions/day).
   // Fires 30 min after `media-buyer-grade-cron` so it reads settled per-day grades —
   // the M4 "Graded + self-correcting" milestone's revert consumer. registeredAt graces
   // the first-tick window (newcron-grace).
-  { id: "media-buyer-self-correcting-cron", kind: "cron", owner: "growth", label: "Media buyer self-correcting revert", description: "Daily sweep: auto-flips armed Media Buyer cohorts back to `shadow` on a sustained 7-day <5 grade regression (+ CEO escalation).", expectedCadence: "daily (30 14 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-07-09T14:30:00Z" },
-  { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "media-buyer-self-correcting-cron", kind: "cron", owner: "growth", label: "Media buyer self-correcting revert", description: "Daily sweep: auto-flips armed Media Buyer cohorts back to `shadow` on a sustained 7-day <5 grade regression (+ CEO escalation).", expectedCadence: "daily (30 14 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-09T14:30:00Z" },
+  { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
-  { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },
+  { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },
   {
     id: "storefront-ltv-reconcile-cron",
     kind: "cron",
@@ -779,7 +783,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "storefront-ltv-reconcile-cron",
     description: "Auto-proposed monitored loop for the storefront-ltv-reconcile-cron cron (daily (0 14 * * *)). Confirm the owner-function + cadence/window.",
     expectedCadence: "daily (0 14 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-23T16:00:05.906Z",
   },
   {
@@ -789,15 +793,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "storefront-optimizer-cron",
     description: "Auto-proposed monitored loop for the storefront-optimizer-cron cron (daily (30 14 * * *)). Confirm the owner-function + cadence/window.",
     expectedCadence: "daily (30 14 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-23T16:00:06.292Z",
   },
-  { id: "monthly-revenue-snapshot", kind: "cron", owner: "platform", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "monthly-revenue-snapshot", kind: "cron", owner: "platform", label: "Revenue snapshot", description: "Pre-computes monthly revenue snapshots from daily data.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 30 * HOUR },
   // loop-heartbeats-retention spec, Phase 1: daily prune so loop_heartbeats stays small + the
   // control_tower_loop_beats RPC stays fast. registeredAt claims the registered_not_firing grace
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
-  { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
-  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR, outputAssertion: "segment-coverage" },
+  { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
+  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, outputAssertion: "segment-coverage" },
   {
     id: "refund-settlement-reconcile",
     kind: "cron",
@@ -805,20 +809,20 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "refund-settlement-reconcile",
     description: "Auto-proposed monitored loop for the refund-settlement-reconcile cron (daily (15 6 * * *)). Confirm the owner-function + cadence/window.",
     expectedCadence: "daily (15 6 * * *)",
-    livenessWindowMs: 26 * HOUR,
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-08T08:15:04.399Z",
   },
   // SMS Marketing Agent (Margo, under Iris/CMO) — daily cadence engine. personaKind surfaces it
   // as a worker under Iris on the org chart. registeredAt claims the new-cron grace (dormant until
   // sms_marketing_policy.active=true, so it fires the heartbeat but takes no send action yet).
-  { id: "sms-marketing-cron", kind: "cron", owner: "cmo", label: "SMS marketing agent", description: "Daily cadence engine — on a valid send window (Sun/Mon/Thu/Sat AM, Tue PM) builds + schedules one theme's per-segment VIP/Weekend campaigns within Iris's leash. Dormant until sms_marketing_policy.active=true.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 26 * HOUR, personaKind: "sms-marketing", registeredAt: "2026-07-04T12:00:00Z" },
-  { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 26 * HOUR },
-  { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sms-marketing-cron", kind: "cron", owner: "cmo", label: "SMS marketing agent", description: "Daily cadence engine — on a valid send window (Sun/Mon/Thu/Sat AM, Tue PM) builds + schedules one theme's per-segment VIP/Weekend campaigns within Iris's leash. Dormant until sms_marketing_policy.active=true.", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 30 * HOUR, personaKind: "sms-marketing", registeredAt: "2026-07-04T12:00:00Z" },
+  { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 30 * HOUR },
   // ─ Weekly crons (window ~8 days) ─
-  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 8 * DAY },
-  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 8 * DAY },
-  { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 8 * DAY },
+  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
+  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
+  { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 9 * DAY },
   {
     id: "playbook-compiler",
     kind: "cron",
@@ -826,7 +830,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "playbook-compiler",
     description: "Auto-proposed monitored loop for the playbook-compiler cron (weekly (0 12 * * 1)). Confirm the owner-function + cadence/window.",
     expectedCadence: "weekly (0 12 * * 1)",
-    livenessWindowMs: 8 * DAY,
+    livenessWindowMs: 9 * DAY,
     registeredAt: "2026-07-08T08:15:04.473Z",
   },
   // ─ Monthly crons (window ~32 days) ─
@@ -837,7 +841,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "investor-monthly-invite",
     description: "Auto-proposed monitored loop for the investor-monthly-invite cron (monthly (0 14 20 * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
     expectedCadence: "monthly (0 14 20 * *)",
-    livenessWindowMs: 32 * DAY,
+    livenessWindowMs: 37 * DAY,
     registeredAt: "2026-07-10T16:15:05.108Z",
   },
   {
@@ -847,7 +851,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     label: "qb-snapshot-refresh",
     description: "Auto-proposed monitored loop for the qb-snapshot-refresh cron (monthly (0 8 16 * *)). Owned by platform (loop liveness monitoring); confirm the cadence/window.",
     expectedCadence: "monthly (0 8 16 * *)",
-    livenessWindowMs: 32 * DAY,
+    livenessWindowMs: 37 * DAY,
     registeredAt: "2026-07-10T16:15:05.195Z",
   },
   // ─ Yearly cron (window ~370 days) ─
@@ -1122,3 +1126,76 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
 export function agentLoopId(kind: string): string {
   return `agent:${kind}`;
 }
+
+/**
+ * Smallest cron cadence the registry accepts (monitor-cadence-scaled-liveness-window Phase 1).
+ * Matches the pinned control-tower-monitor tick — a cron finer than the monitor's own tick
+ * can't be reliably alerted on (the monitor might miss two beats between ticks), so the CEO
+ * 2026-07-11 monitoring-cost guardrail codifies "no sub-5-min crons in the registry" as a
+ * build-time invariant. `assertRegistryInvariants` throws naming this constant when a cron
+ * row's parsed cadence is finer than the floor.
+ */
+export const MONITOR_TICK_FLOOR_MS = 5 * 60 * 1000;
+
+/**
+ * Jitter grace for the "livenessWindow >= cadence" invariant — a window equal to the cadence
+ * false-fires whenever a firing lands even a second late, so we require 20% slack. Mirrors the
+ * existing 90-min-window-for-30-min-cron / 2h-for-hourly pattern already used across the
+ * registry. Kept as a constant so the assertion + tests share the same threshold.
+ */
+export const REGISTRY_LIVENESS_JITTER_GRACE = 1.2;
+
+/**
+ * Build-time invariant over the monitored-loop registry (monitor-cadence-scaled-liveness-window Phase 1).
+ * For each `kind:'cron'` loop with a parseable cron cadence:
+ *   1. If the mean cadence is finer than MONITOR_TICK_FLOOR_MS — THROW naming the constant
+ *      (a sub-monitor-tick cron can't be reliably alerted on).
+ *   2. If `livenessWindowMs` is missing or less than `cadenceMs * REGISTRY_LIVENESS_JITTER_GRACE` —
+ *      THROW naming the loop and the required window (a tight window false-fires cron_freshness
+ *      every cycle, the exact pattern that produced the ticket-analysis-cron / storefront-experiments-
+ *      refresh-cron incidents cited in docs/brain/libraries/control-tower.md § monitor.ts).
+ * Loops with no parseable cron expression (`"box job"`, `"per event"`, worker/agent-kind kinds) are
+ * skipped — the invariant is about SCHEDULED crons.
+ *
+ * `loops` defaults to MONITORED_LOOPS so callers (tests, the bootstrap block below) can pass
+ * a fixture to unit-test the assertion.
+ */
+export function assertRegistryInvariants(loops: MonitoredLoop[] = MONITORED_LOOPS): void {
+  for (const loop of loops) {
+    if (loop.kind !== "cron") continue;
+    const expr = extractCronExpr(loop.expectedCadence);
+    if (!expr) continue; // "box job" / non-Inngest cadence — nothing to assert
+    const sets = parseCronExpr(expr);
+    if (!sets) continue; // unparseable — leave to the human review path
+    const cadenceMs = meanCadenceMsFromSets(sets);
+    if (!Number.isFinite(cadenceMs)) continue;
+    if (cadenceMs < MONITOR_TICK_FLOOR_MS) {
+      throw new Error(
+        `assertRegistryInvariants: loop '${loop.id}' has cadence ${Math.round(cadenceMs / 1000)}s ` +
+          `(cron '${expr}') which is finer than MONITOR_TICK_FLOOR_MS ` +
+          `(${MONITOR_TICK_FLOOR_MS / 1000}s) — a cron finer than the monitor tick can't be ` +
+          `reliably alerted on. Widen the cadence or make this event-driven.`,
+      );
+    }
+    const requiredWindowMs = cadenceMs * REGISTRY_LIVENESS_JITTER_GRACE;
+    const windowMs = loop.livenessWindowMs;
+    if (windowMs == null || windowMs < requiredWindowMs) {
+      throw new Error(
+        `assertRegistryInvariants: loop '${loop.id}' has livenessWindowMs ` +
+          `${windowMs ?? "undefined"} < cadence ${Math.round(cadenceMs / 1000)}s ` +
+          `* ${REGISTRY_LIVENESS_JITTER_GRACE} = ${Math.round(requiredWindowMs / 1000)}s ` +
+          `(cron '${expr}'). Widen the window to at least ` +
+          `${Math.ceil(requiredWindowMs / 60_000)} min so cron_freshness doesn't false-fire.`,
+      );
+    }
+  }
+}
+
+// ── Bootstrap: run the invariant on module import ──────────────────────────
+// monitor-cadence-scaled-liveness-window Phase 2. The invariant is defined here + the fixture-
+// based test file verifies its two throw paths. Phase 2 widened the existing offenders (all
+// daily/weekly/monthly windows to satisfy cadence*1.2, and all sub-5-min crons to */5 per the
+// CEO 2026-07-11 monitoring-cost guardrail) so the bootstrap can hard-throw — any regression
+// is caught at the import site (test, `next build`, `tsx` script) with a clear line-numbered
+// error naming the offending loop.
+assertRegistryInvariants();

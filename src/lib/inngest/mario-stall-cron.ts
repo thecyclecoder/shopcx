@@ -37,7 +37,7 @@ export const marioStallCron = inngest.createFunction(
     id: "mario-stall-cron",
     // The next tick re-evaluates a minute later — no value in long retries here.
     retries: 1,
-    triggers: [{ cron: "* * * * *" }], // every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const result = await step.run("evaluate-and-enqueue", async () => {
