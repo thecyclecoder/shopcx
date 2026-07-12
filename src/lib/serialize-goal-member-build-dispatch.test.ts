@@ -103,6 +103,44 @@ test("all members already on the goal branch (degenerate): dispatch is allowed",
   );
 });
 
+test("thundering-herd: a NON-earliest in-flight race artifact does not block the true earliest", () => {
+  // 2026-07-12 livelock: after a head integrated, the box filled several build lanes in one tick —
+  // control-tower-switch (the earliest) + orphan-node + message-center all flipped to `building`, then
+  // each was re-queued by this predicate. Pre-fix rule (b) held ALL of them (incl. the earliest) because
+  // each saw a mate in-flight → 0 building, perpetual 90s-cooldown churn. Post-fix: a non-earliest
+  // in-flight artifact never blocks the earliest; the earliest wins its slot.
+  const members = [m("control-tower-switch"), m("orphan-node"), m("message-center")];
+  const goalSlug = "ceo-org-control-tower";
+  // orphan-node was race-claimed this same tick (a non-earliest artifact about to be re-queued).
+  const inflight: GoalMemberInflightRow[] = [{ slug: "orphan-node", status: "building" }];
+
+  // The true earliest proceeds despite the non-earliest artifact being "building".
+  assert.deepEqual(
+    decideGoalMemberBuildDispatch({ slug: "control-tower-switch", goalSlug, members, inflight }),
+    { ok: true },
+    "the earliest ready head is never blocked by a non-earliest same-sweep race artifact",
+  );
+  // The non-earliest artifact itself is still held (rule c) — only one dispatches.
+  assert.equal(
+    decideGoalMemberBuildDispatch({ slug: "orphan-node", goalSlug, members, inflight }).ok,
+    false,
+    "the non-earliest artifact is still held so exactly one goal-mate dispatches",
+  );
+});
+
+test("genuine slot-holder: an in-flight EARLIEST mate still blocks the rest (collision guard intact)", () => {
+  // The 2026-07-06 protection MUST survive the thundering-herd fix: when the in-flight mate IS the
+  // earliest (a genuinely-building slot-holder), every other member is held with the in-flight reason.
+  const members = [m("a-spec"), m("b-spec"), m("c-spec")];
+  const goalSlug = "guaranteed-ticket-handling";
+  const inflight: GoalMemberInflightRow[] = [{ slug: "a-spec", status: "building" }]; // a-spec = earliest
+
+  const rb = decideGoalMemberBuildDispatch({ slug: "b-spec", goalSlug, members, inflight });
+  assert.equal(rb.ok, false);
+  if (!rb.ok) assert.match(rb.reason, /in-flight for goal/);
+  assert.equal(decideGoalMemberBuildDispatch({ slug: "c-spec", goalSlug, members, inflight }).ok, false);
+});
+
 test("in-flight row for THIS spec itself does not block itself", () => {
   // The caller is dispatching THIS spec (freshly claimed → status='claimed'). The in-flight query is
   // meant to filter it out via .neq('spec_slug', slug); the pure predicate mirrors that with the
