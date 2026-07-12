@@ -31,7 +31,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
-import { getSpec as getSpecFromDb } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
 
@@ -492,6 +492,11 @@ async function readReviewFailedBlockerStalls(
  *      stall.
  *  (d) DROPS a candidate whose spec status is `folded` (fold-cooldown) — a
  *      folded row stopped emitting events on purpose.
+ *  (d2) DROPS a goal member whose build is integrated on `goal/<goalSlug>` and whose
+ *      goal has NOT yet atomically promoted (`goals.main_merge_sha` null) — its
+ *      integration target is the goal branch, not `main`, so the ledger's silence is
+ *      the promotion gate's job, not Mario's. Removes the `mario_fired` row + the
+ *      loop-guard oscillation risk that Phase 1's applier-level catch still accrued.
  *  (e) attaches a MarioBrief to every surviving candidate so the M4 reasoning
  *      agent picks up the last 10 events + blockedBy state + current job status
  *      without another read.
@@ -660,6 +665,18 @@ export async function evaluateStalledSpecs(
     // survive the filter chain and enqueue a mario job — the false-trigger class from Mario's first sweep.)
     if (!specRow) continue;
     if (specRow.status === "folded" || specRow.status === "deferred") continue;
+
+    // (d2) GOAL MEMBER AWAITING ATOMIC PROMOTION → legit wait, drop. A goal member's correct
+    // integration target is its GOAL BRANCH; it only reaches `main` via M5's atomic goal→main
+    // promotion. When the member's build has already merged onto goal/<goalSlug> AND the goal has
+    // NOT yet atomically promoted (`goals.main_merge_sha` is null), the ledger's silence is expected
+    // — the promotion gate owns driving it to main, and Mario has no honest fix. Dropping the row
+    // here (source-level) means no verdict, no `mario_fired` row, no loop-guard pressure and no
+    // wasted Max session — cheaper than the Phase-1 catch that only refused to reclaim, and it
+    // removes the ≥3-in-24h oscillation risk that repeated firings on the same awaiting slug can
+    // accrue on `MARIO_LOOP_GUARD_MAX`. Same class as folded/deferred/uncleared-blocker: a legit
+    // wait, not a stall. See [[isGoalMemberAwaitingPromotion]] for the pure predicate.
+    if (await isSpecRowAwaitingGoalPromotion(admin, specRow)) continue;
 
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
@@ -1137,6 +1154,95 @@ async function queueBoxRestart(admin: Admin, boxId: string): Promise<void> {
   if (error) throw new Error(`queue_box_restart: ${error.message}`);
 }
 
+/**
+ * Pure discriminator — is this spec a GOAL MEMBER that is already INTEGRATED on its goal branch and
+ * merely awaiting the atomic goal→main promotion? A goal member NEVER merges to main until M5's atomic
+ * `promoteCompleteGoalsToMain`; its correct terminal-before-promotion state is "on the goal branch"
+ * (`specs.goal_branch_sha` stamped by [[stampSpecGoalBranchSha]]). Reclaim-and-redrive's "built-but-
+ * unmerged" class measures against MAIN, so for such a member it fires a false-positive: rebuilding
+ * on a fresh branch head resets `isSpecTestGreenForBranch` → flips `isSpecPromoteEligible` false →
+ * blocks `promoteCompleteGoalsToMain` (the 2026-07-12 director-chats stall).
+ *
+ * True iff ALL THREE hold:
+ *   1. `milestoneId !== null` — it's a goal member (specs with no milestone are unaffected — a standalone
+ *      spec's integration target IS main, so the built-but-unmerged class applies as today).
+ *   2. `goalBranchSha !== null` — its `claude/build-<slug>` branch has already merged onto `goal/<goalSlug>`
+ *      (M4 `stampSpecGoalBranchSha`). "Unmerged" for a goal member means "not on its goal branch",
+ *      NEVER "not on main".
+ *   3. `goalMainMergeSha === null` — the goal itself has NOT yet atomically promoted to main. A goal
+ *      already-promoted (has a main_merge_sha) means the spec IS on main via M5, so a genuinely orphaned
+ *      "not on main" reading is impossible for it; a stall of a *different* class handles the rare
+ *      after-promotion drift.
+ *
+ * A pure predicate — no I/O. The I/O wrapper `isSpecAwaitingGoalPromotion` below resolves the fields
+ * from `specs` + `goal_milestones` + `goals`. Kept exported so the unit tests can pin it without any
+ * Supabase stub (mirrors [[shouldSurfaceMissingBlocker]]'s split of I/O from decision).
+ */
+export function isGoalMemberAwaitingPromotion(input: {
+  milestoneId: string | null;
+  goalBranchSha: string | null;
+  goalMainMergeSha: string | null;
+}): boolean {
+  if (input.milestoneId === null) return false;
+  if (input.goalBranchSha === null) return false;
+  if (input.goalMainMergeSha !== null) return false;
+  return true;
+}
+
+/**
+ * I/O wrapper for [[isGoalMemberAwaitingPromotion]] — resolves the fields the pure predicate needs
+ * from `specs` + `goal_milestones` + `goals`. Reads only; never mutates. Fails CLOSED to `false` (a
+ * lookup error means "we don't know if this is a goal member awaiting promotion", so we default to the
+ * SAFER prior behavior of allowing the reclaim class — a genuinely orphaned build must still be
+ * reclaimed). This mirrors the fail-closed contract in [[isSpecOnGoalBranch]] (an unknown state must
+ * NOT be treated as "on the goal branch" — safer to hold than to skip a real signal).
+ *
+ * Used at BOTH `reclaim_and_redrive` gates (the vocabulary case in [[applyBoxMario]] AND the escalate →
+ * [[surfaceMarioEscalationToAda]] path) so no reclaim build job is created for an integrated-awaiting
+ * goal member, however the verdict routes the request.
+ */
+async function isSpecRowAwaitingGoalPromotion(admin: Admin, spec: SpecRow): Promise<boolean> {
+  try {
+    if (!spec.milestone_id) return false;
+    // Not yet on the goal branch → this IS a genuine "not integrated" state; the reclaim class still owns it.
+    if (!spec.goal_branch_sha) return false;
+    // Resolve the milestone → goal_id → goal.main_merge_sha in one small pair of reads.
+    const { data: milestone, error: mErr } = await admin
+      .from("goal_milestones")
+      .select("goal_id")
+      .eq("id", spec.milestone_id)
+      .maybeSingle();
+    if (mErr || !milestone) return false;
+    const { data: goal, error: gErr } = await admin
+      .from("goals")
+      .select("main_merge_sha")
+      .eq("id", (milestone as { goal_id: string }).goal_id)
+      .maybeSingle();
+    if (gErr || !goal) return false;
+    return isGoalMemberAwaitingPromotion({
+      milestoneId: spec.milestone_id,
+      goalBranchSha: spec.goal_branch_sha,
+      goalMainMergeSha: (goal as { main_merge_sha: string | null }).main_merge_sha,
+    });
+  } catch {
+    return false; // fail closed — an unknown state defaults to prior reclaim behavior.
+  }
+}
+
+async function isSpecAwaitingGoalPromotion(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string,
+): Promise<boolean> {
+  try {
+    const spec = await getSpecFromDb(workspaceId, specSlug);
+    if (!spec) return false;
+    return await isSpecRowAwaitingGoalPromotion(admin, spec);
+  } catch {
+    return false;
+  }
+}
+
 /** `reclaim_and_redrive` — unstick a spec whose LATEST build FAILED/orphaned (the built-but-unmerged class:
  *  a build orphaned by a worker restart, or one left on a stale/conflicting branch). Unlike the status-flip
  *  actions above, a `failed` build has NO in-flight row to flip — this enqueues a FRESH build, which rebases
@@ -1577,10 +1683,20 @@ export async function applyBoxMario(
             fixExecuted = true;
             break;
           }
-          case "reclaim_and_redrive":
-            await reclaimAndRedrive(admin, row.workspace_id, lf.target.spec_slug ?? row.spec_slug);
+          case "reclaim_and_redrive": {
+            const targetSlug = lf.target.spec_slug ?? row.spec_slug;
+            // Discriminator: an integrated goal member awaiting the atomic promotion is NOT built-but-
+            // unmerged (its integration target is its goal branch, not main). Reclaiming it rebuilds a
+            // finished member on a new branch head → resets isSpecTestGreenForBranch → blocks the goal's
+            // atomic promotion. Skip the fix with a reason instead of firing the rebuild.
+            if (await isSpecAwaitingGoalPromotion(admin, row.workspace_id, targetSlug)) {
+              fixReason = "goal_member_awaiting_promotion";
+              break;
+            }
+            await reclaimAndRedrive(admin, row.workspace_id, targetSlug);
             fixExecuted = true;
             break;
+          }
           default:
             fixReason = `unknown action: ${lf.action}`;
         }
@@ -1702,11 +1818,22 @@ export async function applyBoxMario(
     // lets him self-service the built-but-unmerged class, a true escalation is rare — but when it happens
     // it reaches his supervisor.
     let escalatedToAda = false;
+    let escalateSkippedReason: string | null = null;
     if (verdict.escalate && !fixExecuted && !verificationRepaired && !blockedByRepaired && mode === "live") {
-      try {
-        escalatedToAda = await surfaceMarioEscalationToAda(admin, row.workspace_id, row.spec_slug, verdict.reasoning ?? "", jobId);
-      } catch (e) {
-        console.warn("[mario] escalate-to-Ada surface failed:", e instanceof Error ? e.message : e);
+      // Same discriminator as the reclaim_and_redrive vocabulary case above: never surface an integrated
+      // goal member as a stuck built-but-unmerged spec to Ada. surfaceMarioEscalationToAda creates a fresh
+      // `reclaim_stuck_build` job (in-leash for Ada's auto-approval), which rebuilds the member on a new
+      // branch head and resets its spec-test green signal — blocking the goal's atomic promotion (the exact
+      // 2026-07-12 director-chats stall). The promotion's eligibility gate + the escort own driving it to
+      // main; Mario leaves the goal member alone.
+      if (await isSpecAwaitingGoalPromotion(admin, row.workspace_id, row.spec_slug)) {
+        escalateSkippedReason = "goal_member_awaiting_promotion";
+      } else {
+        try {
+          escalatedToAda = await surfaceMarioEscalationToAda(admin, row.workspace_id, row.spec_slug, verdict.reasoning ?? "", jobId);
+        } catch (e) {
+          console.warn("[mario] escalate-to-Ada surface failed:", e instanceof Error ? e.message : e);
+        }
       }
     }
 
@@ -1728,6 +1855,7 @@ export async function applyBoxMario(
         threshold_adjustment: verdict.threshold_adjustment ?? null,
         escalate: verdict.escalate,
         escalated_to_ada: escalatedToAda,
+        escalate_skipped_reason: escalateSkippedReason,
         job_id: jobId,
         mode,
         fix_executed: fixExecuted,
