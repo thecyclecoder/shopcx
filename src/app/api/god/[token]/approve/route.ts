@@ -23,7 +23,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
-  resolveCockpitToken,
   getApprovalForSession,
   decideApproval,
   bumpActivity,
@@ -33,6 +32,8 @@ import {
   grantStanding,
   type GodModeApprovalRow,
 } from "@/lib/god-mode";
+import { resolveCockpitTokenAny } from "@/lib/cockpit-resolver";
+import { setActionDecision } from "@/lib/agents/director-coach-threads";
 
 function publicApproval(a: GodModeApprovalRow) {
   return {
@@ -71,14 +72,70 @@ export async function POST(
   }
 
   const admin = createAdminClient();
-  const res = await resolveCockpitToken(admin, token);
-  if (res.kind === "not_found" || res.kind === "disarmed") {
+  const resolved = await resolveCockpitTokenAny(admin, token);
+  if (!resolved) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
-  if (res.kind === "expired") {
-    return NextResponse.json({ error: "expired" }, { status: 410 });
+
+  if (resolved.kind === "director") {
+    // ── director cockpit branch ────────────────────────────────────────────
+    // Look up the pending action on the thread; the resolver already TTL-
+    // rejected expired tokens (director_coach_threads.absolute_expires_at /
+    // token_expires_at), so a 404 here means the actionId was guessed or the
+    // card no longer belongs to this thread.
+    const thread = resolved.thread;
+    const card = thread.pending_actions.find((a) => a.id === body.approvalId);
+    if (!card) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (card.status !== "pending") {
+      // Already terminal — idempotent no-op (matches the god-mode side).
+      return NextResponse.json({ ok: true, action: card });
+    }
+
+    // PIN gate — ONLY when the M3 escalation path stamped `rail:true` on this
+    // card (out-of-leash, destructive, or new-goal). An in-leash card (rail
+    // absent or false) NEVER prompts for a PIN — same discipline as the web
+    // coach chat where the CEO taps Approve on an in-leash card without any
+    // interstitial. This is the whole point of Phase 3: PIN discipline WITHOUT
+    // extending god-mode's prod-write reach to a leash-bound director.
+    if (decision === "approve" && card.rail === true) {
+      const providedPin = typeof body.pin === "string" ? body.pin.trim() : "";
+      if (!providedPin) {
+        return NextResponse.json({ error: "pin_required" }, { status: 401 });
+      }
+      const stored = await loadPinHash(admin, thread.workspace_id);
+      if (!stored || !verifyPin(providedPin, stored)) {
+        return NextResponse.json({ error: "pin_incorrect" }, { status: 401 });
+      }
+    }
+
+    const updatedThread = await setActionDecision(
+      thread.workspace_id,
+      thread.id,
+      body.approvalId,
+      decision === "approve" ? "approve" : "decline",
+    );
+    if (!updatedThread) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+    // On approve, enqueue the director-coach approve_action job — the M3
+    // dispatch runs it on the max sandbox (never the godmode sandbox), which is
+    // the whole PIN-does-not-become-godmode invariant.
+    if (decision === "approve") {
+      await admin.from("agent_jobs").insert({
+        workspace_id: thread.workspace_id,
+        kind: "director-coach",
+        spec_slug: thread.id,
+        status: "queued",
+        instructions: JSON.stringify({ thread_id: thread.id, mode: "approve_action" }),
+        created_by: thread.user_id ?? null,
+      });
+    }
+
+    const updatedCard = updatedThread.pending_actions.find((a) => a.id === body.approvalId) ?? card;
+    return NextResponse.json({ ok: true, action: updatedCard });
   }
 
+  // ── god (Eve) branch — existing behavior byte-for-byte ─────────────────────
+  const res = { session: resolved.session };
   // Tamper-guard: the approval MUST belong to the token's session. A caller
   // guessing an approvalId from another workspace gets a 404 (never a 403 —
   // 403 would confirm the id exists somewhere).

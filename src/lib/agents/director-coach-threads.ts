@@ -10,7 +10,8 @@
  */
 import { randomBytes } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { SLIDING_TTL_MS, ABSOLUTE_TTL_MS, cockpitUrl } from "@/lib/god-mode";
+import { SLIDING_TTL_MS, ABSOLUTE_TTL_MS, cockpitUrl, sendGodModeSMS } from "@/lib/god-mode";
+import { PERSONAS } from "@/lib/agents/personas";
 
 export type ThreadMsg = { role: "user" | "assistant"; content: string };
 export type TurnStatus = "idle" | "thinking" | "error";
@@ -49,6 +50,12 @@ export type CoachThreadAction = {
   // ada-slack-chat: when this card was posted to #cto-ada, the Slack message ts — so a web-side OR
   // box-side decision can chat.update the card in place. Absent on web-only threads.
   slackTs?: string;
+  // director-sms-cockpit-per-director Phase 3: the M3 escalation path stamps this
+  // TRUE on a card that hit the director's leash rail (out-of-leash, destructive,
+  // or new-goal — anything routed through `escalateApprovalRequestToCeo`). The
+  // SMS-cockpit approve route PIN-gates on this flag; in-leash cards (rail
+  // absent or FALSE) never prompt for a PIN.
+  rail?: boolean;
 };
 
 // ada-slack-chat: where a thread lives. 'web' (default) = the dashboard coach chat; 'slack' = a
@@ -313,6 +320,19 @@ export async function armDirectorCockpit(input: {
     .maybeSingle();
   const thread = toRow(data as Record<string, unknown> | null);
   if (!thread) return null;
+
+  // director-sms-cockpit-per-director Phase 3: fire the arm SMS through the
+  // SAME sendGodModeSMS primitive Eve's cockpit uses — persona-named copy, no
+  // Eve flirt. Best-effort (matches sendGodModeSMS's discipline); a Twilio
+  // failure here never blocks the arm write.
+  const personaName = (PERSONAS[thread.director_function] as { name?: string } | undefined)?.name ?? "the director";
+  void sendGodModeSMS(admin, {
+    workspaceId: input.workspaceId,
+    kind: "director-arm",
+    cockpitToken: token,
+    context: { personaName },
+  });
+
   return { thread, cockpitToken: token, cockpitUrl: cockpitUrl(token) };
 }
 

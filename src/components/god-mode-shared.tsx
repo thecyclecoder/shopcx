@@ -60,6 +60,37 @@ export function godCardTitle(risk: string): string {
   return "Approval";
 }
 
+/**
+ * director-sms-cockpit-per-director Phase 2: the persona accent + leash subheader
+ * rendered at the top of the /god/[token] cockpit when `kind === 'director'`. The
+ * SAME god-mode-shared.tsx renders both Eve and director cockpits (CLAUDE.md hard
+ * rule for this goal — one cockpit renderer), so a director cockpit picks up the
+ * transcript + approvals subcomponents unchanged while the header swaps.
+ */
+export function DirectorCockpitHeader({
+  personaName,
+  personaAccent,
+  personaRole,
+  leashSummary,
+}: {
+  personaName: string;
+  personaAccent?: string;
+  personaRole?: string;
+  leashSummary: string;
+}) {
+  const accent = personaAccent && personaAccent.trim() ? personaAccent : "text-indigo-600 dark:text-indigo-400";
+  return (
+    <header className="flex items-center justify-between py-3">
+      <div className="min-w-0">
+        <h1 className={`truncate text-lg font-bold ${accent}`}>{personaName}</h1>
+        <p className="mt-0.5 truncate text-xs text-zinc-500">
+          {personaRole ? `${personaRole} · ` : ""}Leash: {leashSummary}
+        </p>
+      </div>
+    </header>
+  );
+}
+
 /** The live checklist widget rendered from a role='checklist' message's JSON content. */
 export function GodModeChecklist({ content }: { content: string }) {
   let payload: ChecklistPayload | null = null;
