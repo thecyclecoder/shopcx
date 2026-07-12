@@ -907,7 +907,7 @@ export async function resolveFounderPhone(admin: Admin, workspaceId: string): Pr
 }
 
 /**
- * The three god-mode SMS events. Distinct kinds keep the text deterministic +
+ * The god-mode SMS events. Distinct kinds keep the text deterministic +
  * make an integration test straightforward. Bodies are DELIBERATELY clean —
  * professional-warm, no flirt, no emoji (a text can show on a lock screen). Eve's
  * full flirty voice lives inside the app only.
@@ -919,10 +919,25 @@ export async function resolveFounderPhone(admin: Admin, workspaceId: string): Pr
  *                card sits unanswered past the threshold.
  *   • done     — "Eve here — I've clocked out ({reason}). Tap me back in the app anytime."
  *
+ * director-sms-cockpit-per-director Phase 3: the director-scoped variants that
+ * reuse the SAME primitive but render the director's name (never Eve's flirt).
+ * Kept as its own union arm so a leash-bound director cockpit's arm/nudge never
+ * looks like an Eve arm on a lock screen.
+ *
+ *   • director-arm      — "You armed a chat with {personaName} — cockpit: {url}"
+ *   • director-approval — "{personaName} has been waiting 5+ min for your approval — {url}"
+ *   • director-done     — "Chat with {personaName} ended."
+ *
  * "reply" is intentionally absent — the spec says plain box replies send NONE
  * (the Chat tab handles live watching). Only the approval nudge + session-done push.
  */
-export type GodModeSmsKind = "arm" | "approval" | "done";
+export type GodModeSmsKind =
+  | "arm"
+  | "approval"
+  | "done"
+  | "director-arm"
+  | "director-approval"
+  | "director-done";
 
 /**
  * Best-effort SMS emit. Never throws; returns { sent } for the caller's log.
@@ -935,7 +950,16 @@ export async function sendGodModeSMS(
     workspaceId: string;
     kind: GodModeSmsKind;
     cockpitToken?: string | null;
-    context?: { toolName?: string; risk?: GodModeApprovalRisk; reason?: string; count?: number };
+    context?: {
+      toolName?: string;
+      risk?: GodModeApprovalRisk;
+      reason?: string;
+      count?: number;
+      // director-sms-cockpit-per-director Phase 3: the director-scoped variants
+      // interpolate the persona's plain name so the founder-facing brand of a
+      // director cockpit is that director, never Eve.
+      personaName?: string;
+    };
   },
 ): Promise<{ sent: boolean; reason?: string }> {
   try {
@@ -946,6 +970,7 @@ export async function sendGodModeSMS(
     // NOTE: SMS bodies are deliberately CLEAN — Eve's full flirty personality (and
     // her emojis) live INSIDE the app (cockpit + tab replies), never in a text that
     // might surface on a lock screen. Keep these professional-warm: no flirt, no emoji.
+    const personaName = (args.context?.personaName ?? "").trim() || "the director";
     let text = "";
     if (args.kind === "arm") {
       text = `Eve here — I'm online and ready. Tap in:`;
@@ -957,11 +982,18 @@ export async function sendGodModeSMS(
       } else {
         text = `Eve here — one item needs your call (waiting 5+ min). Tap in:`;
       }
-    } else {
+    } else if (args.kind === "done") {
       const reason = args.context?.reason ?? "wrapped up";
       text = `Eve here — I've clocked out (${reason}). Tap me back in the app anytime.`;
+    } else if (args.kind === "director-arm") {
+      text = `You armed a chat with ${personaName} — cockpit:`;
+    } else if (args.kind === "director-approval") {
+      text = `${personaName} has been waiting 5+ min for your approval —`;
+    } else {
+      // director-done: no URL body — the link is already dead.
+      text = `Chat with ${personaName} ended.`;
     }
-    const body = url ? `${text}\n\n${url}` : text;
+    const body = url && args.kind !== "director-done" ? `${text}\n\n${url}` : text;
 
     const r = await sendSMS(args.workspaceId, to, body);
     return { sent: r.success, reason: r.error };
@@ -1043,7 +1075,106 @@ export async function nudgeStalePendingApprovals(admin: Admin): Promise<{ nudged
       nudged++;
     }
   }
+
+  // director-sms-cockpit-per-director Phase 3: parallel sweep over armed director
+  // cockpits. A director_coach_threads row with a live cockpit_token AND a pending
+  // action older than APPROVAL_NUDGE_AFTER_MS AND sms_notified_at IS NULL earns
+  // exactly one director-approval SMS (persona-named, no Eve flirt) — then we
+  // stamp sms_notified_at so it never re-nudges the same wait. Batched-once: even
+  // with multiple pending cards, the founder gets ONE text per thread.
+  nudged += await nudgeStaleDirectorCockpitApprovals(admin, cutoff);
   return { nudged };
+}
+
+/**
+ * director-sms-cockpit-per-director Phase 3 — the director cockpit's parallel of
+ * the god-mode 5-min approval nudge. Selects armed director_coach_threads whose
+ * pending_actions JSONB carries at least one card older than the cutoff AND whose
+ * sms_notified_at is NULL (never-nudged), sends ONE persona-named director-approval
+ * SMS, and stamps sms_notified_at so a subsequent sweep skips the same wait.
+ *
+ * Kept as a private helper (called from `nudgeStalePendingApprovals`) so ONE cron
+ * beat drains both approval surfaces. Returns the count of threads nudged.
+ *
+ * Batched-once discipline (matches the god-mode side):
+ *   • A thread with 3 pending cards → 1 SMS + stamp; a new 4th card sitting past
+ *     the cutoff will re-trigger a nudge only after `armDirectorCockpit`'s next
+ *     clearing of sms_notified_at.
+ *   • Sending Twilio failed → no stamp, next beat retries.
+ */
+async function nudgeStaleDirectorCockpitApprovals(admin: Admin, cutoff: string): Promise<number> {
+  // A pending_actions JSONB filter would need a Postgres side-hop; instead
+  // shortlist ANY armed director cockpit (there are a small number per workspace)
+  // and evaluate the array in JS. Bounded to 200 for the same reason
+  // nudgeStalePendingApprovals bounds its scan.
+  const { data: candidates } = await admin
+    .from("director_coach_threads")
+    .select("id, workspace_id, director_function, cockpit_token, pending_actions, sms_notified_at, updated_at")
+    .not("cockpit_token", "is", null)
+    .is("sms_notified_at", null)
+    .lt("updated_at", cutoff)
+    .order("updated_at", { ascending: true })
+    .limit(200);
+  const rows = (candidates as {
+    id: string;
+    workspace_id: string;
+    director_function: string;
+    cockpit_token: string | null;
+    pending_actions: unknown;
+    sms_notified_at: string | null;
+    updated_at: string;
+  }[] | null) ?? [];
+  if (!rows.length) return 0;
+
+  const cutoffMs = new Date(cutoff).getTime();
+  let nudged = 0;
+  for (const r of rows) {
+    if (!r.cockpit_token) continue;
+    const actions = Array.isArray(r.pending_actions) ? (r.pending_actions as { id?: string; status?: string; ts?: string }[]) : [];
+    const stalePending = actions.filter((a) => a && a.status === "pending");
+    if (!stalePending.length) continue;
+    // Best proxy for "the pending card is stale" without adding a per-card
+    // timestamp: the thread's updated_at (which markThreadThinking / the box
+    // bumps every turn) is already past the cutoff at this point (SELECT
+    // filter), so any pending card here has been waiting at least that long.
+    void cutoffMs;
+
+    // Look up the persona name from the shared persona registry (matches every
+    // other surface that says "June" / "Ada" / "Max" — no hardcoded map).
+    const personaName = await resolveDirectorPersonaName(r.director_function);
+
+    const res = await sendGodModeSMS(admin, {
+      workspaceId: r.workspace_id,
+      kind: "director-approval",
+      cockpitToken: r.cockpit_token,
+      context: { personaName, count: stalePending.length },
+    });
+    if (res.sent) {
+      await admin
+        .from("director_coach_threads")
+        .update({ sms_notified_at: new Date().toISOString() })
+        .eq("id", r.id);
+      nudged++;
+    }
+  }
+  return nudged;
+}
+
+/**
+ * Resolve a director function slug ('cs', 'growth', 'platform', …) to the persona's
+ * plain name ('June', 'Max', 'Ada', …). Kept as a dynamic import so this pure-server
+ * file (imported by the box worker's poll loop) does not pull the client-safe
+ * persona registry into every call site; also avoids a hard circular under
+ * director_coach_threads → god-mode.
+ */
+async function resolveDirectorPersonaName(directorFunction: string): Promise<string> {
+  try {
+    const mod = await import("@/lib/agents/personas");
+    const p = (mod.PERSONAS as Record<string, { name?: string } | undefined>)[directorFunction];
+    return (p?.name ?? "").trim() || "the director";
+  } catch {
+    return "the director";
+  }
 }
 
 /**

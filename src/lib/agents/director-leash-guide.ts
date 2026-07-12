@@ -17,6 +17,8 @@
  */
 import { LEASH_CATEGORIES as PLATFORM_LEASH } from "@/lib/agents/platform-director";
 import { LEASH_CATEGORIES as GROWTH_LEASH } from "@/lib/agents/growth-director";
+import { LEASH_CATEGORIES as CS_LEASH } from "@/lib/agents/cs-director";
+import { LEASH_CATEGORIES as LOGISTICS_LEASH } from "@/lib/agents/logistics-director";
 
 export interface LeashLine {
   title: string;
@@ -41,6 +43,14 @@ export interface LeashGuide {
 const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   platform: PLATFORM_LEASH,
   growth: GROWTH_LEASH,
+  cs: CS_LEASH,
+  // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands READ-ONLY: `LOGISTICS_LEASH` is
+  // an empty array by design, so `getLeashGuide('logistics')` returns `defined:true` with
+  // `autonomous:[]` and only the generic CEO escalation rails. Every pending_action on a logistics
+  // thread routes UP to the CEO via the M3 dispatch's out-of-leash branch. The follow-up spec
+  // marco-logistics-executor-surface will populate this once the founder-driven inventory executors
+  // are open to Ada (docs/brain/functions/logistics.md § "Provenance / build model").
+  logistics: LOGISTICS_LEASH,
 };
 
 /**
@@ -48,7 +58,7 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
  * words for a non-engineer founder — what the director does on its own, in the first person. Keep a line
  * here for each category any director's `LEASH_CATEGORIES` can contain.
  */
-const CATEGORY_COPY: Record<string, LeashLine> = {
+export const CATEGORY_COPY: Record<string, LeashLine> = {
   // ── Platform (Ada) ──
   error_fix: {
     title: "Ship a fix for a confirmed bug",
@@ -94,6 +104,19 @@ const CATEGORY_COPY: Record<string, LeashLine> = {
   approve_voice_angle: {
     title: "Approve a tested message angle",
     detail: "I approve a messaging angle or voice that's already passed our review checks.",
+  },
+  // ── CS (June) ──
+  approve_remedy_within_ceiling: {
+    title: "Approve a customer remedy inside our refund ceiling",
+    detail: "A bounded make-good — a coupon, a partial refund, a subscription pause, or resending a lost order — inside the refund ceiling you already approved, fired through the same executor a rep would use.",
+  },
+  author_derived_from_ticket_spec: {
+    title: "Author a derived-from-ticket spec for a product fix",
+    detail: "When the same customer problem keeps landing in tickets, I write it up as a spec on the roadmap under CS so we fix the product instead of remedying the ticket again.",
+  },
+  amend_low_blast_sonnet_prompt: {
+    title: "Amend a low-blast conversation rule",
+    detail: "A small tweak to how our conversation AI answers — narrow enough that its blast radius stays inside the CS workflow, never touching billing or a promise to a customer.",
   },
 };
 
@@ -151,6 +174,16 @@ const DIRECTOR_EXTRA_ESCALATES: Record<string, LeashLine[]> = {
     },
   ],
 };
+
+/**
+ * The set of director function slugs that have a registered `<name>-director.ts` leash module — the
+ * live-directors-with-coach filter the Message Center's director-tab endpoint uses. A director whose
+ * slug appears here CAN back a coach thread (its leash is defined, so getLeashGuide(slug).defined ===
+ * true). Kept as a named export so the API route doesn't reach into the private `DIRECTOR_LEASH` map.
+ */
+export function getRegisteredDirectorSlugs(): Set<string> {
+  return new Set(Object.keys(DIRECTOR_LEASH));
+}
 
 /**
  * Build the plain-English leash guide for one director slug. Derived from that director's OWN

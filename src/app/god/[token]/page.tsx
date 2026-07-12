@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE, EveAvatar } from "@/components/god-mode-shared";
+import { GodModeChecklist, godCardTitle, DEC_STATUS_BADGE, EveAvatar, DirectorCockpitHeader } from "@/components/god-mode-shared";
 
 type Tab = "chat" | "approvals";
 
@@ -33,6 +33,7 @@ interface GodApproval {
 }
 interface GodStandingGrant { category: string; created_at: string }
 interface GodPayload {
+  kind?: "god";
   status: "armed" | "disarmed" | "expired";
   messages: GodMessage[];
   approvals: GodApproval[];
@@ -41,12 +42,41 @@ interface GodPayload {
   absolute_expires_at: string | null;
 }
 
+// director-sms-cockpit-per-director Phase 2: the payload shape returned by
+// GET /api/god/<director-token>. Rendered by the SAME cockpit page — only the
+// header + the transcript/approvals data source swap; the transcript +
+// approvals subcomponents come from god-mode-shared.tsx unchanged.
+interface DirectorCoachMsg { role: "user" | "assistant"; content: string }
+interface DirectorCoachAction {
+  id: string;
+  type: string;
+  summary: string;
+  status: "pending" | "approved" | "declined" | "done" | "failed";
+  rail?: boolean;
+}
+interface DirectorPayload {
+  kind: "director";
+  thread: {
+    id: string;
+    director_function: string;
+    messages: DirectorCoachMsg[];
+    pending_actions: DirectorCoachAction[];
+    turn_status: "idle" | "thinking" | "error";
+    title: string | null;
+  };
+  persona: { name: string; accent: string; role: string };
+  expires_at: string | null;
+  absolute_expires_at: string | null;
+}
+
+type AnyPayload = GodPayload | DirectorPayload;
+
 const STATUS_BADGE = DEC_STATUS_BADGE;
 
 export default function GodModeCockpit() {
   const { token } = useParams<{ token: string }>();
   const [tab, setTab] = useState<Tab>("chat");
-  const [payload, setPayload] = useState<GodPayload | null>(null);
+  const [payload, setPayload] = useState<AnyPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "not_found" | "expired" | "error">("loading");
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -64,7 +94,7 @@ export default function GodModeCockpit() {
       if (r.status === 404) { setState("not_found"); return; }
       if (r.status === 410) { setState("expired"); return; }
       if (!r.ok) { setState("error"); return; }
-      const j: GodPayload = await r.json();
+      const j: AnyPayload = await r.json();
       setPayload(j);
       setState("ok");
     } catch {
@@ -78,23 +108,31 @@ export default function GodModeCockpit() {
     return () => clearInterval(iv);
   }, [load]);
 
+  // Director / god narrowing — the payload union is discriminated on `kind`; a
+  // legacy Eve payload omits `kind` (treated as 'god'). Keep memos + effects
+  // guarded so a director payload never dereferences god-only fields.
+  const godPayload: GodPayload | null =
+    payload && (payload as { kind?: string }).kind !== "director" ? (payload as GodPayload) : null;
+  const directorPayload: DirectorPayload | null =
+    payload && (payload as { kind?: string }).kind === "director" ? (payload as DirectorPayload) : null;
+
   // Auto-scroll transcript to bottom when new messages arrive.
   useEffect(() => {
     if (scrollRef.current && tab === "chat") scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [payload?.messages.length, tab]);
+  }, [godPayload?.messages.length, directorPayload?.thread.messages.length, tab]);
 
   const sortedApprovals = useMemo(() => {
-    if (!payload) return [] as GodApproval[];
-    return [...payload.approvals].sort((a, b) => {
+    if (!godPayload) return [] as GodApproval[];
+    return [...godPayload.approvals].sort((a, b) => {
       if (a.status === "pending" && b.status !== "pending") return -1;
       if (a.status !== "pending" && b.status === "pending") return 1;
       return b.created_at.localeCompare(a.created_at);
     });
-  }, [payload]);
+  }, [godPayload]);
 
   const pendingCount = useMemo(
-    () => (payload ? payload.approvals.filter((a) => a.status === "pending").length : 0),
-    [payload],
+    () => (godPayload ? godPayload.approvals.filter((a) => a.status === "pending").length : 0),
+    [godPayload],
   );
 
   async function sendMessage() {
@@ -120,7 +158,7 @@ export default function GodModeCockpit() {
   }
 
   async function decideApproval(id: string, decision: "approve" | "deny" | "ask") {
-    const approval = payload?.approvals.find((a) => a.id === id);
+    const approval = godPayload?.approvals.find((a) => a.id === id);
     if (!approval) return;
     setBusyApprovalId(id);
     setApprovalError((s) => ({ ...s, [id]: "" }));
@@ -190,6 +228,68 @@ export default function GodModeCockpit() {
     load();
   }
 
+  // director-sms-cockpit-per-director Phase 3: the director cockpit's decide
+  // handler. Mirrors decideApproval's dispatch discipline (busy tracking, error
+  // surface) but calls the SAME POST /api/god/[token]/approve endpoint — the
+  // route's cockpit-resolver branch picks director vs god. PIN is only ever
+  // required when the card carries `rail: true`.
+  async function decideDirectorAction(actionId: string, decision: "approve" | "decline") {
+    const card = directorPayload?.thread.pending_actions.find((a) => a.id === actionId);
+    if (!card) return;
+    setBusyApprovalId(actionId);
+    setApprovalError((s) => ({ ...s, [actionId]: "" }));
+    try {
+      const body: { approvalId: string; decision: string; pin?: string } = { approvalId: actionId, decision };
+      if (decision === "approve" && card.rail) {
+        const pin = (pinDraft[actionId] || "").trim();
+        if (!pin) {
+          setApprovalError((s) => ({ ...s, [actionId]: "PIN required (rail action)." }));
+          return;
+        }
+        body.pin = pin;
+      }
+      const r = await fetch(`/api/god/${token}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        setPinDraft((s) => ({ ...s, [actionId]: "" }));
+        load();
+      } else {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        const err = j.error === "pin_incorrect" ? "PIN incorrect."
+          : j.error === "pin_required" ? "PIN required (rail action)."
+          : `Failed: ${j.error ?? r.statusText}`;
+        setApprovalError((s) => ({ ...s, [actionId]: err }));
+      }
+    } finally {
+      setBusyApprovalId(null);
+    }
+  }
+
+  async function sendDirectorMessage() {
+    const text = composer.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      const r = await fetch(`/api/god/${token}/message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      if (r.ok) {
+        setComposer("");
+        load();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        alert(`Send failed: ${(j as { error?: string }).error ?? r.statusText}`);
+      }
+    } finally {
+      setSending(false);
+    }
+  }
+
   // ── State branches ─────────────────────────────────────────────────────
   if (state === "loading") {
     return <FullPageMessage title="Getting Eve…" body="One sec." />;
@@ -204,6 +304,170 @@ export default function GodModeCockpit() {
     return <FullPageMessage title="Something went wrong" body="Please refresh." />;
   }
 
+  // director-sms-cockpit-per-director Phase 2: SAME cockpit page, director accent
+  // header + leash subheader + persona-owned transcript/approvals. Reuses
+  // GodModeChecklist + DEC_STATUS_BADGE + godCardTitle from god-mode-shared.tsx
+  // so a fix in one is a fix in both. Eve's payload never reaches this branch,
+  // so her existing render is byte-for-byte unchanged below.
+  if (directorPayload) {
+    const p = directorPayload;
+    const sortedActions = [...p.thread.pending_actions].sort((a, b) => {
+      if (a.status === "pending" && b.status !== "pending") return -1;
+      if (a.status !== "pending" && b.status === "pending") return 1;
+      return 0;
+    });
+    const leashSummary = `${p.persona.name} auto-approves in-leash actions; rail-hit calls require your PIN.`;
+    return (
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+        <div className="mx-auto flex h-screen w-full max-w-3xl flex-col px-3 sm:px-6">
+          <DirectorCockpitHeader
+            personaName={p.persona.name}
+            personaAccent={p.persona.accent}
+            personaRole={p.persona.role}
+            leashSummary={leashSummary}
+          />
+          {/* Tabs — mirror Eve's cockpit chrome */}
+          <div className="border-b border-zinc-200 dark:border-zinc-800">
+            <nav className="-mb-px flex gap-6">
+              {[
+                { k: "chat", label: "Chat" },
+                { k: "approvals", label: `Approvals${sortedActions.filter((a) => a.status === "pending").length > 0 ? ` (${sortedActions.filter((a) => a.status === "pending").length})` : ""}` },
+              ].map((t) => (
+                <button
+                  key={t.k}
+                  onClick={() => setTab(t.k as Tab)}
+                  className={`border-b-2 pb-2 text-sm font-medium ${tab === t.k ? "border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400" : "border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"}`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </nav>
+          </div>
+          {tab === "chat" && (
+            <div className="flex flex-1 flex-col overflow-hidden">
+              <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto py-4">
+                {p.thread.messages.length === 0 && (
+                  <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/40">
+                    Message {p.persona.name} to get started.
+                  </div>
+                )}
+                {p.thread.messages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm ${
+                      m.role === "user"
+                        ? "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/50 dark:text-indigo-100"
+                        : "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+                    }`}
+                  >
+                    <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-400">
+                      {m.role === "user" ? "You" : p.persona.name}
+                    </div>
+                    {m.content}
+                  </div>
+                ))}
+              </div>
+              <div className="border-t border-zinc-200 py-3 dark:border-zinc-800">
+                <div className="flex gap-2">
+                  <textarea
+                    value={composer}
+                    onChange={(e) => setComposer(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendDirectorMessage(); }
+                    }}
+                    rows={2}
+                    placeholder={`Message ${p.persona.name}… (⌘/Ctrl+Enter to send)`}
+                    disabled={sending}
+                    className="min-h-[52px] flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                  />
+                  <button
+                    onClick={sendDirectorMessage}
+                    disabled={sending || !composer.trim()}
+                    className="self-stretch rounded-md bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {sending ? "…" : "Send"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {tab === "approvals" && (
+            <div className="flex-1 space-y-3 overflow-y-auto py-4">
+              {sortedActions.length === 0 && (
+                <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
+                  Nothing needs you right now. {p.persona.name} is handling in-leash calls herself.
+                </div>
+              )}
+              {sortedActions.map((a) => {
+                const isPending = a.status === "pending";
+                const isRail = !!a.rail;
+                const err = approvalError[a.id];
+                return (
+                  <div
+                    key={a.id}
+                    className={`rounded-lg border p-4 ${isRail ? "border-red-200 bg-red-50/40 dark:border-red-900/40 dark:bg-red-950/20" : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          {isRail ? godCardTitle("destructive") : godCardTitle("decision")}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-zinc-400">
+                          {a.type}
+                          {isRail ? " · rail" : ""}
+                        </div>
+                      </div>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${DEC_STATUS_BADGE[a.status] ?? DEC_STATUS_BADGE.pending}`}>
+                        {a.status}
+                      </span>
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-snug text-zinc-800 dark:text-zinc-200">{a.summary}</p>
+                    {isPending && (
+                      <div className="mt-3 space-y-2">
+                        {isRail && (
+                          <input
+                            type="password"
+                            inputMode="numeric"
+                            autoComplete="off"
+                            value={pinDraft[a.id] ?? ""}
+                            onChange={(e) => setPinDraft((s) => ({ ...s, [a.id]: e.target.value }))}
+                            placeholder="Enter your PIN to confirm"
+                            disabled={busyApprovalId === a.id}
+                            className="w-full rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm text-zinc-900 shadow-sm focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500 dark:border-red-900 dark:bg-zinc-900 dark:text-zinc-100"
+                          />
+                        )}
+                        {err && <div className="text-xs text-red-600 dark:text-red-400">{err}</div>}
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => decideDirectorAction(a.id, "approve")}
+                            disabled={busyApprovalId === a.id || (isRail && !(pinDraft[a.id] || "").trim())}
+                            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => decideDirectorAction(a.id, "decline")}
+                            disabled={busyApprovalId === a.id}
+                            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Eve branch — the original god-mode cockpit render (unchanged) ──────────
+  const eve = godPayload!;
+
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <div className="mx-auto flex h-screen w-full max-w-3xl flex-col px-3 sm:px-6">
@@ -214,8 +478,8 @@ export default function GodModeCockpit() {
             <div>
               <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">Eve</h1>
               <p className="text-xs text-zinc-500">
-                {payload.status === "armed" ? "Online" : "Clocked out"}
-                {payload.status === "armed" && payload.token_expires_at ? ` · here till ${new Date(payload.token_expires_at).toLocaleTimeString()} if idle` : ""}
+                {eve.status === "armed" ? "Online" : "Clocked out"}
+                {eve.status === "armed" && eve.token_expires_at ? ` · here till ${new Date(eve.token_expires_at).toLocaleTimeString()} if idle` : ""}
               </p>
             </div>
           </div>
@@ -253,13 +517,13 @@ export default function GodModeCockpit() {
         {tab === "chat" && (
           <div className="flex flex-1 flex-col overflow-hidden">
             <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto py-4">
-              {payload.messages.length === 0 && (
+              {eve.messages.length === 0 && (
                 <div className="flex items-center gap-2.5 rounded-lg border border-amber-200 bg-amber-50/50 p-4 text-sm text-zinc-600 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-zinc-300">
                   <EveAvatar size={32} />
                   <span>Hey you 😌 What do you need? Just tell me and I&apos;ll take care of it.</span>
                 </div>
               )}
-              {payload.messages.map((m, i) =>
+              {eve.messages.map((m, i) =>
                 m.role === "checklist" ? (
                   <GodModeChecklist key={i} content={m.content} />
                 ) : m.role === "assistant" ? (
@@ -316,13 +580,13 @@ export default function GodModeCockpit() {
 
         {tab === "approvals" && (
           <div className="flex-1 space-y-3 overflow-y-auto py-4">
-            {(payload.standingGrants ?? []).length > 0 && (
+            {(eve.standingGrants ?? []).length > 0 && (
               <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 dark:border-zinc-800 dark:bg-zinc-900/40">
                 <div className="mb-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
                   Standing approvals — Eve won&apos;t ask about these
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {(payload.standingGrants ?? []).map((g) => (
+                  {(eve.standingGrants ?? []).map((g) => (
                     <span
                       key={g.category}
                       className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300"

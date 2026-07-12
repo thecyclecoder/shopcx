@@ -20,9 +20,21 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createThread, loadThread, markThreadThinking, setActionDecision, listRecentThreads, type DirectorCoachThread } from "@/lib/agents/director-coach-threads";
 import { getSlackToken, postMessage, updateMessage } from "@/lib/slack";
 import { buildAdaResolvedCard } from "@/lib/slack-ada";
+import { getOrgChart } from "@/lib/agents/org-chart";
+import { getLeashGuide } from "@/lib/agents/director-leash-guide";
 
+const DEFAULT_DIRECTOR = "platform"; // backward-compat for the Ask-Ada button (no director_function in body).
 
-const DIRECTOR = "platform"; // the only live director today
+/**
+ * Live + leashed director allowlist for a new coach thread. A caller-supplied `director_function` must be
+ * a slug the org-chart marks `live` AND that has a registered leash module in director-leash-guide.ts — no
+ * client can start a coach thread with a director whose backend can't back it up. Absent field → the
+ * default 'platform' (unpin Phase 1: generalize-director-coach-backend spec).
+ */
+async function liveLeashedDirectorSlugs(): Promise<Set<string>> {
+  const chart = await getOrgChart();
+  return new Set(chart.directors.filter((d) => d.live && getLeashGuide(d.slug).defined).map((d) => d.slug));
+}
 
 // ── ada-slack-chat: keep a #cto-ada thread's Slack side in sync with web actions ──
 // A thread that started in Slack (source='slack') stays a single conversation visible on BOTH surfaces.
@@ -99,6 +111,7 @@ export async function POST(req: Request) {
     actionId?: string;
     decision?: "approve" | "decline";
     intent?: "ask" | "coach" | "plan";
+    director_function?: string;
   };
   const action = body.action ?? "chat";
 
@@ -124,7 +137,16 @@ export async function POST(req: Request) {
   if (!message) return NextResponse.json({ error: "Empty message" }, { status: 400 });
   let threadId = body.id;
   if (!threadId) {
-    const created = await createThread({ workspaceId: g.workspaceId, userId: g.userId, directorFunction: DIRECTOR, message });
+    // Resolve the director this thread will run AS. Absent field → default 'platform' (Ask-Ada button
+    // backward-compat). A client-supplied slug must be a live + leashed director — otherwise 400.
+    const requested = typeof body.director_function === "string" && body.director_function.trim() ? body.director_function.trim() : undefined;
+    let directorFunction = DEFAULT_DIRECTOR;
+    if (requested) {
+      const allow = await liveLeashedDirectorSlugs();
+      if (!allow.has(requested)) return NextResponse.json({ error: "director_function not live-or-leashed" }, { status: 400 });
+      directorFunction = requested;
+    }
+    const created = await createThread({ workspaceId: g.workspaceId, userId: g.userId, directorFunction, message });
     if (!created) return NextResponse.json({ error: "Could not create thread" }, { status: 500 });
     threadId = created.id;
   } else {

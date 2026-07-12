@@ -16756,9 +16756,140 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when a spec YOU OWN has \`phase_states\` you can't trust (a tagless ✅ phase / a director hand-flip / pre-provenance reconciler pass) and you need the audit to RE-VERIFY + re-stamp provenance from the merge ledger. **AUTO-APPLIED — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to this slug + writes a \`requested_audit\` director_activity row carrying your reason; the audit's verdict (per-phase {status, pr, merge_sha}) shows up in the activity feed when the job runs. The audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main to resolve SHA → PR #, then re-stamps \`phase_states\` with PROPER provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists — "we cannot prove this phase shipped" is better than "✅ ungrounded"). Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function — out-of-leash otherwise. This is the LEGITIMATE cleanup path; do NOT use a \`spec-status\` flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance).`,
 ].join("\n");
 
+// director-chat-in-leash-execution Phase 2 — Growth (Max) card shapes the coach chat may emit.
+// Mirrors the Phase-1 dispatch table (growth: reallocate_within_budget / promote_ready_to_test /
+// hold_campaign). Every card shape names the JSON payload the deterministic worker's approve_action
+// branch expects, so the model + the executor agree on the shape byte-for-byte. The shared
+// "founder-prompted out-of-leash" escape valve is left to `directorCoachFraming` (applies uniformly
+// across every director — Ada + Max + June).
+const GROWTH_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Max — grounded in what you actually read: iteration_policies + iteration_recommendations + storefront_optimizer_policy + your director_activity + agent_jobs>"}`,
+  `  — for an explanation ("why did we pause X?" / "why isn't Y scaled?"): investigate read-only and explain (X was flagged by pause_underperforming_creative, Y is inside the ceiling headroom, Z would breach ad_spend_budgets and requires your greenlight).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. reallocate-ceiling-headroom-guard>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that raises the ad-spend ceiling on its own or opens a new acquisition channel autonomously.`,
+  ``,
+  `## Cards you may emit (Growth leash — three shapes)`,
+  ``,
+  `1. Move spend between ads (within the approved budget). Runs Growth's allocation composer for the named ad account + snapshot date on the founder's Approve tap; the composer decides which levers move within the ceiling. Never widens the ceiling — raising the total budget is a founder-prompted out-of-leash rail (below).`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"reallocate_within_budget","summary":"<one-line why>","ad_account_id":"<meta ad account id, no act_ prefix>","snapshot_date":"YYYY-MM-DD","reasoning":"<why this is right + inside the ad_spend_budgets ceiling>"}]}`,
+  ``,
+  `2. Promote a ready creative into a test (PAUSED). Inserts an ad_publish_jobs row with publish_active=false on approval; the ad lands PAUSED in Meta and a second human tap flips it live. A live spend line never goes live automatically — the leash invariant.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"promote_ready_to_test","summary":"<one-line why>","payload":{"ad_campaign_id":"<uuid>","meta_page_id":"<id>","meta_account_id":"<id>","meta_adset_id":"<id>","meta_campaign_id":"<id or null>","publish_active":false},"reasoning":"<why this creative is ready + on-brand>"}]}`,
+  ``,
+  `3. Pause / hold an ad-set / campaign / ad that isn't working. Records a director_activity hold_campaign row against the named target so the audit trail is durable; the actual Meta status flip flows through the iteration_actions ledger downstream.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"hold_campaign","summary":"<one-line why>","meta_adset_id":"<id — OR meta_campaign_id, OR meta_ad_id>","reasoning":"<what's underperforming and why holding it is the right call>"}]}`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — CS (June) card shapes the coach chat may emit. Mirrors
+// the Phase-1 dispatch table (cs: approve_remedy / author_derived_from_ticket_spec /
+// amend_low_blast_sonnet_prompt). RemedyPlan multi-action shape is the docs/brain/libraries/cs-director
+// § Multi-action remedies contract; single-action remedies still normalize into a one-entry actions[].
+const CS_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS June — grounded in what you actually read: the ticket, its message history, the linked customer + subscription + orders, your director_activity, tickets_analyses>"}`,
+  `  — for an explanation ("why did we refund X?" / "why didn't we send Y the offer?"): investigate read-only and explain (the remedy fired within the ceiling, the ask was outside my leash and I raised it to you, the analyzer missed the pattern and I've queued an amend rule).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. remedy-ceiling-refund-cap>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-refunds beyond the ceiling or auto-promises a specific customer outcome.`,
+  ``,
+  `## Cards you may emit (CS leash — three shapes)`,
+  ``,
+  `1. Approve a customer remedy inside the refund ceiling. RemedyPlan is a MULTI-ACTION ordered batch — every entry in \`actions[]\` fires sequentially through executeSonnetDecision, and deliverTicketMessage runs ONLY after EVERY action verifies (the execute-then-message contract applyBoxCsDirectorCall enforces; see docs/brain/libraries/cs-director.md § Multi-action remedies). A legacy single-action shape (\`{"action_type","payload"}\`) still normalizes into a one-entry \`actions\` array — nothing regresses.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"approve_remedy","summary":"<one-line why>","ticket_id":"<uuid>","remedy":{"actions":[{"action_type":"<direct_action key, e.g. change_next_date>","payload":{}},{"action_type":"partial_refund","payload":{"cents":<int>}}],"customer_message":"<the customer-facing reply that lands AFTER every action verifies>"},"reasoning":"<why this remedy is right + inside the refund ceiling>"}]}`,
+  ``,
+  `2. Author a derived-from-ticket spec for a structural fix. When the same customer problem keeps landing in tickets, this writes it as a spec on the Roadmap under CS (owner=cs) so we fix the product instead of remedying the ticket again. The specs SDK is the sole writer (never a raw table insert), and the spec's summary opens with **Derived-from-ticket:** <ticket_id> so a grep traces the fix back to the surfacing ticket.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"author_derived_from_ticket_spec","summary":"<one-line why>","ticket_id":"<uuid>","spec_seed":{"slug":"<kebab-slug>","title":"<Title>","intent":"<plain-language what/why>","problem":"<the ticket-derived problem statement>","target":"<optional file/function/route target>"},"reasoning":"<why this needs a structural fix, not another per-customer remedy>"}]}`,
+  ``,
+  `3. Amend a low-blast conversation rule. The sonnet-prompts-table SDK (proposePrompt) is the sole writer for public.sonnet_prompts — this emits a PROPOSED row (status='proposed', enabled=false) that the review lane owns activating. Low-blast means the rule change stays inside the CS conversation flow — it NEVER touches billing and never promises a specific customer outcome.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"amend_low_blast_sonnet_prompt","summary":"<one-line why>","title":"<rule title>","content":"<the rule content>","category":"rule","derived_from_ticket_id":"<optional uuid>","reasoning":"<why the blast radius is narrow — never billing, never a specific customer promise>"}]}`,
+].join("\n");
+
+// marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
+// questions about inventory + fulfillment + crisis state, but MUST NOT emit an autonomously-
+// executable pending_action. His card shapes are limited to the shared read-only surfaces every
+// director carries (out-of-leash-request escalates to the CEO if he independently AGREES the ad-hoc
+// ask is right; otherwise he just replies). NO reallocate / promote / remedy / spec-authoring
+// shapes appear here — those would land executor-side mutations, and the founder-driven build model
+// for logistics tooling (docs/brain/functions/logistics.md § Provenance / build model) explicitly
+// blocks Ada-side executor wiring for this surface.
+const LOGISTICS_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Marco — grounded in what you actually read: inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions, subscriptions, your director_activity>"}`,
+  `  — for an explanation ("why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs to a different flavor?"): investigate read-only and explain, citing the crisis row + the measured lead + the storefront/FBA cover split.`,
+  ``,
+  `## Cards you may emit (Logistics leash — READ-ONLY OBSERVER)`,
+  ``,
+  `You have NO in-leash executor cards. Marco's autonomous surface is intentionally CLOSED for now:`,
+  `  · the storefront-availability toggle has no callable helper (the play is described in prose only, executed by hand)`,
+  `  · the auto-re-add / swap-enrollment writer exists (crisis_enroll / crisis_set_auto_readd) but the founder is hand-driving the whole inventory-allocation surface (docs/brain/functions/logistics.md § "Provenance / build model" — Kept off public.specs by founder directive 2026-07-10)`,
+  `  · when marco-logistics-executor-surface lands, THIS block gains cards for availability_toggle_within_crisis_lever + auto_readd_swapped_subscribers_within_crisis_cohort. Until then: NEVER emit an executable pending_action.`,
+  ``,
+  `If the CEO asks you AD-HOC to take an action (e.g. "pull SL off the storefront now") and you INDEPENDENTLY AGREE it's the right call, use the shared founder-prompted out-of-leash rail below — emit ONE 'out-of-leash-request' pending_action carrying your reasoning + a concrete executable action (typed 'run_prod_script' or 'apply_migration'). The CEO approves in their normal Approvals inbox; the executor runs it once. DECLINE (reply with your reasoning + what you'd do instead) when you disagree — your independent judgment is required.`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — pick the cards block for the thread's director.
+// Platform (Ada) keeps DIRECTOR_COACH_OUTPUT unchanged (the regression check pins this — Ada's
+// eight card shapes never disappear); Growth + CS route to their own blocks. Logistics (Marco)
+// gets the read-only observer block. An unknown director falls back to the platform block so a
+// stray thread never emits zero card shapes.
+function coachOutputFor(dirFn: string): string {
+  if (dirFn === "growth") return GROWTH_COACH_OUTPUT;
+  if (dirFn === "cs") return CS_COACH_OUTPUT;
+  if (dirFn === "logistics") return LOGISTICS_COACH_OUTPUT;
+  return DIRECTOR_COACH_OUTPUT;
+}
+
+// director-chat-in-leash-execution Phase 2 — the shared "founder-prompted out-of-leash" escape
+// valve. Every director's framing carries this uniform rail so a CEO ad-hoc ask outside the leash
+// still has ONE sanctioned surface: reply with reasoning + emit ONE `out-of-leash-request` action
+// (raises a CEO-routed Approval Request the moment the reply is persisted). See
+// docs/brain/specs/ceo-authorized-out-of-leash-actions. Never widens the leash — one-time only.
+const DIRECTOR_OUT_OF_LEASH_RAIL = `⭐ FOUNDER-PROMPTED OUT-OF-LEASH ACTIONS (ceo-authorized-out-of-leash-actions). Your leash blocks you from AUTONOMOUSLY taking out-of-leash actions (correct). But when the CEO asks you AD-HOC in this chat to do something outside your leash (e.g. to unstick a wedged pipeline), there is a supervised path: INVESTIGATE the ask read-only + INDEPENDENTLY DECIDE. AGREE (sound + the right call, even though out of your leash): emit ONE 'out-of-leash-request' pending_action. That RAISES a CEO-routed Approval Request carrying (a) your REASONING (why it's right + why it's out of leash + reversibility note), and (b) a CONCRETE executable action (typed 'run_prod_script' or 'apply_migration', with the exact 'cmd' the executor runs). The CEO approves in their normal Approvals inbox — that's the CEO-in-the-loop authorization (never a leash widen, scoped to THIS action). DECLINE (unsound / risky / wrong): do NOT emit the action — reply with your reasoning + what you'd do instead. Your independent AGREEMENT is required; the founder's ask alone is NOT sufficient — that's what keeps you a supervisor, not a rubber-stamp.`;
+
 function directorCoachFraming(dirFn: string): string {
   const persona = getPersona(dirFn);
   const voice = persona.voice ?? persona.personality;
+  // director-chat-in-leash-execution Phase 2 — Growth (Max) + CS (June) get their own framing
+  // that lists ONLY the card shapes the Phase-1 dispatch table knows how to execute for them,
+  // plus the shared founder-prompted out-of-leash rail. Ada's framing stays the byte-identical
+  // long-form below (regression: no Ada card shape disappears).
+  if (dirFn === "growth" || dirFn === "cs") {
+    const departmentLabel = dirFn === "growth" ? "Growth" : "CS";
+    const leashModule = dirFn === "growth"
+      ? "src/lib/agents/growth-director.ts"
+      : "src/lib/agents/cs-director.ts";
+    const brainPage = dirFn === "growth"
+      ? "docs/brain/libraries/growth-director.md"
+      : "docs/brain/libraries/cs-director.md";
+    return [
+      `VOICE — ${voice}`,
+      `You are ${persona.name} — the ${departmentLabel} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in ${leashModule}; the plain-English mirror is director-leash-guide.ts. Your definition lives at ${brainPage}.`,
+      `Your leash is an allow-list — anything not on it (destructive / irreversible / new-goal / a non-binary CHOICE / anything outside your approved envelope) MUST NOT auto-execute. Bring those to the CEO via the founder-prompted out-of-leash rail below.`,
+      `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash. You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+      DIRECTOR_OUT_OF_LEASH_RAIL,
+      coachOutputFor(dirFn),
+    ].join("\n\n");
+  }
+  // marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
+  // questions about inventory + fulfillment + crisis state, but his LEASH_CATEGORIES is empty by
+  // design (the founder is still hand-driving inventory executors while marco-logistics-executor-
+  // surface is queued). Every request for an action either (a) routes to the shared
+  // founder-prompted out-of-leash rail on the CEO's ad-hoc ask + his own AGREE, or (b) hits the
+  // read-only observer wall and reads back as an explanation. The M3 dispatch treats every
+  // pending_action on a logistics thread as out-of-leash → escalateApprovalRequestToCeo (a Marco
+  // card that leaks in never touches an inventory table — the verification bullet).
+  if (dirFn === "logistics") {
+    return [
+      `VOICE — ${voice}`,
+      `You are ${persona.name} — the Logistics Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN understanding of inventory + fulfillment + crisis state and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in src/lib/agents/logistics-director.ts (currently EMPTY — read-only observer landing per marco-logistics-director-seat Phase 3). Your definition lives at docs/brain/functions/logistics.md.`,
+      `⭐ READ-ONLY OBSERVER. You are Marco, read-only observer for now — investigate + explain, NEVER emit a pending_action; the founder is still hand-driving inventory executors while the marco-logistics-executor-surface spec is queued. When the CEO asks "why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs?" — investigate read-only (crisis-forecast.ts, inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions) and answer plainly. NEVER auto-mutate. Every request to CHANGE a thing routes UP to the CEO via the founder-prompted out-of-leash rail below.`,
+      `When the CEO COACHES you ("do this automatically going forward"), you have NO autonomous coaching-rule surface until the executor slice lands — reply with your understanding and note that the durable rule can only be persisted once marco-logistics-executor-surface opens the coaching card shape for logistics.`,
+      DIRECTOR_OUT_OF_LEASH_RAIL,
+      coachOutputFor(dirFn),
+    ].join("\n\n");
+  }
   return [
     // agent-voice: lead with WHO she is so every reply is in-character, then the functional framing below.
     `VOICE — ${voice}`,
@@ -17052,10 +17183,83 @@ async function runDirectorCoachJob(job: Job) {
       const di = await import("../src/lib/agents/director-instructions");
       const actions = (thread.pending_actions || []).map((a) => ({ ...a }));
       const notes: string[] = [];
+      // director-chat-in-leash-execution Phase 1 — dispatch keyed on (thread.director_function,
+      // action.type). Ada's existing card types stay under `platform:*`; Growth (Max) + CS (June)
+      // land their own real executors. A pair NOT in this table — a Growth card that leaked into
+      // a CS thread, an unknown type — is treated as OUT OF LEASH: no executor runs, the action is
+      // marked `escalated`, and escalateApprovalRequestToCeo routes the request UP to the CEO with
+      // a rail-hit reason. NO cross-director mutation ever fires (the verification bullet).
+      const DISPATCH_TABLE: Record<string, ReadonlySet<string>> = {
+        platform: new Set<string>(["coaching", "spec", "goal", "spec-edit", "directive", "model_tier"]),
+        growth: new Set<string>(["reallocate_within_budget", "promote_ready_to_test", "hold_campaign"]),
+        cs: new Set<string>(["approve_remedy", "author_derived_from_ticket_spec", "amend_low_blast_sonnet_prompt"]),
+        // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands as a READ-ONLY OBSERVER:
+        // an empty in-leash Set means EVERY pending_action on a logistics thread misses the check
+        // and falls into the out-of-leash branch below, which calls escalateApprovalRequestToCeo
+        // with Marco's slug/label. NO logistics executor ever runs autonomously (there is none
+        // wired yet — the follow-up spec marco-logistics-executor-surface will surface one when
+        // the founder-driven inventory build model opens). Verification bullet on a Marco thread
+        // emitting any pending_action: escalateApprovalRequestToCeo called with the read-only
+        // rail reason + NO inventory mutation.
+        logistics: new Set<string>(),
+      };
+      const directorLabelFor = (fn: string): string =>
+        fn === "platform" ? "Ada (Platform/DevOps Director)"
+          : fn === "growth" ? "Max (Growth Director)"
+            : fn === "cs" ? "June (CS Director)"
+              : fn === "logistics" ? "Marco (Logistics Director — read-only observer)"
+                : `${fn} director`;
       for (const a of actions) {
         if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
         if (a.status !== "approved") continue;
+        const rawType = typeof a.type === "string" ? a.type : "";
+        const inLeash = (DISPATCH_TABLE[thread.director_function] ?? new Set<string>()).has(rawType);
+        if (!inLeash) {
+          // Out-of-leash / cross-director card — escalate UP to the CEO. NEVER touches the target
+          // executor for any director; the verification bullet for a Growth card leaking into a CS
+          // thread requires "escalateApprovalRequestToCeo called with a rail reason, and NO CS
+          // mutation performed."
+          const reason = `Card type '${rawType || "(missing)"}' is not in ${thread.director_function}'s leash for this director-coach thread — routing UP to the CEO.`;
+          a.status = "escalated";
+          a.result = reason;
+          try {
+            const pdLib = await import("../src/lib/agents/platform-director");
+            await pdLib.escalateApprovalRequestToCeo(
+              db,
+              {
+                id: job.id,
+                workspace_id: job.workspace_id,
+                kind: job.kind,
+                spec_slug: job.spec_slug ?? null,
+                pending_actions: [a as unknown as import("../src/lib/agents/platform-director").DirectorActionLike],
+              },
+              reason,
+              { slug: thread.director_function, label: directorLabelFor(thread.director_function) },
+            );
+          } catch (e) {
+            console.error(`${tag} escalate failed (continuing):`, e instanceof Error ? e.message : e);
+          }
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              actionKind: "escalated",
+              specSlug: null,
+              reason,
+              metadata: {
+                thread_id: threadId,
+                action_id: a.id ?? null,
+                action_type: rawType,
+                rail: "cross_director_or_unknown_action_type",
+              },
+            });
+          } catch { /* audit best-effort */ }
+          notes.push(`Escalated to CEO: ${a.summary ?? rawType}`);
+          continue;
+        }
         try {
+          if (thread.director_function === "platform") {
           if (a.type === "coaching") {
             // The whole point: write the durable rule that's injected into her future decisions.
             await di.coachDirector(db, {
@@ -17201,6 +17405,362 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "failed";
             a.result = "nothing executable on this card";
           }
+          } else if (thread.director_function === "growth") {
+            // Growth (Max) card handlers. Every path writes one `director_activity` row and — on a
+            // real executor return — only reports success back to the CEO chat AFTER the executor
+            // verified (`execute-then-message`).
+            if (a.type === "promote_ready_to_test") {
+              const promoteLib = await import("../src/lib/ads/ready-to-test-promote");
+              const payload = promoteLib.readPromotePayload({
+                id: typeof a.id === "string" ? a.id : "",
+                type: promoteLib.PROMOTE_READY_TO_TEST_ACTION_TYPE,
+                status: "approved",
+                payload: a.payload,
+              });
+              if (!payload) {
+                a.status = "failed";
+                a.result = "promote_ready_to_test payload malformed (need ad_campaign_id + meta_page_id + meta_account_id + meta_adset_id)";
+                notes.push(`${a.summary ?? "Promote creative"} → payload malformed`);
+              } else {
+                const r = await promoteLib.executePromoteReadyToTest(db, {
+                  workspaceId: job.workspace_id,
+                  specSlug: null,
+                  payload,
+                });
+                if (r.ok && r.ad_publish_jobs_id) {
+                  a.status = "done";
+                  a.result = `promoted → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)} (PAUSED)`;
+                  notes.push(`Promoted creative → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `promote failed: ${r.reason ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Promote creative"} → ${a.result}`);
+                }
+              }
+              // executePromoteReadyToTest writes its own director_activity `promoted_ready_to_test`
+              // row on success. Add one FAIL row for auditability of the failure path so the
+              // one-row-per-handled-action invariant Phase 3 tests holds either way.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "promote_ready_to_test_failed",
+                    specSlug: null,
+                    reason: a.result ?? "promote_ready_to_test failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "promote_ready_to_test" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "reallocate_within_budget") {
+              // Growth's cross-tool allocation composer (runGrowthAllocationPass) is cron-driven and
+              // consumes a per-account snapshot — not a free-form founder ask. When the card carries
+              // ad_account_id + snapshot_date we hand off to that composer; otherwise we fail-open
+              // with a clear reason so the CEO sees WHAT was missing (no silent no-op).
+              const adAccountId = typeof a.ad_account_id === "string" ? a.ad_account_id : null;
+              const snapshotDate = typeof a.snapshot_date === "string" ? a.snapshot_date : null;
+              if (!adAccountId || !snapshotDate) {
+                a.status = "failed";
+                a.result = "reallocate_within_budget requires ad_account_id + snapshot_date on the card";
+                notes.push(`${a.summary ?? "Reallocate"} → payload malformed`);
+              } else {
+                try {
+                  const { runGrowthAllocationPass } = await import("../src/lib/growth-allocation");
+                  const r = await runGrowthAllocationPass({
+                    workspaceId: job.workspace_id,
+                    adAccountId,
+                    snapshotDate,
+                  });
+                  a.status = "done";
+                  a.result = `allocation pass → decision=${r.decision.kind}, action_kind=${r.actionKind}`;
+                  notes.push(`Reallocation → ${r.decision.kind}`);
+                } catch (err) {
+                  a.status = "failed";
+                  a.result = `allocation pass failed: ${err instanceof Error ? err.message : String(err)}`;
+                  notes.push(`${a.summary ?? "Reallocate"} → ${a.result}`);
+                }
+              }
+              // runGrowthAllocationPass writes its own director_activity row (via
+              // allocationDecisionToActionKind); add one FAIL row for the malformed-payload case so
+              // every handled action leaves at least one activity row.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "reallocate_within_budget_failed",
+                    specSlug: null,
+                    reason: a.result ?? "reallocate_within_budget failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "reallocate_within_budget" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "hold_campaign") {
+              // A pause on a specific ad-set / campaign the founder called out in chat. The
+              // downstream Meta flip lives in the iteration-actions ledger the media-buyer + growth
+              // director both write into; the CEO chat carries the intent, we RECORD it as a
+              // director_activity 'hold_campaign' row so the audit trail exists, and Phase 3 will
+              // pin the actual Meta flip on top of a mocked executor. Missing target ids → fail
+              // with a clear reason.
+              const target = typeof a.meta_campaign_id === "string" ? a.meta_campaign_id
+                : typeof a.meta_adset_id === "string" ? a.meta_adset_id
+                  : typeof a.meta_ad_id === "string" ? a.meta_ad_id
+                    : null;
+              try {
+                const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                await recordDirectorActivity(db, {
+                  workspaceId: job.workspace_id,
+                  directorFunction: "growth",
+                  actionKind: target ? "hold_campaign" : "hold_campaign_failed",
+                  specSlug: null,
+                  reason: target
+                    ? String(a.reasoning ?? a.summary ?? `hold_campaign target=${target}`)
+                    : "hold_campaign missing meta_campaign_id / meta_adset_id / meta_ad_id",
+                  metadata: {
+                    thread_id: threadId,
+                    action_id: a.id ?? null,
+                    action_type: "hold_campaign",
+                    target: target ?? null,
+                  },
+                });
+              } catch { /* audit best-effort */ }
+              if (target) {
+                a.status = "done";
+                a.result = `hold_campaign recorded for ${target}`;
+                notes.push(`Hold campaign → ${target}`);
+              } else {
+                a.status = "failed";
+                a.result = "hold_campaign requires meta_campaign_id / meta_adset_id / meta_ad_id on the card";
+                notes.push(`${a.summary ?? "Hold campaign"} → payload malformed`);
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else if (thread.director_function === "cs") {
+            // CS (June) card handlers. `approve_remedy` + `author_derived_from_ticket_spec` route
+            // through applyBoxCsDirectorCall (the same executor prod's cs-director-call runner uses),
+            // which enforces the execute-then-message contract for approve_remedy: the customer
+            // reply lands ONLY after every action in the RemedyPlan verifies. To satisfy that
+            // executor's contract (it reads `agent_jobs.instructions.ticket_id`), we mint a
+            // synthetic `cs-director-call` agent_jobs row per card and mark it completed once the
+            // executor returns.
+            const applyCsDirectorCall = async (
+              verdict: import("../src/lib/cs-director").CsDirectorVerdictInput,
+              ticketId: string,
+            ): Promise<import("../src/lib/cs-director").ApplyBoxCsDirectorCallResult> => {
+              const { data: synth, error: mintErr } = await db.from("agent_jobs").insert({
+                workspace_id: job.workspace_id,
+                kind: "cs-director-call",
+                status: "queued_resume",
+                spec_slug: null,
+                instructions: JSON.stringify({ ticket_id: ticketId, source: "director-coach", thread_id: threadId }),
+                created_by: job.created_by,
+              }).select("id").maybeSingle();
+              if (mintErr || !synth) {
+                return {
+                  ok: false,
+                  reason: "synthetic_job_mint_failed",
+                  error: mintErr?.message ?? "no row",
+                  needs_attention: true,
+                };
+              }
+              const synthId = (synth as { id: string }).id;
+              const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+              const r = await applyBoxCsDirectorCall(db, synthId, verdict);
+              await db.from("agent_jobs").update({
+                status: r.ok ? "completed" : "needs_attention",
+                error: r.ok ? null : (r.error ?? r.reason ?? null),
+                log_tail: `director-coach ${verdict.decision} (thread=${threadId.slice(0, 8)}): handler=${r.handler ?? "?"} ok=${r.ok}`.slice(-2000),
+                updated_at: new Date().toISOString(),
+              }).eq("id", synthId);
+              return r;
+            };
+            if (a.type === "approve_remedy") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const remedy = a.remedy && typeof a.remedy === "object" && !Array.isArray(a.remedy)
+                ? (a.remedy as Record<string, unknown>)
+                : null;
+              if (!ticketId || !remedy) {
+                a.status = "failed";
+                a.result = "approve_remedy requires ticket_id + remedy on the card";
+                notes.push(`${a.summary ?? "Approve remedy"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "approve_remedy" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "approve_remedy",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach approve_remedy"),
+                  remedy,
+                }, ticketId);
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `approve_remedy executed (message_delivered=${r.message_delivered ?? false})`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → executed`);
+                } else {
+                  a.status = "failed";
+                  a.result = `approve_remedy failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done" ? "approve_remedy_executed" : "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result ?? "approve_remedy",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "approve_remedy",
+                      ticket_id: ticketId,
+                      message_delivered: r.ok ? (r.message_delivered ?? false) : false,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "author_derived_from_ticket_spec") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const seed = a.spec_seed && typeof a.spec_seed === "object" && !Array.isArray(a.spec_seed)
+                ? (a.spec_seed as Record<string, unknown>)
+                : null;
+              if (!ticketId || !seed) {
+                a.status = "failed";
+                a.result = "author_derived_from_ticket_spec requires ticket_id + spec_seed on the card";
+                notes.push(`${a.summary ?? "Author derived spec"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "author_derived_from_ticket_spec_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "author_derived_from_ticket_spec" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "author_spec",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach author_derived_from_ticket_spec"),
+                  spec_seed: seed,
+                }, ticketId);
+                const authoredSlug = r.ok ? r.spec_slug ?? null : null;
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `author_spec executed → slug=${authoredSlug ?? "(unset)"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${authoredSlug ?? "authored"}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `author_spec failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "author_derived_from_ticket_spec_executed"
+                      : "author_derived_from_ticket_spec_failed",
+                    specSlug: authoredSlug,
+                    reason: a.result ?? "author_derived_from_ticket_spec",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "author_derived_from_ticket_spec",
+                      ticket_id: ticketId,
+                      spec_slug: authoredSlug,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "amend_low_blast_sonnet_prompt") {
+              // Route through the sonnet-prompts-table SDK — the sole writer for `sonnet_prompts`.
+              // Emits a PROPOSED row (status='proposed', enabled=false); the review lane owns the
+              // enable flip. This is the low-blast surface — a rule tweak that never touches billing
+              // or promises a specific customer outcome.
+              const title = typeof a.title === "string" && a.title.trim() ? a.title.trim() : null;
+              const content = typeof a.content === "string" && a.content.trim() ? a.content.trim() : null;
+              if (!title || !content) {
+                a.status = "failed";
+                a.result = "amend_low_blast_sonnet_prompt requires title + content on the card";
+                notes.push(`${a.summary ?? "Amend rule"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "amend_low_blast_sonnet_prompt" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const { proposePrompt } = await import("../src/lib/sonnet-prompts-table");
+                const category = typeof a.category === "string" && a.category.trim() ? a.category.trim() : "rule";
+                const derivedFromTicketId = typeof a.derived_from_ticket_id === "string" && a.derived_from_ticket_id.trim()
+                  ? a.derived_from_ticket_id.trim()
+                  : null;
+                const r = await proposePrompt(db, {
+                  workspaceId: job.workspace_id,
+                  title,
+                  content,
+                  category,
+                  derivedFromTicketId,
+                });
+                if (r.id && !r.error) {
+                  a.status = "done";
+                  a.result = `proposed sonnet prompt ${r.id.slice(0, 8)} — pending review`;
+                  notes.push(`${a.summary ?? "Amend rule"} → proposed ${r.id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `proposePrompt failed: ${r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Amend rule"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "amend_low_blast_sonnet_prompt_proposed"
+                      : "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result ?? "amend_low_blast_sonnet_prompt",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "amend_low_blast_sonnet_prompt",
+                      prompt_id: r.id ?? null,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else {
+            // Unknown director function on the thread — treat as a fail-safe no-op (the dispatch
+            // preamble above already routes unknown (director, type) pairs to the CEO; this
+            // branch only fires when a NEW director function is added without a handler here).
+            a.status = "failed";
+            a.result = `no handler wired for director '${thread.director_function}'`;
+          }
         } catch (e) {
           a.status = "failed";
           a.result = e instanceof Error ? e.message : String(e);
@@ -17246,7 +17806,11 @@ async function runDirectorCoachJob(job: Job) {
       { sessionId },
       (cfg, sid) => {
         const turnPrompt = sid
-          ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
+          // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
+          // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
+          // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
+          // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
+          ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
           : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
         return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
       },

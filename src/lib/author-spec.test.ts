@@ -193,6 +193,7 @@ test("unbuildableReason flags phases with empty titles + empty bodies", () => {
         what: null,
         kind: "phase",
         origin_check_keys: [],
+        metadata: {},
         created_at: "2026-07-02T00:00:00Z",
         updated_at: "2026-07-02T00:00:00Z",
       },

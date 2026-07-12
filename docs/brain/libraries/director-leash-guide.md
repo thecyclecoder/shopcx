@@ -9,7 +9,7 @@ The **leash → plain-English guide** generalizer (director-guide-tab spec). Eac
 - **`LeashGuide` / `LeashLine`** types.
 
 ## Internal config (the generalization point)
-- **`DIRECTOR_LEASH`** — `{ platform: LEASH_CATEGORIES, growth: LEASH_CATEGORIES }`. The registry that ties each director to ITS OWN live array. **Adding a leashed director** = add one import line here + a `CATEGORY_COPY` entry per new category.
+- **`DIRECTOR_LEASH`** — `{ platform: LEASH_CATEGORIES, growth: LEASH_CATEGORIES, cs: LEASH_CATEGORIES, logistics: LEASH_CATEGORIES }`. The registry that ties each director to ITS OWN live array. **Adding a leashed director** = add one import line here + a `CATEGORY_COPY` entry per new category. A director whose `LEASH_CATEGORIES` is DELIBERATELY EMPTY (e.g. Marco/Logistics per [[../specs/marco-logistics-director-seat]] Phase 3 — read-only observer landing until [[../specs/marco-logistics-executor-surface]] opens the executors) still registers here so `getLeashGuide('logistics')` returns `defined:true` with `autonomous:[]` — every request falls through to the generic escalation rails, not the graceful "leash not yet defined" empty state.
 - **`CATEGORY_COPY`** — `category string → { title, detail }` friendly copy, covering every Platform + Growth category.
 - **`GENERIC_ESCALATES`** (every director: destructive/irreversible · new feature or goal · anything unverifiable) + **`DIRECTOR_EXTRA_ESCALATES`** (Growth: raise total budget / new ad platform / non-binary choice; Platform: non-binary choice).
 
