@@ -2,7 +2,7 @@
 
 The **four director cockpits + Eve** — the founder's supervision surface for every director-agent seat in the org chart, unified in one Message Center. Each director gets a first-person coach thread; the leash + M3 dispatch enforce **supervisable autonomy** ([[../operational-rules]] § North star): every in-leash executor auto-runs, every rail hit escalates via `escalateApprovalRequestToCeo`, and every action lands one `director_activity` row named by `director_function`.
 
-Landed under [[../goals/director-chats-in-message-center]] (M1–M5). Marco's read-only seat closed the goal on 2026-07-12 with [[../specs/marco-logistics-director-seat]].
+Delivered by the **director-chats-in-message-center** goal (M1 generalize the coach backend off platform → M2 Message-Center launcher tabs → M3 in-leash execution → M4 per-director SMS cockpit → M5 Marco's seat), folded 2026-07-12 → [[../archive]]. Marco's read-only Logistics seat was the fourth cockpit and closed the goal.
 
 ## The directory
 
@@ -23,6 +23,15 @@ Landed under [[../goals/director-chats-in-message-center]] (M1–M5). Marco's re
 - **Coach backend** — [[../specs/generalize-director-coach-backend]] · the shared framing + coach-output selector routed at `coachOutputFor(directorFunction)` so a new persona plugs in with one import + one map entry.
 - **In-leash execution** — [[../specs/director-chat-in-leash-execution]] · the M3 dispatch → executor → `director_activity` write-back Marco piggybacks on (his row never fires because his in-leash Set is empty).
 
+## SMS cockpit — text any director from your phone (M4)
+
+Each director thread can be **armed for the phone** without forking a second SMS stack — it reuses Eve's `/god/[token]` cockpit surface end-to-end:
+
+- **One URL surface, two disjoint token spaces.** `armDirectorCockpit` ([[../libraries/director-coach-threads]]) mints a 48-hex `cockpit_token` onto the [[../tables/director_coach_threads]] row with the SAME sliding + absolute TTLs as `god_mode_sessions`. A unique-per-token index on each table keeps the spaces disjoint, and **[[../libraries/cockpit-resolver]]** (`resolveCockpitTokenAny`) is the single chokepoint the `/god/[token]` routes call to decide `{kind:'god'|'director'}` — god_mode_sessions is checked first so Eve's path stays byte-for-byte unchanged; the director branch is purely additive.
+- **`max` sandbox, never `godmode`.** A director cockpit token grants ONLY that director's leash — it PIN-gates exactly the same rails the in-app chat does and runs the read-only `max` sandbox, never Eve's prod-write `godmode`. A director cockpit can never reach a god-mode power.
+- **Persona-named SMS, not Eve's voice.** `sendGodModeSMS` ([[../libraries/god-mode]]) grew director-scoped kinds — `director-arm` / `director-approval` / `director-done` — that interpolate the persona's plain name (`resolveDirectorPersonaName`) so a lock-screen text reads "You armed a chat with Max — cockpit: …", never Eve's flirt. Bodies stay deliberately clean (no emoji, no flirt); the full personality lives inside the app only.
+- **Approval nudge parity.** `nudgeStaleDirectorApprovals` mirrors Eve's `nudgeStalePendingApprovals` on the box's 60s god-mode beat — a card sitting unanswered ≥ 5 min texts ONE reminder and stamps `sms_notified_at` so it never re-texts. Plain box replies push NO SMS (the Chat tab handles live watching); only the arm, the 5-min approval reminder, and session-done push.
+
 ## Invariants
 
 - **A director grades only workers in its own charge.** Same north-star principle enforced at [[../libraries/agent-grader]] `gradeableKindsForFunction` — a supervisor owns the layer below, not adjacent departments. See [[../operational-rules]] § North star.
@@ -38,4 +47,4 @@ Landed under [[../goals/director-chats-in-message-center]] (M1–M5). Marco's re
 
 ## Related
 
-[[../libraries/director-leash-guide]] · [[../libraries/director-coach-threads]] · [[../libraries/agent-personas]] · [[../tables/director_activity]] · [[../tables/approval_decisions]] · [[../tables/function_autonomy]] · [[ada-slack-chat]] · [[ada-slack-routed-approvals]] · [[god-mode]] · [[../functions/platform]] · [[../functions/growth]] · [[../functions/cs]] · [[../functions/logistics]] · [[../operational-rules]]
+[[../libraries/director-leash-guide]] · [[../libraries/director-coach-threads]] · [[../libraries/cockpit-resolver]] · [[../libraries/god-mode]] · [[../libraries/agent-personas]] · [[../tables/director_coach_threads]] · [[../tables/director_activity]] · [[../tables/approval_decisions]] · [[../tables/function_autonomy]] · [[ada-slack-chat]] · [[ada-slack-routed-approvals]] · [[god-mode]] · [[../functions/platform]] · [[../functions/growth]] · [[../functions/cs]] · [[../functions/logistics]] · [[../operational-rules]]

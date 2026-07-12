@@ -11,8 +11,14 @@ Server helpers for the [[../tables/director_coach_threads]] conversation ([[../s
 | `markThreadThinking(workspaceId, id, userMessage?)` | Append an optional CEO message + flip `turn_status='thinking'` (clears prior error). |
 | `setActionDecision(workspaceId, id, actionId, decision)` | Approve/decline a `coaching`/`spec` card; approve flips to `thinking` (the worker executes it). |
 | `listRecentThreads(workspaceId, userId, limit?)` | The resume list. |
+| `armDirectorCockpit({workspaceId, threadId})` | **SMS cockpit (M4).** Mint a 48-hex `cockpit_token` + sliding/absolute TTLs on the thread, fire the persona-named arm SMS via `sendGodModeSMS`, return `{thread, cockpitToken, cockpitUrl}`. Idempotent per thread. |
+| `disarmDirectorCockpit({workspaceId, threadId})` | Null the `cockpit_token` + TTL columns so `/god/[token]` stops resolving it. Idempotent. |
+| `resolveDirectorCockpitToken(token)` | Resolve a 48-hex token → thread row or null (unknown / wrong-length / past either TTL). Mirrors god-mode's `resolveCockpitToken`; called behind [[cockpit-resolver]] `resolveCockpitTokenAny`. |
 
 **Types:** `DirectorCoachThread`, `CoachThreadAction` (`type ∈ coaching｜spec`), `ThreadMsg`, `TurnStatus`.
+
+## SMS cockpit (M4)
+The `armDirectorCockpit` / `disarmDirectorCockpit` / `resolveDirectorCockpitToken` trio deliberately mirrors god-mode.ts's `armSession` / `disarmSession` / `resolveCockpitToken` so a director token routes through the SAME 48-hex + sliding/absolute-TTL discipline as Eve's cockpit on the shared `/god/[token]` surface — but bound to that director's leash and running the read-only `max` sandbox, never `godmode`. The two token spaces are DISJOINT; [[cockpit-resolver]] is the single chokepoint that decides director vs god vs unknown. See [[../lifecycles/director-cockpits]] § SMS cockpit + [[../tables/director_coach_threads]].
 
 ## The two-button intent
 The route ([[../../src/app/api/director/coach/route]]) sets `intent` on a turn: **Ask** (explain only) vs **Coach her** (distill into a `coaching` card). The box (`runDirectorCoachJob`) branches its framing on `intent`; the approval card is the explicit confirmation. Owner-gated at the route/UI; surfaced as `DirectorCoachChat` on her profile (`/dashboard/agents/platform`).
@@ -31,4 +37,4 @@ The endpoint intersects `getOrgChart().directors.filter(d => d.live)` with `getR
 
 ---
 
-[[../README]] · [[../tables/director_coach_threads]] · [[director-instructions]] · [[dev-message-threads]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/director_coach_threads]] · [[cockpit-resolver]] · [[god-mode]] · [[../lifecycles/director-cockpits]] · [[director-instructions]] · [[dev-message-threads]] · [[../specs/worker-grading-and-director-management]] · [[../../CLAUDE]]

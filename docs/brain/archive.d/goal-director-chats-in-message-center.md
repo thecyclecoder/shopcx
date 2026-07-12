@@ -1,0 +1,1 @@
+- **Talk to any director from the Message Center — leash-bound director chats + SMS cockpit** · folded 2026-07-12 · → [[lifecycles/director-cockpits]]
