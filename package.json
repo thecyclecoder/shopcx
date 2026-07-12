@@ -61,6 +61,7 @@
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
     "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
     "test:creative-outcome-attribution": "tsx --test src/lib/ads/creative-outcome-attribution.test.ts",
+    "test:advertised-products": "tsx --test src/lib/advertised-products.test.ts",
     "test:winning-creative-detect": "tsx --test src/lib/ads/winning-creative-detect.test.ts",
     "test:pair-promoted-lander": "tsx --test src/lib/storefront/pair-promoted-lander.test.ts",
     "test:customer-voice-mining": "tsx --test src/lib/ads/customer-voice-mining.test.ts",
