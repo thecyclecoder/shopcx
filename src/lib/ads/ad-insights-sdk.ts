@@ -201,18 +201,29 @@ export async function resolveCacThresholds(admin: Admin, workspaceId: string, ov
 
 export type Verdict = "winner" | "hold" | "kill" | "below_floor";
 export const VERDICT_FLOOR_SPEND = 450;
-export const MIN_PURCHASES = 3;
+/** Crown floor — a winner needs ≥ this many purchases (CEO decision tree 2026-07-12). ~3 purchases
+ *  ($450 at a $150 CPA) is statistical noise; a 3–7 purchase converter reads as HOLD, not a crown. */
+export const MIN_PURCHASES = 8;
+/** Decision deadline — an ad at/past this spend that never crowned is RETIRED (free the test slot).
+ *  ~8 test-days at $150/day. Mirrors iteration_policies.max_test_spend_cents. */
+export const DECISION_DEADLINE_SPEND = 1200;
 const FATIGUE_FREQ_ACT = 4.5;
 
-/** Classify one ad against the LTV-derived thresholds + the methodology's verdict floor/fatigue. */
+/** Classify one ad against the decision-tree bands (CEO 2026-07-12): crown (CPA ≤ target AND ≥ 8
+ *  purchases) · HOLD (converting, CPA ≤ kill/profit-floor, not yet crown-qualified) · slow-kill (CPA >
+ *  kill) · dud (no purchases past the floor) · deadline-retire (spent the full runway without crowning).
+ *  Kill stays fast; only CROWNING is patient. See docs/brain/reference/meta-scaling-methodology.md. */
 export function classifyAd(ad: AdInsight, t: CacThresholds): { verdict: Verdict; fatigued: boolean; cpa: number | null; action: string } {
   const cpa = ad.purchases > 0 ? ad.spend / ad.purchases : null;
   const fatigued = ad.frequency >= FATIGUE_FREQ_ACT && ad.linkCtr < 1.0;
+  const crownQualified = cpa != null && cpa <= t.targetCac && ad.purchases >= MIN_PURCHASES;
+  // Decision deadline — full runway spent without crowning → retire the slot.
+  if (ad.spend >= DECISION_DEADLINE_SPEND && !crownQualified) return { verdict: "kill", fatigued, cpa, action: `RETIRE — $${ad.spend.toFixed(0)} spent, never crowned (deadline)` };
   if (ad.spend < VERDICT_FLOOR_SPEND) return { verdict: "below_floor", fatigued, cpa, action: `still testing — under $${VERDICT_FLOOR_SPEND} verdict floor` };
-  if (cpa == null || ad.purchases < MIN_PURCHASES) return { verdict: "kill", fatigued, cpa, action: `KILL — ${ad.purchases} purchase(s) at $${ad.spend.toFixed(0)}` };
-  if (cpa <= t.targetCac) return { verdict: "winner", fatigued, cpa, action: fatigued ? "WINNER but FATIGUED — refresh before scaling" : "WINNER — duplicate into scaler, +20%/3–4d while ROAS holds" };
-  if (cpa <= t.killCac) return { verdict: "hold", fatigued, cpa, action: fatigued ? "HOLD + FATIGUED — refresh, don't scale" : "HOLD — iterate hook/creative, don't scale" };
-  return { verdict: "kill", fatigued, cpa, action: `KILL — CPA $${cpa.toFixed(0)} > kill $${t.killCac.toFixed(0)}` };
+  if (crownQualified) return { verdict: "winner", fatigued, cpa, action: fatigued ? "WINNER but FATIGUED — refresh before scaling" : "WINNER — duplicate into scaler, +20%/3–4d while ROAS holds" };
+  if (cpa == null) return { verdict: "kill", fatigued, cpa, action: `KILL — 0 purchases at $${ad.spend.toFixed(0)}` };
+  if (cpa > t.killCac) return { verdict: "kill", fatigued, cpa, action: `KILL — CPA $${cpa.toFixed(0)} > kill $${t.killCac.toFixed(0)}` };
+  return { verdict: "hold", fatigued, cpa, action: `HOLD — CPA $${cpa.toFixed(0)}, ${ad.purchases}/${MIN_PURCHASES} purchases; keep testing` };
 }
 
 /** Merge DB spend/destination onto Meta insights (Meta = conversion truth for PDP; DB spend is
