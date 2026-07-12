@@ -23592,9 +23592,13 @@ async function dispatchJob(job: Job) {
       };
 
       // ONE reconcile attempt per claim: try the primary, then the single fallback if it conflicts.
+      // conflictLogs accumulates the RAW git output from each FAILED attempt so Phase 2's file-list
+      // extractor sees the union of conflicting files across both strategies (primary+fallback).
+      const conflictLogs: string[] = [];
       let outcome = await runStrategy(primary);
       let usedStrategy: string = primary;
       if (!outcome.ok) {
+        conflictLogs.push(`--- primary=${primary} ---\n${outcome.log}`);
         console.log(
           `${tag} reconcile-onto-main primary=${primary} conflicted on ${branch} — trying fallback=${fallback}`,
         );
@@ -23602,16 +23606,32 @@ async function dispatchJob(job: Job) {
         usedStrategy = fallback;
       }
       if (!outcome.ok) {
-        // Primary AND fallback both conflicted → genuine semantic divergence. Phase 2 will name
-        // the conflicting files on this park; for now the log_tail carries the raw git output.
+        // Phase 2 — Escalate only a REAL conflict + NAME the conflicting files. Both strategies
+        // conflicted → genuine semantic divergence a fresh reset can't resolve. Parse the union of
+        // conflicting files across BOTH failed attempts (`build-lane-reconcile.extractConflictingFiles`),
+        // compose the operator-facing error via `formatReconcileConflictError`, and stamp
+        // `needs_attention_class = "reconcile_conflict"` so the classifier bypasses this row (the
+        // file list is the routing signal). The loop-guard's failedCount counts THIS park (a real,
+        // post-self-heal failure) but never counts a self-healable staleness (Phase 1's merge
+        // fallback / recreate-fresh means such a branch never parks at all).
+        conflictLogs.push(`--- fallback=${fallback} ---\n${outcome.log}`);
+        const combinedLog = conflictLogs.join("\n");
+        const { extractConflictingFiles, formatReconcileConflictError } = await import(
+          "../src/lib/build-lane-reconcile"
+        );
+        const files = extractConflictingFiles(combinedLog);
+        const errorMsg = formatReconcileConflictError({
+          strategies: [primary, fallback],
+          files,
+        });
         await update(job.id, {
           status: "needs_attention",
-          error:
-            "reconcile-with-main hit a real conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `reconcile-with-main (primary ${primary} AND fallback ${fallback} both conflicted — real semantic divergence):\n${outcome.log}`.slice(-2000),
+          needs_attention_class: "reconcile_conflict",
+          error: errorMsg,
+          log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):\n${combinedLog}`.slice(-2000),
         });
         console.error(
-          `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}) — parked needs_attention (never silently dropped, never force-pushed)`,
+          `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — parked needs_attention (reconcile_conflict; never silently dropped, never force-pushed)`,
         );
         chosenAccount.inFlight--;
         sh("git", ["worktree", "remove", "--force", wt]);
@@ -23633,14 +23653,19 @@ async function dispatchJob(job: Job) {
         cwd: wt,
       });
       if (tscGate.code !== 0) {
+        // Base-poison: origin/main itself fails tsc — the fault is main, not the spec. Stamp a
+        // distinct class so operators can triage it separately from a spec-caused reconcile_conflict
+        // (both are POST-self-heal parks that count toward the escort loop-guard, but their remedy
+        // is different: base_poison needs a main hotfix, reconcile_conflict needs a spec-level merge).
         await update(job.id, {
           status: "needs_attention",
+          needs_attention_class: "base_poison",
           error:
             "reconciled tree fails tsc — origin/main is broken (base poison). Refusing to run repo-wide checks on a broken base.",
           log_tail: `reconcile-tsc-gate (post-${usedStrategy}):\n${(tscGate.out + tscGate.err).slice(-1800)}`.slice(-2000),
         });
         console.error(
-          `${tag} reconcile tsc-gate FAILED on ${branch} — parked needs_attention (main is broken)`,
+          `${tag} reconcile tsc-gate FAILED on ${branch} — parked needs_attention (base_poison; main is broken)`,
         );
         chosenAccount.inFlight--;
         sh("git", ["worktree", "remove", "--force", wt]);

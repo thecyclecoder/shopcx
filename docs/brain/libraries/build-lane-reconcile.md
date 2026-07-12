@@ -28,6 +28,14 @@ A `git rebase origin/main` linearly replays the branch's commits and SPURIOUSLY 
 - ONE reconcile attempt per claim: primary + a single fallback. When BOTH conflict the divergence is genuine and the caller parks `needs_attention`.
 - After a successful reconcile, the caller tsc-gates the reconciled tree BEFORE the claude run — a broken origin/main (base poison) parks with the tsc output so the operator sees the real reason, never spending claude tokens on a broken base.
 
+## Phase 2 — Name the conflicting files on a real-conflict park
+
+`extractConflictingFiles(gitOutput)` parses the sorted, deduplicated file list from the RAW output of a failing `git merge` / `git rebase`. Shapes covered: `CONFLICT (content): Merge conflict in <path>`, `CONFLICT (modify/delete): <path> deleted in <ref> ...`, `CONFLICT (rename/rename): Rename "<src>"->"<dst-a>" ... rename "<src>"->"<dst-b>" ...`. `Auto-merging <path>` lines are IGNORED unless a paired CONFLICT line for the same file appears (a clean merge emits Auto-merging without CONFLICT — naming those files would false-positive).
+
+`formatReconcileConflictError({ strategies, files })` composes the operator-facing park `error` string. Caps at 8 named files with a `+N more` overflow tag so the CEO card stays scannable; on an empty file list (a real conflict whose git output was novel enough to defeat the parser) it falls back to a "see log_tail" hint that still names the strategies attempted.
+
+The builder-worker's real-conflict park (grep `Phase 2 — Escalate only a REAL conflict`) accumulates the raw git output from BOTH the primary AND fallback attempts and passes their union to `extractConflictingFiles`, so a divergence that surfaces on `merge` but not `rebase` (or vice versa) still appears in the error. `needs_attention_class` is stamped `"reconcile_conflict"` so the standard classifier ([[needs-attention-classify]]) bypasses this row — the file list IS the routing signal. A distinct `"base_poison"` class is stamped on the tsc-gate failure (post-successful-reconcile, main itself is broken) so the two POST-self-heal park classes can be triaged separately: `reconcile_conflict` needs a spec-level merge, `base_poison` needs a main hotfix. Both count toward the escort loop-guard's 2×→CEO trip because both are real, actionable signals; a self-healable staleness never parks at all because Phase 1's merge fallback / recreate-fresh handles it.
+
 ## Spec of record
 
 - [[../specs/builder-self-heals-stale-build-branch-instead-of-refailing-to-ceo]] — Phase 1 folds `mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks` Phase 1 + the 2026-07-11 rebase→merge hotfix into a single strategy-driven reconcile.
