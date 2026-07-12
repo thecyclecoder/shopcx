@@ -1,0 +1,1 @@
+- **Builder self-heals a stale build branch instead of re-failing 2× to the CEO** · verified 2026-07-12 · → [[../libraries/build-lane-reconcile]]
