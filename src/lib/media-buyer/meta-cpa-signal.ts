@@ -178,15 +178,19 @@ export interface MetaCpaWinnerOptions {
   metaAdAccountId: string;
   crownMaxCpaCents: number;
   crownMinSpendCents: number;
+  /** A crown ALSO requires this many purchases — not just CPA ≤ crown at ≥ crown_min_spend. ~3 purchases
+   *  ($450 at a $150 CPA) is statistical noise; ~8 at target is real signal before scaling. CEO 2026-07-12. */
+  crownMinPurchases: number;
   topK?: number;
 }
 
-/** Winners on Meta's reported signal: adsets with CPA ≤ crownMaxCpaCents AND spend ≥ crownMinSpendCents,
- *  ranked by CPA ascending, resolved into the DetectedWinner shape the plan/amplifier consume. */
+/** Winners on Meta's reported signal: adsets with CPA ≤ crownMaxCpaCents AND spend ≥ crownMinSpendCents
+ *  AND purchases ≥ crownMinPurchases (the anti-noise floor), ranked by CPA ascending, resolved into the
+ *  DetectedWinner shape the plan/amplifier consume. */
 export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOptions): Promise<DetectedWinner[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
   const qualifying = rows
-    .filter((r) => r.purchases > 0 && r.spend_cents >= opts.crownMinSpendCents && r.spend_cents / r.purchases <= opts.crownMaxCpaCents)
+    .filter((r) => r.purchases >= opts.crownMinPurchases && r.spend_cents >= opts.crownMinSpendCents && r.spend_cents / r.purchases <= opts.crownMaxCpaCents)
     .sort((a, b) => a.spend_cents / a.purchases - b.spend_cents / b.purchases)
     .slice(0, opts.topK ?? 3);
 
@@ -226,31 +230,58 @@ export interface MetaCpaLoserOptions {
   trimMaxCostPerAtcCents: number;
   /** Trim if CPM (spend per 1000 impressions) exceeds this — Meta disfavoring the ad (secondary). */
   trimMaxCpmCents: number;
-  /** Converter guard: NEVER trim an adset already producing purchases at CPP ≤ this (the crown CPA) —
-   *  it's a winner-in-progress, protect it even if a leading signal looks bad. */
+  /** The crown CPA — a converter here counts toward the winner path, so it is never deadline-retired. */
   crownMaxCpaCents: number;
+  /** HOLD-band ceiling (~LTV/1.5, the profit floor). A converter with CPA ≤ this is PROFITABLE → HOLD:
+   *  never trimmed on a leading signal AND never slow-killed. CPA above this = slow-kill (below). This
+   *  WIDENS the old converter guard from the crown CPA ($150) to the profit floor ($220) so a profitable
+   *  ad at, say, $160 CPA is not trimmed just for being over the crown target. CEO 2026-07-12. */
+  holdBandMaxCpaCents: number;
+  /** Crown-min spend — the floor at/after which a still-unprofitable converter (CPA > hold band) is
+   *  slow-killed, and below which we don't yet judge on CPA (kills stay leading-signal only). */
+  crownMinSpendCents: number;
+  /** Crown-min purchases — a crown-qualified adset (also needs CPA ≤ crown) is never deadline-retired. */
+  crownMinPurchases: number;
+  /** Decision deadline: an adset that reaches this cumulative spend WITHOUT crowning is retired to free
+   *  the test slot for a fresh creative. Default $1,200 (~8 test-days at $150/day). CEO 2026-07-12. */
+  maxTestSpendCents: number;
 }
 
 /**
- * Losers on Meta's LEADING signals — trim early on the signs Meta doesn't like the ad, long BEFORE the
- * lagging cost-per-purchase would tell you. An active adset past `earlyTrimMinSpendCents` is a clear
- * laggard when ANY of:
- *   • cost-per-ATC (spend ÷ add_to_cart) > `trimMaxCostPerAtcCents` — the strongest signal (validated on
- *     Amazing Coffee: winners $18–65/ATC, laggards $100–152; CTR alone lies), OR
- *   • CPM > `trimMaxCpmCents` — Meta charging a premium = poor relevance/auction, OR
- *   • it has real clicks (≥ MIN_CLICKS_FOR_ZERO_ATC) but ZERO add-to-carts (only when the account has ATC
- *     data at all — guards against pre-backfill false positives).
+ * Losers = the media-buyer test-loop's non-crown exits, in band order (CEO decision tree 2026-07-12 —
+ * see docs/brain/reference/meta-scaling-methodology.md). For each active adset on cumulative metrics:
+ *   (D) DEADLINE-RETIRE — spend ≥ `maxTestSpendCents` and NOT crown-qualified (CPA ≤ crown AND
+ *       purchases ≥ crownMinPurchases): it had its full runway and never crowned → free the slot.
+ *   HOLD / converter guard — a converter with CPA ≤ `holdBandMaxCpaCents` (the profit floor) is
+ *       profitable: NEVER trimmed on a leading signal and NEVER slow-killed — it runs toward the crown
+ *       floor or the deadline. (Widened from the old crown-CPA guard so a $160-CPA ad isn't trimmed.)
+ *   (S) SLOW-KILL — a converter with CPA > `holdBandMaxCpaCents` past `crownMinSpendCents`: converting
+ *       but UNPROFITABLE → kill.
+ *   (F) FAST-KILL (dud) — near-zero conversions: a hard backstop of 0 purchases by `crownMinSpendCents`,
+ *       PLUS the early leading-signal trims (past `earlyTrimMinSpendCents`) — high cost-per-ATC (the
+ *       strongest signal: Coffee winners $18–65/ATC, laggards $100–152), high CPM, or real clicks
+ *       (≥ MIN_CLICKS_FOR_ZERO_ATC) with ZERO add-to-carts. Leading signals KILL, never crown.
  * Each loser cites its dominant child ad so the audit names the creative in decline.
  */
 export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOptions): Promise<MediaBuyerLoser[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
   const accountHasAtc = rows.some((r) => r.add_to_cart > 0); // ATC ingested/backfilled → the 0-ATC rule is safe
   const losing = rows.filter((r) => {
-    if (r.spend_cents < opts.earlyTrimMinSpendCents) return false;
-    // Converter guard: NEVER trim an adset already converting at/below the crown CPA — it's a
-    // winner-in-progress (e.g. Tabs Test 02: cost-per-ATC $94 but 2 purchases @ $47 CPP). Leading
-    // signals only trim adsets that are NOT yet proving out on purchases.
-    if (r.purchases > 0 && r.spend_cents / r.purchases <= opts.crownMaxCpaCents) return false;
+    const cpa = r.purchases > 0 ? r.spend_cents / r.purchases : Infinity;
+    const crownQualified = r.purchases >= opts.crownMinPurchases && cpa <= opts.crownMaxCpaCents;
+
+    // (D) Decision deadline — full runway spent without crowning → retire the slot.
+    if (r.spend_cents >= opts.maxTestSpendCents && !crownQualified) return true;
+
+    // HOLD band / converter guard — converting at/below the profit floor: keep running, never trim.
+    if (r.purchases > 0 && cpa <= opts.holdBandMaxCpaCents) return false;
+
+    // (S) Slow-kill — converting but UNPROFITABLE (CPA above the profit floor) past the crown-min spend.
+    if (r.purchases > 0 && cpa > opts.holdBandMaxCpaCents && r.spend_cents >= opts.crownMinSpendCents) return true;
+
+    // (F) Fast-kill (dud). Hard backstop: 0 purchases by the crown-min spend (~$450 = 3× CPA).
+    if (r.purchases === 0 && r.spend_cents >= opts.crownMinSpendCents) return true;
+    if (r.spend_cents < opts.earlyTrimMinSpendCents) return false; // else need the early-trim floor
     const cpm = r.impressions > 0 ? (r.spend_cents / r.impressions) * 1000 : 0;
     // Cost-per-ATC only trusted with a real ATC sample (≥ MIN_ATC_FOR_COST_SIGNAL) — 1 ATC is noise.
     const costPerAtc = r.add_to_cart >= MIN_ATC_FOR_COST_SIGNAL ? r.spend_cents / r.add_to_cart : null;

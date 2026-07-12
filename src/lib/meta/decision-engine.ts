@@ -105,6 +105,13 @@ export interface IterationPolicy {
   trim_max_cost_per_atc_cents: number | null;
   /** ...or if CPM (spend per 1000 impressions) > this (cents) — Meta disfavoring the ad. */
   trim_max_cpm_cents: number | null;
+  /** Crown ALSO requires ≥ this many purchases (anti-noise floor; ~3 is noise, ~8 is signal). CEO 2026-07-12. */
+  crown_min_purchases: number | null;
+  /** HOLD-band ceiling / profit floor (cents, ~LTV/1.5). CPA in (crown_max, this] = HOLD (keep running,
+   *  never trimmed); CPA > this past crown_min_spend = slow-kill. CEO 2026-07-12. */
+  hold_band_max_cpa_cents: number | null;
+  /** Decision deadline (cents): an adset that reaches this spend without crowning is retired. CEO 2026-07-12. */
+  max_test_spend_cents: number | null;
 }
 
 export type AutonomousActionType =
@@ -253,6 +260,11 @@ export async function loadActivePolicy(
       early_trim_min_spend_cents: p.early_trim_min_spend_cents == null ? null : Number(p.early_trim_min_spend_cents),
       trim_max_cost_per_atc_cents: p.trim_max_cost_per_atc_cents == null ? null : Number(p.trim_max_cost_per_atc_cents),
       trim_max_cpm_cents: p.trim_max_cpm_cents == null ? null : Number(p.trim_max_cpm_cents),
+      // Decision-tree knobs (CEO 2026-07-12). Absent column ⇒ null ⇒ the agent applies its documented
+      // defaults (crown_min_purchases 8, hold_band_max_cpa $220, max_test_spend $1,200).
+      crown_min_purchases: p.crown_min_purchases == null ? null : Number(p.crown_min_purchases),
+      hold_band_max_cpa_cents: p.hold_band_max_cpa_cents == null ? null : Number(p.hold_band_max_cpa_cents),
+      max_test_spend_cents: p.max_test_spend_cents == null ? null : Number(p.max_test_spend_cents),
     };
   } catch {
     return null;

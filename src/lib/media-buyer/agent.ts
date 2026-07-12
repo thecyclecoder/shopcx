@@ -790,6 +790,7 @@ export async function runMediaBuyerLoop(
         metaAdAccountId: opts.metaAdAccountId,
         crownMaxCpaCents: policy.crown_max_cpa_cents as number,
         crownMinSpendCents: policy.crown_min_spend_cents as number,
+        crownMinPurchases: policy.crown_min_purchases ?? 8, // anti-noise floor — ~3 purchases is noise
       })
     : await detectWinners(admin, {
         workspaceId: opts.workspaceId,
@@ -811,7 +812,11 @@ export async function runMediaBuyerLoop(
       // ≤$65/ATC & ≤$60 CPM; laggards ≥$100/ATC & ≥$110 CPM), tunable per policy.
       trimMaxCostPerAtcCents: policy.trim_max_cost_per_atc_cents ?? 8000, // $80 cost-per-ATC
       trimMaxCpmCents: policy.trim_max_cpm_cents ?? 10000, // $100 CPM
-      crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000, // converter guard — protect winners-in-progress
+      crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000, // winner path — never deadline-retire a crown
+      holdBandMaxCpaCents: policy.hold_band_max_cpa_cents ?? 22000, // profit floor — HOLD guard + slow-kill line
+      crownMinSpendCents: policy.crown_min_spend_cents ?? 45000, // slow-kill / 0-purchase-backstop floor
+      crownMinPurchases: policy.crown_min_purchases ?? 8, // crown-qualified adsets are never deadline-retired
+      maxTestSpendCents: policy.max_test_spend_cents ?? 120000, // decision deadline — retire if not crowned
     });
   } else {
   const { data: loserRows } = await admin

@@ -32,12 +32,23 @@ purchase-opt, equal ad-set budgets            purchase-opt
 - Test ad set `120252196709210184` — "MB — Test 01", $50/day, purchase-opt, F50-65 clone, automatic (Advantage+) placements, `LOWEST_COST_WITHOUT_CAP`.
 - Scaler = existing `120250561500610184` "Amazing Coffee Grouped Prospecting" (CBO $500/d).
 
-## The numeric ruleset (loop config)
+## The decision tree (CEO Dylan, 2026-07-12 — the media-buyer test-loop verdict bands)
+
+Evaluated each review on the test adset's **cumulative** metrics. Target/crown CAC = **$150**, profit/kill-floor CAC = **$220** (~LTV/1.5), test budget = **$150/day**. All values are configurable `iteration_policies` knobs — [[../libraries/media-buyer-agent]] `detectMetaCpaWinners`/`detectMetaCpaLosers` and [[../libraries/ad-insights-sdk]] `classifyAd` read them; **kill stays fast, only CROWNING is patient.** Deep-research (2026-07-12) refuted the old "$450 / 3-purchase" crown as statistical noise (~3 purchases); consensus is 7+ days AND ~8–10 purchases at/under target.
+
+| Band | Trigger (cumulative) | Action | Knob |
+|---|---|---|---|
+| **Too early** | spend < ~$150 (day 1) | HOLD — no verdict | — |
+| **Fast-kill (dud)** | 0 purchases by **$300** (2× CPA) on bad leading signals; hard backstop 0 purch by **$450** | KILL | `early_trim_min_spend_cents` $300 |
+| **Hold / keep-testing** | converting, **CPA ≤ $220**, not yet crown-qualified (CPA $150–220, OR CPA ≤ $150 but < 8 purchases) | HOLD — never trimmed on a leading signal | `hold_band_max_cpa_cents` $220 |
+| **Crown → scale** | **CPA ≤ $150 AND spend ≥ $450 AND ≥ 8 purchases** | CROWN → duplicate into the scaler | `crown_max_cpa_cents` $150 · `crown_min_spend_cents` $450 · `crown_min_purchases` 8 |
+| **Slow-kill (bleeding)** | converting but **CPA > $220** after ≥ $450 | KILL | `hold_band_max_cpa_cents` |
+| **Decision deadline** | reaches **$1,200** (~8 test-days) WITHOUT crowning | RETIRE — free the $150/day slot | `max_test_spend_cents` $1,200 |
+
+Worked example (the Superfood Tabs `ingredient-breakdown` ad): at $450 / 3 purchases / $143 CPA it is **HOLD, not a crown** — it must earn 8 purchases (~$1,050–1,200, ~8 days) before we pour scale budget in. A converter at $700 / $160 CPA is **HELD** (profitable, under the $220 floor), not killed. Leading indicators (cost-per-ATC, CTR, thumbstop) **KILL fast, never crown** — the crown signal is CPA + purchase volume only.
 
 | Rule | Value | Confidence |
 |---|---|---|
-| **Verdict floor (anti-fluke)** | no decision under **48h AND ~$450 spend** (≈3× our CPA) | practitioner-consensus (3× CPA) |
-| **Winner** | CPA ≤ target (~$150, better = better) over ≥~$450 spend, **≥3 purchases** (reject 1-order flukes), held ≥ a few days | our calibration of the generic gate |
 | **Promote** | **duplicate** the winning creative into the scaler (don't disturb the test set) | debated (dup vs raise-in-place); dup preferred |
 | **Scale (vertical)** | **+20% max every 3-4 days** while ROAS holds (>20% single edit resets learning) | settled + Meta-official |
 | **Scale (horizontal)** | duplicate the winning ad set at **50-70% budget** when a set maxes / CPMs climb | practitioner heuristic |
@@ -60,7 +71,7 @@ Significant edits (reset learning): optimization event, targeting, add/remove cr
 The $450 verdict floor is an **anti-fluke guard for a CONFIDENT call** — it does NOT mean you must burn $450 on an obvious laggard. The two directions are **asymmetric**, and conflating them is the expensive mistake:
 
 - **DEMOTE early (defensible, cheap to be wrong):** cut a laggard *before* the floor once it has spent **≥~20% of the floor (~$90+)** AND its **leading indicator is materially worse than the pack**. Our leading indicator is **cost-per-add-to-cart** — ATC is a recognized early purchase-intent signal (Meta's own diagnostic guidance; lower cost-per-ATC → lower CPA), readable *before* purchases accumulate. Practitioner cut-rules: cost-per-result >~30% above the pack, or CPC >2× pack, at ≥20% of threshold. **2026-07-09 coffee test:** skeptic v3 hit **7 ATC @ ~$15 cost-per-ATC vs 1 ATC @ ~$100** for its two siblings on ~$105 each — a ~7× spread, not a fluke → the two siblings were paused. (Tabs' three angles were all 0-ATC on ~$100 → a *null round*, paused entirely and refilled with fresh creative, not "concentrated onto a non-winner.")
-- **SCALE only when PROVEN (strict, expensive to be wrong):** a leading ATC signal is enough to **kill a loser** but NOT to **crown a winner**. **Never** build a scale ad set (or a >20% budget jump) until the ad clears the FULL floor — **≥$450 / ≥3 purchases at ≤ target CPA**. A leading indicator is not a proven winner; it stays *in the test* (nudge ≤+20% every 3-4 days, learning intact) until it earns the scale. The scale campaign is for graduates only.
+- **SCALE only when PROVEN (strict, expensive to be wrong):** a leading ATC signal is enough to **kill a loser** but NOT to **crown a winner**. **Never** build a scale ad set (or a >20% budget jump) until the ad clears the FULL crown — **CPA ≤ $150 at ≥ $450 spend AND ≥ 8 purchases** (the decision-tree crown; ~3 purchases was refuted as noise 2026-07-12). A leading indicator is not a proven winner; it stays *in the test* (HOLD band) until it earns the scale. The scale campaign is for graduates only.
 
 **Why asymmetric:** a false negative (killing a laggard that might've turned around) costs almost nothing — the bench is always refilling. A false positive (scaling a "winner" that regresses after $50) burns real budget. So **cut fast on leading signals, crown slowly on proven ones.**
 

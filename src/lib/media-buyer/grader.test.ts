@@ -49,6 +49,9 @@ function policy(overrides: Partial<IterationPolicy> = {}): IterationPolicy {
     early_trim_min_spend_cents: null,
     trim_max_cost_per_atc_cents: null,
     trim_max_cpm_cents: null,
+    crown_min_purchases: null,
+    hold_band_max_cpa_cents: null,
+    max_test_spend_cents: null,
     ...overrides,
   };
 }
