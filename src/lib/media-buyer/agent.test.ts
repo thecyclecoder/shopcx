@@ -71,6 +71,7 @@ function cohort(overrides: Partial<MediaBuyerTestCohort> = {}): MediaBuyerTestCo
     id: "cohort-1",
     workspaceId: WS,
     metaAdAccountId: null,
+    productId: null,
     testMetaAdsetId: "6100000000001",
     dailyTestCeilingCents: 50_000,
     isActive: true,

@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import {
   evaluateMediaBuyerTestPublish,
   escalateMediaBuyerTestPublishRefusal,
+  getEffectiveMediaBuyerTestCohort,
   MEDIA_BUYER_TEST_ORIGIN,
 } from "./publish-gate";
 
@@ -324,4 +325,102 @@ test("getEffectiveMediaBuyerTestCohort — per-account row beats workspace-wide 
     projectedDailyCents: CEILING_CENTS,
   });
   assert.equal(wide.allowed, true);
+});
+
+// ── Product dimension (media-buyer-product-scoped-test-rail Phase 1) ────────
+
+test("getEffectiveMediaBuyerTestCohort — two active cohorts in one account under different products both resolve; missing-product falls back to the null-product account default", async () => {
+  // Two products share ACCT — Amazing Coffee + Creamer today, each with its own
+  // adset + ceiling — and a null-product account default plays the role of the
+  // fallback for any product that doesn't have its own row (e.g. Superfood Tabs
+  // when they're wired into a shared account, or a not-yet-configured product).
+  const PRODUCT_A = "prod-A";
+  const PRODUCT_B = "prod-B";
+  const PRODUCT_C = "prod-C-missing"; // no row for this product
+  const ADSET_A = "6100000000A";
+  const ADSET_B = "6100000000B";
+  const ADSET_DEFAULT = "6100000000D";
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      cohortRow({
+        id: "acct-a-product-a",
+        meta_ad_account_id: ACCT,
+        product_id: PRODUCT_A,
+        test_meta_adset_id: ADSET_A,
+      }),
+      cohortRow({
+        id: "acct-a-product-b",
+        meta_ad_account_id: ACCT,
+        product_id: PRODUCT_B,
+        test_meta_adset_id: ADSET_B,
+      }),
+      cohortRow({
+        id: "acct-a-null-product-default",
+        meta_ad_account_id: ACCT,
+        product_id: null,
+        test_meta_adset_id: ADSET_DEFAULT,
+      }),
+    ],
+  });
+
+  // Both product-specific rows are active + resolvable (the new unique index
+  // permits one active row per (workspace, account, product)) — they never
+  // collide with each other.
+  const forA = await getEffectiveMediaBuyerTestCohort(admin, WS, {
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_A,
+  });
+  assert.ok(forA, "expected an active cohort for (ACCT, PRODUCT_A)");
+  assert.equal(forA!.id, "acct-a-product-a");
+  assert.equal(forA!.productId, PRODUCT_A);
+  assert.equal(forA!.testMetaAdsetId, ADSET_A);
+
+  const forB = await getEffectiveMediaBuyerTestCohort(admin, WS, {
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_B,
+  });
+  assert.ok(forB, "expected an active cohort for (ACCT, PRODUCT_B)");
+  assert.equal(forB!.id, "acct-a-product-b");
+  assert.equal(forB!.productId, PRODUCT_B);
+  assert.equal(forB!.testMetaAdsetId, ADSET_B);
+
+  // A product with NO row for this account resolves to the null-product account
+  // default — never to another product's row (anti-cross-contamination + the
+  // Superfood-Tabs-preserved-shape claim in the spec).
+  const forC = await getEffectiveMediaBuyerTestCohort(admin, WS, {
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_C,
+  });
+  assert.ok(forC, "expected the null-product account default to catch a missing product");
+  assert.equal(forC!.id, "acct-a-null-product-default");
+  assert.equal(forC!.productId, null);
+  assert.equal(forC!.testMetaAdsetId, ADSET_DEFAULT);
+});
+
+test("getEffectiveMediaBuyerTestCohort — omitting productId (or passing null) preserves the pre-product-scoped resolution (null-product account default)", async () => {
+  // Superfood Tabs today: no product dimension on the caller. The resolver must
+  // return the null-product account default so nothing regresses.
+  const PRODUCT_A = "prod-A";
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      cohortRow({
+        id: "acct-a-product-a",
+        meta_ad_account_id: ACCT,
+        product_id: PRODUCT_A,
+        test_meta_adset_id: "adset-A",
+      }),
+      cohortRow({
+        id: "acct-a-null-product-default",
+        meta_ad_account_id: ACCT,
+        product_id: null,
+        test_meta_adset_id: "adset-default",
+      }),
+    ],
+  });
+  const noProduct = await getEffectiveMediaBuyerTestCohort(admin, WS, {
+    metaAdAccountId: ACCT,
+  });
+  assert.ok(noProduct);
+  assert.equal(noProduct!.id, "acct-a-null-product-default");
+  assert.equal(noProduct!.productId, null);
 });
