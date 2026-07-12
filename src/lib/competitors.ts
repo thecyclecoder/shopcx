@@ -21,6 +21,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
+import { throwForAnthropicNetworkError, throwForAnthropicStatus } from "@/lib/anthropic-retry";
 import type { Seed } from "@/lib/adlibrary";
 
 export type CompetitorSource = "llm" | "category_sweep" | "manual" | "whitelisted";
@@ -159,22 +160,32 @@ async function runDiscovery(
   let inTok = 0;
   let outTok = 0;
   for (let i = 0; i < 6; i++) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: OPUS_MODEL,
-        max_tokens: 4000,
-        system: DISCOVERY_SYSTEM,
-        tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }],
-        messages,
-      }),
-    });
-    if (!res.ok) throw new Error(`anthropic_${res.status}: ${(await res.text()).slice(0, 200)}`);
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPUS_MODEL,
+          max_tokens: 4000,
+          system: DISCOVERY_SYSTEM,
+          tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }],
+          messages,
+        }),
+      });
+    } catch (err) {
+      // Network blip (undici TypeError: fetch failed / ECONNRESET / ETIMEDOUT / …)
+      // → AnthropicDependencyError so Inngest retries with OUTAGE_SPANNING_RETRIES backoff.
+      throwForAnthropicNetworkError(err, "competitor-scout-discovery");
+    }
+    if (!res.ok) {
+      // Retryable status (429/5xx/529) → AnthropicDependencyError; terminal (4xx) → NonRetriableError.
+      throwForAnthropicStatus(res.status, "competitor-scout-discovery");
+    }
     const json = (await res.json()) as AnthropicResponse;
     inTok += json.usage?.input_tokens ?? 0;
     outTok += json.usage?.output_tokens ?? 0;

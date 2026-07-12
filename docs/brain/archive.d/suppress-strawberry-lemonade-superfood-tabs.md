@@ -1,0 +1,1 @@
+- **Suppress Strawberry Lemonade from portal swaps + storefront theme** · verified 2026-07-11 · → [[../lifecycles/customer-portal]]

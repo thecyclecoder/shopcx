@@ -33,6 +33,14 @@ _No internal callers found via static scan._
 - **Internal subs ignore the Appstle `body`.** They take the internal branch
   (decompose into `subSwapVariant`/`subAddItem`/… on `subscriptions.items`);
   `body.oldLineId`/`body.oldVariants` are only used for the Appstle fetch.
+- **Suppressed-variant server gate.** Right after unpacking `newVariants` /
+  `newOneTimeVariants`, the handler calls
+  [[portal__mutation-guard]] `assertNewVariantsSelectable` and returns
+  `variant_not_selectable` (400) if any target id sits in
+  `workspaces.portal_config.suppressed_variant_ids`. Closes the crafted-request
+  hole around the UI catalog filter — hiding-in-the-UI ([[portal__handlers__bootstrap]])
+  is not the only bar. Only NEW selection is blocked; existing sub lines on a
+  suppressed variant continue billing on renewal.
 
 ---
 

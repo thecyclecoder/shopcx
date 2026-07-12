@@ -1,0 +1,1 @@
+- **Vera must not treat a missing-command / harness error as a code regression** · verified 2026-07-11 · → [[lifecycles/roadmap-build-console]]

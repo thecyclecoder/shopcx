@@ -21,6 +21,10 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, appendFixPhases } from "@/lib/specs-table";
 import { recordDirectorActivity } from "@/lib/director-activity";
+// vera-harness-error-is-not-a-code-regression Phase 2 — belt-and-suspenders on the pre-merge fix
+// authoring path: filter HARNESS/COMMAND-signature failing checks out of the set that appends a Fix
+// phase, so a slipped harness `fail` never wedges the origin's build chain with an unbuildable phase.
+import { isHarnessCommandFailure } from "@/lib/spec-test-harness-classifier";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -63,7 +67,15 @@ export type SpawnPreMergeFixResult =
 export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInput): Promise<SpawnPreMergeFixResult> {
   const { workspaceId, originSlug, branch, failing } = input;
   try {
-    const cleanFailing = (failing || []).filter((f) => f && f.check_key && f.text);
+    // vera-harness-error-is-not-a-code-regression Phase 2 — strip HARNESS/COMMAND-signature checks
+    // (missing npm script, command-not-found, ENOENT, missing binary) BEFORE any authoring. A harness
+    // fail never ran an assertion, so it isn't a code regression; appending a Fix phase for it wedges
+    // the origin's build chain (Bo can't build a nonexistent shell command). Phase 1's normalizer
+    // downgrades these to `needs_human` before they reach this filter, but a slipped fail (legacy row,
+    // race) still stops here — only genuine code fails can author a Bo fix phase.
+    const cleanFailing = (failing || [])
+      .filter((f) => f && f.check_key && f.text)
+      .filter((f) => !isHarnessCommandFailure(f.evidence ?? null));
     if (cleanFailing.length === 0) {
       return { spawned: false, escalated: false, reason: "no evidence-backed failing checks — nothing to fix" };
     }

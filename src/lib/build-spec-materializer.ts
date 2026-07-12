@@ -103,6 +103,24 @@ export function renderSpecRow(
   }
   if (meta.length || row.blocked_by.length) parts.push("");
 
+  // render-spec-row-emits-stored-why-what-intent Phase 1 — surface the plain-language intent the DB already
+  // stores (specs.why / specs.what) so Vale + humans reading the materialized markdown SEE it. A fully-
+  // authored spec whose intent lives only in the columns was being bounced needs_fix for 'missing intent';
+  // this emits the lines directly above the summary so the review agent + humans see the structured intent.
+  //
+  // Phase 2 — NO DOUBLE EMIT. Some already-shipped specs baked `**Why:**`/`**What:**` into the summary body
+  // as a stopgap (e.g. marco-logistics-director-seat, director-chat-in-leash-execution). If the summary
+  // already contains a leading `**Why:**` line, skip the column-sourced spec-level Why (same for What) so
+  // the render carries exactly one of each — the inline stopgap wins over the column until the author
+  // migrates the intent up to the columns.
+  const summaryHasLeadingWhy = !!row.summary && /^\*\*Why:\*\*/m.test(row.summary);
+  const summaryHasLeadingWhat = !!row.summary && /^\*\*What:\*\*/m.test(row.summary);
+  const emitSpecWhy = !!(row.why && row.why.trim()) && !summaryHasLeadingWhy;
+  const emitSpecWhat = !!(row.what && row.what.trim()) && !summaryHasLeadingWhat;
+  if (emitSpecWhy) parts.push(`**Why:** ${row.why!.trim()}`);
+  if (emitSpecWhat) parts.push(`**What:** ${row.what!.trim()}`);
+  if (emitSpecWhy || emitSpecWhat) parts.push("");
+
   if (row.summary && row.summary.trim()) {
     parts.push(row.summary.trim(), "");
   }
@@ -116,6 +134,14 @@ export function renderSpecRow(
     // stored title already leads with "Phase" (don't double the prefix).
     const heading = /^phase\b/i.test(title) ? title : `Phase ${i + 1} — ${title}`;
     parts.push(`## ${heading}`);
+    // render-spec-row-emits-stored-why-what-intent Phase 1 — per-phase intent from spec_phases.why / .what,
+    // emitted BEFORE the body so the review agent sees the structured intent alongside the technical detail.
+    // Phase 2 — same no-double-emit rule per phase: if the phase body already leads with `**Why:**` (or
+    // `**What:**`), skip the column-sourced line for that phase so we render exactly one of each.
+    const bodyHasLeadingWhy = !!phase.body && /^\*\*Why:\*\*/m.test(phase.body);
+    const bodyHasLeadingWhat = !!phase.body && /^\*\*What:\*\*/m.test(phase.body);
+    if (phase.why && phase.why.trim() && !bodyHasLeadingWhy) parts.push(`**Why:** ${phase.why.trim()}`);
+    if (phase.what && phase.what.trim() && !bodyHasLeadingWhat) parts.push(`**What:** ${phase.what.trim()}`);
     if (phase.body && phase.body.trim()) parts.push(phase.body.trim());
     parts.push("");
     // Prefer the typed checks (the DB object); fall back to the legacy `verification` column.

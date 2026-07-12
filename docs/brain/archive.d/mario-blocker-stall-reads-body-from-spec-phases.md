@@ -1,0 +1,1 @@
+- **Mario blocker-stall detection reads spec body from spec_phases, not specs** · verified 2026-07-11 · → [[../libraries/mario]]

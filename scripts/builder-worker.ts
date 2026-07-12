@@ -29,6 +29,25 @@ import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal 
 // Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
 // AgentJobsUpdateError instead of silently proceeding. See src/lib/agents/agent-jobs-update-retry.ts.
 import { writeAgentJobsUpdateWithRetry } from "../src/lib/agents/agent-jobs-update-retry";
+// dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the least-privilege env stripper the
+// `sandbox: "qc"` branch calls. Kept in src/lib so scripts/ad-creative-qc-guardrails.test.ts can
+// import + assert the exact key set.
+import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
+// planner-authoring-survives-large-multi-spec-output Phase 1 — transcript fallback for runPlanJob:
+// when a large multi-spec planner envelope's PRIMARY parse drops specs, re-scan the session's
+// on-disk transcript jsonl for the last assistant message that carries the full envelope. Job
+// d5999907 was recovered by hand this way; this makes it automatic.
+import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
+// planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
+// planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
+// per batch, so no single result approaches the size at which the ingestion drop kicked in.
+// Each authored spec is committed to public.specs immediately, so a batch failure never rolls
+// back prior batches.
+import { chunkForAuthoring, PLANNER_AUTHOR_BATCH_SIZE } from "./planner-chunk-authoring";
+// vera-harness-error-is-not-a-code-regression Phase 1 — worker-side belt-and-suspenders reclassifier
+// so a spec-test check with a HARNESS/COMMAND signature (missing npm script, command-not-found,
+// ENOENT) can never survive as a `verdict='fail'` and spawn an unbuildable Bo fix phase.
+import { reclassifyHarnessFails } from "../src/lib/spec-test-harness-classifier";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -387,6 +406,12 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
 const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+// dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
+// `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
+// a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
+// burns an attempt) instead of stalling the ad-creative lane on a stuck QC.
+const AD_CREATIVE_QC_TIMEOUT_MS = 6 * 60 * 1000;   // 6 min hard cap
+const AD_CREATIVE_QC_IDLE_MS = 90 * 1000;          // 90s no-output ⇒ hung ⇒ kill
 // media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
 // grading pass. Deterministic-Node; scores media-buyer director_activity rows
 // against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
@@ -1925,7 +1950,7 @@ interface RunBoxSessionOpts {
   //   an EXPLICIT INTENT MARKER — grep-able, and Phase-3 review can enforce that ONLY
   //   god-mode routes through it. The trust boundary is NOT the env stripping (there is
   //   none vs max), it's the hard per-tool permission gate below (see `permissionGate`).
-  sandbox?: "build" | "max" | "godmode";
+  sandbox?: "build" | "max" | "godmode" | "qc";
   timeout: number;
   idleTimeout?: number;
   // God-mode Phase 2: wire a PreToolUse hook via inline --settings JSON and DO NOT pass
@@ -2038,6 +2063,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   //     sandbox + the pr-resolve worktree (the LLM must not be able to push, mutate prod DB, etc).
   //   "max"  — keep the env, drop ONLY ANTHROPIC_API_KEY so all LLM is Max-billed. Used by every
   //     non-build runner (director / improve / triage / etc — they need read-only DB/crypto creds).
+  //   "qc"   — the LEAST-PRIVILEGE sandbox (dahlia-creative-qc-via-box-session Phase 3 / Fix 1).
+  //     Copies ONLY the QC_CHILD_ALLOWED_ENV_KEYS set (PATH/HOME/LANG/… + CLAUDE_CONFIG_DIR)
+  //     from process.env; every SUPABASE_/GITHUB_/META_/BRAINTREE_/ANTHROPIC_/OPENAI_ / any
+  //     SECRET_RE var is dropped. Used by the ad-creative-qc lane where the child only needs to
+  //     Read one temp JPEG. Pairs with a mandatory PreToolUse gate (opts.permissionGate) that
+  //     denies every non-safe tool call.
   const env: NodeJS.ProcessEnv = {};
   const sb = opts.sandbox ?? "max";
   if (sb === "build") {
@@ -2055,6 +2086,12 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     // docs/brain/lifecycles/god-mode.md § permission gate.
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
+  } else if (sb === "qc") {
+    // Least-privilege QC sandbox. `buildQcChildEnv` is the sole authority on which env keys
+    // reach the QC child (test in scripts/ad-creative-qc-guardrails.test.ts asserts no secrets
+    // are copied). Anything the QC actually needs comes from opts.extraEnv layered on below
+    // (e.g. AD_CREATIVE_QC_ALLOWED_IMAGE) — the sandbox is fail-safe by omission.
+    Object.assign(env, buildQcChildEnv(process.env));
   } else {
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
@@ -8791,17 +8828,15 @@ async function runPlanJob(job: Job) {
       }
     }
 
-    const specList = approved
-      .map((a, i) => {
-        const s = a.spec!;
-        const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
-        const blockedLine = blockers.length ? `\n   blocked_by: ${blockers.join(", ")}` : "";
-        return `${i + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}${blockedLine}`;
-      })
-      .join("\n");
     const declinedNote = declined.length
       ? `\n\nDECLINED branches: ${declined.map((a) => a.spec!.slug).join(", ")} — do NOT re-propose them.`
       : "";
+    const renderSpecListLine = (a: (typeof approved)[number], globalIndex: number): string => {
+      const s = a.spec!;
+      const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+      const blockedLine = blockers.length ? `\n   blocked_by: ${blockers.join(", ")}` : "";
+      return `${globalIndex + 1}. slug=${s.slug} · title="${s.title}" · owner=${s.owner} · parent="${s.parent}"${s.milestone ? ` · milestone=${s.milestone}` : ""}\n   intent: ${s.intent}${s.gap ? `\n   gap: ${s.gap}` : ""}${blockedLine}`;
+    };
 
     // DB-DRIVEN AUTHORING (planner-authors-specs-to-db): the planner returns the fleshed-out spec BODIES as
     // STRUCTURED JSON in its final message — NOT files on disk. There is no `docs/brain/specs/*.md` write and
@@ -8809,42 +8844,14 @@ async function runPlanJob(job: Job) {
     // author-spec SDK (`authorSpecRowStructured`) from the JSON the planner ACTUALLY produces. This removes the
     // prompt↔authoring mismatch that authored 0 specs (the old prompt asked for files the plan-goal session,
     // bound by its "never write specs / never run git" invariant, never wrote, so the glob found nothing).
-    const prompt = [
-      `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
-      `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
-      `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
-      `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
-      `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
-      `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
-      ``,
-      `Approved specs (author EXACTLY these slugs, no more, no fewer):\n${specList}`,
-      ``,
-      `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
-    ].join("\n");
-
-    const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, prompt), sessionId, wt, configDir, job.id);
-    await meterAgentJob(job, configDir, usage, model);
-    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
-    if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
-      await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
-      return;
-    }
-    const parsed = parseStatus(resultText);
-    console.log(`${tag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
-
-    if (parsed?.status === "needs_input") {
-      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
-      return;
-    }
-    if (isError && !parsed) {
-      await update(job.id, { status: "failed", error: "plan authoring errored" });
-      return;
-    }
-
-    // Author each approved spec STRAIGHT to public.specs + public.spec_phases from the structured JSON the
-    // planner returned — DB-only (no .md on disk, no git glob). The planner's `specs[]` is matched to the
-    // approved actions by slug; an approved slug the planner didn't return is a failure (we never queue a
-    // build for an unauthored spec). A returned spec for a non-approved slug is ignored.
+    //
+    // planner-authoring-survives-large-multi-spec-output Phase 2 — BOUNDED / CHUNKED AUTHORING.
+    // Split the approved specs into batches of at most PLANNER_AUTHOR_BATCH_SIZE per turn so no single
+    // planner result approaches the size at which Phase 1's ingestion drop kicked in (the 62KB, 6-spec
+    // envelope). Each spec is committed to public.specs the moment authorSpecRowStructured returns, so
+    // a batch failure on chunk k+1 leaves the specs from chunks 1..k persisted in review — never rolled
+    // back to zero. Session chains across batches: batch N+1 resumes batch N's session so the planner
+    // keeps its read brain context.
     type PlannerSpecOut = {
       slug?: string;
       summary?: string;
@@ -8854,110 +8861,247 @@ async function runPlanJob(job: Job) {
       blocked_by?: unknown;
       phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string }>;
     };
-    const returnedSpecs: PlannerSpecOut[] = (() => {
-      const obj = extractJson<{ specs?: unknown }>(resultText);
-      return Array.isArray(obj?.specs) ? (obj!.specs as PlannerSpecOut[]) : [];
-    })();
-    const returnedBySlug = new Map<string, PlannerSpecOut>();
-    for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
-
     const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+    const batches = chunkForAuthoring(approved, PLANNER_AUTHOR_BATCH_SIZE);
+    console.log(`${tag} planner authoring: ${approved.length} approved spec(s) → ${batches.length} batch(es) of ≤${PLANNER_AUTHOR_BATCH_SIZE}`);
+
+    // Accumulators shared across batches — every author outcome (success + typed failure) rolls up here
+    // so the fail-report and final gates behave identically to the pre-chunking implementation.
     let authored = 0;
     const verificationFailures: string[] = [];
     const emptyBodyFailures: string[] = [];
     const intentFailures: string[] = [];
     const notReturned: string[] = [];
     const milestoneUnresolved: string[] = [];
-    for (const a of approved) {
-      const s = a.spec!;
-      const out = returnedBySlug.get(s.slug);
-      if (!out || !Array.isArray(out.phases) || !out.phases.length) {
-        notReturned.push(s.slug);
+    const transcriptRecovered = new Set<string>();
+    const batchFailures: string[] = [];
+    const perBatchResultBytes: number[] = [];
+    const approvedSlugSet = new Set(approved.map((a) => a.spec!.slug));
+
+    let currentSessionId: string | null = sessionId;
+    let needsInputEmitted = false;
+    let indexOffset = 0;
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const batchTag = `${tag} [batch ${b + 1}/${batches.length}]`;
+      const batchSpecList = batch.map((a, i) => renderSpecListLine(a, indexOffset + i)).join("\n");
+      indexOffset += batch.length;
+      const batchSlugs = batch.map((a) => a.spec!.slug);
+      const batchApprovedSet = new Set(batchSlugs);
+
+      const batchPrompt = [
+        `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
+        `Author BATCH ${b + 1} of ${batches.length} — the planner-authoring flow is bounded (max ${PLANNER_AUTHOR_BATCH_SIZE} specs per turn) so no single result grows past the size that dropped a prior 6-spec envelope. Author EXACTLY the ${batch.length} slug(s) listed in this batch; the remaining approved slugs are handled in other batches.`,
+        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+        `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
+        `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
+        `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
+        `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
+        ``,
+        `Approved specs for THIS batch (author EXACTLY these ${batch.length} slug(s), no more, no fewer):\n${batchSpecList}`,
+        ``,
+        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+      ].join("\n");
+
+      const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, batchPrompt), currentSessionId, wt, configDir, job.id);
+      await meterAgentJob(job, configDir, usage, model);
+      if (session) {
+        currentSessionId = session;
+        await update(job.id, { claude_session_id: session, claude_session_config_dir: configDir });
+      }
+      if (isError && isUsageCapError(`${resultText}\n${raw}`)) {
+        await handlePoolUsageCap(job.id, tag, configDir, !!session, raw.slice(-2000));
+        return;
+      }
+      const parsed = parseStatus(resultText);
+      perBatchResultBytes.push(resultText.length);
+      console.log(`${batchTag} authoring finished — status: ${parsed?.status ?? "(none)"} isError=${isError} resultBytes=${resultText.length}`);
+
+      if (parsed?.status === "needs_input") {
+        // A needs_input in any batch propagates to the job — the human answers, the job re-runs.
+        // Already-authored specs from prior batches STAY landed (committed batch-by-batch above).
+        await update(job.id, { status: "needs_input", questions: parsed.questions ?? [] });
+        needsInputEmitted = true;
+        break;
+      }
+      if (isError && !parsed) {
+        // Plain error in a batch: record it + mark this batch's slugs as not-returned so the
+        // downstream fail-report names them, and continue to the next batch. Previously-authored
+        // specs stay landed — the mandate ("failure on spec k+1 leaves specs 1..k landed").
+        batchFailures.push(`batch ${b + 1}: ${resultText.slice(-500)}`);
+        for (const slug of batchSlugs) notReturned.push(slug);
         continue;
       }
-      // Resolve the milestone (prefer the planner's returned handle, fall back to the approved action's).
-      const milestoneId = resolveMilestoneId(out.milestone) ?? resolveMilestoneId(s.milestone);
-      // RECURRENCE FIX: a spec that NAMES a milestone which doesn't resolve fails LOUDLY — regardless of how
-      // many milestones the goal has. The old `goalForMilestones?.milestones.length &&` precondition meant a
-      // ZERO-milestone goal (proposed with a prose arc, not a `## Decomposition` block) silently authored every
-      // spec with milestone_id=NULL → unlinked → 0% rollup forever (the growth-director bug). The milestone-
-      // materialization step above now creates the referenced milestones from the approved decomposition; if a
-      // named milestone STILL doesn't resolve, refuse to author an orphaned spec rather than swallow it.
-      if ((out.milestone || s.milestone) && !milestoneId) {
-        milestoneUnresolved.push(`${s.slug} (milestone="${out.milestone || s.milestone}")`);
-        continue;
-      }
-      // Blocked-by: approved blockers only (drop declined siblings + self-refs) — the same rule as the
-      // proposal stage, applied to whichever list is authoritative (the approved action carries it).
-      const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
-      // pm-structured-intent-and-refs Phase 1 — extract per-phase intent (why/what) from the planner
-      // JSON. Fall back to the spec-level intent (`out.why`/`out.what`) so a planner that only writes
-      // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
-      const fallbackWhy = String(out.why || "").trim();
-      const fallbackWhat = String(out.what || "").trim();
-      const phases = out.phases.map((p) => ({
-        title: String(p.title || "").trim() || "Phase",
-        body: String(p.body || "").trim(),
-        verification: String(p.verification || "").trim(),
-        why: String(p.why || "").trim() || fallbackWhy,
-        what: String(p.what || "").trim() || fallbackWhat,
-      }));
-      try {
-        // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
-        // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
-        // + binds milestone_id, all via the SDK. Authoring happens BEFORE any build is queued.
-        await markSpecCardForReview(job.workspace_id, s.slug, "planned", { actor: "planner", reason: `planner authored for goal ${goalSlug}` }).catch((e) => {
-          console.warn(`${tag} markSpecCardForReview ${s.slug} failed: ${e instanceof Error ? e.message : e}`);
-        });
-        // pm-structured-intent-and-refs Phase 1 — build the spec-level intent. The planner should emit
-        // both explicitly; fall back to the approved action's `intent` (a one-liner) + a synthesized
-        // "what" from the title if the planner missed either field. If the planner supplied nothing
-        // useful at all the chokepoint gate throws MissingIntentError below (caught + reported).
-        const specWhy = (String(out.why || "").trim() || (s.intent || "").trim()) || "";
-        const specWhat = String(out.what || "").trim();
-        await authorSpecRowStructured(
-          job.workspace_id,
-          s.slug,
-          {
-            title: s.title,
-            summary: out.summary ? String(out.summary).trim() : s.intent || null,
-            owner: s.owner,
-            parent: s.parent,
-            blocked_by: blockers,
-            why: specWhy,
-            what: specWhat,
-            phases,
-          },
-          "planned",
-          { intendedStatusSetBy: "planner", milestoneId },
-        );
-        authored++;
-      } catch (e) {
-        // A spec with no per-phase Verification is untestable, one with an empty-body phase is un-buildable,
-        // and one with no plain-language intent is unreadable — all three fail loudly instead of silently
-        // dropping the spec (and then queueing a build for a spec that never landed or that silently no-ops).
-        if (e instanceof MissingVerificationError) {
-          verificationFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
-        } else if (e instanceof EmptyPhaseBodyError) {
-          emptyBodyFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
-        } else if (e instanceof MissingIntentError) {
-          intentFailures.push(e.message);
-          console.error(`${tag} author ${s.slug}: ${e.message}`);
+
+      // Primary parse of THIS batch's result. resultText is bounded (typically ~10-20KB per batch);
+      // the byte size is logged so an operator can confirm the "no single planner result exceeds
+      // the bounded size" invariant from the spec's Phase 2 verification.
+      const returnedSpecs: PlannerSpecOut[] = (() => {
+        const obj = extractJson<{ specs?: unknown }>(resultText);
+        return Array.isArray(obj?.specs) ? (obj!.specs as PlannerSpecOut[]) : [];
+      })();
+      console.log(`${batchTag} planner primary parse: ${returnedSpecs.length} spec(s) from ${resultText.length}B resultText (batch=${batch.length})`);
+      const returnedBySlug = new Map<string, PlannerSpecOut>();
+      for (const sp of returnedSpecs) if (typeof sp.slug === "string") returnedBySlug.set(sp.slug, sp);
+
+      // Phase 1 transcript fallback — still applies per-batch. When the primary parse of a batch
+      // dropped one of the batch's approved slugs, re-scan the session's on-disk transcript for
+      // the last assistant message that carries the missing slug and merge it. Scoped to this
+      // batch's slugs so recovery only fills THIS batch's gaps.
+      const missingInBatchBefore = new Set<string>();
+      for (const a of batch) if (!returnedBySlug.has(a.spec!.slug)) missingInBatchBefore.add(a.spec!.slug);
+      if (missingInBatchBefore.size > 0 && session) {
+        let recovery: { specs: RecoveredSpec[]; transcriptPath: string | null };
+        try {
+          recovery = recoverSpecsForSession(session);
+        } catch (e) {
+          console.warn(`${batchTag} transcript fallback threw: ${e instanceof Error ? e.message : e}`);
+          recovery = { specs: [], transcriptPath: null };
+        }
+        if (!recovery.transcriptPath) {
+          console.warn(`${batchTag} transcript fallback: no jsonl for session ${session} — primary parse stands`);
+        } else if (!recovery.specs.length) {
+          console.warn(`${batchTag} transcript fallback: transcript at ${recovery.transcriptPath} carried no assistant specs[] envelope`);
         } else {
-          console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
+          let merged = 0;
+          for (const sp of recovery.specs) {
+            const slug = typeof sp.slug === "string" ? sp.slug : null;
+            if (!slug) continue;
+            if (!batchApprovedSet.has(slug)) continue; // recovery only fills THIS batch's gaps
+            if (!approvedSlugSet.has(slug)) continue;
+            if (returnedBySlug.has(slug)) continue;
+            returnedBySlug.set(slug, sp as PlannerSpecOut);
+            transcriptRecovered.add(slug);
+            merged++;
+          }
+          console.log(`${batchTag} transcript fallback: recovered ${merged} of ${missingInBatchBefore.size} missed spec(s) from ${recovery.transcriptPath}`);
+        }
+      }
+
+      // Author each of THIS batch's specs. Committed one-by-one to public.specs — a mid-batch
+      // authoring error records the typed failure and moves on to the next spec (identical
+      // behavior to the pre-chunking loop, just bounded to K specs at a time).
+      for (const a of batch) {
+        const s = a.spec!;
+        const out = returnedBySlug.get(s.slug);
+        if (!out || !Array.isArray(out.phases) || !out.phases.length) {
+          notReturned.push(s.slug);
+          continue;
+        }
+        // Resolve the milestone (prefer the planner's returned handle, fall back to the approved action's).
+        const milestoneId = resolveMilestoneId(out.milestone) ?? resolveMilestoneId(s.milestone);
+        // RECURRENCE FIX: a spec that NAMES a milestone which doesn't resolve fails LOUDLY — regardless of how
+        // many milestones the goal has. The old `goalForMilestones?.milestones.length &&` precondition meant a
+        // ZERO-milestone goal (proposed with a prose arc, not a `## Decomposition` block) silently authored every
+        // spec with milestone_id=NULL → unlinked → 0% rollup forever (the growth-director bug). The milestone-
+        // materialization step above now creates the referenced milestones from the approved decomposition; if a
+        // named milestone STILL doesn't resolve, refuse to author an orphaned spec rather than swallow it.
+        if ((out.milestone || s.milestone) && !milestoneId) {
+          milestoneUnresolved.push(`${s.slug} (milestone="${out.milestone || s.milestone}")`);
+          continue;
+        }
+        // Blocked-by: approved blockers only (drop declined siblings + self-refs) — the same rule as the
+        // proposal stage, applied to whichever list is authoritative (the approved action carries it).
+        const blockers = (s.blocked_by ?? []).filter((b) => b !== s.slug && !declinedSlugs.has(b));
+        // pm-structured-intent-and-refs Phase 1 — extract per-phase intent (why/what) from the planner
+        // JSON. Fall back to the spec-level intent (`out.why`/`out.what`) so a planner that only writes
+        // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
+        const fallbackWhy = String(out.why || "").trim();
+        const fallbackWhat = String(out.what || "").trim();
+        const phases = out.phases.map((p) => ({
+          title: String(p.title || "").trim() || "Phase",
+          body: String(p.body || "").trim(),
+          verification: String(p.verification || "").trim(),
+          why: String(p.why || "").trim() || fallbackWhy,
+          what: String(p.what || "").trim() || fallbackWhat,
+        }));
+        try {
+          // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
+          // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
+          // + binds milestone_id, all via the SDK. Authoring happens BEFORE any build is queued.
+          await markSpecCardForReview(job.workspace_id, s.slug, "planned", { actor: "planner", reason: `planner authored for goal ${goalSlug}` }).catch((e) => {
+            console.warn(`${tag} markSpecCardForReview ${s.slug} failed: ${e instanceof Error ? e.message : e}`);
+          });
+          // pm-structured-intent-and-refs Phase 1 — build the spec-level intent. The planner should emit
+          // both explicitly; fall back to the approved action's `intent` (a one-liner) + a synthesized
+          // "what" from the title if the planner missed either field. If the planner supplied nothing
+          // useful at all the chokepoint gate throws MissingIntentError below (caught + reported).
+          const specWhy = (String(out.why || "").trim() || (s.intent || "").trim()) || "";
+          const specWhat = String(out.what || "").trim();
+          await authorSpecRowStructured(
+            job.workspace_id,
+            s.slug,
+            {
+              title: s.title,
+              summary: out.summary ? String(out.summary).trim() : s.intent || null,
+              owner: s.owner,
+              parent: s.parent,
+              blocked_by: blockers,
+              why: specWhy,
+              what: specWhat,
+              phases,
+            },
+            "planned",
+            { intendedStatusSetBy: "planner", milestoneId },
+          );
+          authored++;
+        } catch (e) {
+          // A spec with no per-phase Verification is untestable, one with an empty-body phase is un-buildable,
+          // and one with no plain-language intent is unreadable — all three fail loudly instead of silently
+          // dropping the spec (and then queueing a build for a spec that never landed or that silently no-ops).
+          if (e instanceof MissingVerificationError) {
+            verificationFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else if (e instanceof EmptyPhaseBodyError) {
+            emptyBodyFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else if (e instanceof MissingIntentError) {
+            intentFailures.push(e.message);
+            console.error(`${tag} author ${s.slug}: ${e.message}`);
+          } else {
+            console.error(`${tag} author ${s.slug}: ${e instanceof Error ? e.message : e}`);
+          }
         }
       }
     }
-    if (verificationFailures.length || emptyBodyFailures.length || intentFailures.length || notReturned.length || milestoneUnresolved.length) {
+
+    // If any batch emitted needs_input above, we returned into the DB status; skip the rest.
+    if (needsInputEmitted) return;
+
+    if (perBatchResultBytes.length) {
+      const maxBytes = perBatchResultBytes.reduce((m, n) => (n > m ? n : m), 0);
+      console.log(`${tag} planner authoring: bounded-size check — max per-batch resultText was ${maxBytes}B across ${perBatchResultBytes.length} batch(es), authored=${authored} of ${approved.length}`);
+    }
+
+    if (batchFailures.length || verificationFailures.length || emptyBodyFailures.length || intentFailures.length || notReturned.length || milestoneUnresolved.length) {
       const reasons: string[] = [];
       if (verificationFailures.length) reasons.push(`untestable (no "## Verification"): ${verificationFailures.join(" | ")}`);
       if (emptyBodyFailures.length) reasons.push(`un-buildable (empty phase body): ${emptyBodyFailures.join(" | ")}`);
       if (intentFailures.length) reasons.push(`missing plain-language why/what: ${intentFailures.join(" | ")}`);
-      if (notReturned.length) reasons.push(`planner did not return a spec body for: ${notReturned.join(", ")}`);
+      if (notReturned.length) {
+        // planner-authoring-survives-large-multi-spec-output Phase 1 — distinguish
+        // GENUINELY-MISSING (planner never authored a body for the slug — not in resultText AND
+        // not in the transcript fallback either) from INGESTION-DROPPED (the transcript carried
+        // the slug but the fallback couldn't parse it back into the expected shape). Both end up
+        // in `notReturned` here — the fallback either merged the slug into returnedBySlug (which
+        // takes it out of notReturned before we get here) or it didn't (which is the ingestion-
+        // dropped case). Any recovered-then-still-invalid slug lives in transcriptRecovered ∩
+        // notReturned; everything else is a true miss.
+        const ingestionDropped = notReturned.filter((s) => transcriptRecovered.has(s));
+        const genuinelyMissing = notReturned.filter((s) => !transcriptRecovered.has(s));
+        const parts: string[] = [];
+        if (genuinelyMissing.length) parts.push(`genuinely missing (planner never authored): ${genuinelyMissing.join(", ")}`);
+        if (ingestionDropped.length) parts.push(`ingestion-dropped (transcript had it but re-parse still failed): ${ingestionDropped.join(", ")}`);
+        reasons.push(`planner did not return a spec body — ${parts.join("; ")}`);
+      }
       if (milestoneUnresolved.length) reasons.push(`milestone did not resolve to a goal_milestones row: ${milestoneUnresolved.join(", ")}`);
+      if (batchFailures.length) reasons.push(`${batchFailures.length} batch(es) errored — ${batchFailures.join(" || ")}`);
+      // planner-authoring-survives-large-multi-spec-output Phase 2 — partial progress in log_tail.
+      // Even on failure the specs already committed to public.specs during prior batches stay
+      // landed; the log line reports "authored X of Y" instead of rolling back to zero. The final
+      // gates below (getSpec + queueRoadmapBuild) still run against the landed set and only queue
+      // builds for slugs that actually reached the DB.
       await update(job.id, {
         status: "failed",
         error: `planner authoring failed — ${reasons.join("; ")}`,
@@ -11941,7 +12085,7 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
   report: string;
 } {
   const rawChecks = Array.isArray(parsed?.checks) ? (parsed!.checks as unknown[]) : [];
-  const checks: SpecTestCheck[] = rawChecks.map((c) => {
+  const parsedChecks: SpecTestCheck[] = rawChecks.map((c) => {
     const o = (c || {}) as Record<string, unknown>;
     const v = String(o.verdict || "inconclusive");
     const verdict = ["pass", "fail", "needs_human", "inconclusive"].includes(v) ? v : "inconclusive";
@@ -11954,6 +12098,12 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
       screenshot: o.screenshot ? String(o.screenshot) : undefined,
     };
   });
+  // vera-harness-error-is-not-a-code-regression Phase 1 — a `fail` whose evidence carries a
+  // HARNESS/COMMAND signature (missing npm script, command-not-found, ENOENT, missing binary) never
+  // ran an assertion, so it is NOT a code regression. Downgrade it to `needs_human` before summary /
+  // verdict / fix-phase authoring see it, so a broken verification bullet can never wedge the
+  // pipeline via an unbuildable Bo fix phase (the 2026-07-11 cs-director-leash false-regression).
+  const { checks } = reclassifyHarnessFails(parsedChecks);
   const summary: SpecTestSummary = {
     auto_pass: checks.filter((c) => c.verdict === "pass").length,
     auto_fail: checks.filter((c) => c.verdict === "fail").length,
@@ -12074,9 +12224,130 @@ async function runSpecTestJob(job: Job) {
     }
     const isPreMerge = !!previewOrigin && !!branch;
 
+    // ── machine-declared-verification-and-deterministic-spec-test-runner Phase 3 ─────────────────
+    // Deterministic-first: run the machine-declared checks in-process BEFORE we spawn a Max session.
+    // If every check resolved (no `needs_human` residual) AND this is NOT a fused pre-merge job (the
+    // security envelope stays a Max session by design — Vault is judgment), write the deterministic
+    // verdicts straight to spec_test_runs and run the same post-verdict downstream (timecard +
+    // green-writeback + auto-fold + regression detector) — NO claude session, no Max cost. Best-
+    // effort: any thrown error falls through to the LLM lane below (the runner is additive, never
+    // regressive). The `residual*` values are threaded into the prompt so an unavoidable Max session
+    // can focus its work.
+    let deterministicResiduals: string[] = [];
+    let deterministicChecks: SpecTestCheck[] = [];
+    let deterministicOk = false;
+    try {
+      const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+        "../src/lib/spec-check-runner"
+      );
+      const pkg = JSON.parse(readFileSync(resolve(REPO_DIR, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+      const runnerOut = await runSpecChecks({
+        workspaceId: job.workspace_id,
+        slug,
+        deps: {
+          loadChecks: defaultLoadChecks,
+          executors: defaultExecutors,
+          packageScripts,
+          repoRoot: REPO_DIR,
+        },
+      });
+      const cls = classifyDeterministicRun(runnerOut.results);
+      deterministicResiduals = cls.residualTexts;
+      deterministicChecks = cls.checks;
+      deterministicOk = true;
+      console.log(
+        `${tag} deterministic runner — ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤 (residual=${cls.residualCount}, isPreMerge=${isPreMerge})`,
+      );
+      if (cls.allResolved && !isPreMerge) {
+        // No LLM needed. Insert the deterministic verdicts + run the same downstream Vera runs today.
+        await db.from("spec_test_runs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          agent_job_id: job.id,
+          agent_verdict: cls.agentVerdict,
+          summary: cls.summary,
+          checks: cls.checks,
+          transcript: null,
+          error: null,
+          spec_branch: null,
+          preview_url: null,
+        });
+        await emitTimecardOnceInSession(emittedThisSession, {
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "spec_test_verdict",
+          actor: "vera",
+          metadata: { job_id: job.id, agent_verdict: cls.agentVerdict, summary: cls.summary, deterministic: true },
+        });
+        try {
+          const { reflectSpecGreenChecks } = await import("../src/lib/spec-green-writeback");
+          const g = await reflectSpecGreenChecks(job.workspace_id, slug);
+          if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
+        } catch (e) {
+          console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // The claude_session_id stays null on this row — the grader's `ungradedConcludedJobs` filter
+        // reads that as "monitored, not graded" and skips it (agent-grader.ts, machine-declared Phase 3).
+        await update(job.id, {
+          status: "completed",
+          log_tail: `${cls.agentVerdict} — ✅${cls.summary.auto_pass} ✗${cls.summary.auto_fail} 👤${cls.summary.needs_human} (deterministic — no Max session)`.slice(-2000),
+        });
+        try {
+          const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
+          const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
+          if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
+        } catch (e) {
+          console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (cls.agentVerdict === "issues") {
+          try {
+            const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
+            const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
+            const q = await getHumanTestQueue(job.workspace_id);
+            const reg = q.regressions.find((r) => r.slug === slug);
+            if (reg) {
+              await enqueueRegressionJob(db, {
+                workspaceId: job.workspace_id,
+                specSlug: reg.slug,
+                fromSpecTestRunId: null,
+              });
+            }
+          } catch (e) {
+            console.error(`${tag} regression enqueue (deterministic path) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      // The runner throwing is NOT a regression — fall back to today's LLM path. The runner's whole
+      // contract is additive: it verifies more cheaply when it can and gets out of the way otherwise.
+      console.warn(`${tag} deterministic runner failed (falling back to Max): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Emit the monitored-loops heartbeat for the deterministic runner (Control Tower registry
+    // entry DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) — ok:true when the runner returned verdicts,
+    // ok:false when it threw and Vera's LLM lane had to take over. Best-effort; never fails the job.
+    try {
+      const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+      const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+      await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: deterministicOk });
+    } catch { /* best-effort */ }
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
+      ...(deterministicResiduals.length
+        ? [
+            // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — deterministic
+            // pre-pass. The box's Node runner already executed the machine-declared checks; its verdicts
+            // are AUTHORITATIVE and will be merged after your session. Focus your effort on the
+            // subjective/drift residual — do NOT re-run the checks the runner already handled.
+            `🤖 DETERMINISTIC PRE-PASS (spec-check-runner) — a Node module already ran the machine-declared \`spec_phase_checks\` (${deterministicChecks.length} check(s)); its pass/fail verdicts are AUTHORITATIVE and will be merged into the final row after your session. SCOPE your effort to the ${deterministicResiduals.length} RESIDUAL bullet(s) below (drift · subjective · un-typed prose). Still emit ONE check per bullet in your JSON so the merge is complete; other bullets can carry a needs_human / inconclusive placeholder with evidence "handled by deterministic runner" — the merge will replace them with the runner's verdict.\nResidual bullets:\n${deterministicResiduals.map((t) => `  - ${t}`).join("\n")}`,
+          ]
+        : []),
       ...(isPreMerge
         ? [
             `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
@@ -12118,6 +12389,7 @@ async function runSpecTestJob(job: Job) {
       `🚨 EXTERNAL SIDE-EFFECT FIREWALL (the core Phase-2 safety rule) — drive a flow ONLY if you can PROVE every side effect stays internal. A flow that would call an EXTERNAL API with real effect — Amplifier fulfillment, a Braintree charge/refund, an Appstle mutation, a Resend/Twilio send, a live Meta ad pause — is NOT run; it stays needs_human. Prove it by reading the handler: assert UP TO the external edge and flag the edge itself human (e.g. comp renewal: the fail-closed branch — comp sub + comp_role null → failed type='comp' txn + subscription.comp_renewal_failed event, no order, no advance — is fully internal → SANDBOX; the happy branch's Amplifier handoff is external → that sub-assertion stays needs_human). The toolkit only drives flows in INTERNAL_ONLY_FLOWS and refuses any non-is_test workspace; the is_test tenant also carries NO external credentials. ALWAYS also assert ZERO writes to non-test-workspace rows (the tool's \`isolation.zero_non_test_workspace_writes\`).`,
       `\`needs_human\` is now EXACTLY TWO cases: (a) VISUAL/AESTHETIC judgment (looks good / renders nicely / big enough — human taste is the only instrument; a RENDERED-FACT assertion like "the stamp/chip is present" is a BROWSER check, not this), and (b) an IRREVERSIBLE PROD SIDE-EFFECT with NO already-observable evidence AND NO local-harness/browser/sandbox equivalent (a real SMS/email/charge actually reaching an external carrier/processor, a UI flow that can only be verified by submitting a real customer/billing mutation, or a behavioral flow that CROSSES THE EXTERNAL FIREWALL — the side effect would hit Amplifier/Braintree/Appstle/Resend/Twilio/Meta with real effect). An internal-only behavioral flow on \`is_test\` fixtures is a SANDBOX check (auto), not this. Everything else attempts a non-destructive verification.`,
       `🚨 \`fail\` REQUIRES POSITIVE EVIDENCE OF BREAKAGE — you ran a non-destructive check (incl. a local harness) and OBSERVED the feature doing the wrong thing (a column it claims to select isn't there; a route 500s; a role check returns the wrong status; the harness returned the wrong state). "I couldn't verify this read-only" is NOT a fail. A fault-injection bullet is \`auto\` (pass/fail) whenever the logic is reachable as a local unit; only when it is NOT reachable locally (needs forcing a fault in a live prod runtime path, a mutation, or visual/UX judgment) is it \`needs_human\` (a human can verify it), NEVER \`fail\`. Genuinely undeterminable (missing fixture, ambiguous bullet) → \`inconclusive\`. When the code plainly satisfies a bullet but the runtime path needs a forced fault AND the logic isn't reachable locally, prefer \`needs_human\` with a note ("code present at file:line; not reachable as a local unit, needs forced fault to confirm") over \`fail\`. Only evidence-backed \`fail\`s become regressions / flip the verdict to \`issues\`; \`needs_human\`/\`inconclusive\` never do.`,
+      `🚨 HARNESS/COMMAND FAILURE IS NEVER A CODE \`fail\` (vera-harness-error-is-not-a-code-regression Phase 1) — when a verification bullet names a command whose stderr says \`npm error Missing script\`, \`command not found\`, \`No such file or directory\`/\`ENOENT\`, \`Cannot find module\`/\`Cannot find package\`, or the command exit-1s BEFORE any assertion ran, the command NEVER ran an assertion — the bullet is a broken verification, not a code regression. NEVER record \`verdict='fail'\` for such a check (a \`fail\` spawns a Bo fix phase, and Bo cannot build a phase that fixes a nonexistent shell command — the pipeline wedges; that is the exact 2026-07-11 cs-director-leash false-regression this rule exists to stop). FIRST attempt to map the intended command to the repo's REAL runnable script — e.g. \`npm test src/lib/foo.test.ts\` when \`package.json\` has no \`test\` script but has a matching \`npm run test:<name>\` (grep \`package.json\` \`"scripts"\` for a \`test:*\` entry whose value includes the target file / test name) — and re-run it; if the mapped script now RUNS an assertion, \`pass\`/\`fail\` on that (a real assertion FAIL is a real \`fail\`). If no runnable script maps → classify the check \`needs_human\` (a verification-authoring wart) with the harness stderr as evidence — NEVER \`fail\`. Only a command that RAN and had an assertion FAIL is a real code \`fail\`. (The worker's normalizer also re-classifies a slipped harness-\`fail\` to \`needs_human\` as belt-and-suspenders, but earn the correct verdict at emit time.)`,
       `TIE-BREAKER (replaces "when in doubt → needs_human"): when in doubt, attempt a read-only outcome probe first, then a non-destructive local harness, then (rendered-UI) a browser check, then (internal-only behavioral) a sandbox check; defer to \`needs_human\` ONLY if ALL are impossible OR the flow crosses the external firewall.`,
       `You have the box's QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, GET/read-only endpoint hits, a non-destructive local harness (\`_\`-prefixed scratch \`npx tsx\` script importing pure code from src/), the headless-browser check \`npx tsx scripts/spec-test-browser-check.ts\` (owner-authed, READ-ONLY render assertions + screenshot), and the behavioral sandbox \`npx tsx scripts/spec-test-sandbox.ts\` (drives INTERNAL-ONLY flows on is_test fixtures, asserts, proves isolation — bounded by the external firewall). NEVER mutate REAL prod data, NEVER mark the spec verified/archived, NEVER run a check that hits a real customer/dollar/external API (those are needs_human), NEVER submit a mutating form in the browser, NEVER point the sandbox at a non-is_test workspace.`,
       isPreMerge
@@ -12253,7 +12525,26 @@ async function runSpecTestJob(job: Job) {
       return;
     }
 
-    const { agent_verdict, summary, checks, report } = normalizeSpecTest(parsed);
+    const { agent_verdict: llmAgentVerdict, summary: llmSummary, checks: llmChecks, report } = normalizeSpecTest(parsed);
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — MERGE. When the
+    // deterministic runner produced verdicts for this spec (a mixed run — residuals forced the Max
+    // session but some checks resolved deterministically), the runner's pass/fail is AUTHORITATIVE
+    // and overrides any conflicting Max verdict on the same bullet; the LLM's verdicts only fill in
+    // the runner's needs_human residual. Pure — same helper the unit tests pin.
+    let checks = llmChecks;
+    let summary = llmSummary;
+    let agent_verdict = llmAgentVerdict;
+    if (deterministicChecks.length) {
+      const { mergeDeterministicWithLlmChecks } = await import("../src/lib/spec-check-runner");
+      checks = mergeDeterministicWithLlmChecks(deterministicChecks, llmChecks);
+      summary = {
+        auto_pass: checks.filter((c) => c.verdict === "pass").length,
+        auto_fail: checks.filter((c) => c.verdict === "fail").length,
+        needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+        inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
+      };
+      agent_verdict = summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
+    }
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
@@ -19823,9 +20114,70 @@ async function runAdCreativeJob(job: Job) {
   } catch {
     /* not JSON — degrade to workspace-wide top-up */
   }
+  // dahlia-creative-qc-via-box-session Phase 1 — inject the QC dispatcher: each per-creative QC
+  // pass spawns a top-level `claude -p` on Max via runBoxLane (kind='ad-creative-qc', sandbox='max'
+  // so ANTHROPIC_API_KEY is stripped from the spawned env). Fail-closed contract: any spawn error /
+  // cap / timeout / non-JSON verdict surfaces as { isError:true } and qaCreativeViaBoxSession
+  // converts it to { pass:false } so nothing unchecked reaches the bin. Best-effort per QC — a
+  // wall on one account hops via runBoxLane's account failover; all accounts capped surfaces via
+  // the ALL_CAPPED_MARKER path and fails-closed to pass:false (regenerator burns an attempt).
+  //
+  // Phase 2 — DAHLIA_QC_MODE kill-switch:
+  //   'box'    (default, unset also = 'box') — use the claude -p QC session (the Phase 1 dispatcher below).
+  //   'direct' — skip the dispatcher; runAdCreativeLoop falls back to the legacy Opus vision API
+  //              (`qaCreative` in src/lib/ads/creative-qa.ts), unchanged. One env flag flip reverts
+  //              a bad rollout without a redeploy. Any other value is treated as 'box' (safest
+  //              default: fail toward the new path we tested rather than silently regressing).
+  // The fail-closed invariant is preserved on BOTH paths — a session error, cap, timeout, or
+  // non-JSON verdict yields { pass:false } in the box path; a missing ANTHROPIC_API_KEY or a
+  // vision-API 5xx yields { pass:false } in the direct path.
+  const qcMode = (process.env.DAHLIA_QC_MODE || "box").toLowerCase() === "direct" ? "direct" : "box";
+  // dahlia-creative-qc-via-box-session Phase 3 / Fix 1 — the PreToolUse hook that only allows
+  // Read on the exact QC image + TodoWrite (the transparency checklist). Every other tool is
+  // denied by src/lib/ads/creative-qc-sandbox evaluateQcPermission. The hook binary is a
+  // dedicated script so the gate's logic isn't tangled up with the god-mode gate's business.
+  const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+  let qcCounter = 0;
+  const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+    qcCounter++;
+    const qcTag = `${tag}[qc#${qcCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-qc",
+        // Phase 3 / Fix 1 — least-privilege env: strip EVERY var except the base OS handful
+        // (PATH/HOME/…). No ANTHROPIC_API_KEY, no SUPABASE_SERVICE_ROLE_KEY, no SUPABASE_DB_URL,
+        // no GITHUB_TOKEN, no META_ACCESS_TOKEN, no OPENAI_API_KEY. See buildQcChildEnv in
+        // src/lib/ads/creative-qc-sandbox.ts.
+        sandbox: "qc",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Phase 3 / Fix 1 — inline PreToolUse hook: allow Read on the ALLOWED image only,
+        // allow TodoWrite (the transparency checklist), deny everything else. Fail-closed on
+        // any unexpected tool shape / env gap.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        // The gate reads the allowed path from this env var. The buildQcChildEnv sandbox does
+        // NOT include this key, so extraEnv (applied AFTER the sandbox) is the only source.
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+      }));
+      if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
+  console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
-    const result = await runAdCreativeLoop(a, { workspaceId: job.workspace_id, productId: instr.product_id, count: instr.count });
+    const result = await runAdCreativeLoop(a, {
+      workspaceId: job.workspace_id,
+      productId: instr.product_id,
+      count: instr.count,
+      // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
+      // stockProduct falls through to the legacy qaCreative(...) call unchanged.
+      qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
+    });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
       status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
@@ -23115,25 +23467,42 @@ async function dispatchJob(job: Job) {
       );
       const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
       if (rebase.code !== 0) {
-        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
-        // clean for the reap, then surface needs_attention — the human resolves the divergence
-        // rather than the box silently running repo-wide checks on a stale tree.
+        // builder-self-heals-stale-build-branch Phase 1: a `git rebase` (linear replay of the
+        // branch's commits) SPURIOUSLY conflicts on non-linear / merge history or sibling
+        // divergence where a plain `git merge origin/main` is CLEAN — e.g. a goal-member branch
+        // whose goal branch already merge-reconciled main, or a branch carrying a merge commit.
+        // (Confirmed 2026-07-12: the ceo-org-control-tower goal members livelocked here — a merge
+        // of origin/main applied with ZERO conflicts while the rebase failed identically every
+        // retry, wedging the whole build queue.) So: abort the rebase, then FALL BACK to a merge.
+        // The goal is only to advance the BASE so it CONTAINS origin/main (repo-wide checks then
+        // run against a tree with main) — a merge achieves that without rewriting the branch's
+        // commits. Invariants preserved: never force-push, never touch main, never drop WIP. Only a
+        // GENUINE semantic conflict (the merge ALSO fails) parks needs_attention.
         sh("git", ["rebase", "--abort"], { cwd: wt });
-        await update(job.id, {
-          status: "needs_attention",
-          error:
-            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
-        });
-        console.error(
-          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
-        );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+        const mergeFallback = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+        if (mergeFallback.code === 0) {
+          console.log(
+            `${tag} rebase-onto-main conflicted but MERGE origin/main SUCCEEDED on ${branch} — base advanced via merge (stale-branch self-heal; no WIP dropped, no force-push)`,
+          );
+        } else {
+          // Merge also conflicts → a real semantic divergence a human must resolve.
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
+            log_tail: `reconcile-with-main (rebase AND merge conflicted — real semantic divergence):\n${(mergeFallback.out + mergeFallback.err).slice(-1800)}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile-with-main CONFLICT on ${branch} (rebase AND merge) — parked needs_attention (never silently dropped, never force-pushed)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
       }
       console.log(
-        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+        `${tag} reconcile-onto-main SUCCESS on ${branch} — base now contains origin/main (rebase or merge fallback; no WIP dropped)`,
       );
     }
   }

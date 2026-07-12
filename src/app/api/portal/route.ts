@@ -149,7 +149,7 @@ async function handle(req: NextRequest) {
     // UI-gating guardrails (the portal should never offer the action that empties
     // a subscription) — same class as insufficient_points. Suppress here so a
     // legitimate last-item removal never spawns a portal-action-failed ticket.
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products"]);
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products", "variant_not_selectable"]);
     // Some validation errors carry a dynamic message instead of a stable code
     // (e.g. loyalty redeem returns "Insufficient points. Need 1500, have 297").
     // These are UI-gating issues — the portal should never offer the action —

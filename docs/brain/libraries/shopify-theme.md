@@ -25,6 +25,7 @@ Types: `ThemeFile`, `FileChange`, `ThemeTarget`.
 ## Callers
 
 - `scripts/reconcile-shopify-theme.ts` — export-live → commit-diff-to-repo.
+- `scripts/hide-strawberry-lemonade-superfood-tabs-theme.ts` — crisis availability lever, storefront half: extends the customize-flavor Liquid `variant.id ==` exclusion in the **quantity-breaks snippet** so it also excludes Strawberry Lemonade (`42614433480877`), mirroring the mechanism already used to skip Mixed Berry. Then `commitThemeFiles` + `verifyDeployed`. Parallels the portal half in [[portal__mutation-guard]] (`workspaces.portal_config.suppressed_variant_ids`). SL stays ACTIVE in Shopify admin so existing SL subscribers renew — VISUAL PDP suppression only. Pure patch predicates (`patchLiquidVariantExclusion` + JSON/Dawn fallbacks) live in `src/lib/shopify-theme-hidden-variants.ts` with tests alongside.
 - Ad-hoc: Claude edits the theme on request (read → edit → `commitThemeFiles`).
 - **Homepage rebuild** — `ensureBranch` + `commitThemeFiles` staged 9 direct-response `sections/dr-*.liquid` + `templates/index.json` + 4 press-logo theme assets on a `homepage-rebuild` branch (live `master` untouched), to connect as a Shopify preview theme before promoting. See [[../recipes/edit-shopify-theme]] § Staging a big change.
 

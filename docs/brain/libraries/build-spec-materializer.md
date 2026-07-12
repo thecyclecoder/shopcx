@@ -20,8 +20,9 @@ Phase 1 of [[../specs/spec-authoring-writes-db-and-worker-materialize]] dual-wro
 - `# {title}` — H1, NO status emoji ([[../specs/spec-status-db-driven]] rule: the materialized file is content-only).
 - `**Owner:** [[../functions/{owner}]] · **Parent:** {parent}` — metadata line (only the parts that exist).
 - `**Blocked-by:** [[slug-a]], [[slug-b]]` — when `blocked_by` is non-empty.
+- `**Why:** {row.why}` + `**What:** {row.what}` — the plain-language intent from the [[../tables/specs]] `why` / `what` columns ([[../specs/pm-structured-intent-and-refs]] Phase 1 stored them; [[../specs/render-spec-row-emits-stored-why-what-intent]] Phase 1 wired the render). Emitted directly above the summary so Vale + humans reading the materialized markdown SEE the structured intent (a fully-authored spec whose intent lived only in the columns was being bounced `needs_fix` for "missing intent"). Skipped when the column is null/empty. Skipped for that specific label when the `summary` already contains a leading `**Why:**` or `**What:**` line — the inline stopgap (specs like [[../specs/marco-logistics-director-seat]] baked the lines directly into the summary body) wins over the column to preserve idempotency (exactly one of each at the spec level, never a duplicate).
 - The `summary` paragraph as a single block. **Brain refs are a `spec_brain_refs` RELATION now ([[../specs/pm-structured-intent-and-refs]] Phase 2)** — 0-4 rows per spec/phase, `brain_slug` values like `libraries/foo` or `tables/foo`. The materialized body may list them in a `**Brain refs:**` block for READABILITY, but the DB rows are authoritative — the CI ref check (`scripts/_check-brain-refs.ts`) refuses a dangling row. The [[../skills/build-spec]] skill Reads each `docs/brain/{brain_slug}.md` FIRST as the authoritative brain slice for the build.
-- `## Phase {N} — {phase.title}` per phase (1..N, ordered by `position`), followed by `phase.body`. The `Phase N — ` prefix is added unless the stored title already leads with "Phase" (don't double it).
+- `## Phase {N} — {phase.title}` per phase (1..N, ordered by `position`), followed by (in this order) `**Why:** {phase.why}` + `**What:** {phase.what}` (from the [[../tables/spec_phases]] `why` / `what` columns), then `phase.body`. The `Phase N — ` prefix is added unless the stored title already leads with "Phase" (don't double it). Same idempotency rule as the spec level: if the `phase.body` already leads with a `**Why:**` or `**What:**` line (a stopgap that predates this render), the column-sourced line for THAT label is skipped, so every phase renders exactly one `**Why:**` and one `**What:**`.
 - `### Verification` under each phase — rendered from the phase's typed [[../tables/spec_phase_checks]] rows (one `- {description}` bullet per check) when `renderSpecRow` is called with a `checksByPhaseId` map that has rows for that phase; otherwise from the `spec_phases.verification` TEXT column (the transitional fallback for a phase with no checks rows). Emitted only when the phase yields at least one check line either way.
 
 The H1 + per-phase headings carry NO status emoji — `spec-status-db-driven` made status DB-driven, and this file is the BUILD-FACING body (not the board surface).
@@ -31,6 +32,16 @@ The H1 + per-phase headings carry NO status emoji — `spec-status-db-driven` ma
 ### What is NOT rendered
 
 The `## Safety / invariants` and `## Completion criteria` sections are NOT captured by Phase 1's author flow (the [[author-spec]] writer extracts only summary + phases, and the schema has no columns for these blocks). The dual-write mirror commit on `main` preserves them in `docs/brain/specs/{slug}.md` for the parser readers — a follow-up spec is the right place to add columns + extract these into the DB.
+
+### Stored intent surfaces at both levels — no double emit
+
+[[../specs/render-spec-row-emits-stored-why-what-intent]] wired `renderSpecRow` to surface the [[../tables/specs]] `why` / `what` columns above the summary AND the [[../tables/spec_phases]] `why` / `what` columns under each phase heading (Phase 1), so a fully-authored spec whose intent lives only in the columns stops getting bounced `needs_fix` for "missing intent". Phase 2 added the **no-double-emit rule** so already-shipped specs (e.g. [[../specs/marco-logistics-director-seat]], [[../specs/director-chat-in-leash-execution]]) that baked `**Why:**` / `**What:**` directly into the summary or phase body as a stopgap don't render duplicate intent:
+
+- At the spec level, if `row.summary` already contains a leading `**Why:**` line (regex `^\*\*Why:\*\*` — matches the beginning of any line in the summary), skip the column-sourced spec-level `**Why:**` — the inline stopgap wins. Same rule for `**What:**` independently. The two labels are gated separately, so a summary with only an inline `**Why:**` still gets the column-sourced `**What:**` emitted.
+- Per phase, the same rule keyed on `phase.body`: an inline leading `**Why:**` / `**What:**` line in the body suppresses the column-sourced line for that label on that phase only. Sibling phases are unaffected.
+- Effect: every rendered spec carries EXACTLY ONE `**Why:**` and EXACTLY ONE `**What:**` per level. Column-only specs render the column line; inline-only stopgaps render the inline line; the render stays idempotent when an author migrates the intent from the body up to the columns (the inline wins, the column is skipped — no duplicate).
+
+Pinned by `src/lib/build-spec-materializer.render.test.ts` — the "no double emit" tests count `**Why:**` / `**What:**` lines in the rendered markdown and assert the exact expected total across spec + every phase.
 
 ### `### Verification` is rendered FROM the typed check rows — `checkKey`-stable
 
@@ -56,4 +67,4 @@ The verification render was flipped from "dump the `spec_phases.verification` ma
 
 ## Related
 
-[[specs-table]] · [[spec-phase-checks-table]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_phase_checks]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-db-driven]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-fold-from-db-row]] · [[author-spec]] · [[../skills/build-spec]] · [[../skills/fold-to-brain]]
+[[specs-table]] · [[spec-phase-checks-table]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/spec_phase_checks]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../specs/spec-status-db-driven]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-fold-from-db-row]] · [[../specs/render-spec-row-emits-stored-why-what-intent]] · [[../specs/pm-structured-intent-and-refs]] · [[author-spec]] · [[../skills/build-spec]] · [[../skills/fold-to-brain]]

@@ -17,8 +17,14 @@ The typed `spec_phase_checks` rows — NOT the `spec_phases.verification` TEXT c
 
 ## Kinds
 
-- **`auto`** — the spec-test agent runs this check directly (non-destructive: `tsc`, gh CI status, Vercel deploy, GET endpoints, read-only DB probes, code imports). Default.
+- **`auto`** — the spec-test agent (or the deterministic runner, if machine-declared) runs this check directly (non-destructive: `tsc`, gh CI status, Vercel deploy, GET endpoints, read-only DB probes, code imports). Default.
 - **`human`** — parked needs_human. The check requires a human verifier (visual/UX, prod-mutating, out-of-box observation).
+
+## Machine-declared executable checks
+
+[[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 1 extends each row with an executable payload — `exec_kind` + typed `params` — so the deterministic spec-check runner (Phase 2) executes the auto-testable subset with NO LLM. A check declares its kind (tsc · grep · ci_status · http_get · db_probe_readonly · unit_test · build · needs_human) and provides shaped params; [[spec-phase-checks-executable]] documents the schema; [[../tables/spec_phase_checks]] lists the new columns.
+
+`validateExecutableCheck` (exported by this module) enforces the typed params shape before DB write: grep needs `{pattern, path?, expect}`, http_get needs `{url, expect_status}`, db_probe_readonly names a probe from the [[spec-check-db-probes]] registry, unit_test names a real package.json script. A check with no exec_kind or with exec_kind='needs_human' never auto-runs — safe default during the prose→executable migration window.
 
 ## Author chokepoint gate
 
@@ -26,4 +32,4 @@ The typed `spec_phase_checks` rows — NOT the `spec_phases.verification` TEXT c
 
 ## Related
 
-[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[../specs/spec-test-agent]] · [[../specs/pm-structured-intent-and-refs]]
+[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[spec-phase-checks-executable]] · [[spec-check-runner]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/pm-structured-intent-and-refs]]

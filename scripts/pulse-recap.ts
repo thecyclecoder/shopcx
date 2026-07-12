@@ -416,7 +416,20 @@ async function main() {
   );
 }
 
-main().catch((e) => {
-  console.error(`[pulse-recap] ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
-});
+// CLI-only invocation. Gated behind `require.main === module` (the idiomatic
+// pattern used across scripts/, e.g. scripts/_check-table-refs-have-migrations.ts,
+// scripts/_audit-pm-md-reads.ts, scripts/research-capture.ts) so IMPORTING this
+// module from another script never fires main() as a side effect. Without this
+// gate, transitive imports of pulse-recap (scripts/planner-transcript-recover.ts
+// pulls in findTranscriptAcrossProjects, and scripts/builder-worker.ts imports
+// that recover helper) crashed the worker on startup with
+// `[pulse-recap] no transcripts directory at …` → process.exit(1) whenever the
+// runtime environment lacked ~/.claude/projects — the exact failure the
+// planner-authoring-survives-large-multi-spec-output Fix 1 phase resolves for
+// the six spec-test regressions on the branch preview.
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(`[pulse-recap] ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+}

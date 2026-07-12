@@ -208,6 +208,15 @@ export const AUTO_MERGE_GATE_LOOP_ID = "auto-merge-gate";
  */
 export const AUTO_FOLD_GATE_LOOP_ID = "auto-fold-gate";
 
+/**
+ * machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — the deterministic
+ * Node runner (`src/lib/spec-check-runner.ts` `runSpecChecks`) that the box's spec-test lane runs
+ * BEFORE spawning a Max session. Beats once per spec-test job that invokes it (kind='reactive',
+ * end-of-run try/finally: ok:true when the runner returned verdicts, ok:false when it threw and
+ * the LLM lane took over). Idle = green (event-driven, no cadence — beats when a spec is tested).
+ */
+export const DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID = "deterministic-spec-check-runner";
+
 /** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
 export const INLINE_AGENT_IDS = {
   ticketAnalyzer: "ai:ticket-analyzer",
@@ -293,6 +302,12 @@ export interface MonitoredLoop {
  */
 export const INTENTIONALLY_UNMONITORED_CRONS: Record<string, string> = {
   "slack-roadmap-notify": "intentionally unmonitored — owner-confirmed via the coverage-register agent",
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — the two Vale-LLM
+  // Inngest functions were stubbed with an unreachable trigger in Phase 2 and kept as import
+  // shims. The deterministic gate ([[control-tower/registry]] `spec-review-gate`) supersedes
+  // them. Phase 3's follow-up removes these two stubs entirely.
+  "spec-review-cron-retired": "retired stub — replaced by the deterministic spec-review-gate ([[../libraries/spec-review-gate]])",
+  "spec-review-on-mutate-retired": "retired stub — replaced by the deterministic spec-review-gate ([[../libraries/spec-review-gate]])",
 };
 
 const MIN = 60_000;
@@ -529,6 +544,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // flagged "unregistered" worker card (source 3). Loose liveness window — most ticks are quiet
   // (the pipeline is moving); the cron's per-minute beats carry Mario's liveness.
   { id: "mario-agent", kind: "reactive", owner: "platform", agentKind: "mario", personaKind: "mario", label: "Mario reactive fix", description: "Mario's box-session investigation of a stall the M3 detector surfaced — read-only timecard/blockers/agent_jobs walk → typed non-destructive live fix + optional durable fix-spec + optional threshold widen verdict (mario-reactive-box-agent M4).", expectedCadence: "on a mario-stall-cron enqueue", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-08T00:00:00Z" },
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — the DETERMINISTIC
+  // spec-review gate ([[../spec-review-gate]]) that replaces the retired Vale LLM lane. Fires
+  // synchronously at the two authoring chokepoints (`authorSpecRowStructured` +
+  // `authorSpecRowFromMarkdown`) — every spec landing in `public.specs` passed the checklist by
+  // construction. Reactive-shape (no cron cadence): a healthy signal is "no `SpecReviewGateError` on
+  // recent authors" (Cole's dashboard reads `director_activity` `actor='spec-review-gate'` beats).
+  // Loose liveness window — a healthy pipeline may go long stretches without an author, so this
+  // never RED-alerts on quiet workspaces.
+  { id: "spec-review-gate", kind: "reactive", owner: "platform", label: "Spec-review gate (deterministic)", description: "The deterministic spec-review gate ([[../spec-review-gate]]) that replaced Vale's retired LLM lane. Runs synchronously inside `authorSpecRowStructured` / `authorSpecRowFromMarkdown` — a malformed spec is rejected with `SpecReviewGateError` naming the exact defect (Phase-N appears twice / no **Owner:** line / Parent does not resolve / Blocked-by [[x]] does not resolve / customer_id table with no data-tool plan / Phase N has no ### Verification block); a well-formed spec is build-eligible by construction. Cole watches the gate's health via author-time throw rate.", expectedCadence: "on every spec author", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-11T00:00:00Z" },
   // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
   // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
   // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
@@ -566,16 +590,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-15-min crons (window ~45 min) ─
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
-  {
-    id: "spec-review-cron",
-    kind: "cron",
-    owner: "platform",
-    label: "spec-review-cron",
-    description: "Auto-proposed monitored loop for the spec-review-cron cron (every 15 min (*/15 * * * *)). Confirm the owner-function + cadence/window.",
-    expectedCadence: "every 15 min (*/15 * * * *)",
-    livenessWindowMs: 1 * HOUR,
-    registeredAt: "2026-06-25T15:56:34Z",
-  },
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — the legacy 15-min
+  // `spec-review-cron` is retired. Vale's LLM lane is gone; the deterministic authoring gate replaces
+  // it (registered as the reactive `spec-review-gate` entry further below). Kept the Inngest fn as a
+  // no-op stub so back-compat resolves; INTENTIONALLY_UNMONITORED_CRONS below suppresses the
+  // Phase-2 self-audit's "unregistered loop" flag until Phase 3's deletion PR lands.
   // ─ Every-30-min crons (window ~90 min) ─
   { id: "ticket-analysis-cron", kind: "cron", owner: "cs", label: "Ticket analysis enqueue", description: "Feeds closed AI-handled tickets to the QC analyzer (analyzeTicket).", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 90 * MIN },
   {
@@ -598,6 +617,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
+  { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   {
     id: "acquisition-research-cadence-cron",
     kind: "cron",
@@ -959,6 +980,26 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     minRunsForErrorRate: 5,
   },
 
+  // ── Deterministic spec-check runner (loop_heartbeats, loop_id = DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) ──
+  // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — the Node runner over
+  // machine-declared spec_phase_checks. Runs INSIDE runSpecTestJob (not a cron), so it beats once per
+  // spec-test job that invokes it: ok:true when it returned verdicts, ok:false when it threw and the
+  // LLM lane took over. This is MONITORED infra (not a graded agent — no LLM, no rubric); the
+  // agent-grader carve-out on `spec-test` + null `claude_session_id` (agent-grader.ts) is what makes
+  // the deterministic-only path monitored-not-graded, and this loop is where its liveness is asserted.
+  {
+    id: DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID,
+    kind: "reactive",
+    owner: "platform",
+    label: "Deterministic spec-check runner",
+    description:
+      "The Node module (src/lib/spec-check-runner.ts runSpecChecks) that executes machine-declared spec_phase_checks — tsc / grep / ci_status / http_get / db_probe_readonly / unit_test / build — before Vera's LLM lane runs. Verifies the auto-testable subset with no Max cost; reserves the LLM for the needs_human residual. Non-destructive by construction (only read-only kinds run).",
+    expectedCadence: "per spec-test job that invokes it",
+    livenessWindowMs: 30 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+
   // ── Box agent-kind lanes (loop_heartbeats, loop_id = `agent:<kind>`) ───────
   // Idle = green. Alerted only on a STUCK job past the per-kind threshold.
   { id: "agent:build", kind: "agent-kind", owner: "platform", agentKind: "build", label: "Agent — build", description: "Spec → PR feature builds (Max).", expectedCadence: "on demand", stuckThresholdMs: 2 * HOUR },
@@ -987,7 +1028,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "agent:regression", kind: "agent-kind", owner: "platform", agentKind: "regression", label: "Agent — regression", description: "Event-fired the moment the spec-test agent records a regression: review it, dismiss the flaky/false ones, author a fix spec directly. Remi is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:security-review", kind: "agent-kind", owner: "platform", agentKind: "security-review", label: "Agent — security review", description: "The supervisor on the auto-merge proxy: every merged claude/* diff gets an autonomous security pass (injection / secret-leak / authz / RLS / unsafe admin-client) read-only → classify each finding → author a scoped fix spec + surface for owner Build (or surface needs-human), never auto-mutating. Also runs the daily npm-audit dep-watch scan. Vault is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
   { id: "agent:coverage-register", kind: "agent-kind", owner: "platform", agentKind: "coverage-register", label: "Agent — coverage register", description: "The coverage-gap supervisor: when the Control Tower monitor finds an unregistered loop, Cole investigates read-only → proposes register-vs-exempt (a multi-CHOICE the CEO decides), keeping the monitored-loops registry honest. Never auto-mutates the registry. Cole is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
-  { id: "agent:spec-review", kind: "agent-kind", owner: "platform", agentKind: "spec-review", label: "Agent — spec review", description: "Vale, the quality gate ahead of the build pipeline: the moment a spec enters In Review (newly authored, or flagged back by anyone who spots an issue), she reviews it against the authoring guidelines read-only → fixes a malformed spec in place (mangled phases / missing owner+parent / blockers / DB-companion) → passes the well-formed ones to the director for the Planned/Deferred call. An in_review spec can NEVER build until it's cleared. Reactive on the in_review transition + a cron backstop. Vale is watched too.", expectedCadence: "on demand", stuckThresholdMs: 60 * MIN },
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — the Vale LLM agent lane is
+  // retired. The deterministic spec-review gate ([[../spec-review-gate]]) runs synchronously at the
+  // authoring chokepoint; there is no LLM agent-kind to watch. Replaced by the `spec-review-gate`
+  // reactive entry further below (Cole's surface for the retired-Vale supervision invariant).
   { id: "agent:storefront-optimizer", kind: "agent-kind", owner: "growth", agentKind: "storefront-optimizer", label: "Agent — storefront optimizer", description: "Scheduled campaign loop: read funnel + lever map + LTV proxy → propose ONE atomic reversible-lever hypothesis → stand up an M1 experiment vs holdout (auto-run reversible or surface for owner Approve), or author a missing-capability spec + surface for Build. The optimizer is watched too.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:dr-content", kind: "agent-kind", owner: "growth", agentKind: "dr-content", label: "Agent — DR content (Carrie)", description: "Direct-response content lane: on a queued lander blueprint, read our product intelligence → write intense/emotional/urgency DR copy for every block, generate the AI-appropriate imagery (Nano Banana Pro), and flag real-asset gaps (before/after, UGC, press logos) to Max → fill the content bucket to 100% before Cleo specs the build.", expectedCadence: "when a lander blueprint is queued", stuckThresholdMs: 60 * MIN },
 

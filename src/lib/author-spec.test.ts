@@ -359,6 +359,10 @@ test("parseVerificationBlobToChecks splits bullet lines into rows", () => {
   assert.equal(checks[0].position, 1);
   assert.match(checks[0].description, /tsc --noEmit/);
   assert.equal(checks[0].kind, "auto");
+  // machine-declared-verification Phase 1 — un-typed prose is stamped needs_human so the
+  // deterministic runner never auto-runs a check whose params it did not receive.
+  assert.equal(checks[0].exec_kind, "needs_human");
+  assert.equal(checks[0].params, null);
 });
 
 test("parseVerificationBlobToChecks returns [] for empty input", () => {
