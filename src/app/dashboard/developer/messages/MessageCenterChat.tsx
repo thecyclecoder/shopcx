@@ -3,10 +3,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import GodModeTab from "./GodModeTab";
+import { DirectorCoachChat } from "@/components/agents/director-coach-chat";
 
-// Owner-only tabs — the message-center default 'chat' is the founder's read-only console;
-// 'god' is the Phase-4 elevated god-mode mirror (docs/brain/specs/god-mode.md).
-type Tab = "chat" | "god";
+// Owner-only tabs. 'chat' is the founder's read-only dev-ask console; 'god' is the elevated god-mode
+// (Eve) mirror; any other value is a director slug (Ada/Max/June…) rendering a leash-bound coach chat
+// (director-chats-in-message-center goal / message-center-director-tabs). Directors come from the
+// live+leashed list at /api/director/coach/directors.
+type Tab = string;
+
+type DirectorTab = { slug: string; name: string; personaAccent: string; leashSummary: string };
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Action = {
@@ -50,6 +55,7 @@ export default function MessageCenterChat() {
   const [recent, setRecent] = useState<Thread[]>([]);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
+  const [directors, setDirectors] = useState<DirectorTab[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -77,6 +83,25 @@ export default function MessageCenterChat() {
   useEffect(() => {
     if (isOwner) void loadRecent();
   }, [isOwner, loadRecent]);
+
+  // Load the live+leashed directors that get their own tab. Server-gated (owner) + validated: only a
+  // director whose org-chart seat is live AND has a registered leash module comes back, so a tab can
+  // never open a chat the backend can't run AS. Eve is intentionally NOT here — she's rendered separately.
+  useEffect(() => {
+    if (!isOwner) return;
+    (async () => {
+      try {
+        const res = await fetch("/api/director/coach/directors");
+        if (!res.ok) return;
+        const d = await res.json();
+        setDirectors((d.directors as DirectorTab[]) || []);
+      } catch {
+        /* no director tabs — Chat + Eve still work */
+      }
+    })();
+  }, [isOwner]);
+
+  const activeDirector = directors.find((d) => d.slug === tab) || null;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -208,15 +233,21 @@ export default function MessageCenterChat() {
         <div>
           <h1 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Message Center</h1>
           <p className="text-[11px] text-zinc-500">
-            Ask the box anything — it reads the brain, the repo, the prod DB (read-only), and the web on Max. Report-back, never a builder.
+            {tab === "god"
+              ? "Eve — your executive assistant. Company-wide god mode: she acts within your leash, escalating only what needs a PIN."
+              : activeDirector
+                ? `${activeDirector.name} — leash-bound to ${activeDirector.leashSummary || "their department"}. Ask, hand over a plan, or coach — anything on a rail escalates to you.`
+                : "Ask the box anything — it reads the brain, the repo, the prod DB (read-only), and the web on Max. Report-back, never a builder."}
           </p>
         </div>
-        <button
-          onClick={startFresh}
-          className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
-        >
-          New thread
-        </button>
+        {tab === "chat" && (
+          <button
+            onClick={startFresh}
+            className="rounded-md border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            New thread
+          </button>
+        )}
       </div>
 
       {/* Phase-4 god-mode tab: shown ONLY to the workspace owner. The parent gate here
@@ -226,6 +257,8 @@ export default function MessageCenterChat() {
           <nav className="-mb-px flex gap-6">
             {[
               { k: "chat", label: "Chat" },
+              // One tab per live+leashed director (Ada · Max · June …), in org-chart order.
+              ...directors.map((d) => ({ k: d.slug, label: d.name })),
               { k: "god", label: "Eve" },
             ].map((t) => (
               <button
@@ -246,6 +279,11 @@ export default function MessageCenterChat() {
 
       {isOwner && tab === "god" ? (
         <GodModeTab />
+      ) : isOwner && activeDirector ? (
+        <div className="flex-1 overflow-y-auto">
+          {/* key on slug → a clean remount when switching directors, so state never leaks across tabs. */}
+          <DirectorCoachChat key={activeDirector.slug} directorFunction={activeDirector.slug} directorName={activeDirector.name} />
+        </div>
       ) : (
       <>
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto rounded-lg border border-zinc-100 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">

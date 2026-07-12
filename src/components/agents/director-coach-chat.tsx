@@ -37,9 +37,21 @@ type Thread = {
   last_error: string | null;
   pending_actions: Action[];
   source?: "web" | "slack";
+  director_function?: string;
 };
 
-export function DirectorCoachChat() {
+/**
+ * Renders the coach/ask/plan chat for ONE director. `directorFunction` picks which director this thread
+ * runs AS (validated live+leashed server-side); absent → 'platform' (the legacy Ask-Ada page, unchanged).
+ * `directorName` only drives display copy. The Message Center mounts one instance per director tab (keyed
+ * on the slug so switching tabs is a clean remount).
+ */
+export function DirectorCoachChat({
+  directorFunction,
+  directorName,
+}: { directorFunction?: string; directorName?: string } = {}) {
+  const dirFn = directorFunction ?? "platform";
+  const name = directorName ?? "Ada";
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [actions, setActions] = useState<Action[]>([]);
@@ -61,7 +73,9 @@ export function DirectorCoachChat() {
       const res = await fetch("/api/director/coach");
       const d = await res.json();
       const threads = (d.threads as Thread[]) || [];
-      const latest = threads.find((t) => t.messages?.length);
+      // Resume only THIS director's most recent thread — the list endpoint returns every director's
+      // threads, so a tab must not adopt another director's conversation.
+      const latest = threads.find((t) => t.messages?.length && (t.director_function ?? "platform") === dirFn);
       if (latest) {
         setThreadId(latest.id);
         setMessages(latest.messages);
@@ -72,7 +86,7 @@ export function DirectorCoachChat() {
     } catch {
       /* nothing to resume */
     }
-  }, []);
+  }, [dirFn]);
 
   useEffect(() => {
     void loadLatest();
@@ -121,7 +135,8 @@ export function DirectorCoachChat() {
         const res = await fetch("/api/director/coach", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: threadId ?? undefined, message: text, action: "chat", intent }),
+          // director_function is only read when starting a new thread (id absent); ignored on continuation.
+          body: JSON.stringify({ id: threadId ?? undefined, message: text, action: "chat", intent, director_function: dirFn }),
         });
         const d = await res.json();
         const t = d.thread as Thread | null;
@@ -139,7 +154,7 @@ export function DirectorCoachChat() {
         setThinking(false);
       }
     },
-    [input, thinking, threadId],
+    [input, thinking, threadId, dirFn],
   );
 
   const decide = useCallback(
@@ -196,7 +211,7 @@ export function DirectorCoachChat() {
       <div ref={scrollRef} className="max-h-96 space-y-3 overflow-y-auto p-3">
         {!messages.length && (
           <p className="px-1 py-6 text-center text-[12px] text-zinc-400">
-            Ask Ada why she has or hasn&apos;t done something — &ldquo;why haven&apos;t you built spec X?&rdquo; She explains from her real state. When you want to change how she acts, press <span className="font-medium">Coach her</span> and she&apos;ll turn it into a rule you confirm.
+            Ask {name} why something has or hasn&apos;t happened — &ldquo;why haven&apos;t you built spec X?&rdquo; {name} explains from real state. Hand over a plan with <span className="font-medium">Give a plan</span>, or turn what you write into a durable rule with <span className="font-medium">Coach</span> (you confirm either).
           </p>
         )}
         {messages.map((m, i) => (
@@ -256,7 +271,7 @@ export function DirectorCoachChat() {
           </div>
         ))}
 
-        {thinking && <p className="px-1 text-[12px] text-zinc-400">Ada is thinking… (a box turn runs on Max — up to a couple of minutes)</p>}
+        {thinking && <p className="px-1 text-[12px] text-zinc-400">{name} is thinking… (a box turn runs on Max — up to a couple of minutes)</p>}
         {error && <p className="px-1 text-[12px] text-red-600 dark:text-red-400">{error}</p>}
       </div>
 
@@ -270,7 +285,7 @@ export function DirectorCoachChat() {
               void send("ask");
             }
           }}
-          placeholder="Ask Ada anything about what she's doing…"
+          placeholder={`Ask ${name} anything about what they're doing…`}
           rows={2}
           className="w-full resize-none rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-[13px] text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
         />
@@ -294,10 +309,10 @@ export function DirectorCoachChat() {
           <button
             onClick={() => void send("coach")}
             disabled={thinking || !input.trim()}
-            title="Turn what you just wrote into a durable rule she'll follow going forward (you'll confirm it)"
+            title={`Turn what you just wrote into a durable rule ${name} follows going forward (you'll confirm it)`}
             className="rounded-md bg-indigo-600 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-indigo-700 disabled:opacity-40"
           >
-            Coach her
+            Coach
           </button>
         </div>
       </div>
