@@ -3,11 +3,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // CEO↔Director coaching chat (worker-grading-and-director-management Phase 7). A resumable Max
-// conversation with the Platform/DevOps Director (Ada): the CEO asks "why haven't you built spec X?",
-// she explains read-only, and the CEO coaches her. TWO explicit buttons resolve "is this a chat or a
-// directive?": ASK (she explains, never writes a rule) vs COACH HER (distills the directive into a
-// durable director_instruction → an approval card → on approve it's injected into her future decisions).
-// Each turn POSTs /api/director/coach then polls GET ?id= while turn_status='thinking'. Owner-only.
+// conversation with ANY live+leashed director (generalize-director-coach-backend): the CEO asks
+// "why haven't you built spec X?", the director explains read-only, and the CEO coaches. TWO
+// explicit buttons resolve "is this a chat or a directive?": ASK (she explains, never writes a
+// rule) vs COACH HER (distills the directive into a durable director_instruction → an approval
+// card → on approve it's injected into her future decisions). Each turn POSTs /api/director/coach
+// with the target director's function slug, then polls GET ?id= while turn_status='thinking'.
+// Owner-only. Default director = 'platform' (Ada) preserves the pre-generalization Ask-Ada button.
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Action = {
@@ -32,6 +34,7 @@ type Action = {
 };
 type Thread = {
   id: string;
+  director_function?: string;
   messages: Msg[];
   turn_status: "idle" | "thinking" | "error";
   last_error: string | null;
@@ -39,7 +42,9 @@ type Thread = {
   source?: "web" | "slack";
 };
 
-export function DirectorCoachChat() {
+// generalize-director-coach-backend Phase 3: the chat targets a specific director. Absent → 'platform'
+// keeps the pre-generalization Ask-Ada button and any other caller that hasn't threaded the prop yet.
+export function DirectorCoachChat({ director = "platform" }: { director?: string } = {}) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [actions, setActions] = useState<Action[]>([]);
@@ -61,7 +66,9 @@ export function DirectorCoachChat() {
       const res = await fetch("/api/director/coach");
       const d = await res.json();
       const threads = (d.threads as Thread[]) || [];
-      const latest = threads.find((t) => t.messages?.length);
+      // generalize-director-coach-backend Phase 3: pick THIS director's latest thread (not any director's),
+      // so /dashboard/agents/cs never resumes Ada's most recent conversation.
+      const latest = threads.find((t) => t.messages?.length && (t.director_function ?? "platform") === director);
       if (latest) {
         setThreadId(latest.id);
         setMessages(latest.messages);
@@ -72,9 +79,16 @@ export function DirectorCoachChat() {
     } catch {
       /* nothing to resume */
     }
-  }, []);
+  }, [director]);
 
   useEffect(() => {
+    // Reset chat state when switching directors — a mount for /agents/cs must not show Ada's thread.
+    setThreadId(null);
+    setMessages([]);
+    setActions([]);
+    setError(null);
+    setInput("");
+    setSource("web");
     void loadLatest();
   }, [loadLatest]);
 
@@ -121,7 +135,9 @@ export function DirectorCoachChat() {
         const res = await fetch("/api/director/coach", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: threadId ?? undefined, message: text, action: "chat", intent }),
+          // generalize-director-coach-backend Phase 3: the NEW-thread branch of /api/director/coach reads
+          // director_function to pick the director this thread runs AS. Absent → server defaults to 'platform'.
+          body: JSON.stringify({ id: threadId ?? undefined, message: text, action: "chat", intent, director_function: director }),
         });
         const d = await res.json();
         const t = d.thread as Thread | null;
@@ -139,7 +155,7 @@ export function DirectorCoachChat() {
         setThinking(false);
       }
     },
-    [input, thinking, threadId],
+    [input, thinking, threadId, director],
   );
 
   const decide = useCallback(

@@ -18,6 +18,7 @@
 import { LEASH_CATEGORIES as PLATFORM_LEASH } from "@/lib/agents/platform-director";
 import { LEASH_CATEGORIES as GROWTH_LEASH } from "@/lib/agents/growth-director";
 import { LEASH_CATEGORIES as CS_LEASH } from "@/lib/agents/cs-director";
+import { COACH_THREAD_SLUGS } from "@/lib/agents/director-coach-slugs";
 
 export interface LeashLine {
   title: string;
@@ -44,6 +45,23 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   growth: GROWTH_LEASH,
   cs: CS_LEASH,
 };
+
+// The client-safe `COACH_THREAD_SLUGS` list gates the profile-page Coach section; this file registers
+// each director's live LEASH_CATEGORIES. Both must reference the same slugs or Coach would render for
+// a director whose backend can't serve it (or vice-versa). Assert at import time — a divergence throws
+// on the first import, catching a half-added director before it reaches production.
+{
+  const guideKeys = new Set(Object.keys(DIRECTOR_LEASH));
+  const missing = COACH_THREAD_SLUGS.filter((s) => !guideKeys.has(s));
+  const extra = Object.keys(DIRECTOR_LEASH).filter((s) => !COACH_THREAD_SLUGS.includes(s as never));
+  if (missing.length || extra.length) {
+    throw new Error(
+      `director-leash-guide: COACH_THREAD_SLUGS ↔ DIRECTOR_LEASH divergence — ` +
+        (missing.length ? `missing from DIRECTOR_LEASH: ${missing.join(",")} ` : "") +
+        (extra.length ? `missing from COACH_THREAD_SLUGS: ${extra.join(",")}` : ""),
+    );
+  }
+}
 
 /**
  * Friendly copy for EVERY leash category across all directors, keyed by the raw category string. Plain

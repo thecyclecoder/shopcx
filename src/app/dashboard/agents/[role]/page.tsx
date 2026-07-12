@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useSectionNav, type SectionNavItem } from "@/lib/section-nav-context";
 import { getPersona } from "@/lib/agents/personas";
+import { hasCoachThread } from "@/lib/agents/director-coach-slugs";
 import { DirectorActivity } from "@/components/agents/director-activity";
 import { DirectorGuide } from "@/components/agents/director-guide";
 import { PersonaAvatar, StatusBadge } from "@/components/agents/persona-chip";
@@ -150,13 +151,18 @@ function ProfileCard({
     if (isDirector) {
       const isPlatform = directorSlug === "platform";
       const isCfo = directorSlug === "cfo";
+      // generalize-director-coach-backend Phase 3: Coach appears for any director with a coach-thread
+      // backend (a `<slug>-director.ts` leash module), not just Ada. Grades stays platform-only —
+      // that's a Platform-specific worker-grading sweep.
+      const hasCoach = hasCoachThread(directorSlug);
       const sections: SectionNavItem[] = [
         { key: "overview", label: "Overview" },
         // The friendly, self-updating plain-English intro — right after Overview (director-guide-tab).
         { key: "guide", label: "Guide" },
         // The CFO (Grace) owns the P&L visual — Revenue / Net Profit / Mgmt Fees / NP + Addbacks.
         ...(isCfo ? [{ key: "financials", label: "Financials" } as SectionNavItem] : []),
-        ...(isPlatform ? [{ key: "grades", label: "Grades" } as SectionNavItem, { key: "coach", label: "Coach" } as SectionNavItem] : []),
+        ...(isPlatform ? [{ key: "grades", label: "Grades" } as SectionNavItem] : []),
+        ...(hasCoach ? [{ key: "coach", label: "Coach" } as SectionNavItem] : []),
         { key: "activity", label: "Activity" },
         { key: "autonomy", label: "Autonomy" },
         { key: "inbox", label: "Inbox" },
@@ -240,6 +246,11 @@ function ProfileCard({
     badge = <StatusBadge status={d.status} />;
     reportsTo = { name: getPersona("ceo").name, role: "CEO", href: "/dashboard/agents/ceo" };
     const isPlatform = d.slug === "platform";
+    // generalize-director-coach-backend Phase 3: derive coach-capable from the leash registry, not slug ==.
+    // Autonomy + ModelTierCard + the Coach section render for any director whose backend can back a coach
+    // thread (a `<slug>-director.ts` leash module + a `director-leash-guide.ts` entry). Grades stays
+    // platform-only — it reads a Platform-specific worker-grading sweep.
+    const hasCoach = hasCoachThread(d.slug);
     const mandates = d.mandates.map((m) => ({
       primary: m.name,
       secondary: [m.metric, m.specCount > 0 ? `${m.specCount} spec${m.specCount === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · "),
@@ -278,8 +289,8 @@ function ProfileCard({
         <CfoFinancials />
       ) : activeSection === "grades" && isPlatform ? (
         <DirectorGradePanel />
-      ) : activeSection === "coach" && isPlatform ? (
-        <DirectorCoachChat />
+      ) : activeSection === "coach" && hasCoach ? (
+        <DirectorCoachChat director={d.slug} />
       ) : activeSection === "kpi" ? (
         // agents-sidebar-kpis-and-profile-redesign Phase 1 — the same view as the standalone
         // /dashboard/agents/[role]/kpi page, rendered in-place via the shared component.
@@ -288,9 +299,9 @@ function ProfileCard({
         <DirectorActivity fn={d.slug} />
       ) : activeSection === "autonomy" ? (
         <div className="space-y-6">
-          {isPlatform && <DirectorAutonomy autonomous={d.autonomous} />}
-          {/* box-agent-model-tiers Phase 4: the director's own model tier — her change routes to the CEO. */}
-          {isPlatform && <ModelTierCard kind="platform-director" />}
+          {hasCoach && <DirectorAutonomy autonomous={d.autonomous} />}
+          {/* box-agent-model-tiers Phase 4: this director's own model tier — a change routes to the CEO. */}
+          {hasCoach && <ModelTierCard kind={`${d.slug}-director`} />}
           <AutonomyToggle director={d} onChange={onAutonomyChange} />
         </div>
       ) : activeSection === "inbox" ? (

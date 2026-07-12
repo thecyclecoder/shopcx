@@ -20,6 +20,7 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+import { getLeashGuide } from "../src/lib/agents/director-leash-guide"; // generalize-director-coach-backend Phase 2: per-director leash lines
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
@@ -16732,7 +16733,7 @@ function normalizeCoachActions(raw: unknown, ts: string): Record<string, unknown
 
 const DIRECTOR_COACH_OUTPUT = [
   `Final message = ONLY one JSON object, nothing else:`,
-  `{"status":"replied","reply":"<your plain-text answer AS Ada — grounded in what you actually read: the spec's phases/blockers/owner, your leash, the roadmap, your director_activity, the agent_jobs queue>"}`,
+  `{"status":"replied","reply":"<your plain-text answer in your own voice — grounded in what you actually read: the spec's phases/blockers/owner, your leash, the roadmap, your director_activity, the agent_jobs queue>"}`,
   `  — for an explanation ("why haven't you built X?"): investigate read-only and explain (X is blocked by Y · X is a 0-phase feature needing the CEO's greenlight · X isn't goal-linked so my goal-walk didn't catch it · its build failed N× and hit my loop-guard · it's outside my leash).`,
   `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. auto-build-unblocked-fix-specs>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
   `  — when the CEO COACHES you ("build these types automatically going forward"). Distill it into ONE durable rule. On approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-does something destructive/irreversible or starts a new goal.`,
@@ -16759,11 +16760,21 @@ const DIRECTOR_COACH_OUTPUT = [
 function directorCoachFraming(dirFn: string): string {
   const persona = getPersona(dirFn);
   const voice = persona.voice ?? persona.personality;
+  // generalize-director-coach-backend Phase 2: resolve per-director brain refs + leash lines at call time
+  // so June's session cites cs.md + CS_LEASH, not platform-director.md + PLATFORM_LEASH.
+  const functionPage = `docs/brain/functions/${dirFn}.md`;
+  const libraryPage = `docs/brain/libraries/${dirFn}-director.md`;
+  const libraryPageExists = existsSync(resolve(process.cwd(), libraryPage));
+  const guide = getLeashGuide(dirFn);
+  const leashLine = guide.defined
+    ? [`Your leash covers:`, ...guide.autonomous.map((l) => `  · ${l.title} — ${l.detail}`)].join("\n")
+    : `Your leash is not yet defined in director-leash-guide.ts — every action routes to the CEO for approval.`;
   return [
     // agent-voice: lead with WHO she is so every reply is in-character, then the functional framing below.
     `VOICE — ${voice}`,
-    `You are ${persona.name} — the ${dirFn === "platform" ? "Platform/DevOps" : dirFn} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
-    `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your own definition is docs/brain/libraries/platform-director.md (your leash, escort, grooming) + docs/brain/specs/worker-grading-and-director-management.md. Your leash is LEASH_CATEGORIES in src/lib/agents/platform-director.ts.`,
+    `You are ${persona.name} — the ${persona.role} for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
+    `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your own definition is ${functionPage} (your function's charter, mandates, and workers)${libraryPageExists ? ` + ${libraryPage} (your leash, escort, grooming)` : ""}. Your leash categories live in src/lib/agents/${dirFn}-director.ts (LEASH_CATEGORIES).`,
+    leashLine,
     `⭐ SPEC STATUS IS DB-DRIVEN — NOT IN THE MARKDOWN. After spec-status-db-driven, a spec's status + per-phase status (shipped/in_progress/planned), its **Priority:** critical, and its **Deferred:** parked state ALL live in the \`spec_card_state\` DB table — the markdown is CONTENT ONLY (title, phase titles, the plan; no status emojis). NEVER judge a spec's status by reading ⏳/✅ in the .md (there are none, or stale ones) — READ THE DB. Easiest: \`getRoadmap()\` from src/lib/brain-roadmap returns each spec's live status/phases/counts already overlaid from spec_card_state. Or a throwaway scripts/_*.ts that bootstraps createAdminClient and SELECTs spec_card_state directly (status, phase_states, flags). The audit trail is spec_status_history.`,
     `⭐ PHASE-PR PROVENANCE (phase-pr-provenance) — a phase is \`shipped\` because a specific PR MERGED it, and \`spec_card_state.phase_states[i]\` records the proof: \`{status:'shipped', pr, merge_sha}\`. So "is this phase done?" = does it carry a \`pr\` tag. Builds ship a spec ONE PHASE AT A TIME — a P1 merge ships P1, NOT the whole spec (though a single PR can ship several phases at once). The merge hook (applyMergedBuildEffects) is the authoritative writer: when a build PR merges it tags exactly the phase(s) it shipped — you NEVER hand-flip a phase shipped to "catch up" the board; if you suspect drift, emit a 'request-audit' action and the box runs audit-spec-shipped-state against the actual code + the merge ledger to re-stamp provenance (or regress an ungrounded ✅ to planned). To ESCORT/SEQUENCE a partially-shipped spec, drive the FIRST un-shipped phase (the next one with no \`pr\`). Shapes: one-shot (0 phases — ships in one PR, tagged at the card via last_merge_sha), single-phase (1 phase = the whole spec), multi-phase (N phases, each by its own PR). Don't treat a prose-only multi-phase spec as un-built just because its file paths aren't greppable — the \`pr\` tags are the truth.`,
     `To explain "why haven't you built/done X": investigate read-only — check the spec's STATUS in the DB (above), its **Blocked-by:** line, its **Owner:**, whether it's goal-linked, the agent_jobs queue for its build state, and your director_activity. A throwaway scripts/_*.ts that bootstraps createAdminClient can query the DB read-only (SELECT-only; never commit it). Then explain plainly + honestly.`,
@@ -16779,8 +16790,11 @@ function directorCoachFraming(dirFn: string): string {
   ].join("\n\n");
 }
 
-function renderCoachTranscript(messages: CoachThreadRow["messages"]): string {
-  return messages.map((m) => `${m.role === "user" ? "[CEO]" : "[Ada]"}: ${m.content}`).join("\n\n");
+function renderCoachTranscript(messages: CoachThreadRow["messages"], dirFn: string): string {
+  // generalize-director-coach-backend Phase 2: label the assistant with THIS director's persona name.
+  // A cs thread's assistant messages read [June], a growth thread reads [Max], etc. — never a hardcoded [Ada].
+  const assistantLabel = getPersona(dirFn).name;
+  return messages.map((m) => `${m.role === "user" ? "[CEO]" : `[${assistantLabel}]`}: ${m.content}`).join("\n\n");
 }
 
 /**
@@ -17247,7 +17261,7 @@ async function runDirectorCoachJob(job: Job) {
       (cfg, sid) => {
         const turnPrompt = sid
           ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
-          : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
+          : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages, thread.director_function), ``, `Respond to the latest [CEO] message.`].join("\n");
         return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
       },
     );
