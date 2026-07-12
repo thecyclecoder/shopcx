@@ -617,6 +617,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
+  { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   {
     id: "acquisition-research-cadence-cron",
     kind: "cron",
