@@ -1559,18 +1559,10 @@ export function decideGoalMemberBuildDispatch(input: {
   const { slug, goalSlug, members, inflight } = input;
   if (members.length === 0) return { ok: true };
 
-  // (b) In-flight — any OTHER active build for a goal-mate wins the goal's serial slot.
-  const other = inflight.find((r) => r.slug !== slug);
-  if (other) {
-    return {
-      ok: false,
-      reason: `another goal-member build is in-flight for goal ${goalSlug} (${other.slug} status=${other.status}); serialized to prevent hot-file collisions`,
-    };
-  }
-
-  // (c) Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
-  //     A ready head has every goal-mate blocker already on the goal branch (external blockers are the
-  //     existing gate's concern). Sort by slug so the choice is deterministic across ticks.
+  // Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
+  // A ready head has every goal-mate blocker already on the goal branch (external blockers are the
+  // existing gate's concern). Sort by slug so the choice is deterministic across ticks. Computed FIRST
+  // (before the in-flight guard) because the guard below must know WHICH in-flight mate is legitimate.
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
   const unbuilt = members.filter(
     (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
@@ -1599,6 +1591,30 @@ export function decideGoalMemberBuildDispatch(input: {
   }
   readyHeads.sort();
   const earliest = readyHeads[0];
+
+  // (b) In-flight guard — hold ONLY when the in-flight goal-mate that holds the slot IS the earliest
+  //     ready head. A genuinely-building goal-mate is ALWAYS itself the earliest (it is unbuilt +
+  //     alphabetically-first for the whole time it builds, since nothing new integrates while it runs),
+  //     so it legitimately owns the serial slot and everyone else must wait — this preserves the
+  //     2026-07-06 collision guard (#1245/#1246/#1248 on action-executor.ts). But a NON-earliest
+  //     in-flight mate is a same-sweep claim-race artifact: the box fills several build lanes per tick,
+  //     sets each to `building`, THEN post-hoc re-queues the losers via this predicate. If a
+  //     non-earliest artifact were allowed to block, the whole goal LIVELOCKS — the box claims N mates,
+  //     each sees the others `building`, rule (b) holds ALL of them (incl. the true earliest), and they
+  //     churn on the 90s cooldown forever with 0 progress (observed 2026-07-12: ceo-org-control-tower +
+  //     director-chats-in-message-center stalled at 0 building / 8 queued). So the earliest is never
+  //     blocked by a non-earliest artifact; it always wins its slot. Cross-goal parallelism is untouched
+  //     (a different goalSlug carries a different member set).
+  const inflightSlotHolder = inflight.find((r) => r.slug !== slug && r.slug === earliest);
+  if (inflightSlotHolder) {
+    return {
+      ok: false,
+      reason: `another goal-member build is in-flight for goal ${goalSlug} (${inflightSlotHolder.slug} status=${inflightSlotHolder.status}); serialized to prevent hot-file collisions`,
+    };
+  }
+
+  // (c) Only the earliest ready head may dispatch. A non-earliest member is held regardless of in-flight
+  //     state (this is what catches every non-slot-holder, including the race artifacts above).
   if (earliest !== slug) {
     return {
       ok: false,
