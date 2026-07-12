@@ -1,0 +1,1 @@
+- **Add spec slugs to ad creative cadence jobs** · verified 2026-07-12 · → [[../inngest/ad-creative-cadence]]

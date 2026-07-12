@@ -26,6 +26,10 @@ The typed `spec_phase_checks` rows — NOT the `spec_phases.verification` TEXT c
 
 `validateExecutableCheck` (exported by this module) enforces the typed params shape before DB write: grep needs `{pattern, path?, expect}`, http_get needs `{url, expect_status}`, db_probe_readonly names a probe from the [[spec-check-db-probes]] registry, unit_test names a real package.json script. A check with no exec_kind or with exec_kind='needs_human' never auto-runs — safe default during the prose→executable migration window.
 
+### Grep path security: validateGrepPath
+
+Grep checks treat `params.path` as a spec-authored capability boundary. `validateGrepPath` (co-exported, called by `validateExecutableCheck` for every grep check) rejects paths that are absolute, empty, NUL-embedded, traverse outside the repo with `..` segments, or start with `'-'` (would be parsed as an option/preprocessor by ripgrep). The runner also passes the value after an argv `--` separator (see [[spec-check-runner]] `defaultExecutors.grep`), but this validator is the primary gate: a rejected path never reaches spawn at all.
+
 ## Author chokepoint gate
 
 Two gates fire in order BEFORE the DB write; both throw with the offending phase named so the author sees exactly what's un-testable:
