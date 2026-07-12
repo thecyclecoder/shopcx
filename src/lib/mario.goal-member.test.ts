@@ -77,3 +77,42 @@ test(
     assert.equal(awaiting, false);
   },
 );
+
+// ── Phase 2 — pre-screen drop invariants ─────────────────────────────────────────────────────
+//
+// The M3 legit-wait pre-screen in `evaluateStalledSpecs` folds `isGoalMemberAwaitingPromotion`
+// into the drop set alongside folded/deferred/uncleared-blocker/wait-status (see step (d2) in
+// src/lib/mario.ts). These tests pin the drop's semantics under the Phase-2 frame — the pure
+// predicate is the exact seam the pre-screen consumes, so a pinned predicate is a pinned drop.
+// Same class of test as mario.blocked-by.test.ts pinning `shouldSurfaceMissingBlocker` for the
+// fifth-source drop chain.
+
+test(
+  "Phase 2 — a goal at 6/6-integrated-awaiting-promotion: EVERY member reads as awaiting → the pre-screen drops all six → zero mario_fired rows",
+  () => {
+    // Six members, all with a stamped goal_branch_sha, same milestone → same goal (main_merge_sha null).
+    // The predicate is per-spec, so the invariant "all six drop" is per-spec (all six read true).
+    const members = Array.from({ length: 6 }, (_, i) => ({
+      milestoneId: "m-uuid-1",
+      goalBranchSha: `sha-${i}`,
+      goalMainMergeSha: null,
+    }));
+    for (const m of members) assert.equal(isGoalMemberAwaitingPromotion(m), true);
+  },
+);
+
+test(
+  "Phase 2 — a genuinely stalled goal member (not yet integrated, past its wait budget) STILL surfaces (predicate returns false → pre-screen does NOT drop → mario fires)",
+  () => {
+    // Timing is orthogonal to this drop: a candidate REACHES the pre-screen only because it's
+    // already past its SLA (that's the a-step that surfaced it). So "past its wait budget" is a
+    // precondition of every case here. The drop predicate only cares about integration state; a
+    // not-yet-integrated goal member is a genuine stall and must survive the drop.
+    const stillStalled = isGoalMemberAwaitingPromotion({
+      milestoneId: "m-uuid-1",
+      goalBranchSha: null,       // build has NOT merged onto the goal branch — genuine stall
+      goalMainMergeSha: null,
+    });
+    assert.equal(stillStalled, false);
+  },
+);

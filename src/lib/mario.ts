@@ -31,7 +31,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
-import { getSpec as getSpecFromDb } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
 
@@ -492,6 +492,11 @@ async function readReviewFailedBlockerStalls(
  *      stall.
  *  (d) DROPS a candidate whose spec status is `folded` (fold-cooldown) — a
  *      folded row stopped emitting events on purpose.
+ *  (d2) DROPS a goal member whose build is integrated on `goal/<goalSlug>` and whose
+ *      goal has NOT yet atomically promoted (`goals.main_merge_sha` null) — its
+ *      integration target is the goal branch, not `main`, so the ledger's silence is
+ *      the promotion gate's job, not Mario's. Removes the `mario_fired` row + the
+ *      loop-guard oscillation risk that Phase 1's applier-level catch still accrued.
  *  (e) attaches a MarioBrief to every surviving candidate so the M4 reasoning
  *      agent picks up the last 10 events + blockedBy state + current job status
  *      without another read.
@@ -660,6 +665,18 @@ export async function evaluateStalledSpecs(
     // survive the filter chain and enqueue a mario job — the false-trigger class from Mario's first sweep.)
     if (!specRow) continue;
     if (specRow.status === "folded" || specRow.status === "deferred") continue;
+
+    // (d2) GOAL MEMBER AWAITING ATOMIC PROMOTION → legit wait, drop. A goal member's correct
+    // integration target is its GOAL BRANCH; it only reaches `main` via M5's atomic goal→main
+    // promotion. When the member's build has already merged onto goal/<goalSlug> AND the goal has
+    // NOT yet atomically promoted (`goals.main_merge_sha` is null), the ledger's silence is expected
+    // — the promotion gate owns driving it to main, and Mario has no honest fix. Dropping the row
+    // here (source-level) means no verdict, no `mario_fired` row, no loop-guard pressure and no
+    // wasted Max session — cheaper than the Phase-1 catch that only refused to reclaim, and it
+    // removes the ≥3-in-24h oscillation risk that repeated firings on the same awaiting slug can
+    // accrue on `MARIO_LOOP_GUARD_MAX`. Same class as folded/deferred/uncleared-blocker: a legit
+    // wait, not a stall. See [[isGoalMemberAwaitingPromotion]] for the pure predicate.
+    if (await isSpecRowAwaitingGoalPromotion(admin, specRow)) continue;
 
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
@@ -1184,14 +1201,9 @@ export function isGoalMemberAwaitingPromotion(input: {
  * [[surfaceMarioEscalationToAda]] path) so no reclaim build job is created for an integrated-awaiting
  * goal member, however the verdict routes the request.
  */
-async function isSpecAwaitingGoalPromotion(
-  admin: Admin,
-  workspaceId: string,
-  specSlug: string,
-): Promise<boolean> {
+async function isSpecRowAwaitingGoalPromotion(admin: Admin, spec: SpecRow): Promise<boolean> {
   try {
-    const spec = await getSpecFromDb(workspaceId, specSlug);
-    if (!spec || !spec.milestone_id) return false;
+    if (!spec.milestone_id) return false;
     // Not yet on the goal branch → this IS a genuine "not integrated" state; the reclaim class still owns it.
     if (!spec.goal_branch_sha) return false;
     // Resolve the milestone → goal_id → goal.main_merge_sha in one small pair of reads.
@@ -1214,6 +1226,20 @@ async function isSpecAwaitingGoalPromotion(
     });
   } catch {
     return false; // fail closed — an unknown state defaults to prior reclaim behavior.
+  }
+}
+
+async function isSpecAwaitingGoalPromotion(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string,
+): Promise<boolean> {
+  try {
+    const spec = await getSpecFromDb(workspaceId, specSlug);
+    if (!spec) return false;
+    return await isSpecRowAwaitingGoalPromotion(admin, spec);
+  } catch {
+    return false;
   }
 }
 
