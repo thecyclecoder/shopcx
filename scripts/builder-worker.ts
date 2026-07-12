@@ -23658,6 +23658,14 @@ async function dispatchJob(job: Job) {
         `${tag} reconcile-onto-main SUCCESS on ${branch} via ${usedStrategy} — base now contains origin/main (no WIP dropped)`,
       );
 
+      // node_modules is gitignored (absent in a fresh worktree). The unconditional symlink that makes
+      // tsc/builds work lives further down (~L23700), AFTER this reconcile block — so without this the
+      // gate below runs `npx tsc` in a worktree with no `typescript`, npx resolves the DECOY npm "tsc"
+      // package ("This is not the tsc command you are looking for", exit 1), and the gate misreads that
+      // as base_poison — parking a perfectly healthy build and (falsely) blaming a broken main. Symlink
+      // here so the gate invokes the REAL compiler; -sfn is idempotent with the later symlink.
+      sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
       // tsc-gate the RECONCILED tree BEFORE the claude session runs. If origin/main itself is
       // broken (base poison — the coaching-guidance #8 shape: a sibling PR merged a break to main
       // and now every downstream branch inherits it), park with the tsc output so the operator
