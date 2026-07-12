@@ -862,6 +862,72 @@ export function pickMergedPrFromList(
   return null;
 }
 
+// ── Built-in-merge phase filter (reconciler-spec-drift-stamps-only-built-phases-in-merged-pr P1) ────
+
+/** One phase's built-state inputs as the merge-heal filter sees it — enough to decide "in this PR?". */
+export interface PhaseBuiltCandidate {
+  /** 1-based `spec_phases.position` — the writeback key. */
+  position: number;
+  /** The `stampPhaseBuilt` provenance — non-null iff the phase built on the branch. */
+  build_sha: string | null;
+  /** The phase body — code-path extraction source for the file-diff fallback. */
+  body: string;
+}
+
+/** Which phases the merged PR actually built + why we're stamping each. */
+export interface PhasesBuiltInMerge {
+  stamped: { position: number; reason: "build_sha" | "file-diff" }[];
+  skipped: number[]; // positions with build_sha=null AND no declared file in the merge diff
+}
+
+/**
+ * Pure filter (reconciler-spec-drift-stamps-only-built-phases-in-merged-pr P1). Given a spec's
+ * unshipped phases + the merged commit's changed-file set, return ONLY the phases actually built in
+ * that merge. A phase qualifies iff:
+ *
+ *   (1) `build_sha` is non-null — the worker's `stampPhaseBuilt` recorded a real branch build; OR
+ *   (2) at least one declared file path in `body` (via `extractCodePaths`) appears in the merge
+ *       diff — the fallback for a phase whose code was manually smuggled into the squash without
+ *       ever going through the box's build flow.
+ *
+ * Unbuilt phases (build_sha=null AND no declared file in the merge diff) are RETURNED SEPARATELY
+ * in `skipped` so the caller can leave their `spec_phases.status` untouched — the drift-healer's
+ * whole point per this spec is that a partial-phase manual squash-merge must not stamp Phases 2/3
+ * shipped when only Phase 1 was actually in the PR (generalize-director-coach-backend PR #1712 is
+ * the live incident: coach/route.ts +26 only, but the old healer stamped all 3 phases → their
+ * auto-queued build sessions died as "already shipped" → the spec-test correctly failed them →
+ * a permanent shipped-but-red fold-deadlock).
+ *
+ * `mergedFiles === null` means we couldn't fetch the merge diff (a GitHub read failure). In that
+ * case we fall back to `build_sha`-only — a phase with a recorded branch build still qualifies,
+ * but no path-intersection heal is attempted this pass (a later pass retries when GitHub answers).
+ *
+ * Pure — no I/O, no logging; the whole verification is assertable from tests that hand-craft
+ * phases + a mergedFiles set (see spec-drift.test.ts).
+ */
+export function pickPhasesBuiltInMerge(
+  phases: readonly PhaseBuiltCandidate[],
+  mergedFiles: ReadonlySet<string> | null,
+): PhasesBuiltInMerge {
+  const stamped: { position: number; reason: "build_sha" | "file-diff" }[] = [];
+  const skipped: number[] = [];
+  for (const p of phases) {
+    if (p.build_sha) {
+      stamped.push({ position: p.position, reason: "build_sha" });
+      continue;
+    }
+    if (mergedFiles) {
+      const paths = extractCodePaths(p.body);
+      if (paths.some((path) => mergedFiles.has(path))) {
+        stamped.push({ position: p.position, reason: "file-diff" });
+        continue;
+      }
+    }
+    skipped.push(p.position);
+  }
+  return { stamped, skipped };
+}
+
 /**
  * The FOURTH built-unstamped signal — MANUAL GitHub squash/merge of a `claude/build-*` PR.
  *
@@ -893,22 +959,25 @@ export async function reconcileMergedBuildBranchPrs(
   const admin = createAdminClient();
 
   // Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'), not folded — the same shape
-  // `healBuiltUnstampedPhases` uses. Read through the specs-table SDK (no raw PM SQL).
+  // `healBuiltUnstampedPhases` uses. Read through the specs-table SDK (no raw PM SQL). Carry the
+  // per-phase build_sha + body forward: the P1 filter below (pickPhasesBuiltInMerge) needs both to
+  // decide "was this phase actually in the merged PR?" so we don't over-stamp unbuilt phases from a
+  // partial manual squash-merge (the generalize-director-coach-backend #1712 incident).
   const specs = await listSpecs(workspaceId);
-  const unstampedBySlug = new Map<string, number[]>();
+  const unstampedBySlug = new Map<string, PhaseBuiltCandidate[]>();
   for (const spec of specs) {
     if (spec.status === "folded") continue;
-    const positions = spec.phases
+    const candidates = spec.phases
       .filter((p) => p.status !== "shipped" && p.status !== "rejected")
-      .map((p) => p.position);
-    if (positions.length) unstampedBySlug.set(spec.slug, positions);
+      .map((p) => ({ position: p.position, build_sha: p.build_sha, body: p.body }));
+    if (candidates.length) unstampedBySlug.set(spec.slug, candidates);
   }
   if (!unstampedBySlug.size) return [];
 
   const owner = REPO.split("/")[0];
   const healed: { slug: string; phases: number[]; pr: number }[] = [];
 
-  for (const [slug, positions] of unstampedBySlug) {
+  for (const [slug, candidates] of unstampedBySlug) {
     const branch = `claude/build-${slug}`;
 
     // List EVERY PR (open + closed + merged) whose head is this branch. state=all so we can
@@ -930,22 +999,60 @@ export async function reconcileMergedBuildBranchPrs(
     }
     if (!merged) continue; // no MERGED PR (open / closed-unmerged / none) → skip, never stamp
 
-    const stamped: number[] = [];
-    for (const position of positions.slice().sort((a, b) => a - b)) {
+    // Fetch the merge commit's changed-file set — the fallback source for phases whose branch
+    // build never stamped a `build_sha` but whose code was still smuggled into the squash. Best-
+    // effort: a null (missing merge_sha / GitHub read failure / non-array `files`) collapses the
+    // filter to `build_sha`-only, so a phase with a recorded branch build still qualifies but a
+    // path-intersection heal waits for a later pass when GitHub answers.
+    let mergedFiles: Set<string> | null = null;
+    if (merged.merge_sha) {
       try {
-        await stampPhaseShipped(workspaceId, slug, position, {
+        const cRes = await gh("GET", `/repos/${REPO}/commits/${merged.merge_sha}`);
+        if (cRes.ok) {
+          const rawFiles = (cRes.json.files as Array<{ filename?: string }> | undefined) ?? [];
+          mergedFiles = new Set(rawFiles.map((f) => String(f.filename ?? "")).filter(Boolean));
+        }
+      } catch {
+        mergedFiles = null; // read failure — fall back to build_sha-only for this pass
+      }
+    }
+
+    // Filter to the phases ACTUALLY in this merge (build_sha ≠ null, or a declared file in the
+    // merge diff). Unbuilt phases (build_sha=null AND no file intersection) stay in their prior
+    // status so their one-phase-per-session build sessions still auto-queue — the fix for the
+    // fold-deadlock this spec is closing.
+    const filtered = pickPhasesBuiltInMerge(candidates, mergedFiles);
+    if (!filtered.stamped.length) {
+      // No phase in this spec's PR — nothing to stamp. Don't emit a director_activity row (there's
+      // no heal to report), just skip. A later pass with a fresh build_sha or a proper build-flow
+      // stamp will heal on its own turn.
+      continue;
+    }
+
+    const stamped: { position: number; reason: "build_sha" | "file-diff" }[] = [];
+    for (const s of filtered.stamped.slice().sort((a, b) => a.position - b.position)) {
+      try {
+        await stampPhaseShipped(workspaceId, slug, s.position, {
           pr: merged.number,
           merge_sha: merged.merge_sha,
         });
-        stamped.push(position);
+        stamped.push(s);
       } catch {
         /* a single-phase stamp failure — the next sweep re-attempts the remainder */
       }
     }
     if (!stamped.length) continue;
-    healed.push({ slug, phases: stamped, pr: merged.number });
+    healed.push({ slug, phases: stamped.map((s) => s.position), pr: merged.number });
 
-    // Supervisor-visible report: one director_activity row per healed spec, naming the signal.
+    // Supervisor-visible report: one director_activity row per healed spec, naming the signal +
+    // ONLY the phases actually stamped. `skipped_phases` lists the unbuilt phases we deliberately
+    // left in their prior status so the operator can see the healer honored the "one PR = only its
+    // own phases" invariant (never a blanket all-non-shipped stamp).
+    const stampedPositions = stamped.map((s) => s.position);
+    const stampedReasons = stamped.map((s) => `P${s.position} (${s.reason})`).join(", ");
+    const skippedSuffix = filtered.skipped.length
+      ? ` Left ${filtered.skipped.length} unbuilt phase(s) (P${filtered.skipped.join(", P")}) in their prior status — their build_sha is null AND their declared files are not in the merge diff, so their one-phase-per-session builds can still auto-queue instead of dead-ending as "already shipped".`
+      : "";
     try {
       const { recordDirectorActivity } = await import("@/lib/director-activity");
       await recordDirectorActivity(admin, {
@@ -953,13 +1060,15 @@ export async function reconcileMergedBuildBranchPrs(
         directorFunction: "platform",
         actionKind: "healed_built_unstamped",
         specSlug: slug,
-        reason: `reconciler:spec-drift stamped ${stamped.length} built-but-unstamped phase(s) (P${stamped.join(", P")}) of ${slug} shipped — GitHub reports ${branch}'s PR #${merged.number} is MERGED (merge_sha ${merged.merge_sha ?? "unknown"}). The owner manually squash-merged the PR (which the Branches page invites), so the box's own merge flow never fired the "already merged via #N" job-log signal and the phases stalled. Self-healed the derived status from GitHub's MERGED state.`,
+        reason: `reconciler:spec-drift stamped ${stamped.length} built-but-unstamped phase(s) (${stampedReasons}) of ${slug} shipped — GitHub reports ${branch}'s PR #${merged.number} is MERGED (merge_sha ${merged.merge_sha ?? "unknown"}). The owner manually squash-merged the PR (which the Branches page invites), so the box's own merge flow never fired the "already merged via #N" job-log signal and the phases stalled. Self-healed the derived status from GitHub's MERGED state, filtered to phases actually in this PR (build_sha or merge-diff intersection).${skippedSuffix}`,
         metadata: {
           actor: "reconciler:spec-drift",
           signal: "github-pr-merged",
           pr: merged.number,
           merge_sha: merged.merge_sha,
-          phases: stamped,
+          phases: stampedPositions,
+          skipped_phases: filtered.skipped,
+          stamp_reasons: stamped,
           branch,
         },
       });
