@@ -2,6 +2,8 @@
 
 The Control Tower **detection layer** ([[../specs/control-tower-complete-coverage]] Phase 2) — the watchdog auditing its own coverage + a reliable deploy-time Inngest re-sync, so a coverage gap surfaces *automatically* instead of waiting for someone to notice. Enforces the [[../operational-rules]] "register-or-it's-incomplete" rule by **detecting** violations, not trusting authors.
 
+**Also the runtime half of the [[../operational-rules#Node completeness — a node without a switch + heartbeat + owner is incomplete hard rule|node-completeness hard rule]]:** the § entry names the trio (OWNER + SWITCH + HEARTBEAT) required at authoring time; this page's `buildCoverageAudit` — together with [[../specs/orphan-node-self-audit|orphan-node-self-audit]] — is what CATCHES a shipped node that skipped any leg. Authoring gate ([[spec-review-agent]]) + runtime detector (here) both read the same three sources of truth ([[control-tower-node-registry]], [[../tables/kill_switches]], the heartbeat helpers in [[control-tower]]), so ship-time and audit-time verdicts cannot diverge.
+
 **Files:** `src/lib/inngest/registered-functions.ts` · `src/lib/control-tower/self-audit.ts` · `src/lib/inngest/sync.ts`
 
 ## `registered-functions.ts` — the served-function list (single source of truth)
