@@ -6,7 +6,7 @@ DB mirror of the [[../libraries/control-tower-node-registry|canonical node regis
 
 **Fail-open by construction.** A missing / empty mirror means every kind claims normally (the `not exists` degrades to `true`). See `syncNodeAncestry` in [[../libraries/node-ancestry-sync]] for the invariant.
 
-**GLOBAL config — not workspace-scoped.** The canonical org tree is ShopCX's own DevOps org, singular; there is no `workspace_id`. Read + written via the service role; the box worker + the [[../inngest/node-ancestry-sync-cron]] Inngest cron are the only writers.
+**GLOBAL config — not workspace-scoped.** The canonical org tree is ShopCX's own DevOps org, singular; there is no `workspace_id`. Read + written via the service role; the box worker + the [[../inngest/node-ancestry-sync-cron]] Inngest cron are the only writers. **RLS: service_role only** — the `_select to authenticated` policy shipped alongside [[kill_switches]] in Phase 1 was dropped by `supabase/migrations/20261016000000_lock_kill_switches_service_role_only.sql` ([[../specs/monitor-cadence-scaled-liveness-window]] Phase 3 Fix 1). The RPCs `claim_agent_job` and `claim_agent_job_diag` run with definer privileges and read the table internally, so gating the direct read surface has no runtime impact on the cascade.
 
 **Primary key:** `node_id`
 
@@ -33,7 +33,7 @@ DB mirror of the [[../libraries/control-tower-node-registry|canonical node regis
 
 ## Migration
 
-`supabase/migrations/20261014000000_kill_switch_enforce_claim.sql`. Idempotent — `create table if not exists`, RLS policies (`drop policy if exists` then `create`), `create or replace function` for `kind_to_node_id`, `claim_agent_job`, `claim_agent_job_diag`. Seeded **empty** on apply; the box worker populates it on next startup.
+`supabase/migrations/20261014000000_kill_switch_enforce_claim.sql`. Idempotent — `create table if not exists`, RLS policies (`drop policy if exists` then `create`), `create or replace function` for `kind_to_node_id`, `claim_agent_job`, `claim_agent_job_diag`. Seeded **empty** on apply; the box worker populates it on next startup. Follow-up: `supabase/migrations/20261016000000_lock_kill_switches_service_role_only.sql` (apply: `npx tsx scripts/apply-lock-kill-switches-service-role-only.ts`) drops the broad `_select to authenticated` policy so only the `_service` policy grants direct table access.
 
 ## Related
 
