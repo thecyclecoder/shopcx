@@ -15,7 +15,6 @@
  * build path, so every writer swallows its error (the daily spec-drift reconcile is the backstop).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
 import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
 
 export interface SpecCardPhaseState {
@@ -791,14 +790,10 @@ export async function markSpecCardBackToReview(
       { field: "status", actor: audit.actor, reason: audit.reason ?? "sent back to in_review (malformed/off — re-review needed)" },
     ],
   );
-  // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on every send-back / re-open (the shared
-  // re-open writer every send-back funnels through — Ada, CEO board, repair/regression, author-spec's
-  // re-authored-changed-content re-open). The consumer routes through the same gated
-  // `enqueueSpecReviewIfDue`; the durable review signal was NULLed above, so the pool contains this spec
-  // and an in-flight-safe enqueue lands within seconds. Errors swallowed — the 15-min cron backstop covers.
-  void inngest
-    .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
-    .catch(() => {});
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the reactive
+  // `spec-review/spec-mutated` kick is retired (Vale's LLM lane is gone). A send-back that
+  // discovers a defect in a shipped spec is handled downstream by the re-author path (which
+  // re-runs the deterministic gate at [[spec-review-gate]]).
 }
 
 /**
