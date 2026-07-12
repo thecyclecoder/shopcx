@@ -342,7 +342,7 @@ export const textCampaignSendTick = inngest.createFunction(
     // CTIA. 80 in flight at once = ~80/sec submission rate, well under.
     concurrency: [{ limit: 80 }],
     retries: 3,
-    triggers: [{ cron: "* * * * *" }], // every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const due = await step.run("pick-due-recipients", async () => {

@@ -36,7 +36,7 @@ export const metaCapiDispatchCron = inngest.createFunction(
     id: "meta-capi-dispatch-cron",
     retries: 1,
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "* * * * *" }], // every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const admin = createAdminClient();
