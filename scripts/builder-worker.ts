@@ -17017,10 +17017,73 @@ async function runDirectorCoachJob(job: Job) {
       const di = await import("../src/lib/agents/director-instructions");
       const actions = (thread.pending_actions || []).map((a) => ({ ...a }));
       const notes: string[] = [];
+      // director-chat-in-leash-execution Phase 1 — dispatch keyed on (thread.director_function,
+      // action.type). Ada's existing card types stay under `platform:*`; Growth (Max) + CS (June)
+      // land their own real executors. A pair NOT in this table — a Growth card that leaked into
+      // a CS thread, an unknown type — is treated as OUT OF LEASH: no executor runs, the action is
+      // marked `escalated`, and escalateApprovalRequestToCeo routes the request UP to the CEO with
+      // a rail-hit reason. NO cross-director mutation ever fires (the verification bullet).
+      const DISPATCH_TABLE: Record<string, ReadonlySet<string>> = {
+        platform: new Set<string>(["coaching", "spec", "goal", "spec-edit", "directive", "model_tier"]),
+        growth: new Set<string>(["reallocate_within_budget", "promote_ready_to_test", "hold_campaign"]),
+        cs: new Set<string>(["approve_remedy", "author_derived_from_ticket_spec", "amend_low_blast_sonnet_prompt"]),
+      };
+      const directorLabelFor = (fn: string): string =>
+        fn === "platform" ? "Ada (Platform/DevOps Director)"
+          : fn === "growth" ? "Max (Growth Director)"
+            : fn === "cs" ? "June (CS Director)"
+              : `${fn} director`;
       for (const a of actions) {
         if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
         if (a.status !== "approved") continue;
+        const rawType = typeof a.type === "string" ? a.type : "";
+        const inLeash = (DISPATCH_TABLE[thread.director_function] ?? new Set<string>()).has(rawType);
+        if (!inLeash) {
+          // Out-of-leash / cross-director card — escalate UP to the CEO. NEVER touches the target
+          // executor for any director; the verification bullet for a Growth card leaking into a CS
+          // thread requires "escalateApprovalRequestToCeo called with a rail reason, and NO CS
+          // mutation performed."
+          const reason = `Card type '${rawType || "(missing)"}' is not in ${thread.director_function}'s leash for this director-coach thread — routing UP to the CEO.`;
+          a.status = "escalated";
+          a.result = reason;
+          try {
+            const pdLib = await import("../src/lib/agents/platform-director");
+            await pdLib.escalateApprovalRequestToCeo(
+              db,
+              {
+                id: job.id,
+                workspace_id: job.workspace_id,
+                kind: job.kind,
+                spec_slug: job.spec_slug ?? null,
+                pending_actions: [a as unknown as import("../src/lib/agents/platform-director").DirectorActionLike],
+              },
+              reason,
+              { slug: thread.director_function, label: directorLabelFor(thread.director_function) },
+            );
+          } catch (e) {
+            console.error(`${tag} escalate failed (continuing):`, e instanceof Error ? e.message : e);
+          }
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              actionKind: "escalated",
+              specSlug: null,
+              reason,
+              metadata: {
+                thread_id: threadId,
+                action_id: a.id ?? null,
+                action_type: rawType,
+                rail: "cross_director_or_unknown_action_type",
+              },
+            });
+          } catch { /* audit best-effort */ }
+          notes.push(`Escalated to CEO: ${a.summary ?? rawType}`);
+          continue;
+        }
         try {
+          if (thread.director_function === "platform") {
           if (a.type === "coaching") {
             // The whole point: write the durable rule that's injected into her future decisions.
             await di.coachDirector(db, {
@@ -17165,6 +17228,362 @@ async function runDirectorCoachJob(job: Job) {
           } else {
             a.status = "failed";
             a.result = "nothing executable on this card";
+          }
+          } else if (thread.director_function === "growth") {
+            // Growth (Max) card handlers. Every path writes one `director_activity` row and — on a
+            // real executor return — only reports success back to the CEO chat AFTER the executor
+            // verified (`execute-then-message`).
+            if (a.type === "promote_ready_to_test") {
+              const promoteLib = await import("../src/lib/ads/ready-to-test-promote");
+              const payload = promoteLib.readPromotePayload({
+                id: typeof a.id === "string" ? a.id : "",
+                type: promoteLib.PROMOTE_READY_TO_TEST_ACTION_TYPE,
+                status: "approved",
+                payload: a.payload,
+              });
+              if (!payload) {
+                a.status = "failed";
+                a.result = "promote_ready_to_test payload malformed (need ad_campaign_id + meta_page_id + meta_account_id + meta_adset_id)";
+                notes.push(`${a.summary ?? "Promote creative"} → payload malformed`);
+              } else {
+                const r = await promoteLib.executePromoteReadyToTest(db, {
+                  workspaceId: job.workspace_id,
+                  specSlug: null,
+                  payload,
+                });
+                if (r.ok && r.ad_publish_jobs_id) {
+                  a.status = "done";
+                  a.result = `promoted → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)} (PAUSED)`;
+                  notes.push(`Promoted creative → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `promote failed: ${r.reason ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Promote creative"} → ${a.result}`);
+                }
+              }
+              // executePromoteReadyToTest writes its own director_activity `promoted_ready_to_test`
+              // row on success. Add one FAIL row for auditability of the failure path so the
+              // one-row-per-handled-action invariant Phase 3 tests holds either way.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "promote_ready_to_test_failed",
+                    specSlug: null,
+                    reason: a.result ?? "promote_ready_to_test failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "promote_ready_to_test" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "reallocate_within_budget") {
+              // Growth's cross-tool allocation composer (runGrowthAllocationPass) is cron-driven and
+              // consumes a per-account snapshot — not a free-form founder ask. When the card carries
+              // ad_account_id + snapshot_date we hand off to that composer; otherwise we fail-open
+              // with a clear reason so the CEO sees WHAT was missing (no silent no-op).
+              const adAccountId = typeof a.ad_account_id === "string" ? a.ad_account_id : null;
+              const snapshotDate = typeof a.snapshot_date === "string" ? a.snapshot_date : null;
+              if (!adAccountId || !snapshotDate) {
+                a.status = "failed";
+                a.result = "reallocate_within_budget requires ad_account_id + snapshot_date on the card";
+                notes.push(`${a.summary ?? "Reallocate"} → payload malformed`);
+              } else {
+                try {
+                  const { runGrowthAllocationPass } = await import("../src/lib/growth-allocation");
+                  const r = await runGrowthAllocationPass({
+                    workspaceId: job.workspace_id,
+                    adAccountId,
+                    snapshotDate,
+                  });
+                  a.status = "done";
+                  a.result = `allocation pass → decision=${r.decision.kind}, action_kind=${r.actionKind}`;
+                  notes.push(`Reallocation → ${r.decision.kind}`);
+                } catch (err) {
+                  a.status = "failed";
+                  a.result = `allocation pass failed: ${err instanceof Error ? err.message : String(err)}`;
+                  notes.push(`${a.summary ?? "Reallocate"} → ${a.result}`);
+                }
+              }
+              // runGrowthAllocationPass writes its own director_activity row (via
+              // allocationDecisionToActionKind); add one FAIL row for the malformed-payload case so
+              // every handled action leaves at least one activity row.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "reallocate_within_budget_failed",
+                    specSlug: null,
+                    reason: a.result ?? "reallocate_within_budget failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "reallocate_within_budget" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "hold_campaign") {
+              // A pause on a specific ad-set / campaign the founder called out in chat. The
+              // downstream Meta flip lives in the iteration-actions ledger the media-buyer + growth
+              // director both write into; the CEO chat carries the intent, we RECORD it as a
+              // director_activity 'hold_campaign' row so the audit trail exists, and Phase 3 will
+              // pin the actual Meta flip on top of a mocked executor. Missing target ids → fail
+              // with a clear reason.
+              const target = typeof a.meta_campaign_id === "string" ? a.meta_campaign_id
+                : typeof a.meta_adset_id === "string" ? a.meta_adset_id
+                  : typeof a.meta_ad_id === "string" ? a.meta_ad_id
+                    : null;
+              try {
+                const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                await recordDirectorActivity(db, {
+                  workspaceId: job.workspace_id,
+                  directorFunction: "growth",
+                  actionKind: target ? "hold_campaign" : "hold_campaign_failed",
+                  specSlug: null,
+                  reason: target
+                    ? String(a.reasoning ?? a.summary ?? `hold_campaign target=${target}`)
+                    : "hold_campaign missing meta_campaign_id / meta_adset_id / meta_ad_id",
+                  metadata: {
+                    thread_id: threadId,
+                    action_id: a.id ?? null,
+                    action_type: "hold_campaign",
+                    target: target ?? null,
+                  },
+                });
+              } catch { /* audit best-effort */ }
+              if (target) {
+                a.status = "done";
+                a.result = `hold_campaign recorded for ${target}`;
+                notes.push(`Hold campaign → ${target}`);
+              } else {
+                a.status = "failed";
+                a.result = "hold_campaign requires meta_campaign_id / meta_adset_id / meta_ad_id on the card";
+                notes.push(`${a.summary ?? "Hold campaign"} → payload malformed`);
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else if (thread.director_function === "cs") {
+            // CS (June) card handlers. `approve_remedy` + `author_derived_from_ticket_spec` route
+            // through applyBoxCsDirectorCall (the same executor prod's cs-director-call runner uses),
+            // which enforces the execute-then-message contract for approve_remedy: the customer
+            // reply lands ONLY after every action in the RemedyPlan verifies. To satisfy that
+            // executor's contract (it reads `agent_jobs.instructions.ticket_id`), we mint a
+            // synthetic `cs-director-call` agent_jobs row per card and mark it completed once the
+            // executor returns.
+            const applyCsDirectorCall = async (
+              verdict: import("../src/lib/cs-director").CsDirectorVerdictInput,
+              ticketId: string,
+            ): Promise<import("../src/lib/cs-director").ApplyBoxCsDirectorCallResult> => {
+              const { data: synth, error: mintErr } = await db.from("agent_jobs").insert({
+                workspace_id: job.workspace_id,
+                kind: "cs-director-call",
+                status: "queued_resume",
+                spec_slug: null,
+                instructions: JSON.stringify({ ticket_id: ticketId, source: "director-coach", thread_id: threadId }),
+                created_by: job.created_by,
+              }).select("id").maybeSingle();
+              if (mintErr || !synth) {
+                return {
+                  ok: false,
+                  reason: "synthetic_job_mint_failed",
+                  error: mintErr?.message ?? "no row",
+                  needs_attention: true,
+                };
+              }
+              const synthId = (synth as { id: string }).id;
+              const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+              const r = await applyBoxCsDirectorCall(db, synthId, verdict);
+              await db.from("agent_jobs").update({
+                status: r.ok ? "completed" : "needs_attention",
+                error: r.ok ? null : (r.error ?? r.reason ?? null),
+                log_tail: `director-coach ${verdict.decision} (thread=${threadId.slice(0, 8)}): handler=${r.handler ?? "?"} ok=${r.ok}`.slice(-2000),
+                updated_at: new Date().toISOString(),
+              }).eq("id", synthId);
+              return r;
+            };
+            if (a.type === "approve_remedy") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const remedy = a.remedy && typeof a.remedy === "object" && !Array.isArray(a.remedy)
+                ? (a.remedy as Record<string, unknown>)
+                : null;
+              if (!ticketId || !remedy) {
+                a.status = "failed";
+                a.result = "approve_remedy requires ticket_id + remedy on the card";
+                notes.push(`${a.summary ?? "Approve remedy"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "approve_remedy" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "approve_remedy",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach approve_remedy"),
+                  remedy,
+                }, ticketId);
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `approve_remedy executed (message_delivered=${r.message_delivered ?? false})`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → executed`);
+                } else {
+                  a.status = "failed";
+                  a.result = `approve_remedy failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done" ? "approve_remedy_executed" : "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result ?? "approve_remedy",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "approve_remedy",
+                      ticket_id: ticketId,
+                      message_delivered: r.ok ? (r.message_delivered ?? false) : false,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "author_derived_from_ticket_spec") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const seed = a.spec_seed && typeof a.spec_seed === "object" && !Array.isArray(a.spec_seed)
+                ? (a.spec_seed as Record<string, unknown>)
+                : null;
+              if (!ticketId || !seed) {
+                a.status = "failed";
+                a.result = "author_derived_from_ticket_spec requires ticket_id + spec_seed on the card";
+                notes.push(`${a.summary ?? "Author derived spec"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "author_derived_from_ticket_spec_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "author_derived_from_ticket_spec" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "author_spec",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach author_derived_from_ticket_spec"),
+                  spec_seed: seed,
+                }, ticketId);
+                const authoredSlug = r.ok ? r.spec_slug ?? null : null;
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `author_spec executed → slug=${authoredSlug ?? "(unset)"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${authoredSlug ?? "authored"}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `author_spec failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "author_derived_from_ticket_spec_executed"
+                      : "author_derived_from_ticket_spec_failed",
+                    specSlug: authoredSlug,
+                    reason: a.result ?? "author_derived_from_ticket_spec",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "author_derived_from_ticket_spec",
+                      ticket_id: ticketId,
+                      spec_slug: authoredSlug,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "amend_low_blast_sonnet_prompt") {
+              // Route through the sonnet-prompts-table SDK — the sole writer for `sonnet_prompts`.
+              // Emits a PROPOSED row (status='proposed', enabled=false); the review lane owns the
+              // enable flip. This is the low-blast surface — a rule tweak that never touches billing
+              // or promises a specific customer outcome.
+              const title = typeof a.title === "string" && a.title.trim() ? a.title.trim() : null;
+              const content = typeof a.content === "string" && a.content.trim() ? a.content.trim() : null;
+              if (!title || !content) {
+                a.status = "failed";
+                a.result = "amend_low_blast_sonnet_prompt requires title + content on the card";
+                notes.push(`${a.summary ?? "Amend rule"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "amend_low_blast_sonnet_prompt" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const { proposePrompt } = await import("../src/lib/sonnet-prompts-table");
+                const category = typeof a.category === "string" && a.category.trim() ? a.category.trim() : "rule";
+                const derivedFromTicketId = typeof a.derived_from_ticket_id === "string" && a.derived_from_ticket_id.trim()
+                  ? a.derived_from_ticket_id.trim()
+                  : null;
+                const r = await proposePrompt(db, {
+                  workspaceId: job.workspace_id,
+                  title,
+                  content,
+                  category,
+                  derivedFromTicketId,
+                });
+                if (r.id && !r.error) {
+                  a.status = "done";
+                  a.result = `proposed sonnet prompt ${r.id.slice(0, 8)} — pending review`;
+                  notes.push(`${a.summary ?? "Amend rule"} → proposed ${r.id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `proposePrompt failed: ${r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Amend rule"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "amend_low_blast_sonnet_prompt_proposed"
+                      : "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result ?? "amend_low_blast_sonnet_prompt",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "amend_low_blast_sonnet_prompt",
+                      prompt_id: r.id ?? null,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else {
+            // Unknown director function on the thread — treat as a fail-safe no-op (the dispatch
+            // preamble above already routes unknown (director, type) pairs to the CEO; this
+            // branch only fires when a NEW director function is added without a handler here).
+            a.status = "failed";
+            a.result = `no handler wired for director '${thread.director_function}'`;
           }
         } catch (e) {
           a.status = "failed";
