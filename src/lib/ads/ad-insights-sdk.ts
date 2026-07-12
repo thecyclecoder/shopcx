@@ -169,11 +169,16 @@ export async function getDbAdFacts(
 export interface CacThresholds { ltv: number; targetCac: number; killCac: number; basis: string }
 export const TARGET_CAC_LTV = 3;
 export const KILL_CAC_LTV = 1.5;
+/** CEO strategic crown/target CAC (Dylan, 2026-07-12). The crown line is a STRATEGY setpoint, not an
+ *  LTV function: an ad crowns at CPA ≤ $150 over ≥ $450 spend (the VERDICT_FLOOR_SPEND). Kill stays
+ *  LTV-derived (LTV/1.5) so retention still auto-widens the hold band. Was LTV/3 (≈$110 at current
+ *  LTV), which under-called winners vs the operating rule. */
+export const CROWN_TARGET_CAC = 150;
 const DOCUMENTED_LTV_FALLBACK = 424;
 
-/** Live LTV → target (LTV/3) + kill (LTV/1.5) from the latest complete monthly snapshot. */
+/** Crown/target CAC = the $150 CEO setpoint; kill = live LTV/1.5 from the latest complete monthly snapshot. */
 export async function resolveCacThresholds(admin: Admin, workspaceId: string, override?: number): Promise<CacThresholds> {
-  if (override && override > 0) return { ltv: override, targetCac: override / TARGET_CAC_LTV, killCac: override / KILL_CAC_LTV, basis: `override $${override}` };
+  if (override && override > 0) return { ltv: override, targetCac: CROWN_TARGET_CAC, killCac: override / KILL_CAC_LTV, basis: `override $${override}` };
   let ltv = DOCUMENTED_LTV_FALLBACK, basis = `documented fallback $${DOCUMENTED_LTV_FALLBACK} (live snapshot thin)`;
   try {
     const churn = await getMonthlyChurn({ admin, workspaceId, trailingMonths: null });
@@ -191,7 +196,7 @@ export async function resolveCacThresholds(admin: Admin, workspaceId: string, ov
       basis = `live: AOV $${aov.toFixed(0)} × ${orders.toFixed(1)} orders (sub ${(subRate * 100).toFixed(0)}%, churn ${(churn.monthly_churn * 100).toFixed(1)}%, ${s.month})`;
     }
   } catch { /* fall through to documented */ }
-  return { ltv, targetCac: ltv / TARGET_CAC_LTV, killCac: ltv / KILL_CAC_LTV, basis };
+  return { ltv, targetCac: CROWN_TARGET_CAC, killCac: ltv / KILL_CAC_LTV, basis };
 }
 
 export type Verdict = "winner" | "hold" | "kill" | "below_floor";
