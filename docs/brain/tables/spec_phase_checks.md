@@ -1,6 +1,6 @@
 # spec_phase_checks
 
-ONE ROW PER VERIFICATION CHECK on a spec phase ([[../specs/pm-structured-intent-and-refs]] Phase 3). Replaces the free-text `spec_phases.verification` blob with `{position, description, kind}` rows; the box spec-test agent reads THESE rows and writes a per-row verdict.
+ONE ROW PER VERIFICATION CHECK on a spec phase ([[../specs/pm-structured-intent-and-refs]] Phase 3). Replaces the free-text `spec_phases.verification` blob with `{position, description, kind}` rows; [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 1 extends each row with an executable payload (`exec_kind` + `params`) so the deterministic spec-check runner (Phase 2) executes the auto-testable subset with no LLM.
 
 **Workspace-scoped via the parent** (inherited from `specs.workspace_id` via `spec_phases`). RLS: authenticated reads; service-role full access.
 
@@ -15,6 +15,8 @@ ONE ROW PER VERIFICATION CHECK on a spec phase ([[../specs/pm-structured-intent-
 | `position` | `int` | 1-indexed ordering within the phase. Unique per `(phase_id, position)` |
 | `description` | `text` | the plain-language "- On {where}, {do what} → expect {observable result}" line |
 | `kind` | `text` | `auto` (spec-test agent runs directly, non-destructive) or `human` (parked needs_human). CHECK-constrained · default `auto` |
+| `exec_kind` | `text` | executable check kind ([[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 1): `tsc` \| `grep` \| `ci_status` \| `http_get` \| `db_probe_readonly` \| `unit_test` \| `build` \| `needs_human`. NULL or `needs_human` = never auto-run. Read by [[../libraries/spec-check-runner]] `runSpecChecks`. |
+| `params` | `jsonb` | typed executable params per `exec_kind` (shape validated in app layer by [[../libraries/spec-phase-checks-table]] `validateExecutableCheck`). Null for `tsc`/`build`/`needs_human`. |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | default `now()` |
 
@@ -32,4 +34,4 @@ ONE ROW PER VERIFICATION CHECK on a spec phase ([[../specs/pm-structured-intent-
 
 ## Related
 
-[[spec_phases]] · [[../libraries/spec-phase-checks-table]] · [[../libraries/author-spec]] · [[../specs/pm-structured-intent-and-refs]] · [[../specs/spec-test-agent]]
+[[spec_phases]] · [[../libraries/spec-phase-checks-table]] · [[../libraries/author-spec]] · [[../specs/pm-structured-intent-and-refs]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]]

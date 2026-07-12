@@ -849,14 +849,21 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
   // keeps the window on the recent tail instead of the long-graded head.
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, created_at, kind, status, error")
+    .select("id, created_at, kind, status, error, claude_session_id")
     .eq("workspace_id", workspaceId)
     .in("kind", ownedKinds)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
     .order("created_at", { ascending: false })
     .limit(limit);
-  return ((jobs as UngradedJob[]) || [])
+  return ((jobs as Array<UngradedJob & { claude_session_id: string | null }>) || [])
     .filter((j) => !gradedJobs.has(j.id))
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — a `spec-test` row
+    // whose deterministic runner resolved every check never spawned a Max session (claude_session_id
+    // stays null in that path — scripts/builder-worker.ts runSpecTestJob). There is no LLM output
+    // to score against Vera's rubric, so it is MONITORED (via the Control Tower registry loop
+    // `deterministic-spec-check-runner`), NOT GRADED. Filter it out here so the grader's session
+    // budget stays on the real LLM residuals.
+    .filter((j) => !(j.kind === "spec-test" && !j.claude_session_id))
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 

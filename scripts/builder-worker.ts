@@ -8893,15 +8893,17 @@ async function runPlanJob(job: Job) {
       const batchPrompt = [
         `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
         `Author BATCH ${b + 1} of ${batches.length} — the planner-authoring flow is bounded (max ${PLANNER_AUTHOR_BATCH_SIZE} specs per turn) so no single result grows past the size that dropped a prior 6-spec envelope. Author EXACTLY the ${batch.length} slug(s) listed in this batch; the remaining approved slugs are handled in other batches.`,
-        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); optional non-blocking \`human_review\` (see HUMAN-REVIEW rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist","checks":[{position,description,kind,exec_kind,params}]}. NO status emoji/markers anywhere — status is DB-driven.`,
         `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
         `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
+        `MACHINE-RUNNABLE CHECKS ARE MANDATORY (every-spec-writer-authors-machine-runnable-verifications Phase 1): EVERY phase MUST also carry a \`checks\` array with >=1 TYPED machine-runnable row the deterministic spec-check runner can execute. Each check = {"position":N,"description":"…","kind":"auto"|"human","exec_kind":"tsc"|"grep"|"ci_status"|"http_get"|"db_probe_readonly"|"unit_test"|"build"|"needs_human","params":<see shape below>}. VALID PARAMS: \`tsc\`/\`ci_status\`/\`build\`/\`needs_human\` → params:null; \`grep\` → {"pattern":"…","path":"…","expect":"present"|"absent"}; \`http_get\` → {"url":"https://…","expect_status":200}; \`db_probe_readonly\` → {"probe_id":"<registered probe key>","args":{…},"expect":null|number|boolean}; \`unit_test\` → {"script":"<a real package.json script>"}. \`needs_human\` rows are ALLOWED as EXTRA (subjective / eyeball) but NEVER the SOLE check on a phase — a phase with only \`needs_human\` (or only untyped prose) is REJECTED at author time with MissingMachineCheckError. Prefer \`tsc\`+\`grep\` when the phase adds a symbol/module, \`db_probe_readonly\` when it touches a table (name a probe from src/lib/spec-check-db-probes.ts), \`http_get\` when it exposes a route, \`unit_test\` when there's a package.json script that exercises the change.`,
+        `HUMAN-REVIEW IS OPTIONAL, NON-BLOCKING (Phase 2): a spec MAY carry a spec-level \`human_review\` string — the OPTIONAL founder-facing advisory prompt (e.g. "after ship, open /dashboard/x and confirm the layout reads right"). It renders on the spec card + a post-ship founder surface and is NEVER read by the fold gate / promote gate / spec-check runner (machine checks are the ship gate). Absence is the norm — set it only when there's a real subjective look-see the founder should do post-ship. Do NOT put subjective checks in \`checks\` — use \`human_review\`.`,
         `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
         `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
         ``,
         `Approved specs for THIS batch (author EXACTLY these ${batch.length} slug(s), no more, no fewer):\n${batchSpecList}`,
         ``,
-        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","human_review":"OPTIONAL founder eyeball note or omit","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …","checks":[{"position":1,"description":"tsc clean","kind":"auto","exec_kind":"tsc","params":null}]}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
       ].join("\n");
 
       const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, batchPrompt), currentSessionId, wt, configDir, job.id);
@@ -9009,13 +9011,43 @@ async function runPlanJob(job: Job) {
         // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
         const fallbackWhy = String(out.why || "").trim();
         const fallbackWhat = String(out.what || "").trim();
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — carry the typed
+        // machine-runnable `checks` array through to the SDK. The planner is prompted to emit
+        // {position,description,kind,exec_kind,params} per acceptance criterion; if it did not,
+        // the shared `checks: []` falls through, and the app-layer chokepoint's
+        // `parseVerificationBlobToChecks(verification)` still fires (defaulting exec_kind to
+        // needs_human) — which the Phase 1 machine-check gate then rejects with a loud error.
         const phases = out.phases.map((p) => ({
           title: String(p.title || "").trim() || "Phase",
           body: String(p.body || "").trim(),
           verification: String(p.verification || "").trim(),
           why: String(p.why || "").trim() || fallbackWhy,
           what: String(p.what || "").trim() || fallbackWhat,
+          checks: Array.isArray(p.checks)
+            ? (p.checks as Array<{
+                position?: number;
+                description?: string;
+                kind?: "auto" | "human";
+                exec_kind?: string;
+                params?: unknown;
+              }>).map((c, i) => ({
+                position: Number.isInteger(c.position) ? (c.position as number) : i + 1,
+                description: String(c.description ?? "").trim(),
+                kind: c.kind === "human" ? "human" as const : "auto" as const,
+                exec_kind: (typeof c.exec_kind === "string" ? c.exec_kind : null) as
+                  | "tsc" | "grep" | "ci_status" | "http_get" | "db_probe_readonly"
+                  | "unit_test" | "build" | "needs_human" | null,
+                params: (c.params ?? null) as never,
+              }))
+            : undefined,
         }));
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+        // founder-facing note (Phase-2 spec column). The planner emits it as `out.human_review`;
+        // absence is fine.
+        const specHumanReview: string | null | undefined =
+          typeof out.human_review === "string" && out.human_review.trim()
+            ? out.human_review.trim()
+            : undefined;
         try {
           // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
           // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
@@ -9040,6 +9072,9 @@ async function runPlanJob(job: Job) {
               blocked_by: blockers,
               why: specWhy,
               what: specWhat,
+              // every-spec-writer-authors-machine-runnable-verifications Phase 2 — the OPTIONAL,
+              // non-blocking founder-facing advisory note (never gates fold/ship/merge).
+              human_review: specHumanReview,
               phases,
             },
             "planned",
@@ -12224,9 +12259,130 @@ async function runSpecTestJob(job: Job) {
     }
     const isPreMerge = !!previewOrigin && !!branch;
 
+    // ── machine-declared-verification-and-deterministic-spec-test-runner Phase 3 ─────────────────
+    // Deterministic-first: run the machine-declared checks in-process BEFORE we spawn a Max session.
+    // If every check resolved (no `needs_human` residual) AND this is NOT a fused pre-merge job (the
+    // security envelope stays a Max session by design — Vault is judgment), write the deterministic
+    // verdicts straight to spec_test_runs and run the same post-verdict downstream (timecard +
+    // green-writeback + auto-fold + regression detector) — NO claude session, no Max cost. Best-
+    // effort: any thrown error falls through to the LLM lane below (the runner is additive, never
+    // regressive). The `residual*` values are threaded into the prompt so an unavoidable Max session
+    // can focus its work.
+    let deterministicResiduals: string[] = [];
+    let deterministicChecks: SpecTestCheck[] = [];
+    let deterministicOk = false;
+    try {
+      const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+        "../src/lib/spec-check-runner"
+      );
+      const pkg = JSON.parse(readFileSync(resolve(REPO_DIR, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+      const runnerOut = await runSpecChecks({
+        workspaceId: job.workspace_id,
+        slug,
+        deps: {
+          loadChecks: defaultLoadChecks,
+          executors: defaultExecutors,
+          packageScripts,
+          repoRoot: REPO_DIR,
+        },
+      });
+      const cls = classifyDeterministicRun(runnerOut.results);
+      deterministicResiduals = cls.residualTexts;
+      deterministicChecks = cls.checks;
+      deterministicOk = true;
+      console.log(
+        `${tag} deterministic runner — ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤 (residual=${cls.residualCount}, isPreMerge=${isPreMerge})`,
+      );
+      if (cls.allResolved && !isPreMerge) {
+        // No LLM needed. Insert the deterministic verdicts + run the same downstream Vera runs today.
+        await db.from("spec_test_runs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          agent_job_id: job.id,
+          agent_verdict: cls.agentVerdict,
+          summary: cls.summary,
+          checks: cls.checks,
+          transcript: null,
+          error: null,
+          spec_branch: null,
+          preview_url: null,
+        });
+        await emitTimecardOnceInSession(emittedThisSession, {
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "spec_test_verdict",
+          actor: "vera",
+          metadata: { job_id: job.id, agent_verdict: cls.agentVerdict, summary: cls.summary, deterministic: true },
+        });
+        try {
+          const { reflectSpecGreenChecks } = await import("../src/lib/spec-green-writeback");
+          const g = await reflectSpecGreenChecks(job.workspace_id, slug);
+          if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
+        } catch (e) {
+          console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // The claude_session_id stays null on this row — the grader's `ungradedConcludedJobs` filter
+        // reads that as "monitored, not graded" and skips it (agent-grader.ts, machine-declared Phase 3).
+        await update(job.id, {
+          status: "completed",
+          log_tail: `${cls.agentVerdict} — ✅${cls.summary.auto_pass} ✗${cls.summary.auto_fail} 👤${cls.summary.needs_human} (deterministic — no Max session)`.slice(-2000),
+        });
+        try {
+          const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
+          const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
+          if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
+        } catch (e) {
+          console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (cls.agentVerdict === "issues") {
+          try {
+            const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
+            const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
+            const q = await getHumanTestQueue(job.workspace_id);
+            const reg = q.regressions.find((r) => r.slug === slug);
+            if (reg) {
+              await enqueueRegressionJob(db, {
+                workspaceId: job.workspace_id,
+                specSlug: reg.slug,
+                fromSpecTestRunId: null,
+              });
+            }
+          } catch (e) {
+            console.error(`${tag} regression enqueue (deterministic path) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      // The runner throwing is NOT a regression — fall back to today's LLM path. The runner's whole
+      // contract is additive: it verifies more cheaply when it can and gets out of the way otherwise.
+      console.warn(`${tag} deterministic runner failed (falling back to Max): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Emit the monitored-loops heartbeat for the deterministic runner (Control Tower registry
+    // entry DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) — ok:true when the runner returned verdicts,
+    // ok:false when it threw and Vera's LLM lane had to take over. Best-effort; never fails the job.
+    try {
+      const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+      const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+      await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: deterministicOk });
+    } catch { /* best-effort */ }
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
+      ...(deterministicResiduals.length
+        ? [
+            // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — deterministic
+            // pre-pass. The box's Node runner already executed the machine-declared checks; its verdicts
+            // are AUTHORITATIVE and will be merged after your session. Focus your effort on the
+            // subjective/drift residual — do NOT re-run the checks the runner already handled.
+            `🤖 DETERMINISTIC PRE-PASS (spec-check-runner) — a Node module already ran the machine-declared \`spec_phase_checks\` (${deterministicChecks.length} check(s)); its pass/fail verdicts are AUTHORITATIVE and will be merged into the final row after your session. SCOPE your effort to the ${deterministicResiduals.length} RESIDUAL bullet(s) below (drift · subjective · un-typed prose). Still emit ONE check per bullet in your JSON so the merge is complete; other bullets can carry a needs_human / inconclusive placeholder with evidence "handled by deterministic runner" — the merge will replace them with the runner's verdict.\nResidual bullets:\n${deterministicResiduals.map((t) => `  - ${t}`).join("\n")}`,
+          ]
+        : []),
       ...(isPreMerge
         ? [
             `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
@@ -12404,7 +12560,26 @@ async function runSpecTestJob(job: Job) {
       return;
     }
 
-    const { agent_verdict, summary, checks, report } = normalizeSpecTest(parsed);
+    const { agent_verdict: llmAgentVerdict, summary: llmSummary, checks: llmChecks, report } = normalizeSpecTest(parsed);
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — MERGE. When the
+    // deterministic runner produced verdicts for this spec (a mixed run — residuals forced the Max
+    // session but some checks resolved deterministically), the runner's pass/fail is AUTHORITATIVE
+    // and overrides any conflicting Max verdict on the same bullet; the LLM's verdicts only fill in
+    // the runner's needs_human residual. Pure — same helper the unit tests pin.
+    let checks = llmChecks;
+    let summary = llmSummary;
+    let agent_verdict = llmAgentVerdict;
+    if (deterministicChecks.length) {
+      const { mergeDeterministicWithLlmChecks } = await import("../src/lib/spec-check-runner");
+      checks = mergeDeterministicWithLlmChecks(deterministicChecks, llmChecks);
+      summary = {
+        auto_pass: checks.filter((c) => c.verdict === "pass").length,
+        auto_fail: checks.filter((c) => c.verdict === "fail").length,
+        needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+        inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
+      };
+      agent_verdict = summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
+    }
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
@@ -16581,9 +16756,96 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when a spec YOU OWN has \`phase_states\` you can't trust (a tagless ✅ phase / a director hand-flip / pre-provenance reconciler pass) and you need the audit to RE-VERIFY + re-stamp provenance from the merge ledger. **AUTO-APPLIED — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to this slug + writes a \`requested_audit\` director_activity row carrying your reason; the audit's verdict (per-phase {status, pr, merge_sha}) shows up in the activity feed when the job runs. The audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main to resolve SHA → PR #, then re-stamps \`phase_states\` with PROPER provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists — "we cannot prove this phase shipped" is better than "✅ ungrounded"). Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function — out-of-leash otherwise. This is the LEGITIMATE cleanup path; do NOT use a \`spec-status\` flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance).`,
 ].join("\n");
 
+// director-chat-in-leash-execution Phase 2 — Growth (Max) card shapes the coach chat may emit.
+// Mirrors the Phase-1 dispatch table (growth: reallocate_within_budget / promote_ready_to_test /
+// hold_campaign). Every card shape names the JSON payload the deterministic worker's approve_action
+// branch expects, so the model + the executor agree on the shape byte-for-byte. The shared
+// "founder-prompted out-of-leash" escape valve is left to `directorCoachFraming` (applies uniformly
+// across every director — Ada + Max + June).
+const GROWTH_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Max — grounded in what you actually read: iteration_policies + iteration_recommendations + storefront_optimizer_policy + your director_activity + agent_jobs>"}`,
+  `  — for an explanation ("why did we pause X?" / "why isn't Y scaled?"): investigate read-only and explain (X was flagged by pause_underperforming_creative, Y is inside the ceiling headroom, Z would breach ad_spend_budgets and requires your greenlight).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. reallocate-ceiling-headroom-guard>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that raises the ad-spend ceiling on its own or opens a new acquisition channel autonomously.`,
+  ``,
+  `## Cards you may emit (Growth leash — three shapes)`,
+  ``,
+  `1. Move spend between ads (within the approved budget). Runs Growth's allocation composer for the named ad account + snapshot date on the founder's Approve tap; the composer decides which levers move within the ceiling. Never widens the ceiling — raising the total budget is a founder-prompted out-of-leash rail (below).`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"reallocate_within_budget","summary":"<one-line why>","ad_account_id":"<meta ad account id, no act_ prefix>","snapshot_date":"YYYY-MM-DD","reasoning":"<why this is right + inside the ad_spend_budgets ceiling>"}]}`,
+  ``,
+  `2. Promote a ready creative into a test (PAUSED). Inserts an ad_publish_jobs row with publish_active=false on approval; the ad lands PAUSED in Meta and a second human tap flips it live. A live spend line never goes live automatically — the leash invariant.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"promote_ready_to_test","summary":"<one-line why>","payload":{"ad_campaign_id":"<uuid>","meta_page_id":"<id>","meta_account_id":"<id>","meta_adset_id":"<id>","meta_campaign_id":"<id or null>","publish_active":false},"reasoning":"<why this creative is ready + on-brand>"}]}`,
+  ``,
+  `3. Pause / hold an ad-set / campaign / ad that isn't working. Records a director_activity hold_campaign row against the named target so the audit trail is durable; the actual Meta status flip flows through the iteration_actions ledger downstream.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"hold_campaign","summary":"<one-line why>","meta_adset_id":"<id — OR meta_campaign_id, OR meta_ad_id>","reasoning":"<what's underperforming and why holding it is the right call>"}]}`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — CS (June) card shapes the coach chat may emit. Mirrors
+// the Phase-1 dispatch table (cs: approve_remedy / author_derived_from_ticket_spec /
+// amend_low_blast_sonnet_prompt). RemedyPlan multi-action shape is the docs/brain/libraries/cs-director
+// § Multi-action remedies contract; single-action remedies still normalize into a one-entry actions[].
+const CS_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS June — grounded in what you actually read: the ticket, its message history, the linked customer + subscription + orders, your director_activity, tickets_analyses>"}`,
+  `  — for an explanation ("why did we refund X?" / "why didn't we send Y the offer?"): investigate read-only and explain (the remedy fired within the ceiling, the ask was outside my leash and I raised it to you, the analyzer missed the pattern and I've queued an amend rule).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. remedy-ceiling-refund-cap>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-refunds beyond the ceiling or auto-promises a specific customer outcome.`,
+  ``,
+  `## Cards you may emit (CS leash — three shapes)`,
+  ``,
+  `1. Approve a customer remedy inside the refund ceiling. RemedyPlan is a MULTI-ACTION ordered batch — every entry in \`actions[]\` fires sequentially through executeSonnetDecision, and deliverTicketMessage runs ONLY after EVERY action verifies (the execute-then-message contract applyBoxCsDirectorCall enforces; see docs/brain/libraries/cs-director.md § Multi-action remedies). A legacy single-action shape (\`{"action_type","payload"}\`) still normalizes into a one-entry \`actions\` array — nothing regresses.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"approve_remedy","summary":"<one-line why>","ticket_id":"<uuid>","remedy":{"actions":[{"action_type":"<direct_action key, e.g. change_next_date>","payload":{}},{"action_type":"partial_refund","payload":{"cents":<int>}}],"customer_message":"<the customer-facing reply that lands AFTER every action verifies>"},"reasoning":"<why this remedy is right + inside the refund ceiling>"}]}`,
+  ``,
+  `2. Author a derived-from-ticket spec for a structural fix. When the same customer problem keeps landing in tickets, this writes it as a spec on the Roadmap under CS (owner=cs) so we fix the product instead of remedying the ticket again. The specs SDK is the sole writer (never a raw table insert), and the spec's summary opens with **Derived-from-ticket:** <ticket_id> so a grep traces the fix back to the surfacing ticket.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"author_derived_from_ticket_spec","summary":"<one-line why>","ticket_id":"<uuid>","spec_seed":{"slug":"<kebab-slug>","title":"<Title>","intent":"<plain-language what/why>","problem":"<the ticket-derived problem statement>","target":"<optional file/function/route target>"},"reasoning":"<why this needs a structural fix, not another per-customer remedy>"}]}`,
+  ``,
+  `3. Amend a low-blast conversation rule. The sonnet-prompts-table SDK (proposePrompt) is the sole writer for public.sonnet_prompts — this emits a PROPOSED row (status='proposed', enabled=false) that the review lane owns activating. Low-blast means the rule change stays inside the CS conversation flow — it NEVER touches billing and never promises a specific customer outcome.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"amend_low_blast_sonnet_prompt","summary":"<one-line why>","title":"<rule title>","content":"<the rule content>","category":"rule","derived_from_ticket_id":"<optional uuid>","reasoning":"<why the blast radius is narrow — never billing, never a specific customer promise>"}]}`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — pick the cards block for the thread's director.
+// Platform (Ada) keeps DIRECTOR_COACH_OUTPUT unchanged (the regression check pins this — Ada's
+// eight card shapes never disappear); Growth + CS route to their own blocks. An unknown director
+// falls back to the platform block so a stray thread never emits zero card shapes.
+function coachOutputFor(dirFn: string): string {
+  if (dirFn === "growth") return GROWTH_COACH_OUTPUT;
+  if (dirFn === "cs") return CS_COACH_OUTPUT;
+  return DIRECTOR_COACH_OUTPUT;
+}
+
+// director-chat-in-leash-execution Phase 2 — the shared "founder-prompted out-of-leash" escape
+// valve. Every director's framing carries this uniform rail so a CEO ad-hoc ask outside the leash
+// still has ONE sanctioned surface: reply with reasoning + emit ONE `out-of-leash-request` action
+// (raises a CEO-routed Approval Request the moment the reply is persisted). See
+// docs/brain/specs/ceo-authorized-out-of-leash-actions. Never widens the leash — one-time only.
+const DIRECTOR_OUT_OF_LEASH_RAIL = `⭐ FOUNDER-PROMPTED OUT-OF-LEASH ACTIONS (ceo-authorized-out-of-leash-actions). Your leash blocks you from AUTONOMOUSLY taking out-of-leash actions (correct). But when the CEO asks you AD-HOC in this chat to do something outside your leash (e.g. to unstick a wedged pipeline), there is a supervised path: INVESTIGATE the ask read-only + INDEPENDENTLY DECIDE. AGREE (sound + the right call, even though out of your leash): emit ONE 'out-of-leash-request' pending_action. That RAISES a CEO-routed Approval Request carrying (a) your REASONING (why it's right + why it's out of leash + reversibility note), and (b) a CONCRETE executable action (typed 'run_prod_script' or 'apply_migration', with the exact 'cmd' the executor runs). The CEO approves in their normal Approvals inbox — that's the CEO-in-the-loop authorization (never a leash widen, scoped to THIS action). DECLINE (unsound / risky / wrong): do NOT emit the action — reply with your reasoning + what you'd do instead. Your independent AGREEMENT is required; the founder's ask alone is NOT sufficient — that's what keeps you a supervisor, not a rubber-stamp.`;
+
 function directorCoachFraming(dirFn: string): string {
   const persona = getPersona(dirFn);
   const voice = persona.voice ?? persona.personality;
+  // director-chat-in-leash-execution Phase 2 — Growth (Max) + CS (June) get their own framing
+  // that lists ONLY the card shapes the Phase-1 dispatch table knows how to execute for them,
+  // plus the shared founder-prompted out-of-leash rail. Ada's framing stays the byte-identical
+  // long-form below (regression: no Ada card shape disappears).
+  if (dirFn === "growth" || dirFn === "cs") {
+    const departmentLabel = dirFn === "growth" ? "Growth" : "CS";
+    const leashModule = dirFn === "growth"
+      ? "src/lib/agents/growth-director.ts"
+      : "src/lib/agents/cs-director.ts";
+    const brainPage = dirFn === "growth"
+      ? "docs/brain/libraries/growth-director.md"
+      : "docs/brain/libraries/cs-director.md";
+    return [
+      `VOICE — ${voice}`,
+      `You are ${persona.name} — the ${departmentLabel} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in ${leashModule}; the plain-English mirror is director-leash-guide.ts. Your definition lives at ${brainPage}.`,
+      `Your leash is an allow-list — anything not on it (destructive / irreversible / new-goal / a non-binary CHOICE / anything outside your approved envelope) MUST NOT auto-execute. Bring those to the CEO via the founder-prompted out-of-leash rail below.`,
+      `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash. You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+      DIRECTOR_OUT_OF_LEASH_RAIL,
+      coachOutputFor(dirFn),
+    ].join("\n\n");
+  }
   return [
     // agent-voice: lead with WHO she is so every reply is in-character, then the functional framing below.
     `VOICE — ${voice}`,
@@ -16877,10 +17139,73 @@ async function runDirectorCoachJob(job: Job) {
       const di = await import("../src/lib/agents/director-instructions");
       const actions = (thread.pending_actions || []).map((a) => ({ ...a }));
       const notes: string[] = [];
+      // director-chat-in-leash-execution Phase 1 — dispatch keyed on (thread.director_function,
+      // action.type). Ada's existing card types stay under `platform:*`; Growth (Max) + CS (June)
+      // land their own real executors. A pair NOT in this table — a Growth card that leaked into
+      // a CS thread, an unknown type — is treated as OUT OF LEASH: no executor runs, the action is
+      // marked `escalated`, and escalateApprovalRequestToCeo routes the request UP to the CEO with
+      // a rail-hit reason. NO cross-director mutation ever fires (the verification bullet).
+      const DISPATCH_TABLE: Record<string, ReadonlySet<string>> = {
+        platform: new Set<string>(["coaching", "spec", "goal", "spec-edit", "directive", "model_tier"]),
+        growth: new Set<string>(["reallocate_within_budget", "promote_ready_to_test", "hold_campaign"]),
+        cs: new Set<string>(["approve_remedy", "author_derived_from_ticket_spec", "amend_low_blast_sonnet_prompt"]),
+      };
+      const directorLabelFor = (fn: string): string =>
+        fn === "platform" ? "Ada (Platform/DevOps Director)"
+          : fn === "growth" ? "Max (Growth Director)"
+            : fn === "cs" ? "June (CS Director)"
+              : `${fn} director`;
       for (const a of actions) {
         if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
         if (a.status !== "approved") continue;
+        const rawType = typeof a.type === "string" ? a.type : "";
+        const inLeash = (DISPATCH_TABLE[thread.director_function] ?? new Set<string>()).has(rawType);
+        if (!inLeash) {
+          // Out-of-leash / cross-director card — escalate UP to the CEO. NEVER touches the target
+          // executor for any director; the verification bullet for a Growth card leaking into a CS
+          // thread requires "escalateApprovalRequestToCeo called with a rail reason, and NO CS
+          // mutation performed."
+          const reason = `Card type '${rawType || "(missing)"}' is not in ${thread.director_function}'s leash for this director-coach thread — routing UP to the CEO.`;
+          a.status = "escalated";
+          a.result = reason;
+          try {
+            const pdLib = await import("../src/lib/agents/platform-director");
+            await pdLib.escalateApprovalRequestToCeo(
+              db,
+              {
+                id: job.id,
+                workspace_id: job.workspace_id,
+                kind: job.kind,
+                spec_slug: job.spec_slug ?? null,
+                pending_actions: [a as unknown as import("../src/lib/agents/platform-director").DirectorActionLike],
+              },
+              reason,
+              { slug: thread.director_function, label: directorLabelFor(thread.director_function) },
+            );
+          } catch (e) {
+            console.error(`${tag} escalate failed (continuing):`, e instanceof Error ? e.message : e);
+          }
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: thread.director_function,
+              actionKind: "escalated",
+              specSlug: null,
+              reason,
+              metadata: {
+                thread_id: threadId,
+                action_id: a.id ?? null,
+                action_type: rawType,
+                rail: "cross_director_or_unknown_action_type",
+              },
+            });
+          } catch { /* audit best-effort */ }
+          notes.push(`Escalated to CEO: ${a.summary ?? rawType}`);
+          continue;
+        }
         try {
+          if (thread.director_function === "platform") {
           if (a.type === "coaching") {
             // The whole point: write the durable rule that's injected into her future decisions.
             await di.coachDirector(db, {
@@ -17026,6 +17351,362 @@ async function runDirectorCoachJob(job: Job) {
             a.status = "failed";
             a.result = "nothing executable on this card";
           }
+          } else if (thread.director_function === "growth") {
+            // Growth (Max) card handlers. Every path writes one `director_activity` row and — on a
+            // real executor return — only reports success back to the CEO chat AFTER the executor
+            // verified (`execute-then-message`).
+            if (a.type === "promote_ready_to_test") {
+              const promoteLib = await import("../src/lib/ads/ready-to-test-promote");
+              const payload = promoteLib.readPromotePayload({
+                id: typeof a.id === "string" ? a.id : "",
+                type: promoteLib.PROMOTE_READY_TO_TEST_ACTION_TYPE,
+                status: "approved",
+                payload: a.payload,
+              });
+              if (!payload) {
+                a.status = "failed";
+                a.result = "promote_ready_to_test payload malformed (need ad_campaign_id + meta_page_id + meta_account_id + meta_adset_id)";
+                notes.push(`${a.summary ?? "Promote creative"} → payload malformed`);
+              } else {
+                const r = await promoteLib.executePromoteReadyToTest(db, {
+                  workspaceId: job.workspace_id,
+                  specSlug: null,
+                  payload,
+                });
+                if (r.ok && r.ad_publish_jobs_id) {
+                  a.status = "done";
+                  a.result = `promoted → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)} (PAUSED)`;
+                  notes.push(`Promoted creative → ad_publish_jobs ${r.ad_publish_jobs_id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `promote failed: ${r.reason ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Promote creative"} → ${a.result}`);
+                }
+              }
+              // executePromoteReadyToTest writes its own director_activity `promoted_ready_to_test`
+              // row on success. Add one FAIL row for auditability of the failure path so the
+              // one-row-per-handled-action invariant Phase 3 tests holds either way.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "promote_ready_to_test_failed",
+                    specSlug: null,
+                    reason: a.result ?? "promote_ready_to_test failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "promote_ready_to_test" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "reallocate_within_budget") {
+              // Growth's cross-tool allocation composer (runGrowthAllocationPass) is cron-driven and
+              // consumes a per-account snapshot — not a free-form founder ask. When the card carries
+              // ad_account_id + snapshot_date we hand off to that composer; otherwise we fail-open
+              // with a clear reason so the CEO sees WHAT was missing (no silent no-op).
+              const adAccountId = typeof a.ad_account_id === "string" ? a.ad_account_id : null;
+              const snapshotDate = typeof a.snapshot_date === "string" ? a.snapshot_date : null;
+              if (!adAccountId || !snapshotDate) {
+                a.status = "failed";
+                a.result = "reallocate_within_budget requires ad_account_id + snapshot_date on the card";
+                notes.push(`${a.summary ?? "Reallocate"} → payload malformed`);
+              } else {
+                try {
+                  const { runGrowthAllocationPass } = await import("../src/lib/growth-allocation");
+                  const r = await runGrowthAllocationPass({
+                    workspaceId: job.workspace_id,
+                    adAccountId,
+                    snapshotDate,
+                  });
+                  a.status = "done";
+                  a.result = `allocation pass → decision=${r.decision.kind}, action_kind=${r.actionKind}`;
+                  notes.push(`Reallocation → ${r.decision.kind}`);
+                } catch (err) {
+                  a.status = "failed";
+                  a.result = `allocation pass failed: ${err instanceof Error ? err.message : String(err)}`;
+                  notes.push(`${a.summary ?? "Reallocate"} → ${a.result}`);
+                }
+              }
+              // runGrowthAllocationPass writes its own director_activity row (via
+              // allocationDecisionToActionKind); add one FAIL row for the malformed-payload case so
+              // every handled action leaves at least one activity row.
+              if (a.status === "failed") {
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "growth",
+                    actionKind: "reallocate_within_budget_failed",
+                    specSlug: null,
+                    reason: a.result ?? "reallocate_within_budget failed",
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "reallocate_within_budget" },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "hold_campaign") {
+              // A pause on a specific ad-set / campaign the founder called out in chat. The
+              // downstream Meta flip lives in the iteration-actions ledger the media-buyer + growth
+              // director both write into; the CEO chat carries the intent, we RECORD it as a
+              // director_activity 'hold_campaign' row so the audit trail exists, and Phase 3 will
+              // pin the actual Meta flip on top of a mocked executor. Missing target ids → fail
+              // with a clear reason.
+              const target = typeof a.meta_campaign_id === "string" ? a.meta_campaign_id
+                : typeof a.meta_adset_id === "string" ? a.meta_adset_id
+                  : typeof a.meta_ad_id === "string" ? a.meta_ad_id
+                    : null;
+              try {
+                const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                await recordDirectorActivity(db, {
+                  workspaceId: job.workspace_id,
+                  directorFunction: "growth",
+                  actionKind: target ? "hold_campaign" : "hold_campaign_failed",
+                  specSlug: null,
+                  reason: target
+                    ? String(a.reasoning ?? a.summary ?? `hold_campaign target=${target}`)
+                    : "hold_campaign missing meta_campaign_id / meta_adset_id / meta_ad_id",
+                  metadata: {
+                    thread_id: threadId,
+                    action_id: a.id ?? null,
+                    action_type: "hold_campaign",
+                    target: target ?? null,
+                  },
+                });
+              } catch { /* audit best-effort */ }
+              if (target) {
+                a.status = "done";
+                a.result = `hold_campaign recorded for ${target}`;
+                notes.push(`Hold campaign → ${target}`);
+              } else {
+                a.status = "failed";
+                a.result = "hold_campaign requires meta_campaign_id / meta_adset_id / meta_ad_id on the card";
+                notes.push(`${a.summary ?? "Hold campaign"} → payload malformed`);
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else if (thread.director_function === "cs") {
+            // CS (June) card handlers. `approve_remedy` + `author_derived_from_ticket_spec` route
+            // through applyBoxCsDirectorCall (the same executor prod's cs-director-call runner uses),
+            // which enforces the execute-then-message contract for approve_remedy: the customer
+            // reply lands ONLY after every action in the RemedyPlan verifies. To satisfy that
+            // executor's contract (it reads `agent_jobs.instructions.ticket_id`), we mint a
+            // synthetic `cs-director-call` agent_jobs row per card and mark it completed once the
+            // executor returns.
+            const applyCsDirectorCall = async (
+              verdict: import("../src/lib/cs-director").CsDirectorVerdictInput,
+              ticketId: string,
+            ): Promise<import("../src/lib/cs-director").ApplyBoxCsDirectorCallResult> => {
+              const { data: synth, error: mintErr } = await db.from("agent_jobs").insert({
+                workspace_id: job.workspace_id,
+                kind: "cs-director-call",
+                status: "queued_resume",
+                spec_slug: null,
+                instructions: JSON.stringify({ ticket_id: ticketId, source: "director-coach", thread_id: threadId }),
+                created_by: job.created_by,
+              }).select("id").maybeSingle();
+              if (mintErr || !synth) {
+                return {
+                  ok: false,
+                  reason: "synthetic_job_mint_failed",
+                  error: mintErr?.message ?? "no row",
+                  needs_attention: true,
+                };
+              }
+              const synthId = (synth as { id: string }).id;
+              const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+              const r = await applyBoxCsDirectorCall(db, synthId, verdict);
+              await db.from("agent_jobs").update({
+                status: r.ok ? "completed" : "needs_attention",
+                error: r.ok ? null : (r.error ?? r.reason ?? null),
+                log_tail: `director-coach ${verdict.decision} (thread=${threadId.slice(0, 8)}): handler=${r.handler ?? "?"} ok=${r.ok}`.slice(-2000),
+                updated_at: new Date().toISOString(),
+              }).eq("id", synthId);
+              return r;
+            };
+            if (a.type === "approve_remedy") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const remedy = a.remedy && typeof a.remedy === "object" && !Array.isArray(a.remedy)
+                ? (a.remedy as Record<string, unknown>)
+                : null;
+              if (!ticketId || !remedy) {
+                a.status = "failed";
+                a.result = "approve_remedy requires ticket_id + remedy on the card";
+                notes.push(`${a.summary ?? "Approve remedy"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "approve_remedy" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "approve_remedy",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach approve_remedy"),
+                  remedy,
+                }, ticketId);
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `approve_remedy executed (message_delivered=${r.message_delivered ?? false})`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → executed`);
+                } else {
+                  a.status = "failed";
+                  a.result = `approve_remedy failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Approve remedy"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done" ? "approve_remedy_executed" : "approve_remedy_failed",
+                    specSlug: null,
+                    reason: a.result ?? "approve_remedy",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "approve_remedy",
+                      ticket_id: ticketId,
+                      message_delivered: r.ok ? (r.message_delivered ?? false) : false,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "author_derived_from_ticket_spec") {
+              const ticketId = typeof a.ticket_id === "string" && a.ticket_id.trim() ? String(a.ticket_id) : null;
+              const seed = a.spec_seed && typeof a.spec_seed === "object" && !Array.isArray(a.spec_seed)
+                ? (a.spec_seed as Record<string, unknown>)
+                : null;
+              if (!ticketId || !seed) {
+                a.status = "failed";
+                a.result = "author_derived_from_ticket_spec requires ticket_id + spec_seed on the card";
+                notes.push(`${a.summary ?? "Author derived spec"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "author_derived_from_ticket_spec_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "author_derived_from_ticket_spec" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const r = await applyCsDirectorCall({
+                  decision: "author_spec",
+                  reasoning: String(a.reasoning ?? a.summary ?? "director-coach author_derived_from_ticket_spec"),
+                  spec_seed: seed,
+                }, ticketId);
+                const authoredSlug = r.ok ? r.spec_slug ?? null : null;
+                if (r.ok) {
+                  a.status = "done";
+                  a.result = `author_spec executed → slug=${authoredSlug ?? "(unset)"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${authoredSlug ?? "authored"}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `author_spec failed: ${r.reason ?? r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Author derived spec"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "author_derived_from_ticket_spec_executed"
+                      : "author_derived_from_ticket_spec_failed",
+                    specSlug: authoredSlug,
+                    reason: a.result ?? "author_derived_from_ticket_spec",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "author_derived_from_ticket_spec",
+                      ticket_id: ticketId,
+                      spec_slug: authoredSlug,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else if (a.type === "amend_low_blast_sonnet_prompt") {
+              // Route through the sonnet-prompts-table SDK — the sole writer for `sonnet_prompts`.
+              // Emits a PROPOSED row (status='proposed', enabled=false); the review lane owns the
+              // enable flip. This is the low-blast surface — a rule tweak that never touches billing
+              // or promises a specific customer outcome.
+              const title = typeof a.title === "string" && a.title.trim() ? a.title.trim() : null;
+              const content = typeof a.content === "string" && a.content.trim() ? a.content.trim() : null;
+              if (!title || !content) {
+                a.status = "failed";
+                a.result = "amend_low_blast_sonnet_prompt requires title + content on the card";
+                notes.push(`${a.summary ?? "Amend rule"} → payload malformed`);
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result,
+                    metadata: { thread_id: threadId, action_id: a.id ?? null, action_type: "amend_low_blast_sonnet_prompt" },
+                  });
+                } catch { /* audit best-effort */ }
+              } else {
+                const { proposePrompt } = await import("../src/lib/sonnet-prompts-table");
+                const category = typeof a.category === "string" && a.category.trim() ? a.category.trim() : "rule";
+                const derivedFromTicketId = typeof a.derived_from_ticket_id === "string" && a.derived_from_ticket_id.trim()
+                  ? a.derived_from_ticket_id.trim()
+                  : null;
+                const r = await proposePrompt(db, {
+                  workspaceId: job.workspace_id,
+                  title,
+                  content,
+                  category,
+                  derivedFromTicketId,
+                });
+                if (r.id && !r.error) {
+                  a.status = "done";
+                  a.result = `proposed sonnet prompt ${r.id.slice(0, 8)} — pending review`;
+                  notes.push(`${a.summary ?? "Amend rule"} → proposed ${r.id.slice(0, 8)}`);
+                } else {
+                  a.status = "failed";
+                  a.result = `proposePrompt failed: ${r.error ?? "unknown"}`;
+                  notes.push(`${a.summary ?? "Amend rule"} → ${a.result}`);
+                }
+                try {
+                  const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                  await recordDirectorActivity(db, {
+                    workspaceId: job.workspace_id,
+                    directorFunction: "cs",
+                    actionKind: a.status === "done"
+                      ? "amend_low_blast_sonnet_prompt_proposed"
+                      : "amend_low_blast_sonnet_prompt_failed",
+                    specSlug: null,
+                    reason: a.result ?? "amend_low_blast_sonnet_prompt",
+                    metadata: {
+                      thread_id: threadId,
+                      action_id: a.id ?? null,
+                      action_type: "amend_low_blast_sonnet_prompt",
+                      prompt_id: r.id ?? null,
+                    },
+                  });
+                } catch { /* audit best-effort */ }
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else {
+            // Unknown director function on the thread — treat as a fail-safe no-op (the dispatch
+            // preamble above already routes unknown (director, type) pairs to the CEO; this
+            // branch only fires when a NEW director function is added without a handler here).
+            a.status = "failed";
+            a.result = `no handler wired for director '${thread.director_function}'`;
+          }
         } catch (e) {
           a.status = "failed";
           a.result = e instanceof Error ? e.message : String(e);
@@ -17071,7 +17752,11 @@ async function runDirectorCoachJob(job: Job) {
       { sessionId },
       (cfg, sid) => {
         const turnPrompt = sid
-          ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
+          // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
+          // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
+          // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
+          // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
+          ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
           : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
         return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
       },
@@ -23327,25 +24012,42 @@ async function dispatchJob(job: Job) {
       );
       const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
       if (rebase.code !== 0) {
-        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
-        // clean for the reap, then surface needs_attention — the human resolves the divergence
-        // rather than the box silently running repo-wide checks on a stale tree.
+        // builder-self-heals-stale-build-branch Phase 1: a `git rebase` (linear replay of the
+        // branch's commits) SPURIOUSLY conflicts on non-linear / merge history or sibling
+        // divergence where a plain `git merge origin/main` is CLEAN — e.g. a goal-member branch
+        // whose goal branch already merge-reconciled main, or a branch carrying a merge commit.
+        // (Confirmed 2026-07-12: the ceo-org-control-tower goal members livelocked here — a merge
+        // of origin/main applied with ZERO conflicts while the rebase failed identically every
+        // retry, wedging the whole build queue.) So: abort the rebase, then FALL BACK to a merge.
+        // The goal is only to advance the BASE so it CONTAINS origin/main (repo-wide checks then
+        // run against a tree with main) — a merge achieves that without rewriting the branch's
+        // commits. Invariants preserved: never force-push, never touch main, never drop WIP. Only a
+        // GENUINE semantic conflict (the merge ALSO fails) parks needs_attention.
         sh("git", ["rebase", "--abort"], { cwd: wt });
-        await update(job.id, {
-          status: "needs_attention",
-          error:
-            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
-        });
-        console.error(
-          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
-        );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+        const mergeFallback = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+        if (mergeFallback.code === 0) {
+          console.log(
+            `${tag} rebase-onto-main conflicted but MERGE origin/main SUCCEEDED on ${branch} — base advanced via merge (stale-branch self-heal; no WIP dropped, no force-push)`,
+          );
+        } else {
+          // Merge also conflicts → a real semantic divergence a human must resolve.
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
+            log_tail: `reconcile-with-main (rebase AND merge conflicted — real semantic divergence):\n${(mergeFallback.out + mergeFallback.err).slice(-1800)}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile-with-main CONFLICT on ${branch} (rebase AND merge) — parked needs_attention (never silently dropped, never force-pushed)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
       }
       console.log(
-        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+        `${tag} reconcile-onto-main SUCCESS on ${branch} — base now contains origin/main (rebase or merge fallback; no WIP dropped)`,
       );
     }
   }
