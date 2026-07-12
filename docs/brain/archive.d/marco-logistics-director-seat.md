@@ -1,0 +1,1 @@
+- **Marco/Logistics live director seat: read-only observer chat with executor slice queued** · verified 2026-07-12 · → [[../functions/logistics]]

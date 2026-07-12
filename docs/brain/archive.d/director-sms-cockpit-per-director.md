@@ -1,0 +1,1 @@
+- **Per-director SMS cockpit: reuse Eve's token/PIN plumbing, bind to director leash, max sandbox not godmode** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]
