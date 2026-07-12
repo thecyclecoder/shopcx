@@ -171,33 +171,49 @@ export async function getVideoThumbnail(token: string, videoId: string): Promise
  *   - UTM tracking stays in the top-level `url_tags` (the asset feed can't carry it).
  */
 export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
-  // Static (image) ads carry the creative in image_data; video ads in video_data.
-  // Everything else (text variations, CTA link, IG placement, UTM) is identical.
-  const storyMedia = a.imageHash
-    ? {
-        image_data: {
+  const igPart = a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {};
+
+  // ── Static (image) ads are LINK ADS → object_story_spec.link_data. ──────────
+  // `image_data` REJECTS the destination link with "link field is required" (subcode 2061015) even
+  // when `link` IS set — on every account (verified against Graph v21.0, 2026-07-12: image_data fails,
+  // link_data with the same image_hash + link succeeds). This silently broke EVERY static media-buyer
+  // ad. `link_data` carries ONE headline (`name`) + ONE body (`message`) — exactly the per-test model
+  // (one copy set per creative). `asset_feed_spec` copy-variation is not used for link ads (it also
+  // fails the link check); a static test creative pins its single hook.
+  if (a.imageHash) {
+    const body: Record<string, unknown> = {
+      name: a.name,
+      object_story_spec: {
+        page_id: a.pageId,
+        ...igPart,
+        link_data: {
           image_hash: a.imageHash,
-          // image_data REQUIRES a top-level link (subcode "link field is required");
-          // video_data does not. The CTA link alone is not enough for image creatives.
           link: a.destinationUrl,
-          ...(a.description ? { link_description: a.description } : {}),
-          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+          message: a.primaryTexts.filter(Boolean)[0] ?? "",
+          name: a.headlines.filter(Boolean)[0] ?? "",
+          ...(a.description ? { description: a.description } : {}),
+          call_to_action: { type: a.ctaType },
         },
-      }
-    : {
-        video_data: {
-          video_id: a.videoId,
-          ...(a.thumbnailHash ? { image_hash: a.thumbnailHash } : {}),
-          ...(a.description ? { link_description: a.description } : {}),
-          call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
-        },
-      };
+      },
+      ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+    };
+    const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
+    if (!j.id) throw new Error("meta_creative_no_id");
+    return j.id;
+  }
+
+  // ── Video ads: video_data + asset_feed_spec (link not required for video_data). ──
   const body: Record<string, unknown> = {
     name: a.name,
     object_story_spec: {
       page_id: a.pageId,
-      ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}),
-      ...storyMedia,
+      ...igPart,
+      video_data: {
+        video_id: a.videoId,
+        ...(a.thumbnailHash ? { image_hash: a.thumbnailHash } : {}),
+        ...(a.description ? { link_description: a.description } : {}),
+        call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
+      },
     },
     asset_feed_spec: {
       titles: a.headlines.filter(Boolean).map((text) => ({ text })),
