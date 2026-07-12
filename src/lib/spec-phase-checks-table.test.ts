@@ -57,6 +57,62 @@ test("grep requires { pattern, expect } with expect in {present, absent}", () =>
   assert.match((badExpect as { reason: string }).reason, /'present' or 'absent'/);
 });
 
+test("grep.path rejects option-looking, absolute, traversing, NUL, and empty values", () => {
+  // The exact vulnerability the harden-deterministic-grep-check-paths spec closes: a spec-authored
+  // grep.path is an untrusted argument that could otherwise reach `rg` as `--pre=tsx` /
+  // `--search-zip` / an absolute path escape. Belt-and-suspenders — the runner also places `--`
+  // before the path in argv (see `buildGrepArgv` in spec-check-runner), but this predicate must
+  // reject the payload BEFORE spawn.
+  const optionish = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "PRESENT", path: "--pre=tsx", expect: "present" },
+  });
+  assert.equal(optionish.valid, false, "grep.path='--pre=tsx' must reject (rg option/preprocessor)");
+  assert.match((optionish as { reason: string }).reason, /must not start with '-'/);
+
+  const dashOnly = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", path: "-abc", expect: "present" },
+  });
+  assert.equal(dashOnly.valid, false);
+
+  const absolute = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", path: "/etc/passwd", expect: "present" },
+  });
+  assert.equal(absolute.valid, false);
+  assert.match((absolute as { reason: string }).reason, /repo-relative, not absolute/);
+
+  const traversal = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", path: "../../etc/passwd", expect: "present" },
+  });
+  assert.equal(traversal.valid, false);
+  assert.match((traversal as { reason: string }).reason, /outside the repo/);
+
+  const nul = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", path: "src/lib\0/foo", expect: "present" },
+  });
+  assert.equal(nul.valid, false);
+  assert.match((nul as { reason: string }).reason, /NUL/);
+
+  const empty = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", path: "   ", expect: "present" },
+  });
+  assert.equal(empty.valid, false);
+
+  // Sanity: normal repo-relative paths + an inner `..` that stays under root still accept.
+  for (const good of ["src/lib", "src/lib/spec-check-runner.ts", "src/lib/./nested", "src/foo/../lib"]) {
+    const r = validateExecutableCheck({
+      exec_kind: "grep",
+      params: { pattern: "x", path: good, expect: "present" },
+    });
+    assert.equal(r.valid, true, `grep.path='${good}' must accept`);
+  }
+});
+
 test("ci_status takes no params", () => {
   assert.equal(validateExecutableCheck({ exec_kind: "ci_status" }).valid, true);
   const r = validateExecutableCheck({ exec_kind: "ci_status", params: { branch: "main" } });

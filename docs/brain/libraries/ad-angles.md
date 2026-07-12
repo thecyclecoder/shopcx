@@ -32,6 +32,8 @@ function generateAngles(productId: string, count = 12): Promise<GenerateAnglesRe
 
 One Opus call with a strict JSON schema → `coerceAngle` (defensive truncation to META_CAPS) → `validateAngle` each + banned-word scan → on a non-empty survivor set, archives prior `is_active=true` rows (`is_active=false`) then inserts the fresh batch. Logs usage via `logAiUsage` (purpose `ad_angle_generation`). Banned words from `workspaces.ad_tool_settings` via `resolveAdToolSettings`, falling back to `DEFAULT_BANNED_WORDS`.
 
+**Hero-product advertising gate ([[advertised-products]]):** the FIRST check is `isAdvertisedProduct(admin, productId)`; an attachment SKU returns `{ok:false, reason:"not_advertised"}` before the Opus call fires — 0 tokens spent on a Tumbler / Sleep-Gummies angle. This closes the upstream feeder to the Dahlia cadence (a stray `product_ad_angles` row is what would have leaked an attachment SKU into the ready-to-test bin).
+
 ## Callers
 
 - `src/app/api/ads/angles/route.ts` — generate/list angles for a product

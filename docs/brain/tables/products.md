@@ -45,6 +45,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 | `shopify_category_id` | `text` | ✓ |  |
 | `taxable` | `bool` | ✓ | default: `true` |
 | `physical_dimensions` | `jsonb` | ✓ | ad tool · `{length_in, width_in, height_in, weight_oz?, shape: bag\|box\|bottle\|jar\|pouch\|other}` |
+| `is_advertised` | `bool` | — | default: `false` · true for the 6 hero SKUs the workspace actively advertises (Superfood Tabs / Amazing Coffee / Amazing Creamer / Ashwavana Guru Focus / Ashwavana Zen Relax / Creatine Prime+). Every ad/DR/creative pipeline reads it via [[../libraries/advertised-products]] (`isAdvertisedProduct` / `listAdvertisedProductIds`) so attachment SKUs (Tumbler, Sleep Gummies, Handheld Drink Mixer, Bamboo Coffee Mug) never enter advertising. Seeded by `supabase/migrations/20261015000000_products_is_advertised.sql`. |
 
 ## Foreign keys
 
@@ -116,6 +117,7 @@ const { count } = await admin.from("products")
 
 - `physical_dimensions` (jsonb) drives package/B-roll framing in the ad tool. `product_variants` may carry a per-variant override.
 - `target_customer`, `certifications`, `allergen_free`, and `awards` are the **canonical Tier-5 structured proof source** for [[product_ad_angles]] (proof points like "USDA Organic", "no soy", awards). Tiers 1-4 of ad-angle sourcing live in [[product_page_content]] (Tier-1), [[product_benefit_selections]] (Tier-2), [[product_ingredient_research]] (Tier-3), and [[product_reviews]] (Tier-4).
+- `is_advertised` is the **hero-product advertising gate**. Only rows with `is_advertised=true` may enter the ad/DR/creative pipeline (Carrie DR-content, Dahlia ad-creative, product angle-gen, media-buyer fan-out). Reads go through [[../libraries/advertised-products]]; direct `.eq("is_advertised", true)` at call sites is discouraged so the flag stays a single-owner gate. Attachment SKUs (Tumbler, Sleep Gummies, Handheld Drink Mixer, Bamboo Coffee Mug) stay false and are structurally excluded.
 
 ---
 
