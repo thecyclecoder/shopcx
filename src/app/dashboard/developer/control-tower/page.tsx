@@ -1,9 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 import { routedInboxHref } from "@/lib/agents/inbox";
+import { PersonaChip } from "@/components/agents/persona-chip";
+import { getPersona } from "@/lib/agents/personas";
+import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
 
 // Control Tower (control-tower spec, Phase 1): the single "is the machine healthy?" screen.
 // A green/amber/red tile per monitored loop — last ran, last produced, status, open alerts, and
@@ -168,10 +171,12 @@ interface ClaudeHealth {
   detail: string | null;
   updatedAt: string | null;
 }
+// L0 snapshot payload (no `loops` — those load lazily per department via `?level=1&owner=<fn>`).
+// control-tower-switch-controls-three-tier Phase 1: the CEO-glance shape — counts + rollups +
+// page-level auxiliary panels only. Per-department loops arrive from the L1 fetch.
 interface Snapshot {
   generatedAt: string;
   counts: { green: number; amber: number; red: number };
-  loops: LoopStatus[];
   departments?: DepartmentRollup[];
   selfAudit?: CoverageAudit;
   errorFeed?: ErrorFeedSnapshot;
@@ -181,6 +186,21 @@ interface Snapshot {
   dbHealth?: DbHealthPanel;
   coverageRegister?: CoverageRegisterItem[];
   claudeHealth?: ClaudeHealth;
+}
+
+interface LoopsPayload {
+  generatedAt: string;
+  loops: LoopStatus[];
+}
+
+// Persona key for a single LoopStatus — mirrors src/lib/control-tower/node-registry.ts
+// `personaForLoop`: the MonitoredLoop entry's `personaKind ?? agentKind`, falling back to the
+// director slug so a loop with no explicit persona still renders under its department director's
+// chip (never the neutral 🤖 default). Aliases (`deploy-review` → `deploy-guardian` etc.) are
+// resolved inside `getPersona` via KIND_PERSONA_ALIAS in personas.ts.
+function personaKeyForLoop(loopId: string, owner: OwnerFunction): string {
+  const entry = MONITORED_LOOPS.find((l) => l.id === loopId);
+  return entry?.personaKind ?? entry?.agentKind ?? owner;
 }
 
 function elapsed(iso: string | null | undefined): string {
@@ -231,12 +251,18 @@ const ROLLUP_TILE: Record<LoopColor, string> = {
 
 // Phase 3: the CEO-glance rollup tile per org function — worst-of health across its loops, with
 // a healthy/total count + open-alert count. The dashboard leads with these, then drills in.
+// control-tower-switch-controls-three-tier Phase 1: an owner-persona chip surfaces WHO owns the
+// department (the director) before showing whether they're healthy.
 function DepartmentRollupTile({ dept }: { dept: DepartmentRollup }) {
+  const persona = getPersona(dept.owner);
   return (
     <div className={`rounded-lg border p-3.5 ${ROLLUP_TILE[dept.color]}`}>
       <div className="flex items-center gap-2">
         <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[dept.color]}`} />
         <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{dept.healthLabel}</h3>
+      </div>
+      <div className="mt-1.5">
+        <PersonaChip persona={persona} />
       </div>
       <p className="mt-2 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
         {dept.healthy}/{dept.total} <span className="text-xs font-normal text-zinc-500 dark:text-zinc-400">healthy</span>
@@ -264,12 +290,47 @@ function DepartmentRollupTile({ dept }: { dept: DepartmentRollup }) {
 }
 
 // Phase 3: one drill-in block per department — its loops, sub-grouped by kind, collapsible.
-function DepartmentSection({ dept, loops }: { dept: DepartmentRollup; loops: LoopStatus[] }) {
+// control-tower-switch-controls-three-tier Phase 1: lazy — the department's loops arrive from a
+// second fetch (`?level=1&owner=<fn>`) fired the first time the section is opened. The header
+// carries the director's persona chip (owner-first: WHO before whether-they're-healthy).
+function DepartmentSection({
+  dept,
+  loops,
+  onEnsureLoaded,
+  loading,
+}: {
+  dept: DepartmentRollup;
+  loops: LoopStatus[] | undefined;
+  onEnsureLoaded: () => void;
+  loading: boolean;
+}) {
+  const persona = getPersona(dept.owner);
+  // Default-open for a red/amber department; a green one stays collapsed until the CEO clicks.
+  // Either way, a first open fires the L1 fetch — an open-by-default red dept auto-loads on mount.
+  const initialOpen = dept.color !== "green";
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (initialOpen && !firedRef.current) {
+      firedRef.current = true;
+      onEnsureLoaded();
+    }
+  }, [initialOpen, onEnsureLoaded]);
+  const handleToggle = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (e.currentTarget.open && !firedRef.current) {
+      firedRef.current = true;
+      onEnsureLoaded();
+    }
+  };
   return (
-    <details className="rounded-lg border border-zinc-200 dark:border-zinc-800" open={dept.color !== "green"}>
-      <summary className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+    <details
+      className="rounded-lg border border-zinc-200 dark:border-zinc-800"
+      open={initialOpen}
+      onToggle={handleToggle}
+    >
+      <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3.5 py-2.5 text-sm font-semibold text-zinc-800 dark:text-zinc-100">
         <span className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${DOT[dept.color]}`} />
         {dept.label}
+        <PersonaChip persona={persona} />
         <span className="text-[11px] font-normal text-zinc-400">
           {dept.healthy}/{dept.total} healthy
           {dept.counts.red > 0 ? ` · ${dept.counts.red} alerting` : ""}
@@ -277,20 +338,24 @@ function DepartmentSection({ dept, loops }: { dept: DepartmentRollup; loops: Loo
         </span>
       </summary>
       <div className="space-y-4 px-3.5 pb-3.5">
-        {KIND_ORDER.map((k) => {
-          const kindLoops = loops.filter((l) => l.kind === k);
-          if (!kindLoops.length) return null;
-          return (
-            <div key={k}>
-              <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{KIND_LABEL[k]}</h3>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {kindLoops.map((l) => (
-                  <LoopTile key={l.id} loop={l} />
-                ))}
+        {loops === undefined ? (
+          <p className="px-1 py-2 text-[11px] text-zinc-400">{loading ? "Loading loops…" : "…"}</p>
+        ) : (
+          KIND_ORDER.map((k) => {
+            const kindLoops = loops.filter((l) => l.kind === k);
+            if (!kindLoops.length) return null;
+            return (
+              <div key={k}>
+                <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">{KIND_LABEL[k]}</h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {kindLoops.map((l) => (
+                    <LoopTile key={l.id} loop={l} />
+                  ))}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })
+        )}
       </div>
     </details>
   );
@@ -315,6 +380,11 @@ function HistoryStrip({ history }: { history: HistoryRow[] }) {
 
 function LoopTile({ loop }: { loop: LoopStatus }) {
   const produced = compactProduced(loop.lastProduced);
+  // control-tower-switch-controls-three-tier Phase 1: per-loop owner-persona chip. Resolves the
+  // MonitoredLoop entry's personaKind/agentKind (mirrors node-registry.ts personaForLoop), so a
+  // repair-lane tile carries Rafa's chip, a db-health cron carries Devi's, etc. — and a loop with
+  // no explicit persona falls back to the department director's chip via the owner slug.
+  const persona = getPersona(personaKeyForLoop(loop.id, loop.owner));
   return (
     <div className={`rounded-lg border p-3.5 ${TILE[loop.color]}`}>
       <div className="flex items-start justify-between gap-2">
@@ -328,6 +398,9 @@ function LoopTile({ loop }: { loop: LoopStatus }) {
           <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400" title={loop.description}>
             {loop.description}
           </p>
+          <div className="mt-1">
+            <PersonaChip persona={persona} />
+          </div>
         </div>
         <span className="shrink-0 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800/70 dark:text-zinc-400">
           {loop.expectedCadence}
@@ -986,18 +1059,48 @@ export default function ControlTowerPage() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(false);
+  // control-tower-switch-controls-three-tier Phase 1: per-department loop cache. Populated on
+  // first expand (or on mount for a red/amber dept that's open by default), refreshed on every
+  // 15s poll tick alongside the L0 snapshot so the drill-in stays live once opened.
+  const [loopsByOwner, setLoopsByOwner] = useState<Record<string, LoopStatus[]>>({});
+  const [loadingOwner, setLoadingOwner] = useState<Record<string, boolean>>({});
+  // Track which owners have EVER been requested this mount, so the poll tick can re-fetch just
+  // those without re-opening every dept. A ref avoids threading it through effect deps.
+  const requestedOwnersRef = useRef<Set<string>>(new Set());
+
+  const fetchLoopsForOwner = useCallback((owner: OwnerFunction) => {
+    requestedOwnersRef.current.add(owner);
+    setLoadingOwner((s) => ({ ...s, [owner]: true }));
+    return fetch(`/api/developer/control-tower?level=1&owner=${encodeURIComponent(owner)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d: LoopsPayload) => {
+        setLoopsByOwner((s) => ({ ...s, [owner]: d.loops }));
+      })
+      .catch(() => {
+        // A transient L1 failure leaves the last-known loops in place (or `undefined` if never
+        // loaded — the section shows "Loading loops…" until the next tick succeeds).
+      })
+      .finally(() => {
+        setLoadingOwner((s) => ({ ...s, [owner]: false }));
+      });
+  }, []);
 
   const refresh = useCallback(
     () =>
       fetch("/api/developer/control-tower")
         .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-        .then((d) => {
+        .then((d: Snapshot) => {
           setSnap(d);
           setErr(false);
+          // Refresh loops for every dept already loaded/open — the poll tick keeps the drill-in
+          // live without re-collapsing anything the CEO has explicitly expanded.
+          for (const owner of Array.from(requestedOwnersRef.current)) {
+            fetchLoopsForOwner(owner as OwnerFunction);
+          }
         })
         .catch(() => setErr(true))
         .finally(() => setLoading(false)),
-    [],
+    [fetchLoopsForOwner],
   );
 
   useEffect(() => {
@@ -1100,10 +1203,18 @@ export default function ControlTowerPage() {
             </div>
           )}
 
-          {/* Drill-in: per-department loop cards, sub-grouped by kind. */}
+          {/* Drill-in: per-department loop cards, sub-grouped by kind. Loops arrive lazily
+              (control-tower-switch-controls-three-tier Phase 1) — a first expand fires the L1
+              fetch; a red/amber dept auto-loads on mount because it's open by default. */}
           <div className="space-y-3">
             {departments.map((d) => (
-              <DepartmentSection key={d.owner} dept={d} loops={snap.loops.filter((l) => l.owner === d.owner)} />
+              <DepartmentSection
+                key={d.owner}
+                dept={d}
+                loops={loopsByOwner[d.owner]}
+                loading={!!loadingOwner[d.owner]}
+                onEnsureLoaded={() => fetchLoopsForOwner(d.owner)}
+              />
             ))}
           </div>
 
