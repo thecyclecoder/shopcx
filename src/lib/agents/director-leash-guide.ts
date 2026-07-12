@@ -44,12 +44,10 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   platform: PLATFORM_LEASH,
   growth: GROWTH_LEASH,
   cs: CS_LEASH,
-  // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands READ-ONLY: `LOGISTICS_LEASH` is
-  // an empty array by design, so `getLeashGuide('logistics')` returns `defined:true` with
-  // `autonomous:[]` and only the generic CEO escalation rails. Every pending_action on a logistics
-  // thread routes UP to the CEO via the M3 dispatch's out-of-leash branch. The follow-up spec
-  // marco-logistics-executor-surface will populate this once the founder-driven inventory executors
-  // are open to Ada (docs/brain/functions/logistics.md § "Provenance / build model").
+  // marco-logistics-executor-surface Phase 2 — Marco (Logistics) is now the fourth LIVE leash-bound
+  // director. `LOGISTICS_LEASH` carries `availability_toggle_within_crisis_lever` +
+  // `auto_readd_swapped_subscribers_within_crisis_cohort` (both crisis-cohort scoped — the M3
+  // dispatch verifies the crisis is real + same-workspace before executing).
   logistics: LOGISTICS_LEASH,
 };
 
@@ -117,6 +115,15 @@ export const CATEGORY_COPY: Record<string, LeashLine> = {
   amend_low_blast_sonnet_prompt: {
     title: "Amend a low-blast conversation rule",
     detail: "A small tweak to how our conversation AI answers — narrow enough that its blast radius stays inside the CS workflow, never touching billing or a promise to a customer.",
+  },
+  // ── Logistics (Marco) — marco-logistics-executor-surface Phase 2 ──
+  availability_toggle_within_crisis_lever: {
+    title: "Toggle a variant's storefront + portal availability during a crisis",
+    detail: "During an active crisis I can hide or restore a specific variant on the storefront and in the portal's swap options — the availability lever that protects remaining units for existing subscribers or returns a restocked variant to new-choice paths.",
+  },
+  auto_readd_swapped_subscribers_within_crisis_cohort: {
+    title: "Flip auto-re-add on for a crisis cohort",
+    detail: "For an active crisis, I mark every enrolled subscriber's swap as auto-re-addable so that when the crisis resolves their subscription switches back to the original item they signed up for.",
   },
 };
 

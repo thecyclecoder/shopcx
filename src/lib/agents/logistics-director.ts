@@ -1,41 +1,45 @@
 /**
- * Logistics Director (Marco) leash surface — Phase 3 of marco-logistics-director-seat.
+ * Logistics Director (Marco) leash surface.
  *
  * A pure-config module — no server imports, no side effects — so it can be imported from a client
  * component (e.g. the Guide tab) as safely as from server code. Its only job is to declare, in code,
- * that Marco (Logistics) currently has NO autonomous leash: he lands as a READ-ONLY OBSERVER in the
- * Message Center, answers questions about inventory + fulfillment + crisis state, and NEVER emits an
- * autonomously-executable pending_action. Every pending_action on a logistics thread escalates to the
- * CEO via the shared `escalateApprovalRequestToCeo` rail in the M3 dispatch.
+ * the leash categories Marco (Logistics) may auto-act inside.
  *
- * ⭐ Landing shape B (marco_landing='B') from Phase 1. Evidence: the storefront-availability toggle
- * has NO callable server-side helper (crisis-forecast.ts:187 is prose only, not an executor); the
- * swap-enrollment writer DOES exist as `crisis_enroll` / `crisis_set_auto_readd` in
- * action-executor.ts; AND docs/brain/functions/logistics.md § "Provenance / build model" explicitly
- * flags this whole tooling as OFF-LIMITS to Ada — "Kept off public.specs by founder directive
- * 2026-07-10 — deliberate, bounded exception to 'Ada is the sole builder'". The founder is hand-
- * driving the inventory executors; Marco's autonomous surface stays closed until the follow-up spec
- * marco-logistics-executor-surface lands.
+ * ⭐ Phase 2 of [[../../../docs/brain/specs/marco-logistics-executor-surface.md]] — Marco is now the
+ * fourth LIVE leash-bound director. His two categories, grounded in the crisis-cohort surface, are:
  *
- * See docs/brain/specs/marco-logistics-director-seat.md · docs/brain/functions/logistics.md.
+ *   1. `availability_toggle_within_crisis_lever` — flip a variant on/off in the storefront + portal
+ *      swap options via [[../logistics/storefront-availability]] `setStorefrontAvailability` (the
+ *      Phase-1 callable). Card payload names crisis_id + variant_id + available + reason; the M3
+ *      dispatch verifies the crisis is real + same-workspace + names the target variant (the
+ *      crisis-cohort guard) BEFORE firing the executor.
+ *
+ *   2. `auto_readd_swapped_subscribers_within_crisis_cohort` — bulk-flip `auto_readd=true` across
+ *      every `crisis_customer_actions` row scoped to a named crisis so the swapped-away subscribers
+ *      get switched back to their original variant on restock. Card payload names crisis_id + reason;
+ *      the M3 dispatch verifies the crisis is real + same-workspace BEFORE firing the bulk update.
+ *
+ * The live-flip stays a CEO action (function_autonomy.live) — this module only opens the CAPABILITY.
+ * Marco's coach thread now emits the two card shapes as pending_actions the CEO approves; the M3
+ * dispatch runs the executor branch only for an in-leash category (an out-of-leash card still
+ * escalates via `escalateApprovalRequestToCeo`, per director-chat-in-leash-execution).
+ *
+ * Retires the Phase-3 marco-logistics-director-seat READ_ONLY marker — Marco's tab now renders as a
+ * live leash-bound director (like Ada / Max / June), not a read-only observer.
+ *
+ * See docs/brain/specs/marco-logistics-executor-surface.md · docs/brain/functions/logistics.md.
  */
 
 /**
- * Marco's LIVE leash categories. Currently EMPTY — Marco is a read-only observer (Phase 3 landing).
- * `director-leash-guide.ts` `getLeashGuide` handles an empty array naturally: `autonomous:[]` +
- * only the generic CEO-facing escalation rails render. Adding a category here (once
- * marco-logistics-executor-surface lands the callable executors) auto-flows the guide + the M3
- * dispatch's in-leash check without touching those files.
+ * The leash categories Marco may auto-act inside. Both are crisis-cohort scoped — every action
+ * carries a `crisis_id` the M3 dispatch verifies against `public.crisis_events` (workspace-scoped)
+ * before executing. Retires the Phase-3 read-only-observer landing (LEASH_CATEGORIES was `[]`).
  */
-export type LeashCategory = never;
+export type LeashCategory =
+  | "availability_toggle_within_crisis_lever"
+  | "auto_readd_swapped_subscribers_within_crisis_cohort";
 
-export const LEASH_CATEGORIES: LeashCategory[] = [];
-
-/**
- * READ_ONLY = true is the plain marker downstream code MAY key on to render Marco's tab with a
- * "Read-only observer — every request routes to the CEO" subheader, distinct from a director whose
- * `LEASH_CATEGORIES` is TEMPORARILY empty at deploy-time. Kept declarative (not derived from
- * `LEASH_CATEGORIES.length === 0`) so a future Marco with one auto category doesn't accidentally
- * lose the "read-only" framing until this marker is explicitly flipped.
- */
-export const READ_ONLY = true as const;
+export const LEASH_CATEGORIES: readonly LeashCategory[] = [
+  "availability_toggle_within_crisis_lever",
+  "auto_readd_swapped_subscribers_within_crisis_cohort",
+] as const;
