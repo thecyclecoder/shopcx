@@ -36,6 +36,6 @@ A `git rebase origin/main` linearly replays the branch's commits and SPURIOUSLY 
 
 The builder-worker's real-conflict park (grep `Phase 2 — Escalate only a REAL conflict`) accumulates the raw git output from BOTH the primary AND fallback attempts and passes their union to `extractConflictingFiles`, so a divergence that surfaces on `merge` but not `rebase` (or vice versa) still appears in the error. `needs_attention_class` is stamped `"reconcile_conflict"` so the standard classifier ([[needs-attention-classify]]) bypasses this row — the file list IS the routing signal. A distinct `"base_poison"` class is stamped on the tsc-gate failure (post-successful-reconcile, main itself is broken) so the two POST-self-heal park classes can be triaged separately: `reconcile_conflict` needs a spec-level merge, `base_poison` needs a main hotfix. Both count toward the escort loop-guard's 2×→CEO trip because both are real, actionable signals; a self-healable staleness never parks at all because Phase 1's merge fallback / recreate-fresh handles it.
 
-## Spec of record
+## Status / open work
 
-- [[../specs/builder-self-heals-stale-build-branch-instead-of-refailing-to-ceo]] — Phase 1 folds `mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks` Phase 1 + the 2026-07-11 rebase→merge hotfix into a single strategy-driven reconcile.
+Shipped 2026-07-11 ([[../archive.d/builder-self-heals-stale-build-branch-instead-of-refailing-to-ceo]]). Phase 1 merged the rebase→merge hotfix that self-heals a stale build branch (non-linear history recurses via `git merge` instead of `git rebase`); Phase 2 names conflicting files on a real-conflict escalation to the CEO, distinguishing stale-only from genuine semantic conflicts.
