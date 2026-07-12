@@ -8893,15 +8893,17 @@ async function runPlanJob(job: Job) {
       const batchPrompt = [
         `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
         `Author BATCH ${b + 1} of ${batches.length} — the planner-authoring flow is bounded (max ${PLANNER_AUTHOR_BATCH_SIZE} specs per turn) so no single result grows past the size that dropped a prior 6-spec envelope. Author EXACTLY the ${batch.length} slug(s) listed in this batch; the remaining approved slugs are handled in other batches.`,
-        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); optional non-blocking \`human_review\` (see HUMAN-REVIEW rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist","checks":[{position,description,kind,exec_kind,params}]}. NO status emoji/markers anywhere — status is DB-driven.`,
         `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
         `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
+        `MACHINE-RUNNABLE CHECKS ARE MANDATORY (every-spec-writer-authors-machine-runnable-verifications Phase 1): EVERY phase MUST also carry a \`checks\` array with >=1 TYPED machine-runnable row the deterministic spec-check runner can execute. Each check = {"position":N,"description":"…","kind":"auto"|"human","exec_kind":"tsc"|"grep"|"ci_status"|"http_get"|"db_probe_readonly"|"unit_test"|"build"|"needs_human","params":<see shape below>}. VALID PARAMS: \`tsc\`/\`ci_status\`/\`build\`/\`needs_human\` → params:null; \`grep\` → {"pattern":"…","path":"…","expect":"present"|"absent"}; \`http_get\` → {"url":"https://…","expect_status":200}; \`db_probe_readonly\` → {"probe_id":"<registered probe key>","args":{…},"expect":null|number|boolean}; \`unit_test\` → {"script":"<a real package.json script>"}. \`needs_human\` rows are ALLOWED as EXTRA (subjective / eyeball) but NEVER the SOLE check on a phase — a phase with only \`needs_human\` (or only untyped prose) is REJECTED at author time with MissingMachineCheckError. Prefer \`tsc\`+\`grep\` when the phase adds a symbol/module, \`db_probe_readonly\` when it touches a table (name a probe from src/lib/spec-check-db-probes.ts), \`http_get\` when it exposes a route, \`unit_test\` when there's a package.json script that exercises the change.`,
+        `HUMAN-REVIEW IS OPTIONAL, NON-BLOCKING (Phase 2): a spec MAY carry a spec-level \`human_review\` string — the OPTIONAL founder-facing advisory prompt (e.g. "after ship, open /dashboard/x and confirm the layout reads right"). It renders on the spec card + a post-ship founder surface and is NEVER read by the fold gate / promote gate / spec-check runner (machine checks are the ship gate). Absence is the norm — set it only when there's a real subjective look-see the founder should do post-ship. Do NOT put subjective checks in \`checks\` — use \`human_review\`.`,
         `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
         `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
         ``,
         `Approved specs for THIS batch (author EXACTLY these ${batch.length} slug(s), no more, no fewer):\n${batchSpecList}`,
         ``,
-        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","human_review":"OPTIONAL founder eyeball note or omit","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …","checks":[{"position":1,"description":"tsc clean","kind":"auto","exec_kind":"tsc","params":null}]}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
       ].join("\n");
 
       const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, batchPrompt), currentSessionId, wt, configDir, job.id);
@@ -9009,13 +9011,43 @@ async function runPlanJob(job: Job) {
         // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
         const fallbackWhy = String(out.why || "").trim();
         const fallbackWhat = String(out.what || "").trim();
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — carry the typed
+        // machine-runnable `checks` array through to the SDK. The planner is prompted to emit
+        // {position,description,kind,exec_kind,params} per acceptance criterion; if it did not,
+        // the shared `checks: []` falls through, and the app-layer chokepoint's
+        // `parseVerificationBlobToChecks(verification)` still fires (defaulting exec_kind to
+        // needs_human) — which the Phase 1 machine-check gate then rejects with a loud error.
         const phases = out.phases.map((p) => ({
           title: String(p.title || "").trim() || "Phase",
           body: String(p.body || "").trim(),
           verification: String(p.verification || "").trim(),
           why: String(p.why || "").trim() || fallbackWhy,
           what: String(p.what || "").trim() || fallbackWhat,
+          checks: Array.isArray(p.checks)
+            ? (p.checks as Array<{
+                position?: number;
+                description?: string;
+                kind?: "auto" | "human";
+                exec_kind?: string;
+                params?: unknown;
+              }>).map((c, i) => ({
+                position: Number.isInteger(c.position) ? (c.position as number) : i + 1,
+                description: String(c.description ?? "").trim(),
+                kind: c.kind === "human" ? "human" as const : "auto" as const,
+                exec_kind: (typeof c.exec_kind === "string" ? c.exec_kind : null) as
+                  | "tsc" | "grep" | "ci_status" | "http_get" | "db_probe_readonly"
+                  | "unit_test" | "build" | "needs_human" | null,
+                params: (c.params ?? null) as never,
+              }))
+            : undefined,
         }));
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+        // founder-facing note (Phase-2 spec column). The planner emits it as `out.human_review`;
+        // absence is fine.
+        const specHumanReview: string | null | undefined =
+          typeof out.human_review === "string" && out.human_review.trim()
+            ? out.human_review.trim()
+            : undefined;
         try {
           // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
           // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
@@ -9040,6 +9072,9 @@ async function runPlanJob(job: Job) {
               blocked_by: blockers,
               why: specWhy,
               what: specWhat,
+              // every-spec-writer-authors-machine-runnable-verifications Phase 2 — the OPTIONAL,
+              // non-blocking founder-facing advisory note (never gates fold/ship/merge).
+              human_review: specHumanReview,
               phases,
             },
             "planned",

@@ -52,6 +52,7 @@ function makeRow(overrides: Partial<SpecRow> = {}): SpecRow {
     vale_disposition_reason: null,
     why: "why text",
     what: "what text",
+    human_review: null,
     created_at: now,
     updated_at: now,
     phases: [],

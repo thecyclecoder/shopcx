@@ -1085,6 +1085,13 @@ function serializeSpecRowToMarkdown(row: SpecRow): string {
   if (row.repair_signature) out.push(`**Repair-signature:** \`${row.repair_signature}\``);
   if (row.regression_of_slug) out.push(`**Regression-of:** [[${row.regression_of_slug}]]`);
   if (row.regression_signature) out.push(`**Regression-signature:** \`${row.regression_signature}\``);
+  // every-spec-writer-authors-machine-runnable-verifications Phase 2 — surface the optional,
+  // non-blocking founder-facing advisory note on the rendered spec card. The eyeball prompt is
+  // rendered post-ship on the roadmap detail view; the fold gate + promote gate + deterministic
+  // spec-check runner deliberately do not read this column, so its presence never blocks a ship.
+  if (row.human_review && row.human_review.trim()) {
+    out.push(`**Human-review:** ${row.human_review.trim()}`);
+  }
   out.push("");
   if (row.summary && row.summary.trim()) {
     out.push(row.summary.trim());

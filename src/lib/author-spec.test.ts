@@ -20,17 +20,21 @@ import {
   assertEveryPhaseHasVerification,
   assertEveryNodeHasIntent,
   assertEveryPhaseHasChecks,
+  assertEveryPhaseHasMachineCheck,
   assertIntentIsPlainLanguage,
   extractIntentHeaders,
+  extractHumanReviewHeader,
   EmptyPhaseBodyError,
   MissingVerificationError,
   MissingIntentError,
+  MissingMachineCheckError,
   assertValidParent,
   InvalidParentError,
   detectBareFunctionParent,
   autoAnchorBareFunctionParent,
   bestFitMandate,
 } from "./author-spec";
+import { computeUpsertAuthoringProblems } from "./specs-table";
 import { resolveFunctionMandates, type FunctionMandate } from "./function-mandates";
 import { parseVerificationBlobToChecks } from "./spec-phase-checks-table";
 import { parseBrainRefsLineToSlugs } from "./spec-brain-refs-table";
@@ -347,6 +351,275 @@ test("assertEveryPhaseHasChecks passes when every phase has ≥1 check", () => {
       { title: "P1", checks: [{ position: 1, description: "On X, do Y → expect Z", kind: "auto" }] },
     ]),
   );
+});
+
+// ── every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate ──
+// The single-chokepoint invariant: EVERY phase must yield >=1 check whose exec_kind is auto-testable
+// AND passes `validateExecutableCheck`. A phase with only prose (needs_human) rows is REJECTED with
+// MissingMachineCheckError so the deterministic runner has something concrete to execute — no writer
+// can land a prose-only spec.
+
+test("assertEveryPhaseHasMachineCheck throws MissingMachineCheckError when every check is needs_human (prose-only)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("prose-only", [
+        {
+          title: "Wire it up",
+          checks: [
+            { position: 1, description: "look at the page", kind: "auto", exec_kind: "needs_human", params: null },
+            { position: 2, description: "check the copy", kind: "auto", exec_kind: "needs_human", params: null },
+          ],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError, `expected MissingMachineCheckError, got ${e}`);
+      assert.match((e as Error).message, /prose-only/);
+      assert.match((e as Error).message, /phase 1 \(Wire it up\)/);
+      assert.match((e as Error).message, /zero auto-testable checks/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck throws when checks carry only prose (undeclared exec_kind)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("undeclared", [
+        {
+          title: "Prose bullets",
+          checks: [{ position: 1, description: "verify the thing", kind: "auto" }],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /no machine-runnable/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck passes with a single tsc check", () => {
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck("ok", [
+      {
+        title: "Migration + tsc",
+        checks: [{ position: 1, description: "tsc clean", kind: "auto", exec_kind: "tsc", params: null }],
+      },
+    ]),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck passes when needs_human rows COEXIST with a valid machine check", () => {
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck("mixed", [
+      {
+        title: "Machine + eyeball",
+        checks: [
+          {
+            position: 1,
+            description: "On the repo, grep for the new symbol",
+            kind: "auto",
+            exec_kind: "grep",
+            params: { pattern: "assertEveryPhaseHasMachineCheck", expect: "present" },
+          },
+          {
+            position: 2,
+            description: "Founder eyeballs the /dashboard/roadmap card after ship",
+            kind: "human",
+            exec_kind: "needs_human",
+            params: null,
+          },
+        ],
+      },
+    ]),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck rejects grep with a malformed params.expect (invalid params → not machine-runnable)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("bad-params", [
+        {
+          title: "Broken grep",
+          checks: [
+            {
+              position: 1,
+              description: "grep for X",
+              kind: "auto",
+              exec_kind: "grep",
+              params: { pattern: "foo", expect: "maybe" } as unknown as { pattern: string; expect: "present" | "absent" },
+            },
+          ],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /grep.expect must be 'present' or 'absent'/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck names EVERY offending phase (multi-phase failure)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("multi", [
+        {
+          title: "Good phase",
+          checks: [{ position: 1, description: "tsc clean", kind: "auto", exec_kind: "tsc", params: null }],
+        },
+        {
+          title: "Bad phase 2",
+          checks: [
+            { position: 1, description: "look at it", kind: "auto", exec_kind: "needs_human", params: null },
+          ],
+        },
+        {
+          title: "Bad phase 3",
+          checks: [{ position: 1, description: "trust me", kind: "auto" }],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      // First-good phase does not appear
+      assert.doesNotMatch((e as Error).message, /phase 1 \(Good phase\)/);
+      assert.match((e as Error).message, /phase 2 \(Bad phase 2\)/);
+      assert.match((e as Error).message, /phase 3 \(Bad phase 3\)/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck respects packageScripts ctx for unit_test checks", () => {
+  // A unit_test that names a script NOT in package.json is rejected AT AUTHORING — closes the
+  // cs-director `npm test` class before it can land as an executable row.
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck(
+        "ctx-scripts",
+        [
+          {
+            title: "Bogus unit test",
+            checks: [
+              {
+                position: 1,
+                description: "run the test",
+                kind: "auto",
+                exec_kind: "unit_test",
+                params: { script: "test-that-does-not-exist" },
+              },
+            ],
+          },
+        ],
+        { packageScripts: new Set(["test:unit", "check:types"]) },
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /not a package.json script/);
+      return true;
+    },
+  );
+  // The same phase with a REAL script passes (belt-and-suspenders on the positive case).
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck(
+      "ctx-scripts-ok",
+      [
+        {
+          title: "Real unit test",
+          checks: [
+            {
+              position: 1,
+              description: "run the test",
+              kind: "auto",
+              exec_kind: "unit_test",
+              params: { script: "test:unit" },
+            },
+          ],
+        },
+      ],
+      { packageScripts: new Set(["test:unit", "check:types"]) },
+    ),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck — a prose-only markdown blob (parseVerificationBlobToChecks → all needs_human) FAILS the gate", () => {
+  // The markdown author path's shape: the parse is deterministic on prose (every bullet → needs_human).
+  // Wiring this into the chokepoint means a markdown writer that carries only prose bullets is rejected
+  // at author time, not silently landed as a set of un-executable rows.
+  const blob = [
+    "- On the page, look at the layout → confirm it reads right",
+    "- On the roadmap, verify the intent header renders",
+  ].join("\n");
+  const derived = parseVerificationBlobToChecks(blob);
+  assert.throws(
+    () => assertEveryPhaseHasMachineCheck("prose-md", [{ title: "Prose phase", checks: derived }]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /Phase 1/);
+      return true;
+    },
+  );
+});
+
+// ── every-spec-writer-authors-machine-runnable-verifications Phase 2 — human_review advisory ──
+// The OPTIONAL, non-blocking founder-facing note. Extracted from `**Human-review:**` on the
+// markdown path; carried on `human_review` on the structured path; NEVER gates fold/promote/ship.
+// The gates in `specs-table.computeUpsertAuthoringProblems` deliberately do NOT read this column —
+// its presence or absence is invisible to the ship gate.
+
+test("extractHumanReviewHeader pulls **Human-review:** from the markdown body", () => {
+  const md = [
+    "# Some spec",
+    "",
+    "**Owner:** [[../functions/growth]]",
+    "**Human-review:** After ship, open /dashboard/ads/foo and confirm the funnel report reads right.",
+    "",
+    "## Phase 1 — do it",
+  ].join("\n");
+  const note = extractHumanReviewHeader(md);
+  assert.ok(note, "expected the header to parse");
+  assert.match(note!, /funnel report reads right/);
+});
+
+test("extractHumanReviewHeader returns null when the header is absent (absence is the norm)", () => {
+  const md = "# Title\n\n**Owner:** platform\n\n## Phase 1 — do it";
+  assert.equal(extractHumanReviewHeader(md), null);
+});
+
+test("computeUpsertAuthoringProblems IGNORES human_review — it never gates fold/ship/merge", () => {
+  // A fully-authored spec with a human_review note + green machine checks reports ZERO problems.
+  const problems = computeUpsertAuthoringProblems(
+    { why: "spec why", what: "spec what" },
+    [
+      {
+        position: 1,
+        title: "P1",
+        verification: "- On the branch, `npx tsc --noEmit` → expect clean.",
+        why: "phase why",
+        what: "phase what",
+      },
+    ],
+    null,
+    new Map(),
+  );
+  assert.deepEqual(problems, [], `expected no problems; got: ${problems.join(" | ")}`);
+});
+
+test("computeUpsertAuthoringProblems does NOT reference the human_review column at all", () => {
+  // Belt-and-suspenders: even a totally-broken spec's problem list mentions verification/intent,
+  // never human_review. Ensures the floor gate never gained an accidental reference to the new
+  // non-blocking column.
+  const problems = computeUpsertAuthoringProblems(
+    { why: "", what: "" },
+    [{ position: 1, title: "P1", verification: null, why: "", what: "" }],
+    null,
+    new Map(),
+  );
+  // Some problems are expected (empty why/what/verification), but NEVER one about human_review.
+  assert.ok(problems.length > 0);
+  for (const p of problems) {
+    assert.doesNotMatch(p, /human[_-]?review/i, `unexpected human_review reference: ${p}`);
+  }
 });
 
 test("parseVerificationBlobToChecks splits bullet lines into rows", () => {
