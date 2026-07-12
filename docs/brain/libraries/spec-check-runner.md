@@ -35,7 +35,7 @@ Per `exec_kind` the runner delegates to one method of the injected `CheckExecuto
 | exec_kind | Default executor |
 |---|---|
 | `tsc` | `npx tsc --noEmit` in `repoRoot` |
-| `grep` | `rg -e <pattern> <path>` — exit 0 → present, exit 1 → absent, else harness error |
+| `grep` | `rg -e <pattern> -- <path>` — validated path passed after `--` separator to prevent option injection. Exit 0 → present, exit 1 → absent, else harness error. Path validation is enforced by [[spec-phase-checks-table]] `validateGrepPath` at authoring time; the `--` separator is defense-in-depth. |
 | `ci_status` | `gh pr checks` in `repoRoot` |
 | `http_get` | `fetch(url)` — status compared to `expect_status` |
 | `db_probe_readonly` | looks up `params.probe_id` in [[spec-check-db-probes]] `DB_PROBES`, invokes the fixed shaped query with `params.args`, and deep-equals the returned scalar to `params.expect`. Evidence is the probe's REDACTED string (probe id + scalar) — NEVER a row body. Free-form SQL is not accepted; this closes the 5 pre-merge Vault findings on the old `exec_readonly_sql` path (injection · secret_leak · authz_rls · unsafe_admin_client · crypto_encrypted). |

@@ -21,6 +21,7 @@ import {
 } from "@/lib/ad-tool-config";
 import type { AngleGeneratorInput, ProductAdAngle } from "@/lib/ad-types";
 import { validateAngle } from "@/lib/ad-validator";
+import { isAdvertisedProduct } from "@/lib/advertised-products";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -258,6 +259,13 @@ export interface GenerateAnglesResult {
 export async function generateAngles(productId: string, count = 12): Promise<GenerateAnglesResult> {
   if (!ANTHROPIC_API_KEY) return { ok: false, inserted: [], rejected: [], reason: "no_api_key" };
   const admin = createAdminClient();
+  // Hero-product advertising gate ([[advertised-products]]): attachment SKUs never get angles
+  // generated — the reason we added the flag (a stray Tumbler/Sleep-Gummies angle would seed
+  // Dahlia's cadence downstream via product_ad_angles). Gate BEFORE the metered Opus call so
+  // an attachment call costs 0 tokens, not the ~8k of a full angle-gen turn.
+  if (!(await isAdvertisedProduct(admin, productId))) {
+    return { ok: false, inserted: [], rejected: [], reason: "not_advertised" };
+  }
   const inputs = await loadAngleInputs(productId);
 
   const { data: product } = await admin.from("products").select("workspace_id").eq("id", productId).single();

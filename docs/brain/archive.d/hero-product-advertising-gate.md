@@ -1,0 +1,1 @@
+- **Hero-product advertising gate** · verified 2026-07-12 · → [[../libraries/advertised-products]]
