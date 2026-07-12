@@ -232,13 +232,15 @@ export async function GET() {
       }
     : null;
 
-  // Enrich director-coach lanes with their turn intent (ask|coach) from the job instructions, so the box
-  // can render "Asking Ada" vs "Coaching Ada" by which button the CEO pushed.
+  // Enrich director-coach lanes with (a) their turn intent (ask|coach) from the job instructions and (b) the
+  // ACTING director's function slug from the thread (spec_slug == director_coach_threads.id), so the box
+  // renders "Asking June" with June's avatar — not a hardcoded Ada — by which director + button the CEO chose.
   if (worker?.lanes?.length) {
-    const coachIds = worker.lanes.filter((l) => l.kind === "director-coach" && l.job_id).map((l) => l.job_id);
-    if (coachIds.length) {
-      const { data: cj } = await admin.from("agent_jobs").select("id, instructions").in("id", coachIds);
-      const intentById = new Map<string, string>();
+    const coachLanes = worker.lanes.filter((l) => l.kind === "director-coach");
+    const coachJobIds = coachLanes.filter((l) => l.job_id).map((l) => l.job_id);
+    const intentById = new Map<string, string>();
+    if (coachJobIds.length) {
+      const { data: cj } = await admin.from("agent_jobs").select("id, instructions").in("id", coachJobIds);
       for (const j of (cj || []) as Array<{ id: string; instructions: string | null }>) {
         try {
           const i = JSON.parse(j.instructions || "{}");
@@ -247,7 +249,21 @@ export async function GET() {
           /* not JSON */
         }
       }
-      worker.lanes = worker.lanes.map((l) => (l.kind === "director-coach" && intentById.has(l.job_id) ? { ...l, intent: intentById.get(l.job_id) ?? null } : l));
+    }
+    const coachThreadIds = coachLanes.map((l) => l.spec_slug).filter(Boolean);
+    const fnByThread = new Map<string, string>();
+    if (coachThreadIds.length) {
+      const { data: th } = await admin.from("director_coach_threads").select("id, director_function").in("id", coachThreadIds);
+      for (const t of (th || []) as Array<{ id: string; director_function: string | null }>) {
+        if (t.director_function) fnByThread.set(t.id, t.director_function);
+      }
+    }
+    if (intentById.size || fnByThread.size) {
+      worker.lanes = worker.lanes.map((l) =>
+        l.kind === "director-coach"
+          ? { ...l, intent: intentById.get(l.job_id) ?? l.intent ?? null, director_function: fnByThread.get(l.spec_slug) ?? "platform" }
+          : l,
+      );
     }
   }
 
@@ -374,8 +390,18 @@ export async function GET() {
 
   // Waiting = not yet in a lane; paused = needs owner action. The queue carries the avatar-log fields
   // (kind, spec_slug, derived phase) the box page renders as the "Jobs in queue" feed.
-  const queue = jobs
-    .filter((j) => j.status === "queued" || j.status === "queued_resume")
+  const queuedJobs = jobs.filter((j) => j.status === "queued" || j.status === "queued_resume");
+  // Resolve the acting director for queued director-coach jobs from their thread (spec_slug ==
+  // director_coach_threads.id), so a queued coach job shows the real director (June/Max/Ada), not a default.
+  const queuedCoachThreadIds = queuedJobs.filter((j) => j.kind === "director-coach").map((j) => j.spec_slug).filter(Boolean);
+  const coachFnByThread = new Map<string, string>();
+  if (queuedCoachThreadIds.length) {
+    const { data: qth } = await admin.from("director_coach_threads").select("id, director_function").in("id", queuedCoachThreadIds);
+    for (const t of (qth || []) as Array<{ id: string; director_function: string | null }>) {
+      if (t.director_function) coachFnByThread.set(t.id, t.director_function);
+    }
+  }
+  const queue = queuedJobs
     .map((j) => ({
       id: j.id,
       spec_slug: j.spec_slug,
@@ -386,7 +412,7 @@ export async function GET() {
       created_at: j.created_at,
       phase: phaseForJob(j.kind, j.spec_slug, j.instructions),
       spec_missing: specMissing(j.kind, j.spec_slug),
-      director_function: directorFunctionForGradeKind(j.kind, j.instructions),
+      director_function: j.kind === "director-coach" ? (coachFnByThread.get(j.spec_slug) ?? "platform") : directorFunctionForGradeKind(j.kind, j.instructions),
       // consolidate-premerge-checks-one-session Phase 2 — a queued spec-test job targeting a `claude/*`
       // branch is a fused pre-merge session (Vera + Vault); the queued-jobs log renders both personas.
       fused_pre_merge: j.kind === "spec-test" && !!(j.spec_branch && j.spec_branch.startsWith("claude/")),

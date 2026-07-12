@@ -238,11 +238,14 @@ function gradeCoachInfo(kind: string, directorFunction?: string | null): { perso
   return { persona: getPersona(fn), verb };
 }
 
-// The director kinds embody Ada (the Platform director) — her persona + avatar, not a generic label.
+// A director-coach lane embodies the ACTUAL director the thread runs as (keyed off director_function —
+// June/Max/Ada), NOT a hardcoded Ada; platform-director is always Ada. Fall back to platform when the
+// function is absent (a legacy Ask-Ada thread or a lane the feed couldn't resolve).
 function personaForKind(kind: string, directorFunction?: string | null) {
   const gc = gradeCoachInfo(kind, directorFunction);
   if (gc) return gc.persona;
-  return kind === "platform-director" || kind === "director-coach" ? getPersona("platform") : getPersona(kind);
+  if (kind === "director-coach") return getPersona(directorFunction ?? "platform");
+  return kind === "platform-director" ? getPersona("platform") : getPersona(kind);
 }
 
 // consolidate-premerge-checks-one-session Phase 2 — for a fused pre-merge spec-test lane the SAME session
@@ -271,8 +274,9 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
       </div>
     );
   }
-  // A director-coach lane is the CEO talking to Ada — show the SUBJECT (Ada)'s avatar + an Asking/Coaching
-  // label by the button the CEO pushed (intent), and hide the meaningless thread-id slug.
+  // A director-coach lane is the CEO talking to a director — show the SUBJECT director's avatar (June/Max/
+  // Ada, keyed off director_function) + an Asking/Coaching label by the button the CEO pushed (intent), and
+  // hide the meaningless thread-id slug.
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
