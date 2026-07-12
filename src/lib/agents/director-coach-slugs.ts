@@ -12,7 +12,7 @@
  * See docs/brain/specs/generalize-director-coach-backend.md (Phase 3).
  */
 
-export const COACH_THREAD_SLUGS = ["platform", "growth", "cs"] as const;
+export const COACH_THREAD_SLUGS = ["platform", "growth", "cs", "logistics"] as const;
 
 export type CoachThreadSlug = (typeof COACH_THREAD_SLUGS)[number];
 

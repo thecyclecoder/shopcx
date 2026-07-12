@@ -19,6 +19,7 @@ import { LEASH_CATEGORIES as PLATFORM_LEASH } from "@/lib/agents/platform-direct
 import { LEASH_CATEGORIES as GROWTH_LEASH } from "@/lib/agents/growth-director";
 import { LEASH_CATEGORIES as CS_LEASH } from "@/lib/agents/cs-director";
 import { COACH_THREAD_SLUGS } from "@/lib/agents/director-coach-slugs";
+import { LEASH_CATEGORIES as LOGISTICS_LEASH } from "@/lib/agents/logistics-director";
 
 export interface LeashLine {
   title: string;
@@ -44,6 +45,13 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   platform: PLATFORM_LEASH,
   growth: GROWTH_LEASH,
   cs: CS_LEASH,
+  // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands READ-ONLY: `LOGISTICS_LEASH` is
+  // an empty array by design, so `getLeashGuide('logistics')` returns `defined:true` with
+  // `autonomous:[]` and only the generic CEO escalation rails. Every pending_action on a logistics
+  // thread routes UP to the CEO via the M3 dispatch's out-of-leash branch. The follow-up spec
+  // marco-logistics-executor-surface will populate this once the founder-driven inventory executors
+  // are open to Ada (docs/brain/functions/logistics.md § "Provenance / build model").
+  logistics: LOGISTICS_LEASH,
 };
 
 // The client-safe `COACH_THREAD_SLUGS` list gates the profile-page Coach section; this file registers
@@ -184,6 +192,16 @@ const DIRECTOR_EXTRA_ESCALATES: Record<string, LeashLine[]> = {
     },
   ],
 };
+
+/**
+ * The set of director function slugs that have a registered `<name>-director.ts` leash module — the
+ * live-directors-with-coach filter the Message Center's director-tab endpoint uses. A director whose
+ * slug appears here CAN back a coach thread (its leash is defined, so getLeashGuide(slug).defined ===
+ * true). Kept as a named export so the API route doesn't reach into the private `DIRECTOR_LEASH` map.
+ */
+export function getRegisteredDirectorSlugs(): Set<string> {
+  return new Set(Object.keys(DIRECTOR_LEASH));
+}
 
 /**
  * Build the plain-English leash guide for one director slug. Derived from that director's OWN
