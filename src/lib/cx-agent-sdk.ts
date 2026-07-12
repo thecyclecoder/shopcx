@@ -31,6 +31,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { linkGroupIds } from "@/lib/customer-links";
+import { suggestEmailCorrection } from "@/lib/email-typo";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -663,7 +664,15 @@ export function formatCxCustomer(c: CxCustomer | null): string {
   const p = c.profile;
   if (!p) return `CUSTOMER: ${c.customer_id}${linkedLine} · (profile row not found)`;
   const name = `${p.first_name ?? ""} ${p.last_name ?? ""}`.trim() || "(no name)";
-  return `CUSTOMER: ${name} <${p.email ?? ""}> (id ${c.customer_id})${linkedLine} · sub: ${p.subscription_status ?? "none"} · retention: ${p.retention_score ?? 0} · email_marketing: ${p.email_marketing_status ?? "?"} · sms_marketing: ${p.sms_marketing_status ?? "?"}`;
+  // Mistyped-email flag (all three agents see it): a customer typed as gmaik.com is unreachable —
+  // every reply/journey CTA/magic-link bounces and a duplicate account silently spawns. Deterministic,
+  // dependency-free (mailcheck). SUGGESTS only — the agent confirms with the customer / links accounts;
+  // it is never permission to mutate an address into a DIFFERENT live customer's.
+  const typo = suggestEmailCorrection(p.email ?? "");
+  const typoLine = typo.changed
+    ? ` · ⚠️ EMAIL LIKELY MISTYPED (${typo.confidence}): did you mean <${typo.corrected}>? — confirm before relying on this address`
+    : "";
+  return `CUSTOMER: ${name} <${p.email ?? ""}> (id ${c.customer_id})${linkedLine} · sub: ${p.subscription_status ?? "none"} · retention: ${p.retention_score ?? 0} · email_marketing: ${p.email_marketing_status ?? "?"} · sms_marketing: ${p.sms_marketing_status ?? "?"}${typoLine}`;
 }
 
 export function formatCxOrders(orders: CxOrder[]): string {
