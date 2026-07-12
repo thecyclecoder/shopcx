@@ -12224,9 +12224,130 @@ async function runSpecTestJob(job: Job) {
     }
     const isPreMerge = !!previewOrigin && !!branch;
 
+    // ── machine-declared-verification-and-deterministic-spec-test-runner Phase 3 ─────────────────
+    // Deterministic-first: run the machine-declared checks in-process BEFORE we spawn a Max session.
+    // If every check resolved (no `needs_human` residual) AND this is NOT a fused pre-merge job (the
+    // security envelope stays a Max session by design — Vault is judgment), write the deterministic
+    // verdicts straight to spec_test_runs and run the same post-verdict downstream (timecard +
+    // green-writeback + auto-fold + regression detector) — NO claude session, no Max cost. Best-
+    // effort: any thrown error falls through to the LLM lane below (the runner is additive, never
+    // regressive). The `residual*` values are threaded into the prompt so an unavoidable Max session
+    // can focus its work.
+    let deterministicResiduals: string[] = [];
+    let deterministicChecks: SpecTestCheck[] = [];
+    let deterministicOk = false;
+    try {
+      const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+        "../src/lib/spec-check-runner"
+      );
+      const pkg = JSON.parse(readFileSync(resolve(REPO_DIR, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+      const runnerOut = await runSpecChecks({
+        workspaceId: job.workspace_id,
+        slug,
+        deps: {
+          loadChecks: defaultLoadChecks,
+          executors: defaultExecutors,
+          packageScripts,
+          repoRoot: REPO_DIR,
+        },
+      });
+      const cls = classifyDeterministicRun(runnerOut.results);
+      deterministicResiduals = cls.residualTexts;
+      deterministicChecks = cls.checks;
+      deterministicOk = true;
+      console.log(
+        `${tag} deterministic runner — ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤 (residual=${cls.residualCount}, isPreMerge=${isPreMerge})`,
+      );
+      if (cls.allResolved && !isPreMerge) {
+        // No LLM needed. Insert the deterministic verdicts + run the same downstream Vera runs today.
+        await db.from("spec_test_runs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          agent_job_id: job.id,
+          agent_verdict: cls.agentVerdict,
+          summary: cls.summary,
+          checks: cls.checks,
+          transcript: null,
+          error: null,
+          spec_branch: null,
+          preview_url: null,
+        });
+        await emitTimecardOnceInSession(emittedThisSession, {
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "spec_test_verdict",
+          actor: "vera",
+          metadata: { job_id: job.id, agent_verdict: cls.agentVerdict, summary: cls.summary, deterministic: true },
+        });
+        try {
+          const { reflectSpecGreenChecks } = await import("../src/lib/spec-green-writeback");
+          const g = await reflectSpecGreenChecks(job.workspace_id, slug);
+          if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
+        } catch (e) {
+          console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // The claude_session_id stays null on this row — the grader's `ungradedConcludedJobs` filter
+        // reads that as "monitored, not graded" and skips it (agent-grader.ts, machine-declared Phase 3).
+        await update(job.id, {
+          status: "completed",
+          log_tail: `${cls.agentVerdict} — ✅${cls.summary.auto_pass} ✗${cls.summary.auto_fail} 👤${cls.summary.needs_human} (deterministic — no Max session)`.slice(-2000),
+        });
+        try {
+          const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
+          const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
+          if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
+        } catch (e) {
+          console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (cls.agentVerdict === "issues") {
+          try {
+            const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
+            const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
+            const q = await getHumanTestQueue(job.workspace_id);
+            const reg = q.regressions.find((r) => r.slug === slug);
+            if (reg) {
+              await enqueueRegressionJob(db, {
+                workspaceId: job.workspace_id,
+                specSlug: reg.slug,
+                fromSpecTestRunId: null,
+              });
+            }
+          } catch (e) {
+            console.error(`${tag} regression enqueue (deterministic path) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      // The runner throwing is NOT a regression — fall back to today's LLM path. The runner's whole
+      // contract is additive: it verifies more cheaply when it can and gets out of the way otherwise.
+      console.warn(`${tag} deterministic runner failed (falling back to Max): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Emit the monitored-loops heartbeat for the deterministic runner (Control Tower registry
+    // entry DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) — ok:true when the runner returned verdicts,
+    // ok:false when it threw and Vera's LLM lane had to take over. Best-effort; never fails the job.
+    try {
+      const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+      const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+      await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: deterministicOk });
+    } catch { /* best-effort */ }
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
+      ...(deterministicResiduals.length
+        ? [
+            // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — deterministic
+            // pre-pass. The box's Node runner already executed the machine-declared checks; its verdicts
+            // are AUTHORITATIVE and will be merged after your session. Focus your effort on the
+            // subjective/drift residual — do NOT re-run the checks the runner already handled.
+            `🤖 DETERMINISTIC PRE-PASS (spec-check-runner) — a Node module already ran the machine-declared \`spec_phase_checks\` (${deterministicChecks.length} check(s)); its pass/fail verdicts are AUTHORITATIVE and will be merged into the final row after your session. SCOPE your effort to the ${deterministicResiduals.length} RESIDUAL bullet(s) below (drift · subjective · un-typed prose). Still emit ONE check per bullet in your JSON so the merge is complete; other bullets can carry a needs_human / inconclusive placeholder with evidence "handled by deterministic runner" — the merge will replace them with the runner's verdict.\nResidual bullets:\n${deterministicResiduals.map((t) => `  - ${t}`).join("\n")}`,
+          ]
+        : []),
       ...(isPreMerge
         ? [
             `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
@@ -12404,7 +12525,26 @@ async function runSpecTestJob(job: Job) {
       return;
     }
 
-    const { agent_verdict, summary, checks, report } = normalizeSpecTest(parsed);
+    const { agent_verdict: llmAgentVerdict, summary: llmSummary, checks: llmChecks, report } = normalizeSpecTest(parsed);
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — MERGE. When the
+    // deterministic runner produced verdicts for this spec (a mixed run — residuals forced the Max
+    // session but some checks resolved deterministically), the runner's pass/fail is AUTHORITATIVE
+    // and overrides any conflicting Max verdict on the same bullet; the LLM's verdicts only fill in
+    // the runner's needs_human residual. Pure — same helper the unit tests pin.
+    let checks = llmChecks;
+    let summary = llmSummary;
+    let agent_verdict = llmAgentVerdict;
+    if (deterministicChecks.length) {
+      const { mergeDeterministicWithLlmChecks } = await import("../src/lib/spec-check-runner");
+      checks = mergeDeterministicWithLlmChecks(deterministicChecks, llmChecks);
+      summary = {
+        auto_pass: checks.filter((c) => c.verdict === "pass").length,
+        auto_fail: checks.filter((c) => c.verdict === "fail").length,
+        needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+        inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
+      };
+      agent_verdict = summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
+    }
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
@@ -23327,25 +23467,42 @@ async function dispatchJob(job: Job) {
       );
       const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
       if (rebase.code !== 0) {
-        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
-        // clean for the reap, then surface needs_attention — the human resolves the divergence
-        // rather than the box silently running repo-wide checks on a stale tree.
+        // builder-self-heals-stale-build-branch Phase 1: a `git rebase` (linear replay of the
+        // branch's commits) SPURIOUSLY conflicts on non-linear / merge history or sibling
+        // divergence where a plain `git merge origin/main` is CLEAN — e.g. a goal-member branch
+        // whose goal branch already merge-reconciled main, or a branch carrying a merge commit.
+        // (Confirmed 2026-07-12: the ceo-org-control-tower goal members livelocked here — a merge
+        // of origin/main applied with ZERO conflicts while the rebase failed identically every
+        // retry, wedging the whole build queue.) So: abort the rebase, then FALL BACK to a merge.
+        // The goal is only to advance the BASE so it CONTAINS origin/main (repo-wide checks then
+        // run against a tree with main) — a merge achieves that without rewriting the branch's
+        // commits. Invariants preserved: never force-push, never touch main, never drop WIP. Only a
+        // GENUINE semantic conflict (the merge ALSO fails) parks needs_attention.
         sh("git", ["rebase", "--abort"], { cwd: wt });
-        await update(job.id, {
-          status: "needs_attention",
-          error:
-            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
-        });
-        console.error(
-          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
-        );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+        const mergeFallback = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+        if (mergeFallback.code === 0) {
+          console.log(
+            `${tag} rebase-onto-main conflicted but MERGE origin/main SUCCEEDED on ${branch} — base advanced via merge (stale-branch self-heal; no WIP dropped, no force-push)`,
+          );
+        } else {
+          // Merge also conflicts → a real semantic divergence a human must resolve.
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
+            log_tail: `reconcile-with-main (rebase AND merge conflicted — real semantic divergence):\n${(mergeFallback.out + mergeFallback.err).slice(-1800)}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile-with-main CONFLICT on ${branch} (rebase AND merge) — parked needs_attention (never silently dropped, never force-pushed)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
       }
       console.log(
-        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+        `${tag} reconcile-onto-main SUCCESS on ${branch} — base now contains origin/main (rebase or merge fallback; no WIP dropped)`,
       );
     }
   }

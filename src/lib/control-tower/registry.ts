@@ -208,6 +208,15 @@ export const AUTO_MERGE_GATE_LOOP_ID = "auto-merge-gate";
  */
 export const AUTO_FOLD_GATE_LOOP_ID = "auto-fold-gate";
 
+/**
+ * machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — the deterministic
+ * Node runner (`src/lib/spec-check-runner.ts` `runSpecChecks`) that the box's spec-test lane runs
+ * BEFORE spawning a Max session. Beats once per spec-test job that invokes it (kind='reactive',
+ * end-of-run try/finally: ok:true when the runner returned verdicts, ok:false when it threw and
+ * the LLM lane took over). Idle = green (event-driven, no cadence — beats when a spec is tested).
+ */
+export const DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID = "deterministic-spec-check-runner";
+
 /** Stable inline-agent loop ids (loop_id on loop_heartbeats; matches the registry entries). */
 export const INLINE_AGENT_IDS = {
   ticketAnalyzer: "ai:ticket-analyzer",
@@ -608,6 +617,8 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
   // ─ Daily crons (window ~26h) ─
+  { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
+  { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 26 * HOUR },
   {
     id: "acquisition-research-cadence-cron",
     kind: "cron",
@@ -964,6 +975,26 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description:
       "Auto-folds fully-verified shipped specs (agent-verdict approved + 0 human checks waiting/failed + 0 regressions) via enqueue_fold — the all-green mirror of the owner's Mark-verified-&-archive click. Owner kill-switch (workspaces.auto_fold_enabled), coalesced into the batch fold-build.",
     expectedCadence: "per spec-test completion / human-check resolution + daily sweep",
+    livenessWindowMs: 30 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+
+  // ── Deterministic spec-check runner (loop_heartbeats, loop_id = DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) ──
+  // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — the Node runner over
+  // machine-declared spec_phase_checks. Runs INSIDE runSpecTestJob (not a cron), so it beats once per
+  // spec-test job that invokes it: ok:true when it returned verdicts, ok:false when it threw and the
+  // LLM lane took over. This is MONITORED infra (not a graded agent — no LLM, no rubric); the
+  // agent-grader carve-out on `spec-test` + null `claude_session_id` (agent-grader.ts) is what makes
+  // the deterministic-only path monitored-not-graded, and this loop is where its liveness is asserted.
+  {
+    id: DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID,
+    kind: "reactive",
+    owner: "platform",
+    label: "Deterministic spec-check runner",
+    description:
+      "The Node module (src/lib/spec-check-runner.ts runSpecChecks) that executes machine-declared spec_phase_checks — tsc / grep / ci_status / http_get / db_probe_readonly / unit_test / build — before Vera's LLM lane runs. Verifies the auto-testable subset with no Max cost; reserves the LLM for the needs_human residual. Non-destructive by construction (only read-only kinds run).",
+    expectedCadence: "per spec-test job that invokes it",
     livenessWindowMs: 30 * HOUR,
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
