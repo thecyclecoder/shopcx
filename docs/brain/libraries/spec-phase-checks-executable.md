@@ -20,7 +20,7 @@ Coexists with the coarse [[spec-phase-checks-table]] `kind` column (`auto` | `hu
 | exec_kind | params | What the runner (Phase 2) will do |
 |---|---|---|
 | `tsc` | `null` | `npx tsc --noEmit` in the repo root. Pass ⇔ clean. |
-| `grep` | `{ pattern, path?, expect: 'present'|'absent' }` | Ripgrep `pattern` under `path` (repo root default). Pass ⇔ match presence matches `expect`. |
+| `grep` | `{ pattern, path?, expect: 'present'|'absent' }` | Ripgrep `pattern` under `path` (repo root default). `path` is validated by [[spec-phase-checks-table]] `validateGrepPath` — must be repo-relative, non-empty, free of NUL/`..` traversal/leading `-`, never absolute. Runs as `rg -e {pattern} -- {path}` with `--` separator for defense-in-depth. Pass ⇔ match presence matches `expect`. |
 | `ci_status` | `null` | `gh run` / `gh pr checks` for the branch. Pass ⇔ green. |
 | `http_get` | `{ url, expect_status }` | `fetch(url)`. Pass ⇔ response status equals `expect_status`. |
 | `db_probe_readonly` | `{ sql, expect }` | Run `sql` via the pooled admin client. `sql` MUST pass `isPlainReadonlySql` (plain `SELECT` / `WITH`, no chained statements, no mutating verbs). Pass ⇔ rows deep-equal `expect`. |
