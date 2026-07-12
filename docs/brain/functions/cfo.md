@@ -27,6 +27,7 @@ Be the single authoritative source for every dollar figure the CEO scoreboard re
 Watch gross + contribution margin and cash position over time; surface a margin slide or a cash-runway concern to the CEO before it becomes a crisis. The financial early-warning system.
 - **Metric:** time-to-surface a margin/cash anomaly; zero silent margin erosion.
 - **Status:** ⏳ planned — follows the metrics feed.
+- **🔜 DATE-TRIGGERED OPEN WORK — July close cutover (do ~Aug 1–5, 2026).** July 2026 is the **first month-end close to run on ShopCX instead of Shoptics**. The close engine is proven in shadow (June reconciles to $0.00 across all 5 QBO artifacts) but the **live posting route was never built**, so it sits UNMERGED on branch `origin/worktree-shoptics-migration` (@`ac60fe9d`, backed up; NOT on main). Spec (deferred, auto-build OFF, guard baked in): `shoptics-close-cutover-july`. Hard guard to implement + honor: the live close **refuses to post unless (a) a dry-run for that month reconciled to $0.00 AND (b) `month_end_closings` has no completed row for it (run-once)** — because the InventoryAdjustment + SalesReceipts are NOT idempotent (re-running duplicates real QBO docs). Live close is **always manually triggered** (matches Shoptics: manual `POST /api/qb/month-end-closing`, no cron). See [[../lifecycles/shoptics-migration]] (currently on the worktree branch) + the qb-close builders `src/lib/qb-close/*`.
 
 ## Owned / contributed goals
 
