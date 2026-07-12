@@ -18,7 +18,6 @@
 import { LEASH_CATEGORIES as PLATFORM_LEASH } from "@/lib/agents/platform-director";
 import { LEASH_CATEGORIES as GROWTH_LEASH } from "@/lib/agents/growth-director";
 import { LEASH_CATEGORIES as CS_LEASH } from "@/lib/agents/cs-director";
-import { LEASH_CATEGORIES as LOGISTICS_LEASH } from "@/lib/agents/logistics-director";
 
 export interface LeashLine {
   title: string;
@@ -44,13 +43,6 @@ const DIRECTOR_LEASH: Record<string, readonly string[]> = {
   platform: PLATFORM_LEASH,
   growth: GROWTH_LEASH,
   cs: CS_LEASH,
-  // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands READ-ONLY: `LOGISTICS_LEASH` is
-  // an empty array by design, so `getLeashGuide('logistics')` returns `defined:true` with
-  // `autonomous:[]` and only the generic CEO escalation rails. Every pending_action on a logistics
-  // thread routes UP to the CEO via the M3 dispatch's out-of-leash branch. The follow-up spec
-  // marco-logistics-executor-surface will populate this once the founder-driven inventory executors
-  // are open to Ada (docs/brain/functions/logistics.md § "Provenance / build model").
-  logistics: LOGISTICS_LEASH,
 };
 
 /**
