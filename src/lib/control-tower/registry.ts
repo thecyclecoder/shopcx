@@ -436,6 +436,19 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     personaKind: "monitor", // Tao — surfaces this cron as a Platform worker on the org view (agent-roster-sync P1)
   },
   {
+    // node-ancestry-sync-cron (claim-rpc-kill-switch-enforcement Phase 1): nightly backstop
+    // that keeps public.node_ancestry — the DB mirror of the canonical node registry — aligned
+    // with src/lib/control-tower/node-registry.ts. The box worker also syncs on startup, so this
+    // cron only matters when the box has stayed up across a registry change.
+    id: "node-ancestry-sync-cron",
+    kind: "cron",
+    owner: "platform",
+    label: "Node ancestry mirror",
+    description: "Nightly sync of the canonical node registry into public.node_ancestry — the DB primitive that gates claim_agent_job on the kill-switch cascade.",
+    expectedCadence: "nightly (15 3 * * *)",
+    livenessWindowMs: 26 * HOUR,
+  },
+  {
     id: "supabase-log-poll-cron",
     kind: "cron",
     owner: "platform",

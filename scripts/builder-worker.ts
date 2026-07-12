@@ -24439,6 +24439,22 @@ async function main() {
     }
   })();
 
+  // Deploy-time node_ancestry re-sync (claim-rpc-kill-switch-enforcement Phase 1): the box
+  // worker restarts after a self-update, so recomputing the DB mirror of the canonical node
+  // registry here keeps public.claim_agent_job's kill-switch cascade in sync with any newly-added
+  // MONITORED_LOOPS row or KIND_OWNER_FALLBACK entry. Fail-open by design — a failed sync just
+  // means the RPC sees an out-of-date mirror; an unregistered kind falls through to the claim
+  // path anyway. Fire-and-forget, best-effort — must never block the worker loop.
+  void (async () => {
+    try {
+      const { syncNodeAncestry } = await import("../src/lib/control-tower/node-ancestry-sync");
+      const r = await syncNodeAncestry();
+      console.log(`[node-ancestry-sync] ${r.detail}`);
+    } catch (e) {
+      console.warn("[node-ancestry-sync] skipped:", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Vercel Ignored-Build-Step auto-heal at startup (regression-of: per-build-vercel-preview-deploys):
   // re-assert the CLAUDE_PREVIEW_IGNORE_COMMAND override so a manual revert in the Vercel dashboard
   // (or any other path that drifts it) is healed by the next box restart. The helper is idempotent —
