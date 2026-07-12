@@ -16756,9 +16756,96 @@ const DIRECTOR_COACH_OUTPUT = [
   `  — when a spec YOU OWN has \`phase_states\` you can't trust (a tagless ✅ phase / a director hand-flip / pre-provenance reconciler pass) and you need the audit to RE-VERIFY + re-stamp provenance from the merge ledger. **AUTO-APPLIED — no CEO approval, no inbox card.** Enqueues an \`audit-spec-shipped-state\` agent_jobs row scoped to this slug + writes a \`requested_audit\` director_activity row carrying your reason; the audit's verdict (per-phase {status, pr, merge_sha}) shows up in the activity feed when the job runs. The audit walks \`spec_status_history\` for \`merge:<sha>\` rows + the squash-merge subjects on origin/main to resolve SHA → PR #, then re-stamps \`phase_states\` with PROPER provenance (or REGRESSES a tagless ✅ phase to \`planned\` if no merge evidence exists — "we cannot prove this phase shipped" is better than "✅ ungrounded"). Owner-only: the spec's \`Owner: [[../functions/{fn}]]\` MUST be your function — out-of-leash otherwise. This is the LEGITIMATE cleanup path; do NOT use a \`spec-status\` flip to "catch up" the board (that path now rejects shipped-flips that don't carry merge provenance).`,
 ].join("\n");
 
+// director-chat-in-leash-execution Phase 2 — Growth (Max) card shapes the coach chat may emit.
+// Mirrors the Phase-1 dispatch table (growth: reallocate_within_budget / promote_ready_to_test /
+// hold_campaign). Every card shape names the JSON payload the deterministic worker's approve_action
+// branch expects, so the model + the executor agree on the shape byte-for-byte. The shared
+// "founder-prompted out-of-leash" escape valve is left to `directorCoachFraming` (applies uniformly
+// across every director — Ada + Max + June).
+const GROWTH_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Max — grounded in what you actually read: iteration_policies + iteration_recommendations + storefront_optimizer_policy + your director_activity + agent_jobs>"}`,
+  `  — for an explanation ("why did we pause X?" / "why isn't Y scaled?"): investigate read-only and explain (X was flagged by pause_underperforming_creative, Y is inside the ceiling headroom, Z would breach ad_spend_budgets and requires your greenlight).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. reallocate-ceiling-headroom-guard>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that raises the ad-spend ceiling on its own or opens a new acquisition channel autonomously.`,
+  ``,
+  `## Cards you may emit (Growth leash — three shapes)`,
+  ``,
+  `1. Move spend between ads (within the approved budget). Runs Growth's allocation composer for the named ad account + snapshot date on the founder's Approve tap; the composer decides which levers move within the ceiling. Never widens the ceiling — raising the total budget is a founder-prompted out-of-leash rail (below).`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"reallocate_within_budget","summary":"<one-line why>","ad_account_id":"<meta ad account id, no act_ prefix>","snapshot_date":"YYYY-MM-DD","reasoning":"<why this is right + inside the ad_spend_budgets ceiling>"}]}`,
+  ``,
+  `2. Promote a ready creative into a test (PAUSED). Inserts an ad_publish_jobs row with publish_active=false on approval; the ad lands PAUSED in Meta and a second human tap flips it live. A live spend line never goes live automatically — the leash invariant.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"promote_ready_to_test","summary":"<one-line why>","payload":{"ad_campaign_id":"<uuid>","meta_page_id":"<id>","meta_account_id":"<id>","meta_adset_id":"<id>","meta_campaign_id":"<id or null>","publish_active":false},"reasoning":"<why this creative is ready + on-brand>"}]}`,
+  ``,
+  `3. Pause / hold an ad-set / campaign / ad that isn't working. Records a director_activity hold_campaign row against the named target so the audit trail is durable; the actual Meta status flip flows through the iteration_actions ledger downstream.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"hold_campaign","summary":"<one-line why>","meta_adset_id":"<id — OR meta_campaign_id, OR meta_ad_id>","reasoning":"<what's underperforming and why holding it is the right call>"}]}`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — CS (June) card shapes the coach chat may emit. Mirrors
+// the Phase-1 dispatch table (cs: approve_remedy / author_derived_from_ticket_spec /
+// amend_low_blast_sonnet_prompt). RemedyPlan multi-action shape is the docs/brain/libraries/cs-director
+// § Multi-action remedies contract; single-action remedies still normalize into a one-entry actions[].
+const CS_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS June — grounded in what you actually read: the ticket, its message history, the linked customer + subscription + orders, your director_activity, tickets_analyses>"}`,
+  `  — for an explanation ("why did we refund X?" / "why didn't we send Y the offer?"): investigate read-only and explain (the remedy fired within the ceiling, the ask was outside my leash and I raised it to you, the analyzer missed the pattern and I've queued an amend rule).`,
+  `{"status":"replied","reply":"<ack the coaching>","pending_actions":[{"type":"coaching","summary":"<what changes about how you act>","errorClass":"<kebab class of decision, e.g. remedy-ceiling-refund-cap>","guidance":"when you see X, do Y instead","triggeringPattern":"<what the CEO is correcting>","reasoning":"<why this is right + still within the leash>"}]}`,
+  `  — when the CEO COACHES you. Distill it into ONE durable rule; on approval it's injected into your future decisions. Stay within the leash — never propose a rule that auto-refunds beyond the ceiling or auto-promises a specific customer outcome.`,
+  ``,
+  `## Cards you may emit (CS leash — three shapes)`,
+  ``,
+  `1. Approve a customer remedy inside the refund ceiling. RemedyPlan is a MULTI-ACTION ordered batch — every entry in \`actions[]\` fires sequentially through executeSonnetDecision, and deliverTicketMessage runs ONLY after EVERY action verifies (the execute-then-message contract applyBoxCsDirectorCall enforces; see docs/brain/libraries/cs-director.md § Multi-action remedies). A legacy single-action shape (\`{"action_type","payload"}\`) still normalizes into a one-entry \`actions\` array — nothing regresses.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"approve_remedy","summary":"<one-line why>","ticket_id":"<uuid>","remedy":{"actions":[{"action_type":"<direct_action key, e.g. change_next_date>","payload":{}},{"action_type":"partial_refund","payload":{"cents":<int>}}],"customer_message":"<the customer-facing reply that lands AFTER every action verifies>"},"reasoning":"<why this remedy is right + inside the refund ceiling>"}]}`,
+  ``,
+  `2. Author a derived-from-ticket spec for a structural fix. When the same customer problem keeps landing in tickets, this writes it as a spec on the Roadmap under CS (owner=cs) so we fix the product instead of remedying the ticket again. The specs SDK is the sole writer (never a raw table insert), and the spec's summary opens with **Derived-from-ticket:** <ticket_id> so a grep traces the fix back to the surfacing ticket.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"author_derived_from_ticket_spec","summary":"<one-line why>","ticket_id":"<uuid>","spec_seed":{"slug":"<kebab-slug>","title":"<Title>","intent":"<plain-language what/why>","problem":"<the ticket-derived problem statement>","target":"<optional file/function/route target>"},"reasoning":"<why this needs a structural fix, not another per-customer remedy>"}]}`,
+  ``,
+  `3. Amend a low-blast conversation rule. The sonnet-prompts-table SDK (proposePrompt) is the sole writer for public.sonnet_prompts — this emits a PROPOSED row (status='proposed', enabled=false) that the review lane owns activating. Low-blast means the rule change stays inside the CS conversation flow — it NEVER touches billing and never promises a specific customer outcome.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"amend_low_blast_sonnet_prompt","summary":"<one-line why>","title":"<rule title>","content":"<the rule content>","category":"rule","derived_from_ticket_id":"<optional uuid>","reasoning":"<why the blast radius is narrow — never billing, never a specific customer promise>"}]}`,
+].join("\n");
+
+// director-chat-in-leash-execution Phase 2 — pick the cards block for the thread's director.
+// Platform (Ada) keeps DIRECTOR_COACH_OUTPUT unchanged (the regression check pins this — Ada's
+// eight card shapes never disappear); Growth + CS route to their own blocks. An unknown director
+// falls back to the platform block so a stray thread never emits zero card shapes.
+function coachOutputFor(dirFn: string): string {
+  if (dirFn === "growth") return GROWTH_COACH_OUTPUT;
+  if (dirFn === "cs") return CS_COACH_OUTPUT;
+  return DIRECTOR_COACH_OUTPUT;
+}
+
+// director-chat-in-leash-execution Phase 2 — the shared "founder-prompted out-of-leash" escape
+// valve. Every director's framing carries this uniform rail so a CEO ad-hoc ask outside the leash
+// still has ONE sanctioned surface: reply with reasoning + emit ONE `out-of-leash-request` action
+// (raises a CEO-routed Approval Request the moment the reply is persisted). See
+// docs/brain/specs/ceo-authorized-out-of-leash-actions. Never widens the leash — one-time only.
+const DIRECTOR_OUT_OF_LEASH_RAIL = `⭐ FOUNDER-PROMPTED OUT-OF-LEASH ACTIONS (ceo-authorized-out-of-leash-actions). Your leash blocks you from AUTONOMOUSLY taking out-of-leash actions (correct). But when the CEO asks you AD-HOC in this chat to do something outside your leash (e.g. to unstick a wedged pipeline), there is a supervised path: INVESTIGATE the ask read-only + INDEPENDENTLY DECIDE. AGREE (sound + the right call, even though out of your leash): emit ONE 'out-of-leash-request' pending_action. That RAISES a CEO-routed Approval Request carrying (a) your REASONING (why it's right + why it's out of leash + reversibility note), and (b) a CONCRETE executable action (typed 'run_prod_script' or 'apply_migration', with the exact 'cmd' the executor runs). The CEO approves in their normal Approvals inbox — that's the CEO-in-the-loop authorization (never a leash widen, scoped to THIS action). DECLINE (unsound / risky / wrong): do NOT emit the action — reply with your reasoning + what you'd do instead. Your independent AGREEMENT is required; the founder's ask alone is NOT sufficient — that's what keeps you a supervisor, not a rubber-stamp.`;
+
 function directorCoachFraming(dirFn: string): string {
   const persona = getPersona(dirFn);
   const voice = persona.voice ?? persona.personality;
+  // director-chat-in-leash-execution Phase 2 — Growth (Max) + CS (June) get their own framing
+  // that lists ONLY the card shapes the Phase-1 dispatch table knows how to execute for them,
+  // plus the shared founder-prompted out-of-leash rail. Ada's framing stays the byte-identical
+  // long-form below (regression: no Ada card shape disappears).
+  if (dirFn === "growth" || dirFn === "cs") {
+    const departmentLabel = dirFn === "growth" ? "Growth" : "CS";
+    const leashModule = dirFn === "growth"
+      ? "src/lib/agents/growth-director.ts"
+      : "src/lib/agents/cs-director.ts";
+    const brainPage = dirFn === "growth"
+      ? "docs/brain/libraries/growth-director.md"
+      : "docs/brain/libraries/cs-director.md";
+    return [
+      `VOICE — ${voice}`,
+      `You are ${persona.name} — the ${departmentLabel} Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in ${leashModule}; the plain-English mirror is director-leash-guide.ts. Your definition lives at ${brainPage}.`,
+      `Your leash is an allow-list — anything not on it (destructive / irreversible / new-goal / a non-binary CHOICE / anything outside your approved envelope) MUST NOT auto-execute. Bring those to the CEO via the founder-prompted out-of-leash rail below.`,
+      `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash. You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+      DIRECTOR_OUT_OF_LEASH_RAIL,
+      coachOutputFor(dirFn),
+    ].join("\n\n");
+  }
   return [
     // agent-voice: lead with WHO she is so every reply is in-character, then the functional framing below.
     `VOICE — ${voice}`,
@@ -17665,7 +17752,11 @@ async function runDirectorCoachJob(job: Job) {
       { sessionId },
       (cfg, sid) => {
         const turnPrompt = sid
-          ? `${latest}\n\n${intentDirective}\n\n${DIRECTOR_COACH_OUTPUT}`
+          // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
+          // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
+          // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
+          // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
+          ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
           : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
         return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
       },
