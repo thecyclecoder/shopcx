@@ -25391,6 +25391,38 @@ async function main() {
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
       }
+      // claim-rpc-kill-switch-enforcement Phase 2 — after every per-kind claim loop has run,
+      // ask public.claim_agent_job_diag which queued rows the current kill_switches state
+      // suppressed this tick. For each unique agent kind returned, write one agent-kind
+      // heartbeat (loop_id = `agent:<kind>`) with produced.blocked_off + offBy + scope so
+      // evalAgentKind can render amber `off by <ancestor> (<scope>)` instead of a false
+      // green-idle or false red. Best-effort: a diag/heartbeat failure must never break
+      // the poll loop. The RPC is a cheap indexed read (LIMIT 20) that returns [] when no
+      // switches are set; skipping the whole path on an empty queue (hasClaimableJob=false)
+      // above keeps the cost off idle boxes.
+      try {
+        const { data: diag } = await db.rpc("claim_agent_job_diag", { p_kinds: null });
+        const rows = Array.isArray(diag)
+          ? (diag as Array<{ kind?: unknown; suppressed_by?: unknown; scope?: unknown }>)
+          : [];
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const kind = typeof r?.kind === "string" ? r.kind : null;
+          const offBy = typeof r?.suppressed_by === "string" ? r.suppressed_by : null;
+          const scope = typeof r?.scope === "string" ? r.scope : null;
+          if (!kind || !offBy || !scope) continue;
+          if (seen.has(kind)) continue;
+          seen.add(kind);
+          await writeLoopHeartbeat(
+            `agent:${kind}`,
+            true,
+            { blocked_off: true, offBy, scope },
+            0,
+          );
+        }
+      } catch (e) {
+        console.error("[claim-diag] suppressed-claim heartbeats skipped:", e instanceof Error ? e.message : e);
+      }
       } // end if (!draining) — queue-restart drain skips all claims above
       // Drained + idle + nothing to pull (already current) past the safety age → clear so we don't strand.
       if (draining && active.size === 0) {
