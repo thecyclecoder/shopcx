@@ -23476,69 +23476,177 @@ async function dispatchJob(job: Job) {
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
   }
-  // ⭐ mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks Phase 1: if the branch's
-  // tip is NOT already on top of origin/main, advance the BASE by rebasing onto origin/main BEFORE
-  // the claude run and (crucially) BEFORE the repo-wide check invocation below (`npx tsc --noEmit`
-  // + `_check-table-refs-have-migrations.ts`). This restores the invariant those checks assume —
-  // origin/main HEAD as the reference tree. A build worktree that was cut BEFORE a new
-  // table-creating migration landed on main would otherwise fail check:table-refs-have-migrations
-  // on a stale base whose fix already shipped, stalling the spec on a non-real regression.
+  // ⭐ builder-self-heals-stale-build-branch Phase 1 (folds mario-rebase-parked-build-worktrees):
+  // if the branch's tip does NOT already contain origin/main, advance the BASE so it does — BEFORE
+  // the claude run and the repo-wide check invocation below (`npx tsc --noEmit` +
+  // `_check-table-refs-have-migrations.ts`). Those checks assume origin/main HEAD as the reference
+  // tree — a build worktree that was cut BEFORE a new table-creating migration landed on main would
+  // otherwise fail check:table-refs-have-migrations on a stale base whose fix already shipped,
+  // stalling the spec on a non-real regression.
   //
-  // Invariants (see docs/brain/libraries/mario.md): NEVER force-push, NEVER drop WIP commits,
-  // NEVER touch main. Only the branch's LOCAL base is advanced — the follow-up phase push and its
-  // existing rebase-retry (build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2,
-  // below) handle a concurrent sibling push idempotently. A rebase conflict is surfaced as
-  // needs_attention (never a silent drop of WIP), matching the phase-push rebase-retry convention.
+  // Strategy: MERGE-first for a non-linear branch (goal-member inherits merge commits from the goal
+  // branch's main reconciliation — REBASE spuriously conflicts by replaying the merges even though
+  // a plain MERGE applies clean; confirmed 2026-07-11 on director-chat-in-leash-execution + machine-
+  // declared-verification-and-deterministic-spec-test-runner, both of which parked and burned CEO
+  // escalations before the merge fallback landed). REBASE-first only for a truly-linear branch
+  // (clean linear replay). Fallback: the other reconcile, or RECREATE-FRESH when the branch carries
+  // NO built work AND was NEVER pushed to origin (its commits are throwaway attempts a reset onto
+  // the correct base loses nothing — the director-chat box-local zero-built-work case named in the
+  // spec). Only when BOTH the primary AND the fallback conflict is the divergence a real semantic
+  // overlap that parks `needs_attention` (Phase 2 will name the conflicting files on that park).
+  //
+  // Bounded: ONE reconcile attempt per claim (primary + a single fallback). tsc-gates the reconciled
+  // tree before the claude run — if origin/main itself is broken (base poison), park with the tsc
+  // output so the human sees the real reason, never spend claude tokens on a broken base.
+  //
+  // Invariants (see docs/brain/libraries/mario.md + build-lane-reconcile.md): NEVER force-push,
+  // NEVER touch main, NEVER drop BUILT commits (hasBuiltWork gates recreate-fresh OFF). The pure
+  // strategy chooser is [[../src/lib/build-lane-reconcile]]; the test pins the choice.
   {
     // Explicit `git fetch origin main` so origin/main is the freshest tip we compare against (the
-    // top-of-runJob `git fetch origin` already covers this, but being explicit here matches the
-    // spec's steps and stays correct if the top-level fetch ever narrows).
+    // top-of-runJob `git fetch origin` already covers this, but being explicit here stays correct
+    // if the top-level fetch ever narrows).
     sh("git", ["fetch", "origin", "main"], { cwd: wt });
-    const headOnMain =
+    const headContainsMain =
       sh("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd: wt }).code === 0;
-    if (!headOnMain) {
-      console.log(
-        `${tag} branch ${branch} is behind origin/main — rebasing onto origin/main BEFORE repo-wide checks (base-only advance; never force-pushes, never drops WIP)`,
-      );
-      const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
-      if (rebase.code !== 0) {
-        // builder-self-heals-stale-build-branch Phase 1: a `git rebase` (linear replay of the
-        // branch's commits) SPURIOUSLY conflicts on non-linear / merge history or sibling
-        // divergence where a plain `git merge origin/main` is CLEAN — e.g. a goal-member branch
-        // whose goal branch already merge-reconciled main, or a branch carrying a merge commit.
-        // (Confirmed 2026-07-12: the ceo-org-control-tower goal members livelocked here — a merge
-        // of origin/main applied with ZERO conflicts while the rebase failed identically every
-        // retry, wedging the whole build queue.) So: abort the rebase, then FALL BACK to a merge.
-        // The goal is only to advance the BASE so it CONTAINS origin/main (repo-wide checks then
-        // run against a tree with main) — a merge achieves that without rewriting the branch's
-        // commits. Invariants preserved: never force-push, never touch main, never drop WIP. Only a
-        // GENUINE semantic conflict (the merge ALSO fails) parks needs_attention.
-        sh("git", ["rebase", "--abort"], { cwd: wt });
-        const mergeFallback = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
-        if (mergeFallback.code === 0) {
-          console.log(
-            `${tag} rebase-onto-main conflicted but MERGE origin/main SUCCEEDED on ${branch} — base advanced via merge (stale-branch self-heal; no WIP dropped, no force-push)`,
+    if (!headContainsMain) {
+      // Observe the branch state for the pure strategy chooser.
+      const mergesProbe = sh("git", ["log", "--merges", "--format=%H", "origin/main..HEAD"], { cwd: wt });
+      const hasMergeCommits = mergesProbe.code === 0 && mergesProbe.out.trim().length > 0;
+      const branchOnRemote =
+        sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch!]).code === 0;
+      // hasBuiltWork = any spec_phases row carries a build_sha (durable BUILT state; never dropped).
+      // Conservative default (true) when the read fails → recreate-fresh is inhibited on any
+      // DB blip, matching the "never drop built work" invariant.
+      let hasBuiltWork = true;
+      if (slug) {
+        try {
+          const { getSpec } = await import("../src/lib/specs-table");
+          const specRow = await getSpec(job.workspace_id, slug);
+          hasBuiltWork = (specRow?.phases ?? []).some((p) => p.build_sha != null);
+        } catch (e) {
+          console.warn(
+            `${tag} hasBuiltWork probe failed for ${slug} — defaulting to true (safe: never recreate-fresh):`,
+            e instanceof Error ? e.message : e,
           );
-        } else {
-          // Merge also conflicts → a real semantic divergence a human must resolve.
-          sh("git", ["merge", "--abort"], { cwd: wt });
-          await update(job.id, {
-            status: "needs_attention",
-            error:
-              "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-            log_tail: `reconcile-with-main (rebase AND merge conflicted — real semantic divergence):\n${(mergeFallback.out + mergeFallback.err).slice(-1800)}`.slice(-2000),
-          });
-          console.error(
-            `${tag} reconcile-with-main CONFLICT on ${branch} (rebase AND merge) — parked needs_attention (never silently dropped, never force-pushed)`,
-          );
-          chosenAccount.inFlight--;
-          sh("git", ["worktree", "remove", "--force", wt]);
-          return;
         }
       }
+      const strategyInput = { headContainsMain, hasMergeCommits, hasBuiltWork, branchOnRemote };
+      const { chooseReconcile, chooseReconcileFallback } = await import("../src/lib/build-lane-reconcile");
+      const primary = chooseReconcile(strategyInput);
+      const fallback = chooseReconcileFallback(strategyInput);
       console.log(
-        `${tag} reconcile-onto-main SUCCESS on ${branch} — base now contains origin/main (rebase or merge fallback; no WIP dropped)`,
+        `${tag} reconcile-onto-main on ${branch}: primary=${primary} fallback=${fallback} (hasMergeCommits=${hasMergeCommits}, hasBuiltWork=${hasBuiltWork}, branchOnRemote=${branchOnRemote})`,
       );
+
+      // Resolve the recreate-fresh reset target — a goal-member resets to the goal branch (which
+      // is itself reconciled with main by the goal-branch machinery), a one-off resets to
+      // origin/main. Only called when the fallback picks recreate-fresh.
+      const resolveResetTarget = async (): Promise<string> => {
+        if (!slug) return "origin/main";
+        try {
+          const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+          const gs = await resolveGoalSlugForSpec(job.workspace_id, slug);
+          if (gs) {
+            const goalBranch = `goal/${gs}`;
+            sh("git", ["fetch", "origin", goalBranch]);
+            return `origin/${goalBranch}`;
+          }
+        } catch (e) {
+          console.warn(
+            `${tag} recreate-fresh goal-slug resolution failed (falling back to origin/main):`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+        return "origin/main";
+      };
+
+      // Run one reconciliation strategy. Any conflict aborts cleanly (rebase --abort / merge
+      // --abort) so the tree is clean for the fallback. Never force-pushes, never drops WIP.
+      const runStrategy = async (
+        strat: "skip" | "merge" | "rebase" | "recreate-fresh",
+      ): Promise<{ ok: boolean; log: string }> => {
+        if (strat === "skip") return { ok: true, log: "" };
+        if (strat === "merge") {
+          const r = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+          if (r.code === 0) return { ok: true, log: "" };
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          return { ok: false, log: (r.out + r.err).slice(-1800) };
+        }
+        if (strat === "rebase") {
+          const r = sh("git", ["rebase", "origin/main"], { cwd: wt });
+          if (r.code === 0) return { ok: true, log: "" };
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          return { ok: false, log: (r.out + r.err).slice(-1800) };
+        }
+        // recreate-fresh: hard-reset the branch to the correct base. Guarded by
+        // chooseReconcileFallback (hasBuiltWork=false AND branchOnRemote=false — no work lost, no
+        // remote history rewrite).
+        const resetTarget = await resolveResetTarget();
+        const r = sh("git", ["reset", "--hard", resetTarget], { cwd: wt });
+        if (r.code !== 0) return { ok: false, log: (r.out + r.err).slice(-1800) };
+        console.log(
+          `${tag} recreate-fresh reset ${branch} to ${resetTarget} (no built work, not on origin — no work lost, no remote history rewritten)`,
+        );
+        return { ok: true, log: "" };
+      };
+
+      // ONE reconcile attempt per claim: try the primary, then the single fallback if it conflicts.
+      let outcome = await runStrategy(primary);
+      let usedStrategy: string = primary;
+      if (!outcome.ok) {
+        console.log(
+          `${tag} reconcile-onto-main primary=${primary} conflicted on ${branch} — trying fallback=${fallback}`,
+        );
+        outcome = await runStrategy(fallback);
+        usedStrategy = fallback;
+      }
+      if (!outcome.ok) {
+        // Primary AND fallback both conflicted → genuine semantic divergence. Phase 2 will name
+        // the conflicting files on this park; for now the log_tail carries the raw git output.
+        await update(job.id, {
+          status: "needs_attention",
+          error:
+            "reconcile-with-main hit a real conflict — refusing to run repo-wide checks on a stale tree",
+          log_tail: `reconcile-with-main (primary ${primary} AND fallback ${fallback} both conflicted — real semantic divergence):\n${outcome.log}`.slice(-2000),
+        });
+        console.error(
+          `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}) — parked needs_attention (never silently dropped, never force-pushed)`,
+        );
+        chosenAccount.inFlight--;
+        sh("git", ["worktree", "remove", "--force", wt]);
+        return;
+      }
+      console.log(
+        `${tag} reconcile-onto-main SUCCESS on ${branch} via ${usedStrategy} — base now contains origin/main (no WIP dropped)`,
+      );
+
+      // tsc-gate the RECONCILED tree BEFORE the claude session runs. If origin/main itself is
+      // broken (base poison — the coaching-guidance #8 shape: a sibling PR merged a break to main
+      // and now every downstream branch inherits it), park with the tsc output so the operator
+      // sees the real reason instead of an inscrutable downstream claude-run failure. This is the
+      // "tsc-gate the reconciled tree before running repo-wide checks" the spec's Phase 1
+      // "What" section calls out — cheap when the base is green, saves an entire claude session's
+      // worth of tokens when it isn't.
+      const tscGate = await shAsync("npx", ["tsc", "--noEmit"], {
+        timeout: 10 * 60 * 1000,
+        cwd: wt,
+      });
+      if (tscGate.code !== 0) {
+        await update(job.id, {
+          status: "needs_attention",
+          error:
+            "reconciled tree fails tsc — origin/main is broken (base poison). Refusing to run repo-wide checks on a broken base.",
+          log_tail: `reconcile-tsc-gate (post-${usedStrategy}):\n${(tscGate.out + tscGate.err).slice(-1800)}`.slice(-2000),
+        });
+        console.error(
+          `${tag} reconcile tsc-gate FAILED on ${branch} — parked needs_attention (main is broken)`,
+        );
+        chosenAccount.inFlight--;
+        sh("git", ["worktree", "remove", "--force", wt]);
+        return;
+      }
+      console.log(`${tag} reconcile tsc-gate CLEAN on ${branch} — proceeding to build`);
     }
   }
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
