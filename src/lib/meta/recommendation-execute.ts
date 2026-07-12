@@ -64,15 +64,22 @@ export const ENABLED_ADAPTERS: ReadonlySet<RecommendationType> = new Set<Recomme
 /**
  * migrate-ad-hoc-kill-switches-to-resolver Phase 1 — union check that wraps the legacy
  * `ENABLED_ADAPTERS` set with a resolver read for the recommendation-executor. A recommendation
- * `action_type` is enabled ONLY IF (a) it is in the ad-hoc set AND (b) the `media-buyer` cascade
- * is ON. Mirrors [[./execution]] `isMetaExecutionAdapterEnabled`; the two adapter sets stay
- * distinct (execution.ts operates on `AutonomousActionType`; this one on `RecommendationType`).
+ * `action_type` is enabled ONLY IF (a) it is in the ad-hoc set AND (b) BOTH the `media-buyer`
+ * cascade AND the `dept:platform` integration rail are ON. Mirrors [[./execution]]
+ * `isMetaExecutionAdapterEnabled`; the two adapter sets stay distinct (execution.ts operates on
+ * `AutonomousActionType`; this one on `RecommendationType`).
+ *
+ * Phase 3 Fix 1 — the `media-buyer` node resolves under `growth`
+ * ([[../control-tower/node-registry]] `KIND_OWNER_FALLBACK`), so a `growth` department-off already
+ * cascades. Meta ad execution is ALSO a platform integration primitive, so a `platform`
+ * department-off must pause the adapter too — the extra `dept:platform` check binds that cascade.
  */
 export async function isMetaRecommendationAdapterEnabled(
   action_type: RecommendationType,
 ): Promise<boolean> {
   const legacyFn = async (): Promise<boolean | undefined> => ENABLED_ADAPTERS.has(action_type);
-  return isEffectivelyEnabled("media-buyer", legacyFn);
+  if (!(await isEffectivelyEnabled("media-buyer", legacyFn))) return false;
+  return isEffectivelyEnabled("dept:platform", async () => true);
 }
 
 /** Stable engine-created marker prepended to every engine-published ad name. */

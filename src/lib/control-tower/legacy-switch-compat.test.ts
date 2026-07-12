@@ -284,6 +284,22 @@ test("site — meta/recommendation-execute isMetaRecommendationAdapterEnabled: R
   }
 });
 
+test("site — meta/recommendation-execute isMetaRecommendationAdapterEnabled: `platform` department-off cascades (Phase 3 Fix 1 — check 524b9aebc6244f22)", async () => {
+  useFixture(mapOf(row("platform", "department", "ceo", "pause platform")));
+  try {
+    const { isMetaRecommendationAdapterEnabled } = await import(
+      "@/lib/meta/recommendation-execute"
+    );
+    // `new_video_adset` IS in ENABLED_ADAPTERS (legacy=true). The `media-buyer` cascade goes
+    // media-buyer → growth (clear here). The additional `dept:platform` binding is what pauses
+    // the adapter — meta ad execution is also a platform integration primitive.
+    const enabled = await isMetaRecommendationAdapterEnabled("new_video_adset");
+    assert.equal(enabled, false, "`platform` department-off must cascade to the meta adapter");
+  } finally {
+    resetFixture();
+  }
+});
+
 test("site — media-buyer arming-gate runMediaBuyerArmingGate: RESOLVER OFF short-circuits with kill_switch_cascade_off", async () => {
   useFixture(mapOf(row("growth", "department", "ceo", "growth paused for review")));
   try {
