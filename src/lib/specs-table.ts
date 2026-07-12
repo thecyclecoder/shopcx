@@ -168,6 +168,12 @@ export interface SpecRow {
   /** pm-structured-intent-and-refs Phase 2 — the resolvable value for the typed parent (function slug,
    *  mandate key, or milestone id). Paired with `parent_kind`. */
   parent_ref: string | null;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+   *  founder-facing advisory note ("after ship, open /dashboard/x and confirm the layout reads
+   *  right"). NULL is the norm (a spec ships without one). NEVER read by the fold gate / promote
+   *  gate / deterministic spec-check runner — machine-runnable `spec_phase_checks` are the sole
+   *  ship gate. Rendered on the spec card + post-ship founder surface. */
+  human_review: string | null;
   created_at: string;
   updated_at: string;
   phases: SpecPhaseRow[];
@@ -210,6 +216,10 @@ export interface SpecRowInput {
   parent_kind?: "function" | "mandate" | "milestone" | null;
   /** pm-structured-intent-and-refs Phase 2 — the resolvable typed-parent value. */
   parent_ref?: string | null;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — optional, non-blocking
+   *  founder-facing advisory note. PASS `null` to CLEAR; OMIT to PRESERVE. Never gated on — a spec
+   *  with a human_review note whose machine checks are green still auto-folds/promotes/ships. */
+  human_review?: string | null;
 }
 
 /** Field set callers pass per-phase. `pr`/`merge_sha`/`verification` are optional — preserved when omitted. */
@@ -284,12 +294,14 @@ interface SpecRowDb {
   what: string | null;
   parent_kind: "function" | "mandate" | "milestone" | null;
   parent_ref: string | null;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — optional advisory founder note. */
+  human_review: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SPEC_COLUMNS =
-  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, related_spec, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, created_at, updated_at";
+  "id, workspace_id, slug, title, summary, owner, parent, blocked_by, priority, deferred, intended_status, status, intended_status_set_by, repair_signature, regression_of_slug, regression_signature, related_spec, auto_build, vale_pass, vale_review_passed_at, ada_disposition, vale_disposition, vale_disposition_reason, milestone_id, merged_pr, last_merge_sha, goal_branch_sha, why, what, parent_kind, parent_ref, human_review, created_at, updated_at";
 const PHASE_COLUMNS =
   "id, spec_id, position, title, body, status, pr, merge_sha, build_sha, verification, why, what, kind, origin_check_keys, created_at, updated_at";
 
@@ -352,6 +364,8 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
     what: db.what,
     parent_kind: db.parent_kind,
     parent_ref: db.parent_ref,
+    // every-spec-writer-authors-machine-runnable-verifications Phase 2 — advisory founder note; NULL is the norm.
+    human_review: db.human_review ?? null,
     created_at: db.created_at,
     updated_at: db.updated_at,
     phases,
@@ -664,6 +678,11 @@ export async function upsertSpec(
   // Same preserve-on-undefined rule.
   if (row.parent_kind !== undefined) upsertRow.parent_kind = row.parent_kind;
   if (row.parent_ref !== undefined) upsertRow.parent_ref = row.parent_ref;
+  // every-spec-writer-authors-machine-runnable-verifications Phase 2 — persist the OPTIONAL, non-blocking
+  // founder-facing advisory note. Same preserve-on-undefined rule: PASS `null` to CLEAR; OMIT (undefined)
+  // to PRESERVE on a re-author. NEVER read by the fold gate / promote gate / spec-check runner (see
+  // `computeUpsertAuthoringProblems` — it is deliberately NOT listed in the problem check).
+  if (row.human_review !== undefined) upsertRow.human_review = row.human_review;
   // specs-status-override-only: `specs.status` is OVERRIDE-ONLY (deferred / folded — the two NON-DERIVABLE
   // lifecycle states). When a caller passes an explicit status, persist it ONLY if it's a true override; a
   // DERIVED value (planned / in_progress / shipped) OR `in_review` (now derived from the phase rollup +

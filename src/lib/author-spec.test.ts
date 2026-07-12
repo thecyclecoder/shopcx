@@ -23,6 +23,7 @@ import {
   assertEveryPhaseHasMachineCheck,
   assertIntentIsPlainLanguage,
   extractIntentHeaders,
+  extractHumanReviewHeader,
   EmptyPhaseBodyError,
   MissingVerificationError,
   MissingIntentError,
@@ -33,6 +34,7 @@ import {
   autoAnchorBareFunctionParent,
   bestFitMandate,
 } from "./author-spec";
+import { computeUpsertAuthoringProblems } from "./specs-table";
 import { resolveFunctionMandates, type FunctionMandate } from "./function-mandates";
 import { parseVerificationBlobToChecks } from "./spec-phase-checks-table";
 import { parseBrainRefsLineToSlugs } from "./spec-brain-refs-table";
@@ -557,6 +559,67 @@ test("assertEveryPhaseHasMachineCheck — a prose-only markdown blob (parseVerif
       return true;
     },
   );
+});
+
+// ── every-spec-writer-authors-machine-runnable-verifications Phase 2 — human_review advisory ──
+// The OPTIONAL, non-blocking founder-facing note. Extracted from `**Human-review:**` on the
+// markdown path; carried on `human_review` on the structured path; NEVER gates fold/promote/ship.
+// The gates in `specs-table.computeUpsertAuthoringProblems` deliberately do NOT read this column —
+// its presence or absence is invisible to the ship gate.
+
+test("extractHumanReviewHeader pulls **Human-review:** from the markdown body", () => {
+  const md = [
+    "# Some spec",
+    "",
+    "**Owner:** [[../functions/growth]]",
+    "**Human-review:** After ship, open /dashboard/ads/foo and confirm the funnel report reads right.",
+    "",
+    "## Phase 1 — do it",
+  ].join("\n");
+  const note = extractHumanReviewHeader(md);
+  assert.ok(note, "expected the header to parse");
+  assert.match(note!, /funnel report reads right/);
+});
+
+test("extractHumanReviewHeader returns null when the header is absent (absence is the norm)", () => {
+  const md = "# Title\n\n**Owner:** platform\n\n## Phase 1 — do it";
+  assert.equal(extractHumanReviewHeader(md), null);
+});
+
+test("computeUpsertAuthoringProblems IGNORES human_review — it never gates fold/ship/merge", () => {
+  // A fully-authored spec with a human_review note + green machine checks reports ZERO problems.
+  const problems = computeUpsertAuthoringProblems(
+    { why: "spec why", what: "spec what" },
+    [
+      {
+        position: 1,
+        title: "P1",
+        verification: "- On the branch, `npx tsc --noEmit` → expect clean.",
+        why: "phase why",
+        what: "phase what",
+      },
+    ],
+    null,
+    new Map(),
+  );
+  assert.deepEqual(problems, [], `expected no problems; got: ${problems.join(" | ")}`);
+});
+
+test("computeUpsertAuthoringProblems does NOT reference the human_review column at all", () => {
+  // Belt-and-suspenders: even a totally-broken spec's problem list mentions verification/intent,
+  // never human_review. Ensures the floor gate never gained an accidental reference to the new
+  // non-blocking column.
+  const problems = computeUpsertAuthoringProblems(
+    { why: "", what: "" },
+    [{ position: 1, title: "P1", verification: null, why: "", what: "" }],
+    null,
+    new Map(),
+  );
+  // Some problems are expected (empty why/what/verification), but NEVER one about human_review.
+  assert.ok(problems.length > 0);
+  for (const p of problems) {
+    assert.doesNotMatch(p, /human[_-]?review/i, `unexpected human_review reference: ${p}`);
+  }
 });
 
 test("parseVerificationBlobToChecks splits bullet lines into rows", () => {

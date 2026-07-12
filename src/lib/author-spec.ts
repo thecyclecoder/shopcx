@@ -766,6 +766,33 @@ export function extractIntentHeaders(raw: string): { why: string | null; what: s
   return { why: collect("Why"), what: collect("What") };
 }
 
+/**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 2 — extract a `**Human-review:**` header
+ * from the markdown body. Optional; absent → null. Multi-line paragraphs are absorbed until the next
+ * `**Header:**` / heading / blank line (same shape as `extractIntentHeaders`). The extracted note is
+ * OPTIONAL and NEVER blocks author / fold / promote / merge — it's the founder-facing advisory prompt.
+ * A caller's `opts.humanReview` still wins (undefined → try the markdown header; null → clear it).
+ */
+export function extractHumanReviewHeader(raw: string): string | null {
+  const lines = raw.split("\n");
+  const re = /^\*\*Human-review:\*\*\s*(.*)$/i;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(re);
+    if (!m) continue;
+    let text = m[1].trim();
+    for (let k = i + 1; k < lines.length; k++) {
+      const l = lines[k];
+      if (!l.trim()) break;
+      if (/^\*\*[A-Za-z][^:*]{0,40}:\*\*/.test(l)) break;
+      if (/^#{1,6}\s+/.test(l)) break;
+      text = `${text} ${l.trim()}`;
+    }
+    const cleaned = cleanInline(text);
+    return cleaned || null;
+  }
+  return null;
+}
+
 /** no-spec-parent — `**Related-spec:** <slug>` (or `[[<slug>]]`) line: the origin-spec LINK a fix-spec
  *  points at (persists to `specs.related_spec`), so a self-healing agent references the fixed spec WITHOUT
  *  putting it in the parent. Returns the slug (wikilink brackets/`../specs/` stripped), or null. */
@@ -860,6 +887,13 @@ export interface AuthorSpecOpts {
    *  (Phase 3 makes it rare rather than routine, but never invisible). Ignored errors — the auto-anchor
    *  itself still applies. */
   onAutoAnchor?: (result: AutoAnchorResult) => void;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking founder-
+   *  facing advisory note (the "eyeball this after ship" prompt). Persists to `specs.human_review`.
+   *  When set on the structured path, wins over any `spec.human_review` on the input. On the markdown
+   *  path, wins over the extracted `**Human-review:**` header. `undefined` → parse the markdown header
+   *  (markdown path) or preserve the stored value (structured path); explicit `null` clears it.
+   *  NEVER read by the fold gate, promote gate, or deterministic spec-check runner. */
+  humanReview?: string | null;
 }
 
 /** A structured phase a caller hands to `authorSpecRowStructured` — title + body + the verification checklist
@@ -899,6 +933,12 @@ export interface StructuredSpecInput {
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Must be
    *  non-empty. */
   what: string;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+   *  founder-facing advisory note ("after ship, open /dashboard/x and confirm the layout reads
+   *  right"). Absence is fine — a spec ships without one by default. Machine-runnable
+   *  `spec_phase_checks` are the sole ship gate; this note NEVER gates fold/promote/merge and is
+   *  never read by the deterministic spec-check runner. */
+  human_review?: string | null;
 }
 
 /** The content shape a re-author compares against the existing row to decide "did the content change?" —
@@ -1311,6 +1351,15 @@ export async function authorSpecRowStructured(
         // pair (else fall through to the caller's typed values).
         parent_kind: effectiveParentKind ?? null,
         parent_ref: effectiveParentRef ?? null,
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — persist the OPTIONAL,
+        // non-blocking advisory note. Precedence: `opts.humanReview` (planner / director surfaces that
+        // hold the note separately from the spec body) beats `spec.human_review` (structured input on
+        // the spec itself). `undefined` on both preserves the stored value; explicit `null` clears it;
+        // a string writes through. NEVER gated on by fold/promote/spec-check runner.
+        human_review:
+          opts.humanReview !== undefined ? opts.humanReview
+          : spec.human_review !== undefined ? spec.human_review
+          : undefined,
         // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
         // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
         // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
@@ -1597,6 +1646,14 @@ export async function authorSpecRowFromMarkdown(
         // caller's typed values (else null).
         parent_kind: mdEffectiveParentKind ?? null,
         parent_ref: mdEffectiveParentRef ?? null,
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — persist the OPTIONAL,
+        // non-blocking founder-facing advisory note. Precedence: `opts.humanReview` wins (explicit
+        // caller decision, including `null` to CLEAR); else parse the `**Human-review:**` header from
+        // the markdown body (how a submit-spec / director surface would emit it). `undefined` in
+        // both places → preserve the stored value. NEVER gated on.
+        human_review:
+          opts.humanReview !== undefined ? opts.humanReview
+          : (extractHumanReviewHeader(markdown) ?? undefined),
         // auto-build-default-on: HONOR the markdown parser's documented contract — "**Auto-build:** absent = on;
         // only off/no/false/manual/disabled flips it false" (brain-roadmap.ts ~307). `card.autoBuild` is
         // `undefined` when no line is present, which the parser MEANS as "on" — so `!== false` (undefined → on,
