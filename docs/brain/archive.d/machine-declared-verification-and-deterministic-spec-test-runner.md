@@ -1,0 +1,1 @@
+- **Machine-declared verification + a deterministic spec-test runner (retire most of Vera's AI)** · verified 2026-07-12 · → [[lifecycles/spec-build-pipeline]]
