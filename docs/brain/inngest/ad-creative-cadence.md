@@ -7,7 +7,9 @@ The daily cron + per-workspace sweep that keeps [[../libraries/media-buyer-agent
 - **`adCreativeCadenceSweep`** (event `growth/ad-creative-cadence-sweep`, concurrency-keyed on `workspace_id`) → the pure `dispatchAdCreativeCadence`.
 
 ## `dispatchAdCreativeCadence(admin, workspaceId, binFloor?, now?)`
-For every intelligence-backed product: computes bin depth (`listReadyToTest` from [[../libraries/ready-to-test]], grouped back to `product_id` via [[../tables/ad_campaigns]]), and for each product below `DEFAULT_BIN_FLOOR` inserts one [[../tables/agent_jobs]] row `kind='ad-creative'` carrying `instructions.product_id` + `instructions.count` (the deficit). The [[../libraries/builder-worker]] `runAdCreativeJob` lane claims it.
+For every intelligence-backed **advertised** product: computes bin depth (`listReadyToTest` from [[../libraries/ready-to-test]], grouped back to `product_id` via [[../tables/ad_campaigns]]), and for each product below `DEFAULT_BIN_FLOOR` inserts one [[../tables/agent_jobs]] row `kind='ad-creative'` carrying `instructions.product_id` + `instructions.count` (the deficit). The [[../libraries/builder-worker]] `runAdCreativeJob` lane claims it.
+
+**Hero-product advertising gate ([[../libraries/advertised-products]]):** after loading products with `product_ad_angles`, the enumeration intersects with `listAdvertisedProductIds(admin, workspaceId)` — attachment SKUs (Tumbler, Sleep Gummies, Handheld Drink Mixer, Bamboo Coffee Mug) NEVER enter the Dahlia cadence, even when a stray angle row exists for them. Empty gate ⇒ zero dispatches, never a "fall back to all products" default (that was the exact leak Phase 2 closed).
 
 **Idempotency:** skips any product already covered by a NOT-YET-TERMINAL `kind='ad-creative'` job created since the current UTC day start (reuses `ACTIVE_MEDIA_BUYER_JOB_STATUSES` + `utcDayStartIso` from [[media-buyer-cadence]]). A same-day re-fire dispatches ZERO new jobs.
 
