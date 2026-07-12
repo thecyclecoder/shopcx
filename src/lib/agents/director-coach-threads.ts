@@ -8,7 +8,9 @@
  * that's injected into her future decisions. Owner-gated at the route/UI; all writes via service role.
  * See docs/brain/tables/director_coach_threads.md.
  */
+import { randomBytes } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { SLIDING_TTL_MS, ABSOLUTE_TTL_MS, cockpitUrl } from "@/lib/god-mode";
 
 export type ThreadMsg = { role: "user" | "assistant"; content: string };
 export type TurnStatus = "idle" | "thinking" | "error";
@@ -72,12 +74,20 @@ export type DirectorCoachThread = {
   // investigation}) so the box turn knows which approval the founder is discussing without the
   // model having to re-derive it. Empty {} on a normal web/Slack ask thread.
   metadata: Record<string, unknown>;
+  // director-sms-cockpit-per-director Phase 1: the 48-hex SMS-cockpit token minted by
+  // armDirectorCockpit + its sliding/absolute TTLs mirroring god_mode_sessions. Null on
+  // a thread that has never been armed for SMS-cockpit access. sms_notified_at gets
+  // stamped by the pending-approval nudge sweep so we never re-nudge the same wait.
+  cockpit_token: string | null;
+  token_expires_at: string | null;
+  absolute_expires_at: string | null;
+  sms_notified_at: string | null;
   created_at: string;
   updated_at: string;
 };
 
 const ROW_COLUMNS =
-  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, source, slack_channel_id, slack_thread_ts, metadata, created_at, updated_at";
+  "id, workspace_id, user_id, director_function, title, messages, box_session_id, turn_status, last_error, pending_actions, source, slack_channel_id, slack_thread_ts, metadata, cockpit_token, token_expires_at, absolute_expires_at, sms_notified_at, created_at, updated_at";
 
 function normalizeMessages(value: unknown): ThreadMsg[] {
   if (!Array.isArray(value)) return [];
@@ -108,6 +118,10 @@ function toRow(row: Record<string, unknown> | null): DirectorCoachThread | null 
     slack_channel_id: (row.slack_channel_id as string | null) ?? null,
     slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
     metadata: (row.metadata as Record<string, unknown> | null) ?? {},
+    cockpit_token: (row.cockpit_token as string | null) ?? null,
+    token_expires_at: (row.token_expires_at as string | null) ?? null,
+    absolute_expires_at: (row.absolute_expires_at as string | null) ?? null,
+    sms_notified_at: (row.sms_notified_at as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -249,4 +263,104 @@ export async function listRecentThreads(workspaceId: string, userId: string, lim
     .order("updated_at", { ascending: false })
     .limit(limit);
   return ((data as Record<string, unknown>[] | null) ?? []).map(toRow).filter((r): r is DirectorCoachThread => !!r);
+}
+
+// ── director-sms-cockpit-per-director Phase 1 — arm / disarm / resolve ────────────────────────────
+//
+// The SMS cockpit primitives for a director thread. They deliberately mirror god-mode.ts's
+// armSession / disarmSession / resolveCockpitToken so the /god/[token] surface can route a
+// director token through the SAME 48-hex + sliding/absolute TTL discipline as Eve's cockpit,
+// but resolve against a director_coach_threads row (never god_mode_sessions).
+//
+// The TWO cockpit token spaces are DISJOINT — src/lib/cockpit-resolver.ts is the single
+// chokepoint that decides director vs god. A token found in director_coach_threads maps to
+// { kind:'director', thread }; a token found in god_mode_sessions maps to { kind:'god', session }.
+
+/** 48-char hex cockpit token (24 random bytes) — same size as god_mode_sessions.cockpit_token. */
+function newDirectorCockpitToken(): string {
+  return randomBytes(24).toString("hex");
+}
+
+/**
+ * Arm a director thread for SMS-cockpit access. Mints a fresh 48-hex cockpit_token,
+ * sets sliding + absolute TTLs from god-mode's constants, and returns the row + the
+ * cockpit URL the SMS body carries. Idempotent per thread — re-arming an already-armed
+ * thread REFRESHES the token (new slug + reset TTLs), mirroring armSession's discipline.
+ * Clears sms_notified_at so a fresh arm never inherits a stale nudge stamp.
+ */
+export async function armDirectorCockpit(input: {
+  workspaceId: string;
+  threadId: string;
+}): Promise<{ thread: DirectorCoachThread; cockpitToken: string; cockpitUrl: string } | null> {
+  const admin = createAdminClient();
+  const now = new Date();
+  const token = newDirectorCockpitToken();
+  const tokenExpiresAt = new Date(now.getTime() + SLIDING_TTL_MS).toISOString();
+  const absoluteExpiresAt = new Date(now.getTime() + ABSOLUTE_TTL_MS).toISOString();
+
+  const { data } = await admin
+    .from("director_coach_threads")
+    .update({
+      cockpit_token: token,
+      token_expires_at: tokenExpiresAt,
+      absolute_expires_at: absoluteExpiresAt,
+      sms_notified_at: null,
+      updated_at: now.toISOString(),
+    })
+    .eq("id", input.threadId)
+    .eq("workspace_id", input.workspaceId)
+    .select(ROW_COLUMNS)
+    .maybeSingle();
+  const thread = toRow(data as Record<string, unknown> | null);
+  if (!thread) return null;
+  return { thread, cockpitToken: token, cockpitUrl: cockpitUrl(token) };
+}
+
+/**
+ * Disarm a director thread — nulls the cockpit_token + TTL columns so the /god/[token]
+ * surface stops resolving it. Idempotent: a thread with no active cockpit is a no-op.
+ * Returns the post-disarm row (or null on unknown/cross-workspace).
+ */
+export async function disarmDirectorCockpit(input: {
+  workspaceId: string;
+  threadId: string;
+}): Promise<DirectorCoachThread | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("director_coach_threads")
+    .update({
+      cockpit_token: null,
+      token_expires_at: null,
+      absolute_expires_at: null,
+      sms_notified_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", input.threadId)
+    .eq("workspace_id", input.workspaceId)
+    .select(ROW_COLUMNS)
+    .maybeSingle();
+  return toRow(data as Record<string, unknown> | null);
+}
+
+/**
+ * Resolve a 48-hex cockpit token to a director_coach_threads row (or null on unknown /
+ * wrong-length / expired). Mirrors god-mode's resolveCockpitToken discipline: a row past
+ * token_expires_at OR absolute_expires_at resolves to null — the caller (cockpit-resolver
+ * chokepoint) never returns an expired thread. Wrong-length tokens short-circuit BEFORE
+ * hitting the DB.
+ */
+export async function resolveDirectorCockpitToken(token: string): Promise<DirectorCoachThread | null> {
+  if (!token || token.length !== 48) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("director_coach_threads")
+    .select(ROW_COLUMNS)
+    .eq("cockpit_token", token)
+    .maybeSingle();
+  const thread = toRow(data as Record<string, unknown> | null);
+  if (!thread) return null;
+  const now = new Date();
+  if (thread.absolute_expires_at && new Date(thread.absolute_expires_at) < now) return null;
+  if (thread.token_expires_at && new Date(thread.token_expires_at) < now) return null;
+  return thread;
 }
