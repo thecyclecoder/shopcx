@@ -21,6 +21,7 @@ import {
   getCxPolicies,
   getCxBundle,
   formatCxBundle,
+  formatCxCustomer,
   runCxSdkVerb,
   isCxSdkVerb,
   CX_SDK_VERBS,
@@ -578,4 +579,32 @@ test("formatActionableOutcomes: non-empty catalog renders each axis under its he
   assert.match(txt, /loyalty_save \(Loyalty Save\)/);
   assert.match(txt, /Workflows:/);
   assert.match(txt, /Order Tracking template=order_tracking/);
+});
+
+// ── email-typo flag on the shared CUSTOMER line (Sol/Cora/June all see it) ──────
+const cxCustomerWithEmail = (email: string | null) =>
+  ({
+    customer_id: "cust-1",
+    linked_customer_ids: ["cust-1"],
+    profile: {
+      first_name: "Dylan",
+      last_name: "Ralston",
+      email,
+      subscription_status: "active",
+      retention_score: 80,
+      email_marketing_status: "subscribed",
+      sms_marketing_status: "subscribed",
+      shopify_customer_id: null,
+    },
+  }) as unknown as Parameters<typeof formatCxCustomer>[0];
+
+test("formatCxCustomer flags a mistyped email (gmaik.com → gmail.com) so all three agents see it", () => {
+  const line = formatCxCustomer(cxCustomerWithEmail("dylanralston@gmaik.com"));
+  assert.match(line, /EMAIL LIKELY MISTYPED/);
+  assert.match(line, /dylanralston@gmail\.com/);
+});
+
+test("formatCxCustomer does NOT flag a known-good email", () => {
+  const line = formatCxCustomer(cxCustomerWithEmail("dylan@gmail.com"));
+  assert.doesNotMatch(line, /EMAIL LIKELY MISTYPED/);
 });

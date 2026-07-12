@@ -76,6 +76,8 @@ PRODUCTS: (active catalog)
 POLICIES: (active sonnet_prompts)
 ```
 
+**Mistyped-email flag (shared — all three agents).** `formatCxCustomer` runs the customer email through [[email-typo]] `suggestEmailCorrection` and, when the domain is a likely typo, appends `· ⚠️ EMAIL LIKELY MISTYPED (<confidence>): did you mean <corrected>? — confirm before relying on this address` to the CUSTOMER line. Because Sol, Cora, and June all consume this one line, the flag reaches every CX agent from a single wiring point. A customer typed as `dylanralston@gmaik.com` is otherwise unreachable — every reply/journey CTA/magic-link bounces and a duplicate account silently spawns. The flag is a **suggestion**, never permission to mutate: the agent confirms with the customer (or routes to account linking when the corrected address matches an existing account); it never rewrites an address into a DIFFERENT live customer's. Deterministic + dependency-free (mailcheck), so it costs nothing per brief.
+
 ### CLI
 
 ```typescript
