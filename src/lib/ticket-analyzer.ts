@@ -622,9 +622,9 @@ export async function enqueueTicketAnalyzeJob(
 ): Promise<AnalyzeResult> {
   const admin = createAdminClient();
   // Resolve the ticket's workspace first — the agent_jobs row is workspace-scoped, so the
-  // ownerFunctionForKind('ticket-analyze')='cs' resolution + the box lane's per-workspace claim
-  // can pick it up. A missing ticket → skip (the same shape the prior gate emitted, so the
-  // cron's stamp-on-slip path still lands on it).
+  // canonical node registry `agent:ticket-analyze` (owner=cs) resolution + the box lane's
+  // per-workspace claim can pick it up. A missing ticket → skip (the same shape the prior gate
+  // emitted, so the cron's stamp-on-slip path still lands on it).
   const { data: t } = await admin
     .from("tickets")
     .select("id, workspace_id, do_not_reply, ai_disabled, analyzer_locked, merged_into, tags")

@@ -39,4 +39,4 @@ The per-function **`live + autonomous` flag** — the progressive-offload switch
 
 ## Related
 
-[[../specs/approval-routing-engine]] · [[../libraries/approval-router]] · [[../dashboard/agents]] · [[../functions/platform]] · [[../goals/devops-director]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[../specs/approval-routing-engine]] · [[../libraries/approval-router]] · [[../libraries/control-tower-node-registry]] — the canonical org tree the approval walk starts from: `resolveApprover(resolveNodeOwner(kind), chart, autonomy)` is the north-star cascade. The registry picks the OWNER; this table's `live+autonomous` flag decides whether that owner AUTO-DECIDES or falls through to the CEO · [[../specs/control-tower-canonical-node-registry]] · [[../dashboard/agents]] · [[../functions/platform]] · [[../goals/devops-director]] · [[../operational-rules]] (§ North star — supervisable autonomy)

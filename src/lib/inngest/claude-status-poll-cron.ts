@@ -19,7 +19,7 @@ export const claudeStatusPollCron = inngest.createFunction(
   {
     id: "claude-status-poll-cron",
     retries: 1, // the next tick re-polls a minute later — no value in long retries on a status poll
-    triggers: [{ cron: "* * * * *" }], // every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const result = await step.run("poll-claude-status", async () => {

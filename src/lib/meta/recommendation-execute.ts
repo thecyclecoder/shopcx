@@ -51,6 +51,7 @@ import {
   rollupAdSpendActual,
 } from "@/lib/ad-spend-governor";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isEffectivelyEnabled } from "@/lib/control-tower/legacy-switch-compat";
 
 /** The recommendation types whose adapter is enabled (ship one at a time). */
 export const ENABLED_ADAPTERS: ReadonlySet<RecommendationType> = new Set<RecommendationType>([
@@ -59,6 +60,27 @@ export const ENABLED_ADAPTERS: ReadonlySet<RecommendationType> = new Set<Recomme
   // meta-campaign-adset-creation-primitive Phase 2 — media-buyer loop, governed + PAUSED.
   "new_campaign",
 ]);
+
+/**
+ * migrate-ad-hoc-kill-switches-to-resolver Phase 1 — union check that wraps the legacy
+ * `ENABLED_ADAPTERS` set with a resolver read for the recommendation-executor. A recommendation
+ * `action_type` is enabled ONLY IF (a) it is in the ad-hoc set AND (b) BOTH the `media-buyer`
+ * cascade AND the `dept:platform` integration rail are ON. Mirrors [[./execution]]
+ * `isMetaExecutionAdapterEnabled`; the two adapter sets stay distinct (execution.ts operates on
+ * `AutonomousActionType`; this one on `RecommendationType`).
+ *
+ * Phase 3 Fix 1 — the `media-buyer` node resolves under `growth`
+ * ([[../control-tower/node-registry]] `KIND_OWNER_FALLBACK`), so a `growth` department-off already
+ * cascades. Meta ad execution is ALSO a platform integration primitive, so a `platform`
+ * department-off must pause the adapter too — the extra `dept:platform` check binds that cascade.
+ */
+export async function isMetaRecommendationAdapterEnabled(
+  action_type: RecommendationType,
+): Promise<boolean> {
+  const legacyFn = async (): Promise<boolean | undefined> => ENABLED_ADAPTERS.has(action_type);
+  if (!(await isEffectivelyEnabled("media-buyer", legacyFn))) return false;
+  return isEffectivelyEnabled("dept:platform", async () => true);
+}
 
 /** Stable engine-created marker prepended to every engine-published ad name. */
 export const ENGINE_NAME_TAG = "[ie]";
@@ -250,7 +272,7 @@ export async function executeRecommendation(
   const existingJob = (rec.external_result?.ad_publish_job_id as string | undefined) ?? undefined;
   if (existingJob) return { status: "skipped", reason: "already_dispatched", ad_publish_job_id: existingJob };
 
-  if (!ENABLED_ADAPTERS.has(rec.action_type)) {
+  if (!(await isMetaRecommendationAdapterEnabled(rec.action_type))) {
     const reason = `adapter_deferred:${rec.action_type}`;
     await updateRecommendationGuarded(admin, rec, {
       external_result: { ...(rec.external_result || {}), deferred: reason },

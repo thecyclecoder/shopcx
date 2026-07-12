@@ -24,7 +24,21 @@
  * See docs/brain/libraries/control-tower-self-audit.md.
  */
 import { registeredInngestFunctions } from "@/lib/inngest/registered-functions";
-import { MONITORED_LOOPS, INTENTIONALLY_UNMONITORED_CRONS } from "@/lib/control-tower/registry";
+import {
+  MONITORED_LOOPS,
+  INTENTIONALLY_UNMONITORED_CRONS,
+  type MonitoredLoop,
+} from "@/lib/control-tower/registry";
+import { NODES, getOrphanSightings } from "@/lib/control-tower/node-registry";
+import {
+  loadKillSwitchMap,
+  resolveEffectiveSwitchFromMap,
+  type KillSwitchMap,
+} from "@/lib/control-tower/kill-switch-resolver";
+import type { createAdminClient } from "@/lib/supabase/admin";
+import { createAdminClient as makeAdminClient } from "@/lib/supabase/admin";
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 /** The Inngest app id (src/lib/inngest/client.ts) — Cloud slugs are `<appId>-<fnId>`. */
 const INNGEST_APP_ID = "shopcx";
@@ -172,13 +186,136 @@ export interface CoverageAudit {
   unregistered: UnregisteredLoop[];
   /** in-code ↔ Inngest-registered diff (the deploy-didn't-resync gap). */
   inngestRegistration: InngestRegistrationDiff;
+  /** orphan-node audit (orphan-node-self-audit spec, Phase 1). Every finding is a first-class RED. */
+  orphans: OrphanFindings;
 }
 
-/** Build the full coverage self-audit for the dashboard + monitor. READ-ONLY. */
-export async function buildCoverageAudit(): Promise<CoverageAudit> {
-  const [unregistered, inngestRegistration] = await Promise.all([
+/**
+ * Build the full coverage self-audit for the dashboard + monitor. READ-ONLY.
+ *
+ * `admin` is optional so pure-audit callers (the coverage diffs) still work without a client;
+ * when omitted, `auditOrphanNodes` mints its own admin client so the orphan sweep still runs.
+ */
+export async function buildCoverageAudit(admin?: Admin): Promise<CoverageAudit> {
+  const [unregistered, inngestRegistration, orphans] = await Promise.all([
     Promise.resolve(auditCronCoverage()),
     diffInngestRegistered(),
+    auditOrphanNodes(admin),
   ]);
-  return { unregistered, inngestRegistration };
+  return { unregistered, inngestRegistration, orphans };
+}
+
+// ── Orphan-node audit (orphan-node-self-audit spec, Phase 1) ──────────────────────────────
+
+/**
+ * A node id is on this allow-list when we intentionally decline to bind it to a `kill_switches`
+ * group — the audit skips it in the orphanSwitch sweep. Kept small on purpose: the right answer
+ * for almost every real node is a switch group, not an exemption.
+ *
+ * Each entry MUST carry a short reason (why this node has no switch), following the same
+ * convention `INTENTIONALLY_UNMONITORED_CRONS` uses in [[./registry]].
+ */
+export const INTENTIONALLY_NO_SWITCH: Record<string, string> = {
+  // The CEO seat is the OPERATOR that flips every other switch — placing a kill_switches row
+  // on `dept:ceo` would let the CEO turn herself off, breaking the recovery path (there'd be
+  // no one left to turn her back on). All other departments are legitimately switchable.
+  "dept:ceo": "the CEO seat is the operator that flips every other switch — never switchable",
+};
+
+/** One pass of the orphan-node self-audit — three parallel lists, each a first-class RED. */
+export interface OrphanFindings {
+  /** Node ids that `resolveNodeOwnerOrOrphanDefault` fell through to the ORPHAN_OWNER default
+   * on (sighted via the `getOrphanSightings` counter). */
+  orphanOwner: string[];
+  /** Registered node ids NOT on the `INTENTIONALLY_NO_SWITCH` allow-list whose ancestor chain
+   * carries no `kill_switches` row — never bound to a switch group. */
+  orphanSwitch: string[];
+  /** MONITORED_LOOPS entries older than their `livenessWindowMs` since `registeredAt` that
+   * have written zero heartbeats past `registeredAt`. */
+  orphanHeartbeat: string[];
+}
+
+/** Deps for the pure form — every DB / registry read the audit needs, injectable for tests. */
+export interface AuditOrphanNodesDeps {
+  /** The canonical registry to walk (defaults to `NODES`). */
+  nodes: readonly { id: string }[];
+  /** Snapshot of `getOrphanSightings()` (id → sighting count). */
+  orphanSightings: Record<string, number>;
+  /** Snapshot of `public.kill_switches` (already loaded by the caller). */
+  killSwitchMap: KillSwitchMap;
+  /** The MONITORED_LOOPS entries the heartbeat audit walks (defaults to `MONITORED_LOOPS`). */
+  loops: readonly Pick<MonitoredLoop, "id" | "registeredAt" | "livenessWindowMs">[];
+  /**
+   * Per-loop lookup: has this loop written any beat with `ran_at > registeredAt`? Called ONCE
+   * per eligible loop (i.e. registeredAt + livenessWindowMs both set AND the liveness window
+   * has fully elapsed since registration) — a non-eligible loop is skipped without a probe.
+   */
+  hasHeartbeatSinceRegistered: (loopId: string, registeredAtIso: string) => Promise<boolean>;
+  /** `Date.now()` — injectable so tests can pin the "elapsed since registered" comparison. */
+  now: number;
+}
+
+/**
+ * Pure form: given the snapshots + a heartbeat probe, compute the orphan findings. Every
+ * DB / module-state read is behind a dep, so the test suite can exercise every branch without
+ * touching Supabase or the module-level `orphanSightings` counter.
+ */
+export async function auditOrphanNodesWith(deps: AuditOrphanNodesDeps): Promise<OrphanFindings> {
+  // orphanOwner: every id `resolveNodeOwnerOrOrphanDefault` has seen fall through to the default.
+  const orphanOwner = Object.keys(deps.orphanSightings);
+
+  // orphanSwitch: every registered node NOT on the allow-list whose ancestor chain carries no
+  // kill_switches row. `resolveEffectiveSwitchFromMap` returns `{off:false}` iff no ancestor row
+  // exists (a row's presence in kill_switches IS the OFF signal — there are no "row-present-but-on"
+  // rows). So `off:false` is precisely "never bound to a switch group".
+  const orphanSwitch: string[] = [];
+  for (const node of deps.nodes) {
+    if (node.id in INTENTIONALLY_NO_SWITCH) continue;
+    const eff = resolveEffectiveSwitchFromMap(node.id, deps.killSwitchMap);
+    if (!eff.off) orphanSwitch.push(node.id);
+  }
+
+  // orphanHeartbeat: MONITORED_LOOPS entries where BOTH `registeredAt` and `livenessWindowMs` are
+  // set AND the window has fully elapsed since registration AND the loop has written zero beats
+  // since `registeredAt`. A loop without `registeredAt` can't be audited by this rule (there's no
+  // "start" to measure elapsed against) — the audit skips it silently.
+  const orphanHeartbeat: string[] = [];
+  for (const loop of deps.loops) {
+    if (!loop.registeredAt || !loop.livenessWindowMs) continue;
+    const registeredMs = Date.parse(loop.registeredAt);
+    if (!Number.isFinite(registeredMs)) continue;
+    if (deps.now - registeredMs <= loop.livenessWindowMs) continue;
+    const hasBeat = await deps.hasHeartbeatSinceRegistered(loop.id, loop.registeredAt);
+    if (!hasBeat) orphanHeartbeat.push(loop.id);
+  }
+
+  return { orphanOwner, orphanSwitch, orphanHeartbeat };
+}
+
+/**
+ * Live form: mint an admin client (or reuse the caller's), snapshot the registry + kill_switches
+ * + orphan-sightings counter, and run the pure audit. READ-ONLY — never writes.
+ */
+export async function auditOrphanNodes(admin?: Admin): Promise<OrphanFindings> {
+  const client = admin ?? makeAdminClient();
+  const killSwitchMap = await loadKillSwitchMap(client);
+  return auditOrphanNodesWith({
+    nodes: NODES,
+    orphanSightings: getOrphanSightings(),
+    killSwitchMap,
+    loops: MONITORED_LOOPS,
+    hasHeartbeatSinceRegistered: async (loopId, registeredAtIso) => {
+      // ONE index-friendly read per eligible loop (loop_id + ran_at both indexed on
+      // public.loop_heartbeats). `limit(1)` is enough — presence is the signal.
+      const { data, error } = await client
+        .from("loop_heartbeats")
+        .select("loop_id")
+        .eq("loop_id", loopId)
+        .gt("ran_at", registeredAtIso)
+        .limit(1);
+      if (error || !data) return false;
+      return data.length > 0;
+    },
+    now: Date.now(),
+  });
 }
