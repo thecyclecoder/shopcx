@@ -1358,6 +1358,31 @@ export async function runMediaBuyerLoopForAccount(
  * ad_name + destination); a campaign with no landing_url is skipped (ready-to-test
  * already filters those out, but belt-and-suspenders here too).
  */
+/** The angle-copy shape `resolveReplenishAdCopy` needs (a `product_ad_angles` row, or null when the
+ *  campaign has no `angle_id`). */
+export type ReplenishAngleCopy = { meta_headline?: string | null; meta_primary_text?: string | null } | null;
+
+/**
+ * Resolve the ad copy for a replenish publish job from the campaign's angle — PURE (unit-testable).
+ *
+ * FAIL-CLOSED: a replenish `ad_publish_jobs` row must never carry empty `headlines`/`primary_texts`. An empty
+ * copy set makes [[../inngest/ad-tool]] `adToolPublishToMeta` build a Meta creative whose `asset_feed_spec`
+ * has empty `titles[]`/`bodies[]`, which Graph rejects with `meta_400 "The link field is required."` (Meta's
+ * misleading error for absent ad copy). Before this guard, `enqueueReplenishPublish` hard-coded `headlines:
+ * []` / `primary_texts: []`, so EVERY auto-replenish publish failed at Meta. Returns `ok:false` + a reason
+ * when the angle yields no usable copy, so the caller skips the job instead of enqueueing an invalid one.
+ */
+export function resolveReplenishAdCopy(
+  angle: ReplenishAngleCopy,
+): { ok: boolean; headlines: string[]; primaryTexts: string[]; reason: string | null } {
+  const headlines = [(angle?.meta_headline || "").trim()].filter(Boolean);
+  const primaryTexts = [(angle?.meta_primary_text || "").trim()].filter(Boolean);
+  if (!headlines.length || !primaryTexts.length) {
+    return { ok: false, headlines, primaryTexts, reason: "has no meta_headline/meta_primary_text" };
+  }
+  return { ok: true, headlines, primaryTexts, reason: null };
+}
+
 async function enqueueReplenishPublish(
   admin: Admin,
   workspaceId: string,
@@ -1381,12 +1406,41 @@ async function enqueueReplenishPublish(
   }
   const { data: campaign } = await admin
     .from("ad_campaigns")
-    .select("id, name, landing_url")
+    .select("id, name, landing_url, angle_id")
     .eq("id", action.adCampaignId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
   const destination = ((campaign as { landing_url?: string | null } | null)?.landing_url || "").trim();
   if (!destination) return { inserted: false, jobId: null, reason: "campaign has no landing_url" };
+
+  // Populate ad copy from the campaign's angle — replenish must NOT queue empty headlines/primary_texts.
+  // A publish job with empty asset_feed_spec titles/bodies makes ad-tool.ts build a malformed Meta creative
+  // that Graph rejects with meta_400 "The link field is required." (Meta's misleading error for absent ad
+  // copy). Source the copy the SAME way the human publish route does — product_ad_angles via
+  // ad_campaigns.angle_id (meta-cpa-signal.ts) — and FAIL CLOSED (skip with a reason) when the angle carries
+  // no usable copy, instead of enqueueing an invalid job that only surfaces its failure at Meta.
+  const angleId = (campaign as { angle_id?: string | null } | null)?.angle_id ?? null;
+  let angle: ReplenishAngleCopy = null;
+  if (angleId) {
+    const { data } = await admin
+      .from("product_ad_angles")
+      .select("meta_headline, meta_primary_text")
+      .eq("id", angleId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    angle = data as ReplenishAngleCopy;
+  }
+  const copy = resolveReplenishAdCopy(angle);
+  if (!copy.ok) {
+    return {
+      inserted: false,
+      jobId: null,
+      reason: angleId
+        ? `campaign angle ${copy.reason} — skipped to avoid a malformed Meta creative (meta_400 'link field is required')`
+        : "campaign has no angle_id — no ad-copy source; skipped to avoid a malformed Meta creative",
+    };
+  }
+  const { headlines, primaryTexts } = copy;
 
   const { data: video } = await admin
     .from("ad_videos")
@@ -1410,8 +1464,8 @@ async function enqueueReplenishPublish(
       meta_adset_id: action.testMetaAdsetId,
       meta_page_id: pageId,
       meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
-      headlines: [],
-      primary_texts: [],
+      headlines,
+      primary_texts: primaryTexts,
       cta_type: "SHOP_NOW",
       destination_url: destination,
       publish_active: true,

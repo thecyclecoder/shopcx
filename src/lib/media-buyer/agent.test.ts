@@ -26,6 +26,7 @@ import {
   FATIGUE_REPLENISH_THRESHOLD,
   readActiveCohortProductIds,
   readCurrentTestCohortSize,
+  resolveReplenishAdCopy,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerPlanInputs,
@@ -878,4 +879,42 @@ test("agent.ts — runMediaBuyerLoop shadow branch is gated on policy.mode === '
     src.includes("buildShadowActivityRows(plan)"),
     "shadow branch must build director_activity rows via the pure buildShadowActivityRows helper (the tested surface)",
   );
+});
+
+// ── resolveReplenishAdCopy — fail-closed guard (empty-copy → malformed Meta creative) ────────────────
+// Regression for the 2026-07-12 defect: enqueueReplenishPublish hard-coded headlines:[]/primary_texts:[],
+// so ad-tool built an asset_feed_spec with empty titles[]/bodies[] and Meta rejected every replenish publish
+// with meta_400 "The link field is required." The guard must POPULATE copy from the angle and FAIL CLOSED
+// when it's absent.
+
+test("resolveReplenishAdCopy: angle with headline + primary_text → ok, populated arrays", () => {
+  const r = resolveReplenishAdCopy({ meta_headline: "Sleep better tonight", meta_primary_text: "Our gummies help you fall asleep faster." });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Sleep better tonight"]);
+  assert.deepEqual(r.primaryTexts, ["Our gummies help you fall asleep faster."]);
+  assert.equal(r.reason, null);
+});
+
+test("resolveReplenishAdCopy: null angle (no angle_id) → NOT ok, fail closed", () => {
+  const r = resolveReplenishAdCopy(null);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.headlines, []);
+  assert.deepEqual(r.primaryTexts, []);
+  assert.ok(r.reason && r.reason.length > 0);
+});
+
+test("resolveReplenishAdCopy: headline present but primary_text empty → NOT ok (both required)", () => {
+  const r = resolveReplenishAdCopy({ meta_headline: "Sleep better", meta_primary_text: "" });
+  assert.equal(r.ok, false);
+});
+
+test("resolveReplenishAdCopy: primary_text present but headline null → NOT ok (both required)", () => {
+  const r = resolveReplenishAdCopy({ meta_headline: null, meta_primary_text: "Real copy here." });
+  assert.equal(r.ok, false);
+});
+
+test("resolveReplenishAdCopy: whitespace-only copy is treated as empty → NOT ok", () => {
+  const r = resolveReplenishAdCopy({ meta_headline: "   ", meta_primary_text: "  \n " });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.headlines, []);
 });
