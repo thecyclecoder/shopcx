@@ -1,0 +1,1 @@
+- **Migrate ad-hoc kill switches to the universal resolver** · verified 2026-07-12 · → [[../libraries/control-tower]]

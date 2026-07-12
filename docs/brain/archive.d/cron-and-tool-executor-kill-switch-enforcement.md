@@ -1,0 +1,1 @@
+- **Enforce the switch at cron deciders + tool executors** · verified 2026-07-12 · → [[../libraries/enforce-switch]]

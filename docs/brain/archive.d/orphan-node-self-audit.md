@@ -1,0 +1,1 @@
+- **Orphan-node self-audit (missing owner OR switch OR heartbeat = red)** · verified 2026-07-12 · → [[../libraries/control-tower-self-audit]]

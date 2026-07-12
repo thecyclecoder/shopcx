@@ -1,0 +1,1 @@
+- **Per-department infra tab wired to error-feed + db-health + supabase-log-poll** · verified 2026-07-12 · → [[../libraries/control-tower-infra-tab]]
