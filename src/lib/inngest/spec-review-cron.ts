@@ -1,53 +1,31 @@
 /**
- * spec-review-cron — the periodic enqueuer for the box-hosted **spec-review agent** (Vale)
- * ([[../specs/spec-review-agent]]).
+ * spec-review-cron — RETIRED.
  *
- * Whenever ≥1 spec is parked in `in_review` (the column ahead of `planned` — the build-pipeline
- * hard-stop), this cron inserts one `agent_jobs` row `kind='spec-review'` per build-console workspace so
- * the box's spec-review lane (`runSpecReviewJob`) picks it up and reviews every in-review spec on Max.
+ * Vale (the LLM spec-review lane) has been retired in favor of the DETERMINISTIC spec-review gate that
+ * runs at the authoring chokepoint ([[../libraries/spec-review-gate]] · [[../specs/retire-vale-spec-
+ * review-becomes-deterministic-authoring-gate]] Phase 1 + Phase 2). A well-formed spec passes the gate
+ * synchronously at author time; a malformed spec never reaches `public.specs`. There is no periodic LLM
+ * queue for Vale to sweep anymore.
  *
- * Same enqueue-only shape as [[spec-test-cron]] / [[triage-escalations]] — the box has no internal
- * ticker, so an Inngest cron is the trigger. **This cron does NO reasoning** — purely the enqueue.
- * Deduped via `enqueueSpecReviewIfDue` (no pile-up if a pass is already in flight).
+ * This module is kept as a no-op stub so any lingering registration path or dashboard reference resolves
+ * without a hard import error, but the Inngest function no longer fires anything — the trigger is removed
+ * from `registered-functions.ts` and this stub does no work.
  */
 import { inngest } from "@/lib/inngest/client";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { enqueueSpecReviewIfDue } from "@/lib/agents/spec-review";
-import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
+// Retired stub — no cron trigger, no work. Kept exported so a stale reference imports without a build
+// break; downstream removal (Phase 3) drops this file entirely.
 export const specReviewCron = inngest.createFunction(
   {
-    id: "spec-review-cron",
-    name: "Spec-review — periodic Vale enqueue over in_review specs",
-    retries: 1,
+    id: "spec-review-cron-retired",
+    name: "Spec-review cron — RETIRED (deterministic gate at authoring)",
+    retries: 0,
     concurrency: [{ limit: 1 }],
-    // Every 15 min — Vale clears the in_review backlog briskly so a newly authored spec doesn't sit long
-    // (the build pipeline is gated behind it). Offset to keep clear of the other crons.
-    triggers: [{ cron: "*/15 * * * *" }],
+    // No trigger — this function will never execute.
+    triggers: [{ event: "spec-review/RETIRED-never-fired" }],
   },
-  async ({ step }) => {
-    const admin = createAdminClient();
-
-    const result = await step.run("enqueue-spec-review-jobs", async () => {
-      // Build-console workspaces: any workspace with an agent_jobs row (mirrors spec-test-cron).
-      const { data: wsRows } = await admin.from("agent_jobs").select("workspace_id").limit(1000);
-      const workspaceIds = Array.from(new Set((wsRows || []).map((r) => r.workspace_id as string)));
-      if (!workspaceIds.length) return { workspaces: 0, enqueued: 0, pending: 0 };
-
-      let enqueued = 0;
-      let pending = 0;
-      for (const workspaceId of workspaceIds) {
-        const r = await enqueueSpecReviewIfDue(workspaceId);
-        if (r.enqueued) enqueued++;
-        if (r.pending) pending += r.pending;
-      }
-      return { workspaces: workspaceIds.length, enqueued, pending };
-    });
-
-    await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("spec-review-cron", { ok: true, produced: result });
-    });
-
-    return result;
+  async () => {
+    // No-op: the deterministic authoring gate ([[../libraries/spec-review-gate]]) replaces this lane.
+    return { retired: true };
   },
 );

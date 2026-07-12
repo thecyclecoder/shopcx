@@ -610,7 +610,7 @@ function isBoardableStatus(status: SpecRow["status"]): boolean {
  * / `specs.last_merge_sha` but NEVER advances `specs.status`, so reading the stored column would leak a stale
  * `planned` for a truly-shipped one-shot spec. Provenance set ⇒ `shipped`; else `planned`.
  */
-function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
+export function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
   if (row.deferred) return "deferred";
   if (row.status === "folded") return "shipped"; // boardable callers filter folded; preserved for safety
   // Roll the phases up FIRST — phases are ground truth. A one-shot spec (no phases) derives from merge
@@ -621,9 +621,12 @@ function deriveSpecCardStatus(row: SpecRow, phases: SpecPhase[]): SpecStatus {
     : row.merged_pr !== null || row.last_merge_sha !== null
       ? "shipped"
       : "planned";
-  // in_review is derived: only while nothing has been built (rollup still `planned`) AND Vale hasn't
-  // durably passed the current content. Once any phase ships the rollup wins outright.
-  if (rollup === "planned" && row.vale_review_passed_at == null) return "in_review";
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the derived `in_review`
+  // status is RETIRED. Vale's LLM lane is gone; every spec that reaches `public.specs` passed the
+  // deterministic gate ([[spec-review-gate]]) at author time. A fresh, phased, well-formed spec
+  // derives `planned`/`in_progress` via the rollup — never `in_review`. `deferred` / `folded` /
+  // `in_testing` overrides still fire (they're first-class lifecycle states); this branch just
+  // never emits `in_review` as a DERIVED state anymore.
   return rollup;
 }
 
@@ -1082,6 +1085,13 @@ function serializeSpecRowToMarkdown(row: SpecRow): string {
   if (row.repair_signature) out.push(`**Repair-signature:** \`${row.repair_signature}\``);
   if (row.regression_of_slug) out.push(`**Regression-of:** [[${row.regression_of_slug}]]`);
   if (row.regression_signature) out.push(`**Regression-signature:** \`${row.regression_signature}\``);
+  // every-spec-writer-authors-machine-runnable-verifications Phase 2 — surface the optional,
+  // non-blocking founder-facing advisory note on the rendered spec card. The eyeball prompt is
+  // rendered post-ship on the roadmap detail view; the fold gate + promote gate + deterministic
+  // spec-check runner deliberately do not read this column, so its presence never blocks a ship.
+  if (row.human_review && row.human_review.trim()) {
+    out.push(`**Human-review:** ${row.human_review.trim()}`);
+  }
   out.push("");
   if (row.summary && row.summary.trim()) {
     out.push(row.summary.trim());

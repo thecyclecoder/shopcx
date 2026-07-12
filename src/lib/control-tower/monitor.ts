@@ -152,63 +152,8 @@ function fmtDur(ms: number): string {
 // (e.g. "daily (0 4 * * *)"), compute the first firing at-or-after registeredAt, and use THAT as
 // the grace anchor — preserving the red for genuinely-dead schedules but removing the boundary
 // false-page. Computed once per loop and memoized (both inputs are code constants).
-export function extractCronExpr(cadence: string): string | null {
-  const m = cadence.match(/\(([\d*/,\- ]+)\)/);
-  if (!m) return null;
-  const expr = m[1].trim();
-  if (expr.split(/\s+/).length !== 5) return null;
-  return expr;
-}
-
-interface CronSets {
-  minute: Set<number>;
-  hour: Set<number>;
-  dayOfMonth: Set<number>;
-  month: Set<number>;
-  dayOfWeek: Set<number>;
-}
-
-function parseCronField(field: string, min: number, max: number): Set<number> | null {
-  const result = new Set<number>();
-  for (const part of field.split(",")) {
-    const [range, stepStr] = part.split("/");
-    const step = stepStr ? parseInt(stepStr, 10) : 1;
-    if (!Number.isFinite(step) || step <= 0) return null;
-    let start: number;
-    let end: number;
-    if (range === "*") {
-      start = min;
-      end = max;
-    } else if (range.includes("-")) {
-      const [a, b] = range.split("-").map((s) => parseInt(s, 10));
-      if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-      start = a;
-      end = b;
-    } else {
-      const v = parseInt(range, 10);
-      if (!Number.isFinite(v)) return null;
-      start = v;
-      // Vixie cron: a literal-with-step ("5/15") means "5,20,35,…" up to max.
-      end = stepStr ? max : v;
-    }
-    if (start < min || end > max || start > end) return null;
-    for (let v = start; v <= end; v += step) result.add(v);
-  }
-  return result;
-}
-
-export function parseCronExpr(expr: string): CronSets | null {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return null;
-  const ranges: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
-  const out: Set<number>[] = [];
-  for (let i = 0; i < 5; i++) {
-    const set = parseCronField(parts[i], ranges[i][0], ranges[i][1]);
-    if (!set) return null;
-    out.push(set);
-  }
-  return { minute: out[0], hour: out[1], dayOfMonth: out[2], month: out[3], dayOfWeek: out[4] };
-}
+import { extractCronExpr, parseCronExpr, type CronSets } from "./cron-parse";
+export { extractCronExpr, parseCronExpr, type CronSets };
 
 function cronDayMatch(sets: CronSets, t: Date): boolean {
   const dom = t.getUTCDate();
@@ -645,6 +590,24 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
       statusText: `${stuck.length} job${stuck.length === 1 ? "" : "s"} stuck (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))})`,
       violation: { reason: "stuck_jobs", detail: `${stuck.length} ${loop.agentKind} job(s) stuck in ${stuck[0].status} past ${Math.round(threshold / 60_000)}m (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))}, job ${oldest.id.slice(0, 8)}).` },
     };
+  }
+  // claim-rpc-kill-switch-enforcement Phase 2 — the box worker calls
+  // public.claim_agent_job_diag whenever a `claim_agent_job` returns null and
+  // writes an agent-kind heartbeat whose `produced` carries
+  // `{blocked_off:true, offBy, scope}` naming the first ancestor node_id whose
+  // kill switch fired (see writeSuppressedClaimHeartbeats in
+  // scripts/builder-worker.ts). Render that as amber "off by <ancestor>
+  // (<scope>)" so a switched-off tile is not confused with a green silent-idle
+  // (or a false red). The latest beat is authoritative: once the switch is
+  // removed and the next claim succeeds, the launch-path's completion beat
+  // overwrites this one and the tile returns to green.
+  const producedObj = (latest?.produced && typeof latest.produced === "object")
+    ? (latest.produced as { blocked_off?: unknown; offBy?: unknown; scope?: unknown })
+    : null;
+  if (producedObj && producedObj.blocked_off === true) {
+    const offBy = typeof producedObj.offBy === "string" ? producedObj.offBy : "unknown";
+    const scope = typeof producedObj.scope === "string" ? producedObj.scope : "unknown";
+    return { ...base, color: "amber", statusText: `off by ${offBy} (${scope})`, violation: null };
   }
   // Genuinely-idle or running-within-threshold = green (no false positives).
   if (mine.length) {

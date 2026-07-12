@@ -1,0 +1,1 @@
+- **Monitor tick 5-min floor + liveness window scales with cadence** · verified 2026-07-12 · → [[../libraries/control-tower]]

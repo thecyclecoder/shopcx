@@ -698,21 +698,13 @@ export async function enqueueBuildIfDue(
   // check emits a distinct reason so the heartbeat log names the exact eligibility miss.
   if (card.status === "shipped") return { enqueued: false, reason: "already-shipped" };
   if (card.status === "deferred") return { enqueued: false, reason: "deferred" };
-  // fix-bo-reactive-gated-build-enqueue — `in_review` is the ONE lifecycle state where Vale has
-  // (or may have) passed but Ada hasn't yet made a disposition call (planned vs deferred). The
-  // Phase-2 reactive event fires from `markSpecCardValePassed` the moment Vale flips
-  // valeReviewPassed=true, but the spec's status STAYS `in_review` until Ada's disposition sweep
-  // writes `planned`/`deferred`. Without this gate the consumer would enqueue a build on the Vale
-  // pass alone — contradicting the whole "Vale reviews → Ada disposes → THEN build" flow that the
-  // spec-review lane is meant to enforce. `applyAdaDisposition('planned')` re-fires the event, so
-  // no eligibility signal is lost: the build enqueues once Ada actually dispositions the spec.
-  if (card.status === "in_review") return { enqueued: false, reason: "in-review-pending-disposition" };
-  // MIRROR of specReviewDone(card) in src/lib/agents/platform-director.ts:209-211 — re-probed inline
-  // here to avoid a circular import (platform-director already imports enqueueSpecTestIfDue from
-  // this file). Keep the two in lockstep; the durable signal is `specs.vale_review_passed_at`
-  // (surfaced as `card.valeReviewPassed`). The `status==='shipped'` half of specReviewDone is already
-  // covered by the early return above, so the local check reduces to the vale_pass flag.
-  if (card.valeReviewPassed !== true) return { enqueued: false, reason: "not-review-passed" };
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the legacy in_review +
+  // not-review-passed hard-stops are RETIRED. Vale's LLM lane is gone; every spec that reaches
+  // `public.specs` passed the deterministic gate ([[spec-review-gate]]) synchronously at author time.
+  // "reviewed" is TRUE by construction the instant a row exists. A fresh, phased, well-formed spec
+  // derives `planned`/`in_progress` via the phase rollup — never `in_review` — and the build enqueues
+  // freely. Ada's disposition lane keeps routing planned/deferred as a director judgment call
+  // (spec-dispose.selectDispositionCandidates); but that judgment does not gate the build claim path.
   if (card.autoBuild === false) return { enqueued: false, reason: "auto-build-off" };
   if (card.blockedBy.some((b) => !b.cleared)) return { enqueued: false, reason: "blocked" };
 
@@ -1567,18 +1559,10 @@ export function decideGoalMemberBuildDispatch(input: {
   const { slug, goalSlug, members, inflight } = input;
   if (members.length === 0) return { ok: true };
 
-  // (b) In-flight — any OTHER active build for a goal-mate wins the goal's serial slot.
-  const other = inflight.find((r) => r.slug !== slug);
-  if (other) {
-    return {
-      ok: false,
-      reason: `another goal-member build is in-flight for goal ${goalSlug} (${other.slug} status=${other.status}); serialized to prevent hot-file collisions`,
-    };
-  }
-
-  // (c) Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
-  //     A ready head has every goal-mate blocker already on the goal branch (external blockers are the
-  //     existing gate's concern). Sort by slug so the choice is deterministic across ticks.
+  // Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
+  // A ready head has every goal-mate blocker already on the goal branch (external blockers are the
+  // existing gate's concern). Sort by slug so the choice is deterministic across ticks. Computed FIRST
+  // (before the in-flight guard) because the guard below must know WHICH in-flight mate is legitimate.
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
   const unbuilt = members.filter(
     (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
@@ -1607,6 +1591,30 @@ export function decideGoalMemberBuildDispatch(input: {
   }
   readyHeads.sort();
   const earliest = readyHeads[0];
+
+  // (b) In-flight guard — hold ONLY when the in-flight goal-mate that holds the slot IS the earliest
+  //     ready head. A genuinely-building goal-mate is ALWAYS itself the earliest (it is unbuilt +
+  //     alphabetically-first for the whole time it builds, since nothing new integrates while it runs),
+  //     so it legitimately owns the serial slot and everyone else must wait — this preserves the
+  //     2026-07-06 collision guard (#1245/#1246/#1248 on action-executor.ts). But a NON-earliest
+  //     in-flight mate is a same-sweep claim-race artifact: the box fills several build lanes per tick,
+  //     sets each to `building`, THEN post-hoc re-queues the losers via this predicate. If a
+  //     non-earliest artifact were allowed to block, the whole goal LIVELOCKS — the box claims N mates,
+  //     each sees the others `building`, rule (b) holds ALL of them (incl. the true earliest), and they
+  //     churn on the 90s cooldown forever with 0 progress (observed 2026-07-12: ceo-org-control-tower +
+  //     director-chats-in-message-center stalled at 0 building / 8 queued). So the earliest is never
+  //     blocked by a non-earliest artifact; it always wins its slot. Cross-goal parallelism is untouched
+  //     (a different goalSlug carries a different member set).
+  const inflightSlotHolder = inflight.find((r) => r.slug !== slug && r.slug === earliest);
+  if (inflightSlotHolder) {
+    return {
+      ok: false,
+      reason: `another goal-member build is in-flight for goal ${goalSlug} (${inflightSlotHolder.slug} status=${inflightSlotHolder.status}); serialized to prevent hot-file collisions`,
+    };
+  }
+
+  // (c) Only the earliest ready head may dispatch. A non-earliest member is held regardless of in-flight
+  //     state (this is what catches every non-slot-holder, including the race artifacts above).
   if (earliest !== slug) {
     return {
       ok: false,

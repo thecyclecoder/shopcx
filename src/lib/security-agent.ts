@@ -539,8 +539,9 @@ export async function enqueueDepWatchJob(admin: Admin, opts: { workspaceId?: str
 // A security-review job surfaces while it waits on the owner: `needs_approval` (a fix/upgrade spec
 // authored + a Build card, awaiting the owner's queue-the-build) or `needs_attention` (a needs-human
 // finding — no spec, no auto path). Clean reviews complete silently and never appear here. The routed
-// Approval Request is emitted generically by [[approval-inbox]] (KIND_TO_FUNCTION maps security-review →
-// platform via the agent-kind tile), so no per-agent Control Tower route is needed.
+// Approval Request is emitted generically by [[approval-inbox]] (the canonical node registry maps
+// security-review → platform via the first-class Node `agent:security-review`), so no per-agent
+// Control Tower route is needed.
 
 export interface SecuritySurfaceItem {
   jobId: string;

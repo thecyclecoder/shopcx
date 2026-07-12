@@ -39,6 +39,14 @@ export interface MediaBuyerTestCohort {
   id: string;
   workspaceId: string;
   metaAdAccountId: string | null;
+  /**
+   * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 1 —
+   * NULL = the (workspace, account) default cohort (Superfood Tabs's shape today);
+   * non-null = a per-product cohort in a shared account so each product carries
+   * its own adset + ceiling. `getEffectiveMediaBuyerTestCohort` resolves the
+   * product-specific row first, then falls back to the null-product default.
+   */
+  productId: string | null;
   testMetaAdsetId: string;
   dailyTestCeilingCents: number;
   isActive: boolean;
@@ -58,6 +66,7 @@ interface MediaBuyerTestCohortRow {
   id: string;
   workspace_id: string;
   meta_ad_account_id: string | null;
+  product_id?: string | null;
   test_meta_adset_id: string;
   daily_test_ceiling_cents: number | string;
   is_active: boolean;
@@ -76,6 +85,7 @@ function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
     id: row.id,
     workspaceId: row.workspace_id,
     metaAdAccountId: row.meta_ad_account_id,
+    productId: row.product_id ?? null,
     testMetaAdsetId: row.test_meta_adset_id,
     dailyTestCeilingCents: typeof c === "string" ? Number(c) : c,
     isActive: row.is_active,
@@ -90,17 +100,25 @@ function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
 }
 
 /**
- * The EFFECTIVE test cohort for one `(workspace, meta_ad_account)` tuple — a
- * per-account row wins over the workspace-wide (`meta_ad_account_id IS NULL`) row.
- * Returns null when no active row exists (the gate then REFUSES a media-buyer-test
- * publish — no configured cohort = no autonomous go-live).
+ * The EFFECTIVE test cohort for one `(workspace, meta_ad_account, product)` tuple.
+ *
+ * Resolution order ([[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]]
+ * Phase 1): the product-specific `(account, productId)` row wins, then falls back
+ * to the null-product account default, then to the workspace-wide null-account
+ * default. Returns null when no active row exists (the gate then REFUSES a
+ * media-buyer-test publish — no configured cohort = no autonomous go-live).
+ *
+ * `productId` is optional: omitting it (or passing null) preserves the
+ * pre-product-scoped shape — the null-product account default is returned as
+ * before, so callers that never grew a product dimension (Superfood Tabs today)
+ * behave identically.
  */
 export async function getEffectiveMediaBuyerTestCohort(
   admin: Admin,
   workspaceId: string,
-  args: { metaAdAccountId?: string | null },
+  args: { metaAdAccountId?: string | null; productId?: string | null },
 ): Promise<MediaBuyerTestCohort | null> {
-  const { metaAdAccountId = null } = args;
+  const { metaAdAccountId = null, productId = null } = args;
   const { data, error } = await admin
     .from("media_buyer_test_cohorts")
     .select("*")
@@ -110,10 +128,20 @@ export async function getEffectiveMediaBuyerTestCohort(
   const rows = (data || []).map((r) => toCohort(r as MediaBuyerTestCohortRow));
   if (!rows.length) return null;
   if (metaAdAccountId) {
-    const exact = rows.find((r) => r.metaAdAccountId === metaAdAccountId);
-    if (exact) return exact;
+    if (productId) {
+      const productExact = rows.find(
+        (r) => r.metaAdAccountId === metaAdAccountId && r.productId === productId,
+      );
+      if (productExact) return productExact;
+    }
+    const accountDefault = rows.find(
+      (r) => r.metaAdAccountId === metaAdAccountId && r.productId === null,
+    );
+    if (accountDefault) return accountDefault;
   }
-  return rows.find((r) => r.metaAdAccountId === null) ?? null;
+  return (
+    rows.find((r) => r.metaAdAccountId === null && r.productId === null) ?? null
+  );
 }
 
 /** Why a media-buyer-test publish was refused live — carried on the escalation + the audit row. */
@@ -125,6 +153,14 @@ export type MediaBuyerTestRefusalReason =
 export interface MediaBuyerTestGateInput {
   workspaceId: string;
   metaAdAccountId: string | null;
+  /**
+   * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 —
+   * the ad's target product. Passed through to `getEffectiveMediaBuyerTestCohort`
+   * so the ceiling read is scoped to the per-product cohort (Amazing Coffee vs
+   * Creamer in the same account, etc.). Omitting it (or null) falls back to the
+   * null-product account default, preserving Superfood Tabs's pre-Phase-2 shape.
+   */
+  productId?: string | null;
   metaAdsetId: string;
   /** The daily budget in cents the ad set WILL carry after this publish (Meta ABO). */
   projectedDailyCents: number;
@@ -198,6 +234,7 @@ export async function evaluateMediaBuyerTestPublish(
 ): Promise<MediaBuyerTestGateResult> {
   const cohort = await getEffectiveMediaBuyerTestCohort(admin, input.workspaceId, {
     metaAdAccountId: input.metaAdAccountId,
+    productId: input.productId ?? null,
   });
   if (!cohort) {
     return {

@@ -8893,15 +8893,17 @@ async function runPlanJob(job: Job) {
       const batchPrompt = [
         `Flesh out the owner-APPROVED specs for the goal materialized at ${materializedGoalPath} (cwd is the repo root). The goal lives in public.goals — there is NO docs/brain/goals/${goalSlug}.md (purged); ${materializedGoalPath} is a gitignored scratch render of the DB row (read it for the goal's outcome + success metric + milestones). Do NOT write ANY file; do NOT run git; do NOT build anything. You RETURN the specs as structured JSON in your final message — the worker authors them to public.specs + public.spec_phases via the SDK. The goal→milestone binding is the worker's DB write (it resolves the milestone you name), not yours.`,
         `Author BATCH ${b + 1} of ${batches.length} — the planner-authoring flow is bounded (max ${PLANNER_AUTHOR_BATCH_SIZE} specs per turn) so no single result grows past the size that dropped a prior 6-spec envelope. Author EXACTLY the ${batch.length} slug(s) listed in this batch; the remaining approved slugs are handled in other batches.`,
-        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist"}. NO status emoji/markers anywhere — status is DB-driven.`,
+        `For EACH approved spec below, produce a real, concrete build spec object grounded in the brain (read pages to cite real table/library names + the gap). Each spec object has: \`slug\` (exactly as given below); \`summary\` (one paragraph tied to the goal's success metric); a spec-level plain-language \`why\` + \`what\` (see INTENT rule); optional non-blocking \`human_review\` (see HUMAN-REVIEW rule); \`phases\` — an ARRAY of {"title":"Phase N — name","why":"plain-language why this phase exists","what":"plain-language what changes when this phase ships","body":"the concrete work, citing real brain pages/tables/libraries","verification":"a prod-facing acceptance checklist","checks":[{position,description,kind,exec_kind,params}]}. NO status emoji/markers anywhere — status is DB-driven.`,
         `INTENT IS MANDATORY (pm-structured-intent-and-refs Phase 1): EVERY spec + EVERY phase MUST carry non-empty plain-language \`why\` (why this exists) + \`what\` (what changes when it ships). Write for a human reader — NO code fences, NO file:line refs, NO "**Header:**" lines. The technical implementation lives in \`body\`; \`why\`/\`what\` are the shared intent humans and agents both read. A spec/phase with empty intent is rejected and the whole authoring fails — never omit them.`,
         `VERIFICATION IS MANDATORY (no untestable specs): EVERY phase's \`verification\` MUST be a non-empty checklist of >=1 concrete acceptance check, each line "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the phase touches. A phase with an empty verification is rejected and the whole authoring fails — never omit it.`,
+        `MACHINE-RUNNABLE CHECKS ARE MANDATORY (every-spec-writer-authors-machine-runnable-verifications Phase 1): EVERY phase MUST also carry a \`checks\` array with >=1 TYPED machine-runnable row the deterministic spec-check runner can execute. Each check = {"position":N,"description":"…","kind":"auto"|"human","exec_kind":"tsc"|"grep"|"ci_status"|"http_get"|"db_probe_readonly"|"unit_test"|"build"|"needs_human","params":<see shape below>}. VALID PARAMS: \`tsc\`/\`ci_status\`/\`build\`/\`needs_human\` → params:null; \`grep\` → {"pattern":"…","path":"…","expect":"present"|"absent"}; \`http_get\` → {"url":"https://…","expect_status":200}; \`db_probe_readonly\` → {"probe_id":"<registered probe key>","args":{…},"expect":null|number|boolean}; \`unit_test\` → {"script":"<a real package.json script>"}. \`needs_human\` rows are ALLOWED as EXTRA (subjective / eyeball) but NEVER the SOLE check on a phase — a phase with only \`needs_human\` (or only untyped prose) is REJECTED at author time with MissingMachineCheckError. Prefer \`tsc\`+\`grep\` when the phase adds a symbol/module, \`db_probe_readonly\` when it touches a table (name a probe from src/lib/spec-check-db-probes.ts), \`http_get\` when it exposes a route, \`unit_test\` when there's a package.json script that exercises the change.`,
+        `HUMAN-REVIEW IS OPTIONAL, NON-BLOCKING (Phase 2): a spec MAY carry a spec-level \`human_review\` string — the OPTIONAL founder-facing advisory prompt (e.g. "after ship, open /dashboard/x and confirm the layout reads right"). It renders on the spec card + a post-ship founder surface and is NEVER read by the fold gate / promote gate / spec-check runner (machine checks are the ship gate). Absence is the norm — set it only when there's a real subjective look-see the founder should do post-ship. Do NOT put subjective checks in \`checks\` — use \`human_review\`.`,
         `MILESTONE: for each spec, set \`milestone\` to the handle of the goal milestone it attaches under (the "M{n}" handle shown in the materialized goal's "## Decomposition", e.g. "M1", or the milestone_id printed under it). The worker resolves this to the real goal_milestones.id and binds specs.milestone_id. Use ONLY a milestone that exists in the materialized goal.`,
         `BLOCKED-BY (goal-decomposition-encodes-blockers): for each spec, set \`blocked_by\` to the array of prerequisite slugs shown for it below (or [] when none). The worker writes these onto the spec row's blocked_by and gates its build until the prerequisites ship. Use ONLY the slugs listed for that spec — do not invent prerequisites.${declinedNote}`,
         ``,
         `Approved specs for THIS batch (author EXACTLY these ${batch.length} slug(s), no more, no fewer):\n${batchSpecList}`,
         ``,
-        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …"}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
+        `Final message = ONLY one JSON object: {"status":"completed","specs":[{"slug":"…","summary":"…","why":"why this spec exists","what":"what changes when this ships","human_review":"OPTIONAL founder eyeball note or omit","milestone":"M1","blocked_by":["…"],"phases":[{"title":"Phase 1 — …","why":"why this phase exists","what":"what changes when this phase ships","body":"…","verification":"- On …, … → expect …","checks":[{"position":1,"description":"tsc clean","kind":"auto","exec_kind":"tsc","params":null}]}]}]} (or {"status":"needs_input","questions":[{"id":"q1","q":"…"}]} only if a spec is genuinely under-specified).`,
       ].join("\n");
 
       const { session, resultText, isError, raw, usage, model } = await runClaude(await withCoaching(job, batchPrompt), currentSessionId, wt, configDir, job.id);
@@ -9009,13 +9011,43 @@ async function runPlanJob(job: Job) {
         // spec-level intent still passes the per-phase gate; the chokepoint lint still catches empty.
         const fallbackWhy = String(out.why || "").trim();
         const fallbackWhat = String(out.what || "").trim();
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — carry the typed
+        // machine-runnable `checks` array through to the SDK. The planner is prompted to emit
+        // {position,description,kind,exec_kind,params} per acceptance criterion; if it did not,
+        // the shared `checks: []` falls through, and the app-layer chokepoint's
+        // `parseVerificationBlobToChecks(verification)` still fires (defaulting exec_kind to
+        // needs_human) — which the Phase 1 machine-check gate then rejects with a loud error.
         const phases = out.phases.map((p) => ({
           title: String(p.title || "").trim() || "Phase",
           body: String(p.body || "").trim(),
           verification: String(p.verification || "").trim(),
           why: String(p.why || "").trim() || fallbackWhy,
           what: String(p.what || "").trim() || fallbackWhat,
+          checks: Array.isArray(p.checks)
+            ? (p.checks as Array<{
+                position?: number;
+                description?: string;
+                kind?: "auto" | "human";
+                exec_kind?: string;
+                params?: unknown;
+              }>).map((c, i) => ({
+                position: Number.isInteger(c.position) ? (c.position as number) : i + 1,
+                description: String(c.description ?? "").trim(),
+                kind: c.kind === "human" ? "human" as const : "auto" as const,
+                exec_kind: (typeof c.exec_kind === "string" ? c.exec_kind : null) as
+                  | "tsc" | "grep" | "ci_status" | "http_get" | "db_probe_readonly"
+                  | "unit_test" | "build" | "needs_human" | null,
+                params: (c.params ?? null) as never,
+              }))
+            : undefined,
         }));
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+        // founder-facing note (Phase-2 spec column). The planner emits it as `out.human_review`;
+        // absence is fine.
+        const specHumanReview: string | null | undefined =
+          typeof out.human_review === "string" && out.human_review.trim()
+            ? out.human_review.trim()
+            : undefined;
         try {
           // spec-review-agent Phase 3 — every planner-authored spec lands `in_review` with intended_status=
           // planned. markSpecCardForReview sets the card state; authorSpecRowStructured writes the row + phases
@@ -9040,6 +9072,9 @@ async function runPlanJob(job: Job) {
               blocked_by: blockers,
               why: specWhy,
               what: specWhat,
+              // every-spec-writer-authors-machine-runnable-verifications Phase 2 — the OPTIONAL,
+              // non-blocking founder-facing advisory note (never gates fold/ship/merge).
+              human_review: specHumanReview,
               phases,
             },
             "planned",
@@ -12224,9 +12259,130 @@ async function runSpecTestJob(job: Job) {
     }
     const isPreMerge = !!previewOrigin && !!branch;
 
+    // ── machine-declared-verification-and-deterministic-spec-test-runner Phase 3 ─────────────────
+    // Deterministic-first: run the machine-declared checks in-process BEFORE we spawn a Max session.
+    // If every check resolved (no `needs_human` residual) AND this is NOT a fused pre-merge job (the
+    // security envelope stays a Max session by design — Vault is judgment), write the deterministic
+    // verdicts straight to spec_test_runs and run the same post-verdict downstream (timecard +
+    // green-writeback + auto-fold + regression detector) — NO claude session, no Max cost. Best-
+    // effort: any thrown error falls through to the LLM lane below (the runner is additive, never
+    // regressive). The `residual*` values are threaded into the prompt so an unavoidable Max session
+    // can focus its work.
+    let deterministicResiduals: string[] = [];
+    let deterministicChecks: SpecTestCheck[] = [];
+    let deterministicOk = false;
+    try {
+      const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+        "../src/lib/spec-check-runner"
+      );
+      const pkg = JSON.parse(readFileSync(resolve(REPO_DIR, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+      const runnerOut = await runSpecChecks({
+        workspaceId: job.workspace_id,
+        slug,
+        deps: {
+          loadChecks: defaultLoadChecks,
+          executors: defaultExecutors,
+          packageScripts,
+          repoRoot: REPO_DIR,
+        },
+      });
+      const cls = classifyDeterministicRun(runnerOut.results);
+      deterministicResiduals = cls.residualTexts;
+      deterministicChecks = cls.checks;
+      deterministicOk = true;
+      console.log(
+        `${tag} deterministic runner — ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤 (residual=${cls.residualCount}, isPreMerge=${isPreMerge})`,
+      );
+      if (cls.allResolved && !isPreMerge) {
+        // No LLM needed. Insert the deterministic verdicts + run the same downstream Vera runs today.
+        await db.from("spec_test_runs").insert({
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          agent_job_id: job.id,
+          agent_verdict: cls.agentVerdict,
+          summary: cls.summary,
+          checks: cls.checks,
+          transcript: null,
+          error: null,
+          spec_branch: null,
+          preview_url: null,
+        });
+        await emitTimecardOnceInSession(emittedThisSession, {
+          workspace_id: job.workspace_id,
+          spec_slug: slug,
+          phase_index: null,
+          event_kind: "spec_test_verdict",
+          actor: "vera",
+          metadata: { job_id: job.id, agent_verdict: cls.agentVerdict, summary: cls.summary, deterministic: true },
+        });
+        try {
+          const { reflectSpecGreenChecks } = await import("../src/lib/spec-green-writeback");
+          const g = await reflectSpecGreenChecks(job.workspace_id, slug);
+          if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
+        } catch (e) {
+          console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // The claude_session_id stays null on this row — the grader's `ungradedConcludedJobs` filter
+        // reads that as "monitored, not graded" and skips it (agent-grader.ts, machine-declared Phase 3).
+        await update(job.id, {
+          status: "completed",
+          log_tail: `${cls.agentVerdict} — ✅${cls.summary.auto_pass} ✗${cls.summary.auto_fail} 👤${cls.summary.needs_human} (deterministic — no Max session)`.slice(-2000),
+        });
+        try {
+          const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
+          const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
+          if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
+        } catch (e) {
+          console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (cls.agentVerdict === "issues") {
+          try {
+            const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
+            const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
+            const q = await getHumanTestQueue(job.workspace_id);
+            const reg = q.regressions.find((r) => r.slug === slug);
+            if (reg) {
+              await enqueueRegressionJob(db, {
+                workspaceId: job.workspace_id,
+                specSlug: reg.slug,
+                fromSpecTestRunId: null,
+              });
+            }
+          } catch (e) {
+            console.error(`${tag} regression enqueue (deterministic path) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      // The runner throwing is NOT a regression — fall back to today's LLM path. The runner's whole
+      // contract is additive: it verifies more cheaply when it can and gets out of the way otherwise.
+      console.warn(`${tag} deterministic runner failed (falling back to Max): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Emit the monitored-loops heartbeat for the deterministic runner (Control Tower registry
+    // entry DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) — ok:true when the runner returned verdicts,
+    // ok:false when it threw and Vera's LLM lane had to take over. Best-effort; never fails the job.
+    try {
+      const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+      const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+      await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: deterministicOk });
+    } catch { /* best-effort */ }
+
     const prompt = [
       `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
       `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
+      ...(deterministicResiduals.length
+        ? [
+            // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — deterministic
+            // pre-pass. The box's Node runner already executed the machine-declared checks; its verdicts
+            // are AUTHORITATIVE and will be merged after your session. Focus your effort on the
+            // subjective/drift residual — do NOT re-run the checks the runner already handled.
+            `🤖 DETERMINISTIC PRE-PASS (spec-check-runner) — a Node module already ran the machine-declared \`spec_phase_checks\` (${deterministicChecks.length} check(s)); its pass/fail verdicts are AUTHORITATIVE and will be merged into the final row after your session. SCOPE your effort to the ${deterministicResiduals.length} RESIDUAL bullet(s) below (drift · subjective · un-typed prose). Still emit ONE check per bullet in your JSON so the merge is complete; other bullets can carry a needs_human / inconclusive placeholder with evidence "handled by deterministic runner" — the merge will replace them with the runner's verdict.\nResidual bullets:\n${deterministicResiduals.map((t) => `  - ${t}`).join("\n")}`,
+          ]
+        : []),
       ...(isPreMerge
         ? [
             `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
@@ -12404,7 +12560,26 @@ async function runSpecTestJob(job: Job) {
       return;
     }
 
-    const { agent_verdict, summary, checks, report } = normalizeSpecTest(parsed);
+    const { agent_verdict: llmAgentVerdict, summary: llmSummary, checks: llmChecks, report } = normalizeSpecTest(parsed);
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — MERGE. When the
+    // deterministic runner produced verdicts for this spec (a mixed run — residuals forced the Max
+    // session but some checks resolved deterministically), the runner's pass/fail is AUTHORITATIVE
+    // and overrides any conflicting Max verdict on the same bullet; the LLM's verdicts only fill in
+    // the runner's needs_human residual. Pure — same helper the unit tests pin.
+    let checks = llmChecks;
+    let summary = llmSummary;
+    let agent_verdict = llmAgentVerdict;
+    if (deterministicChecks.length) {
+      const { mergeDeterministicWithLlmChecks } = await import("../src/lib/spec-check-runner");
+      checks = mergeDeterministicWithLlmChecks(deterministicChecks, llmChecks);
+      summary = {
+        auto_pass: checks.filter((c) => c.verdict === "pass").length,
+        auto_fail: checks.filter((c) => c.verdict === "fail").length,
+        needs_human: checks.filter((c) => c.verdict === "needs_human").length,
+        inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
+      };
+      agent_verdict = summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
+    }
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
@@ -19912,23 +20087,40 @@ async function runMediaBuyerJob(job: Job) {
     return;
   }
 
-  const { runMediaBuyerLoop } = await import("../src/lib/media-buyer/agent");
-  const perAccount: Array<{ account: string; plan: unknown; writes: unknown; error?: string }> = [];
+  // media-buyer-product-scoped-test-rail Phase 3 — fan out over every active
+  // (account × product) cohort. `runMediaBuyerLoopForAccount` enumerates the
+  // account's active `media_buyer_test_cohorts` rows and runs one pass per row,
+  // so a shared account with product A + product B produces TWO passes (each
+  // scoped to its own adset + ceiling + ready-to-test bin). A null-product
+  // cohort (Superfood Tabs today) runs once as before. An account with no
+  // active cohort still runs one pass with productId=null so the dormant
+  // heartbeat lands (the "audit trail proves the pass ran" invariant).
+  const { runMediaBuyerLoopForAccount } = await import("../src/lib/media-buyer/agent");
+  const perAccount: Array<{ account: string; productId: string | null; plan: unknown; writes: unknown; error?: string }> = [];
   for (const accountId of accountIds) {
+    let passes: Awaited<ReturnType<typeof runMediaBuyerLoopForAccount>>;
     try {
-      const result = await runMediaBuyerLoop(a, {
+      passes = await runMediaBuyerLoopForAccount(a, {
         workspaceId: job.workspace_id,
         metaAdAccountId: accountId,
         cohortTargetCount: instr.cohort_target_count,
       });
-      perAccount.push({ account: accountId, plan: result.plan, writes: result.writes });
-      console.log(
-        `${tag} account=${accountId.slice(0, 8)} → promote=${result.plan.promote.length} kill=${result.plan.kill.length} replenish=${result.plan.replenish.length} (policyActive=${result.plan.policyActive})`,
-      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      perAccount.push({ account: accountId, plan: null, writes: null, error: msg });
-      console.error(`${tag} account=${accountId} threw: ${msg}`);
+      perAccount.push({ account: accountId, productId: null, plan: null, writes: null, error: msg });
+      console.error(`${tag} account=${accountId} dispatch threw: ${msg}`);
+      continue;
+    }
+    for (const pass of passes) {
+      if (pass.error) {
+        perAccount.push({ account: accountId, productId: pass.productId, plan: null, writes: null, error: pass.error });
+        console.error(`${tag} account=${accountId} product=${pass.productId ?? "null"} threw: ${pass.error}`);
+        continue;
+      }
+      perAccount.push({ account: accountId, productId: pass.productId, plan: pass.result.plan, writes: pass.result.writes });
+      console.log(
+        `${tag} account=${accountId.slice(0, 8)} product=${pass.productId ? pass.productId.slice(0, 8) : "null"} → promote=${pass.result.plan.promote.length} kill=${pass.result.plan.kill.length} replenish=${pass.result.plan.replenish.length} (policyActive=${pass.result.plan.policyActive})`,
+      );
     }
   }
   // media-buyer-director-slack-digest Phase 2: the Growth Director (Max) posts ONE digest of this pass's
@@ -23301,52 +23493,210 @@ async function dispatchJob(job: Job) {
     if (add.code !== 0) add = sh("git", ["worktree", "add", "-B", branch!, wt, "origin/main"]); // branch not pushed → base on main
     if (add.code !== 0) throw new Error(`worktree add (resume) failed: ${add.err.slice(0, 300)}`);
   }
-  // ⭐ mario-rebase-parked-build-worktrees-onto-main-before-repo-wide-checks Phase 1: if the branch's
-  // tip is NOT already on top of origin/main, advance the BASE by rebasing onto origin/main BEFORE
-  // the claude run and (crucially) BEFORE the repo-wide check invocation below (`npx tsc --noEmit`
-  // + `_check-table-refs-have-migrations.ts`). This restores the invariant those checks assume —
-  // origin/main HEAD as the reference tree. A build worktree that was cut BEFORE a new
-  // table-creating migration landed on main would otherwise fail check:table-refs-have-migrations
-  // on a stale base whose fix already shipped, stalling the spec on a non-real regression.
+  // ⭐ builder-self-heals-stale-build-branch Phase 1 (folds mario-rebase-parked-build-worktrees):
+  // if the branch's tip does NOT already contain origin/main, advance the BASE so it does — BEFORE
+  // the claude run and the repo-wide check invocation below (`npx tsc --noEmit` +
+  // `_check-table-refs-have-migrations.ts`). Those checks assume origin/main HEAD as the reference
+  // tree — a build worktree that was cut BEFORE a new table-creating migration landed on main would
+  // otherwise fail check:table-refs-have-migrations on a stale base whose fix already shipped,
+  // stalling the spec on a non-real regression.
   //
-  // Invariants (see docs/brain/libraries/mario.md): NEVER force-push, NEVER drop WIP commits,
-  // NEVER touch main. Only the branch's LOCAL base is advanced — the follow-up phase push and its
-  // existing rebase-retry (build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 2,
-  // below) handle a concurrent sibling push idempotently. A rebase conflict is surfaced as
-  // needs_attention (never a silent drop of WIP), matching the phase-push rebase-retry convention.
+  // Strategy: MERGE-first for a non-linear branch (goal-member inherits merge commits from the goal
+  // branch's main reconciliation — REBASE spuriously conflicts by replaying the merges even though
+  // a plain MERGE applies clean; confirmed 2026-07-11 on director-chat-in-leash-execution + machine-
+  // declared-verification-and-deterministic-spec-test-runner, both of which parked and burned CEO
+  // escalations before the merge fallback landed). REBASE-first only for a truly-linear branch
+  // (clean linear replay). Fallback: the other reconcile, or RECREATE-FRESH when the branch carries
+  // NO built work AND was NEVER pushed to origin (its commits are throwaway attempts a reset onto
+  // the correct base loses nothing — the director-chat box-local zero-built-work case named in the
+  // spec). Only when BOTH the primary AND the fallback conflict is the divergence a real semantic
+  // overlap that parks `needs_attention` (Phase 2 will name the conflicting files on that park).
+  //
+  // Bounded: ONE reconcile attempt per claim (primary + a single fallback). tsc-gates the reconciled
+  // tree before the claude run — if origin/main itself is broken (base poison), park with the tsc
+  // output so the human sees the real reason, never spend claude tokens on a broken base.
+  //
+  // Invariants (see docs/brain/libraries/mario.md + build-lane-reconcile.md): NEVER force-push,
+  // NEVER touch main, NEVER drop BUILT commits (hasBuiltWork gates recreate-fresh OFF). The pure
+  // strategy chooser is [[../src/lib/build-lane-reconcile]]; the test pins the choice.
   {
     // Explicit `git fetch origin main` so origin/main is the freshest tip we compare against (the
-    // top-of-runJob `git fetch origin` already covers this, but being explicit here matches the
-    // spec's steps and stays correct if the top-level fetch ever narrows).
+    // top-of-runJob `git fetch origin` already covers this, but being explicit here stays correct
+    // if the top-level fetch ever narrows).
     sh("git", ["fetch", "origin", "main"], { cwd: wt });
-    const headOnMain =
+    const headContainsMain =
       sh("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { cwd: wt }).code === 0;
-    if (!headOnMain) {
+    if (!headContainsMain) {
+      // Observe the branch state for the pure strategy chooser.
+      const mergesProbe = sh("git", ["log", "--merges", "--format=%H", "origin/main..HEAD"], { cwd: wt });
+      const hasMergeCommits = mergesProbe.code === 0 && mergesProbe.out.trim().length > 0;
+      const branchOnRemote =
+        sh("git", ["ls-remote", "--exit-code", "--heads", "origin", branch!]).code === 0;
+      // hasBuiltWork = any spec_phases row carries a build_sha (durable BUILT state; never dropped).
+      // Conservative default (true) when the read fails → recreate-fresh is inhibited on any
+      // DB blip, matching the "never drop built work" invariant.
+      let hasBuiltWork = true;
+      if (slug) {
+        try {
+          const { getSpec } = await import("../src/lib/specs-table");
+          const specRow = await getSpec(job.workspace_id, slug);
+          hasBuiltWork = (specRow?.phases ?? []).some((p) => p.build_sha != null);
+        } catch (e) {
+          console.warn(
+            `${tag} hasBuiltWork probe failed for ${slug} — defaulting to true (safe: never recreate-fresh):`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+      const strategyInput = { headContainsMain, hasMergeCommits, hasBuiltWork, branchOnRemote };
+      const { chooseReconcile, chooseReconcileFallback } = await import("../src/lib/build-lane-reconcile");
+      const primary = chooseReconcile(strategyInput);
+      const fallback = chooseReconcileFallback(strategyInput);
       console.log(
-        `${tag} branch ${branch} is behind origin/main — rebasing onto origin/main BEFORE repo-wide checks (base-only advance; never force-pushes, never drops WIP)`,
+        `${tag} reconcile-onto-main on ${branch}: primary=${primary} fallback=${fallback} (hasMergeCommits=${hasMergeCommits}, hasBuiltWork=${hasBuiltWork}, branchOnRemote=${branchOnRemote})`,
       );
-      const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
-      if (rebase.code !== 0) {
-        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
-        // clean for the reap, then surface needs_attention — the human resolves the divergence
-        // rather than the box silently running repo-wide checks on a stale tree.
-        sh("git", ["rebase", "--abort"], { cwd: wt });
+
+      // Resolve the recreate-fresh reset target — a goal-member resets to the goal branch (which
+      // is itself reconciled with main by the goal-branch machinery), a one-off resets to
+      // origin/main. Only called when the fallback picks recreate-fresh.
+      const resolveResetTarget = async (): Promise<string> => {
+        if (!slug) return "origin/main";
+        try {
+          const { resolveGoalSlugForSpec } = await import("../src/lib/agent-jobs");
+          const gs = await resolveGoalSlugForSpec(job.workspace_id, slug);
+          if (gs) {
+            const goalBranch = `goal/${gs}`;
+            sh("git", ["fetch", "origin", goalBranch]);
+            return `origin/${goalBranch}`;
+          }
+        } catch (e) {
+          console.warn(
+            `${tag} recreate-fresh goal-slug resolution failed (falling back to origin/main):`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+        return "origin/main";
+      };
+
+      // Run one reconciliation strategy. Any conflict aborts cleanly (rebase --abort / merge
+      // --abort) so the tree is clean for the fallback. Never force-pushes, never drops WIP.
+      const runStrategy = async (
+        strat: "skip" | "merge" | "rebase" | "recreate-fresh",
+      ): Promise<{ ok: boolean; log: string }> => {
+        if (strat === "skip") return { ok: true, log: "" };
+        if (strat === "merge") {
+          const r = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+          if (r.code === 0) return { ok: true, log: "" };
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          return { ok: false, log: (r.out + r.err).slice(-1800) };
+        }
+        if (strat === "rebase") {
+          const r = sh("git", ["rebase", "origin/main"], { cwd: wt });
+          if (r.code === 0) return { ok: true, log: "" };
+          sh("git", ["rebase", "--abort"], { cwd: wt });
+          return { ok: false, log: (r.out + r.err).slice(-1800) };
+        }
+        // recreate-fresh: hard-reset the branch to the correct base. Guarded by
+        // chooseReconcileFallback (hasBuiltWork=false AND branchOnRemote=false — no work lost, no
+        // remote history rewrite).
+        const resetTarget = await resolveResetTarget();
+        const r = sh("git", ["reset", "--hard", resetTarget], { cwd: wt });
+        if (r.code !== 0) return { ok: false, log: (r.out + r.err).slice(-1800) };
+        console.log(
+          `${tag} recreate-fresh reset ${branch} to ${resetTarget} (no built work, not on origin — no work lost, no remote history rewritten)`,
+        );
+        return { ok: true, log: "" };
+      };
+
+      // ONE reconcile attempt per claim: try the primary, then the single fallback if it conflicts.
+      // conflictLogs accumulates the RAW git output from each FAILED attempt so Phase 2's file-list
+      // extractor sees the union of conflicting files across both strategies (primary+fallback).
+      const conflictLogs: string[] = [];
+      let outcome = await runStrategy(primary);
+      let usedStrategy: string = primary;
+      if (!outcome.ok) {
+        conflictLogs.push(`--- primary=${primary} ---\n${outcome.log}`);
+        console.log(
+          `${tag} reconcile-onto-main primary=${primary} conflicted on ${branch} — trying fallback=${fallback}`,
+        );
+        outcome = await runStrategy(fallback);
+        usedStrategy = fallback;
+      }
+      if (!outcome.ok) {
+        // Phase 2 — Escalate only a REAL conflict + NAME the conflicting files. Both strategies
+        // conflicted → genuine semantic divergence a fresh reset can't resolve. Parse the union of
+        // conflicting files across BOTH failed attempts (`build-lane-reconcile.extractConflictingFiles`),
+        // compose the operator-facing error via `formatReconcileConflictError`, and stamp
+        // `needs_attention_class = "reconcile_conflict"` so the classifier bypasses this row (the
+        // file list is the routing signal). The loop-guard's failedCount counts THIS park (a real,
+        // post-self-heal failure) but never counts a self-healable staleness (Phase 1's merge
+        // fallback / recreate-fresh means such a branch never parks at all).
+        conflictLogs.push(`--- fallback=${fallback} ---\n${outcome.log}`);
+        const combinedLog = conflictLogs.join("\n");
+        const { extractConflictingFiles, formatReconcileConflictError } = await import(
+          "../src/lib/build-lane-reconcile"
+        );
+        const files = extractConflictingFiles(combinedLog);
+        const errorMsg = formatReconcileConflictError({
+          strategies: [primary, fallback],
+          files,
+        });
         await update(job.id, {
           status: "needs_attention",
-          error:
-            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
+          needs_attention_class: "reconcile_conflict",
+          error: errorMsg,
+          log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):\n${combinedLog}`.slice(-2000),
         });
         console.error(
-          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
+          `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — parked needs_attention (reconcile_conflict; never silently dropped, never force-pushed)`,
         );
         chosenAccount.inFlight--;
         sh("git", ["worktree", "remove", "--force", wt]);
         return;
       }
       console.log(
-        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+        `${tag} reconcile-onto-main SUCCESS on ${branch} via ${usedStrategy} — base now contains origin/main (no WIP dropped)`,
       );
+
+      // node_modules is gitignored (absent in a fresh worktree). The unconditional symlink that makes
+      // tsc/builds work lives further down (~L23700), AFTER this reconcile block — so without this the
+      // gate below runs `npx tsc` in a worktree with no `typescript`, npx resolves the DECOY npm "tsc"
+      // package ("This is not the tsc command you are looking for", exit 1), and the gate misreads that
+      // as base_poison — parking a perfectly healthy build and (falsely) blaming a broken main. Symlink
+      // here so the gate invokes the REAL compiler; -sfn is idempotent with the later symlink.
+      sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+
+      // tsc-gate the RECONCILED tree BEFORE the claude session runs. If origin/main itself is
+      // broken (base poison — the coaching-guidance #8 shape: a sibling PR merged a break to main
+      // and now every downstream branch inherits it), park with the tsc output so the operator
+      // sees the real reason instead of an inscrutable downstream claude-run failure. This is the
+      // "tsc-gate the reconciled tree before running repo-wide checks" the spec's Phase 1
+      // "What" section calls out — cheap when the base is green, saves an entire claude session's
+      // worth of tokens when it isn't.
+      const tscGate = await shAsync("npx", ["tsc", "--noEmit"], {
+        timeout: 10 * 60 * 1000,
+        cwd: wt,
+      });
+      if (tscGate.code !== 0) {
+        // Base-poison: origin/main itself fails tsc — the fault is main, not the spec. Stamp a
+        // distinct class so operators can triage it separately from a spec-caused reconcile_conflict
+        // (both are POST-self-heal parks that count toward the escort loop-guard, but their remedy
+        // is different: base_poison needs a main hotfix, reconcile_conflict needs a spec-level merge).
+        await update(job.id, {
+          status: "needs_attention",
+          needs_attention_class: "base_poison",
+          error:
+            "reconciled tree fails tsc — origin/main is broken (base poison). Refusing to run repo-wide checks on a broken base.",
+          log_tail: `reconcile-tsc-gate (post-${usedStrategy}):\n${(tscGate.out + tscGate.err).slice(-1800)}`.slice(-2000),
+        });
+        console.error(
+          `${tag} reconcile tsc-gate FAILED on ${branch} — parked needs_attention (base_poison; main is broken)`,
+        );
+        chosenAccount.inFlight--;
+        sh("git", ["worktree", "remove", "--force", wt]);
+        return;
+      }
+      console.log(`${tag} reconcile tsc-gate CLEAN on ${branch} — proceeding to build`);
     }
   }
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
@@ -24282,6 +24632,22 @@ async function main() {
     }
   })();
 
+  // Deploy-time node_ancestry re-sync (claim-rpc-kill-switch-enforcement Phase 1): the box
+  // worker restarts after a self-update, so recomputing the DB mirror of the canonical node
+  // registry here keeps public.claim_agent_job's kill-switch cascade in sync with any newly-added
+  // MONITORED_LOOPS row or KIND_OWNER_FALLBACK entry. Fail-open by design — a failed sync just
+  // means the RPC sees an out-of-date mirror; an unregistered kind falls through to the claim
+  // path anyway. Fire-and-forget, best-effort — must never block the worker loop.
+  void (async () => {
+    try {
+      const { syncNodeAncestry } = await import("../src/lib/control-tower/node-ancestry-sync");
+      const r = await syncNodeAncestry();
+      console.log(`[node-ancestry-sync] ${r.detail}`);
+    } catch (e) {
+      console.warn("[node-ancestry-sync] skipped:", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Vercel Ignored-Build-Step auto-heal at startup (regression-of: per-build-vercel-preview-deploys):
   // re-assert the CLAUDE_PREVIEW_IGNORE_COMMAND override so a manual revert in the Vercel dashboard
   // (or any other path that drifts it) is healed by the next box restart. The helper is idempotent —
@@ -25024,6 +25390,38 @@ async function main() {
         if (await claimHeldForUnreviewedSpec(job)) continue;
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
+      }
+      // claim-rpc-kill-switch-enforcement Phase 2 — after every per-kind claim loop has run,
+      // ask public.claim_agent_job_diag which queued rows the current kill_switches state
+      // suppressed this tick. For each unique agent kind returned, write one agent-kind
+      // heartbeat (loop_id = `agent:<kind>`) with produced.blocked_off + offBy + scope so
+      // evalAgentKind can render amber `off by <ancestor> (<scope>)` instead of a false
+      // green-idle or false red. Best-effort: a diag/heartbeat failure must never break
+      // the poll loop. The RPC is a cheap indexed read (LIMIT 20) that returns [] when no
+      // switches are set; skipping the whole path on an empty queue (hasClaimableJob=false)
+      // above keeps the cost off idle boxes.
+      try {
+        const { data: diag } = await db.rpc("claim_agent_job_diag", { p_kinds: null });
+        const rows = Array.isArray(diag)
+          ? (diag as Array<{ kind?: unknown; suppressed_by?: unknown; scope?: unknown }>)
+          : [];
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const kind = typeof r?.kind === "string" ? r.kind : null;
+          const offBy = typeof r?.suppressed_by === "string" ? r.suppressed_by : null;
+          const scope = typeof r?.scope === "string" ? r.scope : null;
+          if (!kind || !offBy || !scope) continue;
+          if (seen.has(kind)) continue;
+          seen.add(kind);
+          await writeLoopHeartbeat(
+            `agent:${kind}`,
+            true,
+            { blocked_off: true, offBy, scope },
+            0,
+          );
+        }
+      } catch (e) {
+        console.error("[claim-diag] suppressed-claim heartbeats skipped:", e instanceof Error ? e.message : e);
       }
       } // end if (!draining) — queue-restart drain skips all claims above
       // Drained + idle + nothing to pull (already current) past the safety age → clear so we don't strand.

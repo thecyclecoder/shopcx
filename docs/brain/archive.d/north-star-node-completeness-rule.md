@@ -1,0 +1,1 @@
+- **North-star: a node without owner + switch + heartbeat is incomplete** · verified 2026-07-12 · → [[../operational-rules]]

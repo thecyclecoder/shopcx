@@ -29,6 +29,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { loadAutonomyMap, isAutoApprover } from "@/lib/agents/approval-router";
+import { readEffectiveOnOff } from "@/lib/control-tower/legacy-switch-compat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -176,6 +177,17 @@ export async function executeApproveVoiceAngle(
   const { workspaceId, specSlug, payload } = opts;
   const deps = { ...defaultDeps, ...(opts.deps ?? {}) };
   try {
+    // migrate-ad-hoc-kill-switches-to-resolver Phase 1 — the executor reads via the shim: writes
+    // to `product_ad_angles.is_active` (the ad-hoc column) still stamp at line ~210 below, but
+    // BEFORE any campaign insert or angle flip we consult the union. If the growth-director
+    // cascade is OFF, refuse execution — the write is deferred until the cascade clears. Legacy
+    // fn returns `true` because voice-angle approval has no pre-existing per-workflow ad-hoc
+    // column; only the resolver can pause this executor.
+    const cascade = await readEffectiveOnOff("growth-director", async () => true);
+    if (cascade.off) {
+      const attribution = `${cascade.source}${cascade.offBy ? `:${cascade.offBy}` : ""}`;
+      return { ok: false, reason: `kill_switch_off:${attribution}` };
+    }
     const { data: angleRow, error: angleErr } = await admin
       .from("product_ad_angles")
       .select("id, status, product_id, hook_one_liner")

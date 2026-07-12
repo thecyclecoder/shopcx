@@ -40,7 +40,9 @@ import { coachAgent } from "@/lib/agents/agent-instructions";
 import { postDirectorMessage } from "@/lib/agents/director-board";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { getPersona } from "@/lib/agents/personas";
-import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+// control-tower-canonical-node-registry P2: routing owner comes from the canonical registry so
+// grader owner-scoping and the approval router agree on every kind by construction.
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 
 /** The director (Ada) + an agent's persona name for board lines. */
 function nm(kind: string): string {
@@ -336,7 +338,11 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   regression: { name: "Remi", criteria: "caught a real regression · correctly dismissed flaky ones · the authored fix spec is sound" },
   db_health: { name: "Devi", criteria: "correct EXPLAIN diagnosis · the index/fix actually addresses the slow query · no foreign/sunset false-positives" },
   "spec-test": { name: "Vera", criteria: "caught real drift / false-✅ · no false alarms · verification matched live prod" },
-  "spec-review": { name: "Vale", criteria: "caught real spec defects (mangled phases · missing owner/parent/blockers · missing Verification) · no false-fix calls on sound specs · diagnoses match the markdown (Phase 3: QUALITY only — pass/needs_fix; planned/deferred is Ada's call, not Vale's)" },
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — Vale (the LLM spec-review lane)
+  // is RETIRED. The deterministic spec-review gate ([[spec-review-gate]]) runs synchronously at authoring,
+  // so there is no LLM verdict to grade. `spec-review` is intentionally OMITTED from AGENT_RUBRICS →
+  // dropped from GRADEABLE_KINDS → dropped from gradeableKindsForFunction('platform'). The gate itself is
+  // "monitored infra" ([[control-tower/registry]] MONITORED_LOOPS), not a graded worker.
   "migration-fix": { name: "Mira", criteria: "migration applied/repaired correctly · audit cleared · no data loss" },
   "pr-resolve": { name: "Pax", criteria: "conflicts resolved without lost work · clean rebase · queue left mergeable" },
   fold: { name: "Fenn", criteria: "folded into the right brain pages · cross-links correct · archived cleanly" },
@@ -356,14 +362,14 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   // docs/brain/libraries/agent-grader.md § who-grades-whom.
   "ticket-improve": { name: "Sol", criteria: "the ticket genuinely improved (clearer, correctly categorized/tagged) · no meaning changed · customer voice preserved" },
   // ticket-analyzer-becomes-box-agent-under-june Phase 2 — the per-ticket QC grader box lane
-  // (kind='ticket-analyze', owner='cs'). ownerFunctionForKind('ticket-analyze')='cs' via the
-  // Control Tower registry, so gradeableKindsForFunction('cs') picks this up and the CS Director's
-  // sweep grades every concluded verdict against this rubric.
+  // (kind='ticket-analyze', owner='cs'). Registry node `agent:ticket-analyze` (owner=cs), so
+  // gradeableKindsForFunction('cs') picks this up and the CS Director's sweep grades every
+  // concluded verdict against this rubric.
   "ticket-analyze": { name: "Cora", criteria: "score matched the AI's real conversation quality · issues are concrete + type-correct · severity actions fired only on real severe issues (no false-escalate on positive close) · no analyzer_locked/do_not_reply/ai_disabled/agent_intervened violations · reasoning cites the transcript" },
   // prompt-auto-review-becomes-box-agent-under-june Phase 2 — Prue reviews proposed sonnet_prompts as a
-  // supervised box-session agent under June (CS Director). ownerFunctionForKind('prompt-review')==='cs'
-  // (Control Tower registry `agent:prompt-review`), so gradeableKindsForFunction('cs') picks this up
-  // and the CS director sweep grades it — same discipline as ticket-improve / ticket-analyze.
+  // supervised box-session agent under June (CS Director). Registry node `agent:prompt-review`
+  // (owner=cs), so gradeableKindsForFunction('cs') picks this up and the CS director sweep grades it —
+  // same discipline as ticket-improve / ticket-analyze.
   "prompt-review": { name: "Prue", criteria: "correct decision per proposal (accept sound rules · reject weak/redundant/voice-violating ones · supersede-not-delete when replacing an approved rule) · well-grounded reasoning citing similar prompts / policies / voice rules · calibrated confidence (no tentative accepts · no low-confidence noise) · never re-routes to a human queue" },
 };
 
@@ -372,23 +378,24 @@ export const GRADEABLE_KINDS = Object.keys(AGENT_RUBRICS);
 
 /**
  * The rubric-backed kinds a given DIRECTOR's grading sweep is allowed to grade — the ones whose
- * owning function in the Control Tower registry (via [[approval-inbox]] `ownerFunctionForKind`) is
- * that director's function. Enforces the north-star cascade rule "a director grades only its own
- * charge" ([[../specs/director-grades-only-own-charge]], [[../operational-rules]] § North star):
+ * owning function resolves through the canonical node registry
+ * ([[../control-tower/node-registry]] `resolveNodeOwner`) to that director's function. Enforces
+ * the north-star cascade rule "a director grades only its own charge"
+ * ([[../specs/director-grades-only-own-charge]], [[../operational-rules]] § North star):
  * a supervisor owns the layer BELOW it, not adjacent departments. So Ada (`fn='platform'`) grades
  * the platform-owned workers (build/fold/spec-test/repair/pr-resolve/security-review/spec-review/
  * plan/dev-ask/spec-chat/coverage-register/db_health) but NOT the CS/CMO/Retention/Growth workers
  * (ticket-improve, ticket-analyze, product-seed, migration-fix, storefront-optimizer). A kind
- * unmapped by `ownerFunctionForKind` is treated as NOT owned (never graded by a reaching-in
- * director) — a cross-function worker stays UNGRADED until its own director runs its own sweep.
- * Grading is a DIRECTOR-tier supervisory function; no director → no worker grading. Never a
- * CEO reach-in fail-safe (ungraded-until-their-director-is-live is the intended behavior).
+ * unmapped by the registry is treated as NOT owned (never graded by a reaching-in director) — a
+ * cross-function worker stays UNGRADED until its own director runs its own sweep. Grading is a
+ * DIRECTOR-tier supervisory function; no director → no worker grading. Never a CEO reach-in
+ * fail-safe (ungraded-until-their-director-is-live is the intended behavior).
  *
- * Mirrors [[approval-inbox]] `ownerFunctionForKind` — the same owner-scoping the approval router
- * already enforces. Same source of truth (Control Tower registry), no second copy.
+ * control-tower-canonical-node-registry P2 — grader owner-scoping and the approval router now
+ * consult the SAME registry, so a cross-function worker's owner cannot diverge between the two.
  */
 export function gradeableKindsForFunction(fn: string): string[] {
-  return GRADEABLE_KINDS.filter((k) => ownerFunctionForKind(k) === fn);
+  return GRADEABLE_KINDS.filter((k) => resolveNodeOwner(k) === fn);
 }
 
 export interface AgentGradeResult {
@@ -845,14 +852,21 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
   // keeps the window on the recent tail instead of the long-graded head.
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, created_at, kind, status, error")
+    .select("id, created_at, kind, status, error, claude_session_id")
     .eq("workspace_id", workspaceId)
     .in("kind", ownedKinds)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
     .order("created_at", { ascending: false })
     .limit(limit);
-  return ((jobs as UngradedJob[]) || [])
+  return ((jobs as Array<UngradedJob & { claude_session_id: string | null }>) || [])
     .filter((j) => !gradedJobs.has(j.id))
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — a `spec-test` row
+    // whose deterministic runner resolved every check never spawned a Max session (claude_session_id
+    // stays null in that path — scripts/builder-worker.ts runSpecTestJob). There is no LLM output
+    // to score against Vera's rubric, so it is MONITORED (via the Control Tower registry loop
+    // `deterministic-spec-check-runner`), NOT GRADED. Filter it out here so the grader's session
+    // budget stays on the real LLM residuals.
+    .filter((j) => !(j.kind === "spec-test" && !j.claude_session_id))
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
@@ -1267,10 +1281,10 @@ export async function detectGradeDropCoaching(opts: { workspaceId: string; agent
   // director-grades-only-own-charge: a director coaches ONLY the workers its function owns. If a stale
   // caller iterates past a cross-function kind (e.g. platform-director-cron before Phase 1's loop-scope
   // fix), refuse to coach — a slip in a CS/CMO/Retention/Growth worker never triggers THIS director's
-  // fix-spec + coaching. An unmapped kind (`ownerFunctionForKind` returns null) is also NOT owned — no
+  // fix-spec + coaching. An unmapped kind (`resolveNodeOwner` returns null) is also NOT owned — no
   // reach-in. `computeAgentRollup` is still returned (so a dashboard view of "what would slip" is
   // faithful — this function is the ACTION gate, not a rollup gate).
-  if (ownerFunctionForKind(opts.agentKind) !== fn) {
+  if (resolveNodeOwner(opts.agentKind) !== fn) {
     const rollup: AgentRollup = { agentKind: opts.agentKind, count: 0, average: null, priorAverage: null, drop: null };
     return { agentKind: opts.agentKind, rollup, slipped: false, coached: false, reason: "not_owned_by_director" };
   }
@@ -1451,7 +1465,7 @@ export async function applyBoxCoaching(opts: {
   // detectGradeDropCoaching already enforces this on the enqueue side; belt-and-suspenders here so a
   // stale `agent-coach` job queued before the Phase-1 fix (or a hand-rolled apply) can't quietly
   // write a cross-function learning through PLATFORM.
-  if (ownerFunctionForKind(opts.agentKind) !== fn) {
+  if (resolveNodeOwner(opts.agentKind) !== fn) {
     return { ok: false, reason: "not_owned_by_director" };
   }
   const rollup = await computeAgentRollup(admin, opts.workspaceId, opts.agentKind);

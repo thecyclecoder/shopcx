@@ -22,6 +22,7 @@ import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
+import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-products";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -294,12 +295,23 @@ export async function runAdCreativeLoop(
 
   const targets: Array<{ productId: string; count: number }> = [];
   if (opts.productId) {
-    targets.push({ productId: opts.productId, count: Math.min(opts.count ?? binFloor, MAX_PER_JOB) });
+    // Per-product path (the cadence's per-product job). Gate the single target on
+    // is_advertised so a stray productId snuck into an ad-creative job never yields creatives
+    // for an attachment SKU. Attachment SKU → return zero targets, no work.
+    const advertised = await isAdvertisedProduct(admin, opts.productId);
+    if (advertised) {
+      targets.push({ productId: opts.productId, count: Math.min(opts.count ?? binFloor, MAX_PER_JOB) });
+    }
   } else {
     // Every product that HAS ad intelligence (an angle row), topped up to the floor.
     const { data: angleProducts } = await admin
       .from("product_ad_angles").select("product_id").eq("workspace_id", workspaceId);
-    const productIds = [...new Set(((angleProducts ?? []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+    const angleProductIds = [...new Set(((angleProducts ?? []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+    // Hero-product advertising gate ([[../../libraries/advertised-products]]): a stray
+    // product_ad_angles row for an attachment SKU never earns Dahlia work — only rows in
+    // listAdvertisedProductIds survive the intersect. Empty gate ⇒ no targets, no fallback.
+    const advertisedIds = new Set(await listAdvertisedProductIds(admin, workspaceId));
+    const productIds = angleProductIds.filter((id) => advertisedIds.has(id));
     for (const productId of productIds) {
       const depth = await currentBinDepth(admin, workspaceId, productId);
       const deficit = binFloor - depth;

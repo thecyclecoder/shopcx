@@ -22,6 +22,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import { DEFAULT_BIN_FLOOR } from "@/lib/ads/creative-agent";
+import { listAdvertisedProductIds } from "@/lib/advertised-products";
 import { ACTIVE_MEDIA_BUYER_JOB_STATUSES, utcDayStartIso } from "@/lib/inngest/media-buyer-cadence";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -39,6 +40,17 @@ interface AgentJobRow {
 export interface DispatchAdCreativeCadenceResult {
   evaluated: number;
   dispatched: number;
+}
+
+/**
+ * Stable per-product `agent_jobs.spec_slug` for an ad-creative job. The column is
+ * `NOT NULL`, so an omitted value blocks the insert (the 2026-07-12 outage,
+ * signature `vercel:731cb5703f5f40b6`). One slug per product keeps
+ * `agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)` useful for the
+ * Roadmap rollups and gives Dahlia's job a durable subject on the dashboard.
+ */
+export function adCreativeSpecSlug(productId: string): string {
+  return `ad-creative:${productId}`;
 }
 
 function readInstructionsProduct(instructions: string | null): string | null {
@@ -68,7 +80,13 @@ export async function dispatchAdCreativeCadence(
     .select("product_id")
     .eq("workspace_id", workspaceId);
   if (angErr) throw new Error(`product_ad_angles read failed: ${angErr.message}`);
-  const productIds = [...new Set(((angleRows || []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+  const angleProductIds = [...new Set(((angleRows || []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+  if (!angleProductIds.length) return { evaluated: 0, dispatched: 0 };
+  // Hero-product advertising gate ([[../libraries/advertised-products]]): keep only products the
+  // workspace actually advertises (products.is_advertised=true) — attachment SKUs (Tumbler, Sleep
+  // Gummies, …) never enter Dahlia's cadence even when a stray product_ad_angles row exists for them.
+  const advertisedIds = new Set(await listAdvertisedProductIds(admin, workspaceId));
+  const productIds = angleProductIds.filter((id) => advertisedIds.has(id));
   if (!productIds.length) return { evaluated: 0, dispatched: 0 };
 
   // Bin depth per product: which ready-to-test campaigns belong to each product.
@@ -107,6 +125,7 @@ export async function dispatchAdCreativeCadence(
     if (covered.has(productId)) continue;
     const { error: insErr } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
+      spec_slug: adCreativeSpecSlug(productId),
       kind: "ad-creative",
       instructions: JSON.stringify({ product_id: productId, count: deficit }),
     });

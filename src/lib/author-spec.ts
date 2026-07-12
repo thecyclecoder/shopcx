@@ -28,9 +28,15 @@ import { parseAuthoredSpecMarkdown, type Phase, type SpecStatus } from "@/lib/br
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
-import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
+import {
+  upsertPhaseChecks,
+  parseVerificationBlobToChecks,
+  validateExecutableCheck,
+  type SpecPhaseCheckInput,
+  type SpecPhaseCheckExecKind,
+} from "@/lib/spec-phase-checks-table";
 import { resolveFunctionMandates, type FunctionMandate } from "@/lib/function-mandates";
-import { inngest } from "@/lib/inngest/client";
+import { assertSpecReviewGate } from "@/lib/spec-review-gate";
 
 /** A phase heading at H2 or (inside `## Phases`) H3. Same rule parseSpec uses. */
 function isPhaseHeading(l: string): boolean {
@@ -521,6 +527,81 @@ export function assertEveryPhaseHasChecks(
 }
 
 /**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate that lifts
+ * "the deterministic runner CAN run machine checks" into "every phase HAS >=1 machine-runnable check."
+ * Thrown when a phase's verification carries only prose / only `needs_human` rows — nothing the runner
+ * can execute. Same "fail-loud-at-the-parse-step" rail as `MissingVerificationError`; both author paths
+ * (`authorSpecRowStructured` + `authorSpecRowFromMarkdown`) run `assertEveryPhaseHasMachineCheck` before
+ * the DB write, so the invariant holds for every writer that funnels through the chokepoint (planner,
+ * spec-chat, ~17 box-worker author lanes, request-fix). A spec whose phase has zero machine-runnable
+ * checks never lands in `public.specs` / `public.spec_phases`.
+ */
+export class MissingMachineCheckError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingMachineCheckError";
+  }
+}
+
+/**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 1 — reject any phase whose structured
+ * checks contain zero VALID machine-runnable rows. A phase passes iff at least one check declares an
+ * auto-testable `exec_kind` (tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build)
+ * whose (kind, params) pair passes `validateExecutableCheck`. `needs_human` rows may be present as
+ * EXTRA (advisory / subjective / drift) but never as the SOLE verification — that's the exact "prose
+ * bullet, nothing to run" shape the retire-Vale / cs-director `npm test` incidents left behind.
+ *
+ * Runs AFTER `assertEveryPhaseHasChecks` in both author paths so the >=1-check gate still fires first
+ * on a fully-empty phase; this gate catches "the checks exist but none is executable." Exported so a
+ * caller (Improve tab, planner, request-fix inline) can pre-flight the same predicate before
+ * proposing a re-author. Throws `MissingMachineCheckError` with slug + offending phase(s) + the exact
+ * reason each phase failed (either "zero auto-testable checks" or the first failing
+ * `validateExecutableCheck` reason so the author sees WHY the params were rejected — e.g.
+ * `unit_test.script "test" is not a package.json script`).
+ */
+export function assertEveryPhaseHasMachineCheck(
+  slug: string,
+  phases: { title: string; checks: SpecPhaseCheckInput[] }[],
+  ctx?: { packageScripts?: ReadonlySet<string> },
+): void {
+  const failures = phases
+    .map((p, i) => {
+      const reasons: string[] = [];
+      let ok = false;
+      for (const c of p.checks) {
+        const kind: SpecPhaseCheckExecKind | null | undefined = c.exec_kind;
+        if (!kind || kind === "needs_human") {
+          // Not machine-runnable. Explicit needs_human rows are legal as EXTRA — they just cannot
+          // be the sole verification, so keep looking.
+          continue;
+        }
+        const v = validateExecutableCheck({ exec_kind: kind, params: c.params ?? null }, ctx);
+        if (v.valid) { ok = true; break; }
+        reasons.push(`check ${c.position}: ${v.reason}`);
+      }
+      return { pos: i + 1, title: p.title, ok, reasons };
+    })
+    .filter((p) => !p.ok);
+  if (failures.length) {
+    const which = failures
+      .map((f) => {
+        const head = `phase ${f.pos}${f.title ? ` (${f.title})` : ""}`;
+        if (f.reasons.length) return `${head} — ${f.reasons.join("; ")}`;
+        return `${head} — zero auto-testable checks (only prose / only needs_human)`;
+      })
+      .join("; ");
+    throw new MissingMachineCheckError(
+      `spec ${slug} ${failures.length === 1 ? "has a phase" : "has phases"} with no machine-runnable ` +
+        `verification — ${which}. Every phase needs >=1 check with a valid \`exec_kind\` ` +
+        `(tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build) so the deterministic ` +
+        `spec-check runner can actually execute the acceptance criterion. \`needs_human\` rows are allowed ` +
+        `as EXTRA advisory / subjective checks but never the sole verification ` +
+        `(every-spec-writer-authors-machine-runnable-verifications Phase 1).`,
+    );
+  }
+}
+
+/**
  * Reject any spec / phase whose plain-language `why` or `what` is empty (or a lint failure). Throws
  * `MissingIntentError` (loud, with the slug + which field + which phase). Called by
  * `authorSpecRowStructured` BEFORE the DB write, mirroring `assertEveryPhaseHasVerification` — a spec that
@@ -685,6 +766,33 @@ export function extractIntentHeaders(raw: string): { why: string | null; what: s
   return { why: collect("Why"), what: collect("What") };
 }
 
+/**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 2 — extract a `**Human-review:**` header
+ * from the markdown body. Optional; absent → null. Multi-line paragraphs are absorbed until the next
+ * `**Header:**` / heading / blank line (same shape as `extractIntentHeaders`). The extracted note is
+ * OPTIONAL and NEVER blocks author / fold / promote / merge — it's the founder-facing advisory prompt.
+ * A caller's `opts.humanReview` still wins (undefined → try the markdown header; null → clear it).
+ */
+export function extractHumanReviewHeader(raw: string): string | null {
+  const lines = raw.split("\n");
+  const re = /^\*\*Human-review:\*\*\s*(.*)$/i;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(re);
+    if (!m) continue;
+    let text = m[1].trim();
+    for (let k = i + 1; k < lines.length; k++) {
+      const l = lines[k];
+      if (!l.trim()) break;
+      if (/^\*\*[A-Za-z][^:*]{0,40}:\*\*/.test(l)) break;
+      if (/^#{1,6}\s+/.test(l)) break;
+      text = `${text} ${l.trim()}`;
+    }
+    const cleaned = cleanInline(text);
+    return cleaned || null;
+  }
+  return null;
+}
+
 /** no-spec-parent — `**Related-spec:** <slug>` (or `[[<slug>]]`) line: the origin-spec LINK a fix-spec
  *  points at (persists to `specs.related_spec`), so a self-healing agent references the fixed spec WITHOUT
  *  putting it in the parent. Returns the slug (wikilink brackets/`../specs/` stripped), or null. */
@@ -779,6 +887,13 @@ export interface AuthorSpecOpts {
    *  (Phase 3 makes it rare rather than routine, but never invisible). Ignored errors — the auto-anchor
    *  itself still applies. */
   onAutoAnchor?: (result: AutoAnchorResult) => void;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking founder-
+   *  facing advisory note (the "eyeball this after ship" prompt). Persists to `specs.human_review`.
+   *  When set on the structured path, wins over any `spec.human_review` on the input. On the markdown
+   *  path, wins over the extracted `**Human-review:**` header. `undefined` → parse the markdown header
+   *  (markdown path) or preserve the stored value (structured path); explicit `null` clears it.
+   *  NEVER read by the fold gate, promote gate, or deterministic spec-check runner. */
+  humanReview?: string | null;
 }
 
 /** A structured phase a caller hands to `authorSpecRowStructured` — title + body + the verification checklist
@@ -818,6 +933,12 @@ export interface StructuredSpecInput {
   /** pm-structured-intent-and-refs Phase 1 — plain-language WHAT changes when this spec ships. Must be
    *  non-empty. */
   what: string;
+  /** every-spec-writer-authors-machine-runnable-verifications Phase 2 — OPTIONAL, non-blocking
+   *  founder-facing advisory note ("after ship, open /dashboard/x and confirm the layout reads
+   *  right"). Absence is fine — a spec ships without one by default. Machine-runnable
+   *  `spec_phase_checks` are the sole ship gate; this note NEVER gates fold/promote/merge and is
+   *  never read by the deterministic spec-check runner. */
+  human_review?: string | null;
 }
 
 /** The content shape a re-author compares against the existing row to decide "did the content change?" —
@@ -1062,6 +1183,15 @@ export async function authorSpecRowStructured(
     slug,
     spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
   );
+  // every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate. A phase whose
+  // structured checks carry only prose / only `needs_human` rows is REJECTED with MissingMachineCheckError.
+  // Runs at the single SDK chokepoint so EVERY structured writer (planner, request-fix, box-worker author
+  // lanes) inherits the invariant — no path can land a spec whose acceptance criteria the deterministic
+  // runner cannot execute. `needs_human` rows may be present as EXTRA but never the sole verification.
+  assertEveryPhaseHasMachineCheck(
+    slug,
+    spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
+  );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -1156,6 +1286,27 @@ export async function authorSpecRowStructured(
     // gates) so a one-off spec never lands with a goal parent Vale will bounce forever. Trusts a declared
     // typed parent / bound milestoneId (see assertValidParent).
     assertValidParent(spec.parent, { milestoneId: opts.milestoneId, parentKind: effectiveParentKind });
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 1 — the DETERMINISTIC spec-review
+    // gate that replaces the Vale LLM lane. Runs the full mechanical checklist Vale used to run (phase-
+    // heading contiguity, Owner resolves to a functions page, Parent resolves via DB lookup, Blocked-by
+    // slugs resolve + acyclic, customer_id table companion plan) and throws `SpecReviewGateError` with
+    // the exact named failure(s). Runs BEFORE `upsertSpec` so a malformed spec never reaches
+    // `public.specs`. See [[spec-review-gate]].
+    await assertSpecReviewGate(workspaceId, {
+      slug,
+      owner: normalizeOwnerSlug(spec.owner),
+      parent: spec.parent,
+      parent_kind: effectiveParentKind ?? null,
+      parent_ref: effectiveParentRef ?? null,
+      blocked_by: spec.blocked_by ?? [],
+      milestone_id: opts.milestoneId ?? null,
+      phases: spec.phases.map((p, i) => ({
+        position: i + 1,
+        title: p.title,
+        body: p.body,
+        verification: phaseBodies[i].verification,
+      })),
+    });
     const phases: SpecPhaseInput[] = spec.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -1200,6 +1351,15 @@ export async function authorSpecRowStructured(
         // pair (else fall through to the caller's typed values).
         parent_kind: effectiveParentKind ?? null,
         parent_ref: effectiveParentRef ?? null,
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — persist the OPTIONAL,
+        // non-blocking advisory note. Precedence: `opts.humanReview` (planner / director surfaces that
+        // hold the note separately from the spec body) beats `spec.human_review` (structured input on
+        // the spec itself). `undefined` on both preserves the stored value; explicit `null` clears it;
+        // a string writes through. NEVER gated on by fold/promote/spec-check runner.
+        human_review:
+          opts.humanReview !== undefined ? opts.humanReview
+          : spec.human_review !== undefined ? spec.human_review
+          : undefined,
         // auto-build-default-on: an autonomously-authored spec auto-builds by DEFAULT — only an EXPLICIT
         // `autoBuild: false` parks it (request-fix + pre-merge-fix opt out deliberately; Pia's planner
         // decomposition + spec-chat + director-authored specs pass nothing → on). Omitting it used to default
@@ -1268,14 +1428,10 @@ export async function authorSpecRowStructured(
         e instanceof Error ? e.message : e,
       );
     }
-    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (a fresh
-    // spec always lands in `in_review`; a re-author already re-opens through the writer above). The
-    // consumer routes through the SAME gated `enqueueSpecReviewIfDue`, so a re-author of already-passed
-    // content that leaves `vale_pass=true` no-ops for free (no Max session). Errors swallowed — the 15-min
-    // cron backstop covers a dropped send.
-    void inngest
-      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
-      .catch(() => {});
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the reactive
+    // `spec-review/spec-mutated` kick to Vale's LLM lane is retired. The deterministic gate
+    // ([[spec-review-gate]]) has already run synchronously above; there is no downstream LLM lane
+    // to notify. Nothing to send.
     return true;
   } catch (e) {
     // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
@@ -1333,6 +1489,21 @@ export async function authorSpecRowFromMarkdown(
   assertEveryPhaseHasVerification(slug, phaseBodies);
   // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body (the db-index-orders class).
   assertEveryPhaseHasBody(slug, phaseBodies);
+  // every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate for the markdown
+  // author path. Derive each phase's structured checks from its `## Verification` blob and reject the write
+  // when no check is machine-runnable. `parseVerificationBlobToChecks` stamps un-typed prose lines with
+  // `exec_kind='needs_human'` (the safe deterministic-runner default), so a prose-only markdown authoring
+  // fails LOUD with MissingMachineCheckError here — same invariant the structured path enforces below via
+  // `assertEveryPhaseHasMachineCheck`. Phase 2 rewrites the writer prompts + submit-spec skill to emit typed
+  // checks; Phase 3 backfills existing prose to typed. Until those land, a markdown writer that carries
+  // only prose is rejected at the same rail — no writer can land a prose-only spec.
+  {
+    const mdPhaseChecks = phaseBodies.map((p) => parseVerificationBlobToChecks(p.verification));
+    assertEveryPhaseHasMachineCheck(
+      slug,
+      phaseBodies.map((p, i) => ({ title: p.title, checks: mdPhaseChecks[i] })),
+    );
+  }
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time. If the incoming markdown has no
   // `**Brain refs:**` line, scan the body for src/ files + tables + wikilinks it already names and
@@ -1409,6 +1580,26 @@ export async function authorSpecRowFromMarkdown(
     // → author returns false (the spec never lands), same as any parse defect on this soft path.
     assertValidParent(mdParent, { milestoneId: opts.milestoneId, parentKind: mdEffectiveParentKind });
 
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 1 — deterministic spec-review gate
+    // for the markdown path. Same checklist as the structured path (phase-heading contiguity, Owner /
+    // Parent / Blocked-by resolution, customer_id companion). Runs BEFORE `upsertSpec` so a malformed
+    // markdown-authored spec is rejected at the same rail as the shape gates above.
+    await assertSpecReviewGate(workspaceId, {
+      slug,
+      owner: normalizeOwnerSlug(card.owner ?? ""),
+      parent: mdParent,
+      parent_kind: mdEffectiveParentKind ?? null,
+      parent_ref: mdEffectiveParentRef ?? null,
+      blocked_by: (card.blockedBy ?? []).map((b) => b.slug),
+      milestone_id: opts.milestoneId ?? null,
+      phases: card.phases.map((p, i) => ({
+        position: i + 1,
+        title: p.title,
+        body: phaseBodies[i]?.body ?? "",
+        verification: phaseBodies[i]?.verification ?? null,
+      })),
+    });
+
     const phases: SpecPhaseInput[] = card.phases.map((p, i) => ({
       position: i + 1,
       title: p.title,
@@ -1455,6 +1646,14 @@ export async function authorSpecRowFromMarkdown(
         // caller's typed values (else null).
         parent_kind: mdEffectiveParentKind ?? null,
         parent_ref: mdEffectiveParentRef ?? null,
+        // every-spec-writer-authors-machine-runnable-verifications Phase 2 — persist the OPTIONAL,
+        // non-blocking founder-facing advisory note. Precedence: `opts.humanReview` wins (explicit
+        // caller decision, including `null` to CLEAR); else parse the `**Human-review:**` header from
+        // the markdown body (how a submit-spec / director surface would emit it). `undefined` in
+        // both places → preserve the stored value. NEVER gated on.
+        human_review:
+          opts.humanReview !== undefined ? opts.humanReview
+          : (extractHumanReviewHeader(markdown) ?? undefined),
         // auto-build-default-on: HONOR the markdown parser's documented contract — "**Auto-build:** absent = on;
         // only off/no/false/manual/disabled flips it false" (brain-roadmap.ts ~307). `card.autoBuild` is
         // `undefined` when no line is present, which the parser MEANS as "on" — so `!== false` (undefined → on,
@@ -1498,12 +1697,9 @@ export async function authorSpecRowFromMarkdown(
         verification: phaseBodies[i]?.verification ?? null,
       })),
     });
-    // vale-reactive-spec-review Phase 2: fire-and-forget kick Vale on any authoring chokepoint (same
-    // rationale as the structured path — the gated helper no-ops if the current content already carries
-    // vale_pass=true). Errors swallowed — the 15-min cron backstop covers a dropped send.
-    void inngest
-      .send({ name: "spec-review/spec-mutated", data: { workspace_id: workspaceId } })
-      .catch(() => {});
+    // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the reactive kick to Vale's
+    // LLM lane is retired. The deterministic gate ([[spec-review-gate]]) has already run synchronously
+    // above; no downstream LLM lane to notify.
     return true;
   } catch (e) {
     // repair-author-write-surface-real-error-not-swallow Phase 2 — RE-THROW the caught error rather
