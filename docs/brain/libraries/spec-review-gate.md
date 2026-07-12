@@ -100,6 +100,17 @@ Run: `npm run test:spec-review-gate` (= `tsx --test src/lib/spec-review-gate.tes
 - **Cycle detection is scoped to the ROOT.** `hasCycleThroughRoot(root, graph)` only cares about cycles that transitively pull this spec in on itself (a cycle among other specs that doesn't involve `root` is silent here — it's covered by upstream authoring paths on those other specs, if it ever appears in practice).
 - **Empty `knownFunctionSlugs` fails safe.** A missing `docs/brain/functions/` dir returns the empty set — Owner check reports "does not resolve", which is the correct verdict when the brain is missing (the gate refuses to author, not silently pass).
 
+## Retirement completeness — the box-side build claim-gate (hotfix 2026-07-12)
+
+retire-vale Phase 2 dropped the `card.valeReviewPassed !== true` build-eligibility gate from [[agent-jobs]] `enqueueBuildIfDue`, so a fresh well-formed spec now gets a `build` job **enqueued**. But it missed **two box-side residues** in `scripts/builder-worker.ts` that still required the retired `vale_review_passed_at` durable signal at CLAIM time:
+
+1. `evaluateClaimTimeBuildGate` — a "── 2) SPEC-REVIEW PASSED (VALE) ──" leg that held the claim (`{ ok: false, disposition: "requeue" }`) and re-routed the spec into the retired review lane whenever `card.valeReviewPassed !== true`.
+2. `claimHeldForUnreviewedSpec` — the "no-max-on-unreviewed-specs" claim-SELECTION backstop that skipped launch on the same signal.
+
+Because **nothing stamps `vale_review_passed_at` anymore** (the Vale LLM lane is a no-op stub), both gates held **every freshly-authored spec's build at `queued` forever** — the `reconcileValeReviewPassStampFor` self-heal only stamps a spec with a prior `spec_review_passed` activity row, which a brand-new spec never has. Observed on `mario-never-reclaims-a-goal-member-already-integrated-on-its-goal-branch` + `marco-logistics-executor-surface`: build enqueued, never claimed.
+
+**The fix:** both gates removed — a spec that EXISTS as a row already cleared `assertSpecReviewGate` at the AUTHORING chokepoint, so it is build-eligible with no claim-time Vale requirement. `evaluateClaimTimeBuildGate`'s VALE leg is deleted (falls through to `{ ok: true }`); `claimHeldForUnreviewedSpec` is a retired no-op (`return false`). Note: the running box worker holds `builder-worker.ts` in memory, so the fix takes effect on the next **worker restart** (or redeploy).
+
 ## Related
 
-[[author-spec]] · [[specs-table]] · [[function-mandates]] · [[goals-table]] · [[../tables/specs]] · [[../tables/goals]] · [[../tables/goal_milestones]] · [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]] · [[../functions/platform]]
+[[author-spec]] · [[specs-table]] · [[agent-jobs]] · [[function-mandates]] · [[goals-table]] · [[../tables/specs]] · [[../tables/goals]] · [[../tables/goal_milestones]] · [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]] · [[../functions/platform]]

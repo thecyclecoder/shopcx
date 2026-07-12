@@ -6006,120 +6006,32 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     };
   }
 
-  // ── 2) SPEC-REVIEW PASSED (VALE) ── the authored spec must have cleared Vale's well-formedness CHECKLIST
-  // (phases present + each with verification, coherent, real Owner/Parent, not malformed) BEFORE its build.
-  //
-  // build-gate-durable-review-signal: the leg now tests the DURABLE `card.valeReviewPassed` (reads
-  // `specs.vale_review_passed_at`), NOT the transient `card.valePass`. `vale_pass` is a Vale→Ada hand-off
-  // flag that Ada's disposition CONSUMES when the spec leaves in_review (applyAdaDisposition clears it) — so
-  // by build-claim time a spec that genuinely passed review has vale_pass=null and the old test deadlocked
-  // it forever (re-claim every tick). `vale_review_passed_at` is stamped on the SAME Vale PASS but is NOT
-  // consumed by the disposition, so it survives into `planned`/shipped; a send-back / re-author clears it
-  // (markSpecCardBackToReview) so a materially-changed spec must be re-reviewed. We do NOT invent a parallel
-  // reviewer — same Vale PASS, durable marker.
-  //
-  // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the CLAIM-ADJACENT self-heal. Before the
-  // gate check, try to heal THIS slug (a spec whose only holding condition is a missing durable stamp
-  // proceeds without a hold, per the spec's Phase-2 verification: "assert the reconciler stamps it (and its
-  // build proceeds)"). reconcileValeReviewPassStampFor is idempotent + narrow: it heals ONLY specs whose
-  // `spec_review_passed` director_activity row proves a prior pass — never invents a pass that didn't
-  // happen. If the row IS stamped by this call, re-read `card.valeReviewPassed` from a fresh getSpec so the
-  // gate check below sees the freshly-stamped state; otherwise fall through to the existing hold + Vale
-  // enqueue path unchanged.
-  if (card.valeReviewPassed !== true) {
-    try {
-      const { reconcileValeReviewPassStampFor } = await import("../src/lib/agents/spec-review");
-      const outcome = await reconcileValeReviewPassStampFor(db, job.workspace_id, slug);
-      if (outcome === "healed") {
-        console.log(`${tag} claim-gate: ${slug} healed — passed-but-unstamped reconciler stamped vale_review_passed_at inline; proceeding`);
-        return { ok: true };
-      }
-    } catch (e) {
-      console.warn(`${tag} claim-gate: claim-adjacent vale-review-passed reconciler failed for ${slug} (falling through to hold):`, e instanceof Error ? e.message : e);
-    }
-  }
-  if (card.valeReviewPassed !== true) {
-    // Two deadlock classes both land here with no durable pass:
-    //   (a) status=in_review — a freshly authored spec still in Vale's queue (normal — just hold + nudge).
-    //   (b) status=planned (or any non-review, non-shipped state) that NEVER entered review — authored
-    //       directly as planned (director fix-spec / Pia / rescue / manual). The old proactive enqueue only
-    //       covered in_review specs, so this class looped forever with no path to review. Route it INTO
-    //       review: flip it back to in_review (markSpecCardBackToReview — clears any stale disposition
-    //       signals too) so Vale's lane picks it up, instead of deadlocking it in planned.
-    const postReviewPassed = card.status === "shipped"; // an already-shipped spec is past review by construction
-    if (!postReviewPassed && card.status !== "in_review") {
-      try {
-        const { markSpecCardBackToReview } = await import("../src/lib/spec-card-state");
-        await markSpecCardBackToReview(job.workspace_id, slug, {
-          actor: "claim-gate",
-          reason: `routed into review — ${slug} reached ${card.status} without a durable Vale pass (unreviewed); build held until Vale passes`,
-        });
-        console.log(`${tag} claim-gate: ${slug} unreviewed in ${card.status} → flipped to in_review for Vale`);
-      } catch (e) {
-        console.error(`${tag} claim-gate: routing ${slug} into review failed (continuing to hold):`, e instanceof Error ? e.message : e);
-      }
-    }
-    // Proactively enqueue a Vale pass (deduped — enqueueSpecReviewIfDue no-ops if one's already in flight or
-    // no in_review spec exists) so the review lands promptly without waiting on the spec-review-cron tick; on
-    // PASS Vale stamps vale_review_passed_at and the next claim attempt clears this leg.
-    try {
-      const { enqueueSpecReviewIfDue } = await import("../src/lib/agents/spec-review");
-      const r = await enqueueSpecReviewIfDue(job.workspace_id);
-      if (r.enqueued) console.log(`${tag} claim-gate: ${slug} not Vale-passed → enqueued a spec-review pass (${r.pending} in_review)`);
-    } catch (e) {
-      console.error(`${tag} claim-gate: enqueueSpecReviewIfDue failed (continuing to hold ${slug}):`, e instanceof Error ? e.message : e);
-    }
-    const note = card.status === "in_review"
-      ? "awaiting Vale's spec-review verdict"
-      : `status=${card.status} but no durable Vale pass — routed into review; Vale must pass the spec before its build`;
-    return { ok: false, disposition: "requeue", reason: `claim-gate: ${slug} not spec-review-passed (${note}); held with cooldown until Vale passes` };
-  }
+  // ── 2) SPEC-REVIEW PASSED (VALE) ── RETIRED.
+  // The Vale LLM spec-review lane is retired ([[../src/lib/spec-review-gate]] /
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate). Well-formedness (phases + per-phase
+  // verification, real Owner/Parent, no dupes/cycles, DB-companion) is now enforced DETERMINISTICALLY at the
+  // AUTHORING chokepoint by `assertSpecReviewGate` (author-spec.ts's authorSpecRowStructured /
+  // authorSpecRowFromMarkdown + the upsertSpec floor), which THROWS before the spec row is ever written. So a
+  // spec that EXISTS as a row has already cleared the checklist — the build claim no longer re-requires the
+  // retired `vale_review_passed_at` durable signal (which nothing stamps anymore now that the LLM lane is a
+  // no-op stub). retire-vale Phase 2 dropped the equivalent gate from `enqueueBuildIfDue`; this removes the
+  // two box-side residues it missed, which otherwise held EVERY freshly-authored spec's build at `queued`
+  // forever (no stamper → the gate never cleared). A well-formed spec is immediately build-eligible.
 
   return { ok: true };
 }
 
-// ── no-max-on-unreviewed-specs (BACKSTOP) ────────────────────────────────────
-// Bo's claim-SELECTION hard-skip: the moment the box CLAIMS a fresh `build` job, refuse to LAUNCH it (which
-// would spin up a Max account session) if its spec hasn't passed Vale spec-review yet. The claim-time build
-// gate (evaluateClaimTimeBuildGate, inside dispatchJob) already bounces an un-reviewed spec — but it runs
-// AFTER launch()/runJob has begun resolving an account + session, so a Max session was still burned each
-// attempt. This check runs in the claim loop BEFORE launch(), so ZERO Max usage is spent on an un-reviewed
-// spec. (Ada's enqueue lanes — the PRIMARY fix in platform-director — should already keep such a job from
-// existing; this is the belt-and-suspenders for any build queued by another path: a manual enqueue, the
-// reactive blocked_by auto-queue, or a sibling agent's chain.)
-//
-// On a hold we mirror the gate's release exactly: status→queued with a FUTURE `claimed_at` cooldown so the
-// claim RPC (which skips queued jobs whose claimed_at is still in the future) backs off instead of re-handing
-// it every tick. A PLAN job, a RESUME (claude_session_id set — already past review), or a non-build kind is
-// never held here. Reads the SAME durable signal as the gate (card.valeReviewPassed via getSpec → the
-// brain-roadmap rollup, never the stored specs.status column) and writes only the requeue via `update` (no
-// PM-table write), so the _check-pm guards stay green. Best-effort + fail-OPEN: a read error lets the job
-// proceed to launch (where the claim-time gate is still the backstop).
-async function claimHeldForUnreviewedSpec(job: Job): Promise<boolean> {
-  if (job.kind !== "build") return false; // only spec builds carry a Vale-review requirement
-  if (job.claude_session_id) return false; // a RESUME is already past review (its branch/PR exists)
-  const slug = job.spec_slug;
-  try {
-    const { getSpec } = await import("../src/lib/brain-roadmap");
-    const got = await getSpec(slug, job.workspace_id);
-    const card = got?.card ?? null;
-    if (!card) return false; // no boardable row → let dispatch's claim-gate PARK it (spec_row_missing), don't silently re-queue
-    const reviewDone = card.valeReviewPassed === true || card.status === "shipped";
-    if (reviewDone) return false; // passed Vale (or already shipped) → safe to launch
-    // Held: release the claim with the gate's future-claimed_at cooldown so the RPC backs off, and do NOT
-    // launch — no worktree, no account, no Max session was spent. The claim-gate's proactive Vale enqueue +
-    // Ada's escort re-release it once Vale passes.
-    const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
-    const reason = `claim-select backstop: ${slug} not spec-review-passed (status=${card.status}, valeReviewPassed=${card.valeReviewPassed ?? "false"}); released BEFORE launch so no Max session is spent — held with cooldown until Vale passes`;
-    await update(job.id, { status: "queued", claimed_at: holdUntil, log_tail: reason.slice(-2000) });
-    console.log(`[${slug}] ${reason}`);
-    return true;
-  } catch (e) {
-    // Fail OPEN — a transient read failure must not strand a legitimately-reviewed build; the claim-time
-    // gate inside dispatch is still the backstop (it requeues on its own read error too).
-    console.error(`[${slug}] claim-select review backstop read failed (proceeding to launch — claim-gate still applies):`, e instanceof Error ? e.message : e);
-    return false;
-  }
+// ── no-max-on-unreviewed-specs (BACKSTOP) ── RETIRED.
+// This claim-SELECTION hard-skip used to refuse to LAUNCH a build whose spec hadn't passed the Vale LLM
+// spec-review, to avoid burning a Max session on an un-reviewed spec. The Vale LLM lane is retired
+// (retire-vale-spec-review-becomes-deterministic-authoring-gate): well-formedness is now enforced
+// DETERMINISTICALLY at the AUTHORING chokepoint (`assertSpecReviewGate`), so a spec that exists as a row is
+// already validated and there is no `vale_review_passed_at` to wait on (nothing stamps it anymore). Left as a
+// no-op (returning false = never hold) so the single call site stays harmless; the enclosing gate
+// (evaluateClaimTimeBuildGate) no longer carries a Vale leg either. Retaining the function keeps the diff
+// minimal and preserves the fail-open contract its caller expects.
+async function claimHeldForUnreviewedSpec(_job: Job): Promise<boolean> {
+  return false; // Vale review requirement retired — a well-formed (author-time-gated) spec is build-eligible.
 }
 
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
