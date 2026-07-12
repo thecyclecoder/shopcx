@@ -24,11 +24,14 @@ import {
   DEFAULT_TEST_COHORT_TARGET,
   evaluateSensorTrustSnapshot,
   FATIGUE_REPLENISH_THRESHOLD,
+  readActiveCohortProductIds,
+  readCurrentTestCohortSize,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerPlanInputs,
   type SensorTrustSnapshot,
 } from "./agent";
+import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import type { DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import type { IterationPolicy } from "@/lib/meta/decision-engine";
 import type { MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
@@ -71,6 +74,7 @@ function cohort(overrides: Partial<MediaBuyerTestCohort> = {}): MediaBuyerTestCo
     id: "cohort-1",
     workspaceId: WS,
     metaAdAccountId: null,
+    productId: null,
     testMetaAdsetId: "6100000000001",
     dailyTestCeilingCents: 50_000,
     isActive: true,
@@ -595,6 +599,267 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
     assert.equal(r.metadata.mode, "shadow");
     assert.ok(r.metadata.plan_action, "every shadow row carries the plan_action JSON");
   }
+});
+
+// ── Product-scoped test rail (media-buyer-product-scoped-test-rail Phase 2) ──
+
+// A small fake admin scoped to what readCurrentTestCohortSize + listReadyToTest
+// need — `ad_publish_jobs`, `ad_campaigns`, `ad_videos` with eq / in / not
+// chainable filters, then `then()` resolving to the filtered set. Mirrors the
+// shape used in publish-gate.test.ts so this file stays consistent.
+type Row = Record<string, unknown>;
+type Tables = Record<string, Row[]>;
+interface Filter {
+  kind: "eq" | "in" | "not_is_null";
+  col: string;
+  val?: unknown;
+  vals?: unknown[];
+}
+function matchesJoined(row: Row, filters: Filter[]): boolean {
+  for (const f of filters) {
+    const v = row[f.col];
+    if (f.kind === "eq" && v !== f.val) return false;
+    if (f.kind === "in" && !(f.vals ?? []).includes(v)) return false;
+    if (f.kind === "not_is_null" && (v === null || v === undefined)) return false;
+  }
+  return true;
+}
+function makeFakeAdminForProductScope(tables: Tables) {
+  function chain(table: string) {
+    const filters: Filter[] = [];
+    const resolve = () => ({
+      data: (tables[table] ?? []).filter((r) => matchesJoined(r, filters)),
+      error: null as null,
+    });
+    const c: {
+      select: (...args: unknown[]) => typeof c;
+      eq: (col: string, val: unknown) => typeof c;
+      in: (col: string, vals: unknown[]) => typeof c;
+      not: (col: string, op: string, val: unknown) => typeof c;
+      then: (onFulfilled: (v: { data: Row[]; error: null }) => unknown) => Promise<unknown>;
+    } = {
+      select: () => c,
+      eq: (col, val) => { filters.push({ kind: "eq", col, val }); return c; },
+      in: (col, vals) => { filters.push({ kind: "in", col, vals }); return c; },
+      not: (col, op, val) => {
+        if (op === "is" && val === null) filters.push({ kind: "not_is_null", col });
+        return c;
+      },
+      then: (onFulfilled) => Promise.resolve(resolve()).then(onFulfilled),
+    };
+    return c;
+  }
+  return {
+    from(table: string) {
+      return {
+        select: (...a: unknown[]) => chain(table).select(...a),
+        eq: (col: string, val: unknown) => chain(table).eq(col, val),
+        in: (col: string, vals: unknown[]) => chain(table).in(col, vals),
+        not: (col: string, op: string, val: unknown) => chain(table).not(col, op, val),
+      };
+    },
+  } as unknown as Parameters<typeof readCurrentTestCohortSize>[0];
+}
+
+test("Phase 2 — the per-product live-test target defaults to 4 (was 3 pre-Phase-2, so each per-product cohort tests 4 fresh creatives at a time)", () => {
+  assert.equal(DEFAULT_TEST_COHORT_TARGET, 4);
+});
+
+test("Phase 2 — readCurrentTestCohortSize counts only THIS product's live ad_publish_jobs (never the other product's) via ad_campaigns.product_id in the same shared Meta ad account", async () => {
+  const PRODUCT_A = "prod-A";
+  const PRODUCT_B = "prod-B";
+  const tables: Tables = {
+    ad_publish_jobs: [
+      { id: "job-A1", workspace_id: WS, campaign_id: "cmp-A1", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+      { id: "job-A2", workspace_id: WS, campaign_id: "cmp-A2", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+      { id: "job-B1", workspace_id: WS, campaign_id: "cmp-B1", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+      { id: "job-B2", workspace_id: WS, campaign_id: "cmp-B2", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+      { id: "job-B3", workspace_id: WS, campaign_id: "cmp-B3", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+      // A queued (not-yet-live) job for A is NOT counted — it's not `published`.
+      { id: "job-A-queued", workspace_id: WS, campaign_id: "cmp-A3", origin: "media-buyer-test", publish_active: true, publish_status: "queued" },
+      // A non-media-buyer origin (studio publish) is NOT counted regardless of product.
+      { id: "job-studio", workspace_id: WS, campaign_id: "cmp-A4", origin: "operator", publish_active: true, publish_status: "published" },
+    ],
+    ad_campaigns: [
+      { id: "cmp-A1", workspace_id: WS, product_id: PRODUCT_A },
+      { id: "cmp-A2", workspace_id: WS, product_id: PRODUCT_A },
+      { id: "cmp-A3", workspace_id: WS, product_id: PRODUCT_A },
+      { id: "cmp-A4", workspace_id: WS, product_id: PRODUCT_A },
+      { id: "cmp-B1", workspace_id: WS, product_id: PRODUCT_B },
+      { id: "cmp-B2", workspace_id: WS, product_id: PRODUCT_B },
+      { id: "cmp-B3", workspace_id: WS, product_id: PRODUCT_B },
+    ],
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+
+  // The core cross-contamination guard: A's count is exactly A's two live jobs,
+  // never gets inflated by B's three, and the queued+studio jobs are excluded.
+  const sizeA = await readCurrentTestCohortSize(admin, { workspaceId: WS, productId: PRODUCT_A });
+  assert.equal(sizeA, 2);
+
+  // Symmetric — B's count is exactly B's three live jobs.
+  const sizeB = await readCurrentTestCohortSize(admin, { workspaceId: WS, productId: PRODUCT_B });
+  assert.equal(sizeB, 3);
+
+  // Null-product default cohort preserves the pre-Phase-2 workspace-scoped count
+  // (all 5 live media-buyer-test jobs, regardless of product) — Superfood Tabs
+  // today is unaffected.
+  const sizeDefault = await readCurrentTestCohortSize(admin, { workspaceId: WS, productId: null });
+  assert.equal(sizeDefault, 5);
+});
+
+test("Phase 2 — listReadyToTest filtered by productId returns ONLY that product's ready campaigns (product B's ready creative is never selected for product A's replenish)", async () => {
+  const PRODUCT_A = "prod-A";
+  const PRODUCT_B = "prod-B";
+  const tables: Tables = {
+    ad_videos: [
+      { campaign_id: "cmp-A1", workspace_id: WS, format: "1x1", media_kind: "video", status: "ready", static_jpg_url: null, meta: null },
+      { campaign_id: "cmp-A2", workspace_id: WS, format: "9x16", media_kind: "video", status: "ready", static_jpg_url: null, meta: null },
+      { campaign_id: "cmp-B1", workspace_id: WS, format: "1x1", media_kind: "video", status: "ready", static_jpg_url: null, meta: null },
+    ],
+    ad_campaigns: [
+      { id: "cmp-A1", workspace_id: WS, product_id: PRODUCT_A, landing_url: "https://x/A1", created_at: "2026-07-10T00:00:00Z" },
+      { id: "cmp-A2", workspace_id: WS, product_id: PRODUCT_A, landing_url: "https://x/A2", created_at: "2026-07-11T00:00:00Z" },
+      { id: "cmp-B1", workspace_id: WS, product_id: PRODUCT_B, landing_url: "https://x/B1", created_at: "2026-07-12T00:00:00Z" },
+    ],
+    ad_publish_jobs: [], // nothing in flight
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+
+  // Product A's replenish sees ONLY A's campaigns — B's ready creative never
+  // pollutes A's adset, which is exactly the anti-cross-contamination guard the
+  // spec calls out.
+  const forA = await listReadyToTest(admin, { workspaceId: WS, productId: PRODUCT_A });
+  const idsA = forA.readyToTest.map((r) => r.ad_campaign_id).sort();
+  assert.deepEqual(idsA, ["cmp-A1", "cmp-A2"]);
+  for (const row of forA.readyToTest) assert.notEqual(row.ad_campaign_id, "cmp-B1");
+
+  // Product B's replenish sees ONLY B's campaigns.
+  const forB = await listReadyToTest(admin, { workspaceId: WS, productId: PRODUCT_B });
+  assert.deepEqual(forB.readyToTest.map((r) => r.ad_campaign_id), ["cmp-B1"]);
+
+  // Null-product (workspace-wide default) → no product filter, sees everything.
+  const forDefault = await listReadyToTest(admin, { workspaceId: WS, productId: null });
+  assert.deepEqual(forDefault.readyToTest.map((r) => r.ad_campaign_id).sort(), ["cmp-A1", "cmp-A2", "cmp-B1"]);
+});
+
+// ── Phase 3 — (account × product) fan-out dispatcher ────────────────────────
+
+test("Phase 3 — readActiveCohortProductIds enumerates one entry per active (account, product) cohort: TWO products in one shared account produce TWO passes with the correct productIds (Amazing Coffee + Creamer's shape)", async () => {
+  const PRODUCT_COFFEE = "prod-coffee";
+  const PRODUCT_CREAMER = "prod-creamer";
+  const ACCT_SHARED = "acct-shared";
+  const ACCT_OTHER = "acct-other";
+  const tables: Tables = {
+    media_buyer_test_cohorts: [
+      // Shared account with two per-product cohorts + one dormant (inactive)
+      // row that MUST NOT show up in the dispatch list.
+      { id: "coh-coffee", workspace_id: WS, meta_ad_account_id: ACCT_SHARED, product_id: PRODUCT_COFFEE, is_active: true },
+      { id: "coh-creamer", workspace_id: WS, meta_ad_account_id: ACCT_SHARED, product_id: PRODUCT_CREAMER, is_active: true },
+      { id: "coh-retired", workspace_id: WS, meta_ad_account_id: ACCT_SHARED, product_id: "prod-retired", is_active: false },
+      // A different account, must NOT appear in ACCT_SHARED's enumeration.
+      { id: "coh-other", workspace_id: WS, meta_ad_account_id: ACCT_OTHER, product_id: null, is_active: true },
+    ],
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+
+  const pids = await readActiveCohortProductIds(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT_SHARED,
+  });
+  // The core "one pass per active (account, product) cohort" guarantee: exactly
+  // two entries, one per product. The dispatcher iterates this list and calls
+  // runMediaBuyerLoop with each productId — a shared account fans out to both
+  // products cleanly (Amazing Coffee + Creamer both get a pass this cadence).
+  assert.equal(pids.length, 2, `expected 2 passes for the shared account, got ${pids.length}`);
+  const set = new Set(pids);
+  assert.ok(set.has(PRODUCT_COFFEE), "product Coffee's pass must be enumerated");
+  assert.ok(set.has(PRODUCT_CREAMER), "product Creamer's pass must be enumerated");
+  // The retired (is_active=false) cohort MUST NOT be enumerated — the dormant
+  // row's audit trail survives but the dispatch treats it identically to "no row".
+  assert.ok(!set.has("prod-retired"), "an inactive cohort must NOT dispatch a pass");
+  // Deterministic ordering: sorted product ids ascending (nulls last).
+  assert.deepEqual([...pids].sort(), pids);
+});
+
+test("Phase 3 — readActiveCohortProductIds returns the null-product default for Superfood Tabs's single-product setup (one pass, productId=null — preserves the pre-Phase-2 shape)", async () => {
+  const ACCT_TABS = "acct-tabs";
+  const tables: Tables = {
+    media_buyer_test_cohorts: [
+      { id: "coh-tabs", workspace_id: WS, meta_ad_account_id: ACCT_TABS, product_id: null, is_active: true },
+    ],
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+  const pids = await readActiveCohortProductIds(admin, { workspaceId: WS, metaAdAccountId: ACCT_TABS });
+  assert.deepEqual(pids, [null]);
+});
+
+test("Phase 3 — readActiveCohortProductIds mixed shape (null-product default + one per-product) fans out to both — null cohort ordered LAST (Superfood Tabs's shape when Coffee spins up in the same account)", async () => {
+  const PRODUCT_COFFEE = "prod-coffee";
+  const ACCT = "acct-mix";
+  const tables: Tables = {
+    media_buyer_test_cohorts: [
+      { id: "coh-default", workspace_id: WS, meta_ad_account_id: ACCT, product_id: null, is_active: true },
+      { id: "coh-coffee", workspace_id: WS, meta_ad_account_id: ACCT, product_id: PRODUCT_COFFEE, is_active: true },
+    ],
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+  const pids = await readActiveCohortProductIds(admin, { workspaceId: WS, metaAdAccountId: ACCT });
+  assert.deepEqual(pids, [PRODUCT_COFFEE, null]);
+});
+
+test("Phase 3 — readActiveCohortProductIds with NO active cohort for the account STILL returns [null] so the dispatcher runs one pass (dormant heartbeat emits — the lane never silently no-ops)", async () => {
+  const admin = makeFakeAdminForProductScope({ media_buyer_test_cohorts: [] });
+  const pids = await readActiveCohortProductIds(admin, {
+    workspaceId: WS,
+    metaAdAccountId: "acct-unconfigured",
+  });
+  assert.deepEqual(pids, [null]);
+});
+
+test("agent.ts — Phase 3 dispatcher (runMediaBuyerLoopForAccount) iterates readActiveCohortProductIds and calls runMediaBuyerLoop per productId (structural pin: a stray edit that drops the loop or the productId argument regresses to the product-blind pre-Phase-3 shape)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+
+  // The dispatcher exists.
+  assert.ok(
+    /export async function runMediaBuyerLoopForAccount/.test(src),
+    "runMediaBuyerLoopForAccount must exist — the box worker's media-buyer lane depends on it",
+  );
+  // It enumerates cohorts via the pure helper the tests above cover.
+  assert.ok(
+    /await readActiveCohortProductIds\(admin, \{[\s\S]*?workspaceId: opts\.workspaceId/.test(src),
+    "runMediaBuyerLoopForAccount must call readActiveCohortProductIds with opts.workspaceId + opts.metaAdAccountId — otherwise the fan-out enumeration slips",
+  );
+  // For each enumerated productId it invokes the runner with that productId
+  // spread onto the options — this is the "one pass per (account, product)"
+  // contract the spec's Phase 3 verification names.
+  assert.ok(
+    /for \(const productId of productIds\)[\s\S]*?runMediaBuyerLoop\(admin, \{ \.\.\.opts, productId \}\)/.test(src),
+    "runMediaBuyerLoopForAccount must call runMediaBuyerLoop({...opts, productId}) inside a loop over the enumerated productIds — no per-product pass without this",
+  );
+});
+
+test("agent.ts — Phase 3 replenish path uses the product-scoped listReadyToTest — the pre-Phase-2 product-blind `listReadyToTest(admin, { workspaceId: opts.workspaceId })` is gone (grep guard: any regression to it is what the spec's cross-contamination guard forbids)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+
+  // The product-scoped call is the ONE the runner uses now — it MUST be present.
+  assert.ok(
+    /listReadyToTest\(admin, \{\s*workspaceId: opts\.workspaceId,\s*productId: cohortProductId,?\s*\}\)/.test(src),
+    "runMediaBuyerLoop must call listReadyToTest with { workspaceId, productId: cohortProductId } — that's the product-scoped read",
+  );
+
+  // The product-blind Phase-1 shape (`listReadyToTest(admin, { workspaceId })`
+  // with no productId property) must be gone from the replenish path. Match a
+  // fenced literal so a call that later adds productId still passes.
+  const blindPattern = /listReadyToTest\s*\(\s*admin\s*,\s*\{\s*workspaceId(?:\s*:\s*[^,}]+)?\s*\}\s*\)/g;
+  const matches = src.match(blindPattern) ?? [];
+  assert.equal(
+    matches.length,
+    0,
+    `agent.ts still contains ${matches.length} product-blind listReadyToTest call(s): ${JSON.stringify(matches)} — the Phase 3 spec verification's grep guard forbids this. Add productId to every call.`,
+  );
 });
 
 // Structural guard on the runner branch predicate — the shadow-mode carve-out is
