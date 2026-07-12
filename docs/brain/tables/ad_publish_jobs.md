@@ -11,7 +11,8 @@ One row per "publish this campaign's video to Meta" action: the chosen targets +
 | `video_id` | uuid → [[ad_videos]] | the rendered video published |
 | `meta_account_id` | text | bare ad-account id (client adds `act_`) |
 | `meta_campaign_id` | text | Meta campaign (optional context) |
-| `meta_adset_id` | text | the ad set the ad is created in |
+| `meta_adset_id` | text | the ad set the ad is created in. **Per-test path:** starts NULL and is STAMPED by the publisher after it mints the adset from `create_adset_spec`. |
+| `create_adset_spec` | jsonb? | **Per-test-adset (CEO 2026-07-12)** — when set, `adToolPublishToMeta` mints a dedicated ~$150/day ad set from this spec (`createAdSet`, in `spec.campaign_id`) BEFORE the ad, with the gated status, then stamps `meta_adset_id`. Null = publish into the row's existing `meta_adset_id` (legacy shared adset). Assembled by [[../libraries/media-buyer-agent]] `enqueueReplenishPublish` from the cohort's `adset_template`. |
 | `meta_page_id` | text | operator-selected FB page for the creative |
 | `meta_instagram_user_id` | text | the page's linked IG account |
 | `headlines` | jsonb | headline + variations |

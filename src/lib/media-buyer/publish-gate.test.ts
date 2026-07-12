@@ -35,7 +35,7 @@ type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 
 interface Filter {
-  kind: "eq" | "gte" | "lte" | "is";
+  kind: "eq" | "gte" | "lte" | "is" | "not_is_null" | "in";
   col: string;
   val: unknown;
 }
@@ -47,6 +47,8 @@ function matches(row: Row, filters: Filter[]): boolean {
     if (f.kind === "gte" && !(typeof v === "string" && typeof f.val === "string" && v >= f.val)) return false;
     if (f.kind === "lte" && !(typeof v === "string" && typeof f.val === "string" && v <= f.val)) return false;
     if (f.kind === "is" && f.val === null && v !== null && v !== undefined) return false;
+    if (f.kind === "not_is_null" && (v === null || v === undefined)) return false;
+    if (f.kind === "in" && !(Array.isArray(f.val) && (f.val as unknown[]).includes(v))) return false;
   }
   return true;
 }
@@ -57,6 +59,8 @@ interface FakeChain {
   gte: (col: string, val: unknown) => FakeChain;
   lte: (col: string, val: unknown) => FakeChain;
   is: (col: string, val: unknown) => FakeChain;
+  not: (col: string, op: string, val: unknown) => FakeChain;
+  in: (col: string, val: unknown[]) => FakeChain;
   order: (...args: unknown[]) => FakeChain;
   limit: (n: number) => FakeChain;
   maybeSingle: () => Promise<{ data: Row | null; error: null }>;
@@ -78,6 +82,8 @@ function makeChain(tables: Tables, table: string): FakeChain {
     gte: (col, val) => { filters.push({ kind: "gte", col, val }); return chain; },
     lte: (col, val) => { filters.push({ kind: "lte", col, val }); return chain; },
     is: (col, val) => { filters.push({ kind: "is", col, val }); return chain; },
+    not: (col, op, val) => { if (op === "is" && val === null) filters.push({ kind: "not_is_null", col, val: null }); return chain; },
+    in: (col, val) => { filters.push({ kind: "in", col, val }); return chain; },
     order: () => chain,
     limit: (n) => { limitN = n; return chain; },
     maybeSingle: async () => {
@@ -98,6 +104,8 @@ function makeAdmin(tables: Tables) {
         gte: (col: string, val: unknown) => makeChain(tables, table).gte(col, val),
         lte: (col: string, val: unknown) => makeChain(tables, table).lte(col, val),
         is: (col: string, val: unknown) => makeChain(tables, table).is(col, val),
+        not: (col: string, op: string, val: unknown) => makeChain(tables, table).not(col, op, val),
+        in: (col: string, val: unknown[]) => makeChain(tables, table).in(col, val),
         insert: async (row: Row | Row[]) => {
           const arr = tables[table] ?? (tables[table] = []);
           if (Array.isArray(row)) arr.push(...row);
@@ -489,4 +497,143 @@ test("getEffectiveMediaBuyerTestCohort — omitting productId (or passing null) 
   assert.ok(noProduct);
   assert.equal(noProduct!.id, "acct-a-null-product-default");
   assert.equal(noProduct!.productId, null);
+});
+
+// ── Per-test-adset cohort (CEO 2026-07-12) ──────────────────────────────────
+// adsetPerTest cohorts mint a fresh $150 ad set per creative — no single shared adset — so the gate
+// swaps the wrong_adset identity check for: per-adset budget ≤ per-test, and a concurrency recount
+// (live per-test adsets + 1) × per-test ≤ ceiling. $600 ceiling / $150 per-test = 4 concurrent max.
+
+const PT_TEMPLATE = {
+  optimizationGoal: "OFFSITE_CONVERSIONS",
+  billingEvent: "IMPRESSIONS",
+  bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+  pixelId: "px-1",
+  customEventType: "PURCHASE",
+  targeting: { age_min: 18 },
+};
+
+function perTestCohortRow(overrides: Partial<Row> = {}): Row {
+  return cohortRow({
+    id: "pt-cohort",
+    meta_ad_account_id: ACCT,
+    product_id: "prod-PT",
+    test_meta_adset_id: null, // per-test cohorts have no shared adset
+    adset_per_test: true,
+    test_meta_campaign_id: "camp-PT",
+    per_test_daily_budget_cents: 15000, // $150
+    daily_test_ceiling_cents: 60000, // $600 → 4 concurrent
+    adset_template: PT_TEMPLATE,
+    ...overrides,
+  });
+}
+
+/** One live per-test job (published + active) in the cohort's product, counted toward concurrency. */
+function liveTestJob(adsetId: string, campaignId = "camp-live"): Row {
+  return {
+    id: `job-${adsetId}`,
+    workspace_id: WS,
+    origin: MEDIA_BUYER_TEST_ORIGIN,
+    publish_active: true,
+    publish_status: "published",
+    create_adset_spec: { campaign_id: "camp-PT" },
+    meta_adset_id: adsetId,
+    campaign_id: campaignId,
+  };
+}
+
+test("evaluateMediaBuyerTestPublish — per-test cohort, first test (0 live) → ALLOW", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [],
+    ad_campaigns: [{ id: "camp-live", workspace_id: WS, product_id: "prod-PT" }],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending:job-x", // no adset yet in per-test mode
+    projectedDailyCents: 15000, // $150 = the per-test budget
+  });
+  assert.equal(r.allowed, true);
+  if (r.allowed) assert.equal(r.ceilingCents, 60000);
+});
+
+test("evaluateMediaBuyerTestPublish — per-test cohort at 3 live (would be the 4th) → ALLOW; at 4 live → over_concurrency", async () => {
+  const campaigns = [{ id: "camp-live", workspace_id: WS, product_id: "prod-PT" }];
+  // 3 live → 4th fits exactly ($600).
+  const three = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [liveTestJob("a1"), liveTestJob("a2"), liveTestJob("a3")],
+    ad_campaigns: campaigns,
+  });
+  const r3 = await evaluateMediaBuyerTestPublish(three, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  assert.equal(r3.allowed, true);
+
+  // 4 live → a 5th would be $750 > $600 → refuse.
+  const four = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [liveTestJob("a1"), liveTestJob("a2"), liveTestJob("a3"), liveTestJob("a4")],
+    ad_campaigns: campaigns,
+    dashboard_notifications: [],
+    director_activity: [],
+  });
+  const r4 = await evaluateMediaBuyerTestPublish(four, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  assert.equal(r4.allowed, false);
+  if (!r4.allowed) assert.equal(r4.reason, "over_concurrency");
+});
+
+test("evaluateMediaBuyerTestPublish — per-test concurrency counts only THIS product's live adsets", async () => {
+  // A live per-test adset for a DIFFERENT product must not count against prod-PT's ceiling.
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [
+      liveTestJob("a1", "camp-live"),          // prod-PT
+      liveTestJob("other", "camp-other"),       // prod-OTHER — must be excluded
+    ],
+    ad_campaigns: [
+      { id: "camp-live", workspace_id: WS, product_id: "prod-PT" },
+      { id: "camp-other", workspace_id: WS, product_id: "prod-OTHER" },
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  // Only 1 counts (a1) → 2nd fits under $600 → ALLOW.
+  assert.equal(r.allowed, true);
+});
+
+test("evaluateMediaBuyerTestPublish — per-test adset budget over per-test → over_ceiling", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [],
+    ad_campaigns: [],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 20000, // $200 > $150 per-test
+  });
+  assert.equal(r.allowed, false);
+  if (!r.allowed) assert.equal(r.reason, "over_ceiling");
+});
+
+test("evaluateMediaBuyerTestPublish — per-test cohort missing template/campaign → cohort_misconfigured", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow({ adset_template: null, test_meta_campaign_id: null })],
+    ad_publish_jobs: [],
+    ad_campaigns: [],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  assert.equal(r.allowed, false);
+  if (!r.allowed) assert.equal(r.reason, "cohort_misconfigured");
 });

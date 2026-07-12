@@ -89,6 +89,10 @@ function cohort(overrides: Partial<MediaBuyerTestCohort> = {}): MediaBuyerTestCo
     defaultMetaAccountId: "act-1",
     defaultMetaPageId: "page-1",
     defaultMetaInstagramUserId: null,
+    adsetPerTest: false,
+    testMetaCampaignId: null,
+    perTestDailyBudgetCents: 15_000,
+    adsetTemplate: null,
     ...overrides,
   };
 }
@@ -318,6 +322,37 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
     }),
   );
   assert.equal(plan.replenish.length, 0);
+});
+
+// ── Per-test-adset cohort (CEO 2026-07-12) ──────────────────────────────────
+
+test("computeMediaBuyerPlan — per-test cohort derives target from ceiling÷per-test (4 at $600/$150) and flags adsetPerTest", () => {
+  const perTest = cohort({
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: "camp-PT",
+    perTestDailyBudgetCents: 15_000, // $150
+    dailyTestCeilingCents: 60_000, // $600 → target 4
+  });
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      cohort: perTest,
+      currentTestCohortSize: 1, // 1 live → deficit 3
+      cohortTargetCount: undefined, // per-test ignores the override; derives from budget math
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "" },
+      ],
+    }),
+  );
+  assert.equal(plan.cohortTargetCount, 4); // ceiling ÷ per-test, NOT DEFAULT_TEST_COHORT_TARGET
+  assert.equal(plan.replenish.length, 3); // deficit 3
+  for (const r of plan.replenish) {
+    assert.equal(r.adsetPerTest, true);
+    assert.equal(r.testMetaAdsetId, null); // per-test mints a fresh adset at publish
+  }
 });
 
 // ── Phase 3 — fatigue-triggered replenish ────────────────────────────────────

@@ -32,7 +32,7 @@ The MORE-SPECIFIC active row wins: a per-account row (`meta_ad_account_id` set) 
 
 ### `MediaBuyerTestRefusalReason` — type
 
-`"no_active_cohort" | "wrong_adset" | "over_ceiling"` — why the gate refused a media-buyer-test publish. Carried on the escalation body + the growth `director_activity` metadata + the dedupe key.
+`"no_active_cohort" | "wrong_adset" | "over_ceiling" | "over_concurrency" | "cohort_misconfigured"` — why the gate refused a media-buyer-test publish. Carried on the escalation body + the growth `director_activity` metadata + the dedupe key. The last two are **per-test-cohort only** (`adset_per_test=true`): `over_concurrency` = minting another $150 adset would push live tests × per-test over the ceiling; `cohort_misconfigured` = per-test cohort missing `test_meta_campaign_id`/`adset_template`.
 
 ### `MediaBuyerTestGateInput` — interface
 
@@ -51,7 +51,11 @@ async function evaluateMediaBuyerTestPublish(
 ): Promise<MediaBuyerTestGateResult>
 ```
 
-The gate. Loads the effective cohort, then applies the three checks in order — no active cohort → `no_active_cohort`; requested adset != cohort adset → `wrong_adset`; projected daily > ceiling → `over_ceiling`; else allow. NEVER escalates — the caller runs `escalateMediaBuyerTestPublishRefusal` on refusal so the audit trail records WHO caught the rail (the route vs the publisher's defensive re-check).
+The gate. Loads the effective cohort, then branches on the cohort shape:
+- **Legacy (`adset_per_test=false`):** no active cohort → `no_active_cohort`; requested adset != cohort adset → `wrong_adset`; projected daily > ceiling → `over_ceiling`; else allow.
+- **Per-test (`adset_per_test=true`, CEO 2026-07-12):** no shared adset exists — the `wrong_adset` identity check is SKIPPED. Instead: missing `test_meta_campaign_id`/`adset_template` → `cohort_misconfigured`; per-adset budget > `per_test_daily_budget_cents` → `over_ceiling`; `(live per-test adsets for the product + 1) × per_test > ceiling` → `over_concurrency` (the belt-and-suspenders recount via `countActivePerTestTests`, product-scoped like `readCurrentTestCohortSize`); else allow. The deterministic primary cap is the replenish deficit (`computeMediaBuyerPlan` target = `maxConcurrentTests`); this gate is the independent recount at publish time.
+
+NEVER escalates — the caller runs `escalateMediaBuyerTestPublishRefusal` on refusal so the audit trail records WHO caught the rail (the route vs the publisher's defensive re-check).
 
 ### `escalateMediaBuyerTestPublishRefusal` — function
 

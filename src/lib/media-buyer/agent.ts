@@ -42,7 +42,8 @@ import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, 
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
-import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
+import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
+import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
 import { inngest } from "@/lib/inngest/client";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -234,8 +235,12 @@ export interface MediaBuyerKillAction {
 export interface MediaBuyerReplenishAction {
   kind: "replenish";
   adCampaignId: string;
-  /** The [[media_buyer_test_cohorts]] `test_meta_adset_id` we publish INTO. */
-  testMetaAdsetId: string;
+  /** Legacy shared-adset mode: the [[media_buyer_test_cohorts]] `test_meta_adset_id` we publish INTO.
+   * NULL in per-test mode (`adsetPerTest`) — a fresh $150 ad set is minted at publish time. */
+  testMetaAdsetId: string | null;
+  /** Per-test mode: the publisher mints a dedicated $150 ad set from this cohort marker (the enqueue
+   * assembles the concrete `create_adset_spec` — this flag routes the enqueue down that path). */
+  adsetPerTest: boolean;
   /** The cohort ceiling we pin the ad set's daily budget to. */
   dailyTestCeilingCents: number;
   rationale: string;
@@ -428,7 +433,15 @@ export const DEFAULT_FATIGUE_REPLENISH_VARIANTS = 2;
  * the Growth director / a human authors + activates one.
  */
 export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPlan {
-  const cohortTargetCount = input.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET;
+  // Per-test cohorts derive the live-test target from budget math: ceiling ÷ per-test = max concurrent
+  // $150 ad sets (4 at $600/$150). Legacy shared-adset cohorts use the fixed DEFAULT (or an override).
+  const cohortTargetCount =
+    input.cohort?.adsetPerTest
+      ? maxConcurrentTests({
+          daily_test_ceiling_cents: input.cohort.dailyTestCeilingCents,
+          per_test_daily_budget_cents: input.cohort.perTestDailyBudgetCents,
+        })
+      : (input.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET);
   const summaryParts: string[] = [];
 
   if (!input.policy) {
@@ -524,13 +537,17 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   if (input.cohort && input.cohort.isActive) {
     const deficit = Math.max(0, cohortTargetCount - input.currentTestCohortSize);
     const picks = input.readyToTest.slice(0, deficit);
+    const perTest = input.cohort.adsetPerTest;
     for (const p of picks) {
       replenish.push({
         kind: "replenish",
         adCampaignId: p.ad_campaign_id,
-        testMetaAdsetId: input.cohort.testMetaAdsetId,
+        testMetaAdsetId: perTest ? null : input.cohort.testMetaAdsetId,
+        adsetPerTest: perTest,
         dailyTestCeilingCents: input.cohort.dailyTestCeilingCents,
-        rationale: `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — publishing ready-to-test campaign ${p.ad_campaign_id} into adset ${input.cohort.testMetaAdsetId} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`,
+        rationale: perTest
+          ? `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — minting a fresh $${(input.cohort.perTestDailyBudgetCents / 100).toFixed(0)}/day ad set in campaign ${input.cohort.testMetaCampaignId} for ready-to-test campaign ${p.ad_campaign_id} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`
+          : `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — publishing ready-to-test campaign ${p.ad_campaign_id} into adset ${input.cohort.testMetaAdsetId} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`,
       });
     }
     if (deficit > 0 && replenish.length < deficit) {
@@ -1459,6 +1476,36 @@ async function enqueueReplenishPublish(
 
   const adName = ((campaign as { name?: string | null } | null)?.name || `Media Buyer test — ${action.adCampaignId.slice(0, 8)}`).slice(0, 200);
 
+  // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
+  // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
+  // it, then stamps `meta_adset_id`. `meta_adset_id` starts null (no shared adset). Fail CLOSED if the
+  // cohort is a per-test cohort but is missing its campaign or adset template — never mint a malformed set.
+  let createAdsetSpec: CreateAdsetSpec | null = null;
+  let metaAdsetIdForJob: string | null = action.testMetaAdsetId;
+  if (action.adsetPerTest) {
+    const tmpl = cohort.adsetTemplate;
+    const campaignId = cohort.testMetaCampaignId;
+    if (!campaignId || !tmpl) {
+      return {
+        inserted: false,
+        jobId: null,
+        reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
+      };
+    }
+    createAdsetSpec = {
+      campaign_id: campaignId,
+      name: adName,
+      daily_budget_cents: cohort.perTestDailyBudgetCents,
+      pixel_id: tmpl.pixelId,
+      custom_event_type: tmpl.customEventType,
+      optimization_goal: tmpl.optimizationGoal,
+      billing_event: tmpl.billingEvent,
+      bid_strategy: tmpl.bidStrategy,
+      targeting: tmpl.targeting,
+    };
+    metaAdsetIdForJob = null;
+  }
+
   const { data: job, error } = await admin
     .from("ad_publish_jobs")
     .insert({
@@ -1466,7 +1513,8 @@ async function enqueueReplenishPublish(
       campaign_id: action.adCampaignId,
       video_id: video.id,
       meta_account_id: accountId,
-      meta_adset_id: action.testMetaAdsetId,
+      meta_adset_id: metaAdsetIdForJob,
+      create_adset_spec: createAdsetSpec,
       meta_page_id: pageId,
       meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
       headlines,

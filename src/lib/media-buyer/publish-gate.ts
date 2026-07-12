@@ -47,7 +47,8 @@ export interface MediaBuyerTestCohort {
    * product-specific row first, then falls back to the null-product default.
    */
   productId: string | null;
-  testMetaAdsetId: string;
+  /** The single shared test ad set (legacy `adsetPerTest=false`). NULL for per-test cohorts. */
+  testMetaAdsetId: string | null;
   dailyTestCeilingCents: number;
   isActive: boolean;
   notes: string | null;
@@ -60,6 +61,44 @@ export interface MediaBuyerTestCohort {
   defaultMetaAccountId: string | null;
   defaultMetaPageId: string | null;
   defaultMetaInstagramUserId: string | null;
+  /**
+   * Per-test-adset model (CEO 2026-07-12). `adsetPerTest=true` → the replenish mints a FRESH
+   * `perTestDailyBudgetCents` (~$150) ad set per test creative under `testMetaCampaignId`, cloning
+   * `adsetTemplate` so only the creative varies. `daily_test_ceiling_cents ÷ per_test` = max concurrent
+   * tests (4 at $600/$150). `adsetPerTest=false` (default) preserves the legacy single-shared-adset shape.
+   */
+  adsetPerTest: boolean;
+  testMetaCampaignId: string | null;
+  perTestDailyBudgetCents: number;
+  adsetTemplate: AdsetTemplateShape | null;
+}
+
+/** The cloned adset spec every per-test ad set inherits (mirrors provision-cohort's `AdsetTemplate`). */
+export interface AdsetTemplateShape {
+  optimizationGoal: string;
+  billingEvent: string;
+  bidStrategy: string;
+  pixelId: string;
+  customEventType: string;
+  targeting: Record<string, unknown>;
+}
+
+/**
+ * The publisher-consumed spec for minting ONE per-test $150 ad set. The media-buyer replenish assembles
+ * it from the cohort's `adsetTemplate` + `perTestDailyBudgetCents` + `testMetaCampaignId` and writes it to
+ * `ad_publish_jobs.create_adset_spec`; `adToolPublishToMeta` reads it, calls `createAdSet`, and stamps the
+ * new `meta_adset_id` on the job BEFORE creating the ad.
+ */
+export interface CreateAdsetSpec {
+  campaign_id: string;
+  name: string;
+  daily_budget_cents: number;
+  pixel_id: string;
+  custom_event_type: string;
+  optimization_goal: string;
+  billing_event: string;
+  bid_strategy: string;
+  targeting: Record<string, unknown>;
 }
 
 interface MediaBuyerTestCohortRow {
@@ -67,7 +106,7 @@ interface MediaBuyerTestCohortRow {
   workspace_id: string;
   meta_ad_account_id: string | null;
   product_id?: string | null;
-  test_meta_adset_id: string;
+  test_meta_adset_id: string | null;
   daily_test_ceiling_cents: number | string;
   is_active: boolean;
   notes: string | null;
@@ -77,6 +116,10 @@ interface MediaBuyerTestCohortRow {
   default_meta_account_id?: string | null;
   default_meta_page_id?: string | null;
   default_meta_instagram_user_id?: string | null;
+  adset_per_test?: boolean | null;
+  test_meta_campaign_id?: string | null;
+  per_test_daily_budget_cents?: number | string | null;
+  adset_template?: AdsetTemplateShape | null;
 }
 
 function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
@@ -96,6 +139,13 @@ function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
     defaultMetaAccountId: row.default_meta_account_id ?? null,
     defaultMetaPageId: row.default_meta_page_id ?? null,
     defaultMetaInstagramUserId: row.default_meta_instagram_user_id ?? null,
+    adsetPerTest: row.adset_per_test === true,
+    testMetaCampaignId: row.test_meta_campaign_id ?? null,
+    perTestDailyBudgetCents:
+      row.per_test_daily_budget_cents == null
+        ? 15000
+        : Number(row.per_test_daily_budget_cents),
+    adsetTemplate: (row.adset_template as AdsetTemplateShape | null) ?? null,
   };
 }
 
@@ -147,8 +197,10 @@ export async function getEffectiveMediaBuyerTestCohort(
 /** Why a media-buyer-test publish was refused live — carried on the escalation + the audit row. */
 export type MediaBuyerTestRefusalReason =
   | "no_active_cohort" // no `media_buyer_test_cohorts` row (opt-in table, workspace hasn't configured one).
-  | "wrong_adset" // the requested `meta_adset_id` != the cohort's `test_meta_adset_id`.
-  | "over_ceiling"; // projected daily spend on the ad set exceeds `daily_test_ceiling_cents`.
+  | "wrong_adset" // the requested `meta_adset_id` != the cohort's `test_meta_adset_id` (shared-adset mode).
+  | "over_ceiling" // projected daily spend on the ad set exceeds `daily_test_ceiling_cents`.
+  | "over_concurrency" // per-test mode: minting this ad set would push live tests × per-test budget over the ceiling.
+  | "cohort_misconfigured"; // per-test cohort missing its campaign/template — can't safely mint an ad set.
 
 export interface MediaBuyerTestGateInput {
   workspaceId: string;
@@ -217,7 +269,62 @@ function refusalDiagnosis(
         `lower the projected budget. Your call.`
       );
     }
+    case "over_concurrency": {
+      const usdCeil = cohort ? (cohort.dailyTestCeilingCents / 100).toFixed(2) : "?";
+      const usdPer = cohort ? (cohort.perTestDailyBudgetCents / 100).toFixed(2) : "?";
+      return (
+        `Media Buyer publish REFUSED live: minting another $${usdPer}/day test ad set for ${scope} would push ` +
+        `concurrent tests over the $${usdCeil}/day ceiling. Publishing PAUSED to Meta. A live test must retire ` +
+        `(kill/crown) to free a slot, or raise the ceiling. Your call.`
+      );
+    }
+    case "cohort_misconfigured":
+      return (
+        `Media Buyer publish REFUSED live: per-test cohort for ${scope} is missing its testing campaign or ` +
+        `adset template — can't safely mint a $${usdProj}/day ad set. Publishing PAUSED to Meta. Re-run ` +
+        `provisionProductTestCohort. Your call.`
+      );
   }
+}
+
+/**
+ * Count the DISTINCT active per-test ad sets currently live for a cohort's product — the belt-and-suspenders
+ * concurrency source the gate uses to enforce the $600/day ceiling as ≤N live $150 ad sets (the deterministic
+ * primary control is the replenish deficit in `computeMediaBuyerPlan`; this is the independent recount at
+ * publish time). Mirrors `readCurrentTestCohortSize`: live = `origin='media-buyer-test'`, `publish_active`,
+ * `publish_status='published'`, per-test (`create_adset_spec` set); product-scoped via `ad_campaigns.product_id`.
+ */
+async function countActivePerTestTests(
+  admin: Admin,
+  args: { workspaceId: string; productId: string | null },
+): Promise<number> {
+  const { data } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id, meta_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
+    .eq("publish_active", true)
+    .eq("publish_status", "published")
+    .not("create_adset_spec", "is", null);
+  const jobs = (data ?? []) as Array<{ campaign_id: string | null; meta_adset_id: string | null }>;
+  const withAdset = jobs.filter((j) => !!j.meta_adset_id);
+  if (!args.productId) return new Set(withAdset.map((j) => j.meta_adset_id)).size;
+
+  const campaignIds = withAdset.map((j) => j.campaign_id).filter((id): id is string => !!id);
+  if (!campaignIds.length) return 0;
+  const { data: camps } = await admin
+    .from("ad_campaigns")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .in("id", campaignIds)
+    .eq("product_id", args.productId);
+  const okCampaigns = new Set((camps ?? []).map((c) => (c as { id: string }).id));
+  const productAdsets = new Set(
+    withAdset
+      .filter((j) => j.campaign_id && okCampaigns.has(j.campaign_id))
+      .map((j) => j.meta_adset_id),
+  );
+  return productAdsets.size;
 }
 
 /**
@@ -246,6 +353,56 @@ export async function evaluateMediaBuyerTestPublish(
       diagnosis: refusalDiagnosis("no_active_cohort", input, null),
     };
   }
+  // ── Per-test-adset cohort ───────────────────────────────────────────────────
+  // Each test creative runs in its OWN freshly-minted ~$150 ad set (not the cohort's single
+  // `test_meta_adset_id`), so the shared-adset identity check doesn't apply. Enforce instead:
+  //   (a) config present — a testing campaign + adset template to clone (else can't safely mint);
+  //   (b) per-adset budget ≤ the per-test budget (no single test ad set carries more than $150);
+  //   (c) concurrency — (live per-test ad sets + this one) × per-test budget ≤ daily ceiling ($600).
+  if (cohort.adsetPerTest) {
+    if (!cohort.testMetaCampaignId || !cohort.adsetTemplate) {
+      return {
+        allowed: false,
+        reason: "cohort_misconfigured",
+        cohort,
+        projectedDailyCents: input.projectedDailyCents,
+        ceilingCents: cohort.dailyTestCeilingCents,
+        diagnosis: refusalDiagnosis("cohort_misconfigured", input, cohort),
+      };
+    }
+    if (input.projectedDailyCents > cohort.perTestDailyBudgetCents) {
+      return {
+        allowed: false,
+        reason: "over_ceiling",
+        cohort,
+        projectedDailyCents: input.projectedDailyCents,
+        ceilingCents: cohort.dailyTestCeilingCents,
+        diagnosis: refusalDiagnosis("over_ceiling", input, cohort),
+      };
+    }
+    const activeTests = await countActivePerTestTests(admin, {
+      workspaceId: input.workspaceId,
+      productId: cohort.productId,
+    });
+    if ((activeTests + 1) * cohort.perTestDailyBudgetCents > cohort.dailyTestCeilingCents) {
+      return {
+        allowed: false,
+        reason: "over_concurrency",
+        cohort,
+        projectedDailyCents: input.projectedDailyCents,
+        ceilingCents: cohort.dailyTestCeilingCents,
+        diagnosis: refusalDiagnosis("over_concurrency", input, cohort),
+      };
+    }
+    return {
+      allowed: true,
+      cohort,
+      projectedDailyCents: input.projectedDailyCents,
+      ceilingCents: cohort.dailyTestCeilingCents,
+    };
+  }
+
+  // ── Legacy single-shared-adset cohort ────────────────────────────────────────
   if (cohort.testMetaAdsetId !== input.metaAdsetId) {
     return {
       allowed: false,
