@@ -1,0 +1,1 @@
+- **CEO Control Tower — universal on/off switches + org-mirror monitoring** · folded 2026-07-12 · → [[lifecycles/control-tower]]
