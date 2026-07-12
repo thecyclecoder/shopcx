@@ -28,8 +28,19 @@ The typed `spec_phase_checks` rows — NOT the `spec_phases.verification` TEXT c
 
 ## Author chokepoint gate
 
-[[author-spec]] `assertEveryPhaseHasChecks` runs BEFORE the DB write and throws `MissingVerificationError` if any phase yields zero checks — an untestable phase never lands.
+Two gates fire in order BEFORE the DB write; both throw with the offending phase named so the author sees exactly what's un-testable:
+
+1. [[author-spec]] `assertEveryPhaseHasChecks` throws `MissingVerificationError` if any phase yields zero checks — a totally-empty phase never lands.
+2. [[author-spec]] `assertEveryPhaseHasMachineCheck` — [[../specs/every-spec-writer-authors-machine-runnable-verifications]] Phase 1 — throws `MissingMachineCheckError` if any phase's checks are ALL prose / ALL `needs_human`. Every phase must carry ≥1 check with a valid `exec_kind` (tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build) that passes `validateExecutableCheck`. Machine-runnable is the sole ship gate; `needs_human` rows are legal only as EXTRA advisory checks alongside a real machine one. Applies to both author entry points (structured + markdown) so every writer (planner, spec-chat, ~17 box-worker author lanes, request-fix) inherits it — no writer can land a prose-only spec.
+
+## Optional, non-blocking `human_review` (Phase 2)
+
+`public.specs.human_review` (additive migration 20261014120000) carries an OPTIONAL, non-blocking founder-facing advisory note — "after ship, open /dashboard/x and confirm the layout reads right." Threaded through both author entry points ([[author-spec]] `authorSpecRowStructured.spec.human_review` / `AuthorSpecOpts.humanReview`; `authorSpecRowFromMarkdown` `extractHumanReviewHeader`). Rendered on the spec card + post-ship founder surface. NEVER read by the fold gate, promote gate, or deterministic spec-check runner — machine-runnable `spec_phase_checks` remain the sole ship gate. Absence is the norm.
+
+## Phase 3 — backfill existing prose to typed
+
+`scripts/backfill-spec-checks-to-typed.ts` — safety-first prose→typed classifier (dry-run/`--apply`, compare-and-set write with `.eq('exec_kind','needs_human')` guard so a re-run never clobbers a subsequent SDK-set typed row). Promotes literal-command bullets (tsc / build / ci_status / http_get / unit_test with a real `package.json` script) to their typed exec_kind; grep and db_probe_readonly are DELIBERATELY NOT auto-derived (fabrication risk). Unmappable prose stays `needs_human` — the safe direction. Pinned by 18 unit tests in `scripts/backfill-spec-checks-to-typed.test.ts`.
 
 ## Related
 
-[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[spec-phase-checks-executable]] · [[spec-check-runner]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/pm-structured-intent-and-refs]]
+[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[spec-phase-checks-executable]] · [[spec-check-runner]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/pm-structured-intent-and-refs]] · [[../specs/every-spec-writer-authors-machine-runnable-verifications]] · [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]]
