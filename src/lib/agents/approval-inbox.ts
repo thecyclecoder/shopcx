@@ -21,7 +21,7 @@
  * action build + multi-branch plan, inline) and deep-links only genuinely multi-choice actions out.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import { MODEL_TIER_PROPOSAL_KIND, APPLY_MODEL_TIER_ACTION_TYPE } from "@/lib/agent-jobs";
 import { APPROVAL_REQUEST_TYPE, type InboxApprovalAction } from "@/lib/agents/inbox";
 import {
@@ -70,45 +70,49 @@ export interface ApprovalJobRow {
 }
 
 /**
- * agent_jobs.kind → the org-chart FUNCTION that owns the raising tool. Most kinds are agent-kind
- * box lanes already tagged with an owner in the Control Tower registry (the single source of truth,
- * no second copy). The proposal kinds db_health / coverage-register raise agent_jobs but run as
- * platform crons, not agent-kind lanes — mapped explicitly. An unknown kind ⇒ null ⇒ resolveApprover
- * routes it to the CEO (fail-safe: an unmapped tool never silently routes to a director).
+ * Approval-only kind → org-chart FUNCTION shim
+ * (control-tower-canonical-node-registry P2). Every real box lane is now a first-class Node in
+ * [[../control-tower/node-registry]] — its owner comes from `resolveNodeOwner`, no second copy
+ * here. What remains are the APPROVAL-ONLY kinds — targets a proposal action carries that have
+ * no agent_jobs.kind dispatched by the box worker (so they're not in `BUILDER_WORKER_KINDS`)
+ * and no MONITORED_LOOPS row. Each entry is scheduled to become a first-class Node in a
+ * follow-up spec; retire ONE per follow-up spec (the P2 sequence-of-node-registrations plan).
+ *
+ * Every entry is annotated with the first-class Node it maps to (or the spec that will create
+ * it) so the Verification #1 grep hit ("every remaining hit ... a comment naming the first-
+ * class Node it maps to") reads clean.
+ *
+ * `proposed-goal` (director-proposed-goals) is deliberately ABSENT — a goal NEVER routes to a
+ * director for greenlight; unmapped ⇒ null ⇒ resolveApprover falls through to the CEO fail-safe.
  */
-const KIND_TO_FUNCTION: Record<string, string> = (() => {
-  const m: Record<string, string> = {};
-  for (const l of MONITORED_LOOPS) {
-    if (l.kind === "agent-kind" && l.agentKind) m[l.agentKind] = l.owner;
-  }
-  if (!m["db_health"]) m["db_health"] = "platform";
-  if (!m["coverage-register"]) m["coverage-register"] = "platform";
-  // growth-customer-voice-to-ad-angles Phase 3: a `growth-voice-angle-approval` target carries one
-  // `approve_voice_angle` pending action per status='proposed' angle and routes UP from the Growth
-  // function; while Growth is live+autonomous, the Growth director auto-approves within the leash,
-  // otherwise it falls through to the CEO (the fail-safe).
-  if (!m["growth-voice-angle-approval"]) m["growth-voice-angle-approval"] = "growth";
-  // `research` (Rhea) is a Growth worker — any research agent_jobs she raises route UP from Growth
-  // (Max auto-approves within his leash, else the CEO fail-safe), same as Cleo's grade lanes.
-  if (!m["research"]) m["research"] = "growth";
-  // `dr-content` (Carrie) is a Growth worker — her content-gap flags + build handoffs route UP from
-  // Growth (Max), same leash. She reports to Max and escalates real-asset gaps to him.
-  if (!m["dr-content"]) m["dr-content"] = "growth";
-  // `ad-creative` (Dahlia) is a Growth worker beside Bianca — she stocks Bianca's ready-to-test bin with
-  // fully-backed, vision-QA'd statics (no human gate; verifiable-by-construction). She raises no approvals
-  // in normal flow, but any escalation routes UP from Growth (Max), same leash as Carrie/Rhea.
-  if (!m["ad-creative"]) m["ad-creative"] = "growth";
-  // `sms-marketing` (Margo) is a CMO worker — her send proposals + stale-segment/no-coupon escalations
-  // route UP from CMO (Iris auto-approves within her leash when live+autonomous, else the CEO fail-safe).
-  if (!m["sms-marketing"]) m["sms-marketing"] = "cmo";
-  // `proposed-goal` (director-proposed-goals) is deliberately ABSENT — a goal NEVER routes to a director for
-  // greenlight, even a live+autonomous one (a director may propose its own goal but never greenlight any).
-  // Unmapped ⇒ ownerFunctionForKind returns null ⇒ resolveApprover falls through to the CEO. Do not add it.
-  return m;
-})();
+const KIND_TO_FUNCTION_SHIM: Record<string, string> = {
+  // `growth-voice-angle-approval` — approval target carried on ad-angle approve actions
+  // (growth-customer-voice-to-ad-angles P3). No box lane, no MONITORED_LOOPS row. Follow-up
+  // spec `growth-voice-angle-approval-node-registry-registration` will lift it into a first-
+  // class Node under `director:growth`; until then, route via this shim.
+  "growth-voice-angle-approval": "growth",
+  // `sms-marketing` — Margo's send-proposal + stale-segment/no-coupon escalations. She IS
+  // rostered under CMO (Iris), but her lane runs as `sms-marketing-cron` (a cron, not an
+  // agent-kind box lane) so there is no first-class Node keyed on this slug yet. Follow-up
+  // spec `sms-marketing-approval-node-registry-registration` will lift it to `director:cmo`.
+  "sms-marketing": "cmo",
+};
 
+/**
+ * Resolve the org-chart FUNCTION that owns a raising tool. The canonical node registry
+ * ([[../control-tower/node-registry]]) is the source of truth for every real box lane
+ * (`BUILDER_WORKER_KINDS`), every MONITORED_LOOPS row, and every reactive/agentKind alias — so
+ * that lookup runs first. The compact `KIND_TO_FUNCTION_SHIM` above is a small backstop for the
+ * approval-only kinds that don't have a first-class Node yet; each shim entry is scheduled to
+ * be retired by a follow-up spec.
+ *
+ * Unknown kind ⇒ null ⇒ resolveApprover falls through to the CEO (fail-safe: an unmapped tool
+ * never silently routes to a director).
+ */
 export function ownerFunctionForKind(kind: string): string | null {
-  return KIND_TO_FUNCTION[kind] ?? null;
+  const fromRegistry = resolveNodeOwner(kind);
+  if (fromRegistry) return fromRegistry;
+  return KIND_TO_FUNCTION_SHIM[kind] ?? null;
 }
 
 /**
@@ -131,7 +135,7 @@ export function ownerFunctionForKind(kind: string): string | null {
  *     goes to CEO because Ada is out of leash; irreversible always to CEO circuit-breaker);
  *   • the override string must be one of the whitelist `'platform' | 'ceo'`.
  *
- * Any missed check → we IGNORE the override and fall through to the `KIND_TO_FUNCTION` default
+ * Any missed check → we IGNORE the override and fall through to the ownerFunctionForKind default
  * (unmapped kind → null → CEO fail-safe). A hostile pending_actions row that hand-installs a
  * `routed_to_function_override: 'platform'` on a `run_prod_script` or on an unrelated job kind
  * cannot install a Platform override — the read-time gates re-derive the routing from the same

@@ -21,7 +21,7 @@ export const deployGuardianCron = inngest.createFunction(
   {
     id: "deploy-guardian-cron",
     retries: 1, // the next tick re-evaluates a minute later — no value in long retries here
-    triggers: [{ cron: "* * * * *" }], // every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const result = await step.run("evaluate-due-deploy-watches", async () => {

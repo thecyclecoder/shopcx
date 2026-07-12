@@ -16,7 +16,8 @@
  *      a `proposed_goal` director_activity row. The roadmap readers themselves no longer read this
  *      markdown — they read `public.goals` directly (goal-readers-from-db-retire-parsegoal).
  *   3. The approval-routing-engine reconciler surfaces it as an Approval Request. Goals NEVER route to a
- *      director — `proposed-goal` is deliberately absent from approval-inbox's KIND_TO_FUNCTION, so
+ *      director — `proposed-goal` is deliberately NOT a first-class Node in the canonical registry
+ *      ([[../control-tower/node-registry]]) and is NOT in approval-inbox's KIND_TO_FUNCTION_SHIM, so
  *      `resolveApprover` falls through to the CEO even when the proposing director is live + autonomous.
  *   4. On CEO greenlight the worker flips the row via `setGoalStatus(goalId, 'greenlit')` (the RESUME
  *      path); on decline it flips the row to `folded` (the active board filters folded rows). The DB row is

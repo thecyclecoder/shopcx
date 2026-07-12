@@ -25196,6 +25196,22 @@ async function main() {
     }
   })();
 
+  // Deploy-time node_ancestry re-sync (claim-rpc-kill-switch-enforcement Phase 1): the box
+  // worker restarts after a self-update, so recomputing the DB mirror of the canonical node
+  // registry here keeps public.claim_agent_job's kill-switch cascade in sync with any newly-added
+  // MONITORED_LOOPS row or KIND_OWNER_FALLBACK entry. Fail-open by design — a failed sync just
+  // means the RPC sees an out-of-date mirror; an unregistered kind falls through to the claim
+  // path anyway. Fire-and-forget, best-effort — must never block the worker loop.
+  void (async () => {
+    try {
+      const { syncNodeAncestry } = await import("../src/lib/control-tower/node-ancestry-sync");
+      const r = await syncNodeAncestry();
+      console.log(`[node-ancestry-sync] ${r.detail}`);
+    } catch (e) {
+      console.warn("[node-ancestry-sync] skipped:", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Vercel Ignored-Build-Step auto-heal at startup (regression-of: per-build-vercel-preview-deploys):
   // re-assert the CLAUDE_PREVIEW_IGNORE_COMMAND override so a manual revert in the Vercel dashboard
   // (or any other path that drifts it) is healed by the next box restart. The helper is idempotent —
@@ -25938,6 +25954,38 @@ async function main() {
         if (await claimHeldForUnreviewedSpec(job)) continue;
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
+      }
+      // claim-rpc-kill-switch-enforcement Phase 2 — after every per-kind claim loop has run,
+      // ask public.claim_agent_job_diag which queued rows the current kill_switches state
+      // suppressed this tick. For each unique agent kind returned, write one agent-kind
+      // heartbeat (loop_id = `agent:<kind>`) with produced.blocked_off + offBy + scope so
+      // evalAgentKind can render amber `off by <ancestor> (<scope>)` instead of a false
+      // green-idle or false red. Best-effort: a diag/heartbeat failure must never break
+      // the poll loop. The RPC is a cheap indexed read (LIMIT 20) that returns [] when no
+      // switches are set; skipping the whole path on an empty queue (hasClaimableJob=false)
+      // above keeps the cost off idle boxes.
+      try {
+        const { data: diag } = await db.rpc("claim_agent_job_diag", { p_kinds: null });
+        const rows = Array.isArray(diag)
+          ? (diag as Array<{ kind?: unknown; suppressed_by?: unknown; scope?: unknown }>)
+          : [];
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const kind = typeof r?.kind === "string" ? r.kind : null;
+          const offBy = typeof r?.suppressed_by === "string" ? r.suppressed_by : null;
+          const scope = typeof r?.scope === "string" ? r.scope : null;
+          if (!kind || !offBy || !scope) continue;
+          if (seen.has(kind)) continue;
+          seen.add(kind);
+          await writeLoopHeartbeat(
+            `agent:${kind}`,
+            true,
+            { blocked_off: true, offBy, scope },
+            0,
+          );
+        }
+      } catch (e) {
+        console.error("[claim-diag] suppressed-claim heartbeats skipped:", e instanceof Error ? e.message : e);
       }
       } // end if (!draining) — queue-restart drain skips all claims above
       // Drained + idle + nothing to pull (already current) past the safety age → clear so we don't strand.

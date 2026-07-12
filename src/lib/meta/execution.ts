@@ -31,6 +31,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
 import type { AutonomousActionType } from "@/lib/meta/decision-engine";
+import { isEffectivelyEnabled } from "@/lib/control-tower/legacy-switch-compat";
 
 /**
  * The action types whose autonomous adapter is enabled. Spec mandate: "ship
@@ -45,6 +46,20 @@ export const ENABLED_ADAPTERS: ReadonlySet<AutonomousActionType> = new Set<Auton
   "scale_up",
   "scale_down",
 ]);
+
+/**
+ * migrate-ad-hoc-kill-switches-to-resolver Phase 1 — union check that wraps the legacy
+ * `ENABLED_ADAPTERS` set with a resolver read. An action_type is enabled ONLY IF (a) it is in
+ * the ad-hoc `ENABLED_ADAPTERS` set AND (b) the `media-buyer` cascade is ON. Any growth /
+ * media-buyer / department-scope kill_switches row flips the answer to disabled — the ad-hoc set
+ * and the cascade both authorize.
+ */
+export async function isMetaExecutionAdapterEnabled(
+  action_type: AutonomousActionType,
+): Promise<boolean> {
+  const legacyFn = async (): Promise<boolean | undefined> => ENABLED_ADAPTERS.has(action_type);
+  return isEffectivelyEnabled("media-buyer", legacyFn);
+}
 
 export interface ExecutionParams {
   workspaceId: string;
@@ -103,8 +118,8 @@ export async function executeAutonomousActions(
   };
 
   for (const a of decided) {
-    if (!ENABLED_ADAPTERS.has(a.action_type)) {
-      bump(a.action_type, "skipped"); // adapter not shipped yet — leave row 'decided'
+    if (!(await isMetaExecutionAdapterEnabled(a.action_type))) {
+      bump(a.action_type, "skipped"); // adapter not shipped yet OR resolver cascade OFF — leave row 'decided'
       continue;
     }
     try {
