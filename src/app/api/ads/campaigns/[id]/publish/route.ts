@@ -8,6 +8,7 @@ import {
   MEDIA_BUYER_TEST_ORIGIN,
   evaluateMediaBuyerTestPublish,
   escalateMediaBuyerTestPublishRefusal,
+  type MediaBuyerTestRefusalReason,
 } from "@/lib/media-buyer/publish-gate";
 import { getMetaUserToken, updateObjectBudget } from "@/lib/meta-ads";
 
@@ -98,7 +99,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const requestedActive = body.publish_active === true;
   let publishActive = requestedActive;
   let gateRefusal: {
-    reason: "no_active_cohort" | "wrong_adset" | "over_ceiling";
+    reason: MediaBuyerTestRefusalReason;
     diagnosis: string;
     ceilingCents: number | null;
     projectedDailyCents: number;

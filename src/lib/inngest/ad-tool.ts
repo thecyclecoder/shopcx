@@ -40,12 +40,13 @@ import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
 import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
-import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createAd } from "@/lib/meta-ads";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createAd, createAdSet } from "@/lib/meta-ads";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 import {
   MEDIA_BUYER_TEST_ORIGIN,
   evaluateMediaBuyerTestPublish,
   escalateMediaBuyerTestPublishRefusal,
+  type CreateAdsetSpec,
 } from "@/lib/media-buyer/publish-gate";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
@@ -836,7 +837,7 @@ export const adToolPublishToMeta = inngest.createFunction(
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
-      const { data: campaign } = await admin.from("ad_campaigns").select("name").eq("id", job.campaign_id).single();
+      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id").eq("id", job.campaign_id).single();
       // Gather BOTH ratios for the campaign so we can publish one placement-customized
       // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Falls back to a
       // single asset when only one ratio is ready.
@@ -864,7 +865,8 @@ export const adToolPublishToMeta = inngest.createFunction(
       // Engine-created jobs carry an explicit [ie]-tagged ad_name (Phase 6b); the
       // studio path falls back to the campaign name.
       const adName = (job.ad_name as string | null) || campaign?.name || "ShopCX Ad";
-      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token };
+      const productId = (campaign as { product_id?: string | null } | null)?.product_id ?? null;
+      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token, productId };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
@@ -947,6 +949,14 @@ export const adToolPublishToMeta = inngest.createFunction(
         }
         await admin.from("ad_publish_jobs").update({ meta_creative_id: creativeId }).eq("id", job_id);
 
+        // Per-test-adset path (media-buyer per-test cohort): this job carries a `create_adset_spec` —
+        // instead of publishing into a shared adset, mint a DEDICATED ~$150/day ad set for THIS one
+        // creative so the whole budget tests it (the researched ABO model). The gate runs FIRST (below)
+        // using the spec's budget + a concurrency recount, so a refusal keeps the freshly-minted adset
+        // PAUSED (zero spend). Idempotency: a retry after the adset was already created reuses the stamped
+        // meta_adset_id (the load step re-reads it) — never a second ad set.
+        const perTestSpec = (j.create_adset_spec as CreateAdsetSpec | null) ?? null;
+
         // Media-Buyer test-cohort gate — belt-and-suspenders re-check
         // (media-buyer-test-winner-loop Phase 1). The publish route runs the same
         // gate BEFORE inserting the job, but a script/enqueue path may bypass the
@@ -955,21 +965,27 @@ export const adToolPublishToMeta = inngest.createFunction(
         // ad to PAUSED (never silently spend) and escalate to the CEO. The refusal
         // is idempotent-safe — escalateDiagnosisToCeo dedupes on the same key the
         // route used, so a route-caught refusal doesn't fan out a duplicate.
+        //
+        // Per-test mode: gate on the SPEC's daily budget (the adset isn't minted yet), scoped to the
+        // campaign's product so the per-product cohort's ceiling/concurrency is enforced.
         let effectivePublishActive = !!j.publish_active;
         if (effectivePublishActive && j.origin === MEDIA_BUYER_TEST_ORIGIN) {
+          const gateAdsetId = perTestSpec ? `pending:${job_id}` : String(j.meta_adset_id);
+          const gateProjected = perTestSpec
+            ? Math.round(Number(perTestSpec.daily_budget_cents))
+            : (Number.isFinite(Number(j.projected_daily_cents)) ? Math.round(Number(j.projected_daily_cents)) : 0);
           const gate = await evaluateMediaBuyerTestPublish(admin, {
             workspaceId: workspace_id,
             metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
-            metaAdsetId: String(j.meta_adset_id),
-            projectedDailyCents: Number.isFinite(Number(j.projected_daily_cents))
-              ? Math.round(Number(j.projected_daily_cents))
-              : 0,
+            productId: ctx.productId ?? null,
+            metaAdsetId: gateAdsetId,
+            projectedDailyCents: gateProjected,
           });
           if (!gate.allowed) {
             effectivePublishActive = false;
             await escalateMediaBuyerTestPublishRefusal(admin, {
               workspaceId: workspace_id,
-              metaAdsetId: String(j.meta_adset_id),
+              metaAdsetId: gateAdsetId,
               metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
               projectedDailyCents: gate.projectedDailyCents,
               reason: gate.reason,
@@ -982,9 +998,32 @@ export const adToolPublishToMeta = inngest.createFunction(
           }
         }
 
+        // Mint the per-test ad set (if this job carries a spec) with the gated status — ACTIVE only when
+        // the gate allowed it, PAUSED otherwise (so a refused publish creates an idle, zero-spend adset).
+        let effectiveAdsetId: string | null = (j.meta_adset_id as string | null) ?? null;
+        if (perTestSpec && !effectiveAdsetId) {
+          effectiveAdsetId = await createAdSet(ctx.token!, j.meta_account_id, {
+            name: perTestSpec.name,
+            campaignId: perTestSpec.campaign_id,
+            dailyBudgetCents: perTestSpec.daily_budget_cents,
+            pixelId: perTestSpec.pixel_id,
+            customEventType: perTestSpec.custom_event_type,
+            optimizationGoal: perTestSpec.optimization_goal,
+            billingEvent: perTestSpec.billing_event,
+            bidStrategy: perTestSpec.bid_strategy,
+            targeting: perTestSpec.targeting,
+            status: effectivePublishActive ? "ACTIVE" : "PAUSED",
+          });
+          await admin.from("ad_publish_jobs").update({ meta_adset_id: effectiveAdsetId }).eq("id", job_id);
+        }
+        if (!effectiveAdsetId) {
+          await setStatus("failed", { error: "no_adset_id" });
+          return { ok: false, reason: "no_adset_id" };
+        }
+
         const adId = await createAd(ctx.token!, j.meta_account_id, {
           name: ctx.adName,
-          adsetId: j.meta_adset_id,
+          adsetId: effectiveAdsetId,
           creativeId,
           status: effectivePublishActive ? "ACTIVE" : "PAUSED",
         });
