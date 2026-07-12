@@ -866,7 +866,18 @@ export const adToolPublishToMeta = inngest.createFunction(
       // studio path falls back to the campaign name.
       const adName = (job.ad_name as string | null) || campaign?.name || "ShopCX Ad";
       const productId = (campaign as { product_id?: string | null } | null)?.product_id ?? null;
-      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token, productId };
+      // Resolve the account's UUID (meta_ad_accounts.id) from the bare act id the job carries — the
+      // media-buyer publish gate resolves the per-product cohort by (account UUID, productId), and the
+      // job row only stores the act id. Without this the publisher's re-check can't find a per-account/
+      // per-product cohort (it would see a null account and refuse). See [[../media-buyer/publish-gate]].
+      const { data: acctRow } = await admin
+        .from("meta_ad_accounts")
+        .select("id")
+        .eq("workspace_id", workspace_id)
+        .eq("meta_account_id", job.meta_account_id)
+        .maybeSingle();
+      const metaAdAccountRowId = (acctRow as { id: string } | null)?.id ?? null;
+      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token, productId, metaAdAccountRowId };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
@@ -976,7 +987,7 @@ export const adToolPublishToMeta = inngest.createFunction(
             : (Number.isFinite(Number(j.projected_daily_cents)) ? Math.round(Number(j.projected_daily_cents)) : 0);
           const gate = await evaluateMediaBuyerTestPublish(admin, {
             workspaceId: workspace_id,
-            metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
+            metaAdAccountId: ctx.metaAdAccountRowId ?? (j.meta_ad_account_row_id as string | null) ?? null,
             productId: ctx.productId ?? null,
             metaAdsetId: gateAdsetId,
             projectedDailyCents: gateProjected,
@@ -986,7 +997,7 @@ export const adToolPublishToMeta = inngest.createFunction(
             await escalateMediaBuyerTestPublishRefusal(admin, {
               workspaceId: workspace_id,
               metaAdsetId: gateAdsetId,
-              metaAdAccountId: (j.meta_ad_account_row_id as string | null) ?? null,
+              metaAdAccountId: ctx.metaAdAccountRowId ?? (j.meta_ad_account_row_id as string | null) ?? null,
               projectedDailyCents: gate.projectedDailyCents,
               reason: gate.reason,
               diagnosis: gate.diagnosis,
