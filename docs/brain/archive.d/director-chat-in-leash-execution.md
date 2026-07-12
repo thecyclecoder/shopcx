@@ -1,0 +1,1 @@
+- **Per-director in-chat leash-bound execution + CEO rail-routing (execute-then-message)** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]

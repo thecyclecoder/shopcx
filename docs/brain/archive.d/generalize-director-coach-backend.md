@@ -1,0 +1,1 @@
+- **Generalize director-coach backend: unpin platform in route + framing + profile page** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]

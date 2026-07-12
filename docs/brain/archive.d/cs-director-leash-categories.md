@@ -1,0 +1,1 @@
+- **CS Director LEASH_CATEGORIES + DIRECTOR_LEASH registry entry** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]

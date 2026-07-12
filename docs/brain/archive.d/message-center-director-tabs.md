@@ -1,0 +1,1 @@
+- **Message Center director-launcher tabs (Ada/Max/June + Eve visually distinct)** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]
