@@ -86,3 +86,84 @@ export function patchHiddenVariantsSetting(content: string, sl: string): string 
   });
   return changed ? out : null;
 }
+
+// ── Reverse patchers (Marco / Phase 1: setStorefrontAvailability available=true) ─
+//
+// The forward patchers above HIDE a variant (add it to a Liquid `variant.id`
+// exclusion or a `hidden_variants` list). The reverses below SHOW a variant
+// (remove it from those same shapes). Every reverse is idempotent: a file that
+// doesn't reference the variant is returned as `null`, so a caller can skip
+// the commit.
+
+/**
+ * Remove `id` from a Liquid `variant.id ==`/`!=` expression the forward
+ * patcher composed.
+ *
+ *   `variant.id == A or variant.id == ID`     → `variant.id == A`
+ *   `variant.id == ID or variant.id == B`     → `variant.id == B`
+ *   `variant.id == ID`                        → whole comparison removed
+ *   `variant.id != A and variant.id != ID`    → `variant.id != A`
+ *
+ * Whole-token guard matches the forward patcher so a longer numeric that
+ * contains `id` as a substring is NOT touched.
+ */
+export function unpatchLiquidVariantExclusion(content: string, id: string): string | null {
+  if (!id) return null;
+  if (!content.includes(id)) return null;
+  // Match `variant.id ==` OR `variant.id !=` optionally preceded by ` or `/` and ` (the
+  // conjunction the forward patcher appended). Also strip a trailing ` or …`/` and …`
+  // when the target is the FIRST term.
+  const trailingEq = new RegExp(`\\s+or\\s+variant\\.id\\s*==\\s*${id}(?![0-9])`, "g");
+  const trailingNe = new RegExp(`\\s+and\\s+variant\\.id\\s*!=\\s*${id}(?![0-9])`, "g");
+  const leadingEq = new RegExp(`variant\\.id\\s*==\\s*${id}(?![0-9])\\s+or\\s+`, "g");
+  const leadingNe = new RegExp(`variant\\.id\\s*!=\\s*${id}(?![0-9])\\s+and\\s+`, "g");
+  // Solo comparison (no conjunction) — remove the whole `variant.id … ID` clause.
+  const soloEq = new RegExp(`variant\\.id\\s*==\\s*${id}(?![0-9])`, "g");
+  const soloNe = new RegExp(`variant\\.id\\s*!=\\s*${id}(?![0-9])`, "g");
+  let out = content;
+  out = out.replace(trailingEq, "");
+  out = out.replace(trailingNe, "");
+  out = out.replace(leadingEq, "");
+  out = out.replace(leadingNe, "");
+  out = out.replace(soloEq, "");
+  out = out.replace(soloNe, "");
+  return out === content ? null : out;
+}
+
+/**
+ * Remove `id` from a JSON array or bare CSV shape the forward `patchJsonForSl`
+ * composed. Handles `"ID"` (JSON array entry, optionally with a leading or
+ * trailing comma) and bare-token CSV.
+ */
+export function unpatchJsonForVariant(content: string, id: string): string | null {
+  if (!id) return null;
+  if (!content.includes(id)) return null;
+  let out = content;
+  // JSON array entry with comma on either side.
+  out = out.replaceAll(`,"${id}"`, "");
+  out = out.replaceAll(`"${id}",`, "");
+  out = out.replaceAll(`"${id}"`, "");
+  // Bare CSV: strip with surrounding commas, then bare-token.
+  const csvComma = new RegExp(`,\\s*${id}(?=[\\s,\\]"']|$)`, "g");
+  out = out.replace(csvComma, "");
+  const bare = new RegExp(`(^|[\\s\\[])${id}(?=[\\s,\\]"']|$),?`, "g");
+  out = out.replace(bare, "$1");
+  return out === content ? null : out;
+}
+
+/**
+ * Remove `id` from every `"hidden_variants": "…"` CSV setting in the theme
+ * settings JSON — the mirror of `patchHiddenVariantsSetting`.
+ */
+export function unpatchHiddenVariantsSetting(content: string, id: string): string | null {
+  if (!id) return null;
+  let changed = false;
+  const out = content.replace(/("hidden_variants"\s*:\s*")([^"]*)(")/g, (_, head: string, csv: string, tail: string) => {
+    const parts = csv.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!parts.includes(id)) return `${head}${csv}${tail}`;
+    changed = true;
+    const nextCsv = parts.filter((p) => p !== id).join(",");
+    return `${head}${nextCsv}${tail}`;
+  });
+  return changed ? out : null;
+}

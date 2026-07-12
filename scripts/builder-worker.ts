@@ -16716,27 +16716,26 @@ const CS_COACH_OUTPUT = [
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"amend_low_blast_sonnet_prompt","summary":"<one-line why>","title":"<rule title>","content":"<the rule content>","category":"rule","derived_from_ticket_id":"<optional uuid>","reasoning":"<why the blast radius is narrow — never billing, never a specific customer promise>"}]}`,
 ].join("\n");
 
-// marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
-// questions about inventory + fulfillment + crisis state, but MUST NOT emit an autonomously-
-// executable pending_action. His card shapes are limited to the shared read-only surfaces every
-// director carries (out-of-leash-request escalates to the CEO if he independently AGREES the ad-hoc
-// ask is right; otherwise he just replies). NO reallocate / promote / remedy / spec-authoring
-// shapes appear here — those would land executor-side mutations, and the founder-driven build model
-// for logistics tooling (docs/brain/functions/logistics.md § Provenance / build model) explicitly
-// blocks Ada-side executor wiring for this surface.
+// marco-logistics-executor-surface Phase 2 — Marco (Logistics) is now a LIVE leash-bound director.
+// His two card shapes are crisis-cohort scoped: every card names a `crisis_id` the M3 dispatch
+// verifies against `public.crisis_events` (same-workspace) BEFORE firing the executor. Retires the
+// Phase-3 read-only-observer text that lived here.
 const LOGISTICS_COACH_OUTPUT = [
   `Final message = ONLY one JSON object, nothing else:`,
   `{"status":"replied","reply":"<your plain-text answer AS Marco — grounded in what you actually read: inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions, subscriptions, your director_activity>"}`,
   `  — for an explanation ("why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs to a different flavor?"): investigate read-only and explain, citing the crisis row + the measured lead + the storefront/FBA cover split.`,
   ``,
-  `## Cards you may emit (Logistics leash — READ-ONLY OBSERVER)`,
+  `## Cards you may emit (Logistics leash — two crisis-cohort shapes)`,
   ``,
-  `You have NO in-leash executor cards. Marco's autonomous surface is intentionally CLOSED for now:`,
-  `  · the storefront-availability toggle has no callable helper (the play is described in prose only, executed by hand)`,
-  `  · the auto-re-add / swap-enrollment writer exists (crisis_enroll / crisis_set_auto_readd) but the founder is hand-driving the whole inventory-allocation surface (docs/brain/functions/logistics.md § "Provenance / build model" — Kept off public.specs by founder directive 2026-07-10)`,
-  `  · when marco-logistics-executor-surface lands, THIS block gains cards for availability_toggle_within_crisis_lever + auto_readd_swapped_subscribers_within_crisis_cohort. Until then: NEVER emit an executable pending_action.`,
+  `Both shapes are crisis-cohort scoped: every card MUST carry a \`crisis_id\` naming a real, same-workspace row in \`public.crisis_events\`. The M3 dispatch runs the crisis-cohort guard (workspace match + variant belongs to the crisis for shape #1) BEFORE firing the executor — a payload naming a foreign or missing crisis is rejected with a stable "crisis-cohort guard" reason and never mutates anything.`,
   ``,
-  `If the CEO asks you AD-HOC to take an action (e.g. "pull SL off the storefront now") and you INDEPENDENTLY AGREE it's the right call, use the shared founder-prompted out-of-leash rail below — emit ONE 'out-of-leash-request' pending_action carrying your reasoning + a concrete executable action (typed 'run_prod_script' or 'apply_migration'). The CEO approves in their normal Approvals inbox; the executor runs it once. DECLINE (reply with your reasoning + what you'd do instead) when you disagree — your independent judgment is required.`,
+  `1. Toggle a variant's storefront + portal availability during a crisis (\`availability_toggle_within_crisis_lever\`). Fires \`setStorefrontAvailability\` in src/lib/logistics/storefront-availability.ts — idempotent, safe to re-run. \`available:true\` restores the variant to the storefront + portal swap options; \`available:false\` hides it (preserving remaining units for existing subscribers). \`variant_id\` MUST be either the crisis's affected variant OR its default swap variant (crisis-cohort guard).`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"availability_toggle_within_crisis_lever","summary":"<one-line why>","crisis_id":"<uuid>","variant_id":"<shopify variant id>","available":<true|false>,"reasoning":"<why this toggle now, inside this crisis>"}]}`,
+  ``,
+  `2. Flip auto_readd=true across a crisis cohort (\`auto_readd_swapped_subscribers_within_crisis_cohort\`). Bulk-updates every \`crisis_customer_actions\` row scoped to the named crisis (same workspace, currently \`auto_readd=false\`) so the swapped-away subscribers get switched BACK to their original item on restock. No customer-side surface fires here — this only marks the cohort as auto-re-addable for the crisis resolution job.`,
+  `{"status":"replied","reply":"<...>","pending_actions":[{"type":"auto_readd_swapped_subscribers_within_crisis_cohort","summary":"<one-line why>","crisis_id":"<uuid>","reasoning":"<why the whole cohort should auto-re-add — usually because restock is imminent + close-to-target>"}]}`,
+  ``,
+  `If the CEO asks you AD-HOC to take an action OUTSIDE the two shapes above (e.g. "reorder that PO now" or "author a spec to fix the storefront/FBA split") and you INDEPENDENTLY AGREE, use the shared founder-prompted out-of-leash rail below — emit ONE 'out-of-leash-request' pending_action carrying your reasoning + a concrete executable action (typed 'run_prod_script' or 'apply_migration'). The CEO approves in their normal Approvals inbox; the executor runs it once. DECLINE (reply with your reasoning + what you'd do instead) when you disagree — your independent judgment is required.`,
 ].join("\n");
 
 // director-chat-in-leash-execution Phase 2 — pick the cards block for the thread's director.
@@ -16783,21 +16782,19 @@ function directorCoachFraming(dirFn: string): string {
       coachOutputFor(dirFn),
     ].join("\n\n");
   }
-  // marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
-  // questions about inventory + fulfillment + crisis state, but his LEASH_CATEGORIES is empty by
-  // design (the founder is still hand-driving inventory executors while marco-logistics-executor-
-  // surface is queued). Every request for an action either (a) routes to the shared
-  // founder-prompted out-of-leash rail on the CEO's ad-hoc ask + his own AGREE, or (b) hits the
-  // read-only observer wall and reads back as an explanation. The M3 dispatch treats every
-  // pending_action on a logistics thread as out-of-leash → escalateApprovalRequestToCeo (a Marco
-  // card that leaks in never touches an inventory table — the verification bullet).
+  // marco-logistics-executor-surface Phase 2 — Marco (Logistics) is now the fourth LIVE
+  // leash-bound director. His LEASH_CATEGORIES carries availability_toggle_within_crisis_lever +
+  // auto_readd_swapped_subscribers_within_crisis_cohort — both crisis-cohort scoped. Every card
+  // he emits names a `crisis_id` the M3 dispatch verifies against public.crisis_events
+  // (same-workspace) BEFORE firing the executor. Retires the read-only-observer framing.
   if (dirFn === "logistics") {
     return [
       `VOICE — ${voice}`,
-      `You are ${persona.name} — the Logistics Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN understanding of inventory + fulfillment + crisis state and taking coaching on it.`,
-      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in src/lib/agents/logistics-director.ts (currently EMPTY — read-only observer landing per marco-logistics-director-seat Phase 3). Your definition lives at docs/brain/functions/logistics.md.`,
-      `⭐ READ-ONLY OBSERVER. You are Marco, read-only observer for now — investigate + explain, NEVER emit a pending_action; the founder is still hand-driving inventory executors while the marco-logistics-executor-surface spec is queued. When the CEO asks "why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs?" — investigate read-only (crisis-forecast.ts, inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions) and answer plainly. NEVER auto-mutate. Every request to CHANGE a thing routes UP to the CEO via the founder-prompted out-of-leash rail below.`,
-      `When the CEO COACHES you ("do this automatically going forward"), you have NO autonomous coaching-rule surface until the executor slice lands — reply with your understanding and note that the durable rule can only be persisted once marco-logistics-executor-surface opens the coaching card shape for logistics.`,
+      `You are ${persona.name} — the Logistics Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN autonomous behavior + understanding of inventory + fulfillment + crisis state and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in src/lib/agents/logistics-director.ts; the plain-English mirror is director-leash-guide.ts. Your definition lives at docs/brain/functions/logistics.md.`,
+      `Your leash is an allow-list — anything not on it (destructive / irreversible / new-goal / a non-binary CHOICE / anything outside your approved envelope) MUST NOT auto-execute. Bring those to the CEO via the founder-prompted out-of-leash rail below.`,
+      `⭐ CRISIS-COHORT GUARD. Both of your cards are crisis-cohort scoped — every payload names a \`crisis_id\` the M3 dispatch verifies against public.crisis_events in this workspace BEFORE firing. availability_toggle_within_crisis_lever additionally requires the \`variant_id\` to be either the crisis's affected or default_swap variant. Never emit a card without a real, current crisis_id — a foreign or missing crisis is rejected with a stable rejection reason and no mutation lands. When you INVESTIGATE ("why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs?"), read crisis-forecast.ts + inventory_levels + purchase_orders + purchase_order_annotations + suppliers + crisis_events + crisis_customer_actions and answer plainly with the specific crisis + measured lead + storefront/FBA cover split.`,
+      `When the CEO COACHES you ("do this automatically going forward"), reply with your understanding — Marco's coaching-rule surface is not wired yet, so the durable rule can only be persisted once the coaching card shape opens for logistics. Use the founder-prompted out-of-leash rail below if the CEO wants a one-off out-of-leash action executed now.`,
       DIRECTOR_OUT_OF_LEASH_RAIL,
       coachOutputFor(dirFn),
     ].join("\n\n");
@@ -17105,21 +17102,20 @@ async function runDirectorCoachJob(job: Job) {
         platform: new Set<string>(["coaching", "spec", "goal", "spec-edit", "directive", "model_tier"]),
         growth: new Set<string>(["reallocate_within_budget", "promote_ready_to_test", "hold_campaign"]),
         cs: new Set<string>(["approve_remedy", "author_derived_from_ticket_spec", "amend_low_blast_sonnet_prompt"]),
-        // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands as a READ-ONLY OBSERVER:
-        // an empty in-leash Set means EVERY pending_action on a logistics thread misses the check
-        // and falls into the out-of-leash branch below, which calls escalateApprovalRequestToCeo
-        // with Marco's slug/label. NO logistics executor ever runs autonomously (there is none
-        // wired yet — the follow-up spec marco-logistics-executor-surface will surface one when
-        // the founder-driven inventory build model opens). Verification bullet on a Marco thread
-        // emitting any pending_action: escalateApprovalRequestToCeo called with the read-only
-        // rail reason + NO inventory mutation.
-        logistics: new Set<string>(),
+        // marco-logistics-executor-surface Phase 2 — Marco (Logistics) is now live leash-bound.
+        // Two crisis-cohort executor branches (below) fire on an approved card:
+        // `availability_toggle_within_crisis_lever` → setStorefrontAvailability; and
+        // `auto_readd_swapped_subscribers_within_crisis_cohort` → bulk auto_readd flip. Both
+        // executors verify a same-workspace crisis row on the payload BEFORE firing (the
+        // crisis-cohort guard). Any other pending_action type on a logistics thread still misses
+        // the check and escalates via escalateApprovalRequestToCeo, unchanged.
+        logistics: new Set<string>(["availability_toggle_within_crisis_lever", "auto_readd_swapped_subscribers_within_crisis_cohort"]),
       };
       const directorLabelFor = (fn: string): string =>
         fn === "platform" ? "Ada (Platform/DevOps Director)"
           : fn === "growth" ? "Max (Growth Director)"
             : fn === "cs" ? "June (CS Director)"
-              : fn === "logistics" ? "Marco (Logistics Director — read-only observer)"
+              : fn === "logistics" ? "Marco (Logistics Director)"
                 : `${fn} director`;
       for (const a of actions) {
         if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
@@ -17661,6 +17657,201 @@ async function runDirectorCoachJob(job: Job) {
                     },
                   });
                 } catch { /* audit best-effort */ }
+              }
+            } else {
+              a.status = "failed";
+              a.result = "nothing executable on this card";
+            }
+          } else if (thread.director_function === "logistics") {
+            // marco-logistics-executor-surface Phase 2 — Marco (Logistics) executor branches.
+            // Both actions are crisis-cohort scoped: every card payload MUST name a `crisis_id`,
+            // and the crisis-cohort guard below verifies the crisis row exists in the SAME
+            // workspace before firing the executor. A missing/foreign crisis → fail with a clear
+            // reason + one director_activity row (director_function='logistics') recording the
+            // rejection. Both writers land ONE director_activity row per action per the CS/Growth
+            // convention (one-row-per-handled-action).
+            const rda = async (kind: string, reason: string, extra: Record<string, unknown> = {}): Promise<void> => {
+              try {
+                const { recordDirectorActivity } = await import("../src/lib/director-activity");
+                await recordDirectorActivity(db, {
+                  workspaceId: job.workspace_id,
+                  directorFunction: "logistics",
+                  actionKind: kind,
+                  specSlug: null,
+                  reason,
+                  metadata: {
+                    thread_id: threadId,
+                    action_id: a.id ?? null,
+                    action_type: rawType,
+                    ...extra,
+                  },
+                });
+              } catch { /* audit best-effort */ }
+            };
+            // Same-workspace crisis-row guard. Returns the crisis row on success, else records a
+            // rejection audit row + sets the action failed. Both executors share this guard so a
+            // hostile payload that names a crisis in ANOTHER workspace can never mutate this one.
+            const requireCrisis = async (): Promise<{ id: string; workspace_id: string; affected_variant_id: string | null; default_swap_variant_id: string | null; status: string | null } | null> => {
+              const cid = typeof (a as unknown as Record<string, unknown>).crisis_id === "string"
+                ? String((a as unknown as Record<string, unknown>).crisis_id).trim()
+                : "";
+              if (!cid) {
+                a.status = "failed";
+                a.result = `${rawType} requires crisis_id on the card`;
+                notes.push(`${a.summary ?? rawType} → missing crisis_id`);
+                await rda(`${rawType}_failed`, a.result, { rejection: "missing_crisis_id" });
+                return null;
+              }
+              const { data: crisis, error: crisisErr } = await db
+                .from("crisis_events")
+                .select("id, workspace_id, affected_variant_id, default_swap_variant_id, status")
+                .eq("id", cid)
+                .eq("workspace_id", job.workspace_id)
+                .maybeSingle();
+              if (crisisErr) {
+                a.status = "failed";
+                a.result = `crisis lookup failed: ${crisisErr.message}`;
+                notes.push(`${a.summary ?? rawType} → crisis lookup failed`);
+                await rda(`${rawType}_failed`, a.result, { rejection: "crisis_lookup_error", crisis_id: cid });
+                return null;
+              }
+              if (!crisis) {
+                a.status = "failed";
+                a.result = `no crisis ${cid} in this workspace (crisis-cohort guard)`;
+                notes.push(`${a.summary ?? rawType} → foreign or missing crisis_id`);
+                await rda(`${rawType}_failed`, a.result, { rejection: "foreign_or_missing_crisis", crisis_id: cid });
+                return null;
+              }
+              return crisis as { id: string; workspace_id: string; affected_variant_id: string | null; default_swap_variant_id: string | null; status: string | null };
+            };
+
+            if (a.type === "availability_toggle_within_crisis_lever") {
+              const crisis = await requireCrisis();
+              if (!crisis) { /* rejection recorded */ }
+              else {
+                const variantIdRaw = (a as unknown as Record<string, unknown>).variant_id;
+                const variantId = typeof variantIdRaw === "string" ? variantIdRaw.trim() : "";
+                const availableRaw = (a as unknown as Record<string, unknown>).available;
+                const available = availableRaw === true || availableRaw === "true";
+                const reason = typeof a.reasoning === "string" && a.reasoning.trim()
+                  ? a.reasoning.trim()
+                  : typeof a.summary === "string" && a.summary.trim()
+                    ? a.summary.trim()
+                    : `${rawType} for crisis ${crisis.id}`;
+                if (!variantId) {
+                  a.status = "failed";
+                  a.result = "availability_toggle_within_crisis_lever requires variant_id on the card";
+                  notes.push(`${a.summary ?? rawType} → missing variant_id`);
+                  await rda("availability_toggle_within_crisis_lever_failed", a.result, {
+                    rejection: "missing_variant_id",
+                    crisis_id: crisis.id,
+                  });
+                } else if (typeof availableRaw !== "boolean" && availableRaw !== "true" && availableRaw !== "false") {
+                  a.status = "failed";
+                  a.result = "availability_toggle_within_crisis_lever requires available:boolean on the card";
+                  notes.push(`${a.summary ?? rawType} → missing available flag`);
+                  await rda("availability_toggle_within_crisis_lever_failed", a.result, {
+                    rejection: "missing_available_flag",
+                    crisis_id: crisis.id,
+                    variant_id: variantId,
+                  });
+                } else {
+                  // Crisis-cohort guard: the variant MUST name a variant known to the crisis row
+                  // (either the affected or the swap side). Prevents a hostile payload from
+                  // hiding an arbitrary variant behind a real crisis_id.
+                  const knownVariants = [crisis.affected_variant_id, crisis.default_swap_variant_id]
+                    .filter((v): v is string => typeof v === "string" && v.length > 0);
+                  if (!knownVariants.includes(variantId)) {
+                    a.status = "failed";
+                    a.result = `variant_id ${variantId} is not the crisis affected or swap variant (crisis-cohort guard)`;
+                    notes.push(`${a.summary ?? rawType} → variant not in crisis cohort`);
+                    await rda("availability_toggle_within_crisis_lever_failed", a.result, {
+                      rejection: "variant_not_in_crisis_cohort",
+                      crisis_id: crisis.id,
+                      variant_id: variantId,
+                    });
+                  } else {
+                    try {
+                      const { setStorefrontAvailability } = await import("../src/lib/logistics/storefront-availability");
+                      const r = await setStorefrontAvailability(job.workspace_id, variantId, available, reason);
+                      a.status = "done";
+                      a.result = `availability_toggle_within_crisis_lever ${available ? "SHOW" : "HIDE"} ${variantId} — portal_changed=${r.portal.attempted && r.portal.changed} storefront_changed=${r.storefront.attempted && r.storefront.changed} already=${r.alreadyInTargetState}`;
+                      notes.push(`${a.summary ?? "Storefront availability"} → ${available ? "SHOW" : "HIDE"} ${variantId}`);
+                      // setStorefrontAvailability writes its OWN director_activity row (director_function='logistics',
+                      // action_kind='storefront_availability_toggled') on a real write. Add ONE dispatch-level row so
+                      // the audit trail names the M3-dispatch entry point + carries thread + crisis linkage.
+                      await rda("availability_toggle_within_crisis_lever_executed", a.result, {
+                        crisis_id: crisis.id,
+                        variant_id: variantId,
+                        available,
+                        portal_changed: r.portal.attempted && r.portal.changed,
+                        storefront_changed: r.storefront.attempted && r.storefront.changed,
+                        already_in_target_state: r.alreadyInTargetState,
+                      });
+                    } catch (e) {
+                      a.status = "failed";
+                      a.result = `setStorefrontAvailability failed: ${e instanceof Error ? e.message : String(e)}`;
+                      notes.push(`${a.summary ?? "Storefront availability"} → ${a.result}`);
+                      await rda("availability_toggle_within_crisis_lever_failed", a.result, {
+                        rejection: "executor_error",
+                        crisis_id: crisis.id,
+                        variant_id: variantId,
+                        available,
+                      });
+                    }
+                  }
+                }
+              }
+            } else if (a.type === "auto_readd_swapped_subscribers_within_crisis_cohort") {
+              const crisis = await requireCrisis();
+              if (!crisis) { /* rejection recorded */ }
+              else {
+                const reason = typeof a.reasoning === "string" && a.reasoning.trim()
+                  ? a.reasoning.trim()
+                  : typeof a.summary === "string" && a.summary.trim()
+                    ? a.summary.trim()
+                    : `auto_readd_swapped_subscribers_within_crisis_cohort for crisis ${crisis.id}`;
+                try {
+                  // Bulk-flip auto_readd=true across every crisis_customer_actions row in the SAME
+                  // workspace scoped to THIS crisis where the flag is currently false — the
+                  // crisis-cohort bulk write. `.eq('workspace_id', …).eq('crisis_id', …).eq('auto_readd', false)`
+                  // is a compare-and-set: the write can only affect rows that still carry
+                  // auto_readd=false in this workspace at write time.
+                  const { data: flipped, error: flipErr } = await db
+                    .from("crisis_customer_actions")
+                    .update({ auto_readd: true, updated_at: new Date().toISOString() })
+                    .eq("workspace_id", job.workspace_id)
+                    .eq("crisis_id", crisis.id)
+                    .eq("auto_readd", false)
+                    .select("id");
+                  if (flipErr) {
+                    a.status = "failed";
+                    a.result = `auto_readd flip failed: ${flipErr.message}`;
+                    notes.push(`${a.summary ?? rawType} → ${a.result}`);
+                    await rda("auto_readd_swapped_subscribers_within_crisis_cohort_failed", a.result, {
+                      rejection: "flip_error",
+                      crisis_id: crisis.id,
+                    });
+                  } else {
+                    const count = flipped?.length ?? 0;
+                    a.status = "done";
+                    a.result = `flipped auto_readd=true on ${count} crisis_customer_actions row(s) for crisis ${crisis.id}`;
+                    notes.push(`${a.summary ?? "Auto-re-add cohort"} → ${count} row(s) flipped`);
+                    await rda("auto_readd_swapped_subscribers_within_crisis_cohort_executed", reason, {
+                      crisis_id: crisis.id,
+                      rows_flipped: count,
+                      reason_source: typeof a.reasoning === "string" ? "reasoning" : typeof a.summary === "string" ? "summary" : "default",
+                    });
+                  }
+                } catch (e) {
+                  a.status = "failed";
+                  a.result = `auto_readd flip threw: ${e instanceof Error ? e.message : String(e)}`;
+                  notes.push(`${a.summary ?? rawType} → ${a.result}`);
+                  await rda("auto_readd_swapped_subscribers_within_crisis_cohort_failed", a.result, {
+                    rejection: "executor_error",
+                    crisis_id: crisis.id,
+                  });
+                }
               }
             } else {
               a.status = "failed";
