@@ -1,0 +1,1 @@
+- **Mario never reclaims a goal member that's already integrated on its goal branch** · verified 2026-07-12 · → [[libraries/mario]]
