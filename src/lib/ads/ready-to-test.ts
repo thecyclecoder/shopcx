@@ -73,12 +73,19 @@ function isReadyCreative(v: AdVideoRow): boolean {
  *   - it has NO `ad_publish_jobs` row whose `publish_status` is queued|uploading|creating|published.
  *
  * The reader is pure SELECT — no writes, no side-effects — and small enough to run per Director sweep.
+ *
+ * [[../../../docs/brain/specs/media-buyer-product-scoped-test-rail]] Phase 2 — an
+ * optional `productId` narrows the read to a single product's campaigns
+ * (`ad_campaigns.product_id = productId`) so the media-buyer's replenish never
+ * feeds product B's ready creative into product A's cohort adset. Omitting the
+ * filter (or passing null) preserves the pre-Phase-2 workspace-wide read used
+ * by the null-product default cohort.
  */
 export async function listReadyToTest(
   admin: Admin,
-  opts: { workspaceId: string },
+  opts: { workspaceId: string; productId?: string | null },
 ): Promise<ListReadyToTestResult> {
-  const { workspaceId } = opts;
+  const { workspaceId, productId = null } = opts;
 
   const { data: videoData } = await admin
     .from("ad_videos")
@@ -101,12 +108,17 @@ export async function listReadyToTest(
   if (candidateCampaignIds.length === 0) return { readyToTest: [] };
 
   // Pull the parent campaigns — workspace scoped + has a landing_url — only for the candidates.
-  const { data: campaignData } = await admin
+  // Phase 2 product-scoped narrowing: when productId is passed, the anti-cross-contamination
+  // guard restricts the ad_campaigns read to that product (a null productId keeps the reader
+  // workspace-wide — the null-product default cohort still catches Superfood Tabs today).
+  let campaignsQuery = admin
     .from("ad_campaigns")
     .select("id, landing_url, created_at")
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
     .not("landing_url", "is", null);
+  if (productId) campaignsQuery = campaignsQuery.eq("product_id", productId);
+  const { data: campaignData } = await campaignsQuery;
   const campaigns = (campaignData || []) as AdCampaignRow[];
   if (campaigns.length === 0) return { readyToTest: [] };
 

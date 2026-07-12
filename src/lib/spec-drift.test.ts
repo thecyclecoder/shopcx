@@ -19,8 +19,10 @@ import {
   buildReverseDriftInboxRow,
   isGoalPendingPromotion,
   pickMergedPrFromList,
+  pickPhasesBuiltInMerge,
   reverseDriftDedupeKey,
   type BranchPrCandidate,
+  type PhaseBuiltCandidate,
 } from "./spec-drift";
 import type { GoalRow } from "./goals-table";
 
@@ -274,4 +276,97 @@ test("buildReverseDriftInboxRow: title/body truncated to safe lengths so a patho
   assert.ok(row.title.length <= 200, `title must be ≤ 200 chars (got ${row.title.length})`);
   assert.ok(row.body.length <= 4000, `body must be ≤ 4000 chars (got ${row.body.length})`);
   assert.ok(row.metadata.escalation_reason.length <= 2000, `escalation_reason must be ≤ 2000 chars (got ${row.metadata.escalation_reason.length})`);
+});
+
+// ── pickPhasesBuiltInMerge — reconciler-spec-drift-stamps-only-built-phases-in-merged-pr P1 ────
+//
+// The live incident (generalize-director-coach-backend): PR #1712 merged with ONLY Phase 1
+// (coach/route.ts +26) in the diff, but the old drift-healer stamped ALL three phases shipped
+// from the mere "PR merged" signal — so Phases 2/3 dead-ended as "already shipped" (their auto-
+// queued builds never re-ran), the spec-test correctly failed them, and the spec locked into a
+// permanent shipped-but-red fold-deadlock. These tests pin the pure filter that closes it:
+//
+//   - build_sha set → stamp (the worker recorded a real branch build);
+//   - build_sha null + a declared file in the merge diff → stamp (manually smuggled into squash);
+//   - build_sha null + NO file in the merge diff → SKIP (leave for its own build-session re-queue);
+//   - mergedFiles=null (GitHub read failure) → collapse to build_sha-only, don't over-stamp.
+
+const P1_BUILT: PhaseBuiltCandidate = {
+  position: 1,
+  build_sha: "abc123",
+  body: "Wire coach in `src/app/api/director/coach/route.ts` — the entry point.",
+};
+const P2_UNBUILT: PhaseBuiltCandidate = {
+  position: 2,
+  build_sha: null,
+  body: "Per-director framing lives in `src/lib/coach/director-framing.ts` for the second phase.",
+};
+const P3_UNBUILT: PhaseBuiltCandidate = {
+  position: 3,
+  build_sha: null,
+  body: "Profile page reads `hasCoachThread` from `src/app/dashboard/profile/page.tsx`.",
+};
+
+test("pickPhasesBuiltInMerge: the generalize-director-coach-backend #1712 shape — merge diff touches ONLY P1's files → stamps ONLY P1, leaves P2+P3 for re-queue (spec's local-replay bullet)", () => {
+  const files = new Set(["src/app/api/director/coach/route.ts"]);
+  const v = pickPhasesBuiltInMerge([P1_BUILT, P2_UNBUILT, P3_UNBUILT], files);
+  assert.deepEqual(
+    v.stamped.map((s) => s.position),
+    [1],
+    "only P1 (with build_sha) is stamped",
+  );
+  assert.deepEqual(v.skipped, [2, 3], "P2+P3 are left for their own build sessions");
+});
+
+test("pickPhasesBuiltInMerge: build_sha set → stamped with reason 'build_sha' (the primary signal)", () => {
+  const v = pickPhasesBuiltInMerge([P1_BUILT], new Set());
+  assert.equal(v.stamped.length, 1);
+  assert.equal(v.stamped[0].reason, "build_sha");
+  assert.equal(v.skipped.length, 0);
+});
+
+test("pickPhasesBuiltInMerge: build_sha null but a declared file appears in the merge diff → stamped with reason 'file-diff' (the manual-squash fallback)", () => {
+  const v = pickPhasesBuiltInMerge([P2_UNBUILT], new Set(["src/lib/coach/director-framing.ts"]));
+  assert.equal(v.stamped.length, 1);
+  assert.equal(v.stamped[0].reason, "file-diff");
+  assert.equal(v.skipped.length, 0);
+});
+
+test("pickPhasesBuiltInMerge: build_sha null AND no declared file in the merge diff → SKIPPED so the phase's build session can still auto-queue (the fold-deadlock fix)", () => {
+  const v = pickPhasesBuiltInMerge([P2_UNBUILT], new Set(["src/lib/unrelated.ts"]));
+  assert.deepEqual(v.stamped, []);
+  assert.deepEqual(v.skipped, [2]);
+});
+
+test("pickPhasesBuiltInMerge: mergedFiles=null (GitHub read failure) → collapses to build_sha-only; the built phase still stamps, unbuilt phases skip (no over-stamp on a hiccup)", () => {
+  const v = pickPhasesBuiltInMerge([P1_BUILT, P2_UNBUILT, P3_UNBUILT], null);
+  assert.deepEqual(
+    v.stamped.map((s) => s.position),
+    [1],
+    "only P1 (with build_sha) is stamped — no path fallback available",
+  );
+  assert.deepEqual(v.skipped, [2, 3]);
+});
+
+test("pickPhasesBuiltInMerge: empty phases → empty stamped + skipped (no-op)", () => {
+  const v = pickPhasesBuiltInMerge([], new Set(["anything"]));
+  assert.deepEqual(v.stamped, []);
+  assert.deepEqual(v.skipped, []);
+});
+
+test("pickPhasesBuiltInMerge: a phase whose body names paths NONE of which are in the merge diff, with build_sha null → SKIPPED (never stamp on prose alone)", () => {
+  const phase: PhaseBuiltCandidate = {
+    position: 4,
+    build_sha: null,
+    body: "Ships `src/lib/a.ts` and `src/lib/b.ts`.",
+  };
+  const v = pickPhasesBuiltInMerge([phase], new Set(["src/lib/c.ts"]));
+  assert.deepEqual(v.stamped, []);
+  assert.deepEqual(v.skipped, [4]);
+});
+
+test("pickPhasesBuiltInMerge: build_sha set wins even when merge diff is empty — the worker's branch-build stamp is the primary truth (don't require file intersection when we already know the branch built it)", () => {
+  const v = pickPhasesBuiltInMerge([P1_BUILT], new Set());
+  assert.equal(v.stamped.length, 1);
+  assert.equal(v.stamped[0].reason, "build_sha");
 });

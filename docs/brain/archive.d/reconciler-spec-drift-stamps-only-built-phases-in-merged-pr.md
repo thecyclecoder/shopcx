@@ -1,0 +1,1 @@
+- **Reconciler spec-drift stamps only phases actually built in the merged PR** · verified 2026-07-12 · → [[../libraries/spec-drift]]

@@ -1,0 +1,1 @@
+- **Every spec writer must author machine-runnable verifications; human tests become optional & non-blocking** · verified 2026-07-12 · → [[../libraries/author-spec]]

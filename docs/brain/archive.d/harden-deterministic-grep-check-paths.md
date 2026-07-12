@@ -1,0 +1,1 @@
+- **Harden deterministic grep check paths against rg option injection** · verified 2026-07-12 · → [[../libraries/spec-phase-checks-executable]] + [[../libraries/spec-phase-checks-table]] + [[../libraries/spec-check-runner]]
