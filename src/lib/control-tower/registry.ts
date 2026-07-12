@@ -35,6 +35,8 @@
  *                  apart from the AI inline agents. (control-tower-complete-coverage P1.)
  */
 
+import { extractCronExpr, meanCadenceMsFromSets, parseCronExpr } from "./cron-parse";
+
 export type LoopKind = "worker" | "cron" | "agent-kind" | "inline-agent" | "reactive";
 
 /**
@@ -431,8 +433,10 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     owner: "platform",
     label: "Control Tower monitor",
     description: "The watchdog itself — so a dead monitor is visible too.",
-    expectedCadence: "every 15 min (*/15 * * * *)",
-    livenessWindowMs: 45 * MIN,
+    // Pinned to MONITOR_TICK_FLOOR_MS (5 min) — the smallest cadence the registry accepts,
+    // and the tick that gates cron_freshness alerting resolution (monitor-cadence-scaled-liveness-window P1).
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
     personaKind: "monitor", // Tao — surfaces this cron as a Platform worker on the org view (agent-roster-sync P1)
   },
   {
@@ -1121,4 +1125,85 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
 /** The agent-kind heartbeat loop_id for a given agent_jobs.kind. */
 export function agentLoopId(kind: string): string {
   return `agent:${kind}`;
+}
+
+/**
+ * Smallest cron cadence the registry accepts (monitor-cadence-scaled-liveness-window Phase 1).
+ * Matches the pinned control-tower-monitor tick — a cron finer than the monitor's own tick
+ * can't be reliably alerted on (the monitor might miss two beats between ticks), so the CEO
+ * 2026-07-11 monitoring-cost guardrail codifies "no sub-5-min crons in the registry" as a
+ * build-time invariant. `assertRegistryInvariants` throws naming this constant when a cron
+ * row's parsed cadence is finer than the floor.
+ */
+export const MONITOR_TICK_FLOOR_MS = 5 * 60 * 1000;
+
+/**
+ * Jitter grace for the "livenessWindow >= cadence" invariant — a window equal to the cadence
+ * false-fires whenever a firing lands even a second late, so we require 20% slack. Mirrors the
+ * existing 90-min-window-for-30-min-cron / 2h-for-hourly pattern already used across the
+ * registry. Kept as a constant so the assertion + tests share the same threshold.
+ */
+export const REGISTRY_LIVENESS_JITTER_GRACE = 1.2;
+
+/**
+ * Build-time invariant over the monitored-loop registry (monitor-cadence-scaled-liveness-window Phase 1).
+ * For each `kind:'cron'` loop with a parseable cron cadence:
+ *   1. If the mean cadence is finer than MONITOR_TICK_FLOOR_MS — THROW naming the constant
+ *      (a sub-monitor-tick cron can't be reliably alerted on).
+ *   2. If `livenessWindowMs` is missing or less than `cadenceMs * REGISTRY_LIVENESS_JITTER_GRACE` —
+ *      THROW naming the loop and the required window (a tight window false-fires cron_freshness
+ *      every cycle, the exact pattern that produced the ticket-analysis-cron / storefront-experiments-
+ *      refresh-cron incidents cited in docs/brain/libraries/control-tower.md § monitor.ts).
+ * Loops with no parseable cron expression (`"box job"`, `"per event"`, worker/agent-kind kinds) are
+ * skipped — the invariant is about SCHEDULED crons.
+ *
+ * `loops` defaults to MONITORED_LOOPS so callers (tests, the bootstrap block below) can pass
+ * a fixture to unit-test the assertion.
+ */
+export function assertRegistryInvariants(loops: MonitoredLoop[] = MONITORED_LOOPS): void {
+  for (const loop of loops) {
+    if (loop.kind !== "cron") continue;
+    const expr = extractCronExpr(loop.expectedCadence);
+    if (!expr) continue; // "box job" / non-Inngest cadence — nothing to assert
+    const sets = parseCronExpr(expr);
+    if (!sets) continue; // unparseable — leave to the human review path
+    const cadenceMs = meanCadenceMsFromSets(sets);
+    if (!Number.isFinite(cadenceMs)) continue;
+    if (cadenceMs < MONITOR_TICK_FLOOR_MS) {
+      throw new Error(
+        `assertRegistryInvariants: loop '${loop.id}' has cadence ${Math.round(cadenceMs / 1000)}s ` +
+          `(cron '${expr}') which is finer than MONITOR_TICK_FLOOR_MS ` +
+          `(${MONITOR_TICK_FLOOR_MS / 1000}s) — a cron finer than the monitor tick can't be ` +
+          `reliably alerted on. Widen the cadence or make this event-driven.`,
+      );
+    }
+    const requiredWindowMs = cadenceMs * REGISTRY_LIVENESS_JITTER_GRACE;
+    const windowMs = loop.livenessWindowMs;
+    if (windowMs == null || windowMs < requiredWindowMs) {
+      throw new Error(
+        `assertRegistryInvariants: loop '${loop.id}' has livenessWindowMs ` +
+          `${windowMs ?? "undefined"} < cadence ${Math.round(cadenceMs / 1000)}s ` +
+          `* ${REGISTRY_LIVENESS_JITTER_GRACE} = ${Math.round(requiredWindowMs / 1000)}s ` +
+          `(cron '${expr}'). Widen the window to at least ` +
+          `${Math.ceil(requiredWindowMs / 60_000)} min so cron_freshness doesn't false-fire.`,
+      );
+    }
+  }
+}
+
+// ── Bootstrap: run the invariant on module import ──────────────────────────
+// monitor-cadence-scaled-liveness-window Phase 1. The invariant is defined here + the fixture-
+// based test file verifies its two throw paths. The full-list widening + brain page § entry
+// are Phase 2's work; until Phase 2 lands, the bootstrap logs a WARNING instead of throwing so
+// existing offending rows (surfaced by the brain page) don't break every import path. Phase 2
+// removes the try/catch (the offenders will have been widened) — then any regression is caught
+// at the import site (test, `next build`, `tsx` script) with a clear line-numbered error.
+try {
+  assertRegistryInvariants();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[control-tower/registry] assertRegistryInvariants advisory (Phase 2 will widen):",
+    err instanceof Error ? err.message : err,
+  );
 }
