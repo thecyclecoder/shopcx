@@ -28,7 +28,13 @@ import { parseAuthoredSpecMarkdown, type Phase, type SpecStatus } from "@/lib/br
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
-import { upsertPhaseChecks, parseVerificationBlobToChecks, type SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
+import {
+  upsertPhaseChecks,
+  parseVerificationBlobToChecks,
+  validateExecutableCheck,
+  type SpecPhaseCheckInput,
+  type SpecPhaseCheckExecKind,
+} from "@/lib/spec-phase-checks-table";
 import { resolveFunctionMandates, type FunctionMandate } from "@/lib/function-mandates";
 import { assertSpecReviewGate } from "@/lib/spec-review-gate";
 
@@ -516,6 +522,81 @@ export function assertEveryPhaseHasChecks(
       `spec ${slug} ${missing.length === 1 ? "has a phase" : "has phases"} with zero structured checks — ${which} ` +
         `carry no spec_phase_checks rows. Every phase needs >=1 concrete "- On {where}, {do what} → expect {observable result}" check ` +
         `(pm-structured-intent-and-refs Phase 3).`,
+    );
+  }
+}
+
+/**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate that lifts
+ * "the deterministic runner CAN run machine checks" into "every phase HAS >=1 machine-runnable check."
+ * Thrown when a phase's verification carries only prose / only `needs_human` rows — nothing the runner
+ * can execute. Same "fail-loud-at-the-parse-step" rail as `MissingVerificationError`; both author paths
+ * (`authorSpecRowStructured` + `authorSpecRowFromMarkdown`) run `assertEveryPhaseHasMachineCheck` before
+ * the DB write, so the invariant holds for every writer that funnels through the chokepoint (planner,
+ * spec-chat, ~17 box-worker author lanes, request-fix). A spec whose phase has zero machine-runnable
+ * checks never lands in `public.specs` / `public.spec_phases`.
+ */
+export class MissingMachineCheckError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingMachineCheckError";
+  }
+}
+
+/**
+ * every-spec-writer-authors-machine-runnable-verifications Phase 1 — reject any phase whose structured
+ * checks contain zero VALID machine-runnable rows. A phase passes iff at least one check declares an
+ * auto-testable `exec_kind` (tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build)
+ * whose (kind, params) pair passes `validateExecutableCheck`. `needs_human` rows may be present as
+ * EXTRA (advisory / subjective / drift) but never as the SOLE verification — that's the exact "prose
+ * bullet, nothing to run" shape the retire-Vale / cs-director `npm test` incidents left behind.
+ *
+ * Runs AFTER `assertEveryPhaseHasChecks` in both author paths so the >=1-check gate still fires first
+ * on a fully-empty phase; this gate catches "the checks exist but none is executable." Exported so a
+ * caller (Improve tab, planner, request-fix inline) can pre-flight the same predicate before
+ * proposing a re-author. Throws `MissingMachineCheckError` with slug + offending phase(s) + the exact
+ * reason each phase failed (either "zero auto-testable checks" or the first failing
+ * `validateExecutableCheck` reason so the author sees WHY the params were rejected — e.g.
+ * `unit_test.script "test" is not a package.json script`).
+ */
+export function assertEveryPhaseHasMachineCheck(
+  slug: string,
+  phases: { title: string; checks: SpecPhaseCheckInput[] }[],
+  ctx?: { packageScripts?: ReadonlySet<string> },
+): void {
+  const failures = phases
+    .map((p, i) => {
+      const reasons: string[] = [];
+      let ok = false;
+      for (const c of p.checks) {
+        const kind: SpecPhaseCheckExecKind | null | undefined = c.exec_kind;
+        if (!kind || kind === "needs_human") {
+          // Not machine-runnable. Explicit needs_human rows are legal as EXTRA — they just cannot
+          // be the sole verification, so keep looking.
+          continue;
+        }
+        const v = validateExecutableCheck({ exec_kind: kind, params: c.params ?? null }, ctx);
+        if (v.valid) { ok = true; break; }
+        reasons.push(`check ${c.position}: ${v.reason}`);
+      }
+      return { pos: i + 1, title: p.title, ok, reasons };
+    })
+    .filter((p) => !p.ok);
+  if (failures.length) {
+    const which = failures
+      .map((f) => {
+        const head = `phase ${f.pos}${f.title ? ` (${f.title})` : ""}`;
+        if (f.reasons.length) return `${head} — ${f.reasons.join("; ")}`;
+        return `${head} — zero auto-testable checks (only prose / only needs_human)`;
+      })
+      .join("; ");
+    throw new MissingMachineCheckError(
+      `spec ${slug} ${failures.length === 1 ? "has a phase" : "has phases"} with no machine-runnable ` +
+        `verification — ${which}. Every phase needs >=1 check with a valid \`exec_kind\` ` +
+        `(tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build) so the deterministic ` +
+        `spec-check runner can actually execute the acceptance criterion. \`needs_human\` rows are allowed ` +
+        `as EXTRA advisory / subjective checks but never the sole verification ` +
+        `(every-spec-writer-authors-machine-runnable-verifications Phase 1).`,
     );
   }
 }
@@ -1062,6 +1143,15 @@ export async function authorSpecRowStructured(
     slug,
     spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
   );
+  // every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate. A phase whose
+  // structured checks carry only prose / only `needs_human` rows is REJECTED with MissingMachineCheckError.
+  // Runs at the single SDK chokepoint so EVERY structured writer (planner, request-fix, box-worker author
+  // lanes) inherits the invariant — no path can land a spec whose acceptance criteria the deterministic
+  // runner cannot execute. `needs_human` rows may be present as EXTRA but never the sole verification.
+  assertEveryPhaseHasMachineCheck(
+    slug,
+    spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
+  );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -1350,6 +1440,21 @@ export async function authorSpecRowFromMarkdown(
   assertEveryPhaseHasVerification(slug, phaseBodies);
   // spec-body-never-silently-empty Phase 1 — reject a phase with an empty body (the db-index-orders class).
   assertEveryPhaseHasBody(slug, phaseBodies);
+  // every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate for the markdown
+  // author path. Derive each phase's structured checks from its `## Verification` blob and reject the write
+  // when no check is machine-runnable. `parseVerificationBlobToChecks` stamps un-typed prose lines with
+  // `exec_kind='needs_human'` (the safe deterministic-runner default), so a prose-only markdown authoring
+  // fails LOUD with MissingMachineCheckError here — same invariant the structured path enforces below via
+  // `assertEveryPhaseHasMachineCheck`. Phase 2 rewrites the writer prompts + submit-spec skill to emit typed
+  // checks; Phase 3 backfills existing prose to typed. Until those land, a markdown writer that carries
+  // only prose is rejected at the same rail — no writer can land a prose-only spec.
+  {
+    const mdPhaseChecks = phaseBodies.map((p) => parseVerificationBlobToChecks(p.verification));
+    assertEveryPhaseHasMachineCheck(
+      slug,
+      phaseBodies.map((p, i) => ({ title: p.title, checks: mdPhaseChecks[i] })),
+    );
+  }
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time. If the incoming markdown has no
   // `**Brain refs:**` line, scan the body for src/ files + tables + wikilinks it already names and

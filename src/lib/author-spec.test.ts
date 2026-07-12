@@ -20,11 +20,13 @@ import {
   assertEveryPhaseHasVerification,
   assertEveryNodeHasIntent,
   assertEveryPhaseHasChecks,
+  assertEveryPhaseHasMachineCheck,
   assertIntentIsPlainLanguage,
   extractIntentHeaders,
   EmptyPhaseBodyError,
   MissingVerificationError,
   MissingIntentError,
+  MissingMachineCheckError,
   assertValidParent,
   InvalidParentError,
   detectBareFunctionParent,
@@ -346,6 +348,214 @@ test("assertEveryPhaseHasChecks passes when every phase has ≥1 check", () => {
     assertEveryPhaseHasChecks("ok", [
       { title: "P1", checks: [{ position: 1, description: "On X, do Y → expect Z", kind: "auto" }] },
     ]),
+  );
+});
+
+// ── every-spec-writer-authors-machine-runnable-verifications Phase 1 — the CHOKEPOINT gate ──
+// The single-chokepoint invariant: EVERY phase must yield >=1 check whose exec_kind is auto-testable
+// AND passes `validateExecutableCheck`. A phase with only prose (needs_human) rows is REJECTED with
+// MissingMachineCheckError so the deterministic runner has something concrete to execute — no writer
+// can land a prose-only spec.
+
+test("assertEveryPhaseHasMachineCheck throws MissingMachineCheckError when every check is needs_human (prose-only)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("prose-only", [
+        {
+          title: "Wire it up",
+          checks: [
+            { position: 1, description: "look at the page", kind: "auto", exec_kind: "needs_human", params: null },
+            { position: 2, description: "check the copy", kind: "auto", exec_kind: "needs_human", params: null },
+          ],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError, `expected MissingMachineCheckError, got ${e}`);
+      assert.match((e as Error).message, /prose-only/);
+      assert.match((e as Error).message, /phase 1 \(Wire it up\)/);
+      assert.match((e as Error).message, /zero auto-testable checks/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck throws when checks carry only prose (undeclared exec_kind)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("undeclared", [
+        {
+          title: "Prose bullets",
+          checks: [{ position: 1, description: "verify the thing", kind: "auto" }],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /no machine-runnable/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck passes with a single tsc check", () => {
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck("ok", [
+      {
+        title: "Migration + tsc",
+        checks: [{ position: 1, description: "tsc clean", kind: "auto", exec_kind: "tsc", params: null }],
+      },
+    ]),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck passes when needs_human rows COEXIST with a valid machine check", () => {
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck("mixed", [
+      {
+        title: "Machine + eyeball",
+        checks: [
+          {
+            position: 1,
+            description: "On the repo, grep for the new symbol",
+            kind: "auto",
+            exec_kind: "grep",
+            params: { pattern: "assertEveryPhaseHasMachineCheck", expect: "present" },
+          },
+          {
+            position: 2,
+            description: "Founder eyeballs the /dashboard/roadmap card after ship",
+            kind: "human",
+            exec_kind: "needs_human",
+            params: null,
+          },
+        ],
+      },
+    ]),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck rejects grep with a malformed params.expect (invalid params → not machine-runnable)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("bad-params", [
+        {
+          title: "Broken grep",
+          checks: [
+            {
+              position: 1,
+              description: "grep for X",
+              kind: "auto",
+              exec_kind: "grep",
+              params: { pattern: "foo", expect: "maybe" } as unknown as { pattern: string; expect: "present" | "absent" },
+            },
+          ],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /grep.expect must be 'present' or 'absent'/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck names EVERY offending phase (multi-phase failure)", () => {
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck("multi", [
+        {
+          title: "Good phase",
+          checks: [{ position: 1, description: "tsc clean", kind: "auto", exec_kind: "tsc", params: null }],
+        },
+        {
+          title: "Bad phase 2",
+          checks: [
+            { position: 1, description: "look at it", kind: "auto", exec_kind: "needs_human", params: null },
+          ],
+        },
+        {
+          title: "Bad phase 3",
+          checks: [{ position: 1, description: "trust me", kind: "auto" }],
+        },
+      ]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      // First-good phase does not appear
+      assert.doesNotMatch((e as Error).message, /phase 1 \(Good phase\)/);
+      assert.match((e as Error).message, /phase 2 \(Bad phase 2\)/);
+      assert.match((e as Error).message, /phase 3 \(Bad phase 3\)/);
+      return true;
+    },
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck respects packageScripts ctx for unit_test checks", () => {
+  // A unit_test that names a script NOT in package.json is rejected AT AUTHORING — closes the
+  // cs-director `npm test` class before it can land as an executable row.
+  assert.throws(
+    () =>
+      assertEveryPhaseHasMachineCheck(
+        "ctx-scripts",
+        [
+          {
+            title: "Bogus unit test",
+            checks: [
+              {
+                position: 1,
+                description: "run the test",
+                kind: "auto",
+                exec_kind: "unit_test",
+                params: { script: "test-that-does-not-exist" },
+              },
+            ],
+          },
+        ],
+        { packageScripts: new Set(["test:unit", "check:types"]) },
+      ),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /not a package.json script/);
+      return true;
+    },
+  );
+  // The same phase with a REAL script passes (belt-and-suspenders on the positive case).
+  assert.doesNotThrow(() =>
+    assertEveryPhaseHasMachineCheck(
+      "ctx-scripts-ok",
+      [
+        {
+          title: "Real unit test",
+          checks: [
+            {
+              position: 1,
+              description: "run the test",
+              kind: "auto",
+              exec_kind: "unit_test",
+              params: { script: "test:unit" },
+            },
+          ],
+        },
+      ],
+      { packageScripts: new Set(["test:unit", "check:types"]) },
+    ),
+  );
+});
+
+test("assertEveryPhaseHasMachineCheck — a prose-only markdown blob (parseVerificationBlobToChecks → all needs_human) FAILS the gate", () => {
+  // The markdown author path's shape: the parse is deterministic on prose (every bullet → needs_human).
+  // Wiring this into the chokepoint means a markdown writer that carries only prose bullets is rejected
+  // at author time, not silently landed as a set of un-executable rows.
+  const blob = [
+    "- On the page, look at the layout → confirm it reads right",
+    "- On the roadmap, verify the intent header renders",
+  ].join("\n");
+  const derived = parseVerificationBlobToChecks(blob);
+  assert.throws(
+    () => assertEveryPhaseHasMachineCheck("prose-md", [{ title: "Prose phase", checks: derived }]),
+    (e: unknown) => {
+      assert.ok(e instanceof MissingMachineCheckError);
+      assert.match((e as Error).message, /Phase 1/);
+      return true;
+    },
   );
 });
 
