@@ -23467,25 +23467,42 @@ async function dispatchJob(job: Job) {
       );
       const rebase = sh("git", ["rebase", "origin/main"], { cwd: wt });
       if (rebase.code !== 0) {
-        // Conflict (or other rebase abort). Abort the in-progress rebase so the worktree is left
-        // clean for the reap, then surface needs_attention — the human resolves the divergence
-        // rather than the box silently running repo-wide checks on a stale tree.
+        // builder-self-heals-stale-build-branch Phase 1: a `git rebase` (linear replay of the
+        // branch's commits) SPURIOUSLY conflicts on non-linear / merge history or sibling
+        // divergence where a plain `git merge origin/main` is CLEAN — e.g. a goal-member branch
+        // whose goal branch already merge-reconciled main, or a branch carrying a merge commit.
+        // (Confirmed 2026-07-12: the ceo-org-control-tower goal members livelocked here — a merge
+        // of origin/main applied with ZERO conflicts while the rebase failed identically every
+        // retry, wedging the whole build queue.) So: abort the rebase, then FALL BACK to a merge.
+        // The goal is only to advance the BASE so it CONTAINS origin/main (repo-wide checks then
+        // run against a tree with main) — a merge achieves that without rewriting the branch's
+        // commits. Invariants preserved: never force-push, never touch main, never drop WIP. Only a
+        // GENUINE semantic conflict (the merge ALSO fails) parks needs_attention.
         sh("git", ["rebase", "--abort"], { cwd: wt });
-        await update(job.id, {
-          status: "needs_attention",
-          error:
-            "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
-          log_tail: `rebase-onto-main:\n${(rebase.out + rebase.err).slice(-1800)}`.slice(-2000),
-        });
-        console.error(
-          `${tag} rebase-onto-main CONFLICT on ${branch} — parked needs_attention (never silently dropped, never force-pushed)`,
-        );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+        const mergeFallback = sh("git", ["merge", "--no-edit", "origin/main"], { cwd: wt });
+        if (mergeFallback.code === 0) {
+          console.log(
+            `${tag} rebase-onto-main conflicted but MERGE origin/main SUCCEEDED on ${branch} — base advanced via merge (stale-branch self-heal; no WIP dropped, no force-push)`,
+          );
+        } else {
+          // Merge also conflicts → a real semantic divergence a human must resolve.
+          sh("git", ["merge", "--abort"], { cwd: wt });
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              "rebase-onto-main hit a conflict — refusing to run repo-wide checks on a stale tree",
+            log_tail: `reconcile-with-main (rebase AND merge conflicted — real semantic divergence):\n${(mergeFallback.out + mergeFallback.err).slice(-1800)}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile-with-main CONFLICT on ${branch} (rebase AND merge) — parked needs_attention (never silently dropped, never force-pushed)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
       }
       console.log(
-        `${tag} rebase-onto-main SUCCESS on ${branch} — base advanced to origin/main (no WIP dropped)`,
+        `${tag} reconcile-onto-main SUCCESS on ${branch} — base now contains origin/main (rebase or merge fallback; no WIP dropped)`,
       );
     }
   }
