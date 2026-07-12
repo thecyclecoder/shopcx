@@ -22,6 +22,7 @@
  * `createAdminClient()` (unchanged).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { listAdvertisedProductIds } from "@/lib/advertised-products";
 import {
   createBlueprint,
   hasBlueprintForProductType,
@@ -300,17 +301,24 @@ export function matchProductToTeardown(
 }
 
 /**
- * Load every ACTIVE product in the workspace, deterministically ordered (created_at ASC)
- * — the input to `matchProductToTeardown`. Extracted so the sweep can load once and
- * reuse across all teardowns in a run (was a per-sweep single-product punt in Phase 2).
+ * Load every ACTIVE + ADVERTISED product in the workspace, deterministically ordered
+ * (created_at ASC) — the input to `matchProductToTeardown`. Gated by
+ * [[advertised-products]] `listAdvertisedProductIds` (hero-product-advertising-gate Phase 2):
+ * attachment SKUs (Sleep Gummies, Tumbler, Handheld Drink Mixer, Bamboo Coffee Mug, …) are
+ * never returned, so Cleo can never target-match a teardown onto them and Carrie's
+ * `dr-content` lane is never enqueued for one (the parked Tumbler + Sleep Gummies
+ * DR-content cards CEO-dismissed 2026-07-11).
  */
 export async function listActiveProducts(workspaceId: string): Promise<ProductForMatch[]> {
   const admin = createAdminClient();
+  const advertisedIds = await listAdvertisedProductIds(admin, workspaceId);
+  if (!advertisedIds.length) return [];
   const { data, error } = await admin
     .from("products")
     .select("id, title, handle, status")
     .eq("workspace_id", workspaceId)
     .eq("status", "active")
+    .in("id", advertisedIds)
     .order("created_at", { ascending: true });
   if (error) return [];
   const rows = (data ?? []) as Array<{ id: string; title: string; handle: string | null; status: string }>;
