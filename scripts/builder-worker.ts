@@ -16804,13 +16804,38 @@ const CS_COACH_OUTPUT = [
   `{"status":"replied","reply":"<...>","pending_actions":[{"type":"amend_low_blast_sonnet_prompt","summary":"<one-line why>","title":"<rule title>","content":"<the rule content>","category":"rule","derived_from_ticket_id":"<optional uuid>","reasoning":"<why the blast radius is narrow — never billing, never a specific customer promise>"}]}`,
 ].join("\n");
 
+// marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
+// questions about inventory + fulfillment + crisis state, but MUST NOT emit an autonomously-
+// executable pending_action. His card shapes are limited to the shared read-only surfaces every
+// director carries (out-of-leash-request escalates to the CEO if he independently AGREES the ad-hoc
+// ask is right; otherwise he just replies). NO reallocate / promote / remedy / spec-authoring
+// shapes appear here — those would land executor-side mutations, and the founder-driven build model
+// for logistics tooling (docs/brain/functions/logistics.md § Provenance / build model) explicitly
+// blocks Ada-side executor wiring for this surface.
+const LOGISTICS_COACH_OUTPUT = [
+  `Final message = ONLY one JSON object, nothing else:`,
+  `{"status":"replied","reply":"<your plain-text answer AS Marco — grounded in what you actually read: inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions, subscriptions, your director_activity>"}`,
+  `  — for an explanation ("why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs to a different flavor?"): investigate read-only and explain, citing the crisis row + the measured lead + the storefront/FBA cover split.`,
+  ``,
+  `## Cards you may emit (Logistics leash — READ-ONLY OBSERVER)`,
+  ``,
+  `You have NO in-leash executor cards. Marco's autonomous surface is intentionally CLOSED for now:`,
+  `  · the storefront-availability toggle has no callable helper (the play is described in prose only, executed by hand)`,
+  `  · the auto-re-add / swap-enrollment writer exists (crisis_enroll / crisis_set_auto_readd) but the founder is hand-driving the whole inventory-allocation surface (docs/brain/functions/logistics.md § "Provenance / build model" — Kept off public.specs by founder directive 2026-07-10)`,
+  `  · when marco-logistics-executor-surface lands, THIS block gains cards for availability_toggle_within_crisis_lever + auto_readd_swapped_subscribers_within_crisis_cohort. Until then: NEVER emit an executable pending_action.`,
+  ``,
+  `If the CEO asks you AD-HOC to take an action (e.g. "pull SL off the storefront now") and you INDEPENDENTLY AGREE it's the right call, use the shared founder-prompted out-of-leash rail below — emit ONE 'out-of-leash-request' pending_action carrying your reasoning + a concrete executable action (typed 'run_prod_script' or 'apply_migration'). The CEO approves in their normal Approvals inbox; the executor runs it once. DECLINE (reply with your reasoning + what you'd do instead) when you disagree — your independent judgment is required.`,
+].join("\n");
+
 // director-chat-in-leash-execution Phase 2 — pick the cards block for the thread's director.
 // Platform (Ada) keeps DIRECTOR_COACH_OUTPUT unchanged (the regression check pins this — Ada's
-// eight card shapes never disappear); Growth + CS route to their own blocks. An unknown director
-// falls back to the platform block so a stray thread never emits zero card shapes.
+// eight card shapes never disappear); Growth + CS route to their own blocks. Logistics (Marco)
+// gets the read-only observer block. An unknown director falls back to the platform block so a
+// stray thread never emits zero card shapes.
 function coachOutputFor(dirFn: string): string {
   if (dirFn === "growth") return GROWTH_COACH_OUTPUT;
   if (dirFn === "cs") return CS_COACH_OUTPUT;
+  if (dirFn === "logistics") return LOGISTICS_COACH_OUTPUT;
   return DIRECTOR_COACH_OUTPUT;
 }
 
@@ -16842,6 +16867,25 @@ function directorCoachFraming(dirFn: string): string {
       `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in ${leashModule}; the plain-English mirror is director-leash-guide.ts. Your definition lives at ${brainPage}.`,
       `Your leash is an allow-list — anything not on it (destructive / irreversible / new-goal / a non-binary CHOICE / anything outside your approved envelope) MUST NOT auto-execute. Bring those to the CEO via the founder-prompted out-of-leash rail below.`,
       `When the CEO COACHES you ("do this automatically going forward"), distill it into ONE durable coaching rule and emit a 'coaching' pending_action — do NOT claim you'll remember it; the rule is what persists. Stay within your leash. You NEVER mutate anything or change your own rules yourself — the CEO approves the card; the worker writes it.`,
+      DIRECTOR_OUT_OF_LEASH_RAIL,
+      coachOutputFor(dirFn),
+    ].join("\n\n");
+  }
+  // marco-logistics-director-seat Phase 3 — Marco (Logistics) is a READ-ONLY OBSERVER: he answers
+  // questions about inventory + fulfillment + crisis state, but his LEASH_CATEGORIES is empty by
+  // design (the founder is still hand-driving inventory executors while marco-logistics-executor-
+  // surface is queued). Every request for an action either (a) routes to the shared
+  // founder-prompted out-of-leash rail on the CEO's ad-hoc ask + his own AGREE, or (b) hits the
+  // read-only observer wall and reads back as an explanation. The M3 dispatch treats every
+  // pending_action on a logistics thread as out-of-leash → escalateApprovalRequestToCeo (a Marco
+  // card that leaks in never touches an inventory table — the verification bullet).
+  if (dirFn === "logistics") {
+    return [
+      `VOICE — ${voice}`,
+      `You are ${persona.name} — the Logistics Director for ShopCX — in a COACHING conversation with the CEO (Dylan). You run on Max, READ-ONLY: the whole brain (docs/brain/), the full repo (src/), and read access to the production database. You are explaining YOUR OWN understanding of inventory + fulfillment + crisis state and taking coaching on it.`,
+      `House rule: Read docs/brain/ before grepping src/ (start at docs/brain/README.md). Your leash is LEASH_CATEGORIES in src/lib/agents/logistics-director.ts (currently EMPTY — read-only observer landing per marco-logistics-director-seat Phase 3). Your definition lives at docs/brain/functions/logistics.md.`,
+      `⭐ READ-ONLY OBSERVER. You are Marco, read-only observer for now — investigate + explain, NEVER emit a pending_action; the founder is still hand-driving inventory executors while the marco-logistics-executor-surface spec is queued. When the CEO asks "why are we OOS on X?" / "when will Y restock?" / "why did we swap Z's subs?" — investigate read-only (crisis-forecast.ts, inventory_levels, purchase_orders + purchase_order_annotations, suppliers, crisis_events + crisis_customer_actions) and answer plainly. NEVER auto-mutate. Every request to CHANGE a thing routes UP to the CEO via the founder-prompted out-of-leash rail below.`,
+      `When the CEO COACHES you ("do this automatically going forward"), you have NO autonomous coaching-rule surface until the executor slice lands — reply with your understanding and note that the durable rule can only be persisted once marco-logistics-executor-surface opens the coaching card shape for logistics.`,
       DIRECTOR_OUT_OF_LEASH_RAIL,
       coachOutputFor(dirFn),
     ].join("\n\n");
@@ -17149,12 +17193,22 @@ async function runDirectorCoachJob(job: Job) {
         platform: new Set<string>(["coaching", "spec", "goal", "spec-edit", "directive", "model_tier"]),
         growth: new Set<string>(["reallocate_within_budget", "promote_ready_to_test", "hold_campaign"]),
         cs: new Set<string>(["approve_remedy", "author_derived_from_ticket_spec", "amend_low_blast_sonnet_prompt"]),
+        // marco-logistics-director-seat Phase 3 — Marco (Logistics) lands as a READ-ONLY OBSERVER:
+        // an empty in-leash Set means EVERY pending_action on a logistics thread misses the check
+        // and falls into the out-of-leash branch below, which calls escalateApprovalRequestToCeo
+        // with Marco's slug/label. NO logistics executor ever runs autonomously (there is none
+        // wired yet — the follow-up spec marco-logistics-executor-surface will surface one when
+        // the founder-driven inventory build model opens). Verification bullet on a Marco thread
+        // emitting any pending_action: escalateApprovalRequestToCeo called with the read-only
+        // rail reason + NO inventory mutation.
+        logistics: new Set<string>(),
       };
       const directorLabelFor = (fn: string): string =>
         fn === "platform" ? "Ada (Platform/DevOps Director)"
           : fn === "growth" ? "Max (Growth Director)"
             : fn === "cs" ? "June (CS Director)"
-              : `${fn} director`;
+              : fn === "logistics" ? "Marco (Logistics Director — read-only observer)"
+                : `${fn} director`;
       for (const a of actions) {
         if (a.status === "declined") { a.result = a.result || "declined by CEO"; continue; }
         if (a.status !== "approved") continue;
