@@ -176,6 +176,16 @@ const DIRECTOR_EXTRA_ESCALATES: Record<string, LeashLine[]> = {
 };
 
 /**
+ * The set of director function slugs that have a registered `<name>-director.ts` leash module — the
+ * live-directors-with-coach filter the Message Center's director-tab endpoint uses. A director whose
+ * slug appears here CAN back a coach thread (its leash is defined, so getLeashGuide(slug).defined ===
+ * true). Kept as a named export so the API route doesn't reach into the private `DIRECTOR_LEASH` map.
+ */
+export function getRegisteredDirectorSlugs(): Set<string> {
+  return new Set(Object.keys(DIRECTOR_LEASH));
+}
+
+/**
  * Build the plain-English leash guide for one director slug. Derived from that director's OWN
  * `LEASH_CATEGORIES` (via `DIRECTOR_LEASH`) so it's Growth's leash on Growth, Platform's on Platform.
  * A director with no leash module returns `{ defined: false }`.
