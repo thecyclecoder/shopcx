@@ -38,7 +38,7 @@ Per `exec_kind` the runner delegates to one method of the injected `CheckExecuto
 | `grep` | `rg -e <pattern> <path>` — exit 0 → present, exit 1 → absent, else harness error |
 | `ci_status` | `gh pr checks` in `repoRoot` |
 | `http_get` | `fetch(url)` — status compared to `expect_status` |
-| `db_probe_readonly` | belt-and-suspenders `isPlainReadonlySql` guard, then `admin.rpc('exec_readonly_sql', { sql_text })` and deep-equal the result to `params.expect` |
+| `db_probe_readonly` | looks up `params.probe_id` in [[spec-check-db-probes]] `DB_PROBES`, invokes the fixed shaped query with `params.args`, and deep-equals the returned scalar to `params.expect`. Evidence is the probe's REDACTED string (probe id + scalar) — NEVER a row body. Free-form SQL is not accepted; this closes the 5 pre-merge Vault findings on the old `exec_readonly_sql` path (injection · secret_leak · authz_rls · unsafe_admin_client · crypto_encrypted). |
 | `unit_test` | reads `package.json.scripts`, spawns `npm run <script>` (emits a harness-classifier-matching signature when `script` is absent — the same rail the app-layer validator uses at authoring) |
 | `build` | `npx next build` in `repoRoot` |
 
@@ -58,4 +58,4 @@ Once each check declares HOW to run it, "verification" is mechanical: a type-che
 
 ## Related
 
-[[spec-phase-checks-executable]] · [[spec-phase-checks-table]] · [[spec-test-runs]] · [[spec-test-harness-classifier]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/spec-test-agent]]
+[[spec-phase-checks-executable]] · [[spec-phase-checks-table]] · [[spec-check-db-probes]] · [[spec-test-runs]] · [[spec-test-harness-classifier]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/spec-test-agent]]

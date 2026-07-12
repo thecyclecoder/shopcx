@@ -309,27 +309,43 @@ export const defaultExecutors: CheckExecutors = {
     }
   },
   db_probe_readonly: async ({ params }) => {
-    // Belt: the validator already asserted `sql` is a plain SELECT/WITH. Suspenders: assert once
-    // more here so a caller that skipped the validator can't sneak a mutating statement through.
-    const { isPlainReadonlySql } = await import("@/lib/spec-phase-checks-table");
-    if (!isPlainReadonlySql(params.sql)) {
-      return { ok: false, evidence: "runner refused: sql is not a plain read-only SELECT" };
+    // Constrained-registry path — the executor NEVER runs spec-authored SQL. Every callable
+    // probe is a code-reviewed entry in [[spec-check-db-probes]] that binds workspace_id
+    // where applicable + returns a redacted scalar. Closes the 5 pre-merge Vault findings
+    // on the old free-form `params.sql` executor:
+    //   - injection / unsafe_admin_client — no user SQL reaches the admin client
+    //   - authz_rls                       — workspace_id is required + .eq()-bound by the probe
+    //   - secret_leak / crypto_encrypted  — evidence is a redacted scalar, never a row body
+    const { DB_PROBES, isRegisteredProbe } = await import("@/lib/spec-check-db-probes");
+    if (!isRegisteredProbe(params.probe_id)) {
+      // Defense in depth — the validator already gates this. Kept so a caller that skipped
+      // the validator can't reach the admin client with an unknown probe id.
+      return {
+        ok: false,
+        evidence: `runner refused: unknown probe_id '${params.probe_id}' (not in DB_PROBES allowlist)`,
+      };
+    }
+    const def = DB_PROBES[params.probe_id];
+    const argsObj: Record<string, string | number | boolean> = params.args ?? {};
+    const missing = def.requiredArgs.filter((k) => !(k in argsObj));
+    if (missing.length) {
+      return {
+        ok: false,
+        evidence: `runner refused: probe '${params.probe_id}' missing required arg(s) [${missing.join(", ")}]`,
+      };
     }
     try {
       const { createAdminClient } = await import("@/lib/supabase/admin");
       const admin = createAdminClient();
-      // Route through the workspace-scoped RPC if available; otherwise a raw admin query. Kept
-      // dynamic so the module works in test contexts that stub the admin client.
-      const { data, error } = await (admin as unknown as {
-        rpc: (name: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: unknown }>;
-      }).rpc("exec_readonly_sql", { sql_text: params.sql });
-      if (error) return { ok: false, evidence: `db probe error: ${(error as { message?: string }).message ?? String(error)}` };
-      const matches = JSON.stringify(data) === JSON.stringify(params.expect);
+      const result = await def.run(admin, argsObj);
+      const matches = JSON.stringify(result.value) === JSON.stringify(params.expect);
+      // Evidence is the probe's REDACTED evidence string + the scalar we compared. Never the
+      // raw Supabase response — that was the crypto_encrypted / secret_leak surface.
       return {
         ok: matches,
         evidence: matches
-          ? `probe matched expect (${JSON.stringify(params.expect).slice(0, 400)})`
-          : `probe returned ${JSON.stringify(data).slice(0, 400)} (expect ${JSON.stringify(params.expect).slice(0, 400)})`,
+          ? `${result.evidence} — matched expect (${JSON.stringify(params.expect)})`
+          : `${result.evidence} — expected ${JSON.stringify(params.expect)}`,
       };
     } catch (e) {
       return { ok: false, evidence: `db probe error: ${(e as Error).message}` };

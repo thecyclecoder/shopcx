@@ -60,7 +60,7 @@ function makeExecutors(overrides: Partial<CheckExecutors> = {}): CheckExecutors 
     },
     db_probe_readonly: async ({ params }) => {
       called.db_probe_readonly++;
-      return { ok: true, evidence: `probe(${params.sql}) — matched expect` };
+      return { ok: true, evidence: `probe(${params.probe_id}) — matched expect` };
     },
     unit_test: async ({ params }) => {
       called.unit_test++;
@@ -80,7 +80,7 @@ test("all-auto machine-declared spec — no LLM, byte-identical reruns", async (
     { text: "tsc clean", exec_kind: "tsc", params: null },
     { text: "runner exported", exec_kind: "grep", params: { pattern: "PRESENT", path: "src/lib", expect: "present" } },
     { text: "roadmap 200s", exec_kind: "http_get", params: { url: "https://shopcx.ai/roadmap", expect_status: 200 } },
-    { text: "probe rows", exec_kind: "db_probe_readonly", params: { sql: "select 1", expect: 1 } },
+    { text: "probe rows", exec_kind: "db_probe_readonly", params: { probe_id: "spec_exists_by_slug", args: { workspace_id: "ws-1", slug: "spec-x" }, expect: true } },
     { text: "unit_test passes", exec_kind: "unit_test", params: { script: "test:build-lifecycle" } },
   ];
   const packageScripts = new Set(["test:build-lifecycle"]);
@@ -106,9 +106,13 @@ test("all-auto machine-declared spec — no LLM, byte-identical reruns", async (
   }
 });
 
-test("db_probe_readonly with a mutating sql — needs_human, executor is NEVER called", async () => {
+test("db_probe_readonly with an unknown probe_id — needs_human, executor is NEVER called", async () => {
   const checks: LoadedCheck[] = [
-    { text: "sneaky delete", exec_kind: "db_probe_readonly", params: { sql: "delete from public.specs", expect: null } },
+    // The old vulnerable shape (free-form sql) is no longer a valid payload — a spec that
+    // authors a probe_id absent from the DB_PROBES registry falls through to needs_human,
+    // never a fail, and the executor is not called. This is the constrained-registry path
+    // that closes the 5 pre-merge Vault findings on spec-check-runner.ts:320/325/332.
+    { text: "sneaky delete", exec_kind: "db_probe_readonly", params: { probe_id: "delete_from_specs", expect: null } },
   ];
   const executors = makeExecutors();
   const called = (executors as CheckExecutors & { __called: Record<string, number> }).__called;
@@ -120,7 +124,33 @@ test("db_probe_readonly with a mutating sql — needs_human, executor is NEVER c
   assert.equal(out.results.length, 1);
   assert.equal(out.results[0].verdict, "needs_human");
   assert.equal(out.results[0].category, "needs_human");
-  assert.match(out.results[0].evidence, /plain read-only SELECT/);
+  assert.match(out.results[0].evidence, /not a registered probe/);
+  assert.equal(called.db_probe_readonly, 0, "runner must not execute a rejected-by-validator check");
+});
+
+test("db_probe_readonly with a sensitive-looking arg name — needs_human, executor is NEVER called", async () => {
+  const checks: LoadedCheck[] = [
+    // A defense-in-depth guard: even a registered probe rejects arg names that LOOK like a
+    // secret column so a crafted spec can't smuggle an `*_encrypted` bind through the payload.
+    {
+      text: "sneaky secret bind",
+      exec_kind: "db_probe_readonly",
+      params: {
+        probe_id: "spec_exists_by_slug",
+        args: { workspace_id: "ws-1", slug: "spec-x", api_key: "leak-me" as unknown as string },
+        expect: true,
+      },
+    },
+  ];
+  const executors = makeExecutors();
+  const called = (executors as CheckExecutors & { __called: Record<string, number> }).__called;
+  const out = await runSpecChecks({
+    workspaceId: "ws-1",
+    slug: "spec-x",
+    deps: { loadChecks: async () => checks, executors },
+  });
+  assert.equal(out.results[0].verdict, "needs_human");
+  assert.match(out.results[0].evidence, /sensitive column/);
   assert.equal(called.db_probe_readonly, 0, "runner must not execute a rejected-by-validator check");
 });
 

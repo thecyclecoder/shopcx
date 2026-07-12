@@ -85,26 +85,64 @@ test("http_get requires { url, expect_status } with a valid URL + HTTP status", 
   assert.equal(badStatus.valid, false);
 });
 
-test("db_probe_readonly requires a plain SELECT with an expect field", () => {
+test("db_probe_readonly names a registered probe_id + binds workspace_id + rejects sensitive arg names", () => {
+  // Happy path: a registered probe with all required args and a scalar expect.
   assert.equal(
     validateExecutableCheck({
       exec_kind: "db_probe_readonly",
-      params: { sql: "select count(*) from public.specs", expect: { rows: 1 } },
+      params: {
+        probe_id: "spec_exists_by_slug",
+        args: { workspace_id: "ws-1", slug: "spec-x" },
+        expect: true,
+      },
     }).valid,
     true,
   );
+  // Reject: expect is required (may be null).
   const noExpect = validateExecutableCheck({
     exec_kind: "db_probe_readonly",
-    params: { sql: "select 1" },
+    params: { probe_id: "spec_exists_by_slug", args: { workspace_id: "ws-1", slug: "spec-x" } },
   });
   assert.equal(noExpect.valid, false);
   assert.match((noExpect as { reason: string }).reason, /expect is required/);
-  const mutating = validateExecutableCheck({
+  // Reject: unknown probe_id — the constrained-registry rail. No free-form SQL is executable.
+  const unknown = validateExecutableCheck({
     exec_kind: "db_probe_readonly",
-    params: { sql: "delete from public.specs", expect: null },
+    params: { probe_id: "delete_specs", expect: null },
   });
-  assert.equal(mutating.valid, false);
-  assert.match((mutating as { reason: string }).reason, /plain read-only SELECT/);
+  assert.equal(unknown.valid, false);
+  assert.match((unknown as { reason: string }).reason, /not a registered probe/);
+  // Reject: missing required arg for the registered probe (workspace_id).
+  const missing = validateExecutableCheck({
+    exec_kind: "db_probe_readonly",
+    params: { probe_id: "spec_exists_by_slug", args: { slug: "spec-x" }, expect: true },
+  });
+  assert.equal(missing.valid, false);
+  assert.match((missing as { reason: string }).reason, /missing required arg/);
+  // Reject: arg name looks like a secret column — the denylist covers `*_encrypted`, `secret_`, `api_key`, `private_key`, `token`.
+  for (const bad of ["api_key", "user_token", "session_token", "credentials_encrypted", "secret_id", "private_key"]) {
+    const r = validateExecutableCheck({
+      exec_kind: "db_probe_readonly",
+      params: {
+        probe_id: "spec_exists_by_slug",
+        args: { workspace_id: "ws-1", slug: "spec-x", [bad]: "x" },
+        expect: true,
+      },
+    });
+    assert.equal(r.valid, false, `arg named '${bad}' must reject`);
+    assert.match((r as { reason: string }).reason, /sensitive column/);
+  }
+  // Reject: object expect — probes return a scalar.
+  const complexExpect = validateExecutableCheck({
+    exec_kind: "db_probe_readonly",
+    params: {
+      probe_id: "spec_exists_by_slug",
+      args: { workspace_id: "ws-1", slug: "spec-x" },
+      expect: { rows: 1 },
+    },
+  });
+  assert.equal(complexExpect.valid, false);
+  assert.match((complexExpect as { reason: string }).reason, /null \| number \| boolean/);
 });
 
 test("unit_test rejects a script that is not in package.json (closes the cs-director npm test class)", () => {

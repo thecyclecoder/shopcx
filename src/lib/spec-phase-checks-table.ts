@@ -13,6 +13,12 @@
  * Service-role only via `createAdminClient()`.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  DB_PROBES,
+  containsSensitiveColumn,
+  isRegisteredProbe,
+  listRegisteredProbes,
+} from "@/lib/spec-check-db-probes";
 
 export type SpecPhaseCheckKind = "auto" | "human";
 
@@ -52,8 +58,19 @@ export interface HttpGetCheckParams {
   url: string;
   expect_status: number;
 }
+/**
+ * db_probe_readonly now names a probe from the [[spec-check-db-probes]] registry — the
+ * runner NEVER executes spec-authored SQL. Closes the pre-merge Vault findings on
+ * spec-check-runner.ts:320/325/332 (injection · secret_leak · authz_rls ·
+ * unsafe_admin_client · crypto_encrypted) that flagged the previous free-form
+ * `{ sql: string }` path. See docs/brain/libraries/spec-check-db-probes.md.
+ */
 export interface DbProbeReadonlyCheckParams {
-  sql: string;
+  /** Must be a key of `DB_PROBES` in [[spec-check-db-probes]]. Unknown ids reject. */
+  probe_id: string;
+  /** Scalar-only bound args for the probe. Sensitive-looking arg names reject. */
+  args?: Record<string, string | number | boolean>;
+  /** Scalar value the probe's returned `value` is deep-equal-compared to (number | boolean | null). */
   expect: unknown;
 }
 export interface UnitTestCheckParams {
@@ -296,8 +313,11 @@ export function parseVerificationBlobToChecks(blob: string | null | undefined): 
 // Rules per spec:
 //   - grep              → { pattern: string, path?: string, expect: 'present'|'absent' }
 //   - http_get          → { url: string, expect_status: number }
-//   - db_probe_readonly → { sql: <plain SELECT / WITH …>, expect: <anything> } — RUNTIME-safe: any
-//                         write / mutating verb rejects up front, closing the mutating-db class.
+//   - db_probe_readonly → { probe_id: <key of DB_PROBES>, args?, expect: number|boolean|null } — the
+//                         SQL is fixed by the registered probe; unknown ids + sensitive arg names
+//                         reject. Closes the pre-merge Vault findings on spec-check-runner.ts
+//                         320/325/332 (injection · secret_leak · authz_rls · unsafe_admin_client ·
+//                         crypto_encrypted); [[spec-check-db-probes]] is the allowlist.
 //   - unit_test         → { script: <a real package.json script> } — packageScripts must be passed;
 //                         a script name absent from package.json rejects (closes the cs-director
 //                         `npm test` class at authoring, not at runtime).
@@ -384,16 +404,75 @@ export function validateExecutableCheck(
       return { valid: true };
     }
     case "db_probe_readonly": {
-      if (!isRecord(params)) return { valid: false, reason: "db_probe_readonly requires { sql, expect }" };
-      const { sql } = params as Record<string, unknown>;
-      if (typeof sql !== "string" || !sql.trim()) {
-        return { valid: false, reason: "db_probe_readonly.sql must be a non-empty string" };
+      if (!isRecord(params)) {
+        return { valid: false, reason: "db_probe_readonly requires { probe_id, expect }" };
       }
-      if (!isPlainReadonlySql(sql)) {
-        return { valid: false, reason: "db_probe_readonly.sql must be a plain read-only SELECT" };
+      const { probe_id, args } = params as Record<string, unknown>;
+      if (typeof probe_id !== "string" || !probe_id.trim()) {
+        return {
+          valid: false,
+          reason: "db_probe_readonly.probe_id must be a non-empty string naming a registered probe",
+        };
+      }
+      // Registered-probe gate — a spec-authored probe_id must resolve in the DB_PROBES allowlist,
+      // otherwise no fixed SQL template exists and nothing may run. Closes the injection /
+      // unsafe_admin_client class at authoring time.
+      if (!isRegisteredProbe(probe_id)) {
+        return {
+          valid: false,
+          reason:
+            `db_probe_readonly.probe_id '${probe_id}' is not a registered probe ` +
+            `(allowlist: [${listRegisteredProbes().join(", ")}] in src/lib/spec-check-db-probes.ts)`,
+        };
+      }
+      // args are scalar-only + arg names must not look like a secret column name — belt-and-suspenders
+      // even though the probe binds them via .eq() (not a template splice).
+      let argsRecord: Record<string, unknown> = {};
+      if (args !== undefined) {
+        if (!isRecord(args)) {
+          return {
+            valid: false,
+            reason: "db_probe_readonly.args (if set) must be an object of {name: string|number|boolean}",
+          };
+        }
+        argsRecord = args as Record<string, unknown>;
+        for (const [k, v] of Object.entries(argsRecord)) {
+          if (containsSensitiveColumn(k)) {
+            return {
+              valid: false,
+              reason: `db_probe_readonly.args.${k} names a sensitive column (denied by the encrypted/secret denylist)`,
+            };
+          }
+          if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+            return {
+              valid: false,
+              reason: `db_probe_readonly.args.${k} must be string | number | boolean (got ${typeof v})`,
+            };
+          }
+        }
+      }
+      // Required args must all be present.
+      const def = DB_PROBES[probe_id];
+      const missing = def.requiredArgs.filter((k) => !(k in argsRecord));
+      if (missing.length) {
+        return {
+          valid: false,
+          reason: `db_probe_readonly.args missing required arg(s) for probe '${probe_id}': [${missing.join(", ")}]`,
+        };
       }
       if (!("expect" in (params as Record<string, unknown>))) {
         return { valid: false, reason: "db_probe_readonly.expect is required (may be null)" };
+      }
+      const expect = (params as Record<string, unknown>).expect;
+      if (
+        expect !== null &&
+        typeof expect !== "number" &&
+        typeof expect !== "boolean"
+      ) {
+        return {
+          valid: false,
+          reason: "db_probe_readonly.expect must be null | number | boolean (probes return a scalar)",
+        };
       }
       return { valid: true };
     }
