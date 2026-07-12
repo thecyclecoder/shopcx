@@ -646,6 +646,24 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
       violation: { reason: "stuck_jobs", detail: `${stuck.length} ${loop.agentKind} job(s) stuck in ${stuck[0].status} past ${Math.round(threshold / 60_000)}m (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))}, job ${oldest.id.slice(0, 8)}).` },
     };
   }
+  // claim-rpc-kill-switch-enforcement Phase 2 — the box worker calls
+  // public.claim_agent_job_diag whenever a `claim_agent_job` returns null and
+  // writes an agent-kind heartbeat whose `produced` carries
+  // `{blocked_off:true, offBy, scope}` naming the first ancestor node_id whose
+  // kill switch fired (see writeSuppressedClaimHeartbeats in
+  // scripts/builder-worker.ts). Render that as amber "off by <ancestor>
+  // (<scope>)" so a switched-off tile is not confused with a green silent-idle
+  // (or a false red). The latest beat is authoritative: once the switch is
+  // removed and the next claim succeeds, the launch-path's completion beat
+  // overwrites this one and the tile returns to green.
+  const producedObj = (latest?.produced && typeof latest.produced === "object")
+    ? (latest.produced as { blocked_off?: unknown; offBy?: unknown; scope?: unknown })
+    : null;
+  if (producedObj && producedObj.blocked_off === true) {
+    const offBy = typeof producedObj.offBy === "string" ? producedObj.offBy : "unknown";
+    const scope = typeof producedObj.scope === "string" ? producedObj.scope : "unknown";
+    return { ...base, color: "amber", statusText: `off by ${offBy} (${scope})`, violation: null };
+  }
   // Genuinely-idle or running-within-threshold = green (no false positives).
   if (mine.length) {
     return { ...base, color: "green", statusText: `running · ${mine.length} active`, violation: null };

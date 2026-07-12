@@ -19,9 +19,10 @@ import { selectAngles, buildCreativeBrief, type ScoredAngle } from "@/lib/ads/cr
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
-import { qaCreative } from "@/lib/ads/creative-qa";
+import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
+import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-products";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -149,8 +150,19 @@ async function insertReadyCreative(
 }
 
 /** Generate + QA + bin-insert `count` fresh creatives for one product, cycling through its top unused
- *  angles. Skips angles already represented by an existing campaign so we add variety, not dupes. */
-async function stockProduct(admin: Admin, workspaceId: string, productId: string, count: number): Promise<StockedCreative[]> {
+ *  angles. Skips angles already represented by an existing campaign so we add variety, not dupes.
+ *
+ *  QC path — when `qcDispatcher` is set, the QC pass runs as a `claude -p` box session on Max
+ *  ([[creative-qa]] qaCreativeViaBoxSession — dahlia-creative-qc-via-box-session Phase 1) so the
+ *  lane never needs an ANTHROPIC_API_KEY; otherwise it falls back to the direct Opus vision API
+ *  path ([[creative-qa]] qaCreative). Fail-closed on either path — any error → `pass:false`. */
+async function stockProduct(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  count: number,
+  qcDispatcher?: QcSessionDispatcher,
+): Promise<StockedCreative[]> {
   const out: StockedCreative[] = [];
   const pi = await getProductIntelligence(admin, workspaceId, productId);
   const product = pi.product as { title?: string; handle?: string } | null;
@@ -236,7 +248,9 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
         const isCompetitor = angle.source === "competitor";
         const refUrl = isCompetitor ? (angle.raw?.imageUrl as string | undefined) : undefined;
         const gen = await generateCreative(workspaceId, brief, { treatment, designReferenceUrl: refUrl, compositionTransfer: isCompetitor && !!refUrl });
-        const verdict = await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
+        const verdict = qcDispatcher
+          ? await qaCreativeViaBoxSession({ buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation }, qcDispatcher)
+          : await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         const metaCopy = {
           headline: (brief.offer?.headline ?? angle.leadBenefit).slice(0, 40),
@@ -265,23 +279,39 @@ async function stockProduct(admin: Admin, workspaceId: string, productId: string
  * Run the ad-creative loop for a workspace. Called by the box lane (`runAdCreativeJob`).
  * `opts.productId` + `opts.count` targets one product (the cadence cron's per-product jobs);
  * with no productId it tops up every intelligence-backed product to `binFloor`.
+ *
+ * `opts.qcDispatcher` — when set, the per-creative QC pass runs as a `claude -p` box session on
+ * Max via the caller's dispatcher (dahlia-creative-qc-via-box-session Phase 1: the ad-creative
+ * lane never needs an ANTHROPIC_API_KEY). When unset, the loop falls back to the direct Opus
+ * vision API path so callers without a spawn context still work; both paths fail-closed.
  */
 export async function runAdCreativeLoop(
   admin: Admin,
-  opts: { workspaceId: string; productId?: string; count?: number; binFloor?: number },
+  opts: { workspaceId: string; productId?: string; count?: number; binFloor?: number; qcDispatcher?: QcSessionDispatcher },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId } = opts;
+  const { workspaceId, qcDispatcher } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
   const targets: Array<{ productId: string; count: number }> = [];
   if (opts.productId) {
-    targets.push({ productId: opts.productId, count: Math.min(opts.count ?? binFloor, MAX_PER_JOB) });
+    // Per-product path (the cadence's per-product job). Gate the single target on
+    // is_advertised so a stray productId snuck into an ad-creative job never yields creatives
+    // for an attachment SKU. Attachment SKU → return zero targets, no work.
+    const advertised = await isAdvertisedProduct(admin, opts.productId);
+    if (advertised) {
+      targets.push({ productId: opts.productId, count: Math.min(opts.count ?? binFloor, MAX_PER_JOB) });
+    }
   } else {
     // Every product that HAS ad intelligence (an angle row), topped up to the floor.
     const { data: angleProducts } = await admin
       .from("product_ad_angles").select("product_id").eq("workspace_id", workspaceId);
-    const productIds = [...new Set(((angleProducts ?? []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+    const angleProductIds = [...new Set(((angleProducts ?? []) as Array<{ product_id: string }>).map((r) => r.product_id).filter(Boolean))];
+    // Hero-product advertising gate ([[../../libraries/advertised-products]]): a stray
+    // product_ad_angles row for an attachment SKU never earns Dahlia work — only rows in
+    // listAdvertisedProductIds survive the intersect. Empty gate ⇒ no targets, no fallback.
+    const advertisedIds = new Set(await listAdvertisedProductIds(admin, workspaceId));
+    const productIds = angleProductIds.filter((id) => advertisedIds.has(id));
     for (const productId of productIds) {
       const depth = await currentBinDepth(admin, workspaceId, productId);
       const deficit = binFloor - depth;
@@ -290,7 +320,7 @@ export async function runAdCreativeLoop(
   }
 
   for (const t of targets) {
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count);
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher);
     stocked.push(...results);
   }
 

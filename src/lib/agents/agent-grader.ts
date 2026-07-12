@@ -338,7 +338,11 @@ export const AGENT_RUBRICS: Record<string, { name: string; criteria: string }> =
   regression: { name: "Remi", criteria: "caught a real regression · correctly dismissed flaky ones · the authored fix spec is sound" },
   db_health: { name: "Devi", criteria: "correct EXPLAIN diagnosis · the index/fix actually addresses the slow query · no foreign/sunset false-positives" },
   "spec-test": { name: "Vera", criteria: "caught real drift / false-✅ · no false alarms · verification matched live prod" },
-  "spec-review": { name: "Vale", criteria: "caught real spec defects (mangled phases · missing owner/parent/blockers · missing Verification) · no false-fix calls on sound specs · diagnoses match the markdown (Phase 3: QUALITY only — pass/needs_fix; planned/deferred is Ada's call, not Vale's)" },
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — Vale (the LLM spec-review lane)
+  // is RETIRED. The deterministic spec-review gate ([[spec-review-gate]]) runs synchronously at authoring,
+  // so there is no LLM verdict to grade. `spec-review` is intentionally OMITTED from AGENT_RUBRICS →
+  // dropped from GRADEABLE_KINDS → dropped from gradeableKindsForFunction('platform'). The gate itself is
+  // "monitored infra" ([[control-tower/registry]] MONITORED_LOOPS), not a graded worker.
   "migration-fix": { name: "Mira", criteria: "migration applied/repaired correctly · audit cleared · no data loss" },
   "pr-resolve": { name: "Pax", criteria: "conflicts resolved without lost work · clean rebase · queue left mergeable" },
   fold: { name: "Fenn", criteria: "folded into the right brain pages · cross-links correct · archived cleanly" },
@@ -848,14 +852,21 @@ async function ungradedConcludedJobs(admin: Admin, workspaceId: string, limit = 
   // keeps the window on the recent tail instead of the long-graded head.
   const { data: jobs } = await admin
     .from("agent_jobs")
-    .select("id, created_at, kind, status, error")
+    .select("id, created_at, kind, status, error, claude_session_id")
     .eq("workspace_id", workspaceId)
     .in("kind", ownedKinds)
     .in("status", Array.from(TERMINAL_JOB_STATUSES))
     .order("created_at", { ascending: false })
     .limit(limit);
-  return ((jobs as UngradedJob[]) || [])
+  return ((jobs as Array<UngradedJob & { claude_session_id: string | null }>) || [])
     .filter((j) => !gradedJobs.has(j.id))
+    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — a `spec-test` row
+    // whose deterministic runner resolved every check never spawned a Max session (claude_session_id
+    // stays null in that path — scripts/builder-worker.ts runSpecTestJob). There is no LLM output
+    // to score against Vera's rubric, so it is MONITORED (via the Control Tower registry loop
+    // `deterministic-spec-check-runner`), NOT GRADED. Filter it out here so the grader's session
+    // budget stays on the real LLM residuals.
+    .filter((j) => !(j.kind === "spec-test" && !j.claude_session_id))
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 

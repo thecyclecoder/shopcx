@@ -1,0 +1,1 @@
+- **renderSpecRow surfaces the stored Why/What intent it already holds** · verified 2026-07-11 · → [[libraries/build-spec-materializer]]

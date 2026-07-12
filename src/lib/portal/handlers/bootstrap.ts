@@ -1,6 +1,11 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, logPortalAction } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+// Portal availability lever — some variants are IN STOCK but must not be
+// selectable via any new-choice path (crisis: preserve inventory for existing
+// renewers). Applied to the swap/add catalog here AND server-side in
+// replaceVariants. See [[../mutation-guard]].
+import { getSuppressedVariantIds } from "@/lib/portal/mutation-guard";
 
 export const bootstrap: RouteHandler = async ({ auth, route }) => {
   const admin = createAdminClient();
@@ -94,6 +99,12 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
       .eq("workspace_id", auth.workspaceId)
       .in("shopify_product_id", productIds);
 
+    // Per-workspace "not selectable for new choice" variant set — a crisis
+    // availability lever pulled from `workspaces.portal_config`. Mixed Berry is
+    // hidden today because it's OOS (`inventory_quantity == 0` below); the
+    // suppressed set covers the in-stock case (e.g. Strawberry Lemonade).
+    const suppressed = await getSuppressedVariantIds(auth.workspaceId);
+
     if (products) {
       catalog = products.map((p) => ({
         internalId: p.id,
@@ -103,7 +114,10 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
         image: { src: p.image_url || "", alt: p.title },
         rating: { value: p.rating || 0, count: (p.rating_count || 0) + reviewBump },
         variants: (Array.isArray(p.variants) ? p.variants : []).filter(
-          (v: { inventory_quantity?: number }) => v.inventory_quantity == null || v.inventory_quantity > 0
+          (v: { id?: unknown; inventory_quantity?: number }) => {
+            if (suppressed.has(String(v.id ?? ""))) return false;
+            return v.inventory_quantity == null || v.inventory_quantity > 0;
+          }
         ),
       })).filter(p => (p.variants as unknown[]).length > 0);
     }

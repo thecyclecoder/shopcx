@@ -164,6 +164,44 @@ breakage observed → it is **not** a `fail`.
   **exclusively** by `fail`s backed by breakage evidence; `needs_human`/`inconclusive` never appear as
   regressions and never flip the verdict to `issues`.
 
+### 🚨 A harness/command failure is NEVER a code `fail` — resolve it or `needs_human`
+
+*vera-harness-error-is-not-a-code-regression Phase 1.* A `fail` requires an assertion that RAN. A
+check whose command never got that far — because the command doesn't exist in the repo — is a broken
+verification bullet, not a code regression. Recording it as `fail` is what spawns Bo an
+**unbuildable** fix phase (Bo can't build a fix for a missing shell command), and the pipeline
+wedges. That is the 2026-07-11 `cs-director-leash-categories` false-regression this rule exists to
+prevent.
+
+**Harness/command signatures** — a check whose stderr / evidence carries ANY of these never ran an
+assertion:
+
+- `npm error Missing script: "…"` (also `npm ERR!` legacy) — e.g. `npm test <file>` in a repo whose
+  `package.json` only defines `npm run test:<name>` scripts (the exact motivating case).
+- `command not found` / `: not found` — the binary isn't on PATH.
+- `No such file or directory` / `ENOENT` — the path passed to the runner doesn't exist.
+- `Cannot find module` / `Cannot find package` — a Node runner couldn't resolve the entry.
+- Any non-zero exit that occurred BEFORE any assertion output (the runner never got started).
+
+**What to do instead:**
+
+1. **Resolve to the real script when you can.** Grep `package.json` `"scripts"` for a matching
+   `test:<name>` (or `check:<name>` etc.) that actually exists and covers the target the bullet
+   names — e.g. `npm test src/lib/agents/cs-director.test.ts` → `npm run test:cs-director` if that
+   script runs the same test file. Re-run the resolved script. If it now runs an assertion and
+   passes, the check is `pass`. If the resolved script runs and its assertion FAILS with real
+   breakage evidence, that IS a legitimate `fail`.
+2. **Otherwise classify `needs_human`** with the harness stderr as evidence and a one-line note like
+   `"harness/command failure — bullet names 'npm test <file>' but package.json has no 'test' script; needs verification-authoring fix"`.
+   The bullet is a **verification-authoring wart** for the spec's owner to fix, not a code
+   regression for Bo to build.
+
+**Never** emit `verdict='fail'` for a harness/command failure. Only a command that RAN and had an
+assertion FAIL is a real `fail`. The worker's normalizer applies the same reclassification as
+belt-and-suspenders (see `src/lib/spec-test-harness-classifier.ts` — a slipped harness-`fail`
+is downgraded to `needs_human` before summary / verdict / fix-phase authoring see it), but earn the
+correct verdict at emit time.
+
 ## Step 2 — run ONLY the non-destructive checks
 
 Your read-only QA toolkit, all on the box:

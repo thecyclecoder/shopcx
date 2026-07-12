@@ -14,6 +14,21 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 `agent_verdict` (a bounded "the automatable checks pass" proxy, the supervisable-autonomy north star in
 [[../operational-rules]]) that the owner then confirms.
 
+## Deterministic pre-pass — [[spec-check-runner]] runs first
+
+[[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 3 wired a deterministic Node runner ahead of Vera on the post-ship path. `runSpecTestJob` (`scripts/builder-worker.ts`) now:
+
+1. Calls [[spec-check-runner]] `runSpecChecks(workspaceId, slug)` in-process — the runner executes every machine-declared `spec_phase_checks` row per its [[spec-phase-checks-executable]] `exec_kind` (tsc · grep · ci_status · http_get · db_probe_readonly · unit_test · build). Non-destructive by construction.
+2. Calls `classifyDeterministicRun(results)` — a pure classifier that returns `{ allResolved, residualCount, residualTexts, checks, summary, agentVerdict }`.
+3. If `allResolved === true` AND this is NOT a fused pre-merge job, writes `spec_test_runs` straight from the runner's verdicts (no `claude_session_id`), runs the same timecard / green-writeback / auto-fold / regression detector downstream, and RETURNS — no Max session. A spec whose verification is fully machine-declared verifies with ZERO Max cost.
+4. If any needs_human residual remains, spawns the Max session as today with a residual-scope hint in the prompt, then `mergeDeterministicWithLlmChecks(runner, llm)` fuses the two — the runner's pass/fail is AUTHORITATIVE (byte-identical + evidence-backed), the LLM only fills the residual.
+
+The FUSED PRE-MERGE path (isPreMerge && branch) stays unchanged — Vault's security envelope is judgment, not mechanical, and the same Max session emits both verdicts today. The runner still runs (its heartbeat still beats — see [[../operational-rules]] § Control Tower), but Max is spawned regardless.
+
+## Monitored, not graded — the runner is Control Tower infra
+
+A `spec-test` row whose `claude_session_id IS NULL` (the deterministic-only path) is filtered out of the [[agent-grader]] pool ([[agent-grader]] `ungradedConcludedJobs`) — there is no LLM output to score against Vera's rubric. Liveness of the runner is asserted through the Control Tower loop `deterministic-spec-check-runner` (`DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID`), which beats once per spec-test job that invokes it (ok:true when the runner returned verdicts, ok:false when it threw and Vera's LLM lane had to take over). This is the "monitored, not graded" carve-out the spec § Phase 3 mandates.
+
 ## Types
 
 - `CheckVerdict` = `pass | fail | needs_human | inconclusive` — per-bullet outcome.
@@ -194,6 +209,55 @@ classification prompt in `runSpecTestJob` (`scripts/builder-worker.ts`); this is
   to verified. "Maximize machine coverage" means *more non-destructive verification*, never relaxing the
   prod-write ban. The richer browser + sandboxed behavioral modes layered on top live in
   [[spec-test-sandbox]] ([[../specs/spec-test-deep-verification]]).
+
+## Harness/command failure is never a code `fail` (vera-harness-error-is-not-a-code-regression)
+
+**Invariant** — a verification bullet whose named command does not exist / cannot run in the repo is a
+**verification-authoring problem**, never a code regression, and MUST NEVER spawn a Bo fix phase.
+
+**Why the invariant exists.** On 2026-07-11 the shipped spec `cs-director-leash-categories` carried a
+verification bullet naming `npm test src/lib/agents/cs-director.test.ts`. This repo has no `npm test`
+script (only named scripts like `npm run test:cs-director`). Vera ran the literal command, `npm error
+Missing script: "test"` exited 1, and Vera recorded `verdict='fail'`. That mis-classified `fail`
+spawned an inline "fix" phase asking Bo to resolve 2 pre-merge spec-test regressions — but nothing in
+the CODE was broken, so Bo could not build the phase and the whole accumulation wedged.
+
+**Harness/command signatures** — the classifier ([[../../../src/lib/spec-test-harness-classifier.ts]]
+`isHarnessCommandFailure`) recognises any of these as the command NEVER having run an assertion:
+`npm error Missing script`, `command not found`, `: not found`, `No such file or directory` / `ENOENT`,
+`Cannot find module` / `Cannot find package`, `Missing script:`, `Unknown command:`. Case-insensitive.
+
+**Two-layer defence.** Both layers use the SAME predicate so they can never disagree:
+
+1. **Vera-side classify + resolve** — the `spec-test` skill (`.claude/skills/spec-test/SKILL.md` §
+   *Harness/command failure*) + the `runSpecTestJob` prompt teach Vera to grep `package.json`
+   `"scripts"` for a matching `test:<name>` and re-run the resolved script when possible; a resolved
+   assertion pass is `pass`, a resolved assertion fail is a real `fail`; if no runnable script maps,
+   the check is `needs_human` (a verification-authoring wart), NEVER `fail`.
+2. **Worker-side reclassifier** — `normalizeSpecTest` in `scripts/builder-worker.ts` runs
+   `reclassifyHarnessFails` on the checks array BEFORE deriving `summary` / `agent_verdict`, so a
+   slipped harness `fail` is downgraded to `needs_human` (with the original stderr preserved as
+   evidence) before it can land in `spec_test_runs.auto_fail`, flip the verdict to `issues`, or reach
+   any fix-phase authoring path.
+
+**Fix-phase authoring guard (Phase 2 belt-and-suspenders).** Both authoring paths ALSO filter harness
+checks at their own gate, so a legacy `spec_test_runs` row / a concurrent race can never squeak past:
+
+- `src/app/api/roadmap/spec-test/request-fix/route.ts` — the inline "Request a fix" POST filters
+  `allFails.filter(!isHarnessCommandFailure)`; a run whose failing checks are ALL harness-class
+  returns HTTP 400 with `harnessFails: [...]` (the owner sees the verification-authoring wart to fix
+  on the origin spec — no Bo fix phase is authored).
+- `src/lib/pre-merge-fix.ts` `spawnPreMergeFix` — filters harness-class checks out of `cleanFailing`
+  BEFORE any `appendFixPhases` / `recordDirectorActivity` call. If every failing check was harness,
+  the function returns `{ spawned:false, escalated:false, reason: "no evidence-backed failing checks
+  — nothing to fix" }` — the auto-merge tests-gate stays closed on red, but no Fix N phase gets
+  appended to the origin's build chain.
+
+**Result** — only a command that RAN and had an assertion FAIL can author a Bo fix phase. A harness /
+command wart surfaces as a `needs_human` check for the owner to fix as verification authoring, never
+as a fix-phase that wedges the pipeline. Tests live at
+[[../../../src/lib/spec-test-harness-classifier.test.ts]] pinning the exact motivating stderr as the
+downgraded state, and confirming a real assertion `fail` still flows through as `fail`.
 
 ## Durable mandate (agent-mandate-hardening-spec-test)
 
