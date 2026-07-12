@@ -46,6 +46,14 @@ Phase 3 wired [[spec-check-runner]] `runSpecChecks` into `runSpecTestJob` (`scri
 
 [[spec-phase-checks-table]] `parseVerificationBlobToChecks` stamps `exec_kind: 'needs_human'` on every derived row. Only the structured author path (`checks: [{ exec_kind, params }]`) can opt a check into deterministic execution — the runner ignores anything else. Un-typed prose falls through to the LLM residual, which is the exact safe default that closes the class of "Vera mis-runs a made-up command" (the 2026-07-11 cs-director false regression) the spec cites in § Why.
 
+## Authoring-time invariant ([[../specs/every-spec-writer-authors-machine-runnable-verifications]])
+
+Phase 1 lifts "the runner CAN run machine checks" into "every phase HAS ≥1 machine-runnable check": [[author-spec]] `assertEveryPhaseHasMachineCheck` runs at both author entry points (structured + markdown) and throws `MissingMachineCheckError` if a phase's checks are all prose / all `needs_human`. So every writer — planner, spec-chat, ~17 box-worker author lanes, request-fix — inherits the invariant at the SDK chokepoint; no writer can land a prose-only spec (CEO decision 2026-07-11: machine-runnable is mandatory; human tests are advisory / non-blocking).
+
+Phase 2 adds `public.specs.human_review` — the OPTIONAL, non-blocking founder-facing advisory note (rendered on the spec card + post-ship founder surface, NEVER read by the fold gate / promote gate / this runner). Subjective / "eyeball this" no longer belongs in `spec_phase_checks`; it belongs in `human_review`.
+
+Phase 3 ships `scripts/backfill-spec-checks-to-typed.ts` — a safety-first, dry-run/apply backfill that promotes existing `needs_human` rows to `tsc` / `build` / `ci_status` / `unit_test` / `http_get` when the description prose is UNAMBIGUOUSLY derivable (unmappable prose stays `needs_human` — nothing auto-runs on a fabricated pattern). The classifier is a pure function pinned by `scripts/backfill-spec-checks-to-typed.test.ts` (18 unit tests: literal-command patterns pass, prose grep / db_probe patterns stay needs_human, unknown npm scripts stay needs_human).
+
 ## Related
 
-[[spec-phase-checks-table]] · [[../tables/spec_phase_checks]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/spec-test-agent]] · [[author-spec]]
+[[spec-phase-checks-table]] · [[../tables/spec_phase_checks]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/every-spec-writer-authors-machine-runnable-verifications]] · [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]] · [[../specs/spec-test-agent]] · [[author-spec]]
