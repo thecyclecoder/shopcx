@@ -698,21 +698,13 @@ export async function enqueueBuildIfDue(
   // check emits a distinct reason so the heartbeat log names the exact eligibility miss.
   if (card.status === "shipped") return { enqueued: false, reason: "already-shipped" };
   if (card.status === "deferred") return { enqueued: false, reason: "deferred" };
-  // fix-bo-reactive-gated-build-enqueue — `in_review` is the ONE lifecycle state where Vale has
-  // (or may have) passed but Ada hasn't yet made a disposition call (planned vs deferred). The
-  // Phase-2 reactive event fires from `markSpecCardValePassed` the moment Vale flips
-  // valeReviewPassed=true, but the spec's status STAYS `in_review` until Ada's disposition sweep
-  // writes `planned`/`deferred`. Without this gate the consumer would enqueue a build on the Vale
-  // pass alone — contradicting the whole "Vale reviews → Ada disposes → THEN build" flow that the
-  // spec-review lane is meant to enforce. `applyAdaDisposition('planned')` re-fires the event, so
-  // no eligibility signal is lost: the build enqueues once Ada actually dispositions the spec.
-  if (card.status === "in_review") return { enqueued: false, reason: "in-review-pending-disposition" };
-  // MIRROR of specReviewDone(card) in src/lib/agents/platform-director.ts:209-211 — re-probed inline
-  // here to avoid a circular import (platform-director already imports enqueueSpecTestIfDue from
-  // this file). Keep the two in lockstep; the durable signal is `specs.vale_review_passed_at`
-  // (surfaced as `card.valeReviewPassed`). The `status==='shipped'` half of specReviewDone is already
-  // covered by the early return above, so the local check reduces to the vale_pass flag.
-  if (card.valeReviewPassed !== true) return { enqueued: false, reason: "not-review-passed" };
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — the legacy in_review +
+  // not-review-passed hard-stops are RETIRED. Vale's LLM lane is gone; every spec that reaches
+  // `public.specs` passed the deterministic gate ([[spec-review-gate]]) synchronously at author time.
+  // "reviewed" is TRUE by construction the instant a row exists. A fresh, phased, well-formed spec
+  // derives `planned`/`in_progress` via the phase rollup — never `in_review` — and the build enqueues
+  // freely. Ada's disposition lane keeps routing planned/deferred as a director judgment call
+  // (spec-dispose.selectDispositionCandidates); but that judgment does not gate the build claim path.
   if (card.autoBuild === false) return { enqueued: false, reason: "auto-build-off" };
   if (card.blockedBy.some((b) => !b.cleared)) return { enqueued: false, reason: "blocked" };
 

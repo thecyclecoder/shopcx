@@ -87,24 +87,29 @@ export async function selectDispositionCandidates(
   _admin: Admin,
   workspaceId: string,
 ): Promise<DispositionCandidate[]> {
-  // specs-status-overrides-only: `status='in_review'` is no longer STORED, so Ada's cohort is selected by
-  // the disposition signals directly — `vale_pass === true` (Vale passed, awaiting disposition) is the real
-  // gate; it can only be set while the spec was in review and is CONSUMED once she disposes, so it precisely
-  // identifies the pending cohort without a status filter. `folded` is skipped defensively. SDK read
-  // (pm-db-agent-toolkit); the JS filters (vale_pass / ada_disposition / deferred / intended_status) all live on SpecRow.
+  // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 — Vale's LLM lane is retired,
+  // so the legacy `vale_pass === true` cohort gate would keep Ada's queue permanently empty. The new
+  // signal is directly derivable from the AUTHOR-TIME state that the deterministic gate leaves
+  // behind: a fresh spec has an `intended_status` set by its author (planner / spec-chat / director-
+  // authored / etc.), and Ada's `applyAdaDisposition` clears both `intended_status` + sets
+  // `ada_disposition`. So Ada's pending cohort = every non-folded, non-deferred spec whose author
+  // still has an outstanding intended_status and no ada_disposition yet. `vale_pass` / `vale_disposition`
+  // are ignored on the read; adaDispositionFor's back-compat path (no Vale rec) trusts the author.
   const rows = await listSpecs(workspaceId);
   const out: DispositionCandidate[] = [];
   for (const r of rows) {
     if (r.status === "folded") continue; // archived — never Ada's turn.
-    if (!r.vale_pass) continue; // Vale hasn't passed it yet (null/false) — not Ada's turn.
     if (r.ada_disposition) continue; // already disposed (autonomous flip landed) or parked (pending_upgrade) — skip.
     if (r.deferred) continue; // an out-of-band defer already happened — leave it for the operator.
+    if (!r.intended_status) continue; // author didn't declare an intent — no Ada disposition to make.
     const intended: "planned" | "deferred" = r.intended_status === "deferred" ? "deferred" : "planned";
     out.push({
       slug: r.slug,
       intended,
-      // vale-reasons-the-disposition Phase 2 — carry Vale's stored recommendation (may be null on a
-      // pre-migration legacy pass; adaDispositionFor falls back to `intended` in that case).
+      // vale-reasons-the-disposition Phase 2 — Vale is retired; the LLM recommendation column is
+      // effectively always null on new authors. adaDispositionFor's fallback branch (no Vale rec)
+      // trusts the author's intended and applies a silent `same` disposition, which is exactly the
+      // pre-Vale-reasons-the-disposition behavior.
       vale_disposition: r.vale_disposition,
       vale_disposition_reason: r.vale_disposition_reason,
     });

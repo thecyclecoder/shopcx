@@ -1,0 +1,1 @@
+- **Retire Vale: spec-review becomes a deterministic authoring gate under Ada** · verified 2026-07-11 · → [[../libraries/spec-review-gate]]
