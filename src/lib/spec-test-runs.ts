@@ -15,6 +15,7 @@ import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_FOLD_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { getSecurityStateBySlug } from "@/lib/security-agent";
+import { isEffectivelyEnabled } from "@/lib/control-tower/legacy-switch-compat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -576,16 +577,24 @@ export async function getHumanTestQueue(workspaceId: string): Promise<HumanTestQ
  * lands before the `auto_fold_enabled` migration applies degrades gracefully (column absent ⇒ undefined ⇒
  * enabled), and a read failure also defaults to enabled (best-effort; the fold is still guarded by machine pass).
  * Only an explicit `auto_fold_enabled === false` pauses the gate. Mirrors isAutoMergeEnabled.
+ *
+ * migrate-ad-hoc-kill-switches-to-resolver Phase 1: the legacy `workspaces.auto_fold_enabled` read is
+ * wrapped by [[./control-tower/legacy-switch-compat]] `readEffectiveOnOff('fold', ...)` so a
+ * `platform`-scope kill_switches row (department seat OR the `fold` agent) also pauses the gate.
+ * Union semantics — either source OFF wins.
  */
 export async function isAutoFoldEnabled(workspaceId: string, adminClient?: Admin): Promise<boolean> {
-  try {
-    const admin = adminClient || createAdminClient();
-    const { data } = await admin.from("workspaces").select("*").eq("id", workspaceId).maybeSingle();
-    const flag = (data as Record<string, unknown> | null)?.auto_fold_enabled;
-    return flag !== false;
-  } catch {
-    return true;
-  }
+  const legacyFn = async (): Promise<boolean | undefined> => {
+    try {
+      const admin = adminClient || createAdminClient();
+      const { data } = await admin.from("workspaces").select("*").eq("id", workspaceId).maybeSingle();
+      const flag = (data as Record<string, unknown> | null)?.auto_fold_enabled;
+      return flag !== false;
+    } catch {
+      return true;
+    }
+  };
+  return isEffectivelyEnabled("fold", legacyFn);
 }
 
 /**

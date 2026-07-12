@@ -8,6 +8,7 @@ import { getSpecTestStateForBranch } from "@/lib/spec-test-runs";
 import { isSecurityGreenForBranch } from "@/lib/security-agent";
 import { recordHumanOnlyPromoteAdvisory } from "@/lib/director-activity";
 import { isSpecAccumulationComplete } from "@/lib/specs-table";
+import { isEffectivelyEnabled } from "@/lib/control-tower/legacy-switch-compat";
 
 /**
  * github-pr-resolve — the detection + enqueue half of the Dirty-PR Resolver Agent
@@ -593,17 +594,25 @@ const SYNC_STALE_MS = 2 * HOUR_MS;
  * lands before the `auto_merge_enabled` migration applies degrades gracefully (column absent ⇒ undefined ⇒
  * enabled), and a read failure also defaults to enabled (best-effort; the merge itself is still guarded by
  * mergeable+green). Only an explicit `auto_merge_enabled === false` pauses the gate.
+ *
+ * migrate-ad-hoc-kill-switches-to-resolver Phase 1: the legacy `workspaces.auto_merge_enabled` read is
+ * wrapped by [[./control-tower/legacy-switch-compat]] `readEffectiveOnOff('pr-resolve', ...)` so a
+ * `platform`-scope kill_switches row (department seat OR the `pr-resolve` agent) also pauses the gate.
+ * Union semantics — either source OFF wins.
  */
 export async function isAutoMergeEnabled(admin: Admin): Promise<boolean> {
-  try {
-    const workspaceId = await resolveBuildWorkspaceId(admin);
-    if (!workspaceId) return true;
-    const { data } = await admin.from("workspaces").select("*").eq("id", workspaceId).maybeSingle();
-    const flag = (data as Record<string, unknown> | null)?.auto_merge_enabled;
-    return flag !== false;
-  } catch {
-    return true;
-  }
+  const legacyFn = async (): Promise<boolean | undefined> => {
+    try {
+      const workspaceId = await resolveBuildWorkspaceId(admin);
+      if (!workspaceId) return true;
+      const { data } = await admin.from("workspaces").select("*").eq("id", workspaceId).maybeSingle();
+      const flag = (data as Record<string, unknown> | null)?.auto_merge_enabled;
+      return flag !== false;
+    } catch {
+      return true;
+    }
+  };
+  return isEffectivelyEnabled("pr-resolve", legacyFn);
 }
 
 /**

@@ -35,6 +35,7 @@ import {
   DEFAULT_BLENDED_CAC_LTV_TARGET,
   type BlendedCacLtvResult,
 } from "@/lib/blended-cac-ltv";
+import { readEffectiveOnOff } from "@/lib/control-tower/legacy-switch-compat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -93,7 +94,8 @@ export type ArmingDenialReason =
   | "trust_no_snapshots" // zero sensor-trust snapshots in the window.
   | "trust_streak_short" // <MIN_CONSECUTIVE_GREEN_TRUST consecutive green snapshots.
   | "blended_cac_ltv_below_target" // cacLtvRatio present but < targetCacLtv.
-  | "blended_cac_ltv_unknown"; // cacLtvRatio null (no CAC, no LTV, or no mapping).
+  | "blended_cac_ltv_unknown" // cacLtvRatio null (no CAC, no LTV, or no mapping).
+  | "kill_switch_cascade_off"; // migrate-ad-hoc-kill-switches-to-resolver Phase 1 — a `growth`/`media-buyer` kill_switches row is OFF; readiness route refuses.
 
 export interface ArmingGateReason {
   code: ArmingDenialReason;
@@ -261,6 +263,37 @@ export async function runMediaBuyerArmingGate(
   const isoWeek = isoWeekLabel(now);
   const windowStartDate = isoDateOffset(now, -ARMING_GATE_LOOKBACK_DAYS);
   const windowEndDate = isoDate(now);
+
+  // migrate-ad-hoc-kill-switches-to-resolver Phase 1 — the arming gate itself is unchanged, but
+  // the READINESS check consults [[../control-tower/kill-switch-resolver]] via the union shim
+  // BEFORE evaluating the three preconditions. If the growth/media-buyer cascade is OFF, refuse
+  // arming immediately (a rail, not an execute — matches the goal's north-star). Legacy fn returns
+  // `true` because arming has no pre-existing per-workspace ad-hoc column; only the resolver can
+  // switch this off. Refusal is stamped as a normal deny (no CEO escalation — the CEO already
+  // owns the kill_switches row that caused it; escalating back to her would be a loop).
+  const cascade = await readEffectiveOnOff("media-buyer", async () => true);
+  if (cascade.off) {
+    const reason: ArmingGateReason = {
+      code: "kill_switch_cascade_off",
+      detail: `kill_switches cascade OFF (source=${cascade.source}${cascade.offBy ? `, offBy=${cascade.offBy}` : ""}${cascade.reason ? `: ${cascade.reason}` : ""})`,
+    };
+    const emptyMetrics: EvaluateMediaBuyerArmingPureResult["metrics"] = {
+      reviewed: 0,
+      concurred: 0,
+      agreementRate: null,
+      consecutiveGreen: 0,
+      cacLtvRatio: null,
+      targetCacLtv: input.targetCacLtv ?? DEFAULT_BLENDED_CAC_LTV_TARGET,
+    };
+    return {
+      status: "denied",
+      isoWeek,
+      authorizationId: null,
+      reasons: [reason],
+      metrics: emptyMetrics,
+      ceoEscalationEmitted: false,
+    };
+  }
 
   const [shadowReviews, trustSnapshots, blended] = await Promise.all([
     loadShadowReviews(admin, {
