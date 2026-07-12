@@ -1,0 +1,1 @@
+- **Universal kill_switches DB primitive + cascade resolver** · verified 2026-07-12 · → [[../tables/kill_switches]]
