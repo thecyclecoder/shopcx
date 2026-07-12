@@ -41,6 +41,17 @@ export interface DispatchAdCreativeCadenceResult {
   dispatched: number;
 }
 
+/**
+ * Stable per-product `agent_jobs.spec_slug` for an ad-creative job. The column is
+ * `NOT NULL`, so an omitted value blocks the insert (the 2026-07-12 outage,
+ * signature `vercel:731cb5703f5f40b6`). One slug per product keeps
+ * `agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)` useful for the
+ * Roadmap rollups and gives Dahlia's job a durable subject on the dashboard.
+ */
+export function adCreativeSpecSlug(productId: string): string {
+  return `ad-creative:${productId}`;
+}
+
 function readInstructionsProduct(instructions: string | null): string | null {
   if (!instructions) return null;
   try {
@@ -107,6 +118,7 @@ export async function dispatchAdCreativeCadence(
     if (covered.has(productId)) continue;
     const { error: insErr } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
+      spec_slug: adCreativeSpecSlug(productId),
       kind: "ad-creative",
       instructions: JSON.stringify({ product_id: productId, count: deficit }),
     });
