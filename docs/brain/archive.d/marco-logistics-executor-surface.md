@@ -1,0 +1,1 @@
+- **Marco / Logistics executor surface** · verified 2026-07-12 · → [[../lifecycles/director-cockpits]]

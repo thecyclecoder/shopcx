@@ -11,13 +11,13 @@ Delivered by the **director-chats-in-message-center** goal (M1 generalize the co
 | **Ada** — Platform / DevOps Director | [[../functions/platform]] | [[../lifecycles/ada-slack-chat]] (Slack + web) · leash: `PLATFORM_LEASH` in [[../libraries/director-leash-guide]] |
 | **Max** — Growth Director | [[../functions/growth]] | leash: `GROWTH_LEASH` in [[../libraries/director-leash-guide]] · reallocate / promote / hold cards |
 | **June** — CS Director | [[../functions/cs]] | leash: `CS_LEASH` (`approve_remedy` / `author_derived_from_ticket_spec` / `amend_low_blast_sonnet_prompt`) per [[../specs/cs-director-leash-categories]] |
-| **Marco** — Logistics Director *(read-only observer)* | [[../functions/logistics]] | leash: `LOGISTICS_LEASH = []` per [[../specs/marco-logistics-director-seat]] Phase 3 — every action escalates to CEO; executor slice queued as [[../specs/marco-logistics-executor-surface]] |
+| **Marco** — Logistics Director *(LIVE leash-bound)* | [[../functions/logistics]] | leash: `LOGISTICS_LEASH` (`availability_toggle_within_crisis_lever` / `auto_readd_swapped_subscribers_within_crisis_cohort`) per [[../specs/marco-logistics-executor-surface]] Phase 2 — crisis-cohort scoped, M3 dispatch gates both on `requireCrisis()` guard |
 | **Eve** — Executive Assistant *(god-mode cockpit)* | Cross-function EA | [[../lifecycles/god-mode]] — texts with the CEO from the cockpit, gates every risky write on PIN + risk-tier |
 
 ## Shared machinery (why the seats plug in without touching each other)
 
 - **Coach threads** — [[../libraries/director-coach-threads]] + [[../tables/director_coach_threads]] · the same table row + turn body every seat uses; `director_function` disambiguates the persona.
-- **Leash + guide** — [[../libraries/director-leash-guide]] · `DIRECTOR_LEASH` maps every function slug to its own `LEASH_CATEGORIES` array; `getLeashGuide('<slug>')` returns the plain-English guide the CEO's Guide tab renders. An empty array (Marco today) yields `defined:true, autonomous:[]` + only the generic CEO escalation rails — no dead "leash not yet defined" empty state.
+- **Leash + guide** — [[../libraries/director-leash-guide]] · `DIRECTOR_LEASH` maps every function slug to its own `LEASH_CATEGORIES` array; `getLeashGuide('<slug>')` returns the plain-English guide the CEO's Guide tab renders. An empty array (Marco before [[../specs/marco-logistics-executor-surface]]) yielded `defined:true, autonomous:[]` + only the generic CEO escalation rails — no dead "leash not yet defined" empty state. Marco now carries two crisis-cohort categories post-Phase 2.
 - **M3 dispatch** — `scripts/builder-worker.ts` `runDirectorCoachJob` · one dispatch table gate per function; in-leash cards run the executor, out-of-leash cards fan out to `escalateApprovalRequestToCeo` with the director's slug/label.
 - **Audit trail** — every card that lands writes one [[../tables/director_activity]] row with `director_function = <slug>`; every rail hit lands one [[../tables/approval_decisions]] row with `decided_by='ceo'` naming the leash category the rail crossed. `scripts/_confirm-director-chat-audit-trail.ts` sweeps both surfaces for every live director in one script (marco-logistics-director-seat Phase 4).
 - **Coach backend** — [[../specs/generalize-director-coach-backend]] · the shared framing + coach-output selector routed at `coachOutputFor(directorFunction)` so a new persona plugs in with one import + one map entry.
@@ -41,9 +41,7 @@ Each director thread can be **armed for the phone** without forking a second SMS
 
 ## Status / open work
 
-**Shipped:** the four cockpits above wired to the shared coach backend, with the leash + M3 dispatch + audit trail contract enforced end-to-end. Marco is the fourth seat; Eve's god-mode cockpit is orthogonal (personal-EA surface) but shares the persona registry + Message Center rendering.
-
-**Open work:** Marco's executor slice — [[../specs/marco-logistics-executor-surface]] — planned; opens the two crisis-cohort levers to autonomous action once the founder-driven inventory build model matures.
+**Shipped:** the four cockpits above wired to the shared coach backend, with the leash + M3 dispatch + audit trail contract enforced end-to-end. Marco is the fourth seat; Eve's god-mode cockpit is orthogonal (personal-EA surface) but shares the persona registry + Message Center rendering. Marco's executor slice — [[../specs/marco-logistics-executor-surface]] (2026-07-12) — wired the two crisis-cohort levers (`setStorefrontAvailability` + `auto_readd` bulk update) to operational autonomy.
 
 ## Related
 

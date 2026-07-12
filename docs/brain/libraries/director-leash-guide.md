@@ -9,8 +9,8 @@ The **leash → plain-English guide** generalizer (director-guide-tab spec). Eac
 - **`LeashGuide` / `LeashLine`** types.
 
 ## Internal config (the generalization point)
-- **`DIRECTOR_LEASH`** — `{ platform: LEASH_CATEGORIES, growth: LEASH_CATEGORIES, cs: LEASH_CATEGORIES, logistics: LEASH_CATEGORIES }`. The registry that ties each director to ITS OWN live array. **Adding a leashed director** = add one import line here + a `CATEGORY_COPY` entry per new category. A director whose `LEASH_CATEGORIES` is DELIBERATELY EMPTY (e.g. Marco/Logistics per [[../specs/marco-logistics-director-seat]] Phase 3 — read-only observer landing until [[../specs/marco-logistics-executor-surface]] opens the executors) still registers here so `getLeashGuide('logistics')` returns `defined:true` with `autonomous:[]` — every request falls through to the generic escalation rails, not the graceful "leash not yet defined" empty state.
-- **`CATEGORY_COPY`** — `category string → { title, detail }` friendly copy, covering every Platform + Growth category.
+- **`DIRECTOR_LEASH`** — `{ platform: LEASH_CATEGORIES, growth: LEASH_CATEGORIES, cs: LEASH_CATEGORIES, logistics: LEASH_CATEGORIES }`. The registry that ties each director to ITS OWN live array. **Adding a leashed director** = add one import line here + a `CATEGORY_COPY` entry per new category. Marco/Logistics landed as a read-only observer per [[../specs/marco-logistics-director-seat]] Phase 3, then flipped to a **LIVE leash-bound director** with [[../specs/marco-logistics-executor-surface]] Phase 2 — his `LEASH_CATEGORIES` now carries `availability_toggle_within_crisis_lever` + `auto_readd_swapped_subscribers_within_crisis_cohort` (both crisis-cohort scoped, gated by the M3 dispatch's requireCrisis guard).
+- **`CATEGORY_COPY`** — `category string → { title, detail }` friendly copy, covering every Platform + Growth + Logistics category.
 - **`GENERIC_ESCALATES`** (every director: destructive/irreversible · new feature or goal · anything unverifiable) + **`DIRECTOR_EXTRA_ESCALATES`** (Growth: raise total budget / new ad platform / non-binary choice; Platform: non-binary choice).
 
 ## Callers
