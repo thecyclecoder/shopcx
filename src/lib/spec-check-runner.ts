@@ -266,6 +266,16 @@ async function runCmd(
   });
 }
 
+/**
+ * Build the ripgrep argv used by the grep executor. The pattern is passed via `-e` so a pattern
+ * starting with `-` cannot be re-parsed as an option, and the user-controlled path is placed after
+ * an argv separator `--` so even a validated path cannot be interpreted by ripgrep as a flag or a
+ * `--pre=`-style preprocessor. `validateExecutableCheck` is the primary gate; this is the belt.
+ */
+export function buildGrepArgv(params: GrepCheckParams): string[] {
+  return ["-e", params.pattern, "--", params.path ?? "."];
+}
+
 export const defaultExecutors: CheckExecutors = {
   tsc: async ({ repoRoot }) => {
     const r = await runCmd("npx", ["tsc", "--noEmit"], repoRoot);
@@ -273,10 +283,7 @@ export const defaultExecutors: CheckExecutors = {
     return { ok: r.code === 0, evidence: r.code === 0 ? "npx tsc --noEmit — clean" : (r.stderr || r.stdout || `exit ${r.code}`).slice(0, 4000) };
   },
   grep: async ({ repoRoot, params }) => {
-    const args = ["--no-heading", "-n"];
-    if (params.path) args.push(params.path);
-    args.push(params.pattern);
-    const r = await runCmd("rg", ["-e", params.pattern, params.path ?? "."], repoRoot);
+    const r = await runCmd("rg", buildGrepArgv(params), repoRoot);
     if (r.error) return { ok: false, evidence: `spawn rg: ${r.error}` };
     // rg exits 0 on match, 1 on no match. Anything else = harness error (bad flag, invalid regex).
     if (r.code !== 0 && r.code !== 1) {
