@@ -38,7 +38,9 @@ import {
   type AutonomyMap,
   type OrgChartGraph,
 } from "@/lib/agents/approval-router";
-import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+// control-tower-canonical-node-registry P2 — route via the canonical node registry so Growth's
+// leash check + the approval router agree on every kind by construction.
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 import { directorLiveStateFact } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -1336,7 +1338,7 @@ export async function growthDirectorInvestigationPrompt(admin: Admin, brief: Gro
 
 /** Does an approval raised by `kind` route to the Growth director, given the live chart + flags? */
 export function routesToGrowth(kind: string, chart: OrgChartGraph, autonomy: AutonomyMap): boolean {
-  return resolveApprover(ownerFunctionForKind(kind), chart, autonomy) === GROWTH;
+  return resolveApprover(resolveNodeOwner(kind), chart, autonomy) === GROWTH;
 }
 
 /**
@@ -1366,7 +1368,7 @@ export async function applyDirectorApproval(
     // One ledger row per approval. A single action keeps its id; a bundle keys on the job (the grader
     // reads approval_decision_id, not the action), so pending_action_id is null.
     pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
-    raisedByFunction: ownerFunctionForKind(target.kind) ?? GROWTH,
+    raisedByFunction: resolveNodeOwner(target.kind) ?? GROWTH,
     routedToFunction: GROWTH,
     decidedBy: "director",
     decision: "approved",

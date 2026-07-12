@@ -14,6 +14,11 @@
 import { inngest } from "@/lib/inngest/client";
 import { runControlTowerMonitor } from "@/lib/control-tower/monitor";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { MONITOR_TICK_FLOOR_MS } from "@/lib/control-tower/registry";
+
+// Cron cadence derived from MONITOR_TICK_FLOOR_MS (monitor-cadence-scaled-liveness-window Phase 1) —
+// the smallest cadence the registry accepts. Matches the `control-tower-monitor` MONITORED_LOOPS entry.
+const MONITOR_CRON_EXPR = `*/${Math.round(MONITOR_TICK_FLOOR_MS / 60_000)} * * * *`;
 
 export const controlTowerMonitor = inngest.createFunction(
   {
@@ -21,7 +26,7 @@ export const controlTowerMonitor = inngest.createFunction(
     name: "Control Tower — liveness + alerting watchdog",
     retries: 1,
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "*/15 * * * *" }],
+    triggers: [{ cron: MONITOR_CRON_EXPR }],
   },
   async ({ step }) => {
     const startedAt = Date.now();

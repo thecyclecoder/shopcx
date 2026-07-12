@@ -128,6 +128,16 @@ const TOOLING_FAILURE_PATTERNS: RegExp[] = [
   /missing spec body/i,
   /malformed instructions/i,
   /apply_model_tier action missing/i,
+  // marco-logistics-director-seat Phase 5 fix — the fused pre-merge spec-test session's
+  // one-shot envelope-repair retry can still miss on a long/complex diff; the resulting
+  // synthesizeMissingEnvelopeStub verdict is a `needs-human` stub whose review string
+  // narrates "did not emit a security envelope". That is the LLM failing to produce
+  // required structured output — the definition of a tooling_failure — not a genuine
+  // missing code prerequisite. Route it to auto-spec-the-tooling-fix, never to spawn a
+  // real_blocker Fix phase against the origin (whose diff has no missing prerequisite).
+  /did not emit a security envelope/i,
+  /no security envelope on the fused spec-test result/i,
+  /fused security envelope missing required check/i,
 ];
 
 const REAL_BLOCKER_PATTERNS: RegExp[] = [

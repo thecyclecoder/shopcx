@@ -1,0 +1,1 @@
+- **claim_agent_job RPC joins kill_switches (department cascade halts every lane)** · verified 2026-07-12 · → [[../tables/agent_jobs]]

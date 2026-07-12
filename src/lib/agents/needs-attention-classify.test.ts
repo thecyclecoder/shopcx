@@ -88,3 +88,37 @@ test("classifyNeedsAttention preserves heuristic-match behavior when no board st
   assert.equal(result.klass, "already_shipped");
   assert.equal(result.source, "heuristic");
 });
+
+// marco-logistics-director-seat Phase 5 fix — a fused pre-merge security review that ended in
+// synthesizeMissingEnvelopeStub is a TOOLING_FAILURE (the LLM couldn't produce structured output),
+// NOT a real_blocker (the code has no missing prerequisite). The previous ordering matched
+// /needs[- ]human/i in REAL_BLOCKER_PATTERNS first, mis-routing the park to a Fix-phase spawn on
+// the origin whose diff had no missing prerequisite to build. Adding a specific TOOLING_FAILURE
+// pattern for the envelope-missing failure mode routes it to auto-spec-tooling-fix — the correct
+// destination for an LLM-output failure — and prevents the same `blocker:real_blocker` check_key
+// from reappearing on the origin's next spec_test_runs row after this Fix phase ships.
+test("classifyByHeuristic routes a fused-session missing-security-envelope failure to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "marco-logistics-director-seat",
+    error: "needs-human",
+    logTail:
+      "Fused session did not emit a security envelope: fused session did not emit a security envelope after one repair retry. Held for a human review (no auto-clean bypass).",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+  assert.equal(result.source, "heuristic");
+});
+
+test("classifyByHeuristic routes the bare-envelope-missing classifier reason to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "any-spec",
+    error: "needs-human",
+    logTail: "no security envelope on the fused spec-test result — bare fall-through",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+});

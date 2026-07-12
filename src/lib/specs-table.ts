@@ -87,6 +87,12 @@ export interface SpecPhaseRow {
   kind: string;
   /** fixes-as-phases — for kind='fix' phases, the spec_test check_key(s) this fix addresses. */
   origin_check_keys: string[];
+  /** marco-logistics-director-seat Phase 1 — per-phase jsonb side-channel bag for structured,
+   *  non-provenance phase state (e.g. a decision recorded by an investigation-only phase whose
+   *  downstream siblings gate on it). Written by [[setPhaseMetadata]]; read via getSpec/listSpecs
+   *  (flowed through the RPCs by `to_jsonb(p)`). Distinct from build_sha/pr/merge_sha (provenance)
+   *  and body/verification/why/what (authored content). Defaults to `{}` at the DB layer. */
+  metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -936,6 +942,54 @@ export async function stampPhaseBuilt(
     })
     .eq("spec_id", specId)
     .eq("position", position);
+  if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
+}
+
+/**
+ * marco-logistics-director-seat Phase 1 — MERGE-write the phase's jsonb `metadata` bag. This is the
+ * per-phase, structured, non-provenance side-channel: a decision recorded by an investigation-only
+ * phase whose downstream siblings gate on it (e.g. Phase 1 of marco-logistics-director-seat stamps
+ * `{ marco_landing: 'A' | 'B' }` here; Phase 3 keys on it). Distinct from build_sha/pr/merge_sha
+ * (provenance) and body/verification/why/what (authored content).
+ *
+ * Semantics: JSONB-MERGE (`||`), not replace — the caller passes only the keys they want to write
+ * and existing keys survive. That keeps two independent decisions on the same phase (from different
+ * lanes) from clobbering each other. Pass an empty object to no-op.
+ *
+ * Idempotent (a second identical call writes the same merged shape) + safe to re-run. No lifecycle-
+ * status side effects: metadata is inert to `derivePhaseStatus`.
+ */
+export async function setPhaseMetadata(
+  workspaceId: string,
+  slug: string,
+  position: number,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (sErr) throw sErr;
+  if (!spec) throw new Error(`setPhaseMetadata: no spec '${slug}' in workspace ${workspaceId}`);
+  const specId = (spec as { id: string }).id;
+  const { data: phase, error: pErr } = await admin
+    .from("spec_phases")
+    .select("id, metadata")
+    .eq("spec_id", specId)
+    .eq("position", position)
+    .maybeSingle();
+  if (pErr) throw pErr;
+  if (!phase) throw new Error(`setPhaseMetadata: no spec_phases row at position=${position} for '${slug}'`);
+  const existing = ((phase as { metadata: Record<string, unknown> | null }).metadata ?? {}) as Record<string, unknown>;
+  const merged = { ...existing, ...patch };
+  const { error } = await admin
+    .from("spec_phases")
+    .update({ metadata: merged, updated_at: new Date().toISOString() })
+    .eq("id", (phase as { id: string }).id);
   if (error) throw error;
   invalidateSpecCache(workspaceId, slug);
 }

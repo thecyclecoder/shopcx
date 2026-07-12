@@ -26,6 +26,7 @@ ONE ROW PER PHASE of every spec — the body content (`title`, `body`), the life
 | `what` | `text?` | [[../specs/pm-structured-intent-and-refs]] Phase 1 — plain-language WHAT changes when this phase ships. Paired with `why`. HARD-gated at the chokepoint |
 | `kind` | `text` | `phase ｜ fix` · default `phase` · **fixes-as-phases** ([[../libraries/pre-merge-fix]]) — a `fix` phase is APPENDED to the ORIGIN spec when a pre-merge spec-test regression is found (retires the separate `fix-<slug>` spec model). Built one-at-a-time on a resumed session (own commit); the origin self-re-tests when the fix ships. Appended via [[../libraries/specs-table]] `appendFixPhases` |
 | `origin_check_keys` | `text[]` | default `{}` · for `kind='fix'` phases, the [[spec_test_runs]] `check_key`(s) this fix must flip to `pass` — maps a fix back to the failing checks it resolves. Empty for normal phases |
+| `metadata` | `jsonb` | default `{}` · [[../specs/marco-logistics-director-seat]] Phase 1 — per-phase side-channel bag for structured, non-provenance phase state (e.g. an investigation-only phase's decision that downstream siblings gate on: Phase 1 stamps `{ marco_landing: 'A' \| 'B' }` here). Written via [[../libraries/specs-table]] `setPhaseMetadata` (JSONB-MERGE, keys survive across writers). Distinct from `build_sha`/`pr`/`merge_sha` (provenance) and `body`/`verification`/`why`/`what` (authored content) |
 | `created_at` | `timestamptz` | default `now()` — preserved across moves |
 | `updated_at` | `timestamptz` | default `now()` |
 
@@ -48,6 +49,7 @@ The lift-a-phase primitive `movePhase(phaseId, newSpecId, newPosition)` is a sin
 - `supabase/migrations/20260726120000_spec_phases_build_sha.sql` — `spec-goal-branch-pm-flow` M2: added `build_sha` (spec-branch build provenance) · apply: `scripts/apply-spec-phases-build-sha-migration.ts`
 - `supabase/migrations/20260807140000_pm_intent_why_what.sql` ([[../specs/pm-structured-intent-and-refs]] Phase 1) — adds `why` + `what` for the plain-language intent layer; HARD-gated by `assertEveryNodeHasIntent` at the app-layer chokepoint (a phase with an empty intent throws before the DB write) · apply: `scripts/apply-pm-intent-why-what-migration.ts`
 - `supabase/migrations/20260808130000_spec_phases_fix_kind.sql` (**fixes-as-phases**, [[../libraries/pre-merge-fix]]) — adds `kind` (`phase`/`fix`) + `origin_check_keys` so a pre-merge spec-test regression is a fix PHASE on the origin (retiring the separate `fix-<slug>` spec + its chains) · apply: `scripts/apply-spec-phases-fix-kind-migration.ts`
+- `supabase/migrations/20261016120000_spec_phases_metadata.sql` ([[../specs/marco-logistics-director-seat]] Phase 1) — adds `metadata jsonb not null default '{}'::jsonb` for the per-phase, structured, non-provenance side-channel (an investigation-only phase's decision downstream siblings gate on); flows through the RPCs by `to_jsonb(p)`, no RPC churn · apply: `scripts/apply-spec-phases-metadata-migration.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
 ## Related

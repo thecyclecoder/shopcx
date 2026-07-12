@@ -133,6 +133,7 @@ import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
 import { researchSensorCron } from "@/lib/inngest/research-sensor";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
+import { nodeAncestrySyncCron } from "@/lib/inngest/node-ancestry-sync-cron";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
 import { growthAdSpendGovernorCron, growthAdSpendGovernorSweep } from "@/lib/inngest/growth-ad-spend-governor";
@@ -307,6 +308,7 @@ export const registeredInngestFunctions = [
   acquisitionResearchCadenceManual,
   researchSensorCron,
   controlTowerMonitor,
+  nodeAncestrySyncCron,
   specDriftReconcileCron,
   fleetSpendGovernorCron,
   growthAdSpendGovernorCron,

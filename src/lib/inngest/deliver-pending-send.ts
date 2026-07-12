@@ -13,7 +13,7 @@ export const deliverPendingSends = inngest.createFunction(
   {
     id: "deliver-pending-sends",
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "* * * * *" }], // Every minute
+    triggers: [{ cron: "*/5 * * * *" }], // every 5 min (CEO 2026-07-11 monitoring-cost guardrail: MONITOR_TICK_FLOOR_MS)
   },
   async ({ step }) => {
     const admin = createAdminClient();
