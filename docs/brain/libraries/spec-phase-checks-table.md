@@ -43,4 +43,4 @@ Two gates fire in order BEFORE the DB write; both throw with the offending phase
 
 ## Related
 
-[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[spec-phase-checks-executable]] · [[spec-check-runner]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/pm-structured-intent-and-refs]] · [[../specs/every-spec-writer-authors-machine-runnable-verifications]] · [[../specs/retire-vale-spec-review-becomes-deterministic-authoring-gate]]
+[[../tables/spec_phase_checks]] · [[build-spec-materializer]] · [[specs-table]] · [[author-spec]] · [[spec-phase-checks-executable]] · [[spec-check-runner]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] · [[../specs/pm-structured-intent-and-refs]]
