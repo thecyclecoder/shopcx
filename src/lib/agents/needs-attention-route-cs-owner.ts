@@ -43,7 +43,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { recordDirectorActivity } from "@/lib/director-activity";
-import { ownerFunctionForKind } from "@/lib/agents/approval-inbox";
+import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 
 type Admin = SupabaseClient;
 
@@ -53,8 +53,8 @@ export const CS_FUNCTION = "cs";
 /**
  * agent_jobs kinds this Phase-3 router owns — the CS-owned box lanes whose parks the CS
  * Director must rule on before Platform's backstop reaches the CEO. Derived at read time from
- * `ownerFunctionForKind` (the registry-backed map from [[../inbox]] `KIND_TO_FUNCTION`) so a
- * future kind whose registry `owner` flips to `cs` is picked up without a code change here.
+ * the canonical `resolveNodeOwner` ([[../control-tower/node-registry]]) so a future kind whose
+ * registry `owner` flips to `cs` is picked up without a code change here.
  * A kind whose owner is not `cs` returns `{route_to: null}` from `decideCsOwnerRoute` — the
  * generic sweep continues to route it.
  */
@@ -90,7 +90,7 @@ export interface CsOwnerRouteDecision {
  * both cases (the fail-safe: never dispatch a CS route on a row the CS runner can't act on).
  */
 export function decideCsOwnerRoute(row: ParkedRowLike): CsOwnerRouteDecision {
-  const owner = ownerFunctionForKind(row.kind);
+  const owner = resolveNodeOwner(row.kind);
   if (owner !== CS_FUNCTION) {
     return { route_to: null, ticket_id: null, reason: `not_cs_owned (kind=${row.kind}, owner=${owner ?? "null"})` };
   }

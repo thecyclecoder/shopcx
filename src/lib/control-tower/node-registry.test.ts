@@ -21,6 +21,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   BUILDER_WORKER_KINDS,
+  RETIRED_KIND_OWNER,
   NODES,
   assertCoverage,
   getNode,
@@ -172,6 +173,21 @@ test("Phase 1 verification #3 — a fixture kind absent from the registry surfac
   // rather than a blanket-null failure.
   for (const real of ["build", "ticket-handle", "spec-test", "god-mode"]) {
     assert.ok(resolveNodeOwner(real), `real kind '${real}' must resolve`);
+  }
+});
+
+test("Phase 1 — a RETIRED kind still resolves to its owner (historical agent_jobs rows keep it in `select distinct kind`)", () => {
+  // A kind that left BUILDER_WORKER_KINDS + dispatch (e.g. `spec-review`, after Vale graduated to
+  // the deterministic authoring gate) still appears in `select distinct kind from public.agent_jobs`
+  // via historical rows. The live-kind coverage check (spec Phase 1 verification) requires every
+  // returned kind to resolve — so RETIRED_KIND_OWNER must give each a resolvable owner even though
+  // it is NOT dispatched. This is the rail that stops the `misses:["spec-review"]` false-fail from
+  // recurring.
+  assert.ok(Object.keys(RETIRED_KIND_OWNER).length > 0, "expected at least one retired kind");
+  for (const [kind, owner] of Object.entries(RETIRED_KIND_OWNER)) {
+    assert.equal(resolveNodeOwner(kind), owner, `retired kind '${kind}' must resolve to '${owner}'`);
+    // ...and it must NOT be a dispatched kind (that's the whole point — retired ≠ dispatched).
+    assert.ok(!BUILDER_WORKER_KINDS.includes(kind as (typeof BUILDER_WORKER_KINDS)[number]), `retired kind '${kind}' must not be in BUILDER_WORKER_KINDS`);
   }
 });
 
