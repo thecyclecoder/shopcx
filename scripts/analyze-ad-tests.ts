@@ -17,6 +17,7 @@ import {
   fetchMetaAdInsights, getDbAdFacts, mergeDbFacts, resolveCacThresholds, classifyAd,
   type AdInsight, type Verdict,
 } from "../src/lib/ads/ad-insights-sdk";
+import { localDayInTz } from "../src/lib/inngest/media-buyer-test-cadence";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906"; // Superfoods Company
 
@@ -29,21 +30,30 @@ async function main() {
   const cohort = argv.find((a) => a.startsWith("--cohort="))?.split("=")[1];
   const accounts = argv.filter((a) => !a.startsWith("--"));
   const ACCOUNTS = accounts.length ? accounts : ["2352876514967984", "196487894712827"];
-  const preset = `last_${days}d`;
+  const nDays = Math.max(1, Number(days) || 30);
 
   const admin = createAdminClient();
   const token = await getMetaUserToken(WS);
   if (!token) { console.error("NO META TOKEN"); process.exit(1); }
 
+  // Account timezones (LA vs Chicago) so the window `until` is each account's OWN today — Meta buckets
+  // insights by account tz, and near the UTC boundary account-local "today" is still the prior UTC day.
+  const { data: acctRows } = await admin.from("meta_ad_accounts").select("meta_account_id, timezone").in("meta_account_id", ACCOUNTS);
+  const tzByAccount = new Map((acctRows ?? []).map((r: { meta_account_id: string; timezone: string | null }) => [r.meta_account_id, r.timezone]));
+  const now = new Date();
+
   const t = await resolveCacThresholds(admin, WS, ltvOverride ? Number(ltvOverride) : undefined);
-  console.log(`LTV $${t.ltv.toFixed(0)} (${t.basis}) → target CAC $${t.targetCac.toFixed(0)} · kill $${t.killCac.toFixed(0)} · window ${preset}${cohort ? ` · cohort "${cohort}"` : ""}`);
+  console.log(`LTV $${t.ltv.toFixed(0)} (${t.basis}) → target CAC $${t.targetCac.toFixed(0)} · kill $${t.killCac.toFixed(0)} · window last ${nDays}d incl. today${cohort ? ` · cohort "${cohort}"` : ""}`);
   const dbFacts = await getDbAdFacts(admin, WS, {});
 
   for (const acct of ACCOUNTS) {
-    console.log(`\n════ act_${acct}${cohort ? ` · ${cohort}` : ""} ════`);
+    const tz = tzByAccount.get(acct) ?? null;
+    const until = localDayInTz(now, tz); // account-local today (inclusive)
+    const since = localDayInTz(new Date(now.getTime() - (nDays - 1) * 86400000), tz);
+    console.log(`\n════ act_${acct}${cohort ? ` · ${cohort}` : ""} · ${since}…${until} (${tz ?? "UTC"}) ════`);
     let meta: Map<string, AdInsight>;
     try {
-      meta = await fetchMetaAdInsights(token, acct, { datePreset: preset, campaignContains: cohort });
+      meta = await fetchMetaAdInsights(token, acct, { timeRange: { since, until }, campaignContains: cohort });
     } catch (e) { console.log(`  insights error: ${e instanceof Error ? e.message.slice(0, 120) : e}`); continue; }
     const rows = mergeDbFacts(meta, dbFacts).filter((r) => r.spend > 0).sort((a, b) => b.spend - a.spend);
 
