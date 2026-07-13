@@ -20,6 +20,10 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 export interface AccountPlan {
   account: string;
+  /** The cohort's product identity — `productTitle` labels the line; null cohorts (legacy Superfood Tabs)
+   * fall back to an account-id label. See media-buyer-digest-consolidate-product-names-suppress-noop Phase 1. */
+  productId?: string | null;
+  productTitle?: string | null;
   plan: MediaBuyerPlan;
 }
 
@@ -29,18 +33,22 @@ export interface DigestResult {
   ts?: string;
 }
 
-/** Compose the Growth-Director-voice digest text from the per-account plans. Plain text (director voice). */
-function composeDigest(accountPlans: AccountPlan[]): { text: string; hasRecommendations: boolean } {
+/** Compose the Growth-Director-voice digest text from the per-account plans. Plain text (director voice).
+ * Exported for test coverage of the "label by product" and "suppress no-op" gates. */
+export function composeDigest(accountPlans: AccountPlan[]): { text: string; hasRecommendations: boolean } {
   let promote = 0, kill = 0, replenish = 0, fatigue = 0, cohorts = 0;
   const lines: string[] = [];
-  for (const { account, plan } of accountPlans) {
+  for (const { account, productTitle, plan } of accountPlans) {
     if (!plan.policyActive) continue;
     cohorts += 1;
     promote += plan.promote.length;
     kill += plan.kill.length;
     replenish += plan.replenish.length;
     fatigue += plan.fatigueReplenish.length;
-    lines.push(`• account ${account.slice(0, 8)} — ${plan.summary}`);
+    // Label by product title (the founder-legible identifier). Only a product-null cohort
+    // (legacy Tabs) keeps the account-id fallback.
+    const label = productTitle ? productTitle : `account ${account.slice(0, 8)}`;
+    lines.push(`• ${label} — ${plan.summary}`);
   }
   const total = promote + kill + replenish + fatigue;
   const mb = getPersona("media-buyer"); // Bianca 🎯 — the media buyer whose calls this digest relays
@@ -75,10 +83,18 @@ export async function deliverMediaBuyerDigest(
     return { posted: false, reason: "no active policy in any account — dormant pass, nothing to digest" };
   }
 
+  // Suppress no-op posts. `composeDigest` already tallies promote/kill/replenish/fatigue across every
+  // active cohort — when the total is zero the digest carries no actionable recommendation, so we skip
+  // the post entirely (per media-buyer-digest-consolidate-product-names-suppress-noop Phase 1: don't
+  // spam Slack every 2h with "no changes recommended this cycle").
+  const { text, hasRecommendations } = composeDigest(accountPlans);
+  if (!hasRecommendations) {
+    return { posted: false, reason: "no actionable recommendations this pass" };
+  }
+
   const token = await getSlackToken(workspaceId);
   if (!token) return { posted: false, reason: "slack not connected" };
 
-  const { text } = composeDigest(accountPlans);
   const post = await postAsGrowthDirector(token, channel, [], text);
   if (!post.ok) return { posted: false, reason: "postAsGrowthDirector failed" };
 

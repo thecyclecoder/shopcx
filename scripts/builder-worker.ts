@@ -20442,9 +20442,30 @@ async function runMediaBuyerJob(job: Job) {
   // rolling up all accounts' plans. Non-fatal: a Slack hiccup must not fail the media-buyer pass.
   try {
     const { deliverMediaBuyerDigest } = await import("../src/lib/media-buyer/director-digest");
-    const plans = perAccount
-      .filter((r) => r.plan && !r.error)
-      .map((r) => ({ account: r.account, plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan }));
+    // media-buyer-digest-consolidate-product-names-suppress-noop Phase 1 — resolve each pass's
+    // cohort product_id → products.title so the digest labels lines by product ("Amazing Coffee — …")
+    // instead of a truncated account id. A null-product cohort (legacy Superfood Tabs) keeps the
+    // account-id fallback in composeDigest.
+    const okPasses = perAccount.filter((r) => r.plan && !r.error);
+    const productIds = Array.from(
+      new Set(okPasses.map((r) => r.productId).filter((v): v is string => !!v)),
+    );
+    const titleByProductId = new Map<string, string>();
+    if (productIds.length) {
+      const { data: prods } = await a
+        .from("products")
+        .select("id, title")
+        .in("id", productIds);
+      for (const p of (prods ?? []) as Array<{ id: string; title: string | null }>) {
+        if (p.title) titleByProductId.set(p.id, p.title);
+      }
+    }
+    const plans = okPasses.map((r) => ({
+      account: r.account,
+      productId: r.productId,
+      productTitle: r.productId ? (titleByProductId.get(r.productId) ?? null) : null,
+      plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan,
+    }));
     if (plans.length) {
       const digest = await deliverMediaBuyerDigest(a, job.workspace_id, plans);
       console.log(`${tag} director digest → ${digest.posted ? `posted (${digest.ts})` : `skipped — ${digest.reason}`}`);
