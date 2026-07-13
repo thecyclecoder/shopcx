@@ -38,7 +38,7 @@ CEO (fail-safe root — approvals fall through here when no live+autonomous dire
 │       ├── box (WORKER_BOX_ID)                  — the box build worker (tool)
 │       ├── every cron/reactive owner="platform" — control-tower-monitor, spec-drift, db-health-*, deploy-guardian-cron, mario-*, brain-index-refresh, …
 │       ├── agent:build (Bo), agent:plan (Pia), agent:fold (Fenn), agent:spec-test (Vera),
-│       │   agent:spec-review (Vale), agent:repair (Rafa), agent:regression (Remi),
+│       │   agent:repair (Rafa), agent:regression (Remi),
 │       │   agent:security-review (Vault), agent:coverage-register (Cole), agent:pr-resolve (Pax),
 │       │   agent:dev-ask (Dex), agent:spec-chat (Sage), plus the reactive box lanes
 │       │   deploy-review-agent (Reva) and mario-agent (Mario)
