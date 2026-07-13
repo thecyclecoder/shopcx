@@ -47,6 +47,7 @@ interface AdVideoRow {
 interface AdCampaignRow {
   id: string;
   landing_url: string | null;
+  status: string | null;
   created_at: string;
 }
 
@@ -113,10 +114,14 @@ export async function listReadyToTest(
   // workspace-wide — the null-product default cohort still catches Superfood Tabs today).
   let campaignsQuery = admin
     .from("ad_campaigns")
-    .select("id, landing_url, created_at")
+    .select("id, landing_url, status, created_at")
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
-    .not("landing_url", "is", null);
+    .not("landing_url", "is", null)
+    // Retiring a campaign (removing its landing URL) sets status='archived'; excluding these keeps
+    // Dahlia's deficit truthful, /director-training's depth honest, and stops the media-buyer's
+    // replenish from ever picking a retired creative.
+    .neq("status", "archived");
   if (productId) campaignsQuery = campaignsQuery.eq("product_id", productId);
   const { data: campaignData } = await campaignsQuery;
   const campaigns = (campaignData || []) as AdCampaignRow[];
@@ -143,6 +148,7 @@ export async function listReadyToTest(
   for (const c of campaigns) {
     if (blocked.has(c.id)) continue;
     if (!c.landing_url) continue;
+    if (c.status === "archived") continue;
     const bucket = byCampaign.get(c.id);
     if (!bucket) continue;
     rows.push({
