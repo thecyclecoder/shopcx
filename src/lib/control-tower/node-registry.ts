@@ -173,6 +173,19 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "media-buyer-grade": "growth", // Bianca / Max grading pass
 };
 
+/**
+ * Retired agent-kinds — the box no longer DISPATCHES these (they're absent from
+ * BUILDER_WORKER_KINDS + `dispatchJob`), but historical `agent_jobs` rows still carry the kind,
+ * so `select distinct kind from public.agent_jobs` returns it and the canonical-registry live-kind
+ * coverage check (this spec's Phase 1 verification) requires the registry to resolve it to an
+ * owner. A retired kind gets a `retired` Node (owner below) via buildNodeRegistry step 7, but is
+ * deliberately NOT in BUILDER_WORKER_KINDS, so the dispatch↔kinds drift check never expects a live
+ * `dispatchJob` lane for it. Add a kind here the moment it leaves BUILDER_WORKER_KINDS + dispatch.
+ */
+export const RETIRED_KIND_OWNER: Record<string, OwnerFunction> = {
+  "spec-review": "platform", // Vale — graduated to the deterministic `assertSpecReviewGate` authoring gate (retire-vale-spec-review-becomes-deterministic-authoring-gate)
+};
+
 /** The MascotId of a director keyed by function slug (from PERSONAS). */
 function directorMascot(fn: OwnerFunction): MascotId {
   const persona = PERSONAS[fn];
@@ -310,6 +323,20 @@ function buildNodeRegistry(): OrgNode[] {
       owner,
       persona: personaForKind(kind),
       label: PERSONAS[kind]?.name ?? kind,
+    });
+  }
+
+  // ── 7. Retired kinds (RETIRED_KIND_OWNER) — no longer dispatched, but historical `agent_jobs`
+  // rows keep the kind in `select distinct kind`, so the registry must still resolve it. Node id
+  // is `agent-kind:<kind>` (same shape resolveNodeOwner's slug convenience looks up). ──────────
+  for (const [kind, owner] of Object.entries(RETIRED_KIND_OWNER)) {
+    addNode({
+      id: `agent-kind:${kind}`,
+      kind: "agent",
+      parent: parentIdForOwner(owner),
+      owner,
+      persona: personaForKind(kind),
+      label: `${PERSONAS[kind]?.name ?? kind} (retired)`,
     });
   }
 

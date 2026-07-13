@@ -95,6 +95,7 @@ CEO (fail-safe root — approvals fall through here when no live+autonomous dire
 - `assertCoverage(): void` — throws on the first MONITORED_LOOPS id or BUILDER_WORKER_KINDS entry that doesn't resolve. Called by the Phase-3 drift check + the test suite.
 - `getNode(nodeId): OrgNode | null` · `getParent(nodeId): OrgNode | null` · `getChildren(nodeId): OrgNode[]` — tree-walk convenience for the M4 CEO glance.
 - `BUILDER_WORKER_KINDS: readonly BuilderWorkerKind[]` — the `agent_jobs.kind` universe emitted by `scripts/builder-worker.ts` `dispatchJob`. The Phase-3 drift check gates against the live worker's dispatch.
+- `RETIRED_KIND_OWNER: Record<string, OwnerFunction>` — kinds the box **no longer dispatches** (removed from `BUILDER_WORKER_KINDS` + `dispatchJob`) but that still appear in `select distinct kind from public.agent_jobs` via **historical** rows. Each builds a `agent-kind:<slug>` node (labelled `… (retired)`) so `resolveNodeOwner(kind)` resolves — the live-kind coverage check requires every historical kind to map to an owner. Deliberately NOT in `BUILDER_WORKER_KINDS`, so the dispatch↔kinds drift check never expects a live lane. First entry: `spec-review` → `platform` (Vale, after `retire-vale-spec-review-becomes-deterministic-authoring-gate`).
 
 ## How to add a node
 
@@ -105,6 +106,8 @@ The registry is DERIVED, not authored: a node appears here because it exists in 
 3. **A director-sweep or proposal kind that ISN'T in MONITORED_LOOPS** (e.g. `agent-grade`, `director-grade`, `db_health`, `coverage-register`) — add a `KIND_OWNER_FALLBACK` entry in `node-registry.ts`, keyed by the slug, mapping to its owner. Then add the slug to `BUILDER_WORKER_KINDS` (or ensure the drift check will fail otherwise).
 4. **The persona for the node** — add or upsert the entry in [[../libraries/agent-personas|personas.ts]] `PERSONAS` (keyed by the agent-kind slug). If the agent-kind slug ≠ the persona key (e.g. `deploy-review` → `deploy-guardian`), add the mapping to `KIND_PERSONA_ALIAS` too.
 5. **Verify** — run `npx tsx --test src/lib/control-tower/node-registry.test.ts` (every id resolves, no orphans) and `npx tsx scripts/_check-node-registry-drift.ts` (the Phase-3 drift check runs source-of-truth ↔ registry symmetry).
+
+**Retiring a kind** — when a box lane is retired (removed from `BUILDER_WORKER_KINDS` + `dispatchJob`), historical `agent_jobs` rows keep the kind in `select distinct kind`, so the live-kind coverage check still demands it resolve. Add the slug to `RETIRED_KIND_OWNER` (mapping to the owner it had) the same PR you remove the lane — this keeps a resolvable `agent-kind:<slug>` node without re-introducing a phantom dispatch expectation.
 
 Every step is enforced by the drift check + the test suite; a missed piece surfaces as an actionable error, never a silent Platform default.
 
