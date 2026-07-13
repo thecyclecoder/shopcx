@@ -569,6 +569,48 @@ test("Phase 2 — customer message is delivered ONLY AFTER runExecutor returns s
   assert.deepEqual(events, ["executor:start", "executor:done", "deliverMessage"]);
 });
 
+test("Phase 2 — a {{label_url}} token in June's message is substituted to a CTA button before delivery (ticket eca3f43b)", async () => {
+  const LABEL = "https://easypost-files.s3.us-west-2.amazonaws.com/files/postage_label/20260713/deadbeef.png";
+  let delivered = "";
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async (ctx) => {
+      // Simulate the executor stashing the create_return batch result on ctx —
+      // exactly what handleDirectAction now does after run+verify.
+      ctx._lastActionResults = [
+        {
+          action: { type: "create_return" },
+          result: { success: true, labelUrl: LABEL, trackingNumber: "9400111", carrier: "USPS" },
+        },
+      ] as typeof ctx._lastActionResults;
+      return { messageSent: false, escalated: false, closed: false, statusManaged: false };
+    },
+    deliverMessage: async (_a, _w, _t, _c, message) => {
+      delivered = message;
+    },
+  };
+
+  const verdict: CsDirectorVerdictInput = {
+    decision: "approve_remedy",
+    reasoning: "Return for full refund.",
+    remedy: {
+      action_type: "create_return",
+      payload: { order_number: "SC134515" },
+      customer_message: "Send the two tabs back with the prepaid label below.\n\n{{label_url}}",
+    },
+  };
+
+  const admin = approveRemedyAdmin("ticket-1");
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.message_delivered, true);
+  // The literal token must be gone; the real label must be a clickable button.
+  assert.ok(!delivered.includes("{{label_url}}"), "no literal {{label_url}} token");
+  assert.ok(delivered.includes(`href="${LABEL}"`), "label rendered as an href");
+  assert.ok(delivered.includes("Download your prepaid return label"), "CTA button label present");
+});
+
 test("Phase 2 — failed remedy action sends NO customer message and marks needs_attention", async () => {
   const events: string[] = [];
   const deps: ApproveRemedyDeps = {

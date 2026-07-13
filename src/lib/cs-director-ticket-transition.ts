@@ -39,6 +39,18 @@ export interface CsDirectorTransitionInput {
   decision: CsDirectorDecision;
   reasoning: string;
   remedy?: Record<string, unknown> | null;
+  /**
+   * True when the Phase-2 mutator ACTUALLY executed the remedy cleanly AND
+   * delivered the resolving customer reply (applyBoxCsDirectorCall returned
+   * ok, not needs_attention, not awaiting_founder_approval). An approve_remedy
+   * that fired its actions + sent the reply has RESOLVED the customer's issue —
+   * the ticket should close, not linger open. Without this signal the helper
+   * only de-escalated, leaving every remedy-resolved ticket stuck open (ticket
+   * eca3f43b). The runner is the sole source of this flag; a test passes it
+   * explicitly. Absent/false → conservative de-escalate-only (a parked/failed
+   * remedy must never auto-close).
+   */
+  remedyResolved?: boolean;
   /** Resolved workspace-owner user_id, when the caller can supply it. Optional. */
   ceoUserId?: string | null;
   /** ISO timestamp used for `updated_at` / `closed_at` / `resolved_at` — passed in so tests are deterministic. */
@@ -114,7 +126,13 @@ export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInpu
     case "close_no_action":
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
     case "approve_remedy":
-      if (remedyClosesTicket(input.remedy)) {
+      // Close when the remedy explicitly signals no reply is pending OR the
+      // mutator actually resolved it (fired the actions + delivered the reply).
+      // The remedy IS the final CS resolution — a return pipeline / customer
+      // follow-up reopens the ticket if needed. Only de-escalate (leave open)
+      // when the remedy hasn't resolved: parked for founder approval, failed,
+      // or genuinely awaiting a further customer reply.
+      if (remedyClosesTicket(input.remedy) || input.remedyResolved) {
         return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
       }
       return { action_key: "deescalate_only", patch: deescalateOnlyPatch(input.now) };

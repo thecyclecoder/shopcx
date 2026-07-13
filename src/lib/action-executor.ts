@@ -181,6 +181,15 @@ export interface ActionContext {
   // ledger row when the verdict is known. See
   // docs/brain/libraries/order-now-verify.md.
   _resolutionOutcomePending?: boolean;
+  // Internal: the per-action results of the LAST direct_action batch this run
+  // executed, stashed by handleDirectAction after run+verify. A caller that
+  // SUPPRESSES the executor's own send path (the cs-director Phase-2 executor
+  // passes a no-op send + owns delivery itself) needs these to run
+  // `substituteActionPlaceholders` on ITS message — otherwise a `{{label_url}}`
+  // token in the remedy's customer_message ships to the customer literally
+  // (the Melissa-class return-label bug, ticket eca3f43b). Empty/undefined when
+  // no direct_action ran.
+  _lastActionResults?: { action: ActionParams; result: ActionResult }[];
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -608,7 +617,7 @@ export function stripUnsubstitutedPlaceholders(message: string): string {
   return out;
 }
 
-function substituteActionPlaceholders(
+export function substituteActionPlaceholders(
   message: string,
   results: { action: ActionParams; result: ActionResult }[],
 ): string {
@@ -3321,6 +3330,13 @@ async function handleDirectAction(
 
   const failures = results.filter((r) => !r.result.success);
   const successes = results.filter((r) => r.result.success);
+
+  // Expose the batch results so a caller that owns its own delivery (the
+  // cs-director Phase-2 executor no-ops our send and delivers June's message
+  // itself) can run substituteActionPlaceholders on that message — otherwise a
+  // {{label_url}} token ships literally (ticket eca3f43b). Set unconditionally
+  // (even on partial failure) so the caller sees exactly what did/didn't land.
+  ctx._lastActionResults = results;
 
   // Log summaries as system notes
   for (const s of successes) {
