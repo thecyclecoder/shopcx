@@ -31,8 +31,10 @@ type Admin = ReturnType<typeof createAdminClient>;
 export const DEFAULT_BIN_FLOOR = 4;
 /** Cap how many creatives one job produces, so a deep deficit can't run away on image-gen cost. */
 const MAX_PER_JOB = 4;
-/** Regenerate-on-QA-fail attempts per creative before giving up on that angle. */
-const MAX_QA_ATTEMPTS = 2;
+/** Regenerate-on-QA-fail attempts per creative before giving up on that angle. Bumped 2→3 (2026-07-13)
+ *  so the stricter render QC (packaging-text garble now in scope) has room to land a clean take rather
+ *  than starving the batch below its target count. */
+const MAX_QA_ATTEMPTS = 3;
 
 export interface StockedCreative {
   productId: string;

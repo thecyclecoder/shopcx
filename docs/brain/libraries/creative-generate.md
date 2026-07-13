@@ -7,13 +7,15 @@ Turns a fully-backed [[creative-brief]] into an actual static ad via [[gemini]] 
 Returns `{ buffer, mimeType, prompt, expectedCopy }`. `expectedCopy` is the exact `{ headline, offer, trust }` the QA pass must verify renders un-garbled.
 
 `buildPrompt(brief, hasDesignRef)` assembles the Nano Banana prompt:
-- **Headline** = `brief.angle.hook`, rendered EXACTLY (the anti-garble instruction), one key phrase in a color block.
+- **Headline** — for an **own-brand** angle: `brief.angle.hook`, rendered EXACTLY (the anti-garble instruction). For a **competitor imitation** (`compositionTransfer` + a design ref): the competitor hook is the angle to ECHO, but the model writes OUR headline in the same structure naming ONLY our product — because the competitor's raw hook often carries THEIR brand/product name (e.g. "MUD\WTR Mushroom Tea Blend"), and rendering it verbatim over our packshot is a brand mismatch the QC gate correctly rejects (2026-07-13). For an imitation, `expectedCopy.headline` is set to `brief.productTitle` (QC verifies OUR name renders ungarbled) instead of the competitor string.
+- **PRODUCT FIDELITY (2026-07-13)** — the pack is reproduced faithfully from the provided product image; the model must NOT invent or garble packaging micro-text (ingredient icons, fine print). Nano Banana redrawing a pack from a reference hallucinates gibberish labels ("Cocoa Flaspert Hand lens", "35 SeUngs") — a real defect. **ALL** text anywhere must be real, correctly-spelled words. The [[creative-qa]] `textLegible` check (and the `creative-qc` box skill) now scope PACKAGING text explicitly.
+- **No-transformation guard (2026-07-13)** — when the brief carries no transformation, the prompt HARD-FORBIDS any before/after / weight-loss / results-timeline panel. Nano Banana free-associated a fabricated weight-loss before/after on competitor imitations (QC-rejected); the explicit negative stops it wasting a generation on an auto-reject.
 - **Transformation** = the brief's single real reviewer, quote + name rendered EXACTLY (a genuine review). See the image rule below.
 - **Supporting** = 1–2 retention truths as a small secondary line.
 - **Trust bar** = first 4 of `brief.proofStack`.
 - **Offer** = shown ONCE as a single badge (`offer.headline`), optionally the per-serving value or the strikethrough+disclaimer. **Never a bare MSRP** (hard rule).
 
-`opts.designReferenceUrl` passes a proven winner as the FIRST image to match its design language.
+`opts.designReferenceUrl` passes a proven winner as the FIRST image to match its design language; `opts.compositionTransfer` = a competitor imitation (reuse layout, swap ALL content to ours). The regenerate-on-fail cap ([[creative-agent]] `MAX_QA_ATTEMPTS`) is **3** (bumped from 2 on 2026-07-13) so the stricter packaging-text QC has room to land a clean take instead of starving the batch count.
 
 ### Image guardrails (the grey-area line)
 - The **quote + reviewer name must be a REAL review** — never invent a name, alter a quote, or add a fake "verified purchase" badge.
