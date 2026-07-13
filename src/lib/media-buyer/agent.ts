@@ -1393,6 +1393,115 @@ export function resolveReplenishAdCopy(
   return { ok: true, headlines, primaryTexts, reason: null };
 }
 
+/**
+ * media-buyer-replenish-per-product-scope Phase 2 — PURE builder of the `ad_publish_jobs`
+ * insert body for one replenish action. The runner's `enqueueReplenishPublish` calls this
+ * after the DB reads (campaign, angle, video) so the artifact the spec verifies (per-test
+ * cohort → NEW ad set in `cohort.testMetaCampaignId` at `perTestDailyBudgetCents`, `meta_adset_id`
+ * NEVER the legacy shared adset) is testable end-to-end without a live admin.
+ *
+ * Two branches, one artifact:
+ *   • adsetPerTest=TRUE: writes `create_adset_spec` = { campaign_id: cohort.testMetaCampaignId,
+ *     daily_budget_cents: cohort.perTestDailyBudgetCents, name: adName, …adsetTemplate } and
+ *     sets `meta_adset_id: null` — the publisher mints a FRESH ad set for this ONE creative
+ *     (one ad per ad set) under the product's testing campaign. Fail-CLOSED when the cohort
+ *     is per-test but missing `test_meta_campaign_id` / `adset_template` — never a malformed set.
+ *   • adsetPerTest=FALSE: `create_adset_spec: null`, `meta_adset_id: action.testMetaAdsetId`
+ *     (the legacy single-shared adset path — Superfood Tabs's null-product cohort today).
+ */
+export interface BuildReplenishJobInsertInput {
+  workspaceId: string;
+  cohort: MediaBuyerTestCohort;
+  action: MediaBuyerReplenishAction;
+  accountId: string;
+  pageId: string;
+  videoId: string;
+  adName: string;
+  destination: string;
+  headlines: string[];
+  primaryTexts: string[];
+}
+
+export interface ReplenishJobInsertBody {
+  workspace_id: string;
+  campaign_id: string;
+  video_id: string;
+  meta_account_id: string;
+  meta_adset_id: string | null;
+  create_adset_spec: CreateAdsetSpec | null;
+  meta_page_id: string;
+  meta_instagram_user_id: string | null;
+  headlines: string[];
+  primary_texts: string[];
+  cta_type: "SHOP_NOW";
+  destination_url: string;
+  publish_active: true;
+  publish_status: "queued";
+  origin: typeof MEDIA_BUYER_TEST_ORIGIN;
+  ad_name: string;
+}
+
+export type BuildReplenishJobInsertResult =
+  | { ok: true; insert: ReplenishJobInsertBody; createAdsetSpec: CreateAdsetSpec | null; metaAdsetIdForJob: string | null }
+  | { ok: false; reason: string };
+
+export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
+  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts } = input;
+
+  // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
+  // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
+  // it, then stamps `meta_adset_id`. `meta_adset_id` starts null (no shared adset). Fail CLOSED if the
+  // cohort is a per-test cohort but is missing its campaign or adset template — never mint a malformed set.
+  let createAdsetSpec: CreateAdsetSpec | null = null;
+  let metaAdsetIdForJob: string | null = action.testMetaAdsetId;
+  if (action.adsetPerTest) {
+    const tmpl = cohort.adsetTemplate;
+    const campaignId = cohort.testMetaCampaignId;
+    if (!campaignId || !tmpl) {
+      return {
+        ok: false,
+        reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
+      };
+    }
+    createAdsetSpec = {
+      campaign_id: campaignId,
+      name: adName,
+      daily_budget_cents: cohort.perTestDailyBudgetCents,
+      pixel_id: tmpl.pixelId,
+      custom_event_type: tmpl.customEventType,
+      optimization_goal: tmpl.optimizationGoal,
+      billing_event: tmpl.billingEvent,
+      bid_strategy: tmpl.bidStrategy,
+      targeting: tmpl.targeting,
+    };
+    metaAdsetIdForJob = null;
+  }
+
+  return {
+    ok: true,
+    createAdsetSpec,
+    metaAdsetIdForJob,
+    insert: {
+      workspace_id: workspaceId,
+      campaign_id: action.adCampaignId,
+      video_id: videoId,
+      meta_account_id: accountId,
+      meta_adset_id: metaAdsetIdForJob,
+      create_adset_spec: createAdsetSpec,
+      meta_page_id: pageId,
+      meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
+      headlines,
+      primary_texts: primaryTexts,
+      cta_type: "SHOP_NOW",
+      destination_url: destination,
+      publish_active: true,
+      publish_status: "queued",
+      origin: MEDIA_BUYER_TEST_ORIGIN,
+      ad_name: adName,
+    },
+  };
+}
+
 async function enqueueReplenishPublish(
   admin: Admin,
   workspaceId: string,
@@ -1464,56 +1573,23 @@ async function enqueueReplenishPublish(
 
   const adName = ((campaign as { name?: string | null } | null)?.name || `Media Buyer test — ${action.adCampaignId.slice(0, 8)}`).slice(0, 200);
 
-  // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
-  // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
-  // it, then stamps `meta_adset_id`. `meta_adset_id` starts null (no shared adset). Fail CLOSED if the
-  // cohort is a per-test cohort but is missing its campaign or adset template — never mint a malformed set.
-  let createAdsetSpec: CreateAdsetSpec | null = null;
-  let metaAdsetIdForJob: string | null = action.testMetaAdsetId;
-  if (action.adsetPerTest) {
-    const tmpl = cohort.adsetTemplate;
-    const campaignId = cohort.testMetaCampaignId;
-    if (!campaignId || !tmpl) {
-      return {
-        inserted: false,
-        jobId: null,
-        reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
-      };
-    }
-    createAdsetSpec = {
-      campaign_id: campaignId,
-      name: adName,
-      daily_budget_cents: cohort.perTestDailyBudgetCents,
-      pixel_id: tmpl.pixelId,
-      custom_event_type: tmpl.customEventType,
-      optimization_goal: tmpl.optimizationGoal,
-      billing_event: tmpl.billingEvent,
-      bid_strategy: tmpl.bidStrategy,
-      targeting: tmpl.targeting,
-    };
-    metaAdsetIdForJob = null;
-  }
+  const built = buildReplenishJobInsert({
+    workspaceId,
+    cohort,
+    action,
+    accountId,
+    pageId,
+    videoId: video.id,
+    adName,
+    destination,
+    headlines,
+    primaryTexts,
+  });
+  if (!built.ok) return { inserted: false, jobId: null, reason: built.reason };
 
   const { data: job, error } = await admin
     .from("ad_publish_jobs")
-    .insert({
-      workspace_id: workspaceId,
-      campaign_id: action.adCampaignId,
-      video_id: video.id,
-      meta_account_id: accountId,
-      meta_adset_id: metaAdsetIdForJob,
-      create_adset_spec: createAdsetSpec,
-      meta_page_id: pageId,
-      meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
-      headlines,
-      primary_texts: primaryTexts,
-      cta_type: "SHOP_NOW",
-      destination_url: destination,
-      publish_active: true,
-      publish_status: "queued",
-      origin: MEDIA_BUYER_TEST_ORIGIN,
-      ad_name: adName,
-    })
+    .insert(built.insert)
     .select("id")
     .single();
   if (error || !job) return { inserted: false, jobId: null, reason: `insert failed: ${error?.message ?? "no row"}` };
