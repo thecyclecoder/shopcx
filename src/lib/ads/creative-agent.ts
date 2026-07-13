@@ -209,7 +209,14 @@ async function stockProduct(
   const exploitPool = eligible.filter(isWon)
     .sort((a, b) => (learning.byAngle.get(angleKey(b.hook))?.won ?? 0) - (learning.byAngle.get(angleKey(a.hook))?.won ?? 0));
   const explorePool = eligible.filter((a) => !isWon(a))
-    .sort((a, b) => ((learning.byAngle.get(angleKey(a.hook))?.tried ?? 0) - (learning.byAngle.get(angleKey(b.hook))?.tried ?? 0)) || (b.acquisitionPower - a.acquisitionPower));
+    .sort((a, b) =>
+      // IMITATE-FIRST (CEO 2026-07-12): explores draw from the product's scouted COMPETITOR angles
+      // BEFORE our own unproven concepts — Dylan's flow: "she goes to the scouted ads for that
+      // competitor list and finds great examples to explore." A competitor angle is market-validated
+      // (a rival is profitably scaling it), so it's the strongest unproven bet. Own angles fill the rest.
+      ((a.source === "competitor" ? 0 : 1) - (b.source === "competitor" ? 0 : 1))
+      || ((learning.byAngle.get(angleKey(a.hook))?.tried ?? 0) - (learning.byAngle.get(angleKey(b.hook))?.tried ?? 0))
+      || (b.acquisitionPower - a.acquisitionPower));
 
   // Build the slot plan: aim for half exploit / half explore, then backfill from whichever pool has more.
   const plan: Array<{ angle: ScoredAngle; intent: "exploit" | "explore" }> = [];
