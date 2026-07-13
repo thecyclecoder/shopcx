@@ -155,4 +155,4 @@ A concluded job with `status IN ('failed','needs_attention')` whose `error` matc
 
 ---
 
-[[../README]] · [[../tables/agent_action_grades]] · [[../tables/agent_grader_prompts]] · [[../tables/agent_coaching_log]] · [[../tables/agent_instructions]] · [[worker-instructions]] · [[director-grader]] · [[platform-director]] · [[agent-kpis]] · [[../specs/worker-grading-and-director-management]] · [[../goals/devops-director]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/agent_action_grades]] · [[../tables/agent_grader_prompts]] · [[../tables/agent_coaching_log]] · [[../tables/agent_instructions]] · [[worker-instructions]] · [[director-grader]] · [[platform-director]] · [[control-tower-node-registry]] · [[agent-kpis]] · [[../specs/worker-grading-and-director-management]] · [[../goals/devops-director]] · [[../../CLAUDE]]

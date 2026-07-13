@@ -116,4 +116,4 @@ When a director escalates a sound diagnosis the CEO inbox can render only **Dism
 
 ## Related
 
-[[../specs/approval-routing-engine]] · [[approval-router]] · [[approvals-feed]] · [[director-bounce-back]] · [[../lifecycles/ada-slack-routed-approvals]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/director_activity]] · [[../dashboard/agents]] · [[../dashboard/approvals]] · [[roadmap-actions]] · [[control-tower]] · [[../goals/devops-director]] · [[../operational-rules]]
+[[../specs/approval-routing-engine]] · [[approval-router]] · [[approvals-feed]] · [[director-bounce-back]] · [[../lifecycles/ada-slack-routed-approvals]] · [[../tables/function_autonomy]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/director_activity]] · [[../dashboard/agents]] · [[../dashboard/approvals]] · [[roadmap-actions]] · [[control-tower]] · [[control-tower-node-registry]] · [[../goals/devops-director]] · [[../operational-rules]]
