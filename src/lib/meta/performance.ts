@@ -113,15 +113,23 @@ interface SyncParams {
 
 // ── Structure ────────────────────────────────────────────────────────────────
 
-/** Mirror campaign/adset/ad structure + budgets + status into our tables. */
-export async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: number; adsets: number; ads: number }> {
+/** Mirror campaign/adset/ad structure + budgets + status into our tables.
+ * `opts.campaignIds` scopes the pull to specific Meta campaigns (the intraday test-cadence path pulls
+ * ONLY the media-buyer test campaigns, not the whole account) via Graph `filtering`. */
+export async function syncMetaStructure(
+  p: SyncParams,
+  opts?: { campaignIds?: string[] },
+): Promise<{ campaigns: number; adsets: number; ads: number }> {
   const admin = createAdminClient();
   const acct = actId(p.metaAccountId);
   const now = new Date().toISOString();
+  const scoped = opts?.campaignIds && opts.campaignIds.length > 0 ? opts.campaignIds : null;
+  const campFilter: Record<string, string> = scoped ? { filtering: JSON.stringify([{ field: "id", operator: "IN", value: scoped }]) } : {};
+  const byCampaign: Record<string, string> = scoped ? { filtering: JSON.stringify([{ field: "campaign.id", operator: "IN", value: scoped }]) } : {};
 
   const campaigns = await graphGetAll(
     `${acct}/campaigns`,
-    { fields: "id,name,status,effective_status,objective,daily_budget,lifetime_budget,created_time,updated_time", limit: "500" },
+    { fields: "id,name,status,effective_status,objective,daily_budget,lifetime_budget,created_time,updated_time", limit: "500", ...campFilter },
     p.accessToken,
   );
   const campaignsPersisted = campaigns.length
@@ -150,7 +158,7 @@ export async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: num
 
   const adsets = await graphGetAll(
     `${acct}/adsets`,
-    { fields: "id,name,status,effective_status,campaign_id,optimization_goal,daily_budget,lifetime_budget,created_time,updated_time", limit: "500" },
+    { fields: "id,name,status,effective_status,campaign_id,optimization_goal,daily_budget,lifetime_budget,created_time,updated_time", limit: "500", ...byCampaign },
     p.accessToken,
   );
   const adsetsPersisted = adsets.length
@@ -180,7 +188,7 @@ export async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: num
 
   const ads = await graphGetAll(
     `${acct}/ads`,
-    { fields: "id,name,status,effective_status,adset_id,campaign_id,creative,created_time,updated_time", limit: "500" },
+    { fields: "id,name,status,effective_status,adset_id,campaign_id,creative,created_time,updated_time", limit: "500", ...byCampaign },
     p.accessToken,
   );
   const adsPersisted = ads.length
@@ -269,10 +277,12 @@ export async function syncMetaInsightsForLevel(
   level: Level,
   startDate: string,
   endDate: string,
+  opts?: { campaignIds?: string[] },
 ): Promise<{ rows: number }> {
   const admin = createAdminClient();
   const acct = actId(p.metaAccountId);
   const now = new Date().toISOString();
+  const scoped = opts?.campaignIds && opts.campaignIds.length > 0 ? opts.campaignIds : null;
 
   const rows = await graphGetAll(
     `${acct}/insights`,
@@ -282,6 +292,8 @@ export async function syncMetaInsightsForLevel(
       time_increment: "1",
       fields: insightsFields(level),
       limit: "500",
+      // Intraday test-cadence: pull ONLY the media-buyer test campaigns, not the whole account.
+      ...(scoped ? { filtering: JSON.stringify([{ field: "campaign.id", operator: "IN", value: scoped }]) } : {}),
     },
     p.accessToken,
   );
