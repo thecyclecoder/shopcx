@@ -14,6 +14,10 @@ The **money invariant** (`PriceInvariantError`) is enforced on every priced line
 
 The legacy call sites still resolve via a thin shim at `src/lib/portal/helpers/enrich-pricing.ts`, which re-exports this file's `priceSubscription` while the migration to `@/lib/commerce` completes.
 
+### Coupon display — shipping-target guard
+
+`computeDisplayCoupon` folds `applied_discounts` into the order-level `discount_cents`. **Shipping-target discounts must NOT reduce the product subtotal.** Shopify/Appstle models "Free Shipping on Subscriptions" as a **100% `PERCENTAGE` discount with `targetType: SHIPPING_LINE`**; applying it against products zeroes the subtotal and shows a fake "shipping-only" total while the card is billed the real product price. `isShippingTargetDiscount` skips these — authoritative signal is `targetType === "SHIPPING_LINE"` (captured at [[../integrations/appstle]] webhook ingest), with a `/free\s*ship/i` title fallback for rows synced before that field existed. Regression: `price.freeship.test.ts` (`npm run test:commerce-price-freeship`). Origin: ticket `eca3f43b` (portal showed a customer −$119.92 → Total $4.95 on a $116.96 renewal; 417 live subs affected).
+
 ## Exports
 
 - **`priceSubscription(workspaceId, sub)`** → `{ priced: Map<string, PricedLineLite>, pricing: ContractPricing }` — the core resolver. Returns per-line priced pairs keyed by BOTH line_id AND variant_id, plus the order-level pricing summary. Throws `PriceInvariantError` on any undefined/NaN cents on a product line.

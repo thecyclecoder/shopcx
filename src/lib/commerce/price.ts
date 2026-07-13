@@ -73,6 +73,25 @@ function assertLineCents(subId: string, lineId: string, base: unknown, unit: unk
   }
 }
 
+/**
+ * True iff a discount only affects the shipping line and must NOT reduce the
+ * product subtotal. Shopify/Appstle models "free shipping" as a 100% PERCENTAGE
+ * discount with `targetType: SHIPPING_LINE` — applying it against products
+ * zeroes the subtotal and shows a fake "shipping only" total while the card is
+ * billed the real product price (the Melissa-class portal bug). `targetType` is
+ * the authoritative signal (captured at Appstle webhook ingest); the title
+ * fallback covers rows synced before that field was persisted. All 417 live
+ * shipping-target discounts are "Free Shipping…"/"…FreeShip" — no legitimate
+ * 100%-off-product promo exists, so the fallback can't hide a real deal.
+ */
+function isShippingTargetDiscount(d: Record<string, unknown>): boolean {
+  const target = String(d.targetType || d.target_type || "").toUpperCase();
+  if (target === "SHIPPING_LINE") return true;
+  if (target === "LINE_ITEM") return false; // explicit product target — never a shipping discount
+  const title = String(d.title || d.code || "");
+  return /free\s*ship/i.test(title);
+}
+
 /** Normalize a coupon (either shape) → its display discount + pill. Read-only. */
 function computeDisplayCoupon(
   appliedDiscounts: Array<Record<string, unknown>>,
@@ -83,6 +102,10 @@ function computeDisplayCoupon(
   let pillLabel: string | null = null;
 
   for (const d of appliedDiscounts || []) {
+    // Shipping-target discounts (free shipping) don't touch the product
+    // subtotal — skip them here so the displayed total matches the real charge.
+    if (isShippingTargetDiscount(d)) continue;
+
     let pct = 0;
     let fixedCents = 0;
     if (d.type === "percentage") pct = Number(d.value) || 0; // internal: 0-100
