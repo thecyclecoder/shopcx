@@ -56,15 +56,17 @@ quality or claims — only the RENDER.
    for our brand and the DATA block's `HEADLINE` is intentionally blank — there is NO exact string to
    match, so return `headlineExact = true` (a garbled/misspelled headline is still a `textLegible`
    failure). A competitor brand name appearing anywhere → `textLegible = false` (see check 2).
-2. **`textLegible`** — **ALL** text on the image is real, correctly-spelled words. Gibberish
-   ("IMPUSEO", "real Ife", "coffee coffee"), mangled diacritics, mid-word breaks, or unreadable
-   overlays → `false`. Every other overlay (badges, small print, watermarks, guarantee stamps) is
-   in scope, not just the headline. **This INCLUDES text printed on the PRODUCT PACKAGE itself** —
-   the pouch/label wordmark, ingredient-icon labels, and any fine print on the bag. Zoom in on the
-   packshot: if the package shows garbled, invented, or scrambled lettering (e.g. "Cocoa Flaspert
-   Hand lens", "COERCY · CKIONICS · NETROBEEN" fake ingredient icons, "35 SeUngs" for "35
-   Servings", a cut-off/misspelled brand wordmark), that is `false`. A model that redraws the pack
-   from a reference commonly hallucinates this micro-text — it is a real defect, not "close enough."
+2. **`textLegible`** — all **READABLE** text is real, correctly-spelled words. Judge at feed-scroll
+   scale: **fail** for garbled/gibberish/scrambled text a person would actually read — the headline,
+   subhead, offer, review quote, trust bar, the product's **MAIN brand wordmark**, or any **prominent**
+   badge (e.g. "IMPUSEO", "real Ife", "coffee coffee", a "Cocoa Flaspert Hand lens" descriptor line, a
+   cut-off/misspelled main wordmark). **Do NOT fail** for sub-readable micro-text on the PRODUCT PACKAGE
+   — the tiny ingredient-icon ring, supplement-facts panel, or fine-print band on the pouch that sits
+   below readable size at ad scale (like the illegible fine print on any real product photo). A model
+   that redraws the pack hallucinates that micro-text on nearly every render; it is invisible to a
+   scroller and is NOT a defect. The line is READABILITY: garbled where a viewer would read it → `false`;
+   garbled only in illegible-anyway micro-print → fine. (A real COMPETITOR brand name appearing anywhere
+   still fails — see imitation mode in check 1.)
 3. **`noBarePrice`** — **NO** bare sticker/MSRP price shown alone (e.g. "$59" floating on the
    image with no context). A price IS OK when it's a strikethrough → discount ("~~$59~~ $39"), a
    per-serving value ("$1.30 per serving"), or a comparison anchor. Bare-price defects are the top

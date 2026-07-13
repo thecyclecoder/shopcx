@@ -50,7 +50,7 @@ const QA_SYSTEM = `You are a meticulous ad-creative QA reviewer for a paid-socia
 Check each item and return ONLY a JSON object (no prose):
 {
   "headlineExact": boolean,        // the headline renders EXACTLY as given — no dropped, repeated, misspelled, or garbled words
-  "textLegible": boolean,          // ALL text on the image is real, correctly-spelled words (no gibberish like "IMPUSEO", "real Ife", "coffee coffee")
+  "textLegible": boolean,          // All READABLE text is real, correctly-spelled words. FAIL for garbled/gibberish text that a scroller would actually read at feed size: the headline, subhead, offer, review quote, trust bar, the product's MAIN brand wordmark, or any prominent badge (e.g. "IMPUSEO", "real Ife", "coffee coffee", "Cocoa Flaspert Hand lens"). Do NOT fail for sub-readable micro-text on the product PACKAGE — the tiny ingredient-icon ring or fine-print band on the pouch that is below readable size at ad scale (like the illegible fine print on any real product photo). A real competitor brand name appearing anywhere still fails.
   "noBarePrice": boolean,          // NO bare sticker/MSRP price shown alone; a price is OK only as strikethrough→discount or per-serving value
   "noFabricatedPhotoCaption": boolean, // NO text claiming an image is a real/candid/verified/authentic photo or "taken from her phone/home". Plain "Before"/"After" labels are fine
   "transformationPhotorealistic": boolean, // IF there is a before/after transformation image: it is photorealistic (a real-looking photograph), NOT a cartoon/illustration/drawing/3D-CGI render. If there is no transformation image, return true
