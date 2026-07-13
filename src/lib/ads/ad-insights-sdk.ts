@@ -72,14 +72,22 @@ const META_GRAPH_MAX_RETRIES = 4;
 export async function fetchMetaAdInsights(
   token: string,
   accountId: string,
-  opts: { datePreset?: string; campaignContains?: string } = {},
+  opts: { datePreset?: string; timeRange?: { since: string; until: string }; campaignContains?: string } = {},
 ): Promise<Map<string, AdInsight>> {
   const params: Record<string, string> = {
     level: "ad",
     fields: "ad_id,ad_name,campaign_name,spend,impressions,frequency,inline_link_clicks,inline_link_click_ctr,cpc,cpm,actions",
-    date_preset: opts.datePreset ?? "last_30d",
     limit: "200",
   };
+  // A `time_range` whose `until` is TODAY includes today's partial spend/conversions; Meta's `last_Nd`
+  // date presets cover the N COMPLETE prior days and silently DROP today (a test ad's fresh purchases
+  // would be invisible). Prefer an explicit account-local time_range; fall back to the preset only when
+  // no range is given (the caller has no account timezone).
+  if (opts.timeRange) {
+    params.time_range = JSON.stringify({ since: opts.timeRange.since, until: opts.timeRange.until });
+  } else {
+    params.date_preset = opts.datePreset ?? "last_30d";
+  }
   if (opts.campaignContains) {
     params.filtering = JSON.stringify([{ field: "campaign.name", operator: "CONTAIN", value: opts.campaignContains }]);
   }

@@ -14,6 +14,7 @@ npx tsx scripts/analyze-ad-tests.ts [<accountId> ...] [--ltv=N] [--days=30] [--c
 ```
 
 - No args → both Superfoods accounts: **Amazing Coffee `2352876514967984`** + **Superfood Tabs `196487894712827`**.
+- **Window INCLUDES today (account-local).** The pull uses an explicit Meta `time_range` whose `until` = the account's OWN today (each account's `meta_ad_accounts.timezone` — Coffee/Creatine/Ashwavana LA, Tabs Chicago), NOT the `last_Nd` date preset (Meta's `last_Nd` covers the N *complete prior* days and silently drops today — a fresh test purchase would be invisible). `--days=N` sets how far back; the header prints the resolved `since…until (tz)`. This is why a $150/day test ad's late-day purchases show up here the moment the 2h [[../../docs/brain/inngest/media-buyer-test-cadence.md]] pull lands them.
 - Prints, per account: every spend>0 ad with spend · purchases · CPA · frequency · **destination + conversion-source tag** · **verdict + the one recommended action**, then the roll-up (blended CPA, `UNPROFITABLE` flag when blended > kill) and explicit RETIRE / SCALE lists.
 - `--cohort=<campaign substring>` → restrict to a cohort (e.g. `"MB —"` for the media-buyer test campaigns) and show the **add-to-cart leading-indicator funnel** (impr · linkCTR · clicks · ATC · IC · P · **clk→ATC%**). The winner separates at ATC well before purchases land — 2026-07-09 coffee test: skeptic v3 hit **50% clk→ATC vs 6%** for its siblings, a day before its first purchase.
 
@@ -21,7 +22,7 @@ npx tsx scripts/analyze-ad-tests.ts [<accountId> ...] [--ltv=N] [--days=30] [--c
 
 All reads go through the SDK **`src/lib/ads/ad-insights-sdk.ts`** — no caller hand-rolls a Graph request or re-implements purchase counting. It composes two sources **by destination URL**:
 
-- **Spend** → always our own DB, [[../../docs/brain/tables/meta_attribution_daily.md]] (synced daily, no API cost).
+- **Spend** → **Meta live insights** (`fetchMetaAdInsights.spend`), so today's partial spend is included (the daily-synced [[../../docs/brain/tables/meta_attribution_daily.md]] lags a day — `mergeDbFacts` reads it only to tag lander-destination + override *lander* purchases/revenue, never spend).
 - **Conversions** → destination-aware. An ad whose `advertorial_page_id` is set ran to one of **our landers** → our DB's sessions/orders/roas are valid. An ad with `advertorial_page_id` null ran to the **Shopify PDP** → our internal order-match can't attribute it, so **Meta is the source of truth** (fetched via `fetchMetaAdInsights`, paginated + rate-limit backoff). The output tags each ad `[L]ander/[S]hopify` and conversion source `[d]b/[m]eta`.
 - **Funnel micro-metrics** (impressions, link CTR, add-to-cart) → Meta only (our DB doesn't carry them) — used by `--cohort`.
 - **⚠ Purchase counting:** the SDK counts the single canonical `purchase` action_type (= the Ads Manager "Purchases" column), **never** the sum of `purchase` + `offsite_conversion.fb_pixel_purchase` (those double-count — a 2026-07-09 bug reported skeptic-v3 as 2 when the dashboard showed 1). Always reconcile any headline number against an Ads Manager export before stating it as fact.
