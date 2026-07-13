@@ -633,6 +633,23 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "dunning-payday-retry-cron", kind: "cron", owner: "retention", label: "Dunning payday retry", description: "Hourly retry sweep of dunning cycles whose payday-retry time has arrived.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR, outputAssertion: "stuck-dunning" },
   { id: "sync-inventory", kind: "cron", owner: "platform", label: "Inventory sync", description: "Hourly product inventory sync.", expectedCadence: "hourly (0 * * * *)", livenessWindowMs: 2 * HOUR },
   { id: "portal-auto-resume-cron", kind: "cron", owner: "retention", label: "Portal auto-resume", description: "Resumes paused subscriptions whose pause_resume_at has passed.", expectedCadence: "hourly at :15 (15 * * * *)", livenessWindowMs: 2 * HOUR },
+  // ─ Every-2h crons (window ~3h — cadence × 1.2 jitter grace) ─
+  // register-media-buyer-test-cadence-monitored-loop Phase 1: gives the intraday freshness cron
+  // ([[../inngest/media-buyer-test-cadence]] `media-buyer-test-cadence`, cron '0 */2 * * *') the
+  // completeness trio's owner + heartbeat legs — an unowned/unbeat freshness loop can silently
+  // stop firing and Bianca's scorecards go stale with nothing surfacing the outage. Window is
+  // 3h (2h × 1.2 = 2.4h clears the jitter grace; 3h leaves comfortable slack) and clears the
+  // 5-min MONITOR_TICK_FLOOR. registeredAt graces the first-tick window (newcron-grace).
+  {
+    id: "media-buyer-test-cadence",
+    kind: "cron",
+    owner: "growth",
+    label: "Media-buyer test cadence (2h)",
+    description: "Intraday freshness loop — syncs meta_insights_daily for the media-buyer TEST campaigns (today-inclusive) then fires the media-buyer cadence sweep.",
+    expectedCadence: "every 2h (0 */2 * * *)",
+    livenessWindowMs: 3 * HOUR,
+    registeredAt: "2026-07-13T00:00:00Z",
+  },
   // ─ Daily crons (window ~26h) ─
   { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },

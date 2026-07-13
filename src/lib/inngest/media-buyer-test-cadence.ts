@@ -24,6 +24,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { syncMetaStructure, syncMetaInsightsForLevel } from "@/lib/meta/performance";
 import { refreshScorecards } from "@/lib/meta/scorecards";
+import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -113,7 +114,12 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
   async ({ step }) => {
     const admin = createAdminClient();
     const targets = await step.run("resolve-targets", async () => resolveTestCadenceTargets(admin));
-    if (!targets.length) return { targets: 0, note: "no active test cohorts" };
+    if (!targets.length) {
+      await step.run("emit-heartbeat", async () => {
+        await emitCronHeartbeat("media-buyer-test-cadence", { ok: true, produced: { targets: 0 }, detail: "no active test cohorts" });
+      });
+      return { targets: 0, note: "no active test cohorts" };
+    }
 
     const now = new Date();
     // Scorecard LABEL stays UTC-today so it matches the media-buyer loop's snapshot read; the pull WINDOW
@@ -138,6 +144,9 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
       });
       results.push(r);
     }
+    await step.run("emit-heartbeat", async () => {
+      await emitCronHeartbeat("media-buyer-test-cadence", { ok: true, produced: { targets: targets.length }, detail: `pulled ${targets.length} account(s) for ${scorecardDate}` });
+    });
     return { targets: targets.length, scorecardDate, results };
   },
 );
