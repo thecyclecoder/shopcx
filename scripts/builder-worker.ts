@@ -148,19 +148,9 @@ const MAX_SPEC_TEST = 3; // read-only QC runs — bumped 1→3 so a backlog re-s
 // One spec-test pass reads the spec + runs the box QA toolkit (tsc can be slow). Minutes, not the
 // 90-min seed ceiling — give it a build-sized ceiling so a tsc + a few probes never get cut short.
 const SPEC_TEST_TIMEOUT_MS = 20 * 60 * 1000;
-// Spec-review (Vale) — the in_review queue reviewer ([[docs/brain/specs/spec-review-agent]]). A single
-// `claude -p` pass walks every in_review spec and emits one QUALITY verdict per spec (pass/needs_fix);
-// the planned/deferred call belongs to Ada (Phase 3 — director-disposition lane).
-// Read-only against repo/DB. Minutes, like the other supervisory passes (repair/regression/spec-test).
-// vale-instant-per-spec-review — bumped 1 → 2: spec-review jobs are now PER-SPEC (one job per in_review
-// spec, scoped to its own slug), so a couple of distinct specs review in PARALLEL when the hopper fills
-// (5-6 specs authored over a few minutes) instead of draining one-at-a-time. Held at 2 (not higher) so
-// short read-only review sessions never starve the build lane on the shared Max pool. Per-slug dedup in
-// enqueueSpecReviewIfDue guarantees two sessions never examine the SAME spec.
-// Claude-down-gated like the other read-only Max agents (repair/regression/security-review) — when
-// Claude is down the queued spec-review jobs park `blocked_on_dependency` + drain on recovery.
-const MAX_SPEC_REVIEW = 2;
-const SPEC_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// (The Vale LLM spec-review lane is retired — retire-vale-spec-review-becomes-deterministic-authoring-gate.
+// Spec well-formedness is now enforced DETERMINISTICALLY at the authoring chokepoint by `assertSpecReviewGate`
+// ([[../src/lib/spec-review-gate]]), so the box no longer runs a spec-review agent lane or enqueue reaper.)
 // Migration-fix jobs (migration-fix-agent) run in their OWN concurrency-1 lane: a top-level Max
 // `claude -p` (migration-fix skill) that DIAGNOSES a failed migration_audits row read-only and PROPOSES
 // the judgment fixes auto-heal punts; prod billing mutations are GATED (executed by the worker via
@@ -544,18 +534,6 @@ const FOLD_QUEUE_REAPER_INTERVAL_MS = 2 * 60 * 1000; // ~2 min — quick to un-s
 let lastFoldQueueReaper = 0; // 0 ⇒ run on first poll so a queue stranded by the prior instance drains right away.
 let foldQueueReaperInFlight = false;
 
-// vale-instant-per-spec-review — the box SELF-ENQUEUES Vale reviews by RECONCILING the specs table every
-// ~30s, rather than waiting on the Inngest `spec-review/spec-mutated` event (which the box cannot reliably
-// send — it has no INNGEST_EVENT_KEY, and the send is fire-and-forget `.catch(() => {})`, so a box-authored
-// spec — submit-spec on a terminal, spec-chat finalize, etc. — silently never fired the reactive enqueue and
-// waited up to 15 min for the Vercel cron). This poll finds every in_review spec lacking a current Vale
-// verdict and inserts ONE per-spec job each (deduped per (workspace, slug) in enqueueSpecReviewIfDue). ~30s
-// so review is near-instant; 0 ⇒ run on the first poll so specs authored while the box was down enqueue on
-// boot. Throttled + in-flight-guarded like the fold reaper; best-effort, never breaks the loop.
-const SPEC_REVIEW_ENQUEUE_INTERVAL_MS = 30 * 1000;
-let lastSpecReviewEnqueue = 0;
-let specReviewEnqueueInFlight = false;
-
 // `blocked_on_usage` (box-multi-account-failover Phase 1): parked when EVERY Max account is at its usage
 // wall. Non-terminal — requeueBlockedOnUsage flips it back to queued/queued_resume once an account resets.
 // `blocked_on_dependency` (agent-outage-resilience Phase 2): parked when the Claude-down breaker is
@@ -638,7 +616,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "spec-review" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -677,7 +655,6 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "spec-chat",
   "triage-escalations",
   "spec-test",
-  "spec-review",
   "migration-fix",
   "dev-ask",
   "god-mode",
@@ -916,7 +893,7 @@ const CODEX_PREAMBLE = [
 // trivially correct — it just starts fresh on Claude.
 const CODEX_KINDS = new Set<string>([
   "agent-grade", "agent-coach", "director-grade", "campaign-grade", "gap-grade", // grading + coaching
-  "spec-review", "spec-test",                                                    // review / QA
+  "spec-test",                                                                   // review / QA
   "repair", "regression", "security-review", "pr-resolve",                       // mechanical fixers/reviewers
   "fold",                                                                        // brain fold
 ]);
@@ -3268,7 +3245,7 @@ const LANE_GROUPS = {
   },
   other: {
     cap:
-      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST + MAX_SPEC_REVIEW +
+      MAX_SEED + MAX_SPEC_CHAT + MAX_TICKET_IMPROVE + MAX_TRIAGE + MAX_SPEC_TEST +
       MAX_MIGRATION_FIX + MAX_DEPLOY_REVIEW + MAX_MARIO + MAX_PLAYBOOK_COMPILE + MAX_PROMPT_REVIEW + MAX_DEV_ASK +
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
@@ -3276,7 +3253,7 @@ const LANE_GROUPS = {
       MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
-      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test", "spec-review",
+      "product-seed", "spec-chat", "ticket-improve", "triage-escalations", "spec-test",
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
@@ -5433,57 +5410,19 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing post-merge diff backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
-    // SPEC-REVIEW backstop (spec-review-agent) — the reliable heartbeat that gets a newly-authored `in_review`
-    // spec its Vale review + Ada disposition. WHY a standing-pass backstop is REQUIRED, not just nice-to-have:
-    // before this, the ONLY enqueuers were (a) the Inngest `spec-review-cron` (`*/15`) and (b) the build
-    // claim-gate. (a) is an OUTSIDE-the-box trigger that can silently miss (an Inngest sync/deploy reaps the
-    // cron, a workspace with no agent_jobs row is filtered out, a transient run drops a tick) — exactly the
-    // same event-only fragility Gate-A and the pre-merge legs had; (b) only fires when a BUILD job for that
-    // spec is actually dispatched, so an `in_review` spec with `auto_build=false` (or one whose build hasn't
-    // been queued yet) never trips the claim-gate and can sit un-reviewed indefinitely (the 2026-06-28
-    // `noop-pipeline-test-1` stall: 16h between cron-driven passes while a malformed in_review spec sat there).
-    // This re-evaluates the FULL in_review pool every standing pass and (idempotently) drives BOTH hops:
-    //   1. enqueue ONE Vale pass if ≥1 in_review spec lacks a live spec-review job (deduped by
-    //      enqueueSpecReviewIfDue — no pile-up; never double-enqueues a spec that already has a live job);
-    //   2. run Ada's disposition sweep so a Vale-PASSED-but-undisposed spec advances in_review→planned even
-    //      when the spec-review job that set vale_pass crashed before reaching its inline dispose tail.
-    // Preserves the Vale quality gate + Ada disposition semantics — it never auto-passes; it just makes sure
-    // the review actually RUNS. Best-effort; both helpers are idempotent.
-    const { enqueueSpecReviewIfDue, selectUnreviewedInReviewSpecs, runValeReviewPassReconciler } = await import("../src/lib/agents/spec-review");
+    // ADA DISPOSITION backstop — advances a disposable `in_review` spec in_review→planned/deferred even when
+    // the inline dispose tail crashed. (The Vale LLM spec-review lane is RETIRED — well-formedness is enforced
+    // DETERMINISTICALLY at the authoring chokepoint by `assertSpecReviewGate`, so the box no longer enqueues a
+    // Vale review pass. Ada's disposition seam remains.) Self-selecting: it only touches disposable candidates,
+    // so it's a no-op when there's nothing to advance. Best-effort; idempotent.
     const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-    // vale-reactive-spec-review Phase 1 / vale-instant-per-spec-review — the selector returns only in_review
-    // specs that LACK a current Vale verdict (vale_pass IS NULL), so the backstop skips workspaces whose
-    // in_review pool is fully verdicted (passed → parked for Ada, or needs_fix). Disposition sweep runs regardless.
-    const inReview = await selectUnreviewedInReviewSpecs(db, job.workspace_id);
-    if (inReview.length) {
-      const enq = await enqueueSpecReviewIfDue(job.workspace_id);
-      if (enq.enqueued) notes.push(`spec-review backstop → enqueued ${enq.enqueuedCount} per-spec Vale job(s) (${enq.pending} unreviewed in_review)`);
-      else if (enq.reason === "all-in-flight" || enq.reason === "batch-in-flight") notes.push(`spec-review backstop → Vale already in flight (${enq.pending} in_review)`);
-    }
-    // Always run the disposition sweep — it self-selects only Vale-passed, un-disposed candidates, so it's a
-    // no-op when there's nothing to advance and recovers a spec whose inline dispose tail never ran.
     const dispo = await runAdaDispositionSweep(db, job.workspace_id);
     if (dispo.same || dispo.downgraded || dispo.upgrade_proposed) {
-      notes.push(`spec-review backstop → disposed ${dispo.scanned}: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`);
-    }
-    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the "passed-but-unstamped" self-heal
-    // reconciler. Finds specs that already have a `spec_review_passed` director_activity row but a NULL
-    // `specs.vale_review_passed_at` (pre-Phase-1 residue where the mirror dual-write silently dropped the
-    // durable stamp), stamps the flag via stampSpecValeReviewPassed, and records a `healed_review_passed_flag`
-    // audit row. Never touches a spec without spec_review_passed evidence — the reconciler heals residue, it
-    // does NOT invent a pass. Self-selecting: the candidate cohort is `vale_review_passed_at IS NULL AND
-    // NOT folded`, so once residue is drained the sweep no-ops for free.
-    try {
-      const rec = await runValeReviewPassReconciler(db, job.workspace_id);
-      if (rec.healed || rec.failed) {
-        notes.push(`spec-review backstop → vale-review-passed reconciler: healed ${rec.healed}/${rec.scanned}${rec.failed ? ` · ${rec.failed} failed` : ""}`);
-      }
-    } catch (e) {
-      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
+      notes.push(`ada disposition backstop → disposed ${dispo.scanned}: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`);
     }
   } catch (e) {
-    notes.push(`spec-review backstop failed: ${e instanceof Error ? e.message : String(e)}`);
-    console.error(`${tag} standing spec-review backstop failed (continuing):`, e instanceof Error ? e.message : e);
+    notes.push(`ada disposition backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} standing ada disposition backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   // ada-standing-pass-reasoning-gate Phase 2 — captures the slugs the phase-progression backstop advanced this
   // pass so groomBoard can skip them (their `continue` verdict would just re-decide the same advance). Hoisted
@@ -9241,24 +9180,6 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
 // claimed is orphaned and must be released back to 'pending'.
 const ACTIVE_FOLD_JOB_STATUSES = ["queued", "queued_resume", "claimed", "building"] as const;
 
-// vale-instant-per-spec-review — the box's ~30s self-enqueue for Vale. Reconciles the specs table (finds
-// every in_review spec lacking a current Vale verdict) and inserts one PER-SPEC spec-review job each, deduped
-// per (workspace, slug) inside enqueueSpecReviewIfDue. This is the primary enqueue path (the Inngest event
-// the box can't reliably send is now just a bonus); distinct specs review in parallel (MAX_SPEC_REVIEW > 1),
-// the same spec never gets two sessions. Fire-and-forget, best-effort — never breaks the poll loop.
-async function runSpecReviewEnqueueReaper(): Promise<void> {
-  try {
-    const workspaceId = await resolveOwnerWorkspaceId();
-    if (!workspaceId) return;
-    const { enqueueSpecReviewIfDue } = await import("../src/lib/agents/spec-review");
-    const r = await enqueueSpecReviewIfDue(workspaceId);
-    if (r.enqueuedCount > 0) {
-      console.log(`[spec-review-reaper] enqueued ${r.enqueuedCount} per-spec Vale job(s) (${r.pending} unreviewed in_review)`);
-    }
-  } catch (e) {
-    console.warn("[spec-review-reaper] best-effort sweep failed:", e instanceof Error ? e.message : e);
-  }
-}
 
 async function runFoldQueueReaperJob(): Promise<void> {
   try {
@@ -12671,292 +12592,6 @@ async function runSpecTestJob(job: Job) {
         metadata: { job_id: job.id, agent_verdict: "error", reason: msg },
       });
     } catch { /* audit best-effort */ }
-    await update(job.id, { status: "failed", error: msg });
-    console.error(`${tag} failed: ${msg}`);
-  }
-}
-
-// ── Box-hosted spec-review agent (Vale) ─────────────────────────────────────
-// A kind='spec-review' job is enqueued by the spec-review-cron whenever ≥1 spec is parked in `in_review`.
-// Vale reads every in_review spec against the authoring CHECKLIST and emits one verdict per spec:
-// approve (sound + needed now → planned), defer (sound but parked → deferred + flags.deferred),
-// or needs_fix (malformed — the diagnosis surfaces on director_activity, the spec stays in_review).
-// Read-only on Max (no API key, web search on); the worker is the only component that mutates state.
-// Implements docs/brain/specs/spec-review-agent.md Phase 2.
-async function runSpecReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
-  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-review", sandbox: "max", timeout: SPEC_REVIEW_TIMEOUT_MS });
-}
-
-interface SpecReviewDecisionJson {
-  slug: string;
-  // Phase 3 narrowed the live vocabulary to `pass | needs_fix`; the legacy `approve`/`defer` strings
-  // still parse for back-compat (the verdict applier auto-routes both as `pass`, since the planned/deferred
-  // call is Ada's now).
-  verdict: "pass" | "needs_fix" | "approve" | "defer";
-  reason: string;
-  defects?: string[];
-  // vale-reasons-the-disposition Phase 1 — on a PASS, Vale ALSO recommends a reasoned planned/deferred
-  // disposition. The worker persists it on specs.vale_disposition + specs.vale_disposition_reason; Ada's
-  // Phase-2 sweep will consume it (retiring the trust-the-author stub). Absent on needs_fix + on legacy
-  // passes (the sweep falls back to intended_status).
-  disposition?: "planned" | "deferred";
-  disposition_reason?: string;
-}
-
-async function runSpecReviewJob(job: Job) {
-  const tag = `[spec-review:${job.id.slice(0, 8)}]`;
-  const { selectUnreviewedInReviewSpecs, applySpecReviewDecision, runValeReviewPassReconciler } = await import("../src/lib/agents/spec-review");
-  const { runAdaDispositionSweep } = await import("../src/lib/agents/spec-dispose");
-  const a = await admin();
-  // vale-reactive-spec-review Phase 1 — the selector returns only in_review specs LACKING a current Vale
-  // review, so Vale never re-reviews content she already cleared. A re-author / send-back NULLs vale_pass
-  // via markSpecCardBackToReview, re-admitting the spec.
-  //
-  // vale-instant-per-spec-review — a PER-SPEC job (spec_slug = a real slug) reviews ONLY its own slug; a
-  // legacy sentinel ('spec-review-sweep') or a slug-less job sweeps the whole pool (back-compat). Scoping
-  // is what lets two concurrent per-spec jobs (MAX_SPEC_REVIEW > 1) run without each re-sweeping the entire
-  // queue. If this job's slug already left the pool by run time (passed/deferred/sent-back), `pending` is
-  // empty → the no-op branch below completes it benignly.
-  const isSentinel = !job.spec_slug || job.spec_slug === "spec-review-sweep";
-  const pool = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
-  const pending = isSentinel ? pool : pool.filter((s) => s === job.spec_slug);
-  if (!pending.length) {
-    // Phase 3 — even with no Vale queue, run Ada's disposition sweep over any Vale-passed in_review spec
-    // a prior pass left behind (a re-fire after a transient failure resumes from the disposition leg).
-    const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the passed-but-unstamped reconciler runs
-    // in the same tail so a workspace with no fresh Vale work still heals legacy residue on the ~30s poll.
-    let heal = { scanned: 0, healed: 0, skipped: 0, failed: 0 };
-    try { heal = await runValeReviewPassReconciler(a, job.workspace_id); } catch (e) {
-      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
-    }
-    const healNote = heal.healed || heal.failed ? ` · heal-vale-pass: ${heal.healed}/${heal.scanned}${heal.failed ? ` (${heal.failed} failed)` : ""}` : "";
-    const tail = `no in_review specs to review · dispose: ${dispo.same}=${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}${healNote}`;
-    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
-    console.log(`${tag} ${tail}`);
-    return;
-  }
-  console.log(`${tag} reviewing ${pending.length} in_review spec(s): ${pending.join(", ")}`);
-
-  // db-driven-specs: Vale reads the SPEC ROW, not `docs/brain/specs/{slug}.md` (those .md files were
-  // DELETED in the purge). Materialize each in_review spec (public.specs + public.spec_phases) into the
-  // run dir's gitignored `.box/spec-{slug}.md` — same shape Bo (build) + the fold runner read. spec-review
-  // runs in REPO_DIR (not a worktree), so materialize into REPO_DIR/.box and the prompt's cwd matches.
-  // A spec that can't be materialized (no row — shouldn't happen, the status came FROM specs) is dropped
-  // from the queue so Vale never reads a stale path.
-  const reviewable: string[] = [];
-  const missingRowSlugs: string[] = [];
-  {
-    const { materializeSpec } = await import("../src/lib/build-spec-materializer");
-    for (const slug of pending) {
-      try {
-        await materializeSpec(job.workspace_id, slug, join(REPO_DIR, ".box"));
-        reviewable.push(slug);
-      } catch (e) {
-        if (isMaterializeMissingRowError(e)) missingRowSlugs.push(slug);
-        console.warn(`${tag} could not materialize ${slug} from DB row: ${e instanceof Error ? e.message : String(e)} — dropping from queue`);
-      }
-    }
-    if (!reviewable.length) {
-      // planner-gates-build-queue-on-authored-specs Phase 2 — when EVERY drop was a missing public.specs
-      // row (selectUnreviewedInReviewSpecs returned a slug the row has since vanished from), stamp
-      // spec_row_missing so the parked-router dismisses it. Otherwise leave the class unstamped and let
-      // the heuristic classifier handle a real materializer fault (DB outage, decoder bug, etc.).
-      const allMissing = missingRowSlugs.length === pending.length;
-      const tail = allMissing
-        ? `public.specs has no row for any of ${pending.length} in_review spec(s): ${pending.join(", ")} — author lane silently failed upstream`
-        : `materialize failed for all ${pending.length} in_review spec(s) — nothing reviewable`;
-      await update(job.id, {
-        status: "needs_attention",
-        ...(allMissing ? { needs_attention_class: "spec_row_missing" as const } : {}),
-        error: tail,
-        log_tail: tail.slice(-2000),
-      });
-      console.error(`${tag} ${tail}`);
-      return;
-    }
-  }
-
-  // spec-timecard-chokepoint-instrumentation Phase 1 — Vale enters review for each materialized slug.
-  // phase_index=null (Vale reviews the spec as a whole, not a specific phase).
-  for (const slug of reviewable) {
-    await emitTimecard({
-      workspace_id: job.workspace_id,
-      spec_slug: slug,
-      phase_index: null,
-      event_kind: "review_started",
-      actor: "vale",
-      metadata: { job_id: job.id },
-    });
-  }
-
-  // agent-mandate-hardening-spec-review Phase 1 — bake the accumulated coaching into the run-job. Pre-
-  // resolve every goal in the workspace so Vale can validate any `Parent: [[../goals/{slug}]]` or
-  // `[[../goals/{slug}#M{n}-…]]` wikilink against the DB row directly. The rejection pattern the coaching
-  // caught: Vale kept flagging `Parent: [[../goals/{slug}]]` specs on the grounds that
-  // docs/brain/goals/{slug}.md is absent — but that path was PURGED in spec-pm-markdown-purge and the DB
-  // is authoritative. Handing Vale the resolved goal + milestones inline lets her check against the truth
-  // instead of a stale filesystem heuristic.
-  const goalIndex: { slug: string; milestones: { id: string; title: string }[] }[] = await (async () => {
-    try {
-      const { listGoals } = await import("../src/lib/goals-table");
-      const goals = await listGoals(job.workspace_id);
-      return goals.map((g) => ({
-        slug: g.slug,
-        milestones: (g.milestones ?? []).map((m) => ({ id: m.id, title: m.title })),
-      }));
-    } catch (e) {
-      console.warn(`${tag} could not pre-resolve goals index: ${e instanceof Error ? e.message : String(e)}`);
-      return [];
-    }
-  })();
-  const goalIndexBlock = goalIndex.length
-    ? [
-        `GOAL-PARENT LOOKUP — RESOLVED FROM public.goals + public.goal_milestones (the DB is authoritative;`,
-        `docs/brain/goals/*.md was DELETED in spec-pm-markdown-purge — do NOT reject a Parent goal wikilink`,
-        `on the grounds that its markdown file is missing). When a spec's Parent line names a goal, validate`,
-        `it against this DB-resolved index (goal slug → milestones):`,
-        ...goalIndex.map(
-          (g) =>
-            `  • ${g.slug}${
-              g.milestones.length
-                ? ` — milestones: ${g.milestones.map((m) => `#${m.id.slice(0, 8)}=${m.title}`).join("; ")}`
-                : ` — no milestones`
-            }`,
-        ),
-        `If the Parent wikilink names a goal slug that IS in this index, the goal parent RESOLVES — do not`,
-        `emit needs_fix on missing-goal-file grounds. If the Parent names ONLY the goal (no milestone) AND`,
-        `the goal has ≥1 milestone in the index above, that IS a defect (specs must anchor to a specific`,
-        `milestone, not the general goal). If the goal slug is NOT in this index, then the parent goal`,
-        `genuinely does not exist and needs_fix is correct.`,
-      ].join("\n")
-    : `GOAL-PARENT LOOKUP — the goals index is empty for this workspace (no goals authored yet), so any Parent that claims a [[../goals/{slug}]] wikilink is unresolved and IS a defect.`;
-
-  try {
-    const prompt = [
-      `You are Vale, the box's Spec-Review agent — the meticulous reviewer who guards the build pipeline. Use the spec-review skill (cwd is the repo root). You are on Max (no ANTHROPIC_API_KEY, web search on), read-only against the repo + DB. The WORKER (deterministic Node) is the only component that mutates state — you investigate and emit verdicts.`,
-      ``,
-      `Phase 3 rubric — QUALITY ONLY: you emit exactly one verdict per spec (pass | needs_fix). Ada owns the planned/deferred call — do NOT emit disposition / disposition_reason. AGENT_RUBRICS["spec-review"] is explicit: "Phase 3: QUALITY only — pass/needs_fix; planned/deferred is Ada's call, not Vale's." An emitted disposition is a lane violation and the grader penalises it. (This supersedes the earlier vale-reasons-the-disposition delegation — repeated coaching stuck.)`,
-      ``,
-      `🗃️ DB-DRIVEN SPECS — specs now live in public.specs + public.spec_phases, NOT in docs/brain/specs/*.md (those files were DELETED in the db-driven-specs purge — do NOT try to read them, they don't exist). The worker has MATERIALIZED each in_review spec's DB row to a temp file under .box/. Read THAT file, never docs/brain/specs/….`,
-      ``,
-      `THE QUEUE — ${reviewable.length} spec(s) parked in_review awaiting your review. Read the materialized DB row at each path (the slug BEFORE .md IS the slug you MUST emit — copy it VERBATIM into decisions[].slug; do not re-derive the slug from the H1 title, the summary, or intuition. Any decision whose slug doesn't match a queued path is silently dropped by the worker):`,
-      reviewable.map((s) => `  • .box/spec-${s}.md   (slug: ${s})`).join("\n"),
-      ``,
-      goalIndexBlock,
-      ``,
-      `For EACH spec, read its .box/spec-{slug}.md (the materialized DB row) + check it against this CHECKLIST (adapted to the DB row — the materialized file has NO status markers; status is a DB column, so don't check the H1 for emojis):`,
-      `  1. PHASES — exactly one well-formed phase sequence. Phases render as "## Phase N — …" (one per spec_phases row); no duplicate / mangled / out-of-order phase numbers (a "P1/P2/P1/P2" shape is a defect). A one-shot spec with no "## Phase" heading is fine.`,
-      `  2. OWNER — a real **Owner:** [[../functions/{slug}]] line whose wikilink resolves to docs/brain/functions/{slug}.md.`,
-      `  3. PARENT — a real **Parent:** line pointing at either a function mandate (a ### under that function's ## Mandates) OR a goal milestone. For a goal parent, USE THE DB-RESOLVED INDEX ABOVE — never reject on "docs/brain/goals/{slug}.md is missing" (that path is purged). A Parent that names only the goal when the DB shows the goal has milestones IS a defect (should anchor to a milestone).`,
-      `  4. BLOCKED-BY — a **Blocked-by:** [[…]] line IFF the spec actually depends on prerequisites (the body names them). Absence is fine when there are none; only a defect when prerequisites are named in the body but missing from the header.`,
-      `  5. DB-COMPANION — flag a customer-referenced table (customer_id column) introduced with no plan for a Sonnet data tool in sonnet-orchestrator-v2.ts (CLAUDE.md hard rule).`,
-      `  6. VERIFICATION — each phase carries its "### Verification" section (spec_phases.verification) so Vera can grade later. A phase with no Verification is a defect; a one-shot spec needs at least one Verification block.`,
-      ``,
-      `EVIDENCE CONTRACT — every verdict's reason field MUST enumerate the six checks by number with the actual RESULT you observed. This is the coaching that stuck: bare "passes" / "looks good" caps you at grade 6 because the grader cannot distinguish a genuine walk from a rubber-stamp. Sample reason:`,
-      `  "spec {slug-verbatim}: (1) phases 1-3 contiguous each with ### Verification; (2) Owner [[../functions/growth]] resolves; (3) Parent [[../goals/acquisition-research-engine#M4-…]] resolves via DB index (M4-… in the goal); (4) no prerequisites named in body → no Blocked-by required; (5) no customer_id table; (6) all phases carry Verification — no defects, verdict pass, stayed in Phase 3 quality lane (no disposition emitted)."`,
-      `Even on a pass, name what you checked; on needs_fix quote the exact offending field or section from the markdown (e.g. "duplicate '## Phase 1' heading at :34 and :52", 'no "**Owner:**" line', '**Parent:** [[../goals/x]] names only the goal but DB shows milestones M1/M2/M3').`,
-      ``,
-      `Then route each spec with ONE quality verdict:`,
-      `  • pass — CHECKLIST clears. The worker sets flags.vale_pass=true; the spec stays in_review for Ada's disposition lane. Emit reason (per the EVIDENCE CONTRACT above). defects: []. Do NOT emit disposition / disposition_reason — that is Ada's call, and the worker will not process it under this rubric.`,
-      `  • needs_fix — one or more CHECKLIST items fail. The worker records your diagnosis as a director_activity row; the spec stays in_review until the corrections land. Emit reason (per the EVIDENCE CONTRACT above) + defects[] listing the specific failures — name the missing field, the mangled phase numbers, the offending section. Never emit disposition.`,
-      ``,
-      `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating script. Your final message is ONE JSON object, no prose before/after (if fenced, the JSON is the last thing in the message):`,
-      `  {"status":"completed","decisions":[{"slug":"<verbatim-from-.box-path>","verdict":"pass","reason":"<evidence-contract sentence>","defects":[]},{"slug":"<verbatim-from-.box-path>","verdict":"needs_fix","reason":"<evidence-contract sentence>","defects":["<specific failure>"]}]}`,
-      `  {"status":"error","error":"<why you cannot proceed>"}`,
-      ``,
-      `Every slug in the queue MUST appear once in decisions[] with its slug copied verbatim from the .box/spec-{slug}.md path above (never abbreviated, never re-derived from the H1 or the summary). verdict MUST be spelled literally "pass" or "needs_fix". needs_fix.defects MUST list the specific checklist failures (no defects → the worker treats it as pass). Do NOT emit disposition or disposition_reason on any verdict under this rubric — planned/deferred is Ada's.`,
-    ].join("\n");
-
-    const { session, resultText, isError, raw, usage, model, configDir: reviewDir } = await runBoxLane(
-      (cfg, sid) => runSpecReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
-    );
-    await meterAgentJob(job, reviewDir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-
-    const parsed = extractJson<{ status?: string; error?: string; decisions?: SpecReviewDecisionJson[] }>(resultText);
-    if (parsed?.status === "error") {
-      await update(job.id, { status: "needs_attention", error: `spec-review error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
-      console.error(`${tag} agent reported error: ${parsed.error}`);
-      return;
-    }
-    if (!parsed || !Array.isArray(parsed.decisions)) {
-      // Defensive (spec-review-sweep phantom-park fix): a "no parseable decisions" verdict is only a GENUINE
-      // failure when there was real input to decide on. Re-read the in_review pool: if it has DRAINED to zero
-      // since this job was enqueued (every spec shipped/deferred/sent back while the job sat queued, or the
-      // agent was handed nothing to decide), there is nothing to review — complete as a benign no-op instead
-      // of parking a needs_attention job that Ada would then re-escalate forever on every standing pass. Only
-      // a parse failure over a STILL-POPULATED queue parks (a real malformed-output failure on real input).
-      // vale-instant-per-spec-review — scope the drain-check to THIS job's slug for a per-spec job (a
-      // slug-less/sentinel job re-checks the whole pool). A per-spec job whose slug already got verdicted
-      // (or shipped/deferred/sent-back) since it was enqueued has nothing to decide → benign no-op.
-      const stillPool = await selectUnreviewedInReviewSpecs(a, job.workspace_id);
-      const stillInReview = isSentinel ? stillPool : stillPool.filter((s) => s === job.spec_slug);
-      if (!stillInReview.length) {
-        const tail = `spec-review no-op — nothing left to review by run time (no parseable decisions over empty input; not parking)`;
-        await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
-        console.log(`${tag} ${tail}`);
-        return;
-      }
-      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "spec-review produced no parseable decisions", log_tail: raw.slice(-2000) });
-      console.error(`${tag} no parseable decisions (${stillInReview.length} spec(s) still in_review)`);
-      return;
-    }
-
-    const queuedSet = new Set(reviewable);
-    let passed = 0;
-    let needsFix = 0;
-    let dispositions = 0; // vale-reasons-the-disposition Phase 1 — how many passes carried a Vale rec
-    const skipped: string[] = [];
-    for (const d of parsed.decisions) {
-      if (!d || typeof d.slug !== "string" || !queuedSet.has(d.slug)) { skipped.push(d?.slug ?? "(no-slug)"); continue; }
-      // Phase 3 — accept the live vocabulary (`pass`/`needs_fix`) and the legacy strings (`approve`/`defer`)
-      // for back-compat; the verdict applier auto-routes the legacy values to `pass`.
-      const verdict = d.verdict === "pass" || d.verdict === "needs_fix" || d.verdict === "approve" || d.verdict === "defer" ? d.verdict : null;
-      if (!verdict) { skipped.push(d.slug); continue; }
-      const reason = String(d.reason || "").slice(0, 1000);
-      const defects = Array.isArray(d.defects) ? d.defects.map((x) => String(x).slice(0, 300)).slice(0, 20) : [];
-      // vale-reasons-the-disposition Phase 1 — carry Vale's reasoned recommendation through to the
-      // applier ONLY on a pass (an ill-formed spec is not dispositionable) and ONLY when both fields
-      // are present. The applier is defensive; the worker just pipes.
-      const rawDisposition = verdict === "pass" && (d.disposition === "planned" || d.disposition === "deferred") ? d.disposition : undefined;
-      const rawDispositionReason = rawDisposition && typeof d.disposition_reason === "string" ? String(d.disposition_reason).slice(0, 1000) : undefined;
-      const disposition = rawDisposition && rawDispositionReason ? rawDisposition : undefined;
-      const disposition_reason = disposition ? rawDispositionReason : undefined;
-      const result = await applySpecReviewDecision(job.workspace_id, { slug: d.slug, verdict, reason, defects, disposition, disposition_reason });
-      // spec-timecard-chokepoint-instrumentation Phase 1 — Vale's verdict lands. phase_index=null; a
-      // pass/needs_fix is a spec-level event (Vale reviews the whole spec at the vale_pass seam).
-      await emitTimecard({
-        workspace_id: job.workspace_id,
-        spec_slug: d.slug,
-        phase_index: null,
-        event_kind: result.applied === "pass" ? "review_passed" : "review_failed",
-        actor: "vale",
-        metadata: { job_id: job.id, ...(defects.length ? { defects } : {}) },
-      });
-      if (result.applied === "pass") {
-        passed++;
-        if (disposition) dispositions++;
-      } else {
-        needsFix++;
-      }
-    }
-    // Phase 3 — every Vale pass enqueues a candidate for Ada's disposition lane. Run the sweep INLINE
-    // so a pass + dispose lands in one cron tick (no waiting for the next director pass).
-    const dispo = await runAdaDispositionSweep(a, job.workspace_id);
-    // spec-review-pass-always-stamps-review-passed-flag Phase 2 — tail the passed-but-unstamped reconciler
-    // after the disposition sweep so a per-spec review job's cadence also drains legacy residue for the
-    // whole workspace (idempotent; a workspace with no residue no-ops for free on the free `IS NULL` filter).
-    let heal = { scanned: 0, healed: 0, skipped: 0, failed: 0 };
-    try { heal = await runValeReviewPassReconciler(a, job.workspace_id); } catch (e) {
-      console.warn(`${tag} vale-review-passed reconciler failed (continuing):`, e instanceof Error ? e.message : e);
-    }
-    const healNote = heal.healed || heal.failed ? ` · heal-vale-pass: ${heal.healed}/${heal.scanned}${heal.failed ? ` (${heal.failed} failed)` : ""}` : "";
-    const tail = `reviewed ${parsed.decisions.length}/${reviewable.length} — ✅${passed}${dispositions ? ` (${dispositions} w/ vale-rec)` : ""} ⚠${needsFix}${skipped.length ? ` · skipped ${skipped.length}` : ""} · dispose: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}${healNote}`;
-    await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
-    console.log(`${tag} ✓ ${tail}`);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -23834,7 +23469,6 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ticket-handle") return runTicketHandleJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
-  if (job.kind === "spec-review") return runSpecReviewJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
   if (job.kind === "deploy-review") return runDeployReviewJob(job);
   if (job.kind === "mario") return runMarioJob(job);
@@ -25276,7 +24910,7 @@ async function main() {
   console.log(
     `lanes: { build/plan:${MAX_CONCURRENT}, fold:${MAX_FOLD}, product-seed:${MAX_SEED}, spec-chat:${MAX_SPEC_CHAT}, ` +
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
-    `spec-review:${MAX_SPEC_REVIEW}, migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
+    `migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
     `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
@@ -25342,7 +24976,6 @@ async function main() {
   const countTicketHandle = () => [...active.values()].filter((v) => v.kind === "ticket-handle").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
-  const countSpecReview = () => [...active.values()].filter((v) => v.kind === "spec-review").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
   const countDeployReview = () => [...active.values()].filter((v) => v.kind === "deploy-review").length;
   const countMario = () => [...active.values()].filter((v) => v.kind === "mario").length;
@@ -25380,7 +25013,7 @@ async function main() {
   const countPlatformDirector = () => [...active.values()].filter((v) => v.kind === "platform-director" || v.kind === "director-bounce-back" || v.kind === "growth-director").length;
   const countProposedGoal = () => [...active.values()].filter((v) => v.kind === "proposed-goal").length;
   const countProposedModelTier = () => [...active.values()].filter((v) => v.kind === "proposed-model-tier").length;
-  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "ticket-handle" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "spec-review" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "playbook-compile" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
+  const countOther = () => [...active.values()].filter((v) => v.kind !== "fold" && v.kind !== "goal-fold" && v.kind !== "product-seed" && v.kind !== "spec-chat" && v.kind !== "ticket-improve" && v.kind !== "ticket-handle" && v.kind !== "triage-escalations" && v.kind !== "spec-test" && v.kind !== "migration-fix" && v.kind !== "deploy-review" && v.kind !== "cs-director-call" && v.kind !== "playbook-compile" && v.kind !== "dev-ask" && v.kind !== "god-mode" && v.kind !== "pr-resolve" && v.kind !== "repair" && v.kind !== "regression" && v.kind !== "security-review" && v.kind !== "storefront-optimizer" && v.kind !== "coverage-register" && v.kind !== "platform-director" && v.kind !== "director-bounce-back" && v.kind !== "growth-director" && v.kind !== "proposed-goal" && v.kind !== "research").length;
   const launch = (job: Job) => {
     active.set(job.id, {
       kind: job.kind,
@@ -25655,16 +25288,6 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed spec-test ${job.id.slice(0, 8)} → ${countSpecTest() + 1}/${MAX_SPEC_TEST} spec-test lane`);
-        launch(job);
-      }
-      // Fill the spec-review lane (spec-review-agent / Vale): cron-fired in_review queue sweep, concurrency-1.
-      // Read-only Max pass — gated on the Claude-down breaker (Phase 2) — parked jobs drain on recovery.
-      // Without this lane the spec-review-cron's queued jobs sit unclaimed (loop:agent:spec-review repair).
-      while (!claudeDown && countSpecReview() < MAX_SPEC_REVIEW) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-review"] });
-        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
-        if (!job || !job.id) break;
-        console.log(`claimed spec-review ${job.id.slice(0, 8)} → ${countSpecReview() + 1}/${MAX_SPEC_REVIEW} spec-review lane`);
         launch(job);
       }
       // Fill the migration-fix lane (migration-fix-agent): event-fired gated billing repair, concurrency-1.
@@ -26211,14 +25834,6 @@ async function main() {
         lastFoldQueueReaper = Date.now();
         foldQueueReaperInFlight = true;
         void runFoldQueueReaperJob().finally(() => { foldQueueReaperInFlight = false; });
-      }
-      // vale-instant-per-spec-review — ~30s self-enqueue: reconcile the specs table → one per-spec Vale job
-      // per unreviewed in_review spec. The primary enqueue path (the box can't reliably send the Inngest
-      // event). In-flight-guarded + throttled; fire-and-forget, never blocks the loop.
-      if (!specReviewEnqueueInFlight && Date.now() - lastSpecReviewEnqueue > SPEC_REVIEW_ENQUEUE_INTERVAL_MS) {
-        lastSpecReviewEnqueue = Date.now();
-        specReviewEnqueueInFlight = true;
-        void runSpecReviewEnqueueReaper().finally(() => { specReviewEnqueueInFlight = false; });
       }
       // Only build/plan/fold/product-seed/spec-chat/ticket-improve produce durable work (a PR, published
       // content, a user's mid-turn) that a restart would lose — those block self-update. The autonomous,
