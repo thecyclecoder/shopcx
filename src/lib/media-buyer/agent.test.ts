@@ -747,6 +747,26 @@ test("Phase 2 — readCurrentTestCohortSize counts only THIS product's live ad_p
   assert.equal(sizeDefault, 5);
 });
 
+test("REGRESSION (2026-07-12 over-launch) — readCurrentTestCohortSize with a testMetaCampaignId counts LIVE campaign adsets ORIGIN-AGNOSTICALLY (legacy adsets count; paused/other-campaign don't), so a full cohort reads 4 not 0", async () => {
+  const CAMP = "camp-coffee";
+  const tables: Tables = {
+    // The 4 pre-existing skeptic adsets were minted by the OLD loop → they have NO ad_publish_jobs rows.
+    // The buggy ad_publish_jobs-only count returned 0 here → deficit 4-0 → replenished 4 on top → 8 live.
+    ad_publish_jobs: [],
+    meta_adsets: [
+      { meta_adset_id: "as-v3", workspace_id: WS, meta_campaign_id: CAMP, effective_status: "ACTIVE" },
+      { meta_adset_id: "as-fad", workspace_id: WS, meta_campaign_id: CAMP, effective_status: "ACTIVE" },
+      { meta_adset_id: "as-taste", workspace_id: WS, meta_campaign_id: CAMP, effective_status: "ACTIVE" },
+      { meta_adset_id: "as-toog", workspace_id: WS, meta_campaign_id: CAMP, effective_status: "ACTIVE" },
+      { meta_adset_id: "as-paused", workspace_id: WS, meta_campaign_id: CAMP, effective_status: "PAUSED" }, // freed
+      { meta_adset_id: "as-other", workspace_id: WS, meta_campaign_id: "camp-other", effective_status: "ACTIVE" }, // other product
+    ],
+  };
+  const admin = makeFakeAdminForProductScope(tables);
+  const size = await readCurrentTestCohortSize(admin, { workspaceId: WS, productId: "prod-coffee", testMetaCampaignId: CAMP });
+  assert.equal(size, 4); // 4 live in CAMP; paused + other-campaign excluded → deficit vs target 4 = 0 → no over-launch
+});
+
 test("Phase 2 — listReadyToTest filtered by productId returns ONLY that product's ready campaigns (product B's ready creative is never selected for product A's replenish)", async () => {
   const PRODUCT_A = "prod-A";
   const PRODUCT_B = "prod-B";

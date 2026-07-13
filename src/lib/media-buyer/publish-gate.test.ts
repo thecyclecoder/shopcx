@@ -528,17 +528,15 @@ function perTestCohortRow(overrides: Partial<Row> = {}): Row {
   });
 }
 
-/** One live per-test job (published + active) in the cohort's product, counted toward concurrency. */
-function liveTestJob(adsetId: string, campaignId = "camp-live"): Row {
+/** One live per-test ad set in the cohort's testing campaign — counts toward concurrency now that the
+ *  gate reads live `meta_adsets` (ORIGIN-AGNOSTIC, so legacy-loop adsets count too), not `ad_publish_jobs`.
+ *  `effective_status` defaults ACTIVE; pass a freed status (PAUSED/…) to prove it does NOT occupy a slot. */
+function liveTestAdset(adsetId: string, campaignId = "camp-PT", effectiveStatus = "ACTIVE"): Row {
   return {
-    id: `job-${adsetId}`,
-    workspace_id: WS,
-    origin: MEDIA_BUYER_TEST_ORIGIN,
-    publish_active: true,
-    publish_status: "published",
-    create_adset_spec: { campaign_id: "camp-PT" },
     meta_adset_id: adsetId,
-    campaign_id: campaignId,
+    workspace_id: WS,
+    meta_campaign_id: campaignId,
+    effective_status: effectiveStatus,
   };
 }
 
@@ -560,12 +558,10 @@ test("evaluateMediaBuyerTestPublish — per-test cohort, first test (0 live) →
 });
 
 test("evaluateMediaBuyerTestPublish — per-test cohort at 3 live (would be the 4th) → ALLOW; at 4 live → over_concurrency", async () => {
-  const campaigns = [{ id: "camp-live", workspace_id: WS, product_id: "prod-PT" }];
   // 3 live → 4th fits exactly ($600).
   const three = makeAdmin({
     media_buyer_test_cohorts: [perTestCohortRow()],
-    ad_publish_jobs: [liveTestJob("a1"), liveTestJob("a2"), liveTestJob("a3")],
-    ad_campaigns: campaigns,
+    meta_adsets: [liveTestAdset("a1"), liveTestAdset("a2"), liveTestAdset("a3")],
   });
   const r3 = await evaluateMediaBuyerTestPublish(three, {
     workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
@@ -576,8 +572,7 @@ test("evaluateMediaBuyerTestPublish — per-test cohort at 3 live (would be the 
   // 4 live → a 5th would be $750 > $600 → refuse.
   const four = makeAdmin({
     media_buyer_test_cohorts: [perTestCohortRow()],
-    ad_publish_jobs: [liveTestJob("a1"), liveTestJob("a2"), liveTestJob("a3"), liveTestJob("a4")],
-    ad_campaigns: campaigns,
+    meta_adsets: [liveTestAdset("a1"), liveTestAdset("a2"), liveTestAdset("a3"), liveTestAdset("a4")],
     dashboard_notifications: [],
     director_activity: [],
   });
@@ -589,24 +584,56 @@ test("evaluateMediaBuyerTestPublish — per-test cohort at 3 live (would be the 
   if (!r4.allowed) assert.equal(r4.reason, "over_concurrency");
 });
 
-test("evaluateMediaBuyerTestPublish — per-test concurrency counts only THIS product's live adsets", async () => {
-  // A live per-test adset for a DIFFERENT product must not count against prod-PT's ceiling.
+test("evaluateMediaBuyerTestPublish — REGRESSION (2026-07-12 over-launch): pre-existing legacy adsets in the campaign count (any origin), and PAUSED adsets are freed", async () => {
+  // The bug: an ad_publish_jobs-only count was blind to 4 pre-existing Coffee adsets (minted by the old
+  // loop, no publish-job rows) → the gate saw 0 → over-launched to 8. The campaign has NO ad_publish_jobs
+  // rows at all — only live meta_adsets — proving the count is origin-agnostic.
+  const atCeiling = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    ad_publish_jobs: [], // deliberately empty — the OLD counter returned 0 here and over-launched
+    meta_adsets: [liveTestAdset("legacy1"), liveTestAdset("legacy2"), liveTestAdset("legacy3"), liveTestAdset("legacy4")],
+    dashboard_notifications: [],
+    director_activity: [],
+  });
+  const rCeil = await evaluateMediaBuyerTestPublish(atCeiling, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  assert.equal(rCeil.allowed, false); // 4 legacy live → 5th refused (was ALLOWED under the bug)
+  if (!rCeil.allowed) assert.equal(rCeil.reason, "over_concurrency");
+
+  // Pausing 3 of those 4 FREES their slots → only 1 occupies → the new one is the 2nd → fits.
+  const mostlyPaused = makeAdmin({
+    media_buyer_test_cohorts: [perTestCohortRow()],
+    meta_adsets: [
+      liveTestAdset("legacy1", "camp-PT", "PAUSED"),
+      liveTestAdset("legacy2", "camp-PT", "ADSET_PAUSED"),
+      liveTestAdset("legacy3", "camp-PT", "CAMPAIGN_PAUSED"),
+      liveTestAdset("legacy4"), // the one still ACTIVE
+    ],
+  });
+  const rPaused = await evaluateMediaBuyerTestPublish(mostlyPaused, {
+    workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
+    metaAdsetId: "pending", projectedDailyCents: 15000,
+  });
+  assert.equal(rPaused.allowed, true);
+});
+
+test("evaluateMediaBuyerTestPublish — per-test concurrency is campaign-scoped (another product's campaign is excluded)", async () => {
+  // Each per-test cohort's test_meta_campaign_id is product-specific, so a live adset in a DIFFERENT
+  // campaign (another product's testing campaign) must not count against prod-PT's ceiling.
   const admin = makeAdmin({
     media_buyer_test_cohorts: [perTestCohortRow()],
-    ad_publish_jobs: [
-      liveTestJob("a1", "camp-live"),          // prod-PT
-      liveTestJob("other", "camp-other"),       // prod-OTHER — must be excluded
-    ],
-    ad_campaigns: [
-      { id: "camp-live", workspace_id: WS, product_id: "prod-PT" },
-      { id: "camp-other", workspace_id: WS, product_id: "prod-OTHER" },
+    meta_adsets: [
+      liveTestAdset("a1", "camp-PT"),        // this cohort's campaign
+      liveTestAdset("other", "camp-other"),   // another product's campaign — must be excluded
     ],
   });
   const r = await evaluateMediaBuyerTestPublish(admin, {
     workspaceId: WS, metaAdAccountId: ACCT, productId: "prod-PT",
     metaAdsetId: "pending", projectedDailyCents: 15000,
   });
-  // Only 1 counts (a1) → 2nd fits under $600 → ALLOW.
+  // Only 1 counts (a1 in camp-PT) → 2nd fits under $600 → ALLOW.
   assert.equal(r.allowed, true);
 });
 
