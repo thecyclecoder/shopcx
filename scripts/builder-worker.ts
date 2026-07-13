@@ -20462,10 +20462,27 @@ async function runMediaBuyerJob(job: Job) {
   // cohort recommendations into #director-growth-max. The agent never posts directly — delivery lives here,
   // rolling up all accounts' plans. Non-fatal: a Slack hiccup must not fail the media-buyer pass.
   try {
-    const { deliverMediaBuyerDigest } = await import("../src/lib/media-buyer/director-digest");
-    const plans = perAccount
-      .filter((r) => r.plan && !r.error)
-      .map((r) => ({ account: r.account, plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan }));
+    const { deliverMediaBuyerDigest, resolveProductTitlesForWorkspace } = await import(
+      "../src/lib/media-buyer/director-digest"
+    );
+    // media-buyer-digest-consolidate-product-names-suppress-noop Phase 1 + Fix 1 — resolve each
+    // pass's cohort product_id → products.title so the digest labels lines by product
+    // ("Amazing Coffee — …") instead of a truncated account id. The helper hard-narrows the
+    // lookup to this workspace so a bad cross-workspace cohort row can never leak another
+    // tenant's product title into this Growth Director Slack digest (resolves the spec-test
+    // `sec:authz_rls` finding). A null-product cohort (legacy Superfood Tabs) OR an
+    // out-of-workspace product silently falls back to the account-id label in composeDigest.
+    const okPasses = perAccount.filter((r) => r.plan && !r.error);
+    const productIds = Array.from(
+      new Set(okPasses.map((r) => r.productId).filter((v): v is string => !!v)),
+    );
+    const titleByProductId = await resolveProductTitlesForWorkspace(a, job.workspace_id, productIds);
+    const plans = okPasses.map((r) => ({
+      account: r.account,
+      productId: r.productId,
+      productTitle: r.productId ? (titleByProductId.get(r.productId) ?? null) : null,
+      plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan,
+    }));
     if (plans.length) {
       const digest = await deliverMediaBuyerDigest(a, job.workspace_id, plans);
       console.log(`${tag} director digest → ${digest.posted ? `posted (${digest.ts})` : `skipped — ${digest.reason}`}`);

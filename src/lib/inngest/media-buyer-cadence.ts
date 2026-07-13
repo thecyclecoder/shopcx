@@ -8,16 +8,23 @@
  * The cron (`media-buyer-cadence-cron`, `0 13 * * *` UTC) SELECTs distinct
  * `workspace_id` from [[../tables/media_buyer_test_cohorts]] where `is_active=true`
  * and fans out one `growth/media-buyer-cadence-sweep` event per workspace. Each sweep
- * inserts one [[../tables/agent_jobs]] row `kind='media-buyer'` per active cohort row
- * (per workspace-account pair), carrying `instructions.meta_ad_account_id` so the
- * [[../libraries/media-buyer-agent]] runner narrows to that account (a workspace-wide
- * cohort with `meta_ad_account_id IS NULL` writes `null`, which the runner treats as
- * "fan out over every connected meta_ad_accounts row").
+ * inserts EXACTLY ONE workspace-scoped [[../tables/agent_jobs]] row `kind='media-buyer'`
+ * (`instructions.meta_ad_account_id = null`), and the [[../libraries/media-buyer-agent]]
+ * runner + the box worker's media-buyer lane fan out over every connected
+ * [[../tables/meta_ad_accounts]] row × the account's active per-product cohorts.
+ * ONE job → ONE run → ONE consolidated Growth-Director digest per workspace per pass.
  *
- * Idempotency: a sweep skips any workspace-account pair that already has a
- * NOT-YET-TERMINAL `kind='media-buyer'` [[../tables/agent_jobs]] row created since the
- * current UTC day start. So a second invocation on the same UTC day dispatches ZERO
- * new jobs, and a manual same-day re-fire of the cron is a safe no-op.
+ * (Pre-Phase-2 shape — media-buyer-digest-consolidate-product-names-suppress-noop Phase 2 —
+ * inserted one row PER active cohort, which under the per-product cohort split produced
+ * up to 6 Slack messages per pass. The account × product fan-out is now the LANE's job,
+ * not the DISPATCHER's — the per-cohort job split was redundant.)
+ *
+ * Idempotency: a sweep skips a workspace that already has a NOT-YET-TERMINAL
+ * `kind='media-buyer'` [[../tables/agent_jobs]] row created since the current UTC day
+ * start (regardless of the row's per-account `instructions` shape, so legacy
+ * per-account rows from before Phase 2 also count as coverage during rollout). So a
+ * second invocation on the same UTC day dispatches ZERO new jobs, and a manual same-day
+ * re-fire of the cron is a safe no-op.
  *
  * Self-monitoring: the cron emits its own `media-buyer-cadence-cron` heartbeat at the
  * end via [[../libraries/control-tower]] `emitCronHeartbeat` (registered in
@@ -78,7 +85,6 @@ interface CohortRow {
 interface AgentJobRow {
   id: string;
   status: string;
-  instructions: string | null;
 }
 
 export interface DispatchMediaBuyerCadenceResult {
@@ -87,9 +93,25 @@ export interface DispatchMediaBuyerCadenceResult {
 }
 
 /**
- * The PURE per-workspace sweep — resolves the workspace's active cohorts, filters out
- * pairs already covered by an unfinished `kind='media-buyer'` job created today, and
- * inserts one `agent_jobs` row per remaining pair. Returns `{evaluated, dispatched}`.
+ * The PURE per-workspace sweep — resolves the workspace's active cohorts, and if
+ * ≥1 exists AND no unfinished workspace-scoped `kind='media-buyer'` job for the
+ * workspace was already created today, inserts ONE workspace-scoped `agent_jobs`
+ * row (`instructions = { meta_ad_account_id: null }`, `spec_slug =
+ * 'media-buyer:workspace'`). The box-worker lane's account × per-product cohort
+ * fan-out downstream now covers every cohort under a single job → single
+ * consolidated digest — this is
+ * media-buyer-digest-consolidate-product-names-suppress-noop Phase 2 (approach (a)
+ * in the spec: collapse the redundant per-cohort dispatcher fan-out; the lane
+ * already fans out).
+ *
+ * Preserves the dormant-heartbeat guarantee: a workspace with cohorts but with
+ * some accounts having zero active cohort still runs one pass per account so the
+ * audit row lands — that invariant lives INSIDE the lane
+ * (`runMediaBuyerLoopForAccount`), so a single workspace-scoped job still fires
+ * one pass per connected account.
+ *
+ * Returns `{evaluated, dispatched}` — `evaluated` counts active cohort rows so
+ * the cron log preserves the pre-Phase-2 signal; `dispatched` is 0 or 1.
  *
  * Extracted from the Inngest handler so it's testable without `step.run`.
  */
@@ -110,53 +132,37 @@ export async function dispatchMediaBuyerCadence(
   const sinceIso = utcDayStartIso(now);
   const { data: todaysJobs, error: jobsErr } = await admin
     .from("agent_jobs")
-    .select("id, status, instructions")
+    .select("id, status")
     .eq("workspace_id", workspaceId)
     .eq("kind", "media-buyer")
     .gte("created_at", sinceIso);
   if (jobsErr) throw new Error(`agent_jobs read failed: ${jobsErr.message}`);
 
-  const covered = new Set<string>();
-  for (const job of (todaysJobs || []) as AgentJobRow[]) {
-    if (!ACTIVE_MEDIA_BUYER_JOB_STATUSES.has(job.status)) continue;
-    covered.add(coverageKey(readInstructionsAccount(job.instructions)));
+  // Phase 2 coverage: ANY unfinished media-buyer job for this workspace today
+  // covers the workspace slot — the lane's fan-out downstream handles every
+  // account × product. Pre-Phase-2 rows (per-account) also count as coverage
+  // during rollout, since the lane will still discover this workspace's accounts
+  // and cohorts under whichever job is already in flight.
+  const alreadyCoveredToday = ((todaysJobs || []) as AgentJobRow[]).some((j) =>
+    ACTIVE_MEDIA_BUYER_JOB_STATUSES.has(j.status),
+  );
+  if (alreadyCoveredToday) {
+    return { evaluated: rows.length, dispatched: 0 };
   }
 
-  let dispatched = 0;
-  for (const cohort of rows) {
-    const account = cohort.meta_ad_account_id;
-    const key = coverageKey(account);
-    if (covered.has(key)) continue;
-    const { error: insErr } = await admin.from("agent_jobs").insert({
-      workspace_id: workspaceId,
-      spec_slug: mediaBuyerSpecSlug(account),
-      kind: "media-buyer",
-      instructions: JSON.stringify({ meta_ad_account_id: account }),
-    });
-    if (insErr) {
-      console.error(
-        `[media-buyer-cadence] insert failed ws=${workspaceId} account=${account ?? "workspace"}: ${insErr.message}`,
-      );
-      continue;
-    }
-    covered.add(key);
-    dispatched++;
+  const { error: insErr } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: mediaBuyerSpecSlug(null),
+    kind: "media-buyer",
+    instructions: JSON.stringify({ meta_ad_account_id: null }),
+  });
+  if (insErr) {
+    console.error(
+      `[media-buyer-cadence] insert failed ws=${workspaceId}: ${insErr.message}`,
+    );
+    return { evaluated: rows.length, dispatched: 0 };
   }
-  return { evaluated: rows.length, dispatched };
-}
-
-function coverageKey(account: string | null): string {
-  return account ?? "__workspace__";
-}
-
-function readInstructionsAccount(instructions: string | null): string | null {
-  if (!instructions) return null;
-  try {
-    const parsed = JSON.parse(instructions) as { meta_ad_account_id?: unknown };
-    return typeof parsed?.meta_ad_account_id === "string" ? parsed.meta_ad_account_id : null;
-  } catch {
-    return null;
-  }
+  return { evaluated: rows.length, dispatched: 1 };
 }
 
 /** Distinct workspace_ids with ≥1 active cohort row — the cron's fan-out set. */
