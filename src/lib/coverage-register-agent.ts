@@ -23,8 +23,14 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { OwnerFunction } from "@/lib/control-tower/registry";
+import type { StructuredSpecInput } from "@/lib/author-spec";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/** File the coverage-register grep check asserts the loop id landed in — MONITORED_LOOPS lives here
+ *  (for the register spec) and INTENTIONALLY_UNMONITORED_CRONS lives here too (for the exempt spec),
+ *  so the same grep pattern (the loop id string) resolves the coverage gap in either case. */
+export const COVERAGE_REGISTRY_FILE = "src/lib/control-tower/registry.ts";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -190,62 +196,138 @@ export function exemptSpecSlug(loopId: string): string {
   return `exempt-loop-${slugFragment(loopId)}`.slice(0, 60);
 }
 
-/** The single-phase fix spec that ADDS the inferred MONITORED_LOOPS entry. Built by the box on Build. */
-export function buildRegisterSpecBody(entry: InferredLoopEntry): string {
-  const slug = registerSpecSlug(entry.id);
-  return `# Register monitored loop: ${entry.id} ⏳
+/** Platform mandate the coverage-register fix specs live under — mirrors mario's fix-spec parent. The
+ *  chokepoint's `assertValidParent` rejects a bare-function parent (`[[../functions/platform]]` alone)
+ *  as free-text, so every autonomous author points at a mandate. */
+const COVERAGE_FIX_MANDATE_SLUG = "infra-devops-reliability";
+const COVERAGE_FIX_PARENT_PROSE =
+  `[[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; ` +
+  `auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).`;
 
-**Owner:** [[../functions/${entry.owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
+/**
+ * The single-phase register fix spec, as a structured input to `authorSpecRowStructured`.
+ *
+ * every-spec-writer-authors-machine-runnable-verifications Phase 1 (coverage-register lane): the
+ * phase carries a typed `exec_kind:'grep'` check asserting the loop id landed in
+ * `src/lib/control-tower/registry.ts` (where `MONITORED_LOOPS` lives). The deterministic runner
+ * executes this after merge; a still-missing entry fails the check without any prose reading.
+ *
+ * Verification prose is preserved alongside the typed check so the human-facing bullets keep working
+ * during the migration window (the structured checks are the sole ship gate).
+ */
+export function buildRegisterSpecBody(entry: InferredLoopEntry): StructuredSpecInput {
+  const why =
+    `The \`${entry.id}\` cron runs in code with no monitored-loop tile, so if it silently stops ` +
+    `firing nothing alerts us — a blind spot in platform coverage.`;
+  const what =
+    `Adds the \`${entry.id}\` entry to \`MONITORED_LOOPS\` so the loop becomes a health-tracked ` +
+    `tile that alerts when it misses its ${entry.expectedCadence} cadence.`;
 
-**Why:** The \`${entry.id}\` cron runs in code with no monitored-loop tile, so if it silently stops firing nothing alerts us — a blind spot in platform coverage.
-**What:** Adds the \`${entry.id}\` entry to \`MONITORED_LOOPS\` so the loop becomes a health-tracked tile that alerts when it misses its ${entry.expectedCadence} cadence.
+  const phaseBody =
+    `In \`${COVERAGE_REGISTRY_FILE}\`, add this entry to \`MONITORED_LOOPS\` (in the Inngest ` +
+    `crons group):\n\n\`\`\`ts\n${renderEntrySnippet(entry)}\n\`\`\`\n\n` +
+    `No other change. After merge + deploy the amber "unregistered loop: ${entry.id}" gap clears ` +
+    `and a \`${entry.id}\` cron tile appears.`;
 
-The coverage self-audit found a cron \`createFunction\` served in code (\`${entry.id}\`, ${entry.expectedCadence}) with **no \`MONITORED_LOOPS\` tile** — an unregistered loop. This spec adds the inferred registry entry so the loop becomes a real monitored tile. Confirm the cadence/window before merging.
+  const verification =
+    `- \`${entry.id}\` is present in \`${COVERAGE_REGISTRY_FILE}\` (the MONITORED_LOOPS entry landed).\n` +
+    `- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: ${entry.id}".`;
 
-## Phase 1 — add the MONITORED_LOOPS entry ⏳
-In \`src/lib/control-tower/registry.ts\`, add this entry to \`MONITORED_LOOPS\` (in the Inngest crons group):
-
-\`\`\`ts
-${renderEntrySnippet(entry)}
-\`\`\`
-
-No other change. After merge + deploy the amber "unregistered loop: ${entry.id}" gap clears and a \`${entry.id}\` cron tile appears.
-
-## Verification
-- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: ${entry.id}".
-- A \`${entry.id}\` cron tile appears in the monitored loops grid (green once it has beaten, amber "awaiting first run" until then — never a false red).
-
-<!-- coverage-register: ${slug} for loop ${entry.id} -->
-`;
+  return {
+    title: `Register monitored loop: ${entry.id}`,
+    summary: null,
+    owner: entry.owner,
+    parent: COVERAGE_FIX_PARENT_PROSE,
+    why,
+    what,
+    autoBuild: true,
+    phases: [
+      {
+        title: `Phase 1 — add the MONITORED_LOOPS entry`,
+        body: phaseBody,
+        verification,
+        why,
+        what,
+        status: "planned",
+        checks: [
+          {
+            position: 1,
+            description: `\`${entry.id}\` is present in \`${COVERAGE_REGISTRY_FILE}\` (the MONITORED_LOOPS entry landed).`,
+            kind: "auto",
+            exec_kind: "grep",
+            params: {
+              path: COVERAGE_REGISTRY_FILE,
+              pattern: entry.id,
+              expect: "present",
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
 
-/** The single-phase fix spec that EXEMPTS the loop (intentionally-unmonitored). Built on the owner tap. */
-export function buildExemptSpecBody(loopId: string, owner: OwnerFunction): string {
-  const slug = exemptSpecSlug(loopId);
-  return `# Exempt loop from coverage monitoring: ${loopId} ⏳
+/**
+ * The single-phase exempt fix spec, as a structured input to `authorSpecRowStructured`. The typed
+ * grep check asserts the loop id landed in `src/lib/control-tower/registry.ts` — where
+ * `INTENTIONALLY_UNMONITORED_CRONS` lives — so an added exemption row satisfies it.
+ */
+export function buildExemptSpecBody(loopId: string, owner: OwnerFunction): StructuredSpecInput {
+  const why =
+    `The coverage self-audit keeps flagging \`${loopId}\` as an unregistered loop, but the owner ` +
+    `reviewed it and it does not need liveness monitoring — a registered exemption records ` +
+    `"intentionally unmonitored" instead of leaving the gap flagged forever.`;
+  const what =
+    `Adds \`${loopId}\` to \`INTENTIONALLY_UNMONITORED_CRONS\` so the coverage audit stops ` +
+    `flagging it as an unregistered loop.`;
 
-**Owner:** [[../functions/${owner}]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (loop-coverage monitoring; auto-proposed by [[../libraries/coverage-register-agent]] from the [[control-tower-complete-coverage]] self-audit).
+  const phaseBody =
+    `In \`${COVERAGE_REGISTRY_FILE}\`, add to \`INTENTIONALLY_UNMONITORED_CRONS\`:\n\n\`\`\`ts\n  ` +
+    `${JSON.stringify(loopId)}: "intentionally unmonitored — owner-confirmed via the coverage-register agent",\n\`\`\`\n\n` +
+    `No other change. After merge + deploy the audit no longer flags \`${loopId}\` as an unregistered loop.`;
 
-**Why:** The coverage self-audit keeps flagging \`${loopId}\` as an unregistered loop, but the owner reviewed it and it does not need liveness monitoring — a registered exemption records "intentionally unmonitored" instead of leaving the gap flagged forever.
-**What:** Adds \`${loopId}\` to \`INTENTIONALLY_UNMONITORED_CRONS\` so the coverage audit stops flagging it as an unregistered loop.
+  const verification =
+    `- \`${loopId}\` is present in \`${COVERAGE_REGISTRY_FILE}\` (the INTENTIONALLY_UNMONITORED_CRONS entry landed).\n` +
+    `- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: ${loopId}".`;
 
-The owner marked \`${loopId}\` **intentionally-unmonitored** — a registered exemption so the coverage self-audit stops flagging it (silence is never the default; this is the owner-confirmed exception).
-
-## Phase 1 — add the INTENTIONALLY_UNMONITORED_CRONS exemption ⏳
-In \`src/lib/control-tower/registry.ts\`, add to \`INTENTIONALLY_UNMONITORED_CRONS\`:
-
-\`\`\`ts
-  ${JSON.stringify(loopId)}: "intentionally unmonitored — owner-confirmed via the coverage-register agent",
-\`\`\`
-
-No other change. After merge + deploy the audit no longer flags \`${loopId}\` as an unregistered loop.
-
-## Verification
-- On /dashboard/developer/control-tower, the Coverage self-audit no longer lists "Unregistered loop: ${loopId}".
-
-<!-- coverage-register exemption: ${slug} for loop ${loopId} -->
-`;
+  return {
+    title: `Exempt loop from coverage monitoring: ${loopId}`,
+    summary: null,
+    owner,
+    parent: COVERAGE_FIX_PARENT_PROSE,
+    why,
+    what,
+    autoBuild: true,
+    phases: [
+      {
+        title: `Phase 1 — add the INTENTIONALLY_UNMONITORED_CRONS exemption`,
+        body: phaseBody,
+        verification,
+        why,
+        what,
+        status: "planned",
+        checks: [
+          {
+            position: 1,
+            description: `\`${loopId}\` is present in \`${COVERAGE_REGISTRY_FILE}\` (the INTENTIONALLY_UNMONITORED_CRONS entry landed).`,
+            kind: "auto",
+            exec_kind: "grep",
+            params: {
+              path: COVERAGE_REGISTRY_FILE,
+              pattern: loopId,
+              expect: "present",
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
+
+/** Typed `parentKind`/`parentRef` the runCoverageRegisterJob worker passes to `authorSpecRowStructured` so the
+ *  chokepoint's `assertValidParent` accepts the mandate-anchored parent prose without falling back to auto-anchor. */
+export const COVERAGE_FIX_PARENT_KIND = "mandate" as const;
+export const COVERAGE_FIX_PARENT_REF = `platform#${COVERAGE_FIX_MANDATE_SLUG}` as const;
 
 /**
  * Resolve the workspace a coverage-register proposal lands under — the build queue is effectively
@@ -323,9 +405,9 @@ export async function enqueueCoverageRegisterJob(
         cadence: input.cadence,
         entry,
         register_spec_slug: regSlug,
-        register_spec_body: buildRegisterSpecBody(entry),
+        register_spec_input: buildRegisterSpecBody(entry),
         exempt_spec_slug: exSlug,
-        exempt_spec_body: buildExemptSpecBody(input.loopId, entry.owner),
+        exempt_spec_input: buildExemptSpecBody(input.loopId, entry.owner),
       }),
       pending_actions: [
         { id: actionId, type: "coverage_register", status: "pending", spec_slug: regSlug, spec_title: `Register monitored loop: ${input.loopId}` },

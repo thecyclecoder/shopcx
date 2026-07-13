@@ -4442,14 +4442,21 @@ async function runDbHealthJob(job: Job) {
 //      author cleanly through the intent-gated chokepoint (the upsertSpec self-gate requires spec why/what).
 async function runCoverageRegisterJob(job: Job) {
   const tag = `[coverage-register:${job.id.slice(0, 8)}]`;
+  // retire-md-spec-writers-db-is-sole-spec Phase 1 (coverage-register lane): the enqueued proposal now
+  // bakes STRUCTURED spec inputs (StructuredSpecInput) into `instructions.register_spec_input` /
+  // `instructions.exempt_spec_input`, each phase carrying a typed `exec_kind:'grep'` machine check that
+  // asserts the loop id landed in src/lib/control-tower/registry.ts. This lane authors via
+  // authorSpecRowStructured; the retired markdown fields (register_spec_body / exempt_spec_body) are
+  // NOT read here — a job carrying only the retired shape fails needs_attention with a clear diagnosis
+  // so the owner sees the exact reason instead of a silent no-op.
   let instr: {
     signature?: string;
     loop_id?: string;
     entry?: unknown;
     register_spec_slug?: string;
-    register_spec_body?: string;
+    register_spec_input?: unknown;
     exempt_spec_slug?: string;
-    exempt_spec_body?: string;
+    exempt_spec_input?: unknown;
   } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
@@ -4477,13 +4484,13 @@ async function runCoverageRegisterJob(job: Job) {
     if (action.status === "approved") {
       const register = action.decision !== "exempt"; // default to register
       const specSlug = register ? instr.register_spec_slug : instr.exempt_spec_slug;
-      const specBody = register ? instr.register_spec_body : instr.exempt_spec_body;
+      const specInput = register ? instr.register_spec_input : instr.exempt_spec_input;
       const what = register ? "register entry" : "intentionally-unmonitored exemption";
-      if (!specSlug || !specBody) {
+      if (!specSlug || !specInput || typeof specInput !== "object") {
         const snippet = await renderInferredSnippet();
-        const tail = `owner ${what} → missing spec body for ${loopId}${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
-        await update(job.id, { status: "needs_attention", error: "no fix spec body to materialize", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
-        console.warn(`${tag} owner ${what} → missing spec body`);
+        const tail = `owner ${what} → missing structured spec input for ${loopId}${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
+        await update(job.id, { status: "needs_attention", error: "no structured spec input to materialize", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
+        console.warn(`${tag} owner ${what} → missing structured spec input`);
         return;
       }
       // Auto-build dedup: never enqueue a second build / open a 4th identical PR for a slug already live.
@@ -4495,27 +4502,32 @@ async function runCoverageRegisterJob(job: Job) {
         console.log(`${tag} owner ${what} → dedup: ${action.result}`);
         return;
       }
-      if (!validateSpecBody(specSlug, specBody, signature)) {
-        const snippet = await renderInferredSnippet();
-        const tail = `owner ${what} → refused to author empty spec ${specSlug} to public.specs${snippet ? ` — one-tap manual remediation:\n${snippet}` : ""}`;
-        await update(job.id, { status: "needs_attention", error: "empty spec body", pending_actions: job.pending_actions, log_tail: tail.slice(-2000) });
-        console.warn(`${tag} owner ${what} → empty spec body`);
-        return;
-      }
 
-      // Coaching bake-in: guarded author → verify → enqueue. Any failure surfaces a specific diagnosis
-      // (which step, which error) + the inferred-entry snippet for one-tap manual paste. One retry on
-      // the author path for transient DB blips before parking needs_attention.
+      // retire-md-spec-writers-db-is-sole-spec Phase 1 (coverage-register lane): author via the STRUCTURED
+      // chokepoint — no markdown parse. Structured phases carry typed `exec_kind:'grep'` checks so the
+      // deterministic runner verifies the registry entry landed after merge. Any failure surfaces a
+      // specific diagnosis (which step, which error) + the inferred-entry snippet for one-tap manual
+      // paste. One retry on the author path for transient DB blips before parking needs_attention.
       const { getSpec: getSpecFromDb } = await import("../src/lib/specs-table");
+      const { authorSpecRowStructured } = await import("../src/lib/author-spec");
+      const { COVERAGE_FIX_PARENT_KIND, COVERAGE_FIX_PARENT_REF } = await import("../src/lib/coverage-register-agent");
+      const structuredSpec = specInput as import("../src/lib/author-spec").StructuredSpecInput;
       const materializeAndVerify = async (): Promise<{ ok: true } | { ok: false; step: "author" | "verify"; error: string }> => {
         try {
-          await markNewSpecInReview(job.workspace_id, specSlug, "planned", "coverage-register", `coverage-register fix spec authored (${what} loop ${loopId})`, specBody);
+          const authored = await authorSpecRowStructured(job.workspace_id, specSlug, structuredSpec, "planned", {
+            intendedStatusSetBy: "coverage-register",
+            parentKind: COVERAGE_FIX_PARENT_KIND,
+            parentRef: COVERAGE_FIX_PARENT_REF,
+          });
+          if (!authored) {
+            return { ok: false, step: "author", error: `authorSpecRowStructured(${specSlug}) returned false — the row did not land (silent no-op write)` };
+          }
         } catch (e) {
           return { ok: false, step: "author", error: e instanceof Error ? e.message : String(e) };
         }
         try {
           const row = await getSpecFromDb(job.workspace_id, specSlug);
-          if (!row) return { ok: false, step: "verify", error: `getSpec(${specSlug}) returned null after markNewSpecInReview — the row did not land in public.specs (silent no-op)` };
+          if (!row) return { ok: false, step: "verify", error: `getSpec(${specSlug}) returned null after authorSpecRowStructured — the row did not land in public.specs (silent no-op)` };
         } catch (e) {
           return { ok: false, step: "verify", error: e instanceof Error ? e.message : String(e) };
         }
