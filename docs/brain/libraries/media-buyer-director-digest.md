@@ -29,3 +29,7 @@ Each surviving line reads `• {ProductTitle} — {summary}` — the founder-leg
 ## Caller
 
 [[builder-worker]] media-buyer lane (`runMediaBuyerLoopForAccount` → per-pass `perAccount` rollup → `deliverMediaBuyerDigest`). Non-fatal: a Slack hiccup logs but never fails the pass. See [[../functions/growth]] · [[../tables/director_activity]] · [[media-buyer-agent]] · `src/lib/slack.ts` (`postAsGrowthDirector`).
+
+## One digest per workspace per pass (Phase 2)
+
+The `deliverMediaBuyerDigest` call posts once per media-buyer job. Under media-buyer-digest-consolidate-product-names-suppress-noop **Phase 2**, the [[../inngest/media-buyer-cadence]] dispatcher now enqueues **exactly one workspace-scoped `kind='media-buyer'` `agent_jobs` row per pass** (rather than one row per active cohort), so a single lane run rolls up every account × per-product cohort and posts **one** consolidated digest — no per-cohort duplicates in `#director-growth-max`. The dormant-heartbeat guarantee (an account with no active cohort still runs one pass with `productId=null` so the audit row lands) lives inside the lane's `runMediaBuyerLoopForAccount` fan-out and is unchanged.

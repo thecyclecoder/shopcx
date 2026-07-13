@@ -1,6 +1,6 @@
 # inngest/media-buyer-cadence
 
-The daily cadence cron that enqueues the Media Buyer agent across every ACTIVE [[../tables/media_buyer_test_cohorts]] row ([[../specs/media-buyer-daily-cadence-cron]] Phase 1 — the missing daily-cadence piece of the [[../goals/autonomous-media-buyer-supervision]] M2 "Shadow mode (read-only)" milestone). Once daily it finds every workspace with ≥1 active cohort row, fans out one event per workspace, and the per-workspace handler inserts one [[../tables/agent_jobs]] row `kind='media-buyer'` per (workspace, meta_ad_account_id) pair — narrowed to that account via `instructions.meta_ad_account_id` (or `null` for a workspace-wide cohort → the runner fans out over every connected [[../tables/meta_ad_accounts]] row). Same-UTC-day re-fires are a no-op — the sweep skips any pair with an unfinished `kind='media-buyer'` job already created today.
+The daily cadence cron that enqueues the Media Buyer agent for each workspace with ≥1 active [[../tables/media_buyer_test_cohorts]] row ([[../specs/media-buyer-daily-cadence-cron]] Phase 1 — the missing daily-cadence piece of the [[../goals/autonomous-media-buyer-supervision]] M2 "Shadow mode (read-only)" milestone). Once daily it fans out one event per workspace, and the per-workspace handler inserts EXACTLY ONE workspace-scoped [[../tables/agent_jobs]] row `kind='media-buyer'` (`instructions.meta_ad_account_id = null`, `spec_slug = 'media-buyer:workspace'`). The box-worker media-buyer lane downstream fans the single job out across every connected [[../tables/meta_ad_accounts]] row × the account's active per-product cohorts, and delivers ONE consolidated Growth-Director digest at the end (media-buyer-digest-consolidate-product-names-suppress-noop Phase 2). Same-UTC-day re-fires are a no-op — the sweep skips any workspace whose slot is already covered by an unfinished `kind='media-buyer'` job created today.
 
 **File:** `src/lib/inngest/media-buyer-cadence.ts` · agent runner in [[../libraries/media-buyer-agent]] (`runMediaBuyerLoop` invoked by the box worker's `runMediaBuyerJob` lane)
 
@@ -15,12 +15,12 @@ The daily cadence cron that enqueues the Media Buyer agent across every ACTIVE [
 ### `media-buyer-cadence-sweep`
 - **Trigger:** event `growth/media-buyer-cadence-sweep` (data: `{ workspace_id, trigger? }`)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.workspace_id" }]`, `retries: 1`
-- **What it does:** calls `dispatchMediaBuyerCadence(admin, workspace_id)` which (1) selects every active cohort row for the workspace, (2) reads every `kind='media-buyer'` [[../tables/agent_jobs]] row for the workspace created since the current UTC day's midnight, (3) inserts one new `agent_jobs` row per cohort whose `meta_ad_account_id` pair isn't already covered by an unfinished job today. Each insert carries `instructions = { meta_ad_account_id }` (verbatim from the cohort row) so the [[../libraries/media-buyer-agent]] runner narrows to that account; a workspace-wide cohort writes `meta_ad_account_id: null` so the runner fans out across every connected account. The insert also stamps `spec_slug = mediaBuyerSpecSlug(account)` — a per-cadence-slot key (`media-buyer:<account-id>` per-account, `media-buyer:workspace` workspace-wide) so the `agent_jobs.spec_slug NOT NULL` column is satisfied and the Roadmap rollup index (`agent_jobs_slug_idx (workspace_id, spec_slug, created_at desc)`) groups a slot's history. An "unfinished" job is one whose `status` ∈ `queued|claimed|building|needs_input|needs_approval|queued_resume|blocked_on_usage` (the `ACTIVE_MEDIA_BUYER_JOB_STATUSES` set).
-- **Returns** `{ status: "complete", evaluated, dispatched }`.
+- **What it does:** calls `dispatchMediaBuyerCadence(admin, workspace_id)` which (1) reads every active cohort row for the workspace (evaluated-count only — the dispatcher no longer fans out per cohort), (2) reads every `kind='media-buyer'` [[../tables/agent_jobs]] row for the workspace created since the current UTC day's midnight, (3) if ≥1 active cohort exists AND no unfinished workspace-scoped row already covers today, inserts EXACTLY ONE row: `instructions = { meta_ad_account_id: null }`, `spec_slug = 'media-buyer:workspace'`. The downstream box-worker media-buyer lane resolves `instructions.meta_ad_account_id=null` as "fan out across every connected [[../tables/meta_ad_accounts]] row" and runs `runMediaBuyerLoopForAccount` per account — that helper itself fans out over the account's active per-product cohorts + preserves the dormant-heartbeat pass for a null-product cohort. One job → one run → one consolidated digest (media-buyer-digest-consolidate-product-names-suppress-noop Phase 2). An "unfinished" job is one whose `status` ∈ `queued|claimed|building|needs_input|needs_approval|queued_resume|blocked_on_usage` (the `ACTIVE_MEDIA_BUYER_JOB_STATUSES` set); ANY such row for the workspace covers the slot (including legacy per-account rows in flight during the Phase-2 rollout, so no duplicate lands).
+- **Returns** `{ status: "complete", evaluated, dispatched }` where `evaluated` is the active-cohort count (preserves the pre-Phase-2 cron log signal) and `dispatched` ∈ `{0, 1}`.
 
 ## Idempotency
 
-Both a same-UTC-day re-fire of the cron and a duplicate `growth/media-buyer-cadence-sweep` event are safe no-ops: the sweep re-reads today's `agent_jobs`, matches by `instructions.meta_ad_account_id`, and dispatches only for pairs not already covered by an unfinished row. A `completed`/`failed`/terminal job from earlier today does NOT block a fresh dispatch — the day's real cadence beats the terminated attempt.
+Both a same-UTC-day re-fire of the cron and a duplicate `growth/media-buyer-cadence-sweep` event are safe no-ops: the sweep re-reads today's `agent_jobs`, checks whether ANY unfinished `kind='media-buyer'` row already covers the workspace, and skips the insert when so. A `completed`/`failed`/terminal job from earlier today does NOT block a fresh dispatch — the day's real cadence beats the terminated attempt.
 
 ## Shadow-default under the M2 policy
 
@@ -34,11 +34,11 @@ The cadence cron is a **dispatch tool** ([[../operational-rules]] § North star)
 
 - `growth/media-buyer-cadence-sweep` (one per workspace with an active cohort, from the cron's fan-out)
 
-Downstream side effect from the sweep is a `kind='media-buyer'` [[../tables/agent_jobs]] insert per new (workspace, meta_ad_account_id) pair. The box worker's `runMediaBuyerJob` lane picks it up and runs [[../libraries/media-buyer-agent]] `runMediaBuyerLoop`.
+Downstream side effect from the sweep is exactly ONE workspace-scoped `kind='media-buyer'` [[../tables/agent_jobs]] insert per workspace per pass (media-buyer-digest-consolidate-product-names-suppress-noop Phase 2). The box worker's `runMediaBuyerJob` lane picks it up, fans out over the workspace's connected [[../tables/meta_ad_accounts]] × per-product cohorts, and delivers ONE consolidated digest.
 
 ## Tables written
 
-- [[../tables/agent_jobs]] (one `kind='media-buyer'` row per new (workspace, meta_ad_account_id) pair — `instructions = { meta_ad_account_id }`, `spec_slug = media-buyer:<account-id>` or `media-buyer:workspace`)
+- [[../tables/agent_jobs]] (EXACTLY ONE `kind='media-buyer'` workspace-scoped row per pass — `instructions = { meta_ad_account_id: null }`, `spec_slug = 'media-buyer:workspace'`)
 - [[../tables/loop_heartbeats]] (its own end-of-run beat)
 
 ## Tables read (not written)
