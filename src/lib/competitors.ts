@@ -90,7 +90,7 @@ export async function loadApprovedCompetitorsForProduct(
   const admin = createAdminClient();
   const { data } = await admin
     .from("competitors")
-    .select("id, brand, search_keyword, evidence, category")
+    .select("id, brand, search_keyword, evidence, category, domain, resolved_advertiser")
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("status", "approved")
@@ -103,6 +103,10 @@ export async function loadApprovedCompetitorsForProduct(
       note: (r.evidence as string) || (r.category as string) || undefined,
       competitorId: r.id as string,
       productId,
+      // Relevance-filter inputs (adMatchesCompetitor): keep only ads that actually drive to the
+      // competitor's own domain, so a noisy brand-keyword search can't pollute the shelf with wrong-brand ads.
+      expectedDomain: (r.domain as string | null) ?? undefined,
+      expectedAdvertiser: (r.resolved_advertiser as string | null) ?? (r.brand as string) ?? undefined,
     }));
 }
 

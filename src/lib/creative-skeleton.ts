@@ -28,6 +28,7 @@ import {
   fetchCreative,
   isWinner,
   winnerScore,
+  adMatchesCompetitor,
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
@@ -428,9 +429,24 @@ export async function sweepSeed(
   }
 
   // Winner signal = reach/spend OR longevity (not longevity alone). See adlibrary.isWinner.
-  const winners = ads.filter((a) =>
+  let winners = ads.filter((a) =>
     a.ad_key && isWinner(a, { minDays: opts.minDays, minImpressions: opts.minImpressions, minSpend: opts.minSpend }),
   );
+
+  // RELEVANCE FILTER (CEO 2026-07-12): brand-keyword search on AdLibrary is noisy — searching "Bulletproof"
+  // returns "Bulletproof Automotive" (car wheels), "Four Sigmatic" returns "Neubrain"/affiliate content-
+  // matches. When the seed carries the competitor's own domain, keep ONLY ads that actually drive to it
+  // (or, for ads with an opaque destination, whose advertiser name exactly matches). Without this the
+  // imitate shelf gets polluted with wrong-brand ads. No-op for legacy seeds without expectedDomain.
+  if (seed.expectedDomain || seed.expectedAdvertiser) {
+    const before = winners.length;
+    winners = winners.filter((a) =>
+      adMatchesCompetitor(a, { domain: seed.expectedDomain, advertiser: seed.expectedAdvertiser }),
+    );
+    const dropped = before - winners.length;
+    if (dropped > 0) console.log(`[creative-scout] relevance-filtered ${dropped}/${before} off-brand ads for "${seed.keyword}" (expected ${seed.expectedDomain ?? seed.expectedAdvertiser})`);
+  }
+
   result.longRunners = winners.length; // (field name kept for back-compat; now = winner count)
   if (!winners.length) return result;
 
