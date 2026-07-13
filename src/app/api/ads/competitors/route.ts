@@ -44,10 +44,10 @@ export async function GET(req: Request) {
   const auth = await authorize(workspaceId);
   if (auth.error) return auth.error;
 
-  // Product filter semantics (Phase 1 preserves current behavior via `includeUnscoped: true`):
-  // when a product is selected, still include workspace-level (product_id IS NULL) competitors —
-  // the legacy seeds are all null-scoped, so a naive equality filter would render an empty list.
-  // Phase 2 of [[competitor-sdk-chokepoint-and-per-product-cleanup]] drops the null-scope fold.
+  // Product filter semantics (Phase 2 of [[competitor-sdk-chokepoint-and-per-product-cleanup]]):
+  // strict per-product — a selected productId returns ONLY that product's rows. The legacy
+  // `product_id.eq.{id} OR product_id.is.null` fold is retired here so the owner surface reflects
+  // the selected product only; Phase 3 purges the null-scoped seed rows the fold used to include.
   let rows;
   try {
     rows = await listCompetitors({
@@ -55,7 +55,6 @@ export async function GET(req: Request) {
       status:
         status && STATUSES.includes(status) ? (status as CompetitorStatus) : undefined,
       productId: productId ?? undefined,
-      includeUnscoped: !!productId,
     });
   } catch (err) {
     return NextResponse.json(
