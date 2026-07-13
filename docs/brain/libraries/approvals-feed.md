@@ -31,4 +31,4 @@ The target spec is resolved from **candidate slugs** in priority order — `pend
 
 ## Related
 
-[[../dashboard/approvals]] · [[approval-inbox]] · [[approval-decisions]] · [[approval-router]] · [[agent-personas]] · [[../tables/approval_decisions]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/goals]] · [[../tables/goal_milestones]] · [[../specs/approval-routing-engine]]
+[[../dashboard/approvals]] · [[approval-inbox]] · [[approval-decisions]] · [[approval-router]] · [[control-tower-node-registry]] · [[agent-personas]] · [[../tables/approval_decisions]] · [[../tables/dashboard_notifications]] · [[../tables/agent_jobs]] · [[../tables/specs]] · [[../tables/spec_phases]] · [[../tables/goals]] · [[../tables/goal_milestones]] · [[../specs/approval-routing-engine]]

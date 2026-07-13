@@ -38,4 +38,4 @@ The proposal job's kind is always `proposed-model-tier`, but it must route by th
 
 ## Related
 
-[[../tables/agent_model_tiers]] · [[agent-model-tiers]] · [[approval-router]] · [[approval-inbox]] · [[approval-decisions]] · [[../tables/approval_decisions]] · [[../specs/box-agent-model-tiers]] · [[goal-proposals]] (the sibling director-proposes pattern)
+[[../tables/agent_model_tiers]] · [[agent-model-tiers]] · [[approval-router]] · [[control-tower-node-registry]] · [[approval-inbox]] · [[approval-decisions]] · [[../tables/approval_decisions]] · [[../specs/box-agent-model-tiers]] · [[goal-proposals]] (the sibling director-proposes pattern)

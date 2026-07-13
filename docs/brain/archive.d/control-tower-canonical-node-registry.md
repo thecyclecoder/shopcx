@@ -1,0 +1,1 @@
+- **Canonical node registry — one org tree, drift reconciled** · verified 2026-07-13 · → [[../libraries/control-tower-node-registry]]
