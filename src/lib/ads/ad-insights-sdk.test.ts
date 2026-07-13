@@ -13,7 +13,7 @@ const T: CacThresholds = { ltv: 330, targetCac: 150, killCac: 220, basis: "test"
 
 function ad(spend: number, purchases: number, extra: Partial<AdInsight> = {}): AdInsight {
   return {
-    adId: "a", name: "n", campaign: "c", spend, impressions: 10000, frequency: 1.5,
+    adId: "a", name: "n", campaign: "c", adSet: "s", adSetId: "s1", spend, impressions: 10000, frequency: 1.5,
     linkClicks: 100, linkCtr: 1.5, cpc: 1, cpm: 20, landingPageViews: 80, addToCart: 5,
     initiateCheckout: 3, purchases, revenue: purchases * 100, destination: "shopify_pdp",
     conversionSource: "meta", ...extra,
