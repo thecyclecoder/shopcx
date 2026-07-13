@@ -49,6 +49,8 @@ export interface AdInsight {
   adId: string;
   name: string;
   campaign: string;
+  adSet: string;   // ad-set name (each testing ad set = one test)
+  adSetId: string; // ad-set id — the stable per-test key
   spend: number;
   impressions: number;
   frequency: number;
@@ -76,7 +78,7 @@ export async function fetchMetaAdInsights(
 ): Promise<Map<string, AdInsight>> {
   const params: Record<string, string> = {
     level: "ad",
-    fields: "ad_id,ad_name,campaign_name,spend,impressions,frequency,inline_link_clicks,inline_link_click_ctr,cpc,cpm,actions",
+    fields: "ad_id,ad_name,campaign_name,adset_id,adset_name,spend,impressions,frequency,inline_link_clicks,inline_link_click_ctr,cpc,cpm,actions",
     limit: "200",
   };
   // A `time_range` whose `until` is TODAY includes today's partial spend/conversions; Meta's `last_Nd`
@@ -123,6 +125,8 @@ export async function fetchMetaAdInsights(
         adId,
         name: String(r.ad_name ?? ""),
         campaign: String(r.campaign_name ?? ""),
+        adSet: String(r.adset_name ?? ""),
+        adSetId: String(r.adset_id ?? ""),
         spend: Number(r.spend ?? 0),
         impressions: Number(r.impressions ?? 0),
         frequency: Number(r.frequency ?? 0),
