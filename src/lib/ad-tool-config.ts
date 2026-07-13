@@ -317,7 +317,13 @@ export function eligibleMotions(vibeTags: string[]): string[] {
 }
 
 // ── Hard caps ──────────────────────────────────────────────────────────────
-export const META_CAPS = { headline: 40, primary_text: 125, description: 30 } as const;
+// Meta's field limits are much higher (headline 255 · primary ~2200 · description 255); these are our
+// working targets. `headline: 40` keeps the bold headline from truncating in-feed. `primary_text` was
+// 125 (the "…See more" fold length) used as a HARD cap — that forced terse, story-less captions like
+// "I lost 40+ pounds! Appetite suppression/craving control" (2026-07-13). Raised to 600 so a real DR
+// caption (proof-led opener → benefits → trust → offer + CTA) fits; the fold is a display detail, not a
+// reason to gut the copy. `description` raised 30 → 90 so the offer/value line isn't clipped mid-phrase.
+export const META_CAPS = { headline: 40, primary_text: 600, description: 90 } as const;
 export const MAX_SPOKEN_SECONDS = 30;
 export const MAX_AVATARS_PER_WORKSPACE = 10;
 export const DEFAULT_COST_CAP_CENTS = 1000; // $10/ad
