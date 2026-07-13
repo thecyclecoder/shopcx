@@ -2,6 +2,16 @@
 
 The DB-only chokepoint every spec-AUTHOR surface (planner, director-coach, triage, regression, spec-chat, db-health, coverage-register, repair, security, migration-fix, storefront-optimizer, developer-message-center, director split/bounce-back) routes through to write the spec BODY to [[../tables/specs]] + [[../tables/spec_phases]]. There is NO `docs/brain/specs/{slug}.md` commit — the per-spec markdown was retired ([[../specs/spec-readers-from-db-retire-parser]] · spec-pm-markdown-purge); the readers read the DB rows.
 
+## Structured is the ONLY sanctioned author path (retire-md-spec-writers-db-is-sole-spec Phase 4)
+
+Every autonomous spec-writer lane authors via `authorSpecRowStructured` / `submitSpec` — the STRUCTURED chokepoint. Each phase carries typed `spec_phase_checks` (`exec_kind` ∈ tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build) so the deterministic spec-check runner ([[spec-check-runner]]) verifies the fix landed after merge. The retired MARKDOWN chokepoint (`authorSpecRowFromMarkdown` + its `scripts/builder-worker.ts` wrapper `markNewSpecInReview`) is closed to NEW autonomous callers: prose Verification bullets parse to `exec_kind='needs_human'`, which `assertEveryPhaseHasMachineCheck` rejects, parking the fix-spec at the CEO inbox — the exact failing state this whole spec exists to kill.
+
+**CI guard.** `scripts/_check-no-markdown-spec-authoring.ts` (wired into `npm run check:no-markdown-spec-authoring` + `predeploy`) fails CI on any new caller of `markNewSpecInReview` / `authorSpecRowFromMarkdown` outside the pre-Phase-4 allow-list. Each allow-listed entry (db_health · spec-chat · migration-fix · security-agent · storefront-optimizer · director-coach · developer-message-center · groom/bounce-back split · regression-agent · repair-agent signature-append) is Phase-4 debt awaiting its own per-lane conversion spec — a NEW autonomous lane must author structured from day one.
+
+**Regression test.** `src/lib/every-deterministic-body-producer.test.ts` asserts every deterministic spec-body producer (`buildRegisterSpecBody` / `buildExemptSpecBody` in [[coverage-register-agent]] Phase 1 · `buildRepairSpecInput` in [[repair-agent]] Phase 2 · `buildStructuredSpecInputFromMarkdown` in this module Phase 3) yields a `StructuredSpecInput` whose every phase carries ≥1 machine-runnable check that passes `assertEveryPhaseHasMachineCheck`. A NEW deterministic producer added by a follow-up spec MUST be appended there — the test is the single locked-in check across every producer.
+
+**Follow-up per-lane conversions** — the allow-list in `scripts/_check-no-markdown-spec-authoring.ts` names each pre-Phase-4 lane with its `tag` (actor label) so a subsequent per-lane conversion spec (e.g. "retire-md-spec-writers-db-is-sole-spec Phase 5 — spec-chat lane") can (a) route the lane's box output through `authorSpecRowStructured` and (b) delete the entry from `SANCTIONED_MARKDOWN_CALLERS`. When the allow-list is empty and `authorSpecRowFromMarkdown` has no callers, the function itself can be removed and the wrapper `markNewSpecInReview` retired.
+
 **File:** `src/lib/author-spec.ts`
 
 ## Why this exists
@@ -23,20 +33,41 @@ The DB-only chokepoint every spec-AUTHOR surface (planner, director-coach, triag
 
 ## Caller patterns
 
-**Markdown-holding surfaces** (auto-fix lanes, spec-chat, director-coach) hand a markdown buffer to `markNewSpecInReview`:
+**The ONE sanctioned author path — structured, with typed machine checks:**
 
 ```ts
-await markNewSpecInReview(workspaceId, slug, "planned", actor, reason, markdown);
-//                                                                       ^^^^^^^^ — the scratch markdown body.
-//   markNewSpecInReview wraps spec-card-state + authorSpecRowFromMarkdown; the .md is a buffer, never committed.
+await authorSpecRowStructured(workspaceId, slug, {
+  title, summary, owner, parent, blocked_by,
+  why,  // plain-language WHY this spec exists (REQUIRED, non-empty)
+  what, // plain-language WHAT changes when it ships (REQUIRED, non-empty)
+  phases: [{
+    title, body, verification,
+    why, what,
+    checks: [
+      // At minimum a tsc gate — every autonomous fix-spec class already gates on tsc-clean before merge.
+      { position: 1, description: "Repo typechecks clean after the fix lands.", kind: "auto", exec_kind: "tsc" },
+      // When the fix touches a known file, add a grep check on that file for a fingerprint of the guard/fix.
+      { position: 2, description: "guardBar landed in src/lib/foo.ts", kind: "auto",
+        exec_kind: "grep", params: { path: "src/lib/foo.ts", pattern: "guardBar", expect: "present" } },
+    ],
+  }],
+}, "planned", { intendedStatusSetBy: "planner", milestoneId });
 ```
 
-**The goal planner** authors DB-only from STRUCTURED data — no markdown, no disk:
+**Deterministic producers (converted lanes)** — a lane authored by an LLM whose output is a structured proposal (repair-agent's Rafa, coverage-register's inferred entry, director-followup's markdown → structured coercion) uses a pure helper to build the `StructuredSpecInput` and hands it straight to `authorSpecRowStructured`. Each helper's tests assert every phase carries a machine-runnable `exec_kind`:
+
+- [[coverage-register-agent]] `buildRegisterSpecBody` / `buildExemptSpecBody` (Phase 1) — typed `grep` on `src/lib/control-tower/registry.ts` for the loop id.
+- [[repair-agent]] `buildRepairSpecInput` (Phase 2) — typed `tsc` default + optional `grep` on the implicated file for the fix fingerprint.
+- `buildStructuredSpecInputFromMarkdown(slug, markdown)` in this module (Phase 3) — coerces a validated director-followup markdown body into the structured shape with a default `tsc` check per phase; prose Verification bullets ride verbatim on the phase's `verification` column for founder review.
+
+**Retired markdown authoring** (pre-Phase-4, allow-listed):
 
 ```ts
-await markSpecCardForReview(workspaceId, slug, "planned", { actor: "planner", reason });
-await authorSpecRowStructured(workspaceId, slug, { title, summary, owner, parent, blocked_by, phases }, "planned",
-  { intendedStatusSetBy: "planner", milestoneId });
+// ❌ NEW autonomous callers of markNewSpecInReview / authorSpecRowFromMarkdown are rejected by
+// `scripts/_check-no-markdown-spec-authoring.ts`. The pre-Phase-4 lanes below are Phase-4 debt
+// awaiting per-lane conversion; each has an allow-list entry with a written reason and a target
+// conversion helper (mirror buildRepairSpecInput / buildRegisterSpecBody / buildStructuredSpecInputFromMarkdown).
+await markNewSpecInReview(workspaceId, slug, "planned", actor, reason, markdown);
 ```
 
 `runPlanJob`'s RESUME pass asks Pia for the spec bodies as STRUCTURED JSON (phases + a non-empty `verification` per phase), then authors each via `authorSpecRowStructured` BEFORE queuing any build — so a build is never queued for a spec that wasn't authored. There is no `docs/brain/specs/*.md` write and no `git status` glob anywhere on this path.

@@ -1,0 +1,1 @@
+- **Register the 2h media-buyer-test-cadence cron as a Control Tower monitored loop** · verified 2026-07-13 · → [[../inngest/media-buyer-test-cadence]]
