@@ -13966,10 +13966,22 @@ async function runCsDirectorCallJob(job: Job) {
           console.warn(`${tag} workspace-owner lookup for CEO stamp failed:`, e instanceof Error ? e.message : e);
         }
       }
+      // The remedy RESOLVED the ticket iff the mutator executed it cleanly and
+      // delivered the reply — ok, not parked for founder approval, not parked
+      // needs_attention. In that case an approve_remedy CLOSES the ticket (the
+      // hard call + reply is the resolution); otherwise it only de-escalates so
+      // a failed/parked remedy isn't auto-closed. (Melissa/eca3f43b: without
+      // this, June de-escalated but the ticket stayed open.)
+      const remedyResolved =
+        verdict.decision === "approve_remedy" &&
+        applyResult.ok === true &&
+        applyResult.needs_attention !== true &&
+        applyResult.awaiting_founder_approval !== true;
       const transition = decideCsDirectorTicketTransition({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
+        remedyResolved,
         ceoUserId,
         now: new Date().toISOString(),
       });

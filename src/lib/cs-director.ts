@@ -733,7 +733,18 @@ async function handleApproveRemedy(
     //    fired, and the runner's per-verdict internal note + ticket transition close the loop.
     if (customerMessage) {
       try {
-        await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, customerMessage, sandbox);
+        // Substitute action-result placeholders ({{label_url}} → CTA button,
+        // {{tracking_number}}, {{carrier}}, {{refund_amount}}, {{coupon_code}})
+        // BEFORE delivery. The executor normally does this inside its own send
+        // path, but we suppress that send (execute-then-message ordering), so we
+        // must run it here against the batch results the executor stashed on
+        // ctx — otherwise June's `{{label_url}}` ships literally to the customer
+        // (ticket eca3f43b). substituteActionPlaceholders also strips any
+        // still-unsubstituted token as a last resort, so a literal `{{…}}` can
+        // never reach the customer even if an action produced no value.
+        const { substituteActionPlaceholders } = await import("@/lib/action-executor");
+        const filledMessage = substituteActionPlaceholders(customerMessage, ctx._lastActionResults ?? []);
+        await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, filledMessage, sandbox);
         console.log(`${tag} approve_remedy: ${batchLabel} ok · customer message delivered`);
         return { ok: true, handler: "approve_remedy", message_delivered: true };
       } catch (e) {
