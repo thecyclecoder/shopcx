@@ -366,22 +366,51 @@ test("Phase 2 — skeptic v3 shape (spend $678, 3 purchases, 13 ATC, CAC $226 ju
   assert.equal(isDecisionTreeKill(m, P2_THRESHOLDS, true), false);
 });
 
-test("Phase 2 — leading-signal fast-kill still fires past earlyTrimMinSpend with 0 purchases + high cost-per-ATC / clicks-no-ATC", () => {
-  // 0 purchases, spend $300 (earlyTrimMin), 4 ATC, $75/ATC (< threshold), CPM $150 (> $100) → CPM kill.
-  const highCpm = { spendCents: 30_000, purchases: 0, addToCart: 4, impressions: 20_000, clicks: 60 };
-  assert.equal(isDecisionTreeKill(highCpm, P2_THRESHOLDS, true), true);
-  // Wait — spend $300, purchases 0 → tierForTest returns 'dud' via early dud. So this counts as dud-tier already.
-  // The real leading-signal-ONLY test needs a state where tierForTest returns 'testing' but leading-signal kills.
-  // That requires purchases > 0 AND cpa > hold_band (past converter guard) AND spend past earlyTrimMin AND high CPM.
-  // Spend $400, purchases 1, cac $400 (> hold_band $220), CPM $100_000/imp... let's construct it.
-  const leadingOnly = { spendCents: 40_000, purchases: 1, addToCart: 5, impressions: 3_000, clicks: 20 }; // CPM = 40_000/3000*1000 = $13.3k → high
-  assert.equal(tierForTest({ spendCents: leadingOnly.spendCents, purchases: leadingOnly.purchases, addToCart: leadingOnly.addToCart }, P2_TIER_THRESHOLDS), "testing");
-  assert.equal(isDecisionTreeKill(leadingOnly, P2_THRESHOLDS, true), true);
+test("Phase 2 — 0-purchase adset past earlyTrimMinSpend is a dud → killed (via tierForTest's early dud path)", () => {
+  // 0 purchases, spend at earlyTrim → tierForTest returns 'dud' (early dud). Kill fires via (a).
+  const earlyDud = { spendCents: 30_000, purchases: 0, addToCart: 4, impressions: 20_000, clicks: 60 };
+  assert.equal(tierForTest({ spendCents: earlyDud.spendCents, purchases: earlyDud.purchases, addToCart: earlyDud.addToCart }, P2_TIER_THRESHOLDS), "dud");
+  assert.equal(isDecisionTreeKill(earlyDud, P2_THRESHOLDS, true), true);
 });
 
-test("Phase 2 — converter guard: profitable converter (cpa ≤ hold_band) is NEVER trimmed on leading signals, even with high CPM", () => {
-  // 3 purchases, cac $150 (at crown), spend $450, absurd CPM = 45_000 / 500 * 1000 = $90_000 → would trigger high CPM.
-  // But cpa ≤ hold_band → converter guard KEEPS it.
+// ── Fix 1 (media-buyer-kill-on-decision-tree-retire-roas-floor Phase 3) — pre-merge parity fix ──
+//
+// The pre-merge spec-test found kill_set != dud_set on live cohorts: `MB Tabs · skeptic-bloat`
+// (spend $529, 2 purchases, 5 ATC) was tierForTest='testing' but detectMetaCpaLosers killed it
+// via leading-signal cost-per-ATC ($105 > $80 threshold). The pre-Fix HOLD-band converter guard
+// (cpa ≤ hold_band) didn't protect it — CAC $264 was $44 over the $220 hold band.
+// Durable fix: a CONVERTER (purchases > 0) is NEVER trimmed on a leading signal. Deadline dud is
+// the only way a converter dies. This aligns the predicate strictly with tierForTest's early-dud
+// rule (spend ≥ earlyTrim AND purchases === 0) so kill_set == dud_set for every input.
+
+test("Fix 1 — regression fixture: MB Tabs · skeptic-bloat (spend $529, 2 purchases, 5 ATC, cost-per-ATC ≈ $105) is 'testing', NOT killed", () => {
+  // Exact numbers from the pre-merge spec-test evidence (Phase 3 Fix 1). Pre-Fix: killed via
+  // leading-signal cost-per-ATC. Post-Fix: purchases > 0 short-circuits before any leading signal.
+  const skepticBloat = { spendCents: 52_925, purchases: 2, addToCart: 5, impressions: 13_294, clicks: 133 };
+  const tier = tierForTest({ spendCents: skepticBloat.spendCents, purchases: skepticBloat.purchases, addToCart: skepticBloat.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "testing");
+  assert.equal(isDecisionTreeKill(skepticBloat, P2_THRESHOLDS, true), false);
+});
+
+test("Fix 1 — a converter (purchases > 0) with high cost-per-ATC past earlyTrim is NOT killed (parity: tier='testing', kill=false)", () => {
+  // 1 purchase, spend $400, 3 ATCs → cost-per-ATC $133 (> $80 threshold). Pre-Fix: killed via
+  // leading signal. Post-Fix: purchases > 0 short-circuits — a converter dies only at the deadline.
+  const converterHighCostPerAtc = { spendCents: 40_000, purchases: 1, addToCart: 3, impressions: 20_000, clicks: 60 };
+  const tier = tierForTest({ spendCents: converterHighCostPerAtc.spendCents, purchases: converterHighCostPerAtc.purchases, addToCart: converterHighCostPerAtc.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "testing");
+  assert.equal(isDecisionTreeKill(converterHighCostPerAtc, P2_THRESHOLDS, true), false);
+});
+
+test("Fix 1 — a converter (purchases > 0) with absurd CPM past earlyTrim is NOT killed either (single invariant: purchases > 0 → no leading-signal kill)", () => {
+  const converterHighCpm = { spendCents: 40_000, purchases: 1, addToCart: 5, impressions: 3_000, clicks: 20 }; // CPM $133
+  const tier = tierForTest({ spendCents: converterHighCpm.spendCents, purchases: converterHighCpm.purchases, addToCart: converterHighCpm.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "testing");
+  assert.equal(isDecisionTreeKill(converterHighCpm, P2_THRESHOLDS, true), false);
+});
+
+test("Phase 2 — converter guard (retained): profitable converter (cpa ≤ hold_band) is NEVER trimmed", () => {
+  // 3 purchases, cac $150 (at crown), spend $450 → tierForTest returns 'promising'. The Fix's
+  // `purchases > 0` short-circuit protects it (a superset of the old hold-band guard).
   const guarded = { spendCents: 45_000, purchases: 3, addToCart: 6, impressions: 500, clicks: 15 };
   assert.equal(isDecisionTreeKill(guarded, P2_THRESHOLDS, true), false);
 });

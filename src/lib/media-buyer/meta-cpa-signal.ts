@@ -271,9 +271,20 @@ export function isDecisionTreeKill(
   );
   if (tier === "dud") return true;
 
-  // (b) EARLY leading-signal trim — converter guard first (a profitable converter is never trimmed).
-  const cpa = m.purchases > 0 ? m.spendCents / m.purchases : Infinity;
-  if (m.purchases > 0 && cpa <= t.holdBandMaxCpaCents) return false;
+  // Fix 1 (media-buyer-kill-on-decision-tree-retire-roas-floor Phase 3) — the pre-merge spec-test's
+  // kill-set-vs-dud-set parity check failed on `MB Tabs · skeptic-bloat` (spend $529, 2 purchases, 5
+  // ATC, cost-per-ATC ≈ $105, CPM $40): tierForTest returned `testing` but the leading-signal cost-per-
+  // ATC path here returned kill=true, violating kill ⇔ 'dud'. The pre-Fix HOLD-band converter guard
+  // (cpa ≤ hold_band) didn't protect this state because CAC $264 was $44 over the hold band. The
+  // durable fix: a CONVERTER (purchases > 0) is NEVER trimmed on a leading signal — deadline dud is
+  // the only way a converter dies. This aligns the predicate strictly with tierForTest's early-dud
+  // rule (spend ≥ earlyTrim AND purchases === 0) so kill_set == dud_set for every input.
+  if (m.purchases > 0) return false;
+
+  // (b) EARLY leading-signal trim — reached ONLY for `purchases === 0` adsets. Any state that hits
+  // these signals ALSO hits tierForTest's early-dud rule (both require `spend ≥ earlyTrim`), so this
+  // block is a strict subset of (a) and effectively redundant. Kept for auditability + a clear seam if
+  // the earlyTrim thresholds ever diverge.
   if (m.spendCents < t.earlyTrimMinSpendCents) return false;
   const cpm = m.impressions > 0 ? (m.spendCents / m.impressions) * 1000 : 0;
   const costPerAtc = m.addToCart >= MIN_ATC_FOR_COST_SIGNAL ? m.spendCents / m.addToCart : null;
