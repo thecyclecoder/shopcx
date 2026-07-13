@@ -58,7 +58,7 @@ function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: Ge
   const offerHeadline = brief.offer?.headline ?? null;
 
   const refClause = compositionTransfer && hasDesignRef
-    ? "The FIRST image is a PROVEN, high-performing competitor ad. REUSE ITS EXACT WINNING COMPOSITION — the layout, visual hierarchy, focal structure, where imagery vs text sit, the negative space, the scroll-stopping energy. But REPLACE every piece of its CONTENT with OURS: swap the competitor's product for OUR product (from the other provided images), and use OUR headline / proof / offer below. Change everything that identifies the competitor (their brand name, product, logo, claims, any of their text) — copy the STRUCTURE, never their words or marks."
+    ? "The FIRST image is a PROVEN, high-performing competitor ad. REUSE ITS WINNING COMPOSITION — the visual hierarchy, focal structure, where imagery vs text sit, the negative space, the scroll-stopping energy. But REPLACE every piece of its CONTENT with OURS: swap the competitor's product for OUR product (from the other provided images), and use OUR headline / proof / offer below. Change everything that identifies the competitor (their brand name, product, logo, claims, any of their text) — copy the STRUCTURE, never their words or marks. Produce ONE cohesive, polished direct-response static built around a single hero product shot — NEVER a stacked list of blue links, sitelinks, a button/menu column, or a search-result layout (even if the reference looks like that)."
     : hasDesignRef
     ? "Match the FIRST image's design language (layout energy, typography weight, color system) — the product images follow it."
     : "Clean, premium direct-response e-commerce static; high contrast; mobile-thumb-legible.";
@@ -96,7 +96,7 @@ ${bodyBits.join("\n")}
 
 Show the real product (from the provided product image) prominently.
 
-PRODUCT FIDELITY: reproduce the product package faithfully from the provided product image — its real wordmark, colors, and imagery. Do NOT invent, add, or garble any small text, ingredient icons, badges, or fine print on the package; if such micro-text would not be crisply legible, render those areas cleanly rather than as garbled lettering. EVERY piece of text anywhere in the image must be real, correctly-spelled English words — never gibberish, fake-latin, or nonsense characters.
+PRODUCT FIDELITY: reproduce the product package faithfully from the provided product image — its real wordmark, colors, and imagery. Keep ONLY the main brand wordmark and product name crisp and legible. For the small ingredient icons, supplement-facts panel, and any other fine print on the package: do NOT try to spell them out — a redrawn pack turns them into gibberish. Render those areas as a clean, softly-defocused, or subtly out-of-focus surface (as a real product photo's fine print looks at ad size), NOT as invented lettering. EVERY piece of text that IS legible anywhere in the image must be real, correctly-spelled English words — never gibberish, fake-latin, scrambled glyphs, or nonsense characters.
 
 TRUST BAR (small, along the bottom, render exactly): ${trust}
 
@@ -104,10 +104,12 @@ OFFER (show ONCE — a single badge, never duplicated): ${offerHeadline ? `one p
 
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 
-  // expectedCopy.headline drives the QC garble/consistency check. For an imitation we deliberately let the
-  // model rewrite the headline off the competitor's brand, so we can't assert the exact string — assert OUR
-  // product name renders (ungarbled) instead. Own-brand angles still assert their exact hook.
-  return { prompt, expectedCopy: { headline: isImitation ? brief.productTitle : headline, offer: offerHeadline, trust } };
+  // expectedCopy.headline drives the QC exact-headline check. For an imitation we deliberately let the model
+  // rewrite the headline off the competitor's brand, so there is no exact string to assert — leave it BLANK,
+  // which both QC paths treat as "skip the exact-match, keep textLegible strict" (a productTitle sentinel
+  // wrongly rejected a fine de-branded headline "The #1 Superfood Coffee" on 2026-07-13). Own-brand angles
+  // still assert their exact hook. The no-competitor-brand guard lives in the generation prompt above.
+  return { prompt, expectedCopy: { headline: isImitation ? "" : headline, offer: offerHeadline, trust } };
 }
 
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */

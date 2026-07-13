@@ -32,8 +32,8 @@ The pre-Phase-1 path: same 1568px JPEG normalization, but the vision pass is a d
 
 | check | fails when |
 |---|---|
-| `headlineExact` | the headline isn't the exact expected string (dropped/repeated/misspelled/garbled words) |
-| `textLegible` | any on-image text is gibberish (`IMPUSEO`, `real Ife`, `coffee coffee`) |
+| `headlineExact` | the headline isn't the exact expected string (dropped/repeated/misspelled/garbled words). **Imitation exception (2026-07-13):** a competitor-imitation's headline is rewritten off the competitor's brand, so `expectedCopy.headline` is BLANK — both paths signal `imitationHeadline` (a TRUSTED flag, outside the injection-guarded DATA block: direct via the expected-copy preamble, box via [[creative-qc-sandbox]] `buildQcPrompt`) and the QC returns `headlineExact=true` (nothing to exact-match); a garbled headline still fails `textLegible` |
+| `textLegible` | any on-image text is gibberish (`IMPUSEO`, `real Ife`, `coffee coffee`) — **now explicitly scoped to PRODUCT-PACKAGE text** (garbled ingredient-icon labels / fine print like `Cocoa Flaspert Hand lens`), and, in imitation mode, **any competitor brand name appearing anywhere** |
 | `noBarePrice` | a bare sticker/MSRP price shows alone (allowed only as strikethrough→discount or per-serving) |
 | `noFabricatedPhotoCaption` | text claims an image is a real/candid/verified/authentic photo ("Candid photos from her home"). Plain "Before"/"After" labels are fine |
 | `transformationPhotorealistic` | a before/after image is a cartoon/illustration/3D-CGI render instead of a photorealistic photograph (true if no transformation image) |

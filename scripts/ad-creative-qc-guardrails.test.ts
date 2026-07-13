@@ -121,6 +121,25 @@ test("buildQcPrompt: expectedCopy fields live inside the DATA block with the inj
   assert.ok(prompt.includes("HAS_TRANSFORMATION: no"), "transformation flag threads through");
 });
 
+test("buildQcPrompt: imitationHeadline emits the HEADLINE MODE rule OUTSIDE the DATA block, and it is absent by default", () => {
+  const off = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "15 SUPERFOODS", offer: "", trust: "10k reviews" },
+    hasTransformation: false,
+  });
+  assert.ok(!off.includes("HEADLINE MODE — IMITATION"), "own-brand render carries no imitation rule");
+
+  const on = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "", offer: "", trust: "10k reviews" },
+    hasTransformation: false,
+    imitationHeadline: true,
+  });
+  assert.ok(on.includes("HEADLINE MODE — IMITATION"), "imitation render carries the rule");
+  // It must sit in the TRUSTED region — BEFORE the DATA block begins (not inside the untrusted block).
+  assert.ok(on.indexOf("HEADLINE MODE — IMITATION") < on.indexOf(QC_DATA_BLOCK_BEGIN), "imitation rule is outside/above the DATA block");
+});
+
 test("sanitizeExpectedCopyField: newlines / control chars / backticks / '---' inside a malicious copy string are neutralized so it can't forge a prompt turn", () => {
   // A review body containing an injected instruction that tries to break out of the DATA block.
   const malicious = [

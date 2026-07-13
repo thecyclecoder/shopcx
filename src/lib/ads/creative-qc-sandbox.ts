@@ -138,6 +138,11 @@ export interface QcPromptInput {
   imagePath: string;
   expectedCopy: { headline: string; offer?: string | null; trust: string };
   hasTransformation: boolean;
+  /** TRUSTED flag (from our code, not the untrusted DATA block): this is a competitor-imitation whose
+   *  headline the generator rewrote for our brand, so there is NO exact headline string to match. When
+   *  set, the outer (trusted) prompt tells the QC to pass `headlineExact` on legibility+on-brand rather
+   *  than exact-match. Set by qaCreativeViaBoxSession when expectedCopy.headline is blank. */
+  imitationHeadline?: boolean;
 }
 
 /**
@@ -154,8 +159,14 @@ export function buildQcPrompt(input: QcPromptInput): string {
   // Image path is a controlled tmp filename we minted (join(tmpdir(), `creative-qc-${uuid}.jpg`)),
   // NOT user data — safe to embed as-is. Still, keep it outside the DATA block since the skill
   // needs to Read it directly.
+  // TRUSTED instruction (outside the DATA block) — only emitted when OUR code flags an imitation. It is a
+  // legitimate rule from the caller, not untrusted copy, so it may direct the QC's judgment.
+  const imitationRule = input.imitationHeadline
+    ? "HEADLINE MODE — IMITATION: this ad is a competitor-imitation whose headline was rewritten for OUR brand, so there is NO exact headline string to match. Set `headlineExact` = true UNLESS the headline is garbled/misspelled (that is a `textLegible` failure, not `headlineExact`). Still apply every other check in full — and FAIL `textLegible` if ANY competitor brand name (a brand that is not ours) appears anywhere in the image. The HEADLINE field in the DATA block below is intentionally blank."
+    : null;
   return [
     "Use the creative-qc skill to visually QC ONE rendered ad against the exact copy strings it should contain. You are on Max (no ANTHROPIC_API_KEY). READ the image with the Read tool — Claude Code renders the JPEG visually to you — then judge each of the five render defects and emit ONLY the CreativeQAVerdict JSON (no prose, no code fences, no wrapper).",
+    ...(imitationRule ? ["", imitationRule] : []),
     "",
     `IMAGE: ${input.imagePath}`,
     "",
