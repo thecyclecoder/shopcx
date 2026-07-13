@@ -19,6 +19,7 @@
  * See [[../../../docs/brain/reference/meta-scaling-methodology]] (angle model + price-on-static rule).
  */
 import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-intelligence";
+import { META_CAPS } from "@/lib/ad-tool-config";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -239,4 +240,69 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
   ];
 
   return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails };
+}
+
+/**
+ * buildMetaCopy(brief) — the Meta ad text (primary / headline / description) Dahlia publishes with each
+ * creative. Composed from the SAME grounded brief as the image, so the caption matches the render.
+ *
+ * Fixes the 2026-07-13 defect where the copy was `headline = the OFFER (truncated)`, `primaryText =
+ * hook + a benefit fragment`, `description = empty` — e.g. "I lost 40+ pounds! Appetite
+ * suppression/craving control" with the discount jammed into the headline. Now:
+ *   - **headline** = the hook/benefit (never the offer — the offer belongs in the description).
+ *   - **primaryText** = a real DR caption: a proof-led opener, a benefit line, the trust stack, then the
+ *     offer + a soft CTA — on separate lines.
+ *   - **description** = the allowed price treatment (per-serving value or offer headline).
+ *
+ * De-brand safety: a `source:'competitor'` angle's raw `hook` can carry the COMPETITOR's brand/product
+ * name (e.g. "MUD\WTR vs Ryze") — the image de-brands it, and so must the caption. So for a competitor
+ * angle we NEVER put the raw hook in the copy; the headline falls back to a de-branded benefit and the
+ * opener leads with OUR review/proof (always our own words). Own-brand angles use the hook directly.
+ */
+export function buildMetaCopy(brief: CreativeBrief): { primaryText: string; headline: string; description: string } {
+  const clip = (raw: string, n: number): string => {
+    const s = (raw ?? "").trim();
+    if (s.length <= n) return s;
+    const cut = s.slice(0, n);
+    const sp = cut.lastIndexOf(" ");
+    return (sp > n * 0.6 ? cut.slice(0, sp) : cut).trim().replace(/[\s.,;:!-]+$/, "");
+  };
+  const isCompetitor = brief.angle.source === "competitor";
+
+  // A de-branded benefit line (always OUR words) — used as the headline for competitor imitations and as
+  // a fallback everywhere. Prefer a supporting truth, then the (de-branded) lead benefit, then the title.
+  const benefitHeadline =
+    brief.supportingBenefits.find(Boolean) ??
+    (brief.angle.leadBenefit && !/proven competitor angle/i.test(brief.angle.leadBenefit) ? brief.angle.leadBenefit : "") ??
+    "";
+
+  // HEADLINE — the hook/benefit, NEVER the offer. Competitor imitations skip the (possibly brand-carrying)
+  // raw hook in favor of the de-branded benefit.
+  const headline = clip(
+    (isCompetitor ? benefitHeadline : brief.angle.hook) || benefitHeadline || brief.productTitle,
+    META_CAPS.headline,
+  );
+
+  // OPENER — lead with real proof (our customer's own words → never a competitor brand). Own-brand angles
+  // may lead with the hook instead.
+  let opener = "";
+  if (brief.transformation?.quote) opener = `"${clip(brief.transformation.quote, 120)}" — ${brief.transformation.reviewer}`;
+  else if (brief.leadProof?.kind === "review" && brief.leadProof.text) opener = `"${clip(brief.leadProof.text, 120)}"${brief.leadProof.attribution ? ` — ${brief.leadProof.attribution}` : ""}`;
+  else if (!isCompetitor && brief.angle.hook) opener = brief.angle.hook.trim();
+
+  const benefitLine = brief.supportingBenefits.filter(Boolean).length
+    ? `${brief.productTitle} — ${brief.supportingBenefits.filter(Boolean).slice(0, 2).join(", ")}.`
+    : "";
+  const proofLine = brief.proofStack.filter(Boolean).slice(0, 3).join(" · ");
+  const offerLine = brief.offer?.headline ? `${brief.offer.headline}. Shop now 👉` : "Shop now 👉";
+
+  const primaryText = [opener, [benefitLine, proofLine].filter(Boolean).join("\n"), offerLine]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, META_CAPS.primary_text);
+
+  // DESCRIPTION — the allowed price treatment (never empty). Falls back to a proof line.
+  const description = clip(brief.offer?.perServing ?? brief.offer?.headline ?? proofLine ?? "", META_CAPS.description);
+
+  return { primaryText, headline, description };
 }

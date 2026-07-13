@@ -15,7 +15,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, type ScoredAngle } from "@/lib/ads/creative-brief";
+import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle } from "@/lib/ads/creative-brief";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -23,6 +23,7 @@ import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-products";
+import { META_CAPS } from "@/lib/ad-tool-config";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -118,9 +119,9 @@ async function insertReadyCreative(
       lead_benefit_anchor: angle.leadBenefit.slice(0, 120),
       hook_one_liner: angle.hook.slice(0, 120),
       urgency_lever: "none", generated_by: "ad-creative-agent", is_active: true,
-      meta_headline: metaCopy.headline.slice(0, 40),
-      meta_primary_text: metaCopy.primaryText.slice(0, 125),
-      meta_description: metaCopy.description.slice(0, 30),
+      meta_headline: metaCopy.headline.slice(0, META_CAPS.headline),
+      meta_primary_text: metaCopy.primaryText.slice(0, META_CAPS.primary_text),
+      meta_description: metaCopy.description.slice(0, META_CAPS.description),
     })
     .select("id").single();
 
@@ -262,11 +263,11 @@ async function stockProduct(
           ? await qaCreativeViaBoxSession({ buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation }, qcDispatcher)
           : await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
-        const metaCopy = {
-          headline: (brief.offer?.headline ?? angle.leadBenefit).slice(0, 40),
-          primaryText: `${angle.hook} ${brief.supportingBenefits[0] ?? ""}`.trim(),
-          description: (brief.offer?.perServing ?? brief.offer?.headline ?? "").slice(0, 30),
-        };
+        // Real Meta copy from the grounded brief — a proof-led caption, a benefit headline (never the
+        // offer), and the offer in the description; de-branded for competitor imitations ([[creative-brief]]
+        // buildMetaCopy). Replaces the old hook+fragment concatenation that shipped "I lost 40+ pounds!
+        // Appetite suppression/craving control" with the discount jammed into the headline (2026-07-13).
+        const metaCopy = buildMetaCopy(brief);
         const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
         // Record the COMBINATION (concept × creative treatment × copy × destination) as pending — the
         // media buyer stamps its outcome later, feeding the learning flywheel.
