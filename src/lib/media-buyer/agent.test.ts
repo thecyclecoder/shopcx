@@ -36,6 +36,8 @@ import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import type { DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import type { IterationPolicy } from "@/lib/meta/decision-engine";
 import type { MediaBuyerTestCohort } from "@/lib/media-buyer/publish-gate";
+import { isDecisionTreeKill } from "@/lib/media-buyer/meta-cpa-signal";
+import { tierForTest } from "@/lib/ads/testing-results-sdk";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -287,6 +289,114 @@ test("computeMediaBuyerPlan — Phase 1: skeptic v3 (ROAS 0.27 < roas_floor 0.30
   // hold band), so the runner passes losers=[] to the pure plan.
   const plan = computeMediaBuyerPlan(baseInputs({ policy: decisionTreePolicy, losers: [] }));
   assert.equal(plan.kill.length, 0);
+});
+
+// ── media-buyer-kill-on-decision-tree-retire-roas-floor Phase 2 — kill ⇔ dud parity ──
+//
+// The Phase 2 contract is "compute kills from the crown/kill decision-tree using the
+// iteration_policies thresholds; reuse (or mirror + unit-lock) tierForTest so an agent
+// kill == a 'dud'-tier test." Phase 2 lives in `isDecisionTreeKill` (src/lib/media-buyer/
+// meta-cpa-signal.ts): (a) tierForTest === 'dud' → kill; (b) plus the converter-guarded
+// EARLY leading-signal trim (cost-per-ATC / CPM / clicks-no-ATC past earlyTrimMinSpend).
+// These tests lock the parity + the skeptic v3 protection + the leading-signal fast-kill.
+
+const P2_THRESHOLDS = {
+  crownMaxCpaCents: 15_000, // $150
+  crownMinSpendCents: 45_000, // $450
+  crownMinPurchases: 8,
+  holdBandMaxCpaCents: 22_000, // $220
+  maxTestSpendCents: 120_000, // $1,200
+  earlyTrimMinSpendCents: 30_000, // $300
+  trimMaxCostPerAtcCents: 8_000, // $80
+  trimMaxCpmCents: 10_000, // $100
+};
+const P2_TIER_THRESHOLDS = {
+  crownMaxCpaCents: P2_THRESHOLDS.crownMaxCpaCents,
+  crownMinSpendCents: P2_THRESHOLDS.crownMinSpendCents,
+  crownMinPurchases: P2_THRESHOLDS.crownMinPurchases,
+  holdBandMaxCpaCents: P2_THRESHOLDS.holdBandMaxCpaCents,
+  maxTestSpendCents: P2_THRESHOLDS.maxTestSpendCents,
+  earlyTrimMinSpendCents: P2_THRESHOLDS.earlyTrimMinSpendCents,
+};
+
+test("Phase 2 parity — isDecisionTreeKill returns true for EVERY tierForTest='dud' input (deadline dud + early dud)", () => {
+  // Every dud-tier input the dashboard would badge 'dud' must also be a kill.
+  const dudCases: Array<{ label: string; m: { spendCents: number; purchases: number; addToCart: number; impressions: number; clicks: number } }> = [
+    // Deadline dud, 0 purchases.
+    { label: "deadline, 0 purchases", m: { spendCents: 130_000, purchases: 0, addToCart: 4, impressions: 60_000, clicks: 200 } },
+    // Deadline dud, converter above hold band ($300 CPA @ $1300 spend).
+    { label: "deadline, cpa > hold_band", m: { spendCents: 130_000, purchases: 4, addToCart: 10, impressions: 60_000, clicks: 200 } },
+    // Early dud — 0 purchases past earlyTrimMinSpend.
+    { label: "early dud, 0 purchases at earlyTrimMin", m: { spendCents: 30_000, purchases: 0, addToCart: 1, impressions: 20_000, clicks: 60 } },
+    // Early dud — 0 purchases past earlyTrimMin but WITH a real ATC sample (still dud — no purchases).
+    { label: "early dud, 0 purchases with ATC sample", m: { spendCents: 40_000, purchases: 0, addToCart: 5, impressions: 25_000, clicks: 80 } },
+  ];
+  for (const c of dudCases) {
+    assert.equal(tierForTest({ spendCents: c.m.spendCents, purchases: c.m.purchases, addToCart: c.m.addToCart }, P2_TIER_THRESHOLDS), "dud", `tierForTest expected dud for ${c.label}`);
+    assert.equal(isDecisionTreeKill(c.m, P2_THRESHOLDS, true), true, `isDecisionTreeKill must kill for tierForTest='dud' case: ${c.label}`);
+  }
+});
+
+test("Phase 2 parity — isDecisionTreeKill returns false for tierForTest='crown' | 'promising' inputs (converter guard preserves them)", () => {
+  const keepCases: Array<{ label: string; m: { spendCents: number; purchases: number; addToCart: number; impressions: number; clicks: number } }> = [
+    // Crown: 10 purchases, $120 CPA, spend $1200 (exactly at deadline — but crown-qualified, so still crown).
+    // Actually tierForTest checks crown BEFORE deadline dud (order in the function), so 10*120=1200 (spend), cpa=$120 ≤ $150.
+    // Wait: spend $1200 IS ≥ maxTestSpend $1200 — but crown check passes first, so it stays crown. Good.
+    { label: "crown at deadline", m: { spendCents: 120_000, purchases: 10, addToCart: 20, impressions: 40_000, clicks: 150 } },
+    // Promising: 3 purchases, cpa $180 (over crown $150, under hold band $220), spend $540.
+    { label: "promising converter", m: { spendCents: 54_000, purchases: 3, addToCart: 8, impressions: 25_000, clicks: 90 } },
+    // Testing: 1 purchase, cpa $150 (at crown), spend $150 (under crownMinSpend $450) → 'promising' actually.
+    { label: "promising at crown CPA", m: { spendCents: 15_000, purchases: 1, addToCart: 3, impressions: 8_000, clicks: 30 } },
+  ];
+  for (const c of keepCases) {
+    const tier = tierForTest({ spendCents: c.m.spendCents, purchases: c.m.purchases, addToCart: c.m.addToCart }, P2_TIER_THRESHOLDS);
+    assert.ok(tier === "crown" || tier === "promising", `expected crown/promising for ${c.label}, got ${tier}`);
+    assert.equal(isDecisionTreeKill(c.m, P2_THRESHOLDS, true), false, `isDecisionTreeKill must KEEP a ${tier} tier: ${c.label}`);
+  }
+});
+
+test("Phase 2 — skeptic v3 shape (spend $678, 3 purchases, 13 ATC, CAC $226 just over hold band, $52/ATC) is NOT killed", () => {
+  // The spec's canonical protect-me case: sales, under deadline, near the hold band. Not a dud, and the
+  // leading-signal trim doesn't fire (cost-per-ATC = $678/13 = $52 ≪ $80 threshold).
+  const m = { spendCents: 67_800, purchases: 3, addToCart: 13, impressions: 30_000, clicks: 120 };
+  const tier = tierForTest({ spendCents: m.spendCents, purchases: m.purchases, addToCart: m.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "testing"); // not crown (< 8 purchases), not promising (cac > $220), not dud
+  assert.equal(isDecisionTreeKill(m, P2_THRESHOLDS, true), false);
+});
+
+test("Phase 2 — leading-signal fast-kill still fires past earlyTrimMinSpend with 0 purchases + high cost-per-ATC / clicks-no-ATC", () => {
+  // 0 purchases, spend $300 (earlyTrimMin), 4 ATC, $75/ATC (< threshold), CPM $150 (> $100) → CPM kill.
+  const highCpm = { spendCents: 30_000, purchases: 0, addToCart: 4, impressions: 20_000, clicks: 60 };
+  assert.equal(isDecisionTreeKill(highCpm, P2_THRESHOLDS, true), true);
+  // Wait — spend $300, purchases 0 → tierForTest returns 'dud' via early dud. So this counts as dud-tier already.
+  // The real leading-signal-ONLY test needs a state where tierForTest returns 'testing' but leading-signal kills.
+  // That requires purchases > 0 AND cpa > hold_band (past converter guard) AND spend past earlyTrimMin AND high CPM.
+  // Spend $400, purchases 1, cac $400 (> hold_band $220), CPM $100_000/imp... let's construct it.
+  const leadingOnly = { spendCents: 40_000, purchases: 1, addToCart: 5, impressions: 3_000, clicks: 20 }; // CPM = 40_000/3000*1000 = $13.3k → high
+  assert.equal(tierForTest({ spendCents: leadingOnly.spendCents, purchases: leadingOnly.purchases, addToCart: leadingOnly.addToCart }, P2_TIER_THRESHOLDS), "testing");
+  assert.equal(isDecisionTreeKill(leadingOnly, P2_THRESHOLDS, true), true);
+});
+
+test("Phase 2 — converter guard: profitable converter (cpa ≤ hold_band) is NEVER trimmed on leading signals, even with high CPM", () => {
+  // 3 purchases, cac $150 (at crown), spend $450, absurd CPM = 45_000 / 500 * 1000 = $90_000 → would trigger high CPM.
+  // But cpa ≤ hold_band → converter guard KEEPS it.
+  const guarded = { spendCents: 45_000, purchases: 3, addToCart: 6, impressions: 500, clicks: 15 };
+  assert.equal(isDecisionTreeKill(guarded, P2_THRESHOLDS, true), false);
+});
+
+test("Phase 2 — under earlyTrimMinSpend with 0 purchases is NOT killed (below the early-dud threshold)", () => {
+  const early = { spendCents: 15_000, purchases: 0, addToCart: 1, impressions: 8_000, clicks: 30 };
+  assert.equal(tierForTest({ spendCents: early.spendCents, purchases: early.purchases, addToCart: early.addToCart }, P2_TIER_THRESHOLDS), "testing");
+  assert.equal(isDecisionTreeKill(early, P2_THRESHOLDS, true), false);
+});
+
+test("Phase 2 — retired (S) slow-kill: converter over hold_band past crownMinSpend but pre-deadline, with NO leading-signal issue, is NOT killed anymore", () => {
+  // Old (S) slow-kill would have fired here: 2 purchases, cpa $300 (> hold_band $220), spend $600 (> crownMinSpend $450, < maxTestSpend $1200).
+  // Phase 2 retires (S) — this state now returns 'testing' from tierForTest, kill=false. Deadline-then-decide.
+  // Chosen numbers keep the leading signals BELOW the trim thresholds: cost-per-ATC $600/8 = $75 (< $80) and CPM $24 (< $100).
+  const slow = { spendCents: 60_000, purchases: 2, addToCart: 8, impressions: 25_000, clicks: 80 };
+  assert.equal(tierForTest({ spendCents: slow.spendCents, purchases: slow.purchases, addToCart: slow.addToCart }, P2_TIER_THRESHOLDS), "testing");
+  assert.equal(isDecisionTreeKill(slow, P2_THRESHOLDS, true), false);
 });
 
 test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {

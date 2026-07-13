@@ -16,6 +16,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { DetectedWinner, WinnerCampaign, WinnerAngle } from "@/lib/ads/winning-creative-detect";
 import type { MediaBuyerLoser } from "@/lib/media-buyer/agent";
+import { tierForTest } from "@/lib/ads/testing-results-sdk";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -222,6 +223,66 @@ const MIN_CLICKS_FOR_ZERO_ATC = 20;
  *  ATCs, e.g. Tabs Test 02: 1 ATC but 2 purchases @ $47 CPP). Below this, cost-per-ATC can't trigger. */
 const MIN_ATC_FOR_COST_SIGNAL = 3;
 
+/**
+ * [[../../../docs/brain/specs/media-buyer-kill-on-decision-tree-retire-roas-floor]] Phase 2 —
+ * The crown/kill decision-tree kill predicate. Returns true iff the media-buyer should kill this
+ * active test adset. The kill decision has two sources, unified here so `detectMetaCpaLosers` and
+ * the unit-test parity harness read the SAME logic:
+ *
+ *   (a) DUD-tier kill — 1:1 parity with [[../ads/testing-results-sdk]] `tierForTest` === 'dud'.
+ *       This is the founder-facing decision-tree the dashboard shows (deadline dud + early dud),
+ *       so an agent kill and a `/ad-testing-results` "dud" badge never disagree.
+ *   (b) EARLY leading-signal trim — the converter-guarded fast-kill on cost-per-ATC / CPM /
+ *       clicks-no-ATC past `earlyTrimMinSpendCents`. Kept per the spec's "keep detectMetaCpaLosers
+ *       (cost-per-ATC / CPM / clicks-no-ATC) as the EARLY leading-signal trim, with its existing
+ *       converter guard" — the HOLD-band converter guard fires FIRST, so a profitable converter
+ *       (purchases > 0 AND cpa ≤ hold_band) is never trimmed on a leading signal.
+ *
+ * The retired paths: the legacy (S) SLOW-KILL (converter with cpa > hold_band past crownMinSpend,
+ * pre-deadline) and the (F1) 0-purchase-past-crownMinSpend backstop are folded into `tierForTest`
+ * (the deadline / early-dud cases). Under Phase 2, an adset with sales, under deadline, near the
+ * hold band is NEVER killed — the spec's skeptic v3 protection ($678 spend, 3 sales, CAC $226).
+ */
+export function isDecisionTreeKill(
+  m: { spendCents: number; purchases: number; addToCart: number; impressions: number; clicks: number },
+  t: {
+    crownMaxCpaCents: number;
+    crownMinSpendCents: number;
+    crownMinPurchases: number;
+    holdBandMaxCpaCents: number;
+    maxTestSpendCents: number;
+    earlyTrimMinSpendCents: number;
+    trimMaxCostPerAtcCents: number;
+    trimMaxCpmCents: number;
+  },
+  accountHasAtc: boolean,
+): boolean {
+  // (a) Dud-tier kill — the exact rule the dashboard's tierForTest reads (1:1 parity, no local drift).
+  const tier = tierForTest(
+    { spendCents: m.spendCents, purchases: m.purchases, addToCart: m.addToCart },
+    {
+      crownMaxCpaCents: t.crownMaxCpaCents,
+      crownMinSpendCents: t.crownMinSpendCents,
+      crownMinPurchases: t.crownMinPurchases,
+      holdBandMaxCpaCents: t.holdBandMaxCpaCents,
+      maxTestSpendCents: t.maxTestSpendCents,
+      earlyTrimMinSpendCents: t.earlyTrimMinSpendCents,
+    },
+  );
+  if (tier === "dud") return true;
+
+  // (b) EARLY leading-signal trim — converter guard first (a profitable converter is never trimmed).
+  const cpa = m.purchases > 0 ? m.spendCents / m.purchases : Infinity;
+  if (m.purchases > 0 && cpa <= t.holdBandMaxCpaCents) return false;
+  if (m.spendCents < t.earlyTrimMinSpendCents) return false;
+  const cpm = m.impressions > 0 ? (m.spendCents / m.impressions) * 1000 : 0;
+  const costPerAtc = m.addToCart >= MIN_ATC_FOR_COST_SIGNAL ? m.spendCents / m.addToCart : null;
+  const highCostPerAtc = costPerAtc != null && costPerAtc > t.trimMaxCostPerAtcCents;
+  const highCpm = cpm > t.trimMaxCpmCents;
+  const clicksNoAtc = accountHasAtc && m.clicks >= MIN_CLICKS_FOR_ZERO_ATC && m.addToCart === 0;
+  return highCostPerAtc || highCpm || clicksNoAtc;
+}
+
 export interface MetaCpaLoserOptions {
   workspaceId: string;
   metaAdAccountId: string;
@@ -248,48 +309,45 @@ export interface MetaCpaLoserOptions {
 }
 
 /**
- * Losers = the media-buyer test-loop's non-crown exits, in band order (CEO decision tree 2026-07-12 —
- * see docs/brain/reference/meta-scaling-methodology.md). For each active adset on cumulative metrics:
- *   (D) DEADLINE-RETIRE — spend ≥ `maxTestSpendCents` and NOT crown-qualified (CPA ≤ crown AND
- *       purchases ≥ crownMinPurchases): it had its full runway and never crowned → free the slot.
- *   HOLD / converter guard — a converter with CPA ≤ `holdBandMaxCpaCents` (the profit floor) is
- *       profitable: NEVER trimmed on a leading signal and NEVER slow-killed — it runs toward the crown
- *       floor or the deadline. (Widened from the old crown-CPA guard so a $160-CPA ad isn't trimmed.)
- *   (S) SLOW-KILL — a converter with CPA > `holdBandMaxCpaCents` past `crownMinSpendCents`: converting
- *       but UNPROFITABLE → kill.
- *   (F) FAST-KILL (dud) — near-zero conversions: a hard backstop of 0 purchases by `crownMinSpendCents`,
- *       PLUS the early leading-signal trims (past `earlyTrimMinSpendCents`) — high cost-per-ATC (the
- *       strongest signal: Coffee winners $18–65/ATC, laggards $100–152), high CPM, or real clicks
- *       (≥ MIN_CLICKS_FOR_ZERO_ATC) with ZERO add-to-carts. Leading signals KILL, never crown.
- * Each loser cites its dominant child ad so the audit names the creative in decline.
+ * Losers = the media-buyer test-loop's non-crown exits, on the crown/kill decision-tree
+ * ([[../../../docs/brain/specs/media-buyer-kill-on-decision-tree-retire-roas-floor]] Phase 2).
+ * The predicate is `isDecisionTreeKill`, which unifies:
+ *   (a) DUD-tier kill — 1:1 parity with [[../ads/testing-results-sdk]] `tierForTest === 'dud'`
+ *       (deadline dud + early dud). An agent kill == a dashboard "dud" badge.
+ *   (b) EARLY leading-signal trim — converter-guarded fast-kill on cost-per-ATC / CPM /
+ *       clicks-no-ATC past `earlyTrimMinSpendCents`. The HOLD-band converter guard fires FIRST,
+ *       so a profitable converter (purchases > 0 AND cpa ≤ hold_band) is never trimmed.
+ * The legacy (S) slow-kill (converter above hold_band pre-deadline) and (F1) 0-purchase-at-
+ * crownMinSpend backstop are retired: `tierForTest`'s deadline / early-dud cases already cover
+ * every state that should die, and Phase 2's contract is "a test with sales, under deadline,
+ * near the hold band is NEVER killed" (skeptic v3 protection). Each loser cites its dominant
+ * child ad so the audit trail names the creative in decline.
  */
 export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOptions): Promise<MediaBuyerLoser[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
   const accountHasAtc = rows.some((r) => r.add_to_cart > 0); // ATC ingested/backfilled → the 0-ATC rule is safe
-  const losing = rows.filter((r) => {
-    const cpa = r.purchases > 0 ? r.spend_cents / r.purchases : Infinity;
-    const crownQualified = r.purchases >= opts.crownMinPurchases && cpa <= opts.crownMaxCpaCents;
-
-    // (D) Decision deadline — full runway spent without crowning → retire the slot.
-    if (r.spend_cents >= opts.maxTestSpendCents && !crownQualified) return true;
-
-    // HOLD band / converter guard — converting at/below the profit floor: keep running, never trim.
-    if (r.purchases > 0 && cpa <= opts.holdBandMaxCpaCents) return false;
-
-    // (S) Slow-kill — converting but UNPROFITABLE (CPA above the profit floor) past the crown-min spend.
-    if (r.purchases > 0 && cpa > opts.holdBandMaxCpaCents && r.spend_cents >= opts.crownMinSpendCents) return true;
-
-    // (F) Fast-kill (dud). Hard backstop: 0 purchases by the crown-min spend (~$450 = 3× CPA).
-    if (r.purchases === 0 && r.spend_cents >= opts.crownMinSpendCents) return true;
-    if (r.spend_cents < opts.earlyTrimMinSpendCents) return false; // else need the early-trim floor
-    const cpm = r.impressions > 0 ? (r.spend_cents / r.impressions) * 1000 : 0;
-    // Cost-per-ATC only trusted with a real ATC sample (≥ MIN_ATC_FOR_COST_SIGNAL) — 1 ATC is noise.
-    const costPerAtc = r.add_to_cart >= MIN_ATC_FOR_COST_SIGNAL ? r.spend_cents / r.add_to_cart : null;
-    const highCostPerAtc = costPerAtc != null && costPerAtc > opts.trimMaxCostPerAtcCents;
-    const highCpm = cpm > opts.trimMaxCpmCents;
-    const clicksNoAtc = accountHasAtc && r.clicks >= MIN_CLICKS_FOR_ZERO_ATC && r.add_to_cart === 0;
-    return highCostPerAtc || highCpm || clicksNoAtc;
-  });
+  const losing = rows.filter((r) =>
+    isDecisionTreeKill(
+      {
+        spendCents: r.spend_cents,
+        purchases: r.purchases,
+        addToCart: r.add_to_cart,
+        impressions: r.impressions,
+        clicks: r.clicks,
+      },
+      {
+        crownMaxCpaCents: opts.crownMaxCpaCents,
+        crownMinSpendCents: opts.crownMinSpendCents,
+        crownMinPurchases: opts.crownMinPurchases,
+        holdBandMaxCpaCents: opts.holdBandMaxCpaCents,
+        maxTestSpendCents: opts.maxTestSpendCents,
+        earlyTrimMinSpendCents: opts.earlyTrimMinSpendCents,
+        trimMaxCostPerAtcCents: opts.trimMaxCostPerAtcCents,
+        trimMaxCpmCents: opts.trimMaxCpmCents,
+      },
+      accountHasAtc,
+    ),
+  );
   const losers: MediaBuyerLoser[] = [];
   for (const r of losing) {
     const { data: ads } = await admin
