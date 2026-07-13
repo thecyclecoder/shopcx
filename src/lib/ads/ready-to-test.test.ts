@@ -27,6 +27,7 @@ function makeChain(result: FakeTableRow) {
   const chain: Record<string, unknown> = {};
   chain.select = () => chain;
   chain.eq = () => chain;
+  chain.neq = () => chain;
   chain.in = () => chain;
   chain.not = () => chain;
   chain.is = () => chain;
@@ -57,7 +58,7 @@ test("a ready campaign with no publish job returns `ready_no_active_ad`", async 
     },
     ad_campaigns: {
       data: [
-        { id: "C1", landing_url: "https://superfoods.com/products/x", created_at: "2026-06-29T10:00:00Z" },
+        { id: "C1", landing_url: "https://superfoods.com/products/x", status: "ready", created_at: "2026-06-29T10:00:00Z" },
       ],
       error: null,
     },
@@ -88,8 +89,8 @@ test("a campaign with an in-flight publish job is excluded", async () => {
     },
     ad_campaigns: {
       data: [
-        { id: "C1", landing_url: "https://superfoods.com/products/x", created_at: "2026-06-29T10:00:00Z" },
-        { id: "C2", landing_url: "https://superfoods.com/products/y", created_at: "2026-06-28T10:00:00Z" },
+        { id: "C1", landing_url: "https://superfoods.com/products/x", status: "ready", created_at: "2026-06-29T10:00:00Z" },
+        { id: "C2", landing_url: "https://superfoods.com/products/y", status: "ready", created_at: "2026-06-28T10:00:00Z" },
       ],
       error: null,
     },
@@ -123,7 +124,7 @@ test("a `media_kind='static'` row with a final JPG counts even if `status` is no
       error: null,
     },
     ad_campaigns: {
-      data: [{ id: "C3", landing_url: "https://superfoods.com/products/z", created_at: "2026-06-30T10:00:00Z" }],
+      data: [{ id: "C3", landing_url: "https://superfoods.com/products/z", status: "ready", created_at: "2026-06-30T10:00:00Z" }],
       error: null,
     },
     ad_publish_jobs: { data: [], error: null },
@@ -147,7 +148,7 @@ test("a `failed` publish job does not block — the campaign is still pending a 
       error: null,
     },
     ad_campaigns: {
-      data: [{ id: "C4", landing_url: "https://superfoods.com/products/w", created_at: "2026-06-27T10:00:00Z" }],
+      data: [{ id: "C4", landing_url: "https://superfoods.com/products/w", status: "ready", created_at: "2026-06-27T10:00:00Z" }],
       error: null,
     },
     ad_publish_jobs: {
@@ -164,6 +165,35 @@ test("a `failed` publish job does not block — the campaign is still pending a 
   const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
   assert.equal(readyToTest.length, 1);
   assert.equal(readyToTest[0].ad_campaign_id, "C4");
+});
+
+test("an archived (URL-removed / retired) campaign is excluded even with a ready ad_video + landing_url + no active publish job", async () => {
+  // The retire path in production: the operator removes a launched ad's URL, which flips
+  // `ad_campaigns.status` to 'archived'. Its sibling ad_video is still `status='ready'` and the
+  // landing_url can linger — so the ONLY signal that keeps the reader honest is the campaign-level
+  // status filter. Without it, Dahlia sees a full bin, /director-training reports depth that
+  // doesn't exist, and media-buyer replenish could republish a retired creative.
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C6", format: "reels_9x16", media_kind: "video", status: "ready", static_jpg_url: null, meta: {} },
+      ],
+      error: null,
+    },
+    // The prod query does `.neq('status','archived')` at the DB, but the fake chain ignores filter
+    // args — so we hand the reader the archived row directly and prove the JS-side belt-and-
+    // suspenders guard (`if (c.status === 'archived') continue`) still drops it.
+    ad_campaigns: {
+      data: [
+        { id: "C6", landing_url: "https://superfoods.com/products/retired", status: "archived", created_at: "2026-06-26T10:00:00Z" },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 0);
 });
 
 test("a campaign with no landing_url is excluded even when its videos are ready", async () => {
