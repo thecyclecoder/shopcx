@@ -802,6 +802,112 @@ test("Phase 2 — listReadyToTest filtered by productId returns ONLY that produc
   assert.deepEqual(forDefault.readyToTest.map((r) => r.ad_campaign_id).sort(), ["cmp-A1", "cmp-A2", "cmp-B1"]);
 });
 
+// ── media-buyer-replenish-per-product-scope Phase 1 — the Bianca-stuck pin ──
+// Composes readCurrentTestCohortSize + computeMediaBuyerPlan + listReadyToTest
+// against the exact real-world state that stalls Bianca today: Superfood Tabs's
+// per-test cohort is at 2/4 live (2 ACTIVE ad sets in its testing campaign)
+// while the WORKSPACE carries 25 other-product active ad sets in other testing
+// campaigns and 9 P-scoped ready-to-test ad_campaigns wait in the bin. The
+// pre-fix workspace-wide count computed deficit = 4 − 25 = 0 and replenish
+// never fired for any product; the per-cohort count computes deficit = 4 − 2
+// = 2 and picks the top 2 of P's ready bin.
+test("Phase 1 pin — cohort P has 2/4 live in its testing campaign against 25 workspace-wide live in OTHER campaigns → deficit = 4-2 = 2 (not 4-25 = 0), ready bin is P-scoped, plan replenishes 2 as per-test ad sets", async () => {
+  const PRODUCT_P = "prod-tabs";
+  const CAMP_P = "camp-tabs"; // P's own testing campaign
+  const otherAdsets = Array.from({ length: 25 }, (_, i) => ({
+    meta_adset_id: `as-other-${i + 1}`,
+    workspace_id: WS,
+    // 5 different OTHER-product testing campaigns × 5 live ad sets each = 25 across the workspace.
+    meta_campaign_id: `camp-other-${(i % 5) + 1}`,
+    effective_status: "ACTIVE",
+  }));
+  const readyRows = Array.from({ length: 9 }, (_, i) => ({
+    id: `cmp-P-r${i + 1}`,
+    workspace_id: WS,
+    product_id: PRODUCT_P,
+    landing_url: `https://x/P/r${i + 1}`,
+    // Older rows first so the plan's slice(0, deficit) picks the newest two (ready-to-test sorts DESC).
+    created_at: `2026-07-${String(i + 1).padStart(2, "0")}T00:00:00Z`,
+  }));
+  const tables: Tables = {
+    meta_adsets: [
+      // P's cohort: exactly 2 ACTIVE ad sets in P's testing campaign.
+      { meta_adset_id: "as-P1", workspace_id: WS, meta_campaign_id: CAMP_P, effective_status: "ACTIVE" },
+      { meta_adset_id: "as-P2", workspace_id: WS, meta_campaign_id: CAMP_P, effective_status: "ACTIVE" },
+      // 25 ACTIVE ad sets across OTHER products' testing campaigns.
+      ...otherAdsets,
+    ],
+    // Ready-to-test video rows for each of P's 9 waiting campaigns.
+    ad_videos: readyRows.map((r) => ({
+      campaign_id: r.id,
+      workspace_id: WS,
+      format: "1x1",
+      media_kind: "video",
+      status: "ready",
+      static_jpg_url: null,
+      meta: null,
+    })),
+    // Plus one OTHER product's ready row to prove listReadyToTest with productId=P excludes it.
+    ad_campaigns: [
+      ...readyRows,
+      { id: "cmp-other-r1", workspace_id: WS, product_id: "prod-other", landing_url: "https://x/other/r1", created_at: "2026-07-15T00:00:00Z" },
+    ],
+    ad_publish_jobs: [], // nothing in-flight in the ready-to-test bin
+  };
+  // Add the other product's ad_videos row so it's also a candidate for the workspace-wide read below.
+  (tables.ad_videos as Row[]).push({
+    campaign_id: "cmp-other-r1",
+    workspace_id: WS,
+    format: "1x1",
+    media_kind: "video",
+    status: "ready",
+    static_jpg_url: null,
+    meta: null,
+  });
+  const admin = makeFakeAdminForProductScope(tables);
+
+  // ── 1. Per-cohort live count: 2 in CAMP_P, NOT 25 (workspace-wide) and NOT 27 (both) ──
+  const currentTestCohortSize = await readCurrentTestCohortSize(admin, {
+    workspaceId: WS,
+    productId: PRODUCT_P,
+    testMetaCampaignId: CAMP_P,
+  });
+  assert.equal(currentTestCohortSize, 2, "cohort count must scope to CAMP_P's ACTIVE ad sets — 25 other-campaign live must NEVER inflate the count");
+
+  // ── 2. P-scoped ready bin: only P's 9 ready campaigns, never the other product's row ──
+  const readyForP = await listReadyToTest(admin, { workspaceId: WS, productId: PRODUCT_P });
+  const readyIdsP = readyForP.readyToTest.map((r) => r.ad_campaign_id).sort();
+  assert.deepEqual(readyIdsP, readyRows.map((r) => r.id).sort(), "listReadyToTest with productId=P must return exactly P's 9 ready ad_campaigns");
+  for (const row of readyForP.readyToTest) assert.notEqual(row.ad_campaign_id, "cmp-other-r1", "the other product's ready ad_campaign must never leak into P's replenish bin");
+
+  // ── 3. computeMediaBuyerPlan closes the loop: deficit = 4 − 2 = 2, replenishes the top 2 P rows ──
+  const perTestCohort = cohort({
+    productId: PRODUCT_P,
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: CAMP_P,
+    perTestDailyBudgetCents: 15_000, // $150
+    dailyTestCeilingCents: 60_000, // $600 → derived target = 4 (matches DEFAULT_TEST_COHORT_TARGET)
+  });
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      cohort: perTestCohort,
+      currentTestCohortSize,
+      readyToTest: readyForP.readyToTest,
+    }),
+  );
+  assert.equal(plan.cohortTargetCount, 4, "per-test cohort target must derive to 4 at $600/$150 (aligned with DEFAULT_TEST_COHORT_TARGET + MAX_ACTIVE_TESTS_PER_CAMPAIGN)");
+  assert.equal(plan.currentTestCohortSize, 2, "the plan carries the cohort-scoped live count, not the workspace-wide 25");
+  assert.equal(plan.replenish.length, 2, "deficit must be 4 − 2 = 2 (NOT 4 − 25 = 0) so the ready bin actually gets drained");
+  for (const r of plan.replenish) {
+    // Per-test cohort: each replenish will mint a fresh $150 ad set at publish time in CAMP_P,
+    // NEVER the legacy shared adset (which is null in the per-product model).
+    assert.equal(r.adsetPerTest, true, "replenish must route down the per-test-adset path");
+    assert.equal(r.testMetaAdsetId, null, "per-test replenish never targets the legacy shared adset");
+    assert.ok(r.rationale.includes("2/4 live"), "the rationale cites the cohort-scoped count, not the workspace-wide count");
+  }
+});
+
 // ── Phase 3 — (account × product) fan-out dispatcher ────────────────────────
 
 test("Phase 3 — readActiveCohortProductIds enumerates one entry per active (account, product) cohort: TWO products in one shared account produce TWO passes with the correct productIds (Amazing Coffee + Creamer's shape)", async () => {
