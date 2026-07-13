@@ -2,11 +2,19 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import {
+  getCompetitorBrandsById,
+  listCompetitors,
+  type CompetitorStatus,
+} from "@/lib/competitors";
 
 // Competitor Scout owner surface (docs/brain/specs/competitor-scout.md, Phase 1).
 //   GET  ?workspaceId=&status=&productId=  → list competitors (proposed/approved/rejected)
 //   POST { workspaceId, productId }        → fire the discovery pass for one product
 // Approve/reject one row lives in ./[id]/route.ts. Owner/admin only.
+//
+// All competitor reads/writes go through the src/lib/competitors.ts SDK — the chokepoint enforced
+// by scripts/_check-competitors-sdk-compliance.ts. See CLAUDE.md § Local conventions.
 
 async function authorize(workspaceId: string | null) {
   const supabase = await createClient();
@@ -36,42 +44,35 @@ export async function GET(req: Request) {
   const auth = await authorize(workspaceId);
   if (auth.error) return auth.error;
 
-  let q = auth.admin
-    .from("competitors")
-    .select(
-      "id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence, search_keyword, runs_ads_for, reviewed_by, reviewed_at, review_note, created_at, updated_at",
-    )
-    .eq("workspace_id", workspaceId as string)
-    .order("created_at", { ascending: false })
-    .limit(500);
-
-  if (status && STATUSES.includes(status)) q = q.eq("status", status);
-  // Product filter semantics: when a product is selected, still include workspace-level
-  // (product_id IS NULL) competitors — the seeds are all null-scoped, so a naive equality
-  // filter would render an empty list. See docs/brain/dashboard/research__competitors.md.
-  if (productId) q = q.or(`product_id.eq.${productId},product_id.is.null`);
-
-  const { data, error } = await q;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  // Product filter semantics (Phase 1 preserves current behavior via `includeUnscoped: true`):
+  // when a product is selected, still include workspace-level (product_id IS NULL) competitors —
+  // the legacy seeds are all null-scoped, so a naive equality filter would render an empty list.
+  // Phase 2 of [[competitor-sdk-chokepoint-and-per-product-cleanup]] drops the null-scope fold.
+  let rows;
+  try {
+    rows = await listCompetitors({
+      workspaceId: workspaceId as string,
+      status:
+        status && STATUSES.includes(status) ? (status as CompetitorStatus) : undefined,
+      productId: productId ?? undefined,
+      includeUnscoped: !!productId,
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 },
+    );
+  }
 
   // Resolve `runs_ads_for` (self-FK) → the fronted competitor's brand so the UI can render
   // "runs ads for {brand}" without a second lookup. Whitelisted-page rows only.
-  const rows = data ?? [];
   const runsAdsForIds = Array.from(
-    new Set(rows.map((r) => r.runs_ads_for as string | null).filter((v): v is string => !!v)),
+    new Set(rows.map((r) => r.runs_ads_for).filter((v): v is string => !!v)),
   );
-  const idToBrand = new Map<string, string>();
-  if (runsAdsForIds.length) {
-    const { data: fronted } = await auth.admin
-      .from("competitors")
-      .select("id, brand")
-      .eq("workspace_id", workspaceId as string)
-      .in("id", runsAdsForIds);
-    for (const r of fronted || []) idToBrand.set(r.id as string, (r.brand as string) || "");
-  }
+  const idToBrand = await getCompetitorBrandsById(workspaceId as string, runsAdsForIds);
   const withResolved = rows.map((r) => ({
     ...r,
-    runs_ads_for_brand: r.runs_ads_for ? idToBrand.get(r.runs_ads_for as string) || null : null,
+    runs_ads_for_brand: r.runs_ads_for ? idToBrand.get(r.runs_ads_for) || null : null,
   }));
 
   return NextResponse.json({ competitors: withResolved });

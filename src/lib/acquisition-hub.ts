@@ -19,6 +19,7 @@
  * the owner (later the Growth director) approves what routes. Nothing here auto-routes.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getCompetitorBrandsById, listCompetitors } from "@/lib/competitors";
 import { buildAdGapReport, type AdGapReport, type AdGapRecommendation } from "@/lib/ad-gap";
 import {
   loadSuppressedGapTypes,
@@ -320,46 +321,40 @@ export async function loadHubData(workspaceId: string, productId?: string | null
   const productTitle = new Map(products.map((p) => [p.id, p.title]));
   const selectedProductId = productId && products.some((p) => p.id === productId) ? productId : null;
 
-  // Competitor set (scoped to the product when one is selected).
-  let competitorsQ = admin
-    .from("competitors")
-    .select(
-      "id, product_id, brand, domain, pdp_urls, category, spend_signal, source, status, evidence, search_keyword, runs_ads_for",
-    )
-    .eq("workspace_id", workspaceId)
-    .order("status", { ascending: true })
-    .order("brand", { ascending: true });
-  if (selectedProductId) competitorsQ = competitorsQ.eq("product_id", selectedProductId);
-  const { data: compRows } = await competitorsQ;
+  // Competitor set (scoped to the product when one is selected). Reads via the [[competitors]] SDK
+  // chokepoint — the SDK returns `created_at DESC`; the Hub sorts by (status ASC, brand ASC) below
+  // to keep the section grouped as before.
+  const compRows = await listCompetitors({
+    workspaceId,
+    productId: selectedProductId ?? undefined,
+  });
+  const STATUS_ORDER: Record<string, number> = { approved: 0, proposed: 1, rejected: 2 };
+  compRows.sort(
+    (a, b) =>
+      (STATUS_ORDER[a.status] ?? 99) - (STATUS_ORDER[b.status] ?? 99) ||
+      (a.brand || "").localeCompare(b.brand || ""),
+  );
   // The `runs_ads_for` self-FK can point at ANY competitor in the workspace, incl. rows filtered
   // out by the product scope. Resolve via a separate id→brand fetch so a product-scoped view still
   // shows "runs ads for <brand>" for its whitelisted rows.
   const runsAdsForIds = Array.from(
-    new Set((compRows || []).map((r) => r.runs_ads_for as string | null).filter((v): v is string => !!v)),
+    new Set(compRows.map((r) => r.runs_ads_for).filter((v): v is string => !!v)),
   );
-  const compIdToBrand = new Map<string, string>();
-  if (runsAdsForIds.length) {
-    const { data: fronted } = await admin
-      .from("competitors")
-      .select("id, brand")
-      .eq("workspace_id", workspaceId)
-      .in("id", runsAdsForIds);
-    for (const r of fronted || []) compIdToBrand.set(r.id as string, (r.brand as string) || "");
-  }
-  const competitors: CompetitorRow[] = (compRows || []).map((r) => ({
-    id: r.id as string,
-    product_id: r.product_id as string | null,
-    brand: r.brand as string,
-    domain: r.domain as string | null,
-    pdp_urls: r.pdp_urls as string[] | null,
-    category: r.category as string | null,
-    spend_signal: r.spend_signal as string | null,
-    source: r.source as string,
-    status: r.status as string,
-    evidence: r.evidence as Record<string, unknown> | null,
-    search_keyword: (r.search_keyword as string | null) ?? null,
-    runs_ads_for: (r.runs_ads_for as string | null) ?? null,
-    runs_ads_for_brand: r.runs_ads_for ? compIdToBrand.get(r.runs_ads_for as string) || null : null,
+  const compIdToBrand = await getCompetitorBrandsById(workspaceId, runsAdsForIds);
+  const competitors: CompetitorRow[] = compRows.map((r) => ({
+    id: r.id,
+    product_id: r.product_id,
+    brand: r.brand,
+    domain: r.domain,
+    pdp_urls: r.pdp_urls,
+    category: r.category,
+    spend_signal: r.spend_signal,
+    source: r.source,
+    status: r.status,
+    evidence: r.evidence as unknown as Record<string, unknown> | null,
+    search_keyword: r.search_keyword,
+    runs_ads_for: r.runs_ads_for,
+    runs_ads_for_brand: r.runs_ads_for ? compIdToBrand.get(r.runs_ads_for) || null : null,
   }));
 
   // Lander findings — snapshots (light: brand/url/status, no signed images here).

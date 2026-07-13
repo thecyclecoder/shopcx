@@ -41,19 +41,26 @@ The DB-driven, supervisable competitor set — replaces the hardcoded `COMPETITO
 
 ## Common queries
 
-### Approved competitor seeds for the sweep (the read path)
+**Read/write goes through the [[../libraries/competitors]] SDK chokepoint** — a raw `.from('competitors')` outside `src/lib/competitors.ts` fails `predeploy` via [scripts/_check-competitors-sdk-compliance.ts](../../../scripts/_check-competitors-sdk-compliance.ts). See CLAUDE.md § Local conventions ("Raw `.from(...)` with no SDK → STOP").
+
+### Approved competitors for a product (the deliberate scout read path)
 ```ts
-const { data } = await admin.from("competitors")
-  .select("brand, evidence, category")
-  .eq("workspace_id", workspaceId).eq("status", "approved");
+import { loadApprovedCompetitorsForProduct } from "@/lib/competitors";
+const seeds = await loadApprovedCompetitorsForProduct(workspaceId, productId);
 ```
 
 ### Proposed rows awaiting owner review
 ```ts
-const { data } = await admin.from("competitors")
-  .select("id, brand, domain, source, evidence, spend_signal")
-  .eq("workspace_id", workspaceId).eq("status", "proposed")
-  .order("created_at", { ascending: false });
+import { listCompetitors } from "@/lib/competitors";
+const proposed = await listCompetitors({ workspaceId, status: "proposed" });
+```
+
+### Approve / reject one row (with a workspace scope-guard + compare-and-set)
+```ts
+import { setCompetitorStatus } from "@/lib/competitors";
+await setCompetitorStatus(id, "approved", userId, note, {
+  workspaceId, expectedStatus: "proposed",
+});
 ```
 
 ## Gotchas
@@ -66,7 +73,7 @@ const { data } = await admin.from("competitors")
 
 ## Read/written by
 
-- [[../libraries/competitors]] — `loadApprovedCompetitorsForProduct` / `productsWithApprovedCompetitors` (per-product read), `discoverCompetitors` / `promoteWhitelistedPages` (write proposals). `loadApprovedCompetitorSeeds` + `promoteFromCategorySweep` retired 2026-07-12.
+- [[../libraries/competitors]] — **the SDK chokepoint** (Phase 1 of [[../specs/competitor-sdk-chokepoint-and-per-product-cleanup]]). `listCompetitors` / `getCompetitor` / `getCompetitorBrandsById` / `upsertCompetitor` / `setCompetitorStatus` / `deleteCompetitor` / `listOrphanCompetitors` / `deleteOrphanCompetitors` — plus the pre-existing `loadApprovedCompetitorsForProduct` / `productsWithApprovedCompetitors` (per-product read) and `discoverCompetitors` / `promoteWhitelistedPages` (write proposals). `loadApprovedCompetitorSeeds` + `promoteFromCategorySweep` retired 2026-07-12.
 - [[../inngest/creative-scout]] — reads approved rows per product; writes whitelisted-page proposals.
 - [[../inngest/acquisition-research-cadence]] — writes category-sweep + whitelisted-page proposals in the daily re-scan.
 - [[../inngest/competitor-scout]] — the discovery pass writer.
