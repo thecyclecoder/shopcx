@@ -716,7 +716,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 20 * MIN,
   },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
-  { id: "creative-finder-daily-cron", kind: "cron", owner: "growth", label: "Creative finder", description: "Daily creative/winning-ad discovery sweep — pulls approved competitors' running ads from AdLibrary + their destination URLs. Rhea's core research loop.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR, personaKind: "research" },
+  { id: "creative-scout-weekly-cron", kind: "cron", owner: "growth", label: "Creative scout", description: "Weekly PER-PRODUCT competitor-ad discovery — pulls each product's deliberately-chosen competitors' running ads from AdLibrary, tagged product_id/competitor_id. Rhea's core research loop (replaced the retired workspace-wide creative-finder-daily-cron 2026-07-12).", expectedCadence: "weekly (0 9 * * 1)", livenessWindowMs: 10 * 24 * HOUR, personaKind: "research" },
   {
     id: "creative-finder-video-process",
     kind: "cron",
