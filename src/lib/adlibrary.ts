@@ -310,6 +310,61 @@ export interface Seed {
    *  Dahlia's getProvenCompetitorAngles reads skeletons by this so a product imitates only ITS
    *  competitors, not the workspace-wide soup. */
   productId?: string;
+  /** The competitor's own registrable domain (e.g. `bulletproof.com`). The scout RELEVANCE-FILTERS
+   *  search results to ads that actually drive to this domain — brand-keyword search on AdLibrary is
+   *  noisy (searching "Bulletproof" returns "Bulletproof Automotive" car ads). See adMatchesCompetitor. */
+  expectedDomain?: string;
+  /** The competitor's canonical advertiser name (resolved_advertiser ?? brand). Used ONLY as the
+   *  fallback when an ad has no determinable domain (opaque AdLibrary `ar…` id + null landing page). */
+  expectedAdvertiser?: string;
+}
+
+/** Lowercased host of a URL/host string, or null when the value is an opaque id (AdLibrary's `ar…`
+ *  ecom_advertiser_id) or otherwise not a real host. */
+export function hostOf(urlOrHost: string | null | undefined): string | null {
+  if (!urlOrHost) return null;
+  let s = String(urlOrHost).trim().toLowerCase();
+  s = s.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  s = s.split("/")[0].split("?")[0];
+  if (!s.includes(".")) return null; // opaque id / not a host
+  return s;
+}
+
+/** Registrable (eTLD+1-ish) domain: last two dot-labels. `shop.bulletproof.com` → `bulletproof.com`. */
+export function registrableDomain(host: string): string {
+  const parts = host.toLowerCase().split(".").filter(Boolean);
+  return parts.length <= 2 ? parts.join(".") : parts.slice(-2).join(".");
+}
+
+/** Compact brand handle for exact advertiser matching — mirrors competitors.normalizeBrand. */
+function handleize(raw: string | null | undefined): string {
+  return String(raw ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Does this scouted ad actually belong to the intended competitor? Brand-keyword search on AdLibrary is
+ * noisy — "Bulletproof" returns "Bulletproof Automotive" (car wheels), "Four Sigmatic" returns "Neubrain"
+ * (a content-match), affiliate pages front the brand under their own name. The relevance test:
+ *   1. DOMAIN (authoritative when available): the ad's landing-page / destination registrable domain
+ *      equals the competitor's. Rejects wrong-brand even when the NAME is similar
+ *      (bulletproofautomotive.com ≠ bulletproof.com).
+ *   2. ADVERTISER (fallback ONLY when the ad has no determinable domain — opaque `ar…` id + null landing):
+ *      exact normalized advertiser match. Rescues real ads like "Mud Wtr, Inc" with an opaque destination.
+ * With neither an expected domain nor a determinable ad domain and no name match → reject (don't pollute).
+ */
+export function adMatchesCompetitor(
+  ad: Pick<NormalizedAd, "advertiser" | "destination_domain" | "landing_page_url">,
+  expected: { domain?: string | null; advertiser?: string | null },
+): boolean {
+  const adDomains = [hostOf(ad.landing_page_url), hostOf(ad.destination_domain)]
+    .filter((h): h is string => !!h)
+    .map(registrableDomain);
+  const target = expected.domain ? registrableDomain(hostOf(expected.domain) ?? expected.domain) : null;
+
+  if (target && adDomains.length) return adDomains.includes(target);
+  // No determinable ad domain (or no expected domain): fall back to an EXACT advertiser-name match.
+  if (expected.advertiser && ad.advertiser) return handleize(ad.advertiser) === handleize(expected.advertiser);
+  return false;
 }
 
 /**

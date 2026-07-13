@@ -39,6 +39,14 @@ The heavier **video drain** stays in [[creative-finder]] (`creativeFinderVideoPr
 2. Freshness gate (unless `force`): `filterSeedsByFreshness` drops brands searched inside `adlibraryFreshnessDays()` (default 7). A fresh/never-searched brand always passes → a newly-approved competitor runs on the very next scout.
 3. Per kept seed: `sweepSeed` → `searchAds` → `isWinner` filter (reach/spend OR longevity) → dedup by `ad_key` → rank by `winnerScore` → cap statics (vision cost) + videos → `ingestAd` (statics vision-deconstructed + `status='analyzed'`; videos `status='video_pending'`). 7s `step.sleep` between searches.
 
+## Relevance filter — the noisy-search guard
+
+Brand-keyword search on AdLibrary is NOISY: searching `Bulletproof` returns **Bulletproof Automotive** (carbon-fiber car wheels, 1299d); `Four Sigmatic` returns **Neubrain** (a content-match) + affiliate pages. Un-filtered, Dahlia would imitate car-wheel ads for coffee. So `sweepSeed` relevance-filters winners via [[../libraries/adlibrary]] `adMatchesCompetitor` before ingest, using the competitor's own `domain` + `resolved_advertiser` (threaded onto the Seed by `loadApprovedCompetitorsForProduct`):
+- **Domain match is authoritative** when the ad has a determinable domain (landing-page or a real destination host): keep iff its registrable domain == the competitor's. `bulletproofautomotive.com ≠ bulletproof.com` → rejected even though the name shares a prefix.
+- **Exact advertiser-name match is the fallback** ONLY when the ad has no determinable domain (opaque AdLibrary `ar…` id + null landing) — rescues real ads like "Mud Wtr, Inc" with an opaque destination, without re-admitting a wrong-brand ad (those have real domains, so the primary filter already caught them).
+
+Requires each competitor row to carry a correct `domain` (+ ideally `resolved_advertiser`). A row with neither can't be relevance-checked — its results fall to the advertiser fallback only. Unit-tested in `src/lib/adlibrary.test.ts`.
+
 ## Gotchas
 
 - **A product with zero approved competitors is silently skipped** — the scout does zero pulls for it (no hardcoded fallback). Approve a competitor row (with `product_id` set) to feed it.
