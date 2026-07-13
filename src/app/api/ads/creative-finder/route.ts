@@ -2,8 +2,9 @@
  * Winning Static-Creative Finder — skeletons list + manual sweep trigger.
  *
  *   GET  ?workspaceId=&status=&kind=        → analyzed creative_skeletons (browse/shortlist)
- *   POST { workspaceId, mode? }             → fire a manual sweep (ads/creative-finder.sweep),
- *                                             or mode:"video" → drain video_pending
+ *   POST { workspaceId, productId?, force? } → fire the deliberate per-product scout
+ *                                             (ads/creative-scout.sweep — all products, or one when
+ *                                             productId is given), or mode:"video" → drain video_pending
  *                                             (ads/creative-finder.video, creative-finder-video)
  *
  * See docs/brain/specs/winning-static-creative-finder.md + creative-finder-video.md.
@@ -73,6 +74,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     workspaceId?: string;
+    productId?: string;
     mode?: string;
     force?: boolean;
   };
@@ -86,9 +88,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, queued: true, mode: "video" });
   }
 
-  // force=true bypasses the freshness gate (explicit user action = intentional spend);
-  // default respects it so re-clicking the button doesn't burn AdLibrary quota.
+  // The deliberate per-product scout. force=true bypasses the freshness gate (explicit user action =
+  // intentional spend); default respects it so re-clicking the button doesn't burn AdLibrary quota.
+  // productId (optional) scopes to a single product — the per-product path that keeps us under the API cap.
   const force = body.force === true;
-  await inngest.send({ name: "ads/creative-finder.sweep", data: { workspaceId, force } });
-  return NextResponse.json({ ok: true, queued: true, forced: force });
+  await inngest.send({
+    name: "ads/creative-scout.sweep",
+    data: { workspaceId, productId: body.productId, force },
+  });
+  return NextResponse.json({ ok: true, queued: true, forced: force, productId: body.productId ?? null });
 }

@@ -50,13 +50,19 @@ export interface CompetitorAngle {
 export interface CompetitorAngleOptions {
   /** Only angles a competitor has run at least this long (longevity = validated). Default 30. */
   minDaysRunning?: number;
-  /** Case-insensitive substring filter on advertiser/hook/mechanism — e.g. "weight", "coffee", "energy". */
+  /** DELIBERATE per-product filter (CEO 2026-07-12): only skeletons scouted for THIS product's own
+   *  competitors (`creative_skeletons.product_id`). This is how imitate reads a product's own shelf —
+   *  strongly preferred over `niche`. When set, `niche` is ignored. */
+  productId?: string;
+  /** LEGACY substring filter on advertiser/hook/mechanism (e.g. "coffee", "weight"). Kept for callers
+   *  that predate product tagging; superseded by `productId`. */
   niche?: string;
   limit?: number;
 }
 
 /** Ranked proven competitor angles from the creative-skeleton library — the strongest idea pool (real
- *  market-validated hooks, ranked by how long the competitor has kept spending on them). */
+ *  market-validated hooks, ranked by how long the competitor has kept spending on them). Pass `productId`
+ *  to read exactly that product's deliberately-chosen competitor shelf (the imitate→innovate path). */
 export async function getProvenCompetitorAngles(admin: Admin, workspaceId: string, opts: CompetitorAngleOptions = {}): Promise<CompetitorAngle[]> {
   let q = admin
     .from("creative_skeletons")
@@ -67,7 +73,8 @@ export async function getProvenCompetitorAngles(admin: Admin, workspaceId: strin
     .gte("days_running", opts.minDaysRunning ?? 30)
     .order("days_running", { ascending: false, nullsFirst: false })
     .limit(opts.limit ?? 40);
-  if (opts.niche) q = q.or(`advertiser.ilike.%${opts.niche}%,hook.ilike.%${opts.niche}%,mechanism_claim.ilike.%${opts.niche}%`);
+  if (opts.productId) q = q.eq("product_id", opts.productId);
+  else if (opts.niche) q = q.or(`advertiser.ilike.%${opts.niche}%,hook.ilike.%${opts.niche}%,mechanism_claim.ilike.%${opts.niche}%`);
   const { data } = await q;
   return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
     advertiser: (r.advertiser as string | null) ?? null,

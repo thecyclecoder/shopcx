@@ -14,7 +14,7 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 | `winnerScore(ad)` | rank for a capped sweep — `impression + spend·50 + days·500` (impressions first, Meta's own signal). |
 | `isLongRunner(ad, minDays=14)` | the ORIGINAL longevity-only gate (`days ≥ minDays` AND `resume_advertising_flag !== false`). Superseded by `isWinner`; kept for reference. **Why it was replaced:** it dropped 72% of a fast-iterating brand's live ads, and its `resume_advertising_flag` cut silently discarded recently-paused HIGH-impression winners (Erth's 576K/549K/420K-impression statics). |
 | `NormalizedAd` / `AdLibraryAd` / `MediaType` / `Seed` | types; `NormalizedAd` adds `media_type` + best `creative_url`; `Seed = { keyword, kind, note? }` |
-| `CATEGORY_SEEDS` | curated category discovery keywords |
+| ~~`CATEGORY_SEEDS`~~ | RETIRED 2026-07-12 — category keywords fed category auto-discovery; the [[../inngest/creative-scout]] pulls only deliberate per-product competitor brands |
 
 ## Full-payload capture (ad-creative-scout)
 
@@ -23,7 +23,7 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 ## Seed list
 
 - **Categories** (still hardcoded here): superfood/mushroom/adaptogen coffee, energy-without-jitters, anti-inflammatory, longevity, anti-aging, weight-loss coffee, ashwagandha, greens.
-- **Competitors are DB-driven** — they live in the [[../tables/competitors]] table, not here. `COMPETITOR_SEEDS`/`ALL_SEEDS` were removed; the sweep loads approved competitors per workspace via [[competitors]]`.loadApprovedCompetitorSeeds()` and concatenates with `CATEGORY_SEEDS`. The original 11 seeds were migrated in as `status='approved'`. See [[../specs/competitor-scout]].
+- **Competitors are DB-driven + per-product** — they live in the [[../tables/competitors]] table (`product_id`), not here. `COMPETITOR_SEEDS`/`ALL_SEEDS`/`CATEGORY_SEEDS` are gone; the [[../inngest/creative-scout]] loads a product's approved competitors via [[competitors]]`.loadApprovedCompetitorsForProduct()`. See [[../specs/competitor-scout]].
 
 ## Gotchas
 
@@ -34,8 +34,8 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 
 ## Callers
 - [[creative-skeleton]] (`sweepSeed` → `searchAds`/`fetchCreative`/`isLongRunner`).
-- [[../inngest/creative-finder]] (`hasAdLibraryKey`, `CATEGORY_SEEDS`, `Seed`).
-- [[competitors]] (`Seed` type for `loadApprovedCompetitorSeeds`).
+- [[../inngest/creative-scout]] + [[../inngest/creative-finder]] (`hasAdLibraryKey`, `Seed`).
+- [[competitors]] (`Seed` type — now carries `competitorId`/`productId` — for `loadApprovedCompetitorsForProduct`).
 - `src/app/api/ads/creative-finder/media` (`fetchCreative` proxy).
 
 ## Related

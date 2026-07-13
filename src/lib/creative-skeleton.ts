@@ -536,6 +536,10 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     ads_type: ad.ads_type,
     seed_keyword: seed.keyword,
     seed_kind: seed.kind,
+    // Deliberate per-product competitor linkage (CEO 2026-07-12): the scout stamps WHICH approved
+    // competitor + WHICH of our products this ad was pulled for, so imitate reads a product's own shelf.
+    competitor_id: seed.competitorId ?? null,
+    product_id: seed.productId ?? null,
     status,
     raw: ad.raw,
     visioned_at: visionedAt,

@@ -7,10 +7,10 @@ The **standing re-scan loop + gap→outcome grading sweep** that makes the Acqui
 ## Functions
 
 ### `acquisition-research-cadence-cron`
-- **Trigger:** cron `0 10 * * *` (daily, offset AFTER the 9am [[creative-finder]] sweep so it reasons over fresh [[../tables/creative_skeletons]])
+- **Trigger:** cron `0 10 * * *` (daily)
 - **Retries:** 1
 - Scope: ad-tool workspaces (those with [[../tables/ad_campaigns]]). Per workspace, in a `cadence-${ws}` step:
-  1. **promote** — [[../libraries/competitors]] `promoteFromCategorySweep` → heavy advertisers recurring in the fresh sweep surface as `proposed` competitors (deduped).
+  1. **whitelisted** — [[../libraries/competitors]] `promoteWhitelistedPages` → affiliate/advertorial pages fronting a KNOWN approved competitor surface as `proposed` whitelisted rows (deduped). (Category-sweep competitor auto-discovery `promoteFromCategorySweep` was RETIRED 2026-07-12 — fully deliberate.)
   1b. **promote whitelisted** — [[../libraries/competitors]] `promoteWhitelistedPages` → advertiser pages fronting a KNOWN competitor `destination_domain` surface as `source='whitelisted'` `proposed` rows with `search_keyword` = the exact page name + `runs_ads_for` = the fronted competitor (deduped). See [[../specs/whitelisted-page-auto-tracking]].
   2. **ad gaps** — [[../libraries/acquisition-hub]] `materializeAdGaps` → re-materialize the deterministic ad-gap report into [[../tables/ad_gap_recommendations]] as `proposed` (idempotent on `dedup_key`; SUPPRESSED `ad_angle` skipped).
   3. **grade** — [[../libraries/acquisition-gap-grader]] `gradeActedGaps` → initial-grade each acted-on gap, revise-grade resolved outcomes.

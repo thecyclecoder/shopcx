@@ -45,7 +45,9 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `fb_merge_channel` | `text` | ✓ | AdLibrary `fb_merge_channel` |
 | `ads_type` | `int4` | ✓ | AdLibrary `ads_type` (1=image, 2=video) |
 | `seed_keyword` | `text` | ✓ | the query that surfaced it |
-| `seed_kind` | `text` | ✓ | `category` \| `competitor` |
+| `seed_kind` | `text` | ✓ | `category` \| `competitor` (`category` retired 2026-07-12 — new rows are all `competitor`) |
+| `competitor_id` | `uuid` | ✓ | → [[competitors]].id · ON DELETE SET NULL. The approved competitor this ad was scouted for. Stamped by [[../libraries/creative-skeleton]] `ingestAd` from the seed. Migration `20261020120000`. |
+| `product_id` | `uuid` | ✓ | → [[products]].id · ON DELETE SET NULL. **The deliberate imitate link** — WHICH of our products this competitor was chosen for. Dahlia's `getProvenCompetitorAngles(productId)` ([[../libraries/creative-sourcing]]) filters on this so a product imitates only its own shelf. Migration `20261020120000`. |
 | `status` | `text` | — | default `'analyzed'` · `pending` \| `analyzed` \| `video_pending` \| `shortlisted` \| `archived` \| `failed` |
 | `raw` | `jsonb` | ✓ | full AdLibrary row for replay/audit |
 | `visioned_at` | `timestamptz` | ✓ | when the skeleton was extracted |
@@ -53,7 +55,9 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `updated_at` | `timestamptz` | — | default `now()` |
 
 **Unique:** `(workspace_id, source, dedup_key)` — the idempotent upsert key.
-**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path).
+**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path), `(product_id)`, `(competitor_id)` (per-product scout read path, migration `20261020120000`).
+
+> **Deliberate-scout reset (2026-07-12).** Migration `20261020120000` added `product_id` + `competitor_id` and **hard-cleared all 473 pre-refactor rows** (`delete where product_id is null`) — they predated product tagging and weren't re-derivable. HARD delete (not archive) because the pattern-matrix / promotion scans read `source='adlibrary'` with no status filter. The [[../inngest/creative-scout]] repopulates per-product, tagged. This is the "clean the competitive ad library" step of the base-layer imitate→innovate fix.
 
 ## RLS
 

@@ -1,14 +1,16 @@
 # `src/lib/competitors.ts` — Competitor Scout
 
-Owns the DB-driven [[../tables/competitors]] set (M1 of [[../goals/acquisition-research-engine]]). The discovery half identifies + ranks competitors with evidence; the read half feeds the creative-finder sweep. North-star: writes `status='proposed'` only — the owner approves before anything enters the live sweep. See [[../specs/competitor-scout]].
+Owns the DB-driven [[../tables/competitors]] set (M1 of [[../goals/acquisition-research-engine]]). The discovery half identifies + ranks competitors with evidence; the read half feeds the deliberate per-product [[../inngest/creative-scout]]. North-star: writes `status='proposed'` only — the owner approves before anything enters the live scout. See [[../specs/competitor-scout]].
 
 ## Exports
 
 | Export | Notes |
 |---|---|
-| `loadApprovedCompetitorSeeds(workspaceId)` | → `Seed[]` — the sweep read path. ONLY `status='approved'` rows, as `{ keyword: search_keyword ?? brand, kind: 'competitor', note }`. Whitelisted-page rows use the EXACT page name (verbatim); everything else falls back to `brand`. Empty ⇒ zero competitor pulls (no hardcoded fallback). |
+| `loadApprovedCompetitorsForProduct(workspaceId, productId)` | → `Seed[]` — the **per-product scout read path** (CEO 2026-07-12). ONLY `status='approved'` rows for ONE `product_id`, as `{ keyword, kind:'competitor', note, competitorId, productId }` — the `competitorId`/`productId` flow through `ingestAd` onto every skeleton. `search_keyword` (verbatim) wins over `brand`. Empty ⇒ zero pulls for that product. |
+| `productsWithApprovedCompetitors(workspaceId)` | → `string[]` — distinct `product_id`s with ≥1 approved competitor. The [[../inngest/creative-scout]] weekly cron's product work-list. |
+| ~~`loadApprovedCompetitorSeeds(workspaceId)`~~ | RETIRED 2026-07-12 — the workspace-wide read (all approved, no product context) that fed the old workspace-wide sweep. Superseded by `loadApprovedCompetitorsForProduct`. |
 | `discoverCompetitors(workspaceId, productId)` | LLM ([[ai-models]] `OPUS_MODEL`) + web search proposes the competitive set framed by product intelligence; inserts `source='llm'`, `status='proposed'` with brand/domain/pdp_urls/evidence. → `{ proposed, skippedExisting, candidates }`. |
-| `promoteFromCategorySweep(workspaceId, minAds=3)` | Scans [[../tables/creative_skeletons]] for advertisers recurring ≥`minAds` times; proposes the new ones as `source='category_sweep'`. → `{ promoted, skippedExisting, scanned }`. |
+| ~~`promoteFromCategorySweep(workspaceId)`~~ | RETIRED 2026-07-12 — category-sweep competitor auto-discovery. Contradicted the fully-deliberate model (competitors chosen by hand). No category skeletons exist to scan anymore. |
 | `promoteWhitelistedPages(workspaceId, { minAds=3, minShare=0.5 })` | Scans [[../tables/creative_skeletons]] for advertiser pages whose ads point at a KNOWN approved-competitor `destination_domain`; proposes each recurring page (≥`minAds` ads, ≥`minShare` share fronting known competitors) as `source='whitelisted'` with `search_keyword`=the raw page name and `runs_ads_for`=the fronted competitor id. → `{ promoted, skippedExisting, scanned }`. See [[../specs/whitelisted-page-auto-tracking]]. |
 | `normalizeBrand(raw)` | lowercase, strip protocol/www/TLD/path/non-alphanumeric → the compact handle + dedup key. |
 | `CompetitorRow` / `CompetitorSource` / `CompetitorStatus` / `DiscoverResult` / `PromoteResult` | types |
@@ -29,8 +31,8 @@ Owns the DB-driven [[../tables/competitors]] set (M1 of [[../goals/acquisition-r
 ## Callers
 
 - [[../inngest/competitor-scout]] (`discoverCompetitors`).
-- [[../inngest/creative-finder]] (`loadApprovedCompetitorSeeds`, `promoteFromCategorySweep`, `promoteWhitelistedPages`).
-- [[../inngest/acquisition-research-cadence]] (`promoteFromCategorySweep`, `promoteWhitelistedPages`).
+- [[../inngest/creative-scout]] (`loadApprovedCompetitorsForProduct`, `productsWithApprovedCompetitors`, `promoteWhitelistedPages`).
+- [[../inngest/acquisition-research-cadence]] (`promoteWhitelistedPages`).
 - `src/app/api/ads/competitors` (list/discover/approve-reject surface).
 
 ## Related

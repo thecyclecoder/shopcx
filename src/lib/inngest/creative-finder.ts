@@ -1,180 +1,35 @@
 /**
- * Winning Static-Creative Finder — daily sweep cron + manual trigger.
+ * Creative-finder VIDEO drain — the surviving half of the retired workspace-wide creative-finder.
  *
- * Once a day, for every workspace that uses the ad tool, pull long-running
- * competitor + category ads from AdLibrary.com (curated seeds), vision-deconstruct
- * each static into a skeleton, and route videos aside for the Phase 6 pipeline.
- * Repetition of a slot across multiple INDEPENDENT brands is the signal — the
- * Phase 4 pattern matrix aggregates these skeletons on demand.
- *
- * Rate limits (AdLibrary: 10 searches/min): we step.sleep ~7s between seed
- * searches so a single sweep stays comfortably under the cap. Dedup by `ad_key`
- * means re-runs don't re-spend credits or vision tokens.
+ * The static/competitor SWEEP that used to live here (daily `0 9 * * *` + `ads/creative-finder.sweep`,
+ * CATEGORY_SEEDS + every-competitor-at-once) was RETIRED 2026-07-12 in favor of the deliberate PER-PRODUCT
+ * scout ([[creative-scout]] — `ads/creative-scout.sweep`). What remains is the heavier video follow-on:
+ * drain each workspace's `video_pending` creative_skeletons (download → ffmpeg keyframes + Whisper transcript
+ * → the four-slot skeleton). The scout still PARKS videos as `video_pending` (product-tagged), so this drain
+ * keeps analyzing them the same way — the id `creative-finder-video-process` is unchanged so Control Tower's
+ * heartbeat tracking is uninterrupted.
  *
  * Triggers:
- *   cron "0 9 * * *"               → daily sweep across all ad-tool workspaces
- *   event "ads/creative-finder.sweep" { workspaceId? } → manual / on-demand
+ *   cron "30 9 * * *"                  → daily drain across all ad-tool workspaces
+ *   event "ads/creative-finder.video" { workspaceId?, max? } → manual / on-demand
  *
- * See docs/brain/specs/winning-static-creative-finder.md + docs/brain/inngest/creative-finder.md.
+ * See docs/brain/inngest/creative-finder.md + docs/brain/inngest/creative-scout.md.
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { hasAdLibraryKey, CATEGORY_SEEDS, type Seed } from "@/lib/adlibrary";
-import {
-  loadApprovedCompetitorSeeds,
-  promoteFromCategorySweep,
-  promoteWhitelistedPages,
-} from "@/lib/competitors";
-import {
-  sweepSeed,
-  filterSeedsByFreshness,
-  adlibraryFreshnessDays,
-  type IngestResult,
-} from "@/lib/creative-skeleton";
+import { hasAdLibraryKey } from "@/lib/adlibrary";
 import { hasFfmpeg, processVideoPending, type VideoProcessResult } from "@/lib/video-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { syncResearchUrlsFromCreatives } from "@/lib/research-urls";
-
-const SWEEP_DELAY_MS = 7000; // ~8 searches/min — under AdLibrary's 10/min cap
 
 async function adToolWorkspaceIds(): Promise<string[]> {
   const admin = createAdminClient();
-  // Workspaces that actually use the ad tool (have campaigns). Avoids spending
-  // shared global credits sweeping for tenants who don't run ads.
+  // Workspaces that actually use the ad tool (have campaigns). Avoids spending shared global
+  // credits/compute on tenants who don't run ads.
   const { data } = await admin.from("ad_campaigns").select("workspace_id");
   return Array.from(new Set((data || []).map((r) => r.workspace_id as string)));
 }
 
-/**
- * Per-workspace sweep seeds: the DB-driven APPROVED competitor brands (competitor-scout) +
- * the curated CATEGORY_SEEDS. Competitor brands are NEVER hardcoded — a workspace with no
- * approved competitors runs only its category keywords (no hardcoded fallback list).
- */
-async function workspaceSeeds(workspaceId: string): Promise<Seed[]> {
-  const competitors = await loadApprovedCompetitorSeeds(workspaceId);
-  return [...competitors, ...CATEGORY_SEEDS];
-}
-
-function emptyTotals(): IngestResult {
-  return { searched: 0, longRunners: 0, inserted: 0, videos: 0, skippedExisting: 0, failed: 0 };
-}
-
-function addTotals(a: IngestResult, b: IngestResult): IngestResult {
-  return {
-    searched: a.searched + b.searched,
-    longRunners: a.longRunners + b.longRunners,
-    inserted: a.inserted + b.inserted,
-    videos: a.videos + b.videos,
-    skippedExisting: a.skippedExisting + b.skippedExisting,
-    failed: a.failed + b.failed,
-  };
-}
-
-export const creativeFinderDailyCron = inngest.createFunction(
-  { id: "creative-finder-daily-cron", retries: 1, triggers: [{ cron: "0 9 * * *" }] },
-  async ({ step }) => {
-    // Compute the run result on every path (incl. no-key / no-workspace skips)
-    // so the end-of-run heartbeat below always fires — a healthy-but-idle cron
-    // must still beat, or Control Tower false-flags it registered_not_firing.
-    const result = await (async () => {
-      if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
-      const workspaceIds = await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-      if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals(), skipped: 0, freshnessDays: adlibraryFreshnessDays() };
-
-      const freshnessDays = adlibraryFreshnessDays();
-      let totals = emptyTotals();
-      let totalSkipped = 0;
-      for (const workspaceId of workspaceIds) {
-        const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
-        // Phase 2 freshness gate: skip seeds searched inside the window WITHOUT a
-        // searchAds call. Fresh seeds (never searched) always pass — a newly-approved
-        // competitor / whitelisted page runs on the very next cron regardless of others.
-        const { kept, skipped } = await step.run(`freshness-${workspaceId}`, () =>
-          filterSeedsByFreshness(workspaceId, seeds, freshnessDays),
-        );
-        totalSkipped += skipped.length;
-        for (let i = 0; i < kept.length; i++) {
-          const seed = kept[i];
-          const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
-          totals = addTotals(totals, r);
-          if (i < kept.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
-        }
-        // Category-sweep promotion (competitor-scout): heavy advertisers that recurred in this
-        // workspace's sweep output surface as 'proposed' competitors for owner approval.
-        await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
-        // Whitelisted-page promotion: affiliate/advertorial/creator pages fronting a KNOWN
-        // competitor (destination_domain join) surface as 'proposed' whitelisted rows.
-        await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
-        // Rhea's URL sensor (rhea-url-sensor Phase 1 + rhea-research-automation Phase 2):
-        // walk creative_skeletons for the workspace and upsert one research_urls row per
-        // distinct destination. Idempotent — the SDK dedups by normalized URL and pre-stamps
-        // non-lander domains / checkout URLs with classification='excluded'|'checkout' so
-        // they're invisible to the research-sensor claim (but still auditable).
-        await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
-      }
-      return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, freshnessDays };
-    })();
-
-    // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
-    await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("creative-finder-daily-cron", { ok: true, produced: result });
-    });
-
-    return result;
-  },
-);
-
-export const creativeFinderManualSweep = inngest.createFunction(
-  { id: "creative-finder-manual-sweep", retries: 1, triggers: [{ event: "ads/creative-finder.sweep" }] },
-  async ({ event, step }) => {
-    if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
-    const data = event.data as { workspaceId?: string; force?: boolean } | undefined;
-    const wsArg = data?.workspaceId;
-    // Explicit user action = intentional spend — force=true BYPASSES the freshness gate.
-    // Default respects it (parity with the cron), so re-clicking "Run sweep now" without
-    // force doesn't burn quota re-searching already-fresh seeds.
-    const force = data?.force === true;
-    const workspaceIds = wsArg ? [wsArg] : await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-    if (!workspaceIds.length) return { workspaces: 0, totals: emptyTotals(), skipped: 0, forced: force };
-
-    const freshnessDays = adlibraryFreshnessDays();
-    let totals = emptyTotals();
-    let totalSkipped = 0;
-    for (const workspaceId of workspaceIds) {
-      const seeds = await step.run(`seeds-${workspaceId}`, () => workspaceSeeds(workspaceId));
-      let kept: Seed[] = seeds;
-      if (!force) {
-        const gated = await step.run(`freshness-${workspaceId}`, () =>
-          filterSeedsByFreshness(workspaceId, seeds, freshnessDays),
-        );
-        kept = gated.kept;
-        totalSkipped += gated.skipped.length;
-      }
-      for (let i = 0; i < kept.length; i++) {
-        const seed = kept[i];
-        const r = await step.run(`sweep-${workspaceId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
-        totals = addTotals(totals, r);
-        if (i < kept.length - 1) await step.sleep(`throttle-${workspaceId}-${i}`, SWEEP_DELAY_MS);
-      }
-      await step.run(`promote-${workspaceId}`, () => promoteFromCategorySweep(workspaceId));
-      await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
-      // Rhea's URL sensor — same deterministic sync the daily cron runs (rhea-url-sensor Phase 1).
-      await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
-    }
-    return { workspaces: workspaceIds.length, totals, skipped: totalSkipped, forced: force, freshnessDays };
-  },
-);
-
-async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult> {
-  try {
-    return await sweepSeed(workspaceId, seed);
-  } catch (err) {
-    console.error(`[creative-finder] sweep failed for ${seed.keyword}:`, err);
-    return { ...emptyTotals(), failed: 1 };
-  }
-}
-
-// ── creative-finder-video Phase 1 — process parked video_pending creatives ──────
+// ── creative-finder-video — process parked video_pending creatives ──────────────
 
 function emptyVideoTotals(): VideoProcessResult {
   return { pending: 0, analyzed: 0, failed: 0, bytesDownloaded: 0, whisperCents: 0 };
@@ -200,10 +55,9 @@ async function safeProcessVideos(workspaceId: string, max?: number): Promise<Vid
 }
 
 /**
- * Heavier video follow-on: download → ffmpeg keyframes + Whisper transcript →
- * same four-slot skeleton, draining each workspace's `video_pending` backlog.
- * Runs after the 9:00 static sweep so newly-parked videos get picked up the same
- * morning. Gated on the AdLibrary key (to download) + an ffmpeg binary (frames);
+ * Heavier video follow-on: download → ffmpeg keyframes + Whisper transcript → the same four-slot
+ * skeleton, draining each workspace's `video_pending` backlog. Runs after the scout parks new videos so
+ * they get picked up promptly. Gated on the AdLibrary key (to download) + an ffmpeg binary (frames);
  * transcription is best-effort inside the pipeline (gates on `hasOpenAiKey()`).
  *
  * Triggers:
