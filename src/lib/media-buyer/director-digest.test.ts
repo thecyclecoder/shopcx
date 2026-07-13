@@ -14,7 +14,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { composeDigest, type AccountPlan } from "./director-digest";
+import { composeDigest, resolveProductTitlesForWorkspace, type AccountPlan } from "./director-digest";
 import type {
   MediaBuyerPlan,
   MediaBuyerPromoteAction,
@@ -108,6 +108,86 @@ test("composeDigest: null-cohort (product-null) falls back to `account <id8>` la
   const { hasRecommendations, text } = composeDigest(plans);
   assert.equal(hasRecommendations, true);
   assert.match(text, /• account acct-leg — top up/, "null-product cohort keeps account fallback");
+});
+
+// ── Fix 1 (spec-test regression fix) — workspace-scoped product-title lookup ───
+
+/**
+ * Fake admin client that emulates the `.from("products").select("id, title").eq("workspace_id",
+ * X).in("id", [...])` chain. Filters the seeded rows by BOTH `.eq("workspace_id", …)` and
+ * `.in("id", …)` — so a product that belongs to a different workspace silently drops out (i.e.
+ * the RLS scope is enforced at the read layer, exactly what `resolveProductTitlesForWorkspace`
+ * relies on).
+ */
+function fakeAdminWithProducts(rows: Array<{ id: string; workspace_id: string; title: string | null }>) {
+  return {
+    from(table: string) {
+      if (table !== "products") throw new Error(`unexpected table: ${table}`);
+      let ws: string | null = null;
+      let ids: readonly string[] = [];
+      const chain = {
+        select: () => chain,
+        eq: (col: string, val: unknown) => {
+          if (col === "workspace_id") ws = String(val);
+          return chain;
+        },
+        in: (col: string, val: readonly string[]) => {
+          if (col === "id") ids = val;
+          return chain;
+        },
+        then: (onFulfilled: (v: { data: Array<{ id: string; title: string | null }>; error: null }) => unknown) =>
+          Promise.resolve({
+            data: rows
+              .filter((r) => (ws === null || r.workspace_id === ws) && ids.includes(r.id))
+              .map((r) => ({ id: r.id, title: r.title })),
+            error: null as null,
+          }).then(onFulfilled),
+      };
+      return chain;
+    },
+  } as unknown as Parameters<typeof resolveProductTitlesForWorkspace>[0];
+}
+
+test("resolveProductTitlesForWorkspace: two product IDs, only one in workspace → only the in-workspace title is used", async () => {
+  const WS = "ws-1";
+  const OTHER_WS = "ws-2";
+  const admin = fakeAdminWithProducts([
+    { id: "prod-in", workspace_id: WS, title: "Amazing Coffee" },
+    { id: "prod-out", workspace_id: OTHER_WS, title: "Somebody Else's Product" },
+  ]);
+  const map = await resolveProductTitlesForWorkspace(admin, WS, ["prod-in", "prod-out"]);
+  assert.equal(map.get("prod-in"), "Amazing Coffee", "in-workspace product title is resolved");
+  assert.equal(
+    map.get("prod-out"),
+    undefined,
+    "cross-workspace product title MUST NOT leak — falls back to account label in composeDigest",
+  );
+  assert.equal(map.size, 1);
+});
+
+test("resolveProductTitlesForWorkspace: empty productIds → no DB call, empty Map", async () => {
+  const called = { from: 0 };
+  const admin = {
+    from() {
+      called.from++;
+      throw new Error("must not query");
+    },
+  } as unknown as Parameters<typeof resolveProductTitlesForWorkspace>[0];
+  const map = await resolveProductTitlesForWorkspace(admin, "ws-1", []);
+  assert.equal(map.size, 0);
+  assert.equal(called.from, 0);
+});
+
+test("resolveProductTitlesForWorkspace: null-title row silently dropped (composeDigest falls back)", async () => {
+  const WS = "ws-1";
+  const admin = fakeAdminWithProducts([
+    { id: "prod-untitled", workspace_id: WS, title: null },
+    { id: "prod-titled", workspace_id: WS, title: "Superfood Creamer" },
+  ]);
+  const map = await resolveProductTitlesForWorkspace(admin, WS, ["prod-untitled", "prod-titled"]);
+  assert.equal(map.get("prod-untitled"), undefined);
+  assert.equal(map.get("prod-titled"), "Superfood Creamer");
+  assert.equal(map.size, 1);
 });
 
 test("composeDigest: mixed cohorts — product-labelled + fallback in the same digest", () => {

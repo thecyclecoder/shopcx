@@ -20441,25 +20441,21 @@ async function runMediaBuyerJob(job: Job) {
   // cohort recommendations into #director-growth-max. The agent never posts directly — delivery lives here,
   // rolling up all accounts' plans. Non-fatal: a Slack hiccup must not fail the media-buyer pass.
   try {
-    const { deliverMediaBuyerDigest } = await import("../src/lib/media-buyer/director-digest");
-    // media-buyer-digest-consolidate-product-names-suppress-noop Phase 1 — resolve each pass's
-    // cohort product_id → products.title so the digest labels lines by product ("Amazing Coffee — …")
-    // instead of a truncated account id. A null-product cohort (legacy Superfood Tabs) keeps the
-    // account-id fallback in composeDigest.
+    const { deliverMediaBuyerDigest, resolveProductTitlesForWorkspace } = await import(
+      "../src/lib/media-buyer/director-digest"
+    );
+    // media-buyer-digest-consolidate-product-names-suppress-noop Phase 1 + Fix 1 — resolve each
+    // pass's cohort product_id → products.title so the digest labels lines by product
+    // ("Amazing Coffee — …") instead of a truncated account id. The helper hard-narrows the
+    // lookup to this workspace so a bad cross-workspace cohort row can never leak another
+    // tenant's product title into this Growth Director Slack digest (resolves the spec-test
+    // `sec:authz_rls` finding). A null-product cohort (legacy Superfood Tabs) OR an
+    // out-of-workspace product silently falls back to the account-id label in composeDigest.
     const okPasses = perAccount.filter((r) => r.plan && !r.error);
     const productIds = Array.from(
       new Set(okPasses.map((r) => r.productId).filter((v): v is string => !!v)),
     );
-    const titleByProductId = new Map<string, string>();
-    if (productIds.length) {
-      const { data: prods } = await a
-        .from("products")
-        .select("id, title")
-        .in("id", productIds);
-      for (const p of (prods ?? []) as Array<{ id: string; title: string | null }>) {
-        if (p.title) titleByProductId.set(p.id, p.title);
-      }
-    }
+    const titleByProductId = await resolveProductTitlesForWorkspace(a, job.workspace_id, productIds);
     const plans = okPasses.map((r) => ({
       account: r.account,
       productId: r.productId,

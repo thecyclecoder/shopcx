@@ -33,6 +33,41 @@ export interface DigestResult {
   ts?: string;
 }
 
+/**
+ * Resolve `products.title` for the given ids, WORKSPACE-SCOPED. The `products` table has no
+ * explicit workspace FK from `media_buyer_test_cohorts` (only `product_id → products(id)`), so a
+ * bad cross-workspace cohort row could otherwise leak another tenant's product title into this
+ * workspace's Growth Director Slack digest. This helper is the sole path used by the media-buyer
+ * lane to resolve titles before it hands the digest AccountPlans off — it hard-narrows every
+ * lookup with `.eq("workspace_id", workspaceId)` so an out-of-workspace product silently drops
+ * out of the map and the digest line falls back to the `account <id8>` label in `composeDigest`
+ * (a mismatched title is NEVER surfaced).
+ *
+ * media-buyer-digest-consolidate-product-names-suppress-noop Fix 1 — resolves the pre-merge
+ * spec-test `sec:authz_rls` finding at scripts/builder-worker.ts:20455.
+ *
+ * Returns an empty Map when `productIds` is empty; a null-title row is intentionally dropped so
+ * the caller's `productTitle ?? null` collapse still routes through the `composeDigest`
+ * account-id fallback.
+ */
+export async function resolveProductTitlesForWorkspace(
+  admin: Admin,
+  workspaceId: string,
+  productIds: readonly string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!productIds.length) return out;
+  const { data } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("workspace_id", workspaceId)
+    .in("id", productIds);
+  for (const p of (data ?? []) as Array<{ id: string; title: string | null }>) {
+    if (p.title) out.set(p.id, p.title);
+  }
+  return out;
+}
+
 /** Compose the Growth-Director-voice digest text from the per-account plans. Plain text (director voice).
  * Exported for test coverage of the "label by product" and "suppress no-op" gates. */
 export function composeDigest(accountPlans: AccountPlan[]): { text: string; hasRecommendations: boolean } {
