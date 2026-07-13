@@ -89,6 +89,7 @@
     "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
     "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
+    "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
     "test:refund-guard": "tsx --test src/lib/refund.guard.test.ts",
     "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",

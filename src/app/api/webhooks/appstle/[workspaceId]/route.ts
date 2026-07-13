@@ -251,6 +251,11 @@ async function handleSubscriptionEvent(
       id: node.id as string,
       title: (node.title as string) || "",
       type: (node.type as string) || "",
+      // Shopify DiscountTargetType (LINE_ITEM | SHIPPING_LINE). Persisted so the
+      // money resolver can exclude shipping-target (free-shipping) discounts
+      // from the product subtotal instead of zeroing it (the Melissa-class
+      // portal bug). See computeDisplayCoupon in @/lib/commerce/price.
+      targetType: (node.targetType as string) || null,
       value: val?.percentage ? Number(val.percentage)
         : (val?.amount as { amount?: string } | undefined)?.amount ? Number((val!.amount as { amount: string }).amount)
         : val?.fixedAmount ? Number((val.fixedAmount as { amount?: string })?.amount || 0)

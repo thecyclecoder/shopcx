@@ -94,6 +94,7 @@ Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, fr
 - **Built-in retries + skip-after-X-failures must be DISABLED** in Appstle settings — our dunning engine owns that logic. See Phase 5 in CLAUDE.md.
 - **Cancellation note carries who+why:** include the operator's display_name (`"Cancelled by Dylan on ShopCX.ai — fraud"`) so it shows up in Appstle's UI for any human review.
 - **discountId for remove** is Appstle's internal id, not the Shopify code. Get it from `appstleGetSubscriptionContract()`.
+- **Discount `targetType` must be persisted.** The webhook discount node carries `targetType` (Shopify `DiscountTargetType`: `LINE_ITEM` | `SHIPPING_LINE`). We now store it on each `applied_discounts[]` entry so the money resolver can tell a free-shipping discount (`SHIPPING_LINE`, e.g. "Free Shipping on Subscriptions" = 100% PERCENTAGE) from a product discount. Dropping it made [[../libraries/commerce__price]] apply free-shipping as 100% off products → fake "shipping-only" portal total (ticket `eca3f43b`). Rows synced before this fall back to a title heuristic in `computeDisplayCoupon`.
 - **Two payment helper endpoints** exist for "switch card" — `update-existing-payment-method` (what we use) vs Appstle's UI flow. Don't mix them.
 - **Audit log fills fast.** [[../tables/appstle_api_calls]] gets a row per call; expect to query it via index on `(workspace_id, created_at)`.
 
