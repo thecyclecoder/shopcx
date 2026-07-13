@@ -27,6 +27,10 @@ The daily full-account pipeline ([[meta-performance]] `metaPerformanceDailyCron`
 - **The review is DETERMINISTIC — no Claude/box session, no LLM tokens:** the box worker runs `kind='media-buyer'` on a **Deterministic-Node lane** (`scripts/builder-worker.ts` `runMediaBuyerJob` → `import runMediaBuyerLoopForAccount`), not a `claude -p` session. The decision is the pure `computeMediaBuyerPlan` ([[../libraries/media-buyer-agent]]); templated `rationale` strings surface the reasoning without an LLM. The SDK is three layers: **pull** ([[../libraries/meta-performance]] `syncMetaInsightsForLevel` + `meta/scorecards` `refreshScorecards`, done by this cron) → **decide** ([[../libraries/media-buyer-agent]] `runMediaBuyerLoopForAccount`/`computeMediaBuyerPlan`, pure) → **execute** (`iteration_actions` ledger applied by the Phase-6a executor / `ad_publish_jobs`).
 - **A product with test ads but NO active cohort is invisible here** (e.g. Amazing Coffee before it's given a cohort) — the pull only covers cohorts. Every product with test ads must have a cohort.
 
+## Monitoring (register-media-buyer-test-cadence-monitored-loop Phase 1)
+
+Registered in [[../libraries/control-tower]] `MONITORED_LOOPS` as `{ id:'media-buyer-test-cadence', kind:'cron', owner:'growth', expectedCadence:'every 2h (0 */2 * * *)', livenessWindowMs: 3 * HOUR }` — owner=growth (Bianca's freshness feeder under Max), 3h window clears the 2h × 1.2 jitter grace + the 5-min `MONITOR_TICK_FLOOR`. The cron ends every run with `emitCronHeartbeat('media-buyer-test-cadence', { ok: true, … })` (same pattern as `budget-watch-cron`) so the watchdog can distinguish a healthy idle tick from a dead Inngest schedule. Phase 2 wires the kill-switches ancestry + drives `check:node-registry-drift` green.
+
 ## Related
 
-[[meta-performance]] · [[../libraries/meta-performance]] (`syncMetaStructure` / `syncMetaInsightsForLevel` scoping) · [[media-buyer-cadence]] · [[../libraries/media-buyer-agent]] · [[../tables/media_buyer_test_cohorts]] · [[../reference/meta-scaling-methodology]]
+[[meta-performance]] · [[../libraries/meta-performance]] (`syncMetaStructure` / `syncMetaInsightsForLevel` scoping) · [[media-buyer-cadence]] · [[../libraries/media-buyer-agent]] · [[../tables/media_buyer_test_cohorts]] · [[../reference/meta-scaling-methodology]] · [[../libraries/control-tower]]
