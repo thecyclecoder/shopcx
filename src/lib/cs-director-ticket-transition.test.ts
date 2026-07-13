@@ -92,6 +92,37 @@ test("approve_remedy default (customer reply pending) de-escalates but does NOT 
   assert.equal(t.patch.updated_at, NOW);
 });
 
+test("approve_remedy that the mutator RESOLVED (fired + reply delivered) closes the ticket", () => {
+  // The Melissa/eca3f43b fix: June's remedy carried a customer_reply (no explicit
+  // close signal), but the mutator executed cleanly and delivered it — so the
+  // ticket is resolved and must close, not linger open.
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Return for full refund + reply.",
+    remedy: { kind: "refund_return", customer_message: "Send the tabs back with the label…" },
+    remedyResolved: true,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.resolved_at, NOW);
+  assert.equal(t.patch.closed_at, NOW);
+  assert.equal(t.patch.escalated_at, null);
+});
+
+test("approve_remedy NOT resolved (parked/failed) still only de-escalates — never auto-closes", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Refund over threshold — parked for founder approval.",
+    remedy: { kind: "refund_order", customer_message: "…" },
+    remedyResolved: false,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "deescalate_only");
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.closed_at, undefined);
+});
+
 test("approve_remedy with no remedy object at all is treated as customer-reply-pending", () => {
   const t = decideCsDirectorTicketTransition({
     decision: "approve_remedy",
