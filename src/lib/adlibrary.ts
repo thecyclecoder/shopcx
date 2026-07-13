@@ -303,33 +303,21 @@ export interface Seed {
   kind: SeedKind;
   /** Which of our products this seed maps to (provenance only). */
   note?: string;
+  /** The approved `competitors.id` this seed was loaded from — stamped onto every skeleton the
+   *  sweep ingests (per-product scout, CEO 2026-07-12). Null for legacy category seeds. */
+  competitorId?: string;
+  /** The `products.id` this competitor was deliberately chosen for — the deliberate imitate link.
+   *  Dahlia's getProvenCompetitorAngles reads skeletons by this so a product imitates only ITS
+   *  competitors, not the workspace-wide soup. */
+  productId?: string;
 }
 
 /**
- * Curated discovery seeds for Superfoods' categories. Per-competitor pulls use the
- * brand name AS the keyword (the API has no brand filter). The daily sweep also
- * runs category keywords; new heavy advertisers surfaced there can be promoted
- * into the competitor list over time.
+ * CATEGORY_SEEDS — RETIRED 2026-07-12. Category-keyword sweeps (mushroom coffee, greens powder, …) fed
+ * category auto-discovery of competitors, which the fully-deliberate model dropped. The scout now pulls
+ * ONLY a product's deliberately-chosen competitor brands (`competitors.product_id`, loaded by
+ * `loadApprovedCompetitorsForProduct`). The `SeedKind='category'` value is kept for historical rows.
  *
- * Categories we compete in: inflammation / energy / longevity / weight-loss / anti-aging.
- */
-export const CATEGORY_SEEDS: Seed[] = [
-  { keyword: "superfood coffee", kind: "category" },
-  { keyword: "mushroom coffee", kind: "category" },
-  { keyword: "adaptogen coffee", kind: "category" },
-  { keyword: "energy without jitters", kind: "category" },
-  { keyword: "anti-inflammatory", kind: "category" },
-  { keyword: "longevity supplement", kind: "category" },
-  { keyword: "anti-aging", kind: "category" },
-  { keyword: "weight loss coffee", kind: "category" },
-  { keyword: "ashwagandha", kind: "category" },
-  { keyword: "greens powder", kind: "category" },
-];
-
-/**
- * Competitor brands are NO LONGER hardcoded here — they live in the DB-driven `competitors` table
- * (docs/brain/specs/competitor-scout.md). The creative-finder sweep loads APPROVED competitors per
- * workspace via `loadApprovedCompetitorSeeds()` in `src/lib/competitors.ts` and concatenates them
- * with CATEGORY_SEEDS above. The original 11 seeds were migrated in as status='approved' by
- * supabase/migrations/20260623120000_competitors.sql.
+ * Competitor brands are NEVER hardcoded — they live in the DB-driven `competitors` table
+ * (docs/brain/specs/competitor-scout.md), read per-product by the scout ([[creative-scout]]).
  */
