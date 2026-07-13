@@ -174,8 +174,11 @@ test("computeMediaBuyerPlan — loser emits a KILL carrying source meta_ad_id + 
   assert.equal(k.roas, l.roas);
   assert.equal(k.targetLevel, "adset");
   assert.equal(k.targetObjectId, l.targetObjectId);
-  assert.ok(k.rationale.includes("roas_floor"));
+  // Rationale cites the decision-tree source + the audit meta_ad_id. The retired
+  // roas_floor / pause_min citation is intentionally gone (Phase 1 retirement).
+  assert.ok(k.rationale.includes("decision-tree"));
   assert.ok(k.rationale.includes(l.sourceMetaAdId));
+  assert.ok(!k.rationale.includes("roas_floor"));
 });
 
 test("computeMediaBuyerPlan — mixed: winner + loser fixture → BOTH promote + kill actions", () => {
@@ -249,9 +252,40 @@ test("computeMediaBuyerPlan — winner below scale_up_roas_trigger is NOT promot
   assert.equal(plan.promote.length, 0);
 });
 
-test("computeMediaBuyerPlan — loser below pause_min_spend_cents is NOT killed", () => {
-  const l = loser({ spendCents: 100 }); // way below $50 floor
+// media-buyer-kill-on-decision-tree-retire-roas-floor Phase 1 — the pure function no
+// longer re-gates on roas_floor or pause_min_spend_cents. `input.losers` is already a
+// decision-tree-vetted list (detectMetaCpaLosers), and every non-never-paused loser
+// becomes a kill. This test locks that new contract.
+test("computeMediaBuyerPlan — Phase 1: input.losers with any spend/ROAS still becomes a KILL (retired roas_floor/pause_min gates)", () => {
+  const l = loser({ spendCents: 100, roas: 5.0 }); // would have been blocked twice by the retired gates
   const plan = computeMediaBuyerPlan(baseInputs({ losers: [l] }));
+  assert.equal(plan.kill.length, 1);
+  assert.equal(plan.kill[0].sourceMetaAdId, l.sourceMetaAdId);
+});
+
+// media-buyer-kill-on-decision-tree-retire-roas-floor Phase 1 verification — the exact
+// skeptic v3 scenario the spec cites: an active test adset with ROAS 0.27 (< roas_floor
+// 0.30) but 3 purchases, CAC $226 near the hold band, spend $678 well under the
+// max_test_spend deadline ($1,200). After Phase 1, the runner only pushes decision-tree
+// losers into input.losers via detectMetaCpaLosers — skeptic v3 does NOT match the
+// leading-signal trim (it has sales) nor the deadline retire (spend < max_test_spend) —
+// so plan.kill stays empty. Codifies the "never kill a converting test that's still
+// legitimately testing" contract Phase 1 protects.
+test("computeMediaBuyerPlan — Phase 1: skeptic v3 (ROAS 0.27 < roas_floor 0.30, 3 sales, CAC $226, spend $678 < max_test_spend) is NOT in plan.kill", () => {
+  const decisionTreePolicy = policy({
+    roas_floor: 0.30, // legacy floor still on the policy row; kill code no longer reads it
+    pause_min_spend_cents: 5_000, // legacy field; kill code no longer reads it
+    trust_meta_reported_signal: true,
+    crown_max_cpa_cents: 15_000, // $150
+    crown_min_spend_cents: 45_000, // $450
+    crown_min_purchases: 8,
+    hold_band_max_cpa_cents: 22_000, // $220 — skeptic v3's CAC $226 is right on the band edge
+    max_test_spend_cents: 120_000, // $1,200 deadline — skeptic v3's $678 is under
+    early_trim_min_spend_cents: 40_000, // $400
+  });
+  // detectMetaCpaLosers does NOT flag skeptic v3 (has sales, under deadline, near/within
+  // hold band), so the runner passes losers=[] to the pure plan.
+  const plan = computeMediaBuyerPlan(baseInputs({ policy: decisionTreePolicy, losers: [] }));
   assert.equal(plan.kill.length, 0);
 });
 

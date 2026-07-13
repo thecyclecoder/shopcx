@@ -8,8 +8,13 @@
  *
  *   1) MEASURES — reads [[../ads/winning-creative-detect]] `detectWinners` over
  *      the recalibrated attribution (attribution-sensor-recalibration Phase 2),
- *      and reads adset-grain scorecards for LOSERS below the active policy's
- *      `roas_floor` × 1.0 (no margin — the policy's floor is authoritative).
+ *      and reads LOSERS from [[./meta-cpa-signal]] `detectMetaCpaLosers` — the
+ *      crown/kill decision-tree source (leading-signal cost-per-ATC / CPM /
+ *      clicks-no-ATC with the converter guard, plus max_test_spend deadline and
+ *      0-purchase backstop). The legacy ROAS-floor kill path is RETIRED
+ *      ([[../../../docs/brain/specs/media-buyer-kill-on-decision-tree-retire-roas-floor]]
+ *      Phase 1) — it killed converting tests on ROAS < roas_floor regardless of
+ *      sales / testing window.
  *   2) PROMOTES — for each winner past the min-spend + ROAS floor, proposes a
  *      `scale_up` at the winner's adset grain, sized by the active policy's
  *      `scale_up_step_pct`, capped by `scale_up_cap_pct`. Persisted to
@@ -17,8 +22,8 @@
  *      existing executor picks it up on its next pass — the AGENT never writes
  *      Meta objects (north star: proxy-owner supervises the tool; the tool moves
  *      dollars only via the sanctioned executor).
- *   3) KILLS — for each loser adset with cost past `pause_min_spend_cents`,
- *      proposes a `pause` action (same iteration_actions ledger).
+ *   3) KILLS — for each decision-tree loser (see MEASURES above), proposes a
+ *      `pause` action (same iteration_actions ledger).
  *   4) REPLENISHES — tops the test cohort back up to N fresh creatives by
  *      publishing ready-to-test campaigns ([[../ads/ready-to-test]]) LIVE into
  *      the configured test ad set via [[./publish-gate]]'s `origin='media-buyer-test'`
@@ -488,10 +493,13 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   }
 
   // ── Kill ───────────────────────────────────────────────────────────────────
+  // Phase 1 of media-buyer-kill-on-decision-tree-retire-roas-floor: the ROAS-floor kill
+  // trigger is retired. `input.losers` is now supplied ONLY by the decision-tree source
+  // (`detectMetaCpaLosers`), which already applies the crown/hold/deadline + leading-signal
+  // rules with the converter guard. The pure function no longer re-gates on `roas_floor`
+  // or `pause_min_spend_cents` — every non-never-paused loser becomes a kill.
   const kill: MediaBuyerKillAction[] = [];
   for (const l of input.losers) {
-    if (l.roas >= policy.roas_floor) continue;
-    if (l.spendCents < policy.pause_min_spend_cents) continue;
     if (policy.never_pause_object_ids.includes(l.targetObjectId)) continue;
     kill.push({
       kind: "kill",
@@ -500,7 +508,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       spendCents: l.spendCents,
       targetLevel: l.targetLevel,
       targetObjectId: l.targetObjectId,
-      rationale: `Kill loser: ${l.targetLevel} ${l.targetObjectId} ROAS ${l.roas.toFixed(2)} < roas_floor ${policy.roas_floor.toFixed(2)} on $${(l.spendCents / 100).toFixed(2)} spend (≥ pause_min $${(policy.pause_min_spend_cents / 100).toFixed(2)}); source winner-ad-in-decline ${l.sourceMetaAdId}.`,
+      rationale: `Kill loser: ${l.targetLevel} ${l.targetObjectId} ROAS ${l.roas.toFixed(2)} on $${(l.spendCents / 100).toFixed(2)} spend — decision-tree trim (source ${l.sourceMetaAdId}).`,
       policyVersionId: policy.id,
     });
   }
@@ -832,9 +840,13 @@ export async function runMediaBuyerLoop(
 
   const snapshotDate = opts.snapshotDate ?? new Date(nowMs).toISOString().slice(0, 10);
 
-  // Losers: TRUST-META path trims early on Meta-reported CPA (spent past the early-trim floor with no
-  // purchases or a CPA already worse than crown); otherwise today's adset scorecards below the ROAS floor.
-  let losers: MediaBuyerLoser[];
+  // Losers: TRUST-META path trims via the crown/kill decision-tree (leading-signal cost-per-ATC / CPM /
+  // clicks-no-ATC with the converter guard, plus the max_test_spend deadline / 0-purchase backstop).
+  // The legacy ROAS-floor path is RETIRED (media-buyer-kill-on-decision-tree-retire-roas-floor Phase 1) —
+  // it killed converting tests on ROAS < roas_floor regardless of sales / testing window. With no scaling
+  // adsets in play, roas_floor has no remaining consumer in the kill code. A non-trust-Meta policy
+  // therefore produces zero kills; only decision-tree losers reach the plan.
+  let losers: MediaBuyerLoser[] = [];
   if (useMetaCpa) {
     losers = await detectMetaCpaLosers(admin, {
       workspaceId: opts.workspaceId,
@@ -850,46 +862,6 @@ export async function runMediaBuyerLoop(
       crownMinPurchases: policy.crown_min_purchases ?? 8, // crown-qualified adsets are never deadline-retired
       maxTestSpendCents: policy.max_test_spend_cents ?? 120000, // decision deadline — retire if not crowned
     });
-  } else {
-  const { data: loserRows } = await admin
-    .from("iteration_scorecards_daily")
-    .select("id, level, object_id, roas, spend_cents, effective_status")
-    .eq("workspace_id", opts.workspaceId)
-    .eq("meta_ad_account_id", opts.metaAdAccountId)
-    .eq("snapshot_date", snapshotDate)
-    .eq("level", "adset")
-    .eq("effective_status", "ACTIVE")
-    .lt("roas", policy.roas_floor)
-    .gte("spend_cents", policy.pause_min_spend_cents);
-
-  // Losers cite a source meta_ad_id (the highest-spend child ad of the losing adset)
-  // so the audit trail names the actual creative in decline, not just the wrapper adset.
-  const loserAdsetIds = ((loserRows || []) as Array<{ object_id: string }>).map((r) => r.object_id);
-  const adsetToDominantAdId = new Map<string, string>();
-  if (loserAdsetIds.length) {
-    const { data: adsForLosers } = await admin
-      .from("meta_ads")
-      .select("meta_ad_id, meta_adset_id, spend_cents")
-      .in("meta_adset_id", loserAdsetIds)
-      .order("spend_cents", { ascending: false });
-    for (const a of (adsForLosers || []) as Array<{ meta_ad_id: string; meta_adset_id: string }>) {
-      if (!adsetToDominantAdId.has(a.meta_adset_id)) adsetToDominantAdId.set(a.meta_adset_id, a.meta_ad_id);
-    }
-  }
-  losers = ((loserRows || []) as Array<{
-    id: string;
-    level: string;
-    object_id: string;
-    roas: number | string | null;
-    spend_cents: number | string | null;
-  }>).map((r) => ({
-    sourceMetaAdId: adsetToDominantAdId.get(r.object_id) ?? r.object_id, // fallback: adset id itself
-    targetLevel: (r.level === "campaign" ? "campaign" : "adset") as "adset" | "campaign",
-    targetObjectId: r.object_id,
-    roas: Number(r.roas ?? 0),
-    spendCents: Number(r.spend_cents ?? 0),
-    triggeringScorecardId: r.id,
-  }));
   }
 
   // Reactivations — recovered-CPA unpause (Meta attribution lags 24–48h, so a leading-signal trim can be
