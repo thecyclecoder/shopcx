@@ -818,13 +818,17 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
 // ── Product-scoped test rail (media-buyer-product-scoped-test-rail Phase 2) ──
 
 // A small fake admin scoped to what readCurrentTestCohortSize + listReadyToTest
-// need — `ad_publish_jobs`, `ad_campaigns`, `ad_videos` with eq / in / not
+// need — `ad_publish_jobs`, `ad_campaigns`, `ad_videos` with eq / in / not / neq
 // chainable filters, then `then()` resolving to the filtered set. Mirrors the
 // shape used in publish-gate.test.ts so this file stays consistent.
+// Fix 2 (2026-07-13): added `.neq()` so the "exclude archived ad_campaigns" filter
+// listReadyToTest gained (src/lib/ads/ready-to-test.ts:124 `.neq("status","archived")`)
+// no longer crashes this harness — a row whose `status` is absent (undefined) passes
+// the neq filter naturally, matching production behaviour for our test fixtures.
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 interface Filter {
-  kind: "eq" | "in" | "not_is_null";
+  kind: "eq" | "in" | "not_is_null" | "neq";
   col: string;
   val?: unknown;
   vals?: unknown[];
@@ -835,6 +839,7 @@ function matchesJoined(row: Row, filters: Filter[]): boolean {
     if (f.kind === "eq" && v !== f.val) return false;
     if (f.kind === "in" && !(f.vals ?? []).includes(v)) return false;
     if (f.kind === "not_is_null" && (v === null || v === undefined)) return false;
+    if (f.kind === "neq" && v === f.val) return false;
   }
   return true;
 }
@@ -850,6 +855,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
       eq: (col: string, val: unknown) => typeof c;
       in: (col: string, vals: unknown[]) => typeof c;
       not: (col: string, op: string, val: unknown) => typeof c;
+      neq: (col: string, val: unknown) => typeof c;
       then: (onFulfilled: (v: { data: Row[]; error: null }) => unknown) => Promise<unknown>;
     } = {
       select: () => c,
@@ -859,6 +865,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
         if (op === "is" && val === null) filters.push({ kind: "not_is_null", col });
         return c;
       },
+      neq: (col, val) => { filters.push({ kind: "neq", col, val }); return c; },
       then: (onFulfilled) => Promise.resolve(resolve()).then(onFulfilled),
     };
     return c;
@@ -870,6 +877,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
         eq: (col: string, val: unknown) => chain(table).eq(col, val),
         in: (col: string, vals: unknown[]) => chain(table).in(col, vals),
         not: (col: string, op: string, val: unknown) => chain(table).not(col, op, val),
+        neq: (col: string, val: unknown) => chain(table).neq(col, val),
       };
     },
   } as unknown as Parameters<typeof readCurrentTestCohortSize>[0];
