@@ -1,0 +1,1 @@
+- **Remove the never-run 48h 'Max on the box' watch scaffolding + the /director-training skill** · verified 2026-07-13 · → [[../tables/ad_campaigns]]
