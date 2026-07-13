@@ -51,6 +51,11 @@ quality or claims — only the RENDER.
 1. **`headlineExact`** — the headline renders **EXACTLY** as given: no dropped words, no repeated
    words, no misspellings, no garbled glyphs, no substitutions. "5 SUPERFOODS" when the copy said
    "15 SUPERFOODS" → `false`. Extra decorative words that weren't asked for → `false`.
+   **IMITATION MODE:** if the invocation prompt (in the TRUSTED region, above the DATA block) carries
+   a `HEADLINE MODE — IMITATION` rule, the ad is a competitor-imitation whose headline was rewritten
+   for our brand and the DATA block's `HEADLINE` is intentionally blank — there is NO exact string to
+   match, so return `headlineExact = true` (a garbled/misspelled headline is still a `textLegible`
+   failure). A competitor brand name appearing anywhere → `textLegible = false` (see check 2).
 2. **`textLegible`** — **ALL** text on the image is real, correctly-spelled words. Gibberish
    ("IMPUSEO", "real Ife", "coffee coffee"), mangled diacritics, mid-word breaks, or unreadable
    overlays → `false`. Every other overlay (badges, small print, watermarks, guarantee stamps) is

@@ -86,8 +86,14 @@ export async function qaCreative(
     return failClosed("qa_image_undecodable");
   }
 
+  // A BLANK expected headline = an imitation whose headline the model rewrote off the competitor's brand
+  // (see creative-generate buildPrompt). There is no exact string to match, so tell the QC to SKIP the
+  // exact-headline check and judge the headline on legibility + on-brand only — textLegible stays strict.
+  const imitationHeadline = !gen.expectedCopy.headline?.trim();
   const expected = [
-    `HEADLINE: "${gen.expectedCopy.headline}"`,
+    imitationHeadline
+      ? `HEADLINE: none given — this is a competitor-imitation whose headline was rewritten for our brand. Set headlineExact=true (there is no exact string to match); DO judge the headline under textLegible (real, correctly-spelled words) and it must contain NO competitor brand name.`
+      : `HEADLINE: "${gen.expectedCopy.headline}"`,
     gen.expectedCopy.offer ? `OFFER: "${gen.expectedCopy.offer}"` : "OFFER: none",
     `TRUST BAR: "${gen.expectedCopy.trust}"`,
     `Has a before/after transformation image: ${gen.hasTransformation ? "yes" : "no"}`,
@@ -231,6 +237,9 @@ export async function qaCreativeViaBoxSession(
       imagePath,
       expectedCopy: { headline: gen.expectedCopy.headline, offer: gen.expectedCopy.offer, trust: gen.expectedCopy.trust },
       hasTransformation: !!gen.hasTransformation,
+      // Blank headline = a competitor-imitation whose headline was rewritten for our brand → tell the QC to
+      // skip the exact-match (keep textLegible + no-competitor-brand strict). See creative-generate buildPrompt.
+      imitationHeadline: !gen.expectedCopy.headline?.trim(),
     });
 
     let dispatchResult: { resultText: string; isError: boolean };
