@@ -1,22 +1,21 @@
 /**
  * Competitor Scout — DB-driven per-product competitor set (docs/brain/specs/competitor-scout.md).
  *
- * The foundation of the Acquisition Research Engine (M1). Owns the `competitors` table that
- * replaces the hardcoded COMPETITOR_SEEDS: a curated, supervisable set the creative-finder sweep
- * (and the downstream ad-creative-scout / landing-page-scout) read from.
+ * The foundation of the Acquisition Research Engine (M1). Owns the `competitors` table: a curated,
+ * supervisable, PER-PRODUCT competitor set (`product_id`) the deliberate per-product scout
+ * ([[creative-scout]]) and the downstream landing-page-scout read from.
  *
  * North-star (supervisable autonomy): the discovery agent only ever writes status='proposed' rows
- * WITH evidence; an owner approves → 'approved' before anything enters the live sweep. The proxy
- * (heavy advertiser longevity / web-search "competitor") is bounded; the owner owns the objective.
+ * WITH evidence; an owner approves → 'approved' before anything enters the live scout. The proxy
+ * (web-search "competitor") is bounded; the owner owns the objective.
  *
- * Three signals author proposals:
+ * Two signals author proposals (category-sweep auto-discovery was RETIRED 2026-07-12 — fully deliberate):
  *   - discoverCompetitors()    — LLM + web search: the direct competitive set + each brand's domain
  *                                and canonical PDP URLs, framed by the product's intelligence.
- *   - promoteFromCategorySweep — heavy advertisers that recur in AdLibrary category sweeps
- *                                (creative_skeletons rows) get promoted as candidates.
  *   - manual                   — hand-curated (incl. the migrated seeds, seeded 'approved').
  *
- * loadApprovedCompetitorSeeds() is the sweep's read path — it returns ONLY approved rows as Seeds.
+ * loadApprovedCompetitorsForProduct() is the scout's read path — approved rows for ONE product, as Seeds
+ * carrying competitorId + productId so every ingested skeleton is tagged with its competitor + product.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
@@ -71,23 +70,29 @@ export function normalizeBrand(raw: string): string {
   return s.replace(/[^a-z0-9]/g, "");
 }
 
+// loadApprovedCompetitorSeeds — RETIRED 2026-07-12. The workspace-wide read path (ALL approved
+// competitors, no product context) fed the old workspace-wide creative-finder sweep. Superseded by
+// loadApprovedCompetitorsForProduct below — the deliberate per-product scout reads a product's own shelf.
+
 /**
- * The sweep's read path: approved competitors for a workspace, as discovery Seeds.
+ * The per-product scout's read path (deliberate imitate, CEO 2026-07-12): the APPROVED competitors we
+ * chose FOR ONE product, as discovery Seeds carrying `competitorId` + `productId` so every skeleton the
+ * sweep ingests is tagged with the competitor + product it came from.
  *
- * Empty when no competitor is approved — the sweep then runs ZERO competitor pulls (no hardcoded
- * fallback). This is what replaced the import of COMPETITOR_SEEDS in the creative-finder.
- *
- * Whitelisted-page rows (`source='whitelisted'`) use `search_keyword` — the EXACT page name — as
- * their sweep keyword, because the AdLibrary API matches page names literally
- * (`"Holistic Health Finds"` → 59 ads; the `normalizeBrand`-flattened `holistichealthfinds` → 0).
- * Normal (llm/category_sweep/manual) rows leave `search_keyword` null and fall back to `brand`.
+ * This is what replaced the workspace-wide `loadApprovedCompetitorSeeds` for the scout — a product imitates
+ * only ITS shelf. Empty when a product has no approved competitor (the scout then does zero pulls for it).
+ * `search_keyword` (the exact page/brand name the AdLibrary API matches literally) wins over `brand`.
  */
-export async function loadApprovedCompetitorSeeds(workspaceId: string): Promise<Seed[]> {
+export async function loadApprovedCompetitorsForProduct(
+  workspaceId: string,
+  productId: string,
+): Promise<Seed[]> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("competitors")
-    .select("brand, search_keyword, evidence, category")
+    .select("id, brand, search_keyword, evidence, category")
     .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
     .eq("status", "approved")
     .order("brand", { ascending: true });
   return (data || [])
@@ -96,7 +101,25 @@ export async function loadApprovedCompetitorSeeds(workspaceId: string): Promise<
       keyword: ((r.search_keyword as string | null) ?? (r.brand as string)) as string,
       kind: "competitor" as const,
       note: (r.evidence as string) || (r.category as string) || undefined,
+      competitorId: r.id as string,
+      productId,
     }));
+}
+
+/**
+ * Every product in a workspace that has ≥1 APPROVED competitor — the scout's weekly cron work-list.
+ * Iterating product-by-product (each with its own small competitor set) is how the scout stays under
+ * the AdLibrary rate cap: it never fans 30 competitors at once, only one product's ~5 at a time.
+ */
+export async function productsWithApprovedCompetitors(workspaceId: string): Promise<string[]> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("competitors")
+    .select("product_id")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "approved")
+    .not("product_id", "is", null);
+  return Array.from(new Set((data || []).map((r) => r.product_id as string)));
 }
 
 interface ProductIntel {
@@ -504,41 +527,8 @@ export async function promoteWhitelistedPages(
   return result;
 }
 
-export async function promoteFromCategorySweep(
-  workspaceId: string,
-  minAds = 3,
-): Promise<PromoteResult> {
-  const admin = createAdminClient();
-  const { data } = await admin
-    .from("creative_skeletons")
-    .select("advertiser")
-    .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
-    .not("advertiser", "is", null)
-    .limit(5000);
-
-  // Count distinct-ish appearances per advertiser, keep the original display name for evidence.
-  const counts = new Map<string, { count: number; display: string }>();
-  for (const r of data || []) {
-    const display = (r.advertiser as string) || "";
-    const brand = normalizeBrand(display);
-    if (!brand) continue;
-    const cur = counts.get(brand) || { count: 0, display };
-    cur.count++;
-    counts.set(brand, cur);
-  }
-
-  const result: PromoteResult = { promoted: 0, skippedExisting: 0, scanned: counts.size };
-  for (const [brand, { count, display }] of counts) {
-    if (count < minAds) continue;
-    const inserted = await upsertCandidate(workspaceId, {
-      brand,
-      source: "category_sweep",
-      spend_signal: `recurs in ${count} AdLibrary sweep ads`,
-      evidence: `Heavy advertiser "${display}" recurred in ${count} category-sweep ads — promote to a tracked competitor?`,
-    });
-    if (inserted) result.promoted++;
-    else result.skippedExisting++;
-  }
-  return result;
-}
+// promoteFromCategorySweep — RETIRED 2026-07-12. Category-sweep competitor auto-discovery (heavy
+// advertisers recurring in CATEGORY_SEEDS sweeps → 'proposed' competitors) contradicted the fully-
+// deliberate model: competitors are chosen by hand per product (discoverCompetitors proposals + manual),
+// never inferred from category keywords. The scout no longer sweeps categories, so there were no
+// category skeletons left to promote from. See docs/brain/inngest/creative-scout.md.

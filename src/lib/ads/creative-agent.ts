@@ -172,11 +172,12 @@ async function stockProduct(
   const stories = await loadTransformationStories(admin, workspaceId, productId);
   const ownAngles = selectAngles(pi, stories);
 
-  // Pool in PROVEN competitor angles (CEO 2026-07-11): market-validated hooks + their winning GRAPHIC,
-  // ranked by days-running. A few, so they don't crowd our own concepts. Each carries its image so the
-  // generator can do COMPOSITION TRANSFER — reuse the competitor's winning layout, swap in our content.
-  const niche = /coffee/i.test(product.handle) ? "coffee" : "weight";
-  const competitorAngles: ScoredAngle[] = (await getProvenCompetitorAngles(admin, workspaceId, { niche, minDaysRunning: 45, limit: 6 }).catch(() => []))
+  // Pool in PROVEN competitor angles from THIS product's deliberately-chosen competitors (CEO 2026-07-12):
+  // market-validated hooks + their winning GRAPHIC, ranked by days-running. Read by product_id — the scout
+  // tagged each skeleton with the product its competitor was chosen for, so imitate reads a product's own
+  // shelf (not a coffee/weight substring guess). Each carries its image so the generator can do COMPOSITION
+  // TRANSFER — reuse the competitor's winning layout, swap in our content.
+  const competitorAngles: ScoredAngle[] = (await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 45, limit: 6 }).catch(() => []))
     .filter((c) => c.hook)
     .map((c) => ({
       hook: c.hook as string,

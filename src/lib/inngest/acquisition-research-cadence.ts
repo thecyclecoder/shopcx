@@ -3,10 +3,10 @@
  * (docs/brain/specs/acquisition-research-loop-grading.md, Phase 1; M5 of the Acquisition Research
  * Engine, docs/brain/goals/acquisition-research-engine.md).
  *
- * Makes the engine CONSTANT research, not one-shot. Runs daily (offset AFTER the 9am creative-finder
- * sweep so it reasons over fresh creative_skeletons), and for every ad-tool workspace:
- *   1. promote — heavy advertisers that recurred in the fresh sweep surface as 'proposed' competitors
- *                (competitor-scout promoteFromCategorySweep; idempotent / deduped).
+ * Makes the engine CONSTANT research, not one-shot. Runs daily, and for every ad-tool workspace:
+ *   1. whitelisted — affiliate/advertorial pages fronting a KNOWN approved competitor surface as
+ *                'proposed' whitelisted rows (promoteWhitelistedPages; idempotent / deduped). Category-sweep
+ *                competitor auto-discovery was RETIRED 2026-07-12 — competitors are now deliberate per-product.
  *   2. ad gaps — re-materialize the deterministic ad-gap report into ad_gap_recommendations as
  *                'proposed' (idempotent on dedup_key; SUPPRESSED types are skipped — the loop learns).
  *   3. lander  — fire ads/landing-page-scout.analyze so the Landing Page Scout re-surfaces NEW lander
@@ -27,7 +27,7 @@
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { promoteFromCategorySweep, promoteWhitelistedPages } from "@/lib/competitors";
+import { promoteWhitelistedPages } from "@/lib/competitors";
 import { materializeAdGaps } from "@/lib/acquisition-hub";
 import { pickGapGradeBatch } from "@/lib/acquisition-gap-grader";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -44,7 +44,6 @@ async function adToolWorkspaceIds(): Promise<string[]> {
 
 interface WorkspaceCadenceResult {
   workspaceId: string;
-  promoted: number;
   /** Whitelisted-page candidates proposed this beat (source='whitelisted', status='proposed'). */
   promotedWhitelisted: number;
   adGaps: number;
@@ -60,18 +59,13 @@ interface WorkspaceCadenceResult {
 
 /** One workspace's re-scan + grade pass. Best-effort per step — a failure never breaks the loop. */
 async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenceResult> {
-  let promoted = 0;
   let promotedWhitelisted = 0;
   let adGaps = 0;
   const graded = { considered: 0, enqueued: 0 };
 
-  try {
-    const p = await promoteFromCategorySweep(workspaceId);
-    promoted = p.promoted;
-  } catch (err) {
-    console.error(`[acquisition-cadence] promote failed ws=${workspaceId}:`, err);
-  }
-
+  // Category-sweep competitor auto-discovery (promoteFromCategorySweep) was RETIRED 2026-07-12 —
+  // competitors are now chosen DELIBERATELY per product (fully-deliberate imitate). Whitelisted-page
+  // promotion stays: it's keyed off KNOWN approved competitors' domains, not category guessing.
   try {
     const p = await promoteWhitelistedPages(workspaceId);
     promotedWhitelisted = p.promoted;
@@ -127,7 +121,7 @@ async function runWorkspaceCadence(workspaceId: string): Promise<WorkspaceCadenc
   // Rhea's `research` enqueue moved to research-sensor-cron (rhea-research-automation Phase 1) —
   // the paced hourly claim supersedes the once-a-day stub. Nothing to do for research here.
 
-  return { workspaceId, promoted, promotedWhitelisted, adGaps, graded };
+  return { workspaceId, promotedWhitelisted, adGaps, graded };
 }
 
 export const acquisitionResearchCadenceCron = inngest.createFunction(
