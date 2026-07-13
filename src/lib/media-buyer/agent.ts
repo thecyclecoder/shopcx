@@ -42,7 +42,7 @@ import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, 
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
-import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
+import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
 import { inngest } from "@/lib/inngest/client";
 
@@ -600,8 +600,23 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
  */
 export async function readCurrentTestCohortSize(
   admin: Admin,
-  args: { workspaceId: string; productId: string | null },
+  args: { workspaceId: string; productId: string | null; testMetaCampaignId?: string | null },
 ): Promise<number> {
+  // Per-test cohort: count LIVE ad sets in its testing campaign — ORIGIN-AGNOSTIC, so the count
+  // includes adsets minted by the legacy media-buyer loop (not just the new per-test publisher). This
+  // is the hard max-concurrent rail: the 2026-07-12 Amazing Coffee over-launch (8 live, double the
+  // ceiling) came from an ad_publish_jobs-only count that couldn't see the 4 pre-existing skeptic
+  // adsets, so the deficit read 4-0 and it replenished 4 on top. Campaign scope == product scope
+  // (each per-test cohort has its own testing campaign). See [[./publish-gate]] countLiveTestAdsetsInCampaign.
+  if (args.testMetaCampaignId) {
+    return countLiveTestAdsetsInCampaign(admin, {
+      workspaceId: args.workspaceId,
+      testMetaCampaignId: args.testMetaCampaignId,
+    });
+  }
+
+  // Legacy / null-product cohort (no per-test campaign, e.g. Superfood Tabs' shared-adset cohort):
+  // preserve the pre-existing ad_publish_jobs-scoped count so that path is unchanged.
   const { data: liveJobsRaw } = await admin
     .from("ad_publish_jobs")
     .select("id, campaign_id")
@@ -951,6 +966,7 @@ export async function runMediaBuyerLoop(
   const currentTestCohortSize = await readCurrentTestCohortSize(admin, {
     workspaceId: opts.workspaceId,
     productId: cohortProductId,
+    testMetaCampaignId: cohort?.testMetaCampaignId ?? null,
   });
 
   // ── Compute the plan ──────────────────────────────────────────────────────

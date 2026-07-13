@@ -294,37 +294,44 @@ function refusalDiagnosis(
  * publish time). Mirrors `readCurrentTestCohortSize`: live = `origin='media-buyer-test'`, `publish_active`,
  * `publish_status='published'`, per-test (`create_adset_spec` set); product-scoped via `ad_campaigns.product_id`.
  */
-async function countActivePerTestTests(
-  admin: Admin,
-  args: { workspaceId: string; productId: string | null },
-): Promise<number> {
-  const { data } = await admin
-    .from("ad_publish_jobs")
-    .select("campaign_id, meta_adset_id")
-    .eq("workspace_id", args.workspaceId)
-    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
-    .eq("publish_active", true)
-    .eq("publish_status", "published")
-    .not("create_adset_spec", "is", null);
-  const jobs = (data ?? []) as Array<{ campaign_id: string | null; meta_adset_id: string | null }>;
-  const withAdset = jobs.filter((j) => !!j.meta_adset_id);
-  if (!args.productId) return new Set(withAdset.map((j) => j.meta_adset_id)).size;
+/** Adset `effective_status` values that DON'T occupy a concurrency slot (paused / not delivering).
+ *  Anything else — ACTIVE, PENDING_REVIEW, PREAPPROVED, PENDING_BILLING_INFO, IN_PROCESS — will (or is
+ *  about to) spend, so it counts toward the ≤ maxConcurrent cap. Conservative on purpose: an unknown
+ *  status counts as occupying, so the rail never UNDER-counts and over-launches. */
+export const FREED_ADSET_STATUSES: ReadonlySet<string> = new Set([
+  "PAUSED",
+  "ADSET_PAUSED",
+  "CAMPAIGN_PAUSED",
+  "ARCHIVED",
+  "DELETED",
+]);
 
-  const campaignIds = withAdset.map((j) => j.campaign_id).filter((id): id is string => !!id);
-  if (!campaignIds.length) return 0;
-  const { data: camps } = await admin
-    .from("ad_campaigns")
-    .select("id")
+/**
+ * Count the live test ad sets occupying concurrency slots in a per-test cohort's testing campaign —
+ * ORIGIN-AGNOSTIC. Each per-test cohort's `test_meta_campaign_id` is product-specific, so counting the
+ * live `meta_adsets` in that campaign == counting that product's concurrent tests. Unlike the old
+ * `ad_publish_jobs`-scoped count, this SEES ad sets minted by the legacy media-buyer loop too — the
+ * 2026-07-12 Amazing Coffee over-launch was an `ad_publish_jobs`-only count blind to 4 pre-existing
+ * adsets, so it replenished 4 ON TOP → 8 live (double the $600 ceiling). Counting live campaign ad sets
+ * makes "> maxConcurrent" structurally impossible regardless of who minted the ad set. Returns 0 when no
+ * campaign id is given (nothing minted yet). Shared by the plan ([[./agent]] `readCurrentTestCohortSize`)
+ * and this gate so both agree on the concurrency count.
+ */
+export async function countLiveTestAdsetsInCampaign(
+  admin: Admin,
+  args: { workspaceId: string; testMetaCampaignId: string | null },
+): Promise<number> {
+  if (!args.testMetaCampaignId) return 0;
+  const { data } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id, effective_status")
     .eq("workspace_id", args.workspaceId)
-    .in("id", campaignIds)
-    .eq("product_id", args.productId);
-  const okCampaigns = new Set((camps ?? []).map((c) => (c as { id: string }).id));
-  const productAdsets = new Set(
-    withAdset
-      .filter((j) => j.campaign_id && okCampaigns.has(j.campaign_id))
-      .map((j) => j.meta_adset_id),
-  );
-  return productAdsets.size;
+    .eq("meta_campaign_id", args.testMetaCampaignId);
+  const occupying = new Set<string>();
+  for (const r of (data ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>) {
+    if (!FREED_ADSET_STATUSES.has(String(r.effective_status ?? "").toUpperCase())) occupying.add(r.meta_adset_id);
+  }
+  return occupying.size;
 }
 
 /**
@@ -380,9 +387,9 @@ export async function evaluateMediaBuyerTestPublish(
         diagnosis: refusalDiagnosis("over_ceiling", input, cohort),
       };
     }
-    const activeTests = await countActivePerTestTests(admin, {
+    const activeTests = await countLiveTestAdsetsInCampaign(admin, {
       workspaceId: input.workspaceId,
-      productId: cohort.productId,
+      testMetaCampaignId: cohort.testMetaCampaignId,
     });
     if ((activeTests + 1) * cohort.perTestDailyBudgetCents > cohort.dailyTestCeilingCents) {
       return {
