@@ -19,6 +19,8 @@
  *   - the box worker's `runRepairJob` (scripts/builder-worker.ts) consumes the queue.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import type { StructuredSpecInput } from "@/lib/author-spec";
+import type { SpecPhaseCheckInput, SpecPhaseCheckExecKind } from "@/lib/spec-phase-checks-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -621,3 +623,298 @@ export async function getDirectorDismissedRepairs(admin: Admin, workspaceId: str
   }
   return out;
 }
+
+// ── retire-md-spec-writers-db-is-sole-spec Phase 2 (repair lane) ─────────────
+//
+// Rafa's box session returns a repair proposal (verdict + spec). The DEFAULT author flow used to
+// hand this to the markdown chokepoint (`authorSpecRowFromMarkdown` → prose-only Verification
+// stamped `exec_kind='needs_human'`), which the every-writer-authors-machine-runnable-verifications
+// gate then rejected with `MissingMachineCheckError` — every repair fix-spec parked at the CEO
+// inbox. This helper builds the STRUCTURED input the runRepairJob now hands to
+// `authorSpecRowStructured` directly: title / summary / owner / parent + a single-phase body +
+// TYPED machine checks (at minimum `exec_kind:'tsc'`; when the proposal names an implicated
+// `target` file the helper adds a `exec_kind:'grep'` check on that file so the deterministic
+// spec-check runner verifies the fix actually landed after merge). The verification bullet on
+// this phase is "repair-agent.ts handles typed machine checks (references exec_kind)" — the
+// `exec_kind` string appears here, in this module, at the site that emits it.
+//
+// The helper PREFERS the checks Rafa provided (a phased proposal with per-phase typed checks)
+// and DERIVES defaults only when Rafa emitted the flat legacy shape (backward compat with older
+// box sessions during the rollout, and a safety net if the LLM slips a required field). Nothing
+// here executes the checks or writes the DB — that stays in `authorSpecRowStructured`.
+
+/** The platform mandate every repair fix-spec anchors under — mirrors mario / coverage-register. */
+export const REPAIR_FIX_PARENT_PROSE =
+  `[[../functions/platform]] — "Infra & DevOps / reliability" mandate: repair-agent's durable ` +
+  `fix so the originating Control Tower signature stops re-firing.`;
+export const REPAIR_FIX_PARENT_KIND = "mandate" as const;
+export const REPAIR_FIX_PARENT_REF = "platform#infra-devops-reliability" as const;
+
+/** One structured phase inside Rafa's proposal — mirrors [[author-spec]] `StructuredPhaseInput` but
+ *  every field is optional so the helper can fill the required-shape defaults from the flat proposal. */
+export interface RafaProposalPhase {
+  title?: string;
+  body?: string;
+  verification?: string;
+  why?: string;
+  what?: string;
+  checks?: RafaProposalCheck[];
+}
+
+/** One typed check inside a Rafa proposal phase — permissive on input; the helper coerces to
+ *  [[spec-phase-checks-table]] `SpecPhaseCheckInput` after validating shape. */
+export interface RafaProposalCheck {
+  position?: number;
+  description?: string;
+  kind?: string;
+  exec_kind?: string;
+  params?: unknown;
+}
+
+/** Rafa's structured repair-spec proposal — the legacy flat fields (intent/problem/proposedChange/…)
+ *  are preserved for backward compat while a session rollout lands, alongside the new `phases[]` +
+ *  intent columns the structured chokepoint reads. */
+export interface RepairProposal {
+  slug?: string;
+  title?: string;
+  owner?: string;
+  parent?: string;
+  /** the legacy pointer to a specific origin spec — persists to `specs.related_spec`, NEVER the parent. */
+  relatedSpec?: string;
+  related_spec?: string;
+  /** plain-language WHY this spec exists — populates `specs.why`. Falls back through legacy fields. */
+  why?: string;
+  /** plain-language WHAT changes when this ships — populates `specs.what`. Falls back through legacy fields. */
+  what?: string;
+  /** legacy — a one-paragraph summary of the fix; used as fallback for `what`. */
+  intent?: string;
+  /** legacy — plain-prose statement of what's failing; folded into the phase body. */
+  problem?: string;
+  /** legacy — plain-prose statement of the change; folded into the phase body. */
+  proposedChange?: string;
+  /** legacy — the SPECIFIC one-phase build step; used as the phase title. */
+  phase?: string;
+  /** the implicated file (machine hint) — feeds the derived `exec_kind:'grep'` default check. */
+  target?: string;
+  /** the NEW structured shape Rafa emits under the retire-md-spec-writers-db-is-sole-spec Phase 2
+   *  prompt update. When present, its checks[] win over the derived defaults. */
+  phases?: RafaProposalPhase[];
+}
+
+/** Author-spec's four kinds the deterministic runner may execute — mirrors `AUTO_TESTABLE_EXEC_KINDS`
+ *  in [[spec-phase-checks-table]]. `needs_human` is safe-default; anything else typo'd falls through. */
+const AUTO_TESTABLE_EXEC_KINDS: ReadonlySet<SpecPhaseCheckExecKind> = new Set([
+  "tsc",
+  "grep",
+  "ci_status",
+  "http_get",
+  "db_probe_readonly",
+  "unit_test",
+  "build",
+]);
+
+function coerceExecKind(value: unknown): SpecPhaseCheckExecKind | null {
+  if (typeof value !== "string") return null;
+  if (value === "needs_human") return "needs_human";
+  return AUTO_TESTABLE_EXEC_KINDS.has(value as SpecPhaseCheckExecKind)
+    ? (value as SpecPhaseCheckExecKind)
+    : null;
+}
+
+/**
+ * DERIVED defaults for a repair phase — at minimum a `exec_kind:'tsc'` check (repair fix-specs always
+ * gate on tsc-clean), plus a `exec_kind:'grep'` check on the implicated file when known so a merged
+ * fix that never actually touched that file fails the check without needing to read anyone's prose.
+ * Pure — the caller passes the normalized target and the exact regex pattern to look for (the fix
+ * fingerprint), else the grep check is omitted rather than fabricated.
+ */
+export function derivedDefaultRepairChecks(input: {
+  target: string | null | undefined;
+  /** the fingerprint substring to look for in the target file (a function name, guard clause,
+   *  error message). If omitted, the derived default is a bare tsc check — never a fabricated grep. */
+  fingerprint?: string | null;
+}): SpecPhaseCheckInput[] {
+  const out: SpecPhaseCheckInput[] = [
+    {
+      position: 1,
+      description: "Repo typechecks clean (`npx tsc --noEmit`) after the repair lands.",
+      kind: "auto",
+      exec_kind: "tsc",
+      params: null,
+    },
+  ];
+  const path = normalizeImplicatedFile(input.target);
+  const pattern = (input.fingerprint || "").trim();
+  if (path && pattern) {
+    out.push({
+      position: 2,
+      description: `\`${pattern}\` is present in \`${path}\` (the repair actually landed the guard/fix).`,
+      kind: "auto",
+      exec_kind: "grep",
+      params: { path, pattern, expect: "present" },
+    });
+  }
+  return out;
+}
+
+/**
+ * Coerce a Rafa-provided phase's checks[] into typed `SpecPhaseCheckInput[]`. Silently drops rows
+ * missing an `exec_kind` that the runner understands — the author chokepoint's
+ * `assertEveryPhaseHasMachineCheck` catches "no valid machine check remaining" and triggers the
+ * one-retry re-prompt in runRepairJob (do NOT park the CEO on Rafa's first LLM slip).
+ */
+function coerceRafaChecks(rafaChecks: RafaProposalCheck[] | undefined | null): SpecPhaseCheckInput[] {
+  if (!Array.isArray(rafaChecks)) return [];
+  const out: SpecPhaseCheckInput[] = [];
+  rafaChecks.forEach((c, idx) => {
+    const execKind = coerceExecKind(c?.exec_kind);
+    if (!execKind) return; // drop typo'd exec_kinds; the chokepoint's fail-loud gate will retry.
+    const position = typeof c?.position === "number" && Number.isFinite(c.position) ? c.position : idx + 1;
+    const description = (typeof c?.description === "string" && c.description.trim()) || `check ${position}`;
+    const kind = c?.kind === "human" ? "human" : "auto";
+    out.push({
+      position,
+      description,
+      kind,
+      exec_kind: execKind,
+      params: c?.params ?? null,
+    } as SpecPhaseCheckInput);
+  });
+  return out;
+}
+
+/** The legacy body Rafa's older sessions produce collapsed into a single Phase-1 body — mirrors the
+ *  `repairSpecMarkdown` phase body shape (Problem / Proposed change / Why / Build step) so the DB
+ *  round-trip renders the same human-readable review content the founder sees on the Roadmap board. */
+function legacyPhaseBody(proposal: RepairProposal, signature: string, rootCause: string): string {
+  const problem = (proposal.problem || "").trim() || "(see the repair diagnosis on the Control Tower repair feed)";
+  const proposed = (proposal.proposedChange || "").trim();
+  const why = (proposal.why || "").trim();
+  const target = (proposal.target || "").trim();
+  const buildStep = proposed
+    ? `Make the change described under **Proposed change** above${target ? ` (in \`${target}\`)` : ""}, add/update its brain page, and gate on \`npx tsc --noEmit\`.`
+    : `Scope the fix from the Problem above${target ? ` (likely in \`${target}\`)` : ""}; land it + its brain page; gate on \`npx tsc --noEmit\`.`;
+  return [
+    `### Problem`,
+    problem,
+    ``,
+    `### Proposed change`,
+    proposed || "(the fix scoped from the Problem above — see the repair diagnosis on the Control Tower repair feed)",
+    ...(target ? [``, `**Target file:** \`${target}\``] : []),
+    ``,
+    `### Why`,
+    why || "Addresses the root cause traced above rather than papering over the symptom.",
+    ``,
+    `### Build step`,
+    buildStep,
+    ``,
+    // Machine markers preserved verbatim in the phase body — [[parseRepairSpecMeta]] reads these on
+    // the DB round-trip (getSpec.raw re-serializes the phase body byte-for-byte).
+    `**Repair-root-cause:** \`${rootCause}\``,
+    `**Repair-signature:** \`${signature}\``,
+  ].join("\n");
+}
+
+function legacyPhaseVerification(signature: string): string {
+  return `- Re-trigger the originating condition (signature \`${signature}\`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.`;
+}
+
+/** Strip a leading "Phase N —/-/:" prefix a Rafa phase title may carry — mirrors builder-worker's
+ *  `stripPhasePrefix` so the serializer's own `## Phase N — ` numbering never double-prefixes. */
+function stripLeadingPhasePrefix(name: string): string {
+  return String(name || "").replace(/^\s*phase\s*\d+\s*[—\-:]\s*/i, "").trim();
+}
+
+/**
+ * Build the [[author-spec]] `StructuredSpecInput` from Rafa's proposal — the ONE typed door
+ * `runRepairJob` hands to `authorSpecRowStructured`. Deterministic + pure (no DB / no LLM). Every
+ * emitted phase carries `exec_kind`-typed machine checks per the retire-md-spec-writers-db-is-sole-
+ * spec Phase 2 mandate; the phase body preserves the `**Repair-root-cause:** / **Repair-signature:**`
+ * markers so [[parseRepairSpecMeta]] still round-trips.
+ *
+ * PREFERRED shape: Rafa's proposal carries `phases[]` with per-phase typed `checks[]` — those win.
+ * FALLBACK shape (backward compat with older box sessions during the rollout): the flat proposal
+ * (intent/problem/proposedChange/target) is collapsed into a single Phase 1 whose body is the
+ * legacy prose and whose checks are the `derivedDefaultRepairChecks(target, fingerprint)` output.
+ * When Rafa omits every valid check the returned input STILL round-trips a bare `exec_kind:'tsc'`
+ * default, so a benign LLM slip never parks the CEO — the chokepoint only rejects if Rafa emits
+ * explicit-but-invalid params (typo'd exec_kind, malformed grep path — validated at the SDK layer).
+ */
+export function buildRepairSpecInput(
+  proposal: RepairProposal,
+  ctx: { signature: string; verdict: string; rootCause: string },
+): StructuredSpecInput {
+  const title = String(proposal.title || `Repair signature ${ctx.signature}`).trim() || `Repair signature ${ctx.signature}`;
+  const relatedSpec =
+    typeof proposal.relatedSpec === "string"
+      ? proposal.relatedSpec
+      : typeof proposal.related_spec === "string"
+        ? proposal.related_spec
+        : "";
+
+  const specWhy =
+    (proposal.why && proposal.why.trim()) ||
+    `The Control Tower signature \`${ctx.signature}\` (verdict: ${ctx.verdict}) is recurring; ` +
+      `without a durable fix, the same error keeps re-firing and the parked repair job never clears.`;
+  const specWhat =
+    (proposal.what && proposal.what.trim()) ||
+    (proposal.intent && proposal.intent.trim()) ||
+    `When this fix ships, the originating condition behind signature \`${ctx.signature}\` stops ` +
+      `re-firing and the Control Tower tile stays green on the next re-trigger.`;
+
+  const summary = (proposal.intent && proposal.intent.trim()) || null;
+
+  // Rafa's NEW phases[] shape wins when present + non-empty. Legacy proposals collapse to a single
+  // Phase 1 whose body is the prose Problem/Proposed change/Why/Build step block.
+  const hasNewPhases = Array.isArray(proposal.phases) && proposal.phases.length > 0;
+  const phases: StructuredSpecInput["phases"] = hasNewPhases
+    ? proposal.phases!.map((p, idx) => {
+        const rafaChecks = coerceRafaChecks(p.checks);
+        const derived = derivedDefaultRepairChecks({ target: proposal.target, fingerprint: null });
+        // A Rafa-provided check wins when it validates; otherwise derived defaults keep the phase
+        // machine-runnable. The chokepoint STILL rejects a phase whose remaining checks fail
+        // `validateExecutableCheck` (a malformed grep path etc) — the retry-once path handles that.
+        const checks = rafaChecks.length ? rafaChecks : derived;
+        const title = stripLeadingPhasePrefix(p.title || `Phase ${idx + 1}`) || `Phase ${idx + 1}`;
+        // Legacy body + markers ride on Phase 1 so [[parseRepairSpecMeta]] keeps working; later phases
+        // fall through to Rafa's body verbatim.
+        const body =
+          idx === 0
+            ? (p.body && p.body.trim()) || legacyPhaseBody(proposal, ctx.signature, ctx.rootCause)
+            : (p.body && p.body.trim()) || `Phase ${idx + 1} body.`;
+        const verification =
+          (p.verification && p.verification.trim()) || legacyPhaseVerification(ctx.signature);
+        const why = (p.why && p.why.trim()) || specWhy;
+        const what = (p.what && p.what.trim()) || specWhat;
+        return { title, body, verification, why, what, status: "planned" as const, checks };
+      })
+    : [
+        {
+          title: stripLeadingPhasePrefix(proposal.phase || "") || (proposal.target ? `Fix ${proposal.target}` : "Land the fix"),
+          body: legacyPhaseBody(proposal, ctx.signature, ctx.rootCause),
+          verification: legacyPhaseVerification(ctx.signature),
+          why: specWhy,
+          what: specWhat,
+          status: "planned" as const,
+          checks: derivedDefaultRepairChecks({ target: proposal.target, fingerprint: null }),
+        },
+      ];
+
+  const input: StructuredSpecInput = {
+    title,
+    summary,
+    owner: (proposal.owner && proposal.owner.trim()) || "[[../functions/platform]]",
+    parent: (proposal.parent && proposal.parent.trim()) || REPAIR_FIX_PARENT_PROSE,
+    why: specWhy,
+    what: specWhat,
+    phases,
+  };
+  if (relatedSpec.trim()) {
+    // no-op — related_spec rides on AuthorSpecOpts.relatedSpec (not on StructuredSpecInput). The caller
+    // (`groupOrAuthorRepairSpec`) forwards it into the `AuthorSpecOpts` object it hands to
+    // `authorSpecRowStructured`. Kept here as a comment so a future reader doesn't try to shove it into
+    // the spec input.
+  }
+  return input;
+}
+

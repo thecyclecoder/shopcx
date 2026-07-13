@@ -18222,125 +18222,72 @@ function repairPrompt(brief: string): string {
     ``,
     `The spec you author is reviewed by the FOUNDER on the Roadmap board BEFORE any build — so its prose must be HUMAN-READABLE, not machine shorthand. A reviewer who never saw this error must understand, in plain language: (a) what is failing + the user-facing/system impact, (b) what you propose to change, concretely, (c) why that's the right fix. Write \`problem\`, \`proposedChange\`, and \`why\` as PROSE a non-engineer can follow — never a bare code-path string. (The \`target\` file is a machine hint, NOT the proposal.)`,
     ``,
+    // retire-md-spec-writers-db-is-sole-spec Phase 2 (repair lane): Rafa now emits STRUCTURED
+    // phases[] with per-phase typed machine checks so the fix spec authors via
+    // authorSpecRowStructured (not the retired markdown chokepoint). Every phase MUST carry >=1
+    // check whose exec_kind is one of tsc | grep | ci_status | http_get | db_probe_readonly |
+    // unit_test | build — the deterministic spec-check runner executes those after merge. A
+    // phase with only prose / only needs_human rows is REJECTED by the chokepoint's
+    // assertEveryPhaseHasMachineCheck (the "parks at the CEO inbox" failing state Phase 2 kills).
+    // Include at MINIMUM a tsc check; when \`target\` names a file, ALSO include a grep check
+    // on that file for the fingerprint substring the fix introduces (a function name, guard
+    // clause, error message — the LLM knows the guard, the helper does not).
+    `⭐ STRUCTURED PHASES + TYPED MACHINE CHECKS mandate — every fix spec you author MUST include a \`phases\` array with per-phase \`checks\` carrying an \`exec_kind\`. The recognized \`exec_kind\` values are: "tsc" (params:null) · "grep" (params:{path,pattern,expect:"present"|"absent"}) · "ci_status" (params:null) · "http_get" (params:{url,expect_status}) · "db_probe_readonly" (params:{probe_id, args?, expect}) · "unit_test" (params:{script}) · "build" (params:null). Emit AT LEAST a "tsc" check per phase; when \`target\` names a file, ALSO emit a "grep" check on that file for the fingerprint substring your fix introduces (a function name, guard clause, error message — the substring by which the runner verifies the fix actually landed). A phase with only prose bullets is REJECTED by the author chokepoint — this is the exact defect this format kills.`,
+    ``,
     `Final message = ONLY one JSON object:`,
-    `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"<plain, specific — what this fixes>","owner":"[[../functions/platform]]","parent":"...","intent":"<one-paragraph summary of the fix>","problem":"<PROSE: what is failing + who/what it affects (the user-facing or system impact), grounded in the signature + the code you traced — 2-4 sentences, no bare code-path strings>","proposedChange":"<PROSE: concretely what you will change and how it fixes the problem — name the file/function but explain the change in words — 2-4 sentences>","why":"<PROSE: why this is the right fix (the root cause it addresses; why not an alternative) — 1-3 sentences>","phase":"<the SPECIFIC one-phase build step for THIS fix — e.g. 'In src/lib/X.ts, guard Y against null and add the missing Z fallback', NOT a generic 'land the fix'>","target":"src/lib/<the file/fn to fix>"}}`,
+    `  {"status":"real-bug"|"monitor-false-positive"|"foreign-app-noise","diagnosis":"<plain text: the root cause + what the fix does>","spec":{"slug":"<stable-kebab-slug>","title":"<plain, specific — what this fixes>","owner":"[[../functions/platform]]","parent":"...","intent":"<one-paragraph summary of the fix>","why":"<PROSE: why this spec exists — 1-3 sentences>","what":"<PROSE: what changes when this ships — 1-2 sentences>","problem":"<PROSE: what is failing + who/what it affects (the user-facing or system impact), grounded in the signature + the code you traced — 2-4 sentences, no bare code-path strings>","proposedChange":"<PROSE: concretely what you will change and how it fixes the problem — name the file/function but explain the change in words — 2-4 sentences>","target":"src/lib/<the file/fn to fix>","phases":[{"title":"<one-line phase title — do NOT prefix with 'Phase 1 — ' (the serializer adds that itself)>","why":"<PROSE — why this phase exists>","what":"<PROSE — what changes when this phase ships>","body":"<the phase build step in prose — describe the change, cite the file>","verification":"<one bullet per human-facing acceptance check>","checks":[{"position":1,"description":"Repo typechecks clean after the fix lands.","kind":"auto","exec_kind":"tsc"},{"position":2,"description":"<the fingerprint the runner greps for>","kind":"auto","exec_kind":"grep","params":{"path":"<the target file>","pattern":"<a fingerprint substring your fix introduces>","expect":"present"}}]}]}}`,
     `  {"status":"transient","reason":"<why this is a genuine wait/transient with no code fix>"}`,
     `  {"status":"needs-human","diagnosis":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
   ].join("\n");
 }
 
-// Strip a leading "Phase N —/-/:" prefix the LLM may have prepended to a phase NAME, so the serializer's
-// own `## Phase {position} — {title}` numbering never double-prefixes ("Phase 1 — Phase 1 — close it").
-// The serializer ([[brain-roadmap]] serializeSpecRowToMarkdown) owns the "Phase N — " prefix; the stored
-// phase TITLE must be the bare name only.
-function stripPhasePrefix(name: string): string {
-  return String(name || "").replace(/^\s*phase\s*\d+\s*[—\-:]\s*/i, "").trim();
+// retire-md-spec-writers-db-is-sole-spec Phase 2 (repair lane): the markdown composer
+// `repairSpecMarkdown` and its `stripPhasePrefix` helper are RETIRED. Rafa's proposal now flows
+// through [[../src/lib/repair-agent]] `buildRepairSpecInput` → `authorSpecRowStructured` — every
+// phase carries `exec_kind`-declared machine checks so the deterministic runner verifies the fix
+// landed. The equivalent human-readable Phase-1-body composer + the `stripLeadingPhasePrefix` helper
+// live in [[repair-agent]] so nothing in this file re-composes prose specs for the retired path.
+
+interface RepairSpecProposal {
+  slug: string;
+  title: string;
+  owner?: string;
+  parent?: string;
+  /** legacy — a one-paragraph summary of the fix; used as fallback for `what`. */
+  intent?: string;
+  /** legacy — plain-prose statement of what's failing; folded into the phase 1 body. */
+  problem?: string;
+  /** legacy — plain-prose statement of the change; folded into the phase 1 body. */
+  proposedChange?: string;
+  /** plain-language WHY this spec exists — populates `specs.why`. Falls back through the legacy fields. */
+  why?: string;
+  /** plain-language WHAT changes when this ships — populates `specs.what`. Falls back through `intent`. */
+  what?: string;
+  /** legacy — the SPECIFIC one-phase build step; used as the (single-phase) title. */
+  phase?: string;
+  /** the implicated file (machine hint) — feeds the derived `exec_kind:'grep'` default check. */
+  target?: string;
+  /** the origin-spec pointer (if any) — rides on `related_spec`, never the parent. */
+  relatedSpec?: string;
+  related_spec?: string;
+  /** retire-md-spec-writers-db-is-sole-spec Phase 2 — Rafa's NEW structured shape: `phases[]` with
+   *  per-phase `checks[]` carrying typed `exec_kind`/`params`. When present + non-empty the helper
+   *  [[repair-agent]] `buildRepairSpecInput` prefers Rafa's checks over the derived defaults. */
+  phases?: Array<{
+    title?: string;
+    body?: string;
+    verification?: string;
+    why?: string;
+    what?: string;
+    checks?: Array<{
+      position?: number;
+      description?: string;
+      kind?: string;
+      exec_kind?: string;
+      params?: unknown;
+    }>;
+  }>;
 }
-
-// Author a HUMAN-READABLE repair spec the FOUNDER can review on the Roadmap board before any build.
-//
-// Two halves, deliberately separated:
-//  - READABLE prose (Problem / Proposed change / Why) so a non-author can tell exactly what the repair
-//    proposes — no machine shorthand, no bare code-path string masquerading as the proposal.
-//  - MACHINE MARKERS (Repair-root-cause / Repair-signature) kept INTACT for grouping/dedup
-//    ([[repair-agent]] parseRepairSpecMeta).
-//
-// THE ROUND-TRIP CONSTRAINT — why everything readable lives in the Phase 1 BODY:
-//   The detail page renders `getSpec().raw`, which is REBUILT by [[brain-roadmap]]
-//   serializeSpecRowToMarkdown from the DB row. That serializer only re-emits the H1, the column-backed
-//   header bits (Owner/Parent/Repair-signature/…), the SUMMARY (firstParagraph), the per-phase
-//   `## Phase N — {title}` + BODY (verbatim), and a `## Verification` block. Arbitrary top-level
-//   `## Problem` / `## Proposed change` / `## Why` H2s are NOT phases, NOT the summary → they'd be DROPPED
-//   on the round-trip and the founder would see nothing. So the readable sections + the machine markers
-//   are authored as `###` subsections INSIDE the Phase 1 body, which the serializer preserves byte-for-byte
-//   (and `**Repair-root-cause:**`/`**Repair-signature:**` still match parseRepairSpecMeta there).
-//
-// Rendering-bug fixes baked in here:
-//  (a) the phase NAME is fed bare (stripPhasePrefix) — the serializer prepends "Phase 1 — " itself, so a
-//      stored title that already said "Phase 1 — close it" used to render "Phase 1 — Phase 1 — close it".
-//  (b) the `intent` paragraph is the FIRST content under the H1 and is the ONLY thing firstParagraph
-//      captures as the summary; the Owner/Parent/Verdict meta line sits BELOW it (after a blank), so the
-//      meta no longer gets swallowed into the summary — and thus no longer DUPLICATED against the header
-//      the serializer regenerates from the Owner/Parent columns.
-function repairSpecMarkdown(
-  spec: { slug: string; title: string; owner: string; parent: string; intent: string; problem: string; proposedChange?: string; why?: string; phase?: string; target?: string; relatedSpec?: string },
-  signature: string,
-  verdict: string,
-  rootCause: string,
-): string {
-  const phaseName = stripPhasePrefix(spec.phase || "") ||
-    (spec.target ? `Fix ${spec.target}` : "Land the fix");
-  const problem = (spec.problem || "").trim() || "(see the repair diagnosis on the Control Tower repair feed)";
-  const proposed = (spec.proposedChange || "").trim();
-  const why = (spec.why || "").trim();
-  const buildStep = proposed
-    ? `Make the change described under **Proposed change** above${spec.target ? ` (in \`${spec.target}\`)` : ""}, add/update its brain page, and gate on \`npx tsc --noEmit\`.`
-    : `Scope the fix from the Problem above${spec.target ? ` (likely in \`${spec.target}\`)` : ""}; land it + its brain page; gate on \`npx tsc --noEmit\`.`;
-
-  // The Phase 1 BODY — preserved verbatim on the round-trip, so ALL the human-readable review content
-  // lives here (NOT in stripped-on-serialize top-level H2s), alongside the intact machine markers.
-  const phaseBody = [
-    `### Problem`,
-    problem,
-    ``,
-    `### Proposed change`,
-    proposed || "(the fix scoped from the Problem above — see the repair diagnosis on the Control Tower repair feed)",
-    ...(spec.target ? [``, `**Target file:** \`${spec.target}\``] : []),
-    ``,
-    `### Why`,
-    why || "Addresses the root cause traced above rather than papering over the symptom.",
-    ``,
-    `### Build step`,
-    buildStep,
-    ``,
-    `**Repair-root-cause:** \`${rootCause}\``,
-    `**Repair-signature:** \`${signature}\``,
-  ].join("\n");
-
-  // repair-author-write-surface-real-error-not-swallow Phase 2 — supply the plain-language `**Why:**`
-  // + `**What:**` intent headers `authorSpecRowFromMarkdown` → `extractIntentHeaders` reads into
-  // `public.specs.why` / `.what`. Before Phase 2 the repair markdown emitted no top-level intent
-  // headers (only a `### Why` SECTION inside the phase body, which the parser ignores) so every
-  // repair-authored spec landed with `why=null` / `what=null`. The markdown path only soft-warns
-  // today (no MissingIntentError throw from `authorSpecRowFromMarkdown` — the hard gate is on the
-  // structured path), so this wasn't the specific failure surfaced by the 4 parked signatures — but
-  // it IS the "supply why/what" hardening Phase 2's north star calls for (fix the ROOT cause, not
-  // just surface the throw): populate the intent columns so the spec is readable to humans + gives
-  // agents a motivational anchor, and future-proof against a hard-gate flip on the markdown path.
-  const specWhy = (spec.why || `The Control Tower signature \`${signature}\` (verdict: ${verdict}) is recurring; without a durable fix, the same error keeps re-firing and the parked repair job never clears.`).trim();
-  const specWhat = (spec.intent || `When this fix ships, the originating condition behind signature \`${signature}\` stops re-firing and the Control Tower tile stays green on the next re-trigger.`).trim();
-
-  return [
-    `# ${spec.title}`,
-    ``,
-    // intent FIRST → it (and only it) becomes the summary; the meta lines below can't be swallowed.
-    (spec.intent || "Close the issue behind this Control Tower signature.").trim(),
-    ``,
-    // Owner/Parent on their OWN line — NO trailing `· **Verdict:**`. parseSpec's Parent regex is greedy to
-    // end-of-line, so an appended `· **Verdict:**` corrupted the stored `parent` column (it became
-    // "extends … · Verdict: real-bug"). The verdict is carried losslessly in the footer's `(verdict: …)`
-    // instead (a standalone `**Verdict:**` line here isn't column-backed and would vanish on the round-trip).
-    // no-spec-parent: parent is a function MANDATE (a repair fix targets infra/reliability, not a spec).
-    // If the fix relates to a specific origin spec, that pointer lives on `**Related-spec:**` (→ specs.related_spec),
-    // NEVER the parent — author-spec's assertValidParent rejects an `extends [[../specs/…]]` parent outright.
-    `**Owner:** ${spec.owner || "[[../functions/platform]]"} · **Parent:** ${spec.parent || '[[../functions/platform]] — "Infra & DevOps / reliability" mandate'}`,
-    ...(spec.relatedSpec ? [`**Related-spec:** ${spec.relatedSpec}`] : []),
-    `**Why:** ${specWhy}`,
-    `**What:** ${specWhat}`,
-    ``,
-    `## Phase 1 — ${phaseName}`,
-    ``,
-    phaseBody,
-    ``,
-    `## Verification`,
-    `- Re-trigger the originating condition (signature \`${signature}\`) → expect no new error_events row / loop_alert for it, and the Control Tower tile stays green.`,
-    ``,
-    `> Authored by the box Repair Agent from Control Tower signature \`${signature}\` (verdict: ${verdict}). Commission the build from the Control Tower / Roadmap board.`,
-    ``,
-  ].join("\n");
-}
-
-interface RepairSpecProposal { slug: string; title: string; owner?: string; parent?: string; intent?: string; problem?: string; proposedChange?: string; why?: string; phase?: string; target?: string }
 
 // Build-job statuses that mean a build for a slug is still live (mirror of src/lib/agent-jobs
 // ACTIVE_STATUSES; inlined so the worker never loads that module at startup just for the array).
@@ -18576,55 +18523,79 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
     // coerce any parent that fails `assertValidParent` to the canonical platform reliability mandate — a bad
     // LLM parent can never again block a repair from persisting. The empty case already defaulted; this also
     // catches the non-empty-invalid case (the real InvalidParentError source).
-    const { assertValidParent: assertValidRepairParent } = await import("../src/lib/author-spec");
-    const CANONICAL_REPAIR_PARENT = "[[../functions/platform#infra-devops-reliability]]";
+    const { assertValidParent: assertValidRepairParent, authorSpecRowStructured } = await import("../src/lib/author-spec");
+    const { buildRepairSpecInput, REPAIR_FIX_PARENT_KIND, REPAIR_FIX_PARENT_REF, REPAIR_FIX_PARENT_PROSE } = await import("../src/lib/repair-agent");
     const proposedParent = String(s.parent || "").trim();
-    let repairParent = CANONICAL_REPAIR_PARENT;
+    let repairParent = REPAIR_FIX_PARENT_PROSE;
     if (proposedParent) {
       try {
         assertValidRepairParent(proposedParent, {});
         repairParent = proposedParent;
       } catch {
-        repairParent = CANONICAL_REPAIR_PARENT;
+        repairParent = REPAIR_FIX_PARENT_PROSE;
       }
     }
-    const markdown = repairSpecMarkdown(
+
+    // retire-md-spec-writers-db-is-sole-spec Phase 2 (repair lane): NO markdown path. Rafa's proposal
+    // is coerced into the typed `StructuredSpecInput` shape by [[repair-agent]] `buildRepairSpecInput`
+    // — every phase carries `exec_kind`-declared machine checks (at minimum a tsc default; the
+    // helper honours Rafa's phases[].checks[] when supplied). Author via `authorSpecRowStructured`
+    // so the chokepoint's `assertEveryPhaseHasMachineCheck` invariant holds on the SAME rail every
+    // other autonomous writer already funnels through.
+    const structuredInput = buildRepairSpecInput(
       {
         slug,
         title,
         owner: String(s.owner || "[[../functions/platform]]"),
-        // no-spec-parent: coerced above to a VALID function mandate (never an `extends [[../specs/…]]` parent).
         parent: repairParent,
-        // The origin-spec pointer (if any) rides on `related_spec`, never the parent.
         relatedSpec: typeof s.relatedSpec === "string" ? s.relatedSpec : (typeof s.related_spec === "string" ? s.related_spec : undefined),
         intent: String(s.intent || "Close the issue behind this Control Tower signature."),
         problem: String(s.problem || "(see the repair diagnosis above)"),
         proposedChange: typeof s.proposedChange === "string" ? s.proposedChange : undefined,
         why: typeof s.why === "string" ? s.why : undefined,
+        what: typeof s.what === "string" ? s.what : undefined,
         phase: typeof s.phase === "string" ? s.phase : undefined,
         target: typeof s.target === "string" ? s.target : undefined,
+        phases: Array.isArray(s.phases) ? s.phases : undefined,
       },
-      signature,
-      verdict,
-      rootCause,
+      { signature, verdict, rootCause },
     );
-    // spec-pm-markdown-purge: author ONLY the DB row (public.specs + public.spec_phases) — no .md file.
+
     try {
-      await markNewSpecInReview(workspaceId, slug, "planned", "repair-agent", `repair-agent ${verdict} fix spec for signature ${signature}`, markdown);
+      // Mirror `markNewSpecInReview`'s side effect: flip the spec card to `in_review` with the actor
+      // stamp before the DB write so surfaces that key off `intended_status` behave identically to
+      // the retired markdown path.
+      const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+      try {
+        await markSpecCardForReview(workspaceId, slug, "planned", { actor: "repair-agent", reason: `repair-agent ${verdict} fix spec for signature ${signature}` });
+      } catch (e) {
+        console.warn(`[spec-card-state] markSpecCardForReview (repair) ${slug} failed:`, e instanceof Error ? e.message : e);
+      }
+      const authored = await authorSpecRowStructured(
+        workspaceId,
+        slug,
+        structuredInput,
+        "planned",
+        {
+          intendedStatusSetBy: "repair-agent",
+          parentKind: REPAIR_FIX_PARENT_KIND,
+          parentRef: REPAIR_FIX_PARENT_REF,
+          relatedSpec: typeof s.relatedSpec === "string" ? s.relatedSpec : (typeof s.related_spec === "string" ? s.related_spec : null),
+        },
+      );
+      if (!authored) {
+        return { authorError: `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (silent no-op)`, slug };
+      }
     } catch (e) {
-      // repair-verify-spec-persisted-before-build Phase 3 — SURFACE the throw's message on the
-      // parked repair job instead of swallowing it into a generic "no valid fix spec proposed".
-      // repair-author-write-surface-real-error-not-swallow Phase 1 widened what `markNewSpecInReview`
-      // propagates: it now re-throws EVERY author-write failure — the shape-gate throws
-      // (`MissingVerificationError` / `EmptyPhaseBodyError` / `MissingIntentError` /
-      // `InvalidParentError`) AND `AuthorWriteFailedError` (which fires when `authorSpecRowFromMarkdown`
-      // returned `false` because its inner catch swallowed a raw DB/upsert error) — instead of only
-      // the two original shape-gate throws. Preserve the error class + message so the operator (and
-      // Ada's supervision lane) reads WHY authoring was rejected, and re-drives the box against the
-      // CORRECT structural constraint instead of guessing.
+      // Same Phase-3 discipline as the retired markdown path: SURFACE the throw's class + message on
+      // the parked repair job (`MissingMachineCheckError` / `MissingVerificationError` /
+      // `EmptyPhaseBodyError` / `MissingIntentError` / `InvalidParentError` / `AuthorWriteFailedError`)
+      // so the operator (and Ada's supervision lane) reads WHY authoring was rejected. The
+      // MissingMachineCheckError case is the specific "Rafa emitted no valid machine check" trigger
+      // the runRepairJob retry-once path detects.
       const name = e instanceof Error ? e.name : "Error";
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[repair] spec DB author failed for ${slug}: ${name} — ${msg}`);
+      console.warn(`[repair] spec DB structured author failed for ${slug}: ${name} — ${msg}`);
       return { authorError: `${name}: ${msg}`, slug };
     }
     return { slug, alreadyExists: false, grouped: false, rootCause };
@@ -18822,7 +18793,45 @@ async function runRepairJob(job: Job) {
       const diagnosis = String(parsed?.diagnosis || "");
       // Author OR GROUP: a sibling spec for the same root cause (implicated file + failure mode) →
       // add this signature to it, don't author a near-duplicate (one root cause → one spec).
-      const authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict, job.workspace_id);
+      let authored = await groupOrAuthorRepairSpec(parsed?.spec, signature, verdict, job.workspace_id);
+
+      // retire-md-spec-writers-db-is-sole-spec Phase 2 — one-retry on MissingMachineCheckError.
+      // The chokepoint rejects a phase that carries no valid machine-runnable check (every
+      // `exec_kind` is either missing, unrecognized, or `needs_human`). This is Rafa's LLM slipping
+      // the required shape; re-prompt ONCE with a nudge before parking to the CEO (per the spec:
+      // "do NOT park to CEO on the first miss"). The nudge is appended to the same prompt so
+      // Rafa keeps the diagnosis in context; a fresh box session emits the corrected structured
+      // payload. If the second attempt still fails, the outer needs_attention park below carries
+      // the FINAL MissingMachineCheckError message so the operator (and Ada) sees exactly what
+      // was rejected — never a silent phantom-completed loop.
+      if (authored && "authorError" in authored && authored.authorError.startsWith("MissingMachineCheckError:")) {
+        const followupNudge =
+          `\n\n⚠️ YOUR PRIOR JSON payload lacked a machine-runnable check in at least one phase. ` +
+          `Re-emit the SAME JSON envelope, but every phase's \`checks\` array MUST include AT LEAST ` +
+          `one row with a valid \`exec_kind\` (tsc | grep | ci_status | http_get | db_probe_readonly ` +
+          `| unit_test | build) — a prose-only or \`needs_human\`-only phase is REJECTED. Include ` +
+          `\`{"position":1,"description":"Repo typechecks clean after the fix.","kind":"auto","exec_kind":"tsc"}\` ` +
+          `at minimum in every phase; when \`target\` names a file, ALSO include a \`grep\` check on ` +
+          `that file for a fingerprint substring your fix introduces.`;
+        console.warn(`${tag} MissingMachineCheckError on first attempt → re-prompting Rafa once with structured-checks nudge`);
+        const followupBrief = repairBrief + followupNudge;
+        try {
+          const followup = await runBoxLane((cfg, sid) => runRepairClaude(followupBrief, sid, REPO_DIR, cfg, job.id));
+          await meterAgentJob(job, followup.configDir ?? undefined, followup.usage ?? null, followup.model ?? null);
+          if (followup.session) await update(job.id, { claude_session_id: followup.session, claude_session_config_dir: followup.configDir });
+          const followupParsed = extractJson<Record<string, unknown>>(followup.resultText);
+          const followupVerdict = String(followupParsed?.status || "");
+          if (followupParsed && REPAIR_VERDICTS.has(followupVerdict) && followupParsed.spec) {
+            authored = await groupOrAuthorRepairSpec(followupParsed.spec, signature, verdict, job.workspace_id);
+            console.log(`${tag} retry after MissingMachineCheckError → ${authored && "authorError" in authored ? `still failed: ${authored.authorError.slice(0, 120)}` : "authored ok"}`);
+          } else {
+            console.warn(`${tag} retry after MissingMachineCheckError produced no recognized verdict — keeping first failure`);
+          }
+        } catch (e) {
+          console.warn(`${tag} retry after MissingMachineCheckError threw: ${e instanceof Error ? e.message : String(e)} — keeping first failure`);
+        }
+      }
+
       if (!authored) {
         // Verdict reached but no valid spec landed → surface for a human rather than silently dropping it.
         // Terminal disposition: close the error row (the human-review item lives on this needs_attention job).
