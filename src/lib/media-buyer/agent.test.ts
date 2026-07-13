@@ -18,6 +18,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildReplenishJobInsert,
   buildShadowActivityRows,
   computeMediaBuyerPlan,
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
@@ -32,6 +33,7 @@ import {
   type MediaBuyerPlanInputs,
   type SensorTrustSnapshot,
 } from "./agent";
+import { MEDIA_BUYER_TEST_ORIGIN, type AdsetTemplateShape } from "@/lib/media-buyer/publish-gate";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import type { DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import type { IterationPolicy } from "@/lib/meta/decision-engine";
@@ -1081,4 +1083,178 @@ test("resolveReplenishAdCopy: whitespace-only copy is treated as empty → NOT o
   const r = resolveReplenishAdCopy({ meta_headline: "   ", meta_primary_text: "  \n " });
   assert.equal(r.ok, false);
   assert.deepEqual(r.headlines, []);
+});
+
+// ── media-buyer-replenish-per-product-scope Phase 2 — the per-test enqueue artifact ──
+// The pure builder for the `ad_publish_jobs` insert body. This IS the runtime artifact
+// the spec's Phase 2 verification bullet asks for: a per-test replenish must insert a
+// row whose target ad set is a NEW one MINTED under `cohort.test_meta_campaign_id` (via
+// `create_adset_spec.campaign_id`) at `perTestDailyBudgetCents` — NEVER the legacy shared
+// `cohort.test_meta_adset_id` (null in the per-product model), one ad per ad set, within
+// the daily ceiling. The wrapper `enqueueReplenishPublish` calls this after the DB reads.
+
+function templateShape(): AdsetTemplateShape {
+  return {
+    optimizationGoal: "OFFSITE_CONVERSIONS",
+    billingEvent: "IMPRESSIONS",
+    bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+    pixelId: "px-1",
+    customEventType: "PURCHASE",
+    targeting: { age_min: 18, age_max: 65 },
+  };
+}
+
+test("Phase 2 — per-test replenish inserts a job whose create_adset_spec targets cohort.testMetaCampaignId at perTestDailyBudgetCents; meta_adset_id is NULL (never the legacy shared adset); origin='media-buyer-test'; publish_active=true", () => {
+  const PRODUCT_P = "prod-tabs";
+  const CAMP_P = "camp-tabs"; // P's own testing campaign — the ad set gets minted UNDER this
+  const perTest = cohort({
+    productId: PRODUCT_P,
+    adsetPerTest: true,
+    testMetaAdsetId: null, // per-product model has no shared adset
+    testMetaCampaignId: CAMP_P,
+    perTestDailyBudgetCents: 15_000, // $150 per test — target=4 at $600 ceiling
+    dailyTestCeilingCents: 60_000,
+    adsetTemplate: templateShape(),
+    defaultMetaAccountId: "act-1",
+    defaultMetaPageId: "page-1",
+    defaultMetaInstagramUserId: "ig-1",
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: perTest,
+    action: {
+      kind: "replenish",
+      adCampaignId: "cmp-P-r1",
+      testMetaAdsetId: null, // computeMediaBuyerPlan writes null in per-test mode (Phase 1's routing)
+      adsetPerTest: true,
+      dailyTestCeilingCents: perTest.dailyTestCeilingCents,
+      rationale: "test",
+    },
+    accountId: "act-1",
+    pageId: "page-1",
+    videoId: "vid-1",
+    adName: "Media Buyer test — cmp-P-r1",
+    destination: "https://x/P/r1",
+    headlines: ["Sleep better tonight"],
+    primaryTexts: ["Real copy from angle."],
+  });
+  assert.equal(built.ok, true, "per-test cohort with valid template + campaign must produce an insert body");
+  if (!built.ok) return; // narrowing
+
+  // Per-cohort ceiling: per-test budget × concurrent target must stay under the daily ceiling.
+  assert.ok(
+    perTest.perTestDailyBudgetCents * 4 <= perTest.dailyTestCeilingCents,
+    "per-test budget × max concurrent (4) must fit under the daily ceiling — Phase 2 publish-gate invariant",
+  );
+
+  // The artifact: NEW ad set under cohort.testMetaCampaignId.
+  assert.ok(built.createAdsetSpec, "per-test replenish must carry a create_adset_spec — that's how the publisher mints a fresh ad set");
+  assert.equal(built.createAdsetSpec!.campaign_id, CAMP_P, "the minted ad set MUST live under cohort.testMetaCampaignId (P's testing campaign) — never a shared campaign");
+  assert.equal(built.createAdsetSpec!.daily_budget_cents, perTest.perTestDailyBudgetCents, "the minted ad set's daily budget MUST equal cohort.perTestDailyBudgetCents ($150), staying under the daily ceiling");
+  assert.equal(built.createAdsetSpec!.name, "Media Buyer test — cmp-P-r1", "the minted ad set's name is the ad name — one ad per ad set");
+  // Template fields flow through verbatim (pixel/event/goal/billing/bid/targeting).
+  assert.equal(built.createAdsetSpec!.pixel_id, "px-1");
+  assert.equal(built.createAdsetSpec!.custom_event_type, "PURCHASE");
+  assert.equal(built.createAdsetSpec!.optimization_goal, "OFFSITE_CONVERSIONS");
+
+  // meta_adset_id MUST be null in per-test mode — never the legacy shared cohort.testMetaAdsetId
+  // (which itself is null in the per-product model, but the invariant survives even if a stray
+  // edit re-populated the shared adset column).
+  assert.equal(built.metaAdsetIdForJob, null, "per-test replenish must NEVER carry a pre-existing meta_adset_id — the publisher creates it from create_adset_spec");
+  assert.equal(built.insert.meta_adset_id, null, "the ad_publish_jobs row's meta_adset_id must be null (the publisher stamps the newly-minted id post-createAdSet)");
+  assert.equal(built.insert.create_adset_spec?.campaign_id, CAMP_P, "the inserted create_adset_spec must target cohort.testMetaCampaignId end-to-end");
+
+  // Publish rail: origin='media-buyer-test' + publish_active=true so the Phase-1 gate scopes
+  // the job to the media-buyer cohort ceiling on the way in AND the way out.
+  assert.equal(built.insert.origin, MEDIA_BUYER_TEST_ORIGIN, "per-test replenish must be published under origin='media-buyer-test'");
+  assert.equal(built.insert.publish_active, true, "publish_active must be true so the publisher fires the ad ACTIVE (behind the gate)");
+  assert.equal(built.insert.publish_status, "queued", "publish_status must start queued so the async publisher can claim it");
+  assert.equal(built.insert.workspace_id, WS);
+  assert.equal(built.insert.campaign_id, "cmp-P-r1", "the ad_publish_jobs row's campaign_id must be the source ad_campaigns.id, NOT the meta_campaign_id");
+});
+
+test("Phase 2 — per-test replenish FAILS CLOSED when cohort.testMetaCampaignId is missing (never mint a malformed ad set)", () => {
+  const badCohort = cohort({
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: null, // ← MISSING — the whole point of Phase 2 is the ad set is minted UNDER this
+    perTestDailyBudgetCents: 15_000,
+    dailyTestCeilingCents: 60_000,
+    adsetTemplate: templateShape(),
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: badCohort,
+    action: { kind: "replenish", adCampaignId: "cmp-1", testMetaAdsetId: null, adsetPerTest: true, dailyTestCeilingCents: 60_000, rationale: "test" },
+    accountId: "act-1",
+    pageId: "page-1",
+    videoId: "vid-1",
+    adName: "test",
+    destination: "https://x",
+    headlines: ["h"],
+    primaryTexts: ["p"],
+  });
+  assert.equal(built.ok, false, "must NOT produce an insert body when testMetaCampaignId is missing");
+  if (!built.ok) {
+    assert.match(built.reason, /test_meta_campaign_id/, "the reason must name the missing config so the audit trail is diagnosable");
+  }
+});
+
+test("Phase 2 — per-test replenish FAILS CLOSED when cohort.adsetTemplate is missing (never mint a template-less ad set)", () => {
+  const badCohort = cohort({
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: "camp-1",
+    perTestDailyBudgetCents: 15_000,
+    dailyTestCeilingCents: 60_000,
+    adsetTemplate: null, // ← MISSING
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: badCohort,
+    action: { kind: "replenish", adCampaignId: "cmp-1", testMetaAdsetId: null, adsetPerTest: true, dailyTestCeilingCents: 60_000, rationale: "test" },
+    accountId: "act-1",
+    pageId: "page-1",
+    videoId: "vid-1",
+    adName: "test",
+    destination: "https://x",
+    headlines: ["h"],
+    primaryTexts: ["p"],
+  });
+  assert.equal(built.ok, false);
+  if (!built.ok) {
+    assert.match(built.reason, /adset_template/, "the reason must name the missing template so the audit trail is diagnosable");
+  }
+});
+
+test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the pre-Phase-2 shape: meta_adset_id=cohort.testMetaAdsetId, create_adset_spec=null", () => {
+  const legacy = cohort({
+    adsetPerTest: false,
+    testMetaAdsetId: "6100000000001", // the shared adset id
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: legacy,
+    action: {
+      kind: "replenish",
+      adCampaignId: "cmp-1",
+      testMetaAdsetId: "6100000000001", // computeMediaBuyerPlan writes the shared id in legacy mode
+      adsetPerTest: false,
+      dailyTestCeilingCents: legacy.dailyTestCeilingCents,
+      rationale: "test",
+    },
+    accountId: "act-1",
+    pageId: "page-1",
+    videoId: "vid-1",
+    adName: "legacy test",
+    destination: "https://x",
+    headlines: ["h"],
+    primaryTexts: ["p"],
+  });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.equal(built.createAdsetSpec, null, "legacy cohorts don't mint a fresh ad set — the shared adset is reused");
+  assert.equal(built.metaAdsetIdForJob, "6100000000001", "legacy mode publishes INTO cohort.testMetaAdsetId directly");
+  assert.equal(built.insert.meta_adset_id, "6100000000001");
+  assert.equal(built.insert.create_adset_spec, null);
 });
