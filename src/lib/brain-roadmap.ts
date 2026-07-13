@@ -8,8 +8,19 @@
  * read-side overlay/merge: `overlayDbStateOnSpec` + `spec-card-state.mergePhaseStates` are gone (the
  * card is built straight from the DB rows, per-phase pr/merge_sha included). `parseSpec` is no longer on
  * any READER path (getRoadmap/getSpec/listSpecSlugs are pure-DB); it survives ONLY as the markdown→card
- * AUTHORING parser (`author-spec.authorSpecRowFromMarkdown`) + the `deriveSpecStatus(raw)` would-this-fold
- * helper ([[platform-director]]) — both write/check paths, not board reads.
+ * AUTHORING parser consumed by the STRUCTURED author chokepoint (`author-spec.authorSpecRowStructured` /
+ * `submitSpec` — via `buildStructuredSpecInputFromMarkdown`, retire-md-spec-writers-db-is-sole-spec
+ * Phase 3) + the `deriveSpecStatus(raw)` would-this-fold helper ([[platform-director]]) — both
+ * write/check paths, not board reads. This module NEVER authors on its own: authoring lives at
+ * `authorSpecRowStructured`, this module only PARSES the markdown INTO the structured shape that
+ * chokepoint consumes.
+ *
+ * retire-md-spec-writers-db-is-sole-spec Phase 4 (2026-07): the markdown chokepoint
+ * `author-spec.authorSpecRowFromMarkdown` (and its wrapper `markNewSpecInReview`) is closed to new
+ * autonomous callers (`scripts/_check-no-markdown-spec-authoring.ts` fails CI on any new caller). The
+ * sole sanctioned author path is `authorSpecRowStructured` / `submitSpec`; `parseAuthoredSpecMarkdown`
+ * below is the AUTHOR-SIDE TRANSPORT helper the structured chokepoint invokes when handed a markdown
+ * body it must coerce to `StructuredSpecInput`.
  *
  * goal-readers-from-db-retire-parsegoal (2026-06-25): every GOAL read now comes from `public.goals` +
  * `public.goal_milestones` via `getGoals` / `getGoal` / `getRoadmapFilters` / `listGoalSlugs` (mapping a
@@ -269,14 +280,18 @@ function firstParagraph(lines: string[]): string {
 
 // pm-structured-intent-and-refs Phase 4 — renamed from `parseSpec` to make the AUTHOR-side transport
 // role explicit. This is NOT a load-bearing markdown reader: the DB is the spec (readers are pure-DB
-// via `readSpecsFromDb`/`getSpecFromDb`). This survives ONLY for the two AUTHOR-side transport paths
-// still on markdown:
-//   1. `author-spec.authorSpecRowFromMarkdown` — an agent writes a spec as markdown, we parse it once
-//      to structured shape and UPSERT into `public.specs` / `public.spec_phases`. Nothing READS the
-//      parsed markdown for lookups; the DB row is authoritative from that write forward.
-//   2. `deriveSpecStatusFromMarkdown` — a would-this-fold check the platform-director runs against a
+// via `readSpecsFromDb`/`getSpecFromDb`). This survives ONLY for AUTHOR-side transport paths:
+//   1. `author-spec.authorSpecRowStructured` (via `buildStructuredSpecInputFromMarkdown`) — the SOLE
+//      sanctioned author chokepoint (retire-md-spec-writers-db-is-sole-spec Phase 3/4). A caller
+//      hands us a markdown body; we parse it once into the structured shape, then the chokepoint
+//      UPSERTs `public.specs` / `public.spec_phases`. Nothing READS the parsed markdown for lookups;
+//      the DB row is authoritative from that write forward.
+//   2. `author-spec.authorSpecRowFromMarkdown` — the RETIRED markdown chokepoint (allow-listed
+//      pre-Phase-4 debt via `scripts/_check-no-markdown-spec-authoring.ts`); still uses this parser
+//      until the last legacy lane converts.
+//   3. `deriveSpecStatusFromMarkdown` — a would-this-fold check the platform-director runs against a
 //      REWRITTEN parent spec's in-memory markdown (never a stored body).
-// Nothing else may call this — grep shows zero readers outside those two transport paths.
+// Nothing else may call this — grep shows zero readers outside those transport paths.
 export function parseAuthoredSpecMarkdown(slug: string, raw: string): SpecCard {
   const lines = raw.split("\n");
 
