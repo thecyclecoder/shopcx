@@ -13,4 +13,4 @@ The founder's **spend tripwire** (CEO 2026-07-10). Texts the founder whenever an
 This is the founder's eyes-on-spend while the growth agents (Bianca, Dahlia) run autonomously — the human tripwire layered on top of the in-system rails ($500/day cohort ceiling + the media-buyer auto-disarm). A budget number that jumps out of range is the fastest anomaly signal there is.
 
 ## Related
-[[../inngest/budget-watch]] · [[twilio]] · [[god-mode]] (`resolveFounderPhone`) · [[../tables/meta_ad_accounts]] · [[media-buyer-agent]] (the main autonomous budget-mover) · [[max-watch]] (the hourly supervisor that also checks spend).
+[[../inngest/budget-watch]] · [[twilio]] · [[god-mode]] (`resolveFounderPhone`) · [[../tables/meta_ad_accounts]] · [[media-buyer-agent]] (the main autonomous budget-mover).
