@@ -415,6 +415,10 @@ const MAX_SENSOR_TRUST_PROBE = Number(process.env.AGENT_TODO_MAX_SENSOR_TRUST_PR
 // Concurrency-1 mirrors sensor-trust-probe — one calibration proposal per (workspace,
 // account) at a time is plenty at the daily/weekly cadence this feeds.
 const MAX_CALIBRATE_MEDIA_BUYER_POLICY = Number(process.env.AGENT_TODO_MAX_CALIBRATE_MEDIA_BUYER_POLICY || 1);
+// growth-ads-supervisor-3h-agent Phase 1: the every-3h supervisory pass over Bianca (media-buyer)
+// + Dahlia (ad-creative). Deterministic-Node lane (Phase 1 stub — Phase 2 fills the pass logic).
+// Concurrency-1 mirrors media-buyer: one supervisory pass per workspace at a time is plenty at 3h.
+const MAX_ADS_SUPERVISOR = Number(process.env.AGENT_TODO_MAX_ADS_SUPERVISOR || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -616,7 +620,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -687,6 +691,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
   "ad-creative",
+  "ads-supervisor",
   "ticket-analyze",
   "ticket-handle",
   "prompt-review",
@@ -20770,6 +20775,56 @@ async function runCalibrateMediaBuyerPolicyJob(job: Job) {
   });
 }
 
+/**
+ * ads-supervisor lane (docs/brain/specs/growth-ads-supervisor-3h-agent.md) — the persistent every-3h
+ * supervisory pass over Bianca (media-buyer) + Dahlia (ad-creative). The pass audits crown/kill drift
+ * (getTestingResults vs Bianca's iteration_actions), Dahlia's ready-to-test bin depth + competitor
+ * seeding, and live-ad LF8-copy + destination scent — and REPAIRS any drift by autonomously authoring
+ * fix-specs through authorSpecRowStructured (dedup-gated on getSpec / open repair jobs), then posts
+ * ONE consolidated digest to #director-growth-max (no-op suppressed). The pass NEVER moves spend /
+ * pauses / crowns / places ads directly — north-star: supervisable autonomy — every mutation flows
+ * through the supervised worker; this lane PROPOSES via fix-specs. See src/lib/ads-supervisor.ts.
+ *
+ * Node-completeness trio: OWNER=growth (in KIND_OWNER_FALLBACK + BUILDER_WORKER_KINDS + this Job.kind
+ * union); KILL-SWITCH via the growth-department ancestor row in kill_switches (cascade in
+ * kill-switch-resolver); HEARTBEAT emitted here (end-of-run try/finally, ok:false on throw).
+ */
+async function runAdsSupervisorJob(job: Job) {
+  const tag = `[ads-supervisor:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const a = await admin();
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "";
+  try {
+    const { runAdsSupervisorPass } = await import("../src/lib/ads-supervisor");
+    const result = await runAdsSupervisorPass(a, job.workspace_id, startedAt);
+    detail = `products=${result.evaluated.products} tests=${result.evaluated.tests} biancaMisses=${result.evaluated.biancaMisses} dahliaGaps=${result.evaluated.dahliaGaps} liveAdIssues=${result.evaluated.liveAdIssues} authored=${result.authoredSlugs.length} deduped=${result.dedupedSlugs.length} digest=${result.digest?.posted ? "posted" : `skipped(${result.digest?.reason ?? "unknown"})`}`;
+    await update(job.id, {
+      status: "completed",
+      log_tail: JSON.stringify({
+        evaluated: result.evaluated,
+        authoredSlugs: result.authoredSlugs,
+        dedupedSlugs: result.dedupedSlugs,
+        digest: result.digest ?? null,
+      }).slice(-4000),
+    });
+    console.log(`${tag} ${detail}`);
+  } catch (err) {
+    ok = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    detail = `threw: ${msg}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("ads-supervisor", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
 async function runCampaignGradeJob(job: Job) {
   const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
   let instr: { candidates?: unknown } = {};
@@ -23555,6 +23610,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
+  if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -25051,6 +25107,7 @@ async function main() {
   const countAdCreative = () => [...active.values()].filter((v) => v.kind === "ad-creative").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
+  const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -25647,6 +25704,18 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed calibrate-media-buyer-policy ${job.id.slice(0, 8)} → ${countCalibrateMediaBuyerPolicy() + 1}/${MAX_CALIBRATE_MEDIA_BUYER_POLICY} calibrate-media-buyer-policy lane`);
+        launch(job);
+      }
+      // Fill the ads-supervisor lane (growth-ads-supervisor-3h-agent Phase 1): the every-3h
+      // supervisory pass over Bianca + Dahlia. Phase 1 is a heartbeat-emitting stub; Phase 2
+      // fills in the getTestingResults + should-happen check + Dahlia bin/seeding check + live-ad
+      // LF8 QA + autonomous fix-spec authoring + #director-growth-max digest. Concurrency-1
+      // mirrors media-buyer — one supervisory pass per workspace at a time.
+      while (countAdsSupervisor() < MAX_ADS_SUPERVISOR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ads-supervisor"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ads-supervisor ${job.id.slice(0, 8)} → ${countAdsSupervisor() + 1}/${MAX_ADS_SUPERVISOR} ads-supervisor lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

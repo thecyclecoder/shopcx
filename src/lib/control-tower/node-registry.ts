@@ -122,6 +122,7 @@ export const BUILDER_WORKER_KINDS = [
   "media-buyer-grade",
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
+  "ads-supervisor",
   "build",
 ] as const;
 
@@ -171,6 +172,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "media-buyer": "growth", // Bianca — daily creative test cadence under Max
   "ad-creative": "growth", // Dahlia — bin-stocking under Max
   "media-buyer-grade": "growth", // Bianca / Max grading pass
+  "ads-supervisor": "growth", // ads-supervisor-3h-agent — 3h supervisory pass over Bianca + Dahlia (owner: Max)
 };
 
 /**
