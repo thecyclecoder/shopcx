@@ -20,6 +20,9 @@ import {
   applyMergedMigrations,
   anyApplied,
   driftSummary,
+  isDuplicateObjectError,
+  DUPLICATE_OBJECT_SQLSTATES,
+  splitSqlStatements,
   type MergedUnappliedMigration,
 } from "./migration-drift";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -500,6 +503,263 @@ test("box control loop — after a successful auto-apply the reconciler reports 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 1 —
+// A duplicate-object error during additive auto-apply means already-applied, not apply-failed.
+// The 2026-07 incident: 103 migration versions were merged-but-unrecorded (their DDL had already
+// been applied) so the reconciler kept re-running additive DDL and getting duplicate_table /
+// duplicate_object / cannot_change_return_type back — recorded as apply-failed, retried every tick.
+// The classifier + outcome fix teaches the loop that "the object already exists" means the ledger
+// is behind, not the DDL is broken. isDuplicateObjectError is the one place that reads err.code;
+// applyMergedMigrations respects both a callback-returned {alreadyApplied:true} signal AND
+// (safety-net) a thrown duplicate-object error.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("isDuplicateObjectError — recognizes every duplicate-object-class SQLSTATE (the six the spec calls out)", () => {
+  // Every code in the exported set MUST be recognized — no missing rows.
+  for (const code of DUPLICATE_OBJECT_SQLSTATES) {
+    assert.equal(isDuplicateObjectError({ code }), true, `expected ${code} to classify as duplicate-object`);
+  }
+  // The six the spec names — pinned individually so a future edit that shrinks the set fails loudly.
+  assert.equal(isDuplicateObjectError({ code: "42P07" }), true); // duplicate_table
+  assert.equal(isDuplicateObjectError({ code: "42710" }), true); // duplicate_object
+  assert.equal(isDuplicateObjectError({ code: "42723" }), true); // duplicate_function
+  assert.equal(isDuplicateObjectError({ code: "42P06" }), true); // duplicate_schema
+  assert.equal(isDuplicateObjectError({ code: "42701" }), true); // duplicate_column
+  assert.equal(isDuplicateObjectError({ code: "42P13" }), true); // cannot_change_return_type
+});
+
+test("isDuplicateObjectError — genuine failure SQLSTATEs stay apply-failed (never silently record a broken migration)", () => {
+  assert.equal(isDuplicateObjectError({ code: "42601" }), false); // syntax_error
+  assert.equal(isDuplicateObjectError({ code: "42P01" }), false); // undefined_table
+  assert.equal(isDuplicateObjectError({ code: "42703" }), false); // undefined_column
+  assert.equal(isDuplicateObjectError({ code: "22P02" }), false); // invalid_text_representation
+  assert.equal(isDuplicateObjectError({ code: "23505" }), false); // unique_violation (NOT a duplicate-object)
+});
+
+test("isDuplicateObjectError — tolerates non-Error / missing-code / non-string-code shapes without throwing", () => {
+  assert.equal(isDuplicateObjectError(null), false);
+  assert.equal(isDuplicateObjectError(undefined), false);
+  assert.equal(isDuplicateObjectError("42P07"), false); // string, not object with .code
+  assert.equal(isDuplicateObjectError(new Error("boom")), false); // vanilla Error, no code
+  assert.equal(isDuplicateObjectError({}), false);
+  assert.equal(isDuplicateObjectError({ code: 42101 }), false); // number, not string
+});
+
+test("applyMergedMigrations — an additive migration whose callback returns {alreadyApplied:true} tags outcome='already-applied' (not 'applied')", async () => {
+  const applied: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create table public.order_refunds_mirror (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      applied.push(version);
+      return { alreadyApplied: true };
+    },
+  });
+  assert.deepEqual(applied, ["20260918120000"]);
+  assert.equal(out[0]?.outcome, "already-applied");
+  assert.equal(out[0]?.severity, "additive");
+  // anyApplied is true — the reconciler should re-check so the ledger fix clears the tile.
+  assert.equal(anyApplied(out), true);
+});
+
+test("applyMergedMigrations — a callback that THROWS a duplicate-object SQLSTATE is classified as already-applied (safety net when the caller forgot to catch)", async () => {
+  const attempted: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create table public.order_refunds_mirror (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      attempted.push(version);
+      // The exact shape node-postgres surfaces — Error subclass with a `code` property.
+      const err = Object.assign(new Error(`relation "order_refunds_mirror" already exists`), {
+        code: "42P07",
+      });
+      throw err;
+    },
+  });
+  assert.deepEqual(attempted, ["20260918120000"]);
+  assert.equal(out[0]?.outcome, "already-applied");
+  assert.equal(out[0]?.severity, "additive");
+  assert.equal(out[0]?.error, undefined); // already-applied is NOT an error
+  assert.equal(anyApplied(out), true);
+});
+
+test("applyMergedMigrations — a genuine (non-duplicate-object) throw STILL yields apply-failed (regression pin — no over-swallowing)", async () => {
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create tabel public.typo (id uuid primary key);`, // syntax error
+    applyMigration: async () => {
+      const err = Object.assign(new Error("syntax error at or near \"tabel\""), { code: "42601" });
+      throw err;
+    },
+  });
+  assert.equal(out[0]?.outcome, "apply-failed");
+  assert.match(out[0]?.error ?? "", /syntax error/);
+});
+
+test("applyMergedMigrations — mixed batch: fresh-apply + already-applied + genuine failure route to three DISTINCT outcomes on the same tick", async () => {
+  const out = await applyMergedMigrations(
+    [ADDITIVE_ORDER_REFUNDS, ADDITIVE_INDEX, { version: "20260930120000", file: "20260930120000_broken.sql" }],
+    {
+      readSql: (file) => {
+        if (file.includes("broken")) return `create tabel public.oops (id uuid primary key);`;
+        if (file.includes("index")) return `create index idx_foo on public.foo (bar);`;
+        return `create table public.order_refunds_mirror (id uuid primary key);`;
+      },
+      applyMigration: async ({ version }) => {
+        // order_refunds — fresh apply (fine, no throw, no signal).
+        if (version === "20260918120000") return;
+        // index — already-applied via return signal.
+        if (version === "20260920120000") return { alreadyApplied: true };
+        // broken — genuine syntax error.
+        throw Object.assign(new Error("syntax error at or near \"tabel\""), { code: "42601" });
+      },
+    },
+  );
+  assert.equal(out[0]?.outcome, "applied");
+  assert.equal(out[1]?.outcome, "already-applied");
+  assert.equal(out[2]?.outcome, "apply-failed");
+  assert.equal(anyApplied(out), true);
+});
+
+test("anyApplied — an already-applied outcome triggers a re-check (the ledger row was inserted; the tile should clear on the same tick)", () => {
+  const items: MergedUnappliedMigration[] = [
+    { ...ADDITIVE_ORDER_REFUNDS, outcome: "already-applied", severity: "additive", matches: [] },
+    { ...DESTRUCTIVE_DROP, outcome: "approval-needed", severity: "irreversible_destructive", matches: ["DROP TABLE"] },
+  ];
+  assert.equal(anyApplied(items), true);
+});
+
+test("driftSummary — the outcome tail names an already-applied count when the reconciler cleared a ledger gap", () => {
+  const summary = driftSummary({
+    status: "drift",
+    missing: [],
+    allowlistedMissing: [],
+    mergedButUnapplied: [
+      { ...ADDITIVE_ORDER_REFUNDS, outcome: "already-applied", severity: "additive", matches: [] },
+      { ...ADDITIVE_INDEX, outcome: "applied", severity: "additive", matches: [] },
+    ],
+    appliedNotOnMain: [],
+    expectedCount: 0,
+    liveCount: 0,
+    parsedFiles: 0,
+    appliedCount: 0,
+    appliedCheckSkipped: false,
+  });
+  assert.match(summary, /1 applied/);
+  assert.match(summary, /1 already-applied/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3 —
+// Statement-level duplicate-object reconciliation. Regression pin for the security review's
+// finding: the whole-file duplicate shortcut can hide unapplied tail statements when a
+// multi-statement migration throws duplicate-object on an early statement. splitSqlStatements is
+// the primitive; per-statement savepoint classification is the behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("splitSqlStatements — a single-statement file returns one element (the trivial case)", () => {
+  assert.deepEqual(splitSqlStatements(`create table public.foo (id uuid primary key);`), [
+    `create table public.foo (id uuid primary key)`,
+  ]);
+});
+
+test("splitSqlStatements — multi-statement file splits at top-level semicolons (the security-review case)", () => {
+  const sql = `create table public.foo (id uuid primary key);
+create index idx_foo on public.foo (id);
+insert into public.foo (id) values ('00000000-0000-0000-0000-000000000001');`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 3);
+  assert.match(stmts[0], /^create table/);
+  assert.match(stmts[1], /^create index/);
+  assert.match(stmts[2], /^insert into/);
+});
+
+test("splitSqlStatements — semicolons inside single-quoted string literals are NOT split points", () => {
+  const sql = `insert into public.notes (body) values ('a;b;c');
+insert into public.notes (body) values ('two');`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("'a;b;c'"));
+  assert.ok(stmts[1].includes("'two'"));
+});
+
+test("splitSqlStatements — the SQL '' escape (doubled single quote) does not close the string early", () => {
+  const sql = `insert into public.notes (body) values ('it''s fine; still one string');
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("'it''s fine; still one string'"));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — dollar-quoted function bodies protect embedded semicolons (the CREATE FUNCTION case)", () => {
+  const sql = `create or replace function public.reset_sync_data()
+returns void
+language sql
+security definer
+as $$
+  truncate public.orders, public.customers, public.sync_jobs cascade;
+$$;
+create index idx_after_function on public.orders (id);`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("$$"));
+  assert.ok(stmts[0].includes("truncate public.orders"));
+  assert.match(stmts[1], /^create index idx_after_function/);
+});
+
+test("splitSqlStatements — tagged dollar-quotes ($body$…$body$) also protect embedded semicolons", () => {
+  const sql = `create or replace function public.foo() returns int language plpgsql as $body$
+begin
+  perform 1;
+  perform 2;
+  return 3;
+end;
+$body$;
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("$body$"));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — line comments (`--`) and block comments (`/* */`) don't hide statement boundaries", () => {
+  const sql = `-- create table public.commented (id uuid); still one statement below
+create table public.foo (id uuid primary key);
+/* multi-line
+   block; comment; nothing here */
+create table public.bar (id uuid primary key);`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.match(stmts[0], /^-- create table[\s\S]*\ncreate table public\.foo/);
+  assert.match(stmts[1], /^\/\* multi-line[\s\S]*create table public\.bar/);
+});
+
+test("splitSqlStatements — quoted identifiers with `;` inside stay intact", () => {
+  const sql = `alter table public.foo rename to "weird;name";
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes(`"weird;name"`));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — empty / comments-only inputs return an empty array", () => {
+  assert.deepEqual(splitSqlStatements(""), []);
+  assert.deepEqual(splitSqlStatements("   "), []);
+  assert.deepEqual(splitSqlStatements(";;;"), []); // no non-empty statements between the terminators
+  assert.deepEqual(
+    splitSqlStatements(`-- comment only\n/* block */`),
+    [`-- comment only\n/* block */`],
+  );
+});
+
+test("splitSqlStatements — trailing statement without a final semicolon still counts", () => {
+  const sql = `create table public.foo (id uuid primary key);
+create table public.bar (id uuid primary key)`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.match(stmts[1], /^create table public\.bar/);
 });
 
 test("driftSummary — with Phase 2 outcomes populated, the summary tail names the outcome mix", () => {

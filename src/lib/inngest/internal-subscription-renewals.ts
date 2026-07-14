@@ -28,6 +28,38 @@ import {
   type RenewalGuardLine,
 } from "@/lib/subscription-renewal-guard";
 
+// ─── Dunning retry-window filter ────────────────────────────────────
+// Dunning is the source of truth for WHEN the next failed-payment retry is
+// allowed: on decline, [[internal-dunning]] moves the sub's `next_billing_date`
+// to the next payday and stamps `dunning_cycles.next_retry_at` to the same
+// moment. The renewal cron then re-attempts on that day. If dunning has moved
+// the retry FORWARD (payday shifted, exhausted-then-reopened, etc.) but the
+// sub's own `next_billing_date` still reads "due today", THIS cron would
+// otherwise dispatch a premature charge attempt before payday recovery —
+// noisy Control Tower alerts + a re-decline on a card that's still empty.
+//
+// Filter: drop any candidate whose active dunning cycle carries a
+// `next_retry_at` still in the future. Candidates with no active cycle, or a
+// retry date already ≤ now, pass through untouched — the normal renewal path
+// still runs.
+//
+// Pure — no I/O. Tested via [[../inngest/internal-subscription-renewals]]
+// dunning-window test.
+export function filterCandidatesByDunningRetryWindow<T extends { id: string }>(
+  candidates: T[],
+  activeCycles: Array<{ subscription_id: string | null; next_retry_at: string | null }>,
+  now: Date,
+): T[] {
+  const nowMs = now.getTime();
+  const blocked = new Set<string>();
+  for (const c of activeCycles) {
+    if (!c.subscription_id || !c.next_retry_at) continue;
+    const t = new Date(c.next_retry_at).getTime();
+    if (Number.isFinite(t) && t > nowMs) blocked.add(c.subscription_id);
+  }
+  return candidates.filter((c) => !blocked.has(c.id));
+}
+
 // ─── Daily cron (3 AM Central) ──────────────────────────────────────
 // 9 AM UTC is 3 AM CST in winter, 4 AM CDT in summer. We accept the
 // 1-hour DST drift because renewal timing is idempotent — even if a
@@ -47,6 +79,7 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
       // Catch anything due today (or earlier — backfills any prior
       // missed runs). End-of-day window so subs scheduled for any time
       // today are eligible.
+      const now = new Date();
       const endOfToday = new Date();
       endOfToday.setUTCHours(23, 59, 59, 999);
       // Keyset-paginate — a bare select is capped at the PostgREST max-rows (1000).
@@ -66,7 +99,20 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
         if (afterId) q = q.gt("id", afterId);
         const { data } = await q;
         if (!data?.length) break;
-        all.push(...data);
+        // Dunning retry-window filter — drop candidates whose active dunning
+        // cycle says the next retry is still in the future. Load ONLY the
+        // active cycles for this page's ids (small subset), then delegate to
+        // the pure helper for the "> now" decision. Pagination cursor is the
+        // last raw id so keyset progression is unaffected by the filter.
+        const pageIds = data.map((s) => s.id);
+        const { data: cycles } = await admin
+          .from("dunning_cycles")
+          .select("subscription_id, next_retry_at")
+          .in("subscription_id", pageIds)
+          .in("status", ["retrying", "active"])
+          .not("next_retry_at", "is", null);
+        const kept = filterCandidatesByDunningRetryWindow(data, cycles ?? [], now);
+        all.push(...kept);
         if (data.length < 1000) break;
         afterId = data[data.length - 1].id;
       }

@@ -101,14 +101,19 @@ export async function waitForVideoReady(token: string, videoId: string, opts?: {
   }
 }
 
-/** Upload an image (e.g. a thumbnail) → returns its hash for use as image_hash. */
+/** Upload an image (e.g. a thumbnail) → returns its hash for use as image_hash.
+ *  Routed through graphFetchJson so a transient Meta error (code 1/2, is_transient,
+ *  429, 5xx) retries with bounded backoff instead of failing the whole publish job.
+ *  The multipart body is rebuilt inside the thunk because a FormData wrapping a
+ *  Blob can't be re-sent across attempts — each attempt gets a fresh copy. */
 export async function uploadAdImage(token: string, accountId: string, bytes: Buffer, filename = "thumb.jpg"): Promise<string> {
-  const fd = new FormData();
-  fd.append("filename", new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }), filename);
-  fd.append("access_token", token);
-  const res = await fetch(`${GRAPH_BASE}/${actId(accountId)}/adimages`, { method: "POST", body: fd });
-  const j = await res.json().catch(() => ({}));
-  if (!res.ok || j.error) throw new Error(`meta_adimage: ${j.error?.message || res.status}`);
+  const path = `${actId(accountId)}/adimages`;
+  const j = await graphFetchJson(() => {
+    const fd = new FormData();
+    fd.append("filename", new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }), filename);
+    fd.append("access_token", token);
+    return fetch(`${GRAPH_BASE}/${path}`, { method: "POST", body: fd });
+  }, `POST ${path}`);
   const first = Object.values(j.images || {})[0] as { hash?: string } | undefined;
   if (!first?.hash) throw new Error("meta_adimage_no_hash");
   return first.hash;

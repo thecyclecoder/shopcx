@@ -1028,18 +1028,19 @@ export async function POST(
         const { data: subData } = selectedSub ? await admin.from("subscriptions").select("id, created_at").eq("shopify_contract_id", selectedSub.contractId).eq("workspace_id", wsId).maybeSingle() : { data: null };
         const subAgeDays = subData?.created_at ? Math.floor((Date.now() - new Date(subData.created_at).getTime()) / 86400000) : 0;
 
-        await admin.from("remedy_outcomes").insert({
+        const { error: rejectedErr } = await admin.from("remedy_outcomes").insert({
           workspace_id: wsId,
           customer_id: session.customer_id,
           subscription_id: subData?.id || null,
           cancel_reason: cancelReason,
           remedy_type: "none",
           accepted: false,
-          outcome: "cancelled",
+          outcome: "rejected",
           customer_ltv_cents: customerLtv,
           subscription_age_days: subAgeDays,
           first_renewal: isFirstRenewal,
         });
+        if (rejectedErr) console.warn("[cancel-flow] remedy_outcomes insert failed (cancelled branch)", rejectedErr.message);
       }
 
       // Tag ticket
@@ -1110,7 +1111,7 @@ export async function POST(
 
       // Record remedy outcome
       if (session.customer_id) {
-        await admin.from("remedy_outcomes").insert({
+        const { error: acceptedErr } = await admin.from("remedy_outcomes").insert({
           workspace_id: wsId,
           customer_id: session.customer_id,
           cancel_reason: cancelReason,
@@ -1119,8 +1120,9 @@ export async function POST(
           offered_text: responses?.remedy_selection?.label || null,
           accepted: true,
           first_renewal: isFirstRenewal,
-          outcome: "saved",
+          outcome: "accepted",
         });
+        if (acceptedErr) console.warn("[cancel-flow] remedy_outcomes insert failed (saved branch)", acceptedErr.message);
       }
 
       // Tag ticket positive

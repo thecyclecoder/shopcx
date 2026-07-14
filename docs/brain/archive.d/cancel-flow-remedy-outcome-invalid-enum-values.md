@@ -1,0 +1,1 @@
+- **Fix cancel-flow remedy_outcomes outcome vocabulary mapping** · verified 2026-07-14 · → [[../lifecycles/cancel-flow]]

@@ -57,6 +57,225 @@ export interface CompetitorRow {
   updated_at: string;
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * SDK chokepoint — the single read/write surface for `public.competitors`.
+ *
+ * Enforced by `scripts/_check-competitors-sdk-compliance.ts`: any `.from('competitors')` outside
+ * this file breaks predeploy red. A hand-rolled query silently reads as empty when a column name
+ * is wrong (a workspace with 82 rows once read as 0 because a raw probe selected a non-existent
+ * `name` column). The SDK types the row shape and centralizes product-scope semantics.
+ * ------------------------------------------------------------------------------------------------- */
+
+/** Args for {@link listCompetitors}. */
+export interface ListCompetitorsOptions {
+  workspaceId: string;
+  /** When set, restricts to rows for that product. Strict per-product by default (Phase 2 target). */
+  productId?: string | null;
+  status?: CompetitorStatus;
+  /**
+   * When `productId` is set AND this is true, ALSO include workspace-level rows (`product_id IS NULL` —
+   * the legacy migrated seeds). Default false — a productId returns strictly that product's rows.
+   * Phase 2 of [[competitor-sdk-chokepoint-and-per-product-cleanup]] retires the last true caller.
+   */
+  includeUnscoped?: boolean;
+  /** Row cap. Default 500 (matches the current owner-list surface). */
+  limit?: number;
+}
+
+/**
+ * List competitor rows for a workspace, optionally scoped to a product / status. The single read
+ * chokepoint — every route/lib that used to hand-roll `.from('competitors').select(...)` goes
+ * through here.
+ */
+export async function listCompetitors(opts: ListCompetitorsOptions): Promise<CompetitorRow[]> {
+  const admin = createAdminClient();
+  let q = admin
+    .from("competitors")
+    .select("*")
+    .eq("workspace_id", opts.workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(opts.limit ?? 500);
+  if (opts.status) q = q.eq("status", opts.status);
+  if (opts.productId) {
+    q = opts.includeUnscoped
+      ? q.or(`product_id.eq.${opts.productId},product_id.is.null`)
+      : q.eq("product_id", opts.productId);
+  }
+  const { data, error } = await q;
+  if (error) throw new Error(`listCompetitors: ${error.message}`);
+  return (data ?? []) as unknown as CompetitorRow[];
+}
+
+/** Fetch one competitor by id (workspace-scoped when {@link opts.workspaceId} is provided). */
+export async function getCompetitor(
+  id: string,
+  opts: { workspaceId?: string } = {},
+): Promise<CompetitorRow | null> {
+  const admin = createAdminClient();
+  let q = admin.from("competitors").select("*").eq("id", id);
+  if (opts.workspaceId) q = q.eq("workspace_id", opts.workspaceId);
+  const { data } = await q.maybeSingle();
+  return (data as unknown as CompetitorRow | null) ?? null;
+}
+
+/**
+ * Resolve `runs_ads_for` (self-FK) → fronted competitor's brand for a set of ids. The GET route +
+ * acquisition-hub both used to hand-roll this second lookup; the SDK owns it now.
+ */
+export async function getCompetitorBrandsById(
+  workspaceId: string,
+  ids: string[],
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (ids.length === 0) return map;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("competitors")
+    .select("id, brand")
+    .eq("workspace_id", workspaceId)
+    .in("id", ids);
+  for (const r of data ?? []) map.set(r.id as string, (r.brand as string) || "");
+  return map;
+}
+
+/** Input shape for {@link upsertCompetitor}. `workspace_id` + `brand` form the unique key. */
+export interface UpsertCompetitorInput {
+  workspace_id: string;
+  brand: string;
+  product_id?: string | null;
+  domain?: string | null;
+  pdp_urls?: string[];
+  category?: string | null;
+  spend_signal?: string | null;
+  source?: CompetitorSource;
+  status?: CompetitorStatus;
+  evidence?: string | null;
+  search_keyword?: string | null;
+  runs_ads_for?: string | null;
+}
+
+/**
+ * General insert-or-update chokepoint on `(workspace_id, brand)`. `discoverCompetitors` /
+ * `promoteWhitelistedPages` still use the narrower private `upsertCandidate` (insert-only,
+ * dedup-across-all-statuses) — this is the surface for manual/script/backfill writes that want
+ * plain upsert semantics.
+ */
+export async function upsertCompetitor(row: UpsertCompetitorInput): Promise<CompetitorRow> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("competitors")
+    .upsert(
+      {
+        workspace_id: row.workspace_id,
+        product_id: row.product_id ?? null,
+        brand: row.brand,
+        domain: row.domain ?? null,
+        pdp_urls: row.pdp_urls ?? [],
+        category: row.category ?? null,
+        spend_signal: row.spend_signal ?? null,
+        source: row.source ?? "manual",
+        status: row.status ?? "proposed",
+        evidence: row.evidence ?? null,
+        search_keyword: row.search_keyword ?? null,
+        runs_ads_for: row.runs_ads_for ?? null,
+      },
+      { onConflict: "workspace_id,brand" },
+    )
+    .select("*")
+    .single();
+  if (error) throw new Error(`upsertCompetitor: ${error.message}`);
+  return data as unknown as CompetitorRow;
+}
+
+/** Options for {@link setCompetitorStatus}. */
+export interface SetCompetitorStatusOptions {
+  /** Scope-guard: only update the row if it belongs to this workspace. */
+  workspaceId?: string;
+  /** Compare-and-set guard: only update if the row is currently in this status (idempotent review). */
+  expectedStatus?: CompetitorStatus;
+}
+
+/**
+ * Flip a competitor's status (the approve/reject write path) with an optional workspace scope-guard
+ * + expected-status compare-and-set (so a stale async read can't overwrite a settled row). Returns
+ * the updated row or null when the guards filtered it out.
+ */
+export async function setCompetitorStatus(
+  id: string,
+  status: CompetitorStatus,
+  reviewedBy: string,
+  note?: string | null,
+  opts: SetCompetitorStatusOptions = {},
+): Promise<CompetitorRow | null> {
+  const admin = createAdminClient();
+  let q = admin
+    .from("competitors")
+    .update({
+      status,
+      reviewed_by: reviewedBy,
+      reviewed_at: new Date().toISOString(),
+      review_note: note ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+  if (opts.workspaceId) q = q.eq("workspace_id", opts.workspaceId);
+  if (opts.expectedStatus) q = q.eq("status", opts.expectedStatus);
+  const { data, error } = await q.select("*").maybeSingle();
+  if (error) throw new Error(`setCompetitorStatus: ${error.message}`);
+  return (data as unknown as CompetitorRow | null) ?? null;
+}
+
+/** Delete one competitor row (workspace-scoped when {@link opts.workspaceId} is provided). */
+export async function deleteCompetitor(
+  id: string,
+  opts: { workspaceId?: string } = {},
+): Promise<void> {
+  const admin = createAdminClient();
+  let q = admin.from("competitors").delete().eq("id", id);
+  if (opts.workspaceId) q = q.eq("workspace_id", opts.workspaceId);
+  const { error } = await q;
+  if (error) throw new Error(`deleteCompetitor: ${error.message}`);
+}
+
+/**
+ * Orphan competitors: rows with a null `product_id` OR a `product_id` that no longer exists in the
+ * workspace's `products` table (deleted / migrated-seed remnants). All 6 hero products now carry
+ * their own product-scoped competitors, so the null-scoped legacy seeds are obsolete. Read-only.
+ */
+export async function listOrphanCompetitors(workspaceId: string): Promise<CompetitorRow[]> {
+  const admin = createAdminClient();
+  const [{ data: productRows }, { data: rows }] = await Promise.all([
+    admin.from("products").select("id").eq("workspace_id", workspaceId),
+    admin.from("competitors").select("*").eq("workspace_id", workspaceId),
+  ]);
+  const liveProductIds = new Set((productRows ?? []).map((p) => p.id as string));
+  return ((rows ?? []) as unknown as CompetitorRow[]).filter(
+    (r) => !r.product_id || !liveProductIds.has(r.product_id),
+  );
+}
+
+/**
+ * Purge orphan competitors (Phase 3 of [[competitor-sdk-chokepoint-and-per-product-cleanup]]).
+ * FK safety: `competitors.runs_ads_for` is a self-FK ON DELETE SET NULL — whitelisted-page rows
+ * pointing at a purged brand automatically null their fronted-competitor link, no cascade damage.
+ * Returns `{ deleted, ids }`. Idempotent — a re-run on a clean workspace returns `{ deleted: 0 }`.
+ */
+export async function deleteOrphanCompetitors(
+  workspaceId: string,
+): Promise<{ deleted: number; ids: string[] }> {
+  const orphans = await listOrphanCompetitors(workspaceId);
+  if (orphans.length === 0) return { deleted: 0, ids: [] };
+  const admin = createAdminClient();
+  const ids = orphans.map((r) => r.id);
+  const { error } = await admin
+    .from("competitors")
+    .delete()
+    .eq("workspace_id", workspaceId)
+    .in("id", ids);
+  if (error) throw new Error(`deleteOrphanCompetitors: ${error.message}`);
+  return { deleted: ids.length, ids };
+}
+
 /**
  * Normalize a brand into the compact handle we use AS the AdLibrary search keyword + the dedup key.
  * Lowercase, strip a domain's protocol/www/TLD path, drop everything non-alphanumeric — so
@@ -410,19 +629,25 @@ export async function promoteWhitelistedPages(
 ): Promise<PromoteResult> {
   const admin = createAdminClient();
 
-  // 1. Approved competitors: id, brand, domain — the fronted-brand anchor set.
+  // 1. Approved competitors: id, brand, domain, product_id — the fronted-brand anchor set. The
+  //    `product_id` is threaded through so a whitelisted-page proposal inherits its fronted
+  //    competitor's product scope (Phase 3 of [[competitor-sdk-chokepoint-and-per-product-cleanup]]):
+  //    a page fronting an approved competitor with a product_id is a competitor FOR THAT PRODUCT,
+  //    not a workspace-level orphan.
   const { data: approvedRows } = await admin
     .from("competitors")
-    .select("id, brand, domain")
+    .select("id, brand, domain, product_id")
     .eq("workspace_id", workspaceId)
     .eq("status", "approved");
   const approvedBrandToId = new Map<string, string>();
   const knownHostToCompetitor = new Map<string, string>();
+  const competitorIdToProductId = new Map<string, string | null>();
   for (const r of approvedRows || []) {
     const brand = (r.brand as string | null) || "";
     if (brand) approvedBrandToId.set(brand, r.id as string);
     const host = normalizeHost(r.domain as string | null);
     if (host) knownHostToCompetitor.set(host, r.id as string);
+    competitorIdToProductId.set(r.id as string, (r.product_id as string | null) ?? null);
   }
 
   // Read enough skeleton rows to cover a workspace's daily sweep + a few historical days without
@@ -519,6 +744,9 @@ export async function promoteWhitelistedPages(
 
     const inserted = await upsertCandidate(workspaceId, {
       brand,
+      // Inherit the fronted competitor's product scope so whitelisted-page proposals are never
+      // orphaned (Phase 3). Null when the fronted competitor itself is workspace-level.
+      product_id: competitorIdToProductId.get(dominantCompId) ?? null,
       source: "whitelisted",
       search_keyword: stat.display, // RAW page name (verbatim, NOT normalized).
       runs_ads_for: dominantCompId,

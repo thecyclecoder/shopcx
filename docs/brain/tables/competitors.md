@@ -41,19 +41,26 @@ The DB-driven, supervisable competitor set — replaces the hardcoded `COMPETITO
 
 ## Common queries
 
-### Approved competitor seeds for the sweep (the read path)
+**Read/write goes through the [[../libraries/competitors]] SDK chokepoint** — a raw `.from('competitors')` outside `src/lib/competitors.ts` fails `predeploy` via [scripts/_check-competitors-sdk-compliance.ts](../../../scripts/_check-competitors-sdk-compliance.ts). See CLAUDE.md § Local conventions ("Raw `.from(...)` with no SDK → STOP").
+
+### Approved competitors for a product (the deliberate scout read path)
 ```ts
-const { data } = await admin.from("competitors")
-  .select("brand, evidence, category")
-  .eq("workspace_id", workspaceId).eq("status", "approved");
+import { loadApprovedCompetitorsForProduct } from "@/lib/competitors";
+const seeds = await loadApprovedCompetitorsForProduct(workspaceId, productId);
 ```
 
 ### Proposed rows awaiting owner review
 ```ts
-const { data } = await admin.from("competitors")
-  .select("id, brand, domain, source, evidence, spend_signal")
-  .eq("workspace_id", workspaceId).eq("status", "proposed")
-  .order("created_at", { ascending: false });
+import { listCompetitors } from "@/lib/competitors";
+const proposed = await listCompetitors({ workspaceId, status: "proposed" });
+```
+
+### Approve / reject one row (with a workspace scope-guard + compare-and-set)
+```ts
+import { setCompetitorStatus } from "@/lib/competitors";
+await setCompetitorStatus(id, "approved", userId, note, {
+  workspaceId, expectedStatus: "proposed",
+});
 ```
 
 ## Gotchas
@@ -63,10 +70,11 @@ const { data } = await admin.from("competitors")
 - **`search_keyword` overrides `brand` for the sweep read** — a `source='whitelisted'` row stores the EXACT advertiser/page name in `search_keyword` because the AdLibrary API matches literally (`"Holistic Health Finds"` → 59 ads; the normalized `holistichealthfinds` → 0). The sweep read uses `search_keyword ?? brand`. Normal (`llm`/`category_sweep`/`manual`) competitors leave `search_keyword` null.
 - **`source='whitelisted'`** = an affiliate/advertorial/creator page fronting a real competitor. `runs_ads_for` points at the fronted competitor row (the destination-domain join target). See [[../specs/whitelisted-page-auto-tracking]].
 - **The 11 legacy seeds** were migrated in as `source='manual'`, `status='approved'`, `product_id=null` for every ad-tool workspace (those with `ad_campaigns` rows).
+- **Orphan competitors are purged (Phase 3 of [[../specs/competitor-sdk-chokepoint-and-per-product-cleanup]]).** The 46 null-scoped / missing-product-scoped legacy rows in the Superfoods workspace are obsolete — all 6 hero products now carry their own product-scoped competitors. Purge them via `deleteOrphanCompetitors(workspaceId)` (SDK chokepoint) or [scripts/purge-orphan-competitors.ts](../../../scripts/purge-orphan-competitors.ts) (dry-run by default; `--apply` writes). `runs_ads_for` self-FK is ON DELETE SET NULL, so a whitelisted-page row pointing at a purged brand simply nulls its fronted-competitor link. Both writers now stamp `product_id` (discovery from the seeded `productId`, whitelisted from the fronted competitor's `product_id`), so new proposals are never orphaned.
 
 ## Read/written by
 
-- [[../libraries/competitors]] — `loadApprovedCompetitorsForProduct` / `productsWithApprovedCompetitors` (per-product read), `discoverCompetitors` / `promoteWhitelistedPages` (write proposals). `loadApprovedCompetitorSeeds` + `promoteFromCategorySweep` retired 2026-07-12.
+- [[../libraries/competitors]] — **the SDK chokepoint** (Phase 1 of [[../specs/competitor-sdk-chokepoint-and-per-product-cleanup]]). `listCompetitors` / `getCompetitor` / `getCompetitorBrandsById` / `upsertCompetitor` / `setCompetitorStatus` / `deleteCompetitor` / `listOrphanCompetitors` / `deleteOrphanCompetitors` — plus the pre-existing `loadApprovedCompetitorsForProduct` / `productsWithApprovedCompetitors` (per-product read) and `discoverCompetitors` / `promoteWhitelistedPages` (write proposals). `loadApprovedCompetitorSeeds` + `promoteFromCategorySweep` retired 2026-07-12.
 - [[../inngest/creative-scout]] — reads approved rows per product; writes whitelisted-page proposals.
 - [[../inngest/acquisition-research-cadence]] — writes category-sweep + whitelisted-page proposals in the daily re-scan.
 - [[../inngest/competitor-scout]] — the discovery pass writer.

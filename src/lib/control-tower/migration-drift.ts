@@ -72,10 +72,16 @@ export interface MergedUnappliedMigration {
   /**
    * Apply outcome (Phase 2):
    *  - 'applied':          additive/idempotent DDL, auto-applied on the pooler, schema_migrations row inserted.
+   *  - 'already-applied':  the DDL threw a duplicate-object-class SQLSTATE (the object already exists in the
+   *                        live schema — the earlier apply was never recorded in schema_migrations, so the
+   *                        reconciler surfaced it as merged-but-unapplied). Version is inserted, tile clears.
+   *                        migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 1.
    *  - 'approval-needed':  classifier flagged destructive — NOT auto-applied; the tile alert names the version.
-   *  - 'apply-failed':     additive but the pooler apply threw (e.g. a semantic error the classifier missed).
+   *  - 'apply-failed':     additive but the pooler apply threw a GENUINE error (syntax / undefined_table /
+   *                        undefined_column) — NOT a duplicate-object class. The tile stays red until a human
+   *                        looks. isDuplicateObjectError below classifies which is which.
    */
-  outcome?: "applied" | "approval-needed" | "apply-failed";
+  outcome?: "applied" | "already-applied" | "approval-needed" | "apply-failed";
   /** Populated only when outcome === 'apply-failed'. */
   error?: string;
 }
@@ -446,21 +452,222 @@ export function driftSummary(r: DriftResult): string {
   return `migration drift — ${parts.join("; ")}`;
 }
 
-/** Compact "K applied · K approval-needed · K apply-failed" outcome tail, or "" when nothing tagged. */
+/** Compact "K applied · K already-applied · K approval-needed · K apply-failed" outcome tail, or "" when nothing tagged. */
 function summarizeOutcomes(items: MergedUnappliedMigration[]): string {
   let applied = 0;
+  let alreadyApplied = 0;
   let approvalNeeded = 0;
   let applyFailed = 0;
   for (const m of items) {
     if (m.outcome === "applied") applied++;
+    else if (m.outcome === "already-applied") alreadyApplied++;
     else if (m.outcome === "approval-needed") approvalNeeded++;
     else if (m.outcome === "apply-failed") applyFailed++;
   }
   const bits: string[] = [];
   if (applied) bits.push(`${applied} applied`);
+  if (alreadyApplied) bits.push(`${alreadyApplied} already-applied`);
   if (approvalNeeded) bits.push(`${approvalNeeded} approval-needed`);
   if (applyFailed) bits.push(`${applyFailed} apply-failed`);
   return bits.join(" · ");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 1 —
+// A duplicate-object error during additive auto-apply means already-applied, not apply-failed.
+//
+// The 2026-07 incident: the ledger was 103 versions behind — 103 merged migrations whose DDL had
+// already been applied to the database (the objects existed) but whose versions were never recorded
+// in supabase_migrations.schema_migrations. The reconciler classified each as merged-but-unapplied
+// and re-ran the additive DDL, which threw a duplicate-object SQLSTATE (`relation already exists`,
+// `cannot change return type of existing function`) — recorded as apply-failed, retried on the next
+// poll, and produced a steady stream of Postgres errors. The applyMigrationAndRecord fix corrected
+// the apply METHOD but never taught the reconciler that a duplicate-object error means the object
+// is already there — reconcile the ledger, don't red the tile.
+//
+// The classifier below is the ONE place that reads err.code so the additive-apply path AND the
+// one-time reconcile script (Phase 2) share the exact same duplicate-object definition. A genuine
+// error (syntax, undefined_table, undefined_column, or anything outside this set) stays apply-failed
+// and stays red — this must NEVER silently record a broken migration.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Postgres SQLSTATE codes that indicate the DDL failed BECAUSE the object it tried to create is
+ * already there — a strong signal the migration was applied earlier but never recorded in
+ * supabase_migrations.schema_migrations. Kept as a readonly Set so the classification is data,
+ * not code.
+ *   42P07  duplicate_table              `relation "x" already exists`
+ *   42710  duplicate_object             `constraint / policy / trigger / index "x" already exists`
+ *   42723  duplicate_function           `function "x(...)" already exists with same argument types`
+ *   42P06  duplicate_schema             `schema "x" already exists`
+ *   42701  duplicate_column             `column "x" of relation "y" already exists`
+ *   42P13  invalid_function_definition  `cannot change return type of existing function` — the
+ *                                       CREATE OR REPLACE case where the signature already matches
+ *                                       but the return type differs; Postgres treats it as a
+ *                                       duplicate for our purposes (the function is already there).
+ * Genuine failures (`42601` syntax_error, `42P01` undefined_table, `42703` undefined_column, any
+ * class outside this set) are DELIBERATELY excluded — they must stay apply-failed.
+ */
+export const DUPLICATE_OBJECT_SQLSTATES: ReadonlySet<string> = new Set([
+  "42P07",
+  "42710",
+  "42723",
+  "42P06",
+  "42701",
+  "42P13",
+]);
+
+/**
+ * True iff `err` looks like a Postgres error whose SQLSTATE is a duplicate-object class (see
+ * DUPLICATE_OBJECT_SQLSTATES). Reads only `err.code` — the standard `pg` package's DatabaseError
+ * shape. Tolerant of non-Error / undefined / plain-object shapes: any input without a string `code`
+ * on the duplicate-object list returns false. Pure, exported so both the additive auto-apply path
+ * and the one-time reconcile script (Phase 2) share the same classifier + it's unit-testable.
+ */
+export function isDuplicateObjectError(err: unknown): boolean {
+  if (err == null || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && DUPLICATE_OBJECT_SQLSTATES.has(code);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3 —
+// Statement-level duplicate-object reconciliation.
+//
+// The Phase 2 reconcile script (and, symmetrically, the Phase 1 live auto-apply path) ran the
+// whole migration file as ONE `c.query(sql)` inside a single savepoint and treated a
+// duplicate-object throw as "already applied → record the version." That's unsafe for a
+// MULTI-statement migration: Postgres aborts the batch on the first failing statement, so a
+// duplicate_table on statement #1 leaves statements #2..N NEVER EXECUTED — and yet we'd stamp the
+// version as applied and never notice the unapplied tail (the security review's finding on the
+// Phase 2 reconcile).
+//
+// The fix: split the file at top-level statement boundaries and classify each statement in its
+// own savepoint. A statement succeeds → applied-fresh. A statement throws a duplicate-object
+// SQLSTATE → verified-already-present (safe to skip; that specific object is in the live schema).
+// A statement throws anything else → the file is broken; record NOTHING and leave the version
+// unrecorded for human review. Only when EVERY statement in the file is accounted for (applied or
+// verified) does the version get recorded — matching the security review's demand: "only record a
+// version after every statement either ran successfully or was independently proven already
+// present; otherwise leave it apply-failed/unrecorded."
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Split a Postgres SQL script into top-level statements at unquoted `;` boundaries. Preserves the
+ * original statement text (whitespace/comments trimmed) — the caller re-executes each string.
+ *
+ * Handles:
+ *  - `--` line comments (skipped through the following newline)
+ *  - `/* *​/` block comments (nested per Postgres semantics — `/* /* *​/ *​/` is one comment)
+ *  - `'...'` single-quoted string literals with the SQL doubled-quote escape (`''` stays inside)
+ *  - `"..."` double-quoted identifiers
+ *  - `$$...$$` and `$tag$...$tag$` dollar-quoted string bodies — the CRITICAL case for
+ *    `CREATE FUNCTION ... AS $$ BEGIN ... END; $$` where a naive splitter would break at the
+ *    function-body `;` and hand Postgres two half-statements
+ *
+ * The output is the list of non-empty statements in source order. Consecutive terminator-only
+ * fragments produce no output. Off-format inputs (unterminated string / comment / dollar-quote)
+ * still return something — the malformed tail is emitted as a single trailing statement so the
+ * caller can attempt it and let Postgres surface the real syntax error.
+ *
+ * migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3.
+ */
+export function splitSqlStatements(sql: string): string[] {
+  const out: string[] = [];
+  const N = sql.length;
+  let i = 0;
+  let start = 0;
+  while (i < N) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    // -- line comment
+    if (ch === "-" && next === "-") {
+      while (i < N && sql[i] !== "\n") i++;
+      continue;
+    }
+    // /* block comment */ (nested)
+    if (ch === "/" && next === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < N && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth++;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth--;
+          i += 2;
+          continue;
+        }
+        i++;
+      }
+      continue;
+    }
+    // '...' single-quoted string
+    if (ch === "'") {
+      i++;
+      while (i < N) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // "..." double-quoted identifier
+    if (ch === '"') {
+      i++;
+      while (i < N) {
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === '"') {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // $tag$ dollar-quoted string (tag may be empty → $$...$$)
+    if (ch === "$") {
+      const tagMatch = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        i += tag.length;
+        const end = sql.indexOf(tag, i);
+        if (end < 0) {
+          // Unterminated dollar-quote — bail (the malformed tail becomes the final statement).
+          i = N;
+          continue;
+        }
+        i = end + tag.length;
+        continue;
+      }
+      // Bare `$` (unusual outside a dollar-quote intro) — advance one char.
+      i++;
+      continue;
+    }
+    // Top-level statement terminator.
+    if (ch === ";") {
+      const stmt = sql.slice(start, i).trim();
+      if (stmt.length > 0) out.push(stmt);
+      i++;
+      start = i;
+      continue;
+    }
+    i++;
+  }
+  const tail = sql.slice(start).trim();
+  if (tail.length > 0) out.push(tail);
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -485,8 +692,21 @@ export interface ApplyMergedOpts {
    * (destructive migrations never reach this — they take the approval-needed branch). Best-effort:
    * a throw is captured as outcome='apply-failed' with the error message; the loop continues so a
    * bad migration in the middle of the batch never blocks the ones after it.
+   *
+   * Return `{ alreadyApplied: true }` when the DDL threw a duplicate-object-class SQLSTATE (the
+   * object already exists in the live schema — an earlier apply the ledger never recorded) and
+   * the version was recorded anyway (a `ON CONFLICT DO NOTHING` insert into schema_migrations).
+   * applyMergedMigrations tags outcome='already-applied' in that case — the tile clears without
+   * red-flagging the reconcile.
+   * migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 1. As a safety net,
+   * applyMergedMigrations ALSO catches a thrown duplicate-object error via isDuplicateObjectError
+   * and tags it 'already-applied' — but that path leaves the version UNRECORDED, so the caller is
+   * expected to catch + record itself and use the return signal (see scripts/builder-worker.ts
+   * applyMigrationAndRecord).
    */
-  applyMigration: (input: { version: string; file: string; sql: string }) => Promise<void>;
+  applyMigration: (
+    input: { version: string; file: string; sql: string },
+  ) => Promise<void | { alreadyApplied?: boolean }>;
   /**
    * Called for each destructive migration BEFORE marking it approval-needed. The tile alert already
    * names the version (Phase 1); this hook lets the caller add an extra surfacing (dashboard notice,
@@ -503,9 +723,20 @@ export interface ApplyMergedOpts {
 
 /**
  * Route each merged-but-unapplied migration through the classifyMigrationSql gate:
- *  - 'additive'                → applyMigration() → outcome 'applied' (or 'apply-failed' on throw)
+ *  - 'additive'                → applyMigration() → outcome 'applied' OR 'already-applied'
+ *                                (or 'apply-failed' on a NON-duplicate-object throw)
  *  - 'reversible_destructive' /
  *    'irreversible_destructive' → onApprovalNeeded() → outcome 'approval-needed' (NEVER auto-apply)
+ *
+ * A duplicate-object-class SQLSTATE (isDuplicateObjectError) is the "already-applied" signal — the
+ * object exists in the live schema because an earlier apply was never recorded in the ledger; the
+ * reconciler surfaced it as merged-but-unapplied, and re-running the DDL would loop forever if we
+ * treated the duplicate error as a genuine failure. The callback is expected to catch it, record
+ * the version conflict-safely (`ON CONFLICT DO NOTHING`), and return `{ alreadyApplied: true }`
+ * so this loop tags outcome='already-applied' AND the ledger is fixed. If the callback forgets to
+ * catch, this loop's fallback ALSO classifies the throw — but that fallback path leaves the
+ * version unrecorded (the next tick will re-try, still safely). migration-drift-reconciler-
+ * idempotent-on-already-applied-objects spec Phase 1.
  *
  * PURE apart from the injected callbacks — readable/testable without fs/pg. Preserves input order.
  * Returns a NEW array (never mutates input) with severity/matches/outcome/error populated.
@@ -531,16 +762,29 @@ export async function applyMergedMigrations(
     const cls = classifyMigrationSql(sql);
     if (cls.severity === "additive") {
       try {
-        await opts.applyMigration({ version: m.version, file: m.file, sql });
-        out.push({ ...m, severity: cls.severity, matches: cls.matches, outcome: "applied" });
+        const applyResult = await opts.applyMigration({ version: m.version, file: m.file, sql });
+        const outcome = applyResult && applyResult.alreadyApplied ? "already-applied" : "applied";
+        out.push({ ...m, severity: cls.severity, matches: cls.matches, outcome });
       } catch (e) {
-        out.push({
-          ...m,
-          severity: cls.severity,
-          matches: cls.matches,
-          outcome: "apply-failed",
-          error: (e as Error)?.message ?? String(e),
-        });
+        // Safety net: an uncaught duplicate-object throw is still classified as already-applied so
+        // the reconciler doesn't loop forever on a ledger-only gap. The version stays UNRECORDED on
+        // this path (the caller-side try/catch + record is the durable fix in applyMigrationAndRecord).
+        if (isDuplicateObjectError(e)) {
+          out.push({
+            ...m,
+            severity: cls.severity,
+            matches: cls.matches,
+            outcome: "already-applied",
+          });
+        } else {
+          out.push({
+            ...m,
+            severity: cls.severity,
+            matches: cls.matches,
+            outcome: "apply-failed",
+            error: (e as Error)?.message ?? String(e),
+          });
+        }
       }
       continue;
     }
@@ -570,7 +814,11 @@ export async function applyMergedMigrations(
   return out;
 }
 
-/** True iff any item in the batch was actually applied — signals the caller should re-run the reconciler. */
+/**
+ * True iff any item in the batch cleared the merged-but-unapplied condition — either freshly applied
+ * ('applied') OR reconciled as already-applied ('already-applied', the ledger got the missing row).
+ * Signals the caller should re-run the reconciler so the tile clears on the same tick's heartbeat.
+ */
 export function anyApplied(items: MergedUnappliedMigration[]): boolean {
-  return items.some((m) => m.outcome === "applied");
+  return items.some((m) => m.outcome === "applied" || m.outcome === "already-applied");
 }

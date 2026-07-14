@@ -1,0 +1,1 @@
+- **Mario's fix-authoring emits machine checks, not prose→needs_human** · verified 2026-07-14 · → [[../libraries/mario]]

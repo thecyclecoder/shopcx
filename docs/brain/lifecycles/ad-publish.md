@@ -52,4 +52,4 @@ The Growth director can now queue ready-to-test creatives ([[../libraries/ready-
 
 ## Related
 
-[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../tables/media_buyer_test_cohorts]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]] · [[../libraries/media-buyer-publish-gate]] · [[../libraries/ready-to-test]] · [[director_activity]]
+[[ad-render]] · [[ad-static]] · [[../integrations/meta-marketing]] · [[../integrations/meta-graph]] · [[../tables/ad_publish_jobs]] · [[../tables/media_buyer_test_cohorts]] · [[../inngest/ad-tool]] · [[../libraries/meta-ads]] · [[../libraries/media-buyer-publish-gate]] · [[../libraries/ready-to-test]] · [[../libraries/ads-supervisor]] · [[../inngest/ads-supervisor-cadence]] · [[director_activity]]

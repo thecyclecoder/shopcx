@@ -1,0 +1,1 @@
+- **Fix customer fraud-status: it selects fraud_cases.updated_at (a column that doesn't exist), so the query errors and every customer reads as fraud-clean** · verified 2026-07-14 · → [[../libraries/customer-fraud-status]]

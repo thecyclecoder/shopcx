@@ -141,6 +141,7 @@ import { growthAdSpendGovernorCron, growthAdSpendGovernorSweep } from "@/lib/inn
 import { mediaBuyerCadenceCron, mediaBuyerCadenceSweep } from "@/lib/inngest/media-buyer-cadence";
 import { mediaBuyerTestCadenceCron } from "@/lib/inngest/media-buyer-test-cadence";
 import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-creative-cadence";
+import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/inngest/ads-supervisor-cadence";
 import { budgetWatchCron } from "@/lib/inngest/budget-watch";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
 import {
@@ -320,6 +321,8 @@ export const registeredInngestFunctions = [
   mediaBuyerTestCadenceCron,
   adCreativeCadenceCron,
   adCreativeCadenceSweep,
+  adsSupervisorCadenceCron,
+  adsSupervisorCadenceSweep,
   budgetWatchCron,
   mediaBuyerGradeCron,
   mediaBuyerGradeSweep,

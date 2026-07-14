@@ -65,7 +65,11 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
-_None documented._
+- The fraud_cases select must use `last_seen_at` (not nonexistent `updated_at`) for the confirmed timestamp. See [[../tables/fraud_cases]] — `last_seen_at` is the case's real last-touched timestamp, rewritten by [[fraud-detector]] on each re-detection.
+
+## Status / open work
+
+✅ **customer-fraud-status-selects-nonexistent-updated-at** (2026-07-14) — Fixed: `getCustomerFraudStatus` was selecting `fraud_cases.updated_at` (column does not exist), causing the query to error and return null for all customers. Removed nonexistent `updated_at` from the select and use `last_seen_at` for confirmed timestamps, matching the actual fraud_cases schema. The fix corrects a silent security/correctness failure in a risk-gating path where confirmed-fraud and amazon-reseller customers were incorrectly read as clean.
 
 ---
 

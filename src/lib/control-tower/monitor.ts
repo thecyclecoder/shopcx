@@ -119,6 +119,17 @@ const HISTORY_LIMIT = 10;
  * genuinely-stuck analyzer (the ticket survives a whole cycle unprocessed) still trips the alert. */
 const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
 
+/**
+ * Cora's settle window for the `tickets-awaiting-qc` work probe
+ * (ticket-analyzer-workprobe-last-customer-settle-grace). Mirrors CORA_CLOSE_SETTLE_MS in
+ * src/lib/inngest/ticket-analysis-cron.ts — the cron's `passesCoraSelectionGate` requires
+ * `last_customer_message_at` to be at least this old before it will select the ticket. Keeping the
+ * probe keyed on `updated_at` alone (without this settle window) flags a ticket the cron is
+ * DELIBERATELY waiting on as "awaited but unserviced" and fires a false idle_while_work on
+ * loop:ai:ticket-analyzer. If the cron's constant moves, the sibling regression test pins the two
+ * to match so this doesn't silently drift. */
+const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
+
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
 function elapsed(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -801,11 +812,6 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // Closed AI-handled tickets never analyzed (last_analyzed_at null), updated in-window —
             // exactly what the ticket-analysis cron feeds analyzeTicket. The cron stamps
             // last_analyzed_at even on skip, so a null here is a genuinely-unprocessed ticket.
-            // Feeder-cadence grace (ticket-analyzer-workprobe-cron-grace): only count a ticket once it
-            // has survived a FULL ticket-analysis-cron cycle still unprocessed — a ticket closing
-            // between the 30-min ticks hasn't been given a chance yet, so its updated_at must also be
-            // older than the grace. Eliminates the between-ticks false positive; a genuinely-stuck
-            // analyzer (ticket still null a whole cycle later) still counts and alerts.
             // Human-veto mirror (ticket-analyzer-workprobe-exclude-analyzer-locked): analyzer_locked
             // is EXCLUDED at the source, mirroring ticket-analysis-cron.ts:48-54 — a human has
             // vetoed the analyzer on those rows (Phase 2 of human-directives-hard-gates-over-ticket-ai),
@@ -824,19 +830,61 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // source. Same for `sol_handled_at`-null tickets (never touched by Sol → cron skips).
             // Adding the two `.not(*, "is", null)` filters aligns the probe with the cron's real
             // selection universe (learning #1: change the durable predicate).
-            const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
-            const { count } = await admin
+            //
+            // Cora settle-window mirror (ticket-analyzer-workprobe-last-customer-settle-grace) —
+            // the cron's real eligibility gate (ticket-analysis-cron.ts `passesCoraSelectionGate`)
+            // is keyed on the LATEST CUSTOMER MESSAGE, not on `updated_at`: it requires that a
+            // customer message exists AND its `created_at` is at least CORA_CLOSE_SETTLE_MS (30 min)
+            // in the past. Keying the probe on `updated_at <= now - FEEDER_GRACE` alone lets a
+            // ticket the cron is DELIBERATELY waiting on (customer last spoke 5 min ago, ticket
+            // updated 45 min ago by an internal side-effect) count as awaited work — the exact
+            // false idle_while_work this spec repairs. We now derive the latest customer message
+            // per candidate and apply the combined cutoff = CORA_CLOSE_SETTLE_MS + the existing
+            // TICKET_ANALYSIS_FEEDER_GRACE_MS, so a normal between-tick wait stays green while a
+            // genuinely-stuck analyzer (a fully-settled + past-a-full-cycle ticket that's still
+            // last_analyzed_at null) still trips the alert. A candidate with NO customer message
+            // (outbound-only send) is dropped — the cron's gate drops it too.
+            const settlePlusFeederCutoffMs =
+              Date.now() - TICKET_ANALYSIS_CORA_SETTLE_MS - TICKET_ANALYSIS_FEEDER_GRACE_MS;
+            const { data: candidates } = await admin
               .from("tickets")
-              .select("id", { count: "exact", head: true })
+              .select("id")
               .eq("status", "closed")
               .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
               .not("closed_at", "is", null)
               .not("sol_handled_at", "is", null)
               .is("last_analyzed_at", null)
-              .gte("updated_at", sinceIso)
-              .lte("updated_at", graceCutoffIso);
-            return count ?? 0;
+              .gte("updated_at", sinceIso);
+            const candidateIds = ((candidates ?? []) as Array<{ id: string }>).map((c) => c.id);
+            if (!candidateIds.length) return 0;
+            // Latest customer message per candidate — mirrors the cron's per-run reduction
+            // (ticket-analysis-cron.ts:203-211) so the probe and the cron see the same universe
+            // of work. Volume is small (candidate cap is the base filter's natural bound).
+            const { data: custMsgRows } = await admin
+              .from("ticket_messages")
+              .select("ticket_id, created_at")
+              .in("ticket_id", candidateIds)
+              .eq("author_type", "customer");
+            const latestCustomerMsgMs = new Map<string, number>();
+            for (const m of ((custMsgRows ?? []) as Array<{ ticket_id: string; created_at: string }>)) {
+              const ms = Date.parse(m.created_at);
+              if (!Number.isFinite(ms)) continue;
+              const prev = latestCustomerMsgMs.get(m.ticket_id);
+              if (prev == null || ms > prev) latestCustomerMsgMs.set(m.ticket_id, ms);
+            }
+            let count = 0;
+            for (const id of candidateIds) {
+              const latestMs = latestCustomerMsgMs.get(id);
+              // No customer message → outbound-only → not gradeable (mirrors the cron's
+              // `if (!last_customer_message_at) return false` in passesCoraSelectionGate).
+              if (latestMs == null) continue;
+              // Not settled long enough for the next feeder tick to have legally picked it up →
+              // cron would skip → don't count as awaited work.
+              if (latestMs > settlePlusFeederCutoffMs) continue;
+              count++;
+            }
+            return count;
           }
           case "journeys-awaiting-delivery": {
             const { count } = await admin
@@ -1043,7 +1091,12 @@ interface AssertionInputs {
   latestTriageJobAt: string | null;
   /** most-recent spec-test agent_jobs.created_at (any status), or null. */
   latestSpecTestJobAt: string | null;
-  /** active internal subs whose next_billing_date is already in the past (overdue). */
+  /**
+   * Active internal subs whose next_billing_date is already in the past (overdue) AND that
+   * aren't already owned by an active/rotating/retrying/paused/skipped dunning cycle. A sub
+   * whose payment failed and is waiting in dunning is HEALTHY retention state, not a
+   * renewal-cron miss (build-control-tower-renewal-integrity-exclude-active-dunning P1).
+   */
   overdueInternalSubs: number;
   /** per-sub renewal outcome breakdown for the LIVE current cycle (since the latest renewal-cron beat). */
   renewalCurrent: RenewalOutcomeCounts;
@@ -1349,6 +1402,7 @@ function evalOutputAssertion(
         // migrations waiting for a human run) vs what auto-cleared (additive) vs what threw.
         const approvalNeeded = mergedButUnapplied.filter((m) => m.outcome === "approval-needed");
         const applyFailed = mergedButUnapplied.filter((m) => m.outcome === "apply-failed");
+        const alreadyApplied = mergedButUnapplied.filter((m) => m.outcome === "already-applied");
         const list = mergedButUnapplied
           .slice(0, 5)
           .map((m) => {
@@ -1358,13 +1412,16 @@ function evalOutputAssertion(
                 ? " — apply-failed"
                 : m.outcome === "applied"
                   ? " — applied"
-                  : "";
+                  : m.outcome === "already-applied"
+                    ? " — already-applied (ledger reconciled)"
+                    : "";
             return `${m.version} (${m.file})${oc}`;
           })
           .join(", ");
         const gateNote: string[] = [];
         if (approvalNeeded.length) gateNote.push(`${approvalNeeded.length} destructive await${approvalNeeded.length === 1 ? "s" : ""} approval`);
         if (applyFailed.length) gateNote.push(`${applyFailed.length} apply-failed`);
+        if (alreadyApplied.length) gateNote.push(`${alreadyApplied.length} already-applied`);
         const gateTail = gateNote.length ? ` — ${gateNote.join(", ")}` : "";
         statusParts.push(`${n} merged-but-unapplied migration${n === 1 ? "" : "s"}${gateTail}`);
         detailParts.push(
@@ -1384,6 +1441,60 @@ function evalOutputAssertion(
   }
 }
 
+/**
+ * Non-terminal dunning statuses: a cycle in one of these is still actively working the retry
+ * flow (rotating cards, waiting for a payday retry, paused pending a customer action, or the
+ * legacy 'active'/'skipped' pre-terminal states). Terminal statuses ('recovered', 'exhausted')
+ * are NOT here — a sub whose only dunning cycle is terminal has no live coverage and should
+ * still trip renewal-integrity if it's overdue. Kept in sync with `getActiveDunningCycle` in
+ * src/lib/dunning.ts, the canonical "is dunning still owning this sub" question.
+ */
+const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"] as const;
+
+/**
+ * READ-ONLY: overdue active internal subscriptions that AREN'T already owned by an active
+ * dunning cycle (build-control-tower-renewal-integrity-exclude-active-dunning Phase 1).
+ *
+ * An overdue internal sub whose payment failed and dunning is waiting for the next retry is
+ * a HEALTHY retention state, not a renewal-cron miss — counting it as renewal_integrity
+ * false-pages the platform owner. So subtract subs whose subscription_id is joined to a
+ * non-terminal `dunning_cycles` row. Uncovered overdue subs still flag as renewal_integrity;
+ * dunning-owned subs remain visible through the stuck-dunning assertion if their retry
+ * schedule is missed.
+ *
+ * The join is on subscription_id (internal UUID) per the CLAUDE.md invariant that internal
+ * joins never go through shopify_*_id. The spec-test sandbox is excluded on both sides so a
+ * seeded stuck-overdue fixture can't inflate the real count.
+ */
+export async function countRenewalIntegrityOverdueSubs(admin: Admin, startOfTodayIso: string): Promise<number> {
+  const { data: overdueRows, error: overdueErr } = await admin
+    .from("subscriptions")
+    .select("id")
+    .eq("is_internal", true)
+    .eq("status", "active")
+    .lt("next_billing_date", startOfTodayIso)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (overdueErr || !overdueRows || overdueRows.length === 0) return 0;
+  const overdueIds = overdueRows.map((r) => (r as { id: string }).id);
+
+  const { data: coveredRows, error: coveredErr } = await admin
+    .from("dunning_cycles")
+    .select("subscription_id")
+    .in("status", [...ACTIVE_DUNNING_STATUSES])
+    .in("subscription_id", overdueIds)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (coveredErr) return overdueIds.length;
+  const coveredIds = new Set<string>();
+  for (const row of coveredRows ?? []) {
+    const subId = (row as { subscription_id: string | null }).subscription_id;
+    if (subId) coveredIds.add(subId);
+  }
+
+  let uncovered = 0;
+  for (const id of overdueIds) if (!coveredIds.has(id)) uncovered += 1;
+  return uncovered;
+}
+
 /** READ-ONLY: fetch the extra state the Phase 2 output assertions evaluate against. */
 async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const startOfToday = new Date();
@@ -1394,7 +1505,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const segFreshCutoffIso = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
   const segStaleCutoffIso = new Date(Date.now() - SEGMENT_COVERAGE_MAX_AGE_MS).toISOString();
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -1427,14 +1538,10 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
     // (no false positive on a sub merely due today that the async attempt hasn't processed yet).
-    admin
-      .from("subscriptions")
-      .select("id", { count: "exact", head: true })
-      .eq("is_internal", true)
-      .eq("status", "active")
-      .lt("next_billing_date", startOfToday.toISOString())
-      // Exclude the spec-test sandbox: its seeded comp fixture is stuck overdue by design.
-      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
+    // Subs already owned by an ACTIVE dunning cycle (rotating/retrying/paused/skipped) are
+    // subtracted — a payment-failed sub waiting for its retry date is healthy retention state,
+    // not a renewal-cron miss (build-control-tower-renewal-integrity-exclude-active-dunning P1).
+    countRenewalIntegrityOverdueSubs(admin, startOfToday.toISOString()),
     // The latest renewal-cron beat marks the start of the LIVE current cycle — outcome beats since
     // then belong to it (vs everything older = the rolling baseline).
     admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "internal-subscription-renewal-cron").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
@@ -1486,7 +1593,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     oldestEscalatedAt: (oldestEscalated.data as { escalated_at: string } | null)?.escalated_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
-    overdueInternalSubs: overdueSubs.count ?? 0,
+    overdueInternalSubs: overdueInternalSubsUncovered,
     renewalCurrent,
     renewalBaseline,
     stuckDunningCycles: stuckDunning.count ?? 0,

@@ -1,0 +1,1 @@
+- **Autonomous spec-writer lanes author structured specs; retire markdown path** · verified 2026-07-13 · → [[../libraries/author-spec]]

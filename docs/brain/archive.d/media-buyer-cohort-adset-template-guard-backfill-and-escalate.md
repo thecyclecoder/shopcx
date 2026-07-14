@@ -1,0 +1,1 @@
+- **Media buyer: backfill missing cohort adset_template, guard against null, and escalate an under-provisioned cohort** · verified 2026-07-14 · → [[../libraries/provision-cohort]], [[../libraries/media-buyer-agent]]

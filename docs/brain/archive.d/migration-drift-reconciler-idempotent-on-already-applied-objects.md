@@ -1,0 +1,1 @@
+- **Migration-drift reconciler: treat 'object already exists' as already-applied (record the version), and reconcile the 103-version ledger backlog** · verified 2026-07-14 · → [[../libraries/control-tower]]

@@ -1,0 +1,1 @@
+- **Bin readiness count: exclude archived (URL-removed) creatives from listReadyToTest** · verified 2026-07-13 · → [[../libraries/ready-to-test]]

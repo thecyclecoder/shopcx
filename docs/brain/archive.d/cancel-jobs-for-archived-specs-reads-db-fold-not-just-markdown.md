@@ -1,0 +1,1 @@
+- **cancelJobsForArchivedSpecs must include DB-folded/deferred specs, not just the filesystem markdown archive** · verified 2026-07-14 · → [[../libraries/agent-jobs]]

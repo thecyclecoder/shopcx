@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getCompetitor, setCompetitorStatus } from "@/lib/competitors";
 
 // Competitor Scout review action (docs/brain/specs/competitor-scout.md, Phase 1) — approve or
 // reject one proposed competitor. Approving flips status → 'approved' (it then enters the
 // creative-finder sweep on the next run); rejecting → 'rejected' (the row stays, so the UNIQUE
 // brand key blocks it from re-surfacing in a later discovery/category-sweep pass). Both stamp the
 // reviewer + timestamp for the audit trail. Owner/admin only.
+//
+// The row read + status flip go through the src/lib/competitors.ts SDK chokepoint
+// (see CLAUDE.md § Local conventions + scripts/_check-competitors-sdk-compliance.ts).
 
 async function authorize(workspaceId: string | null, user: { id: string }) {
   const admin = createAdminClient();
@@ -40,31 +44,33 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (auth.error) return auth.error;
 
   // Only proposed competitors are reviewable (idempotent: re-reviewing a settled row is a no-op).
-  const { data: row } = await auth.admin
-    .from("competitors")
-    .select("id, status")
-    .eq("id", id)
-    .eq("workspace_id", workspaceId as string)
-    .single();
+  const row = await getCompetitor(id, { workspaceId: workspaceId as string });
   if (!row) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (row.status !== "proposed")
     return NextResponse.json({ error: `Already ${row.status}` }, { status: 409 });
 
-  const { data: updated, error } = await auth.admin
-    .from("competitors")
-    .update({
-      status: action === "approve" ? "approved" : "rejected",
-      reviewed_by: user.id,
-      reviewed_at: new Date().toISOString(),
-      review_note: note,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", id)
-    .eq("workspace_id", workspaceId as string)
-    .eq("status", "proposed")
-    .select("id, brand, status, reviewed_at")
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ competitor: updated });
+  let updated;
+  try {
+    updated = await setCompetitorStatus(
+      id,
+      action === "approve" ? "approved" : "rejected",
+      user.id,
+      note,
+      { workspaceId: workspaceId as string, expectedStatus: "proposed" },
+    );
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 },
+    );
+  }
+  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json({
+    competitor: {
+      id: updated.id,
+      brand: updated.brand,
+      status: updated.status,
+      reviewed_at: updated.reviewed_at,
+    },
+  });
 }
