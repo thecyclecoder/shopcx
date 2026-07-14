@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyShaDirectionLocal,
+  countRenewalIntegrityOverdueSubs,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
@@ -30,6 +31,8 @@ import {
   type WorkerRow,
 } from "./monitor";
 import { INLINE_AGENT_IDS, MONITORED_LOOPS, type MonitoredLoop } from "./registry";
+import { SPEC_TEST_FIXTURES } from "@/lib/spec-test-sandbox";
+import type { createAdminClient } from "@/lib/supabase/admin";
 
 test("extractCronExpr pulls the 5-field expression from expectedCadence", () => {
   assert.equal(extractCronExpr("daily (0 4 * * *)"), "0 4 * * *");
@@ -720,4 +723,159 @@ test("extractSolFirstTouchDispatchTicketIds dedupes when a ticket has multiple f
     { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
   ];
   assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
+});
+
+// ── countRenewalIntegrityOverdueSubs — dunning-aware renewal-integrity helper ──
+// (build-control-tower-renewal-integrity-exclude-active-dunning P1) — an overdue internal sub
+// already owned by an active dunning cycle is HEALTHY retention state, not a renewal-cron miss.
+
+interface FakeSubscriptionRow {
+  id: string;
+  workspace_id: string;
+  is_internal: boolean;
+  status: string;
+  next_billing_date: string;
+}
+interface FakeDunningRow {
+  subscription_id: string | null;
+  workspace_id: string;
+  status: string;
+}
+
+/**
+ * Tiny fake admin that models only the two calls `countRenewalIntegrityOverdueSubs` makes:
+ *   1) `.from("subscriptions").select("id").eq("is_internal", true).eq("status","active")
+ *       .lt("next_billing_date", cutoff).neq("workspace_id", sandbox)` → rows
+ *   2) `.from("dunning_cycles").select("subscription_id").in("status", [...])
+ *       .in("subscription_id", overdueIds).neq("workspace_id", sandbox)` → rows
+ * Enough to cover the helper's contract without pulling in the full monitor mock.
+ */
+function fakeRenewalIntegrityAdmin(seed: {
+  subscriptions: FakeSubscriptionRow[];
+  dunning_cycles: FakeDunningRow[];
+}): ReturnType<typeof createAdminClient> {
+  const state = { subscriptions: [...seed.subscriptions], dunning_cycles: [...seed.dunning_cycles] };
+
+  const build = (table: keyof typeof state) => {
+    let filtered: Array<Record<string, unknown>> = state[table].map((r) => ({ ...r }));
+    const chain = {
+      select: (_cols?: string) => chain,
+      eq: (col: string, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] === val);
+        return chain;
+      },
+      lt: (col: string, val: unknown) => {
+        filtered = filtered.filter((r) => (r[col] as string) < (val as string));
+        return chain;
+      },
+      neq: (col: string, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] !== val);
+        return chain;
+      },
+      in: (col: string, vals: unknown[]) => {
+        const set = new Set(vals);
+        filtered = filtered.filter((r) => set.has(r[col]));
+        return chain;
+      },
+      then: (onFulfilled: (v: { data: Array<Record<string, unknown>>; error: null }) => unknown) =>
+        Promise.resolve(onFulfilled({ data: filtered, error: null })),
+    } as unknown as Record<string, unknown>;
+    return chain;
+  };
+  return { from: (t: string) => build(t as keyof typeof state) } as unknown as ReturnType<typeof createAdminClient>;
+}
+
+const CUTOFF_ISO = "2026-07-14T00:00:00.000Z"; // "today" for the fixtures — start of the UTC day.
+const OVERDUE_ISO = "2026-07-12T00:00:00.000Z"; // strictly before cutoff — genuinely overdue.
+const WS = "11111111-1111-4111-8111-111111111111";
+const SANDBOX_WS = SPEC_TEST_FIXTURES.workspaceId;
+
+test("countRenewalIntegrityOverdueSubs: overdue sub in retrying dunning does NOT count as renewal_integrity violation", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-retrying", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+    ],
+    dunning_cycles: [
+      { subscription_id: "sub-retrying", workspace_id: WS, status: "retrying" },
+    ],
+  });
+  // The sub is overdue AND in retrying dunning → payment failed, waiting for its retry date.
+  // That is healthy retention state, NOT a renewal-cron miss. The helper subtracts it.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: overdue sub WITHOUT any dunning cycle still counts (real renewal miss)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-naked", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+    ],
+    dunning_cycles: [],
+  });
+  // Nothing routed this sub into dunning — the renewal cron missed it. The helper counts it.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 1);
+});
+
+test("countRenewalIntegrityOverdueSubs: mix of covered + uncovered overdue subs returns ONLY the uncovered count", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-rotating", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-retrying", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-paused", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-skipped", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-active", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-naked", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-exhausted", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+      { id: "sub-recovered", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+    ],
+    dunning_cycles: [
+      { subscription_id: "sub-rotating", workspace_id: WS, status: "rotating" },
+      { subscription_id: "sub-retrying", workspace_id: WS, status: "retrying" },
+      { subscription_id: "sub-paused", workspace_id: WS, status: "paused" },
+      { subscription_id: "sub-skipped", workspace_id: WS, status: "skipped" },
+      { subscription_id: "sub-active", workspace_id: WS, status: "active" },
+      // Terminal cycles do NOT cover — the retention flow is done with these subs, so they
+      // remain visible to the renewal-integrity assertion if they're still overdue.
+      { subscription_id: "sub-exhausted", workspace_id: WS, status: "exhausted" },
+      { subscription_id: "sub-recovered", workspace_id: WS, status: "recovered" },
+    ],
+  });
+  // Uncovered: sub-naked, sub-exhausted, sub-recovered. The five non-terminal dunning subs are subtracted.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 3);
+});
+
+test("countRenewalIntegrityOverdueSubs: spec-test sandbox subs are always excluded (seeded stuck fixture isn't a real anomaly)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sandbox-sub", workspace_id: SANDBOX_WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO },
+    ],
+    dunning_cycles: [],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: subs due TODAY (>= cutoff) are not counted — full renewal window hasn't passed", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-due-today", workspace_id: WS, is_internal: true, status: "active", next_billing_date: CUTOFF_ISO },
+    ],
+    dunning_cycles: [],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: cancelled/inactive subs and non-internal subs are ignored regardless of billing date", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-cancelled", workspace_id: WS, is_internal: true, status: "cancelled", next_billing_date: OVERDUE_ISO },
+      { id: "sub-external", workspace_id: WS, is_internal: false, status: "active", next_billing_date: OVERDUE_ISO },
+    ],
+    dunning_cycles: [],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
+  assert.equal(n, 0);
 });

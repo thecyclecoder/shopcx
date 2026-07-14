@@ -1043,7 +1043,12 @@ interface AssertionInputs {
   latestTriageJobAt: string | null;
   /** most-recent spec-test agent_jobs.created_at (any status), or null. */
   latestSpecTestJobAt: string | null;
-  /** active internal subs whose next_billing_date is already in the past (overdue). */
+  /**
+   * Active internal subs whose next_billing_date is already in the past (overdue) AND that
+   * aren't already owned by an active/rotating/retrying/paused/skipped dunning cycle. A sub
+   * whose payment failed and is waiting in dunning is HEALTHY retention state, not a
+   * renewal-cron miss (build-control-tower-renewal-integrity-exclude-active-dunning P1).
+   */
   overdueInternalSubs: number;
   /** per-sub renewal outcome breakdown for the LIVE current cycle (since the latest renewal-cron beat). */
   renewalCurrent: RenewalOutcomeCounts;
@@ -1384,6 +1389,60 @@ function evalOutputAssertion(
   }
 }
 
+/**
+ * Non-terminal dunning statuses: a cycle in one of these is still actively working the retry
+ * flow (rotating cards, waiting for a payday retry, paused pending a customer action, or the
+ * legacy 'active'/'skipped' pre-terminal states). Terminal statuses ('recovered', 'exhausted')
+ * are NOT here — a sub whose only dunning cycle is terminal has no live coverage and should
+ * still trip renewal-integrity if it's overdue. Kept in sync with `getActiveDunningCycle` in
+ * src/lib/dunning.ts, the canonical "is dunning still owning this sub" question.
+ */
+const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"] as const;
+
+/**
+ * READ-ONLY: overdue active internal subscriptions that AREN'T already owned by an active
+ * dunning cycle (build-control-tower-renewal-integrity-exclude-active-dunning Phase 1).
+ *
+ * An overdue internal sub whose payment failed and dunning is waiting for the next retry is
+ * a HEALTHY retention state, not a renewal-cron miss — counting it as renewal_integrity
+ * false-pages the platform owner. So subtract subs whose subscription_id is joined to a
+ * non-terminal `dunning_cycles` row. Uncovered overdue subs still flag as renewal_integrity;
+ * dunning-owned subs remain visible through the stuck-dunning assertion if their retry
+ * schedule is missed.
+ *
+ * The join is on subscription_id (internal UUID) per the CLAUDE.md invariant that internal
+ * joins never go through shopify_*_id. The spec-test sandbox is excluded on both sides so a
+ * seeded stuck-overdue fixture can't inflate the real count.
+ */
+export async function countRenewalIntegrityOverdueSubs(admin: Admin, startOfTodayIso: string): Promise<number> {
+  const { data: overdueRows, error: overdueErr } = await admin
+    .from("subscriptions")
+    .select("id")
+    .eq("is_internal", true)
+    .eq("status", "active")
+    .lt("next_billing_date", startOfTodayIso)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (overdueErr || !overdueRows || overdueRows.length === 0) return 0;
+  const overdueIds = overdueRows.map((r) => (r as { id: string }).id);
+
+  const { data: coveredRows, error: coveredErr } = await admin
+    .from("dunning_cycles")
+    .select("subscription_id")
+    .in("status", [...ACTIVE_DUNNING_STATUSES])
+    .in("subscription_id", overdueIds)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (coveredErr) return overdueIds.length;
+  const coveredIds = new Set<string>();
+  for (const row of coveredRows ?? []) {
+    const subId = (row as { subscription_id: string | null }).subscription_id;
+    if (subId) coveredIds.add(subId);
+  }
+
+  let uncovered = 0;
+  for (const id of overdueIds) if (!coveredIds.has(id)) uncovered += 1;
+  return uncovered;
+}
+
 /** READ-ONLY: fetch the extra state the Phase 2 output assertions evaluate against. */
 async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const startOfToday = new Date();
@@ -1394,7 +1453,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const segFreshCutoffIso = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
   const segStaleCutoffIso = new Date(Date.now() - SEGMENT_COVERAGE_MAX_AGE_MS).toISOString();
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueSubs, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -1427,14 +1486,10 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     admin.from("agent_jobs").select("created_at").eq("kind", "spec-test").order("created_at", { ascending: false }).limit(1).maybeSingle(),
     // Overdue = strictly before today 00:00 UTC ⇒ a full renewal window has passed
     // (no false positive on a sub merely due today that the async attempt hasn't processed yet).
-    admin
-      .from("subscriptions")
-      .select("id", { count: "exact", head: true })
-      .eq("is_internal", true)
-      .eq("status", "active")
-      .lt("next_billing_date", startOfToday.toISOString())
-      // Exclude the spec-test sandbox: its seeded comp fixture is stuck overdue by design.
-      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
+    // Subs already owned by an ACTIVE dunning cycle (rotating/retrying/paused/skipped) are
+    // subtracted — a payment-failed sub waiting for its retry date is healthy retention state,
+    // not a renewal-cron miss (build-control-tower-renewal-integrity-exclude-active-dunning P1).
+    countRenewalIntegrityOverdueSubs(admin, startOfToday.toISOString()),
     // The latest renewal-cron beat marks the start of the LIVE current cycle — outcome beats since
     // then belong to it (vs everything older = the rolling baseline).
     admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "internal-subscription-renewal-cron").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
@@ -1486,7 +1541,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     oldestEscalatedAt: (oldestEscalated.data as { escalated_at: string } | null)?.escalated_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
-    overdueInternalSubs: overdueSubs.count ?? 0,
+    overdueInternalSubs: overdueInternalSubsUncovered,
     renewalCurrent,
     renewalBaseline,
     stuckDunningCycles: stuckDunning.count ?? 0,
