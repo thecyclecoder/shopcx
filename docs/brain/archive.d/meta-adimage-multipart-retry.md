@@ -1,0 +1,1 @@
+- **Retry transient Meta ad image uploads through retry wrapper** · verified 2026-07-14 · → [[libraries/meta-ads]]
