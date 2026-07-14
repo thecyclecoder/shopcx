@@ -1,0 +1,1 @@
+- **Ads supervisor: product Amazing Coffee — live test ad has no LF8 language** · verified 2026-07-14 · → [[../libraries/ads-supervisor]]
