@@ -1,0 +1,1 @@
+- **Fix two live schema-drift Postgres errors in Bianca's code: meta_ads.spend_cents and ad_publish_jobs.ad_campaign_id** · verified 2026-07-14 · → [[../libraries/meta-cpa-signal]], [[../libraries/creative-learning]]
