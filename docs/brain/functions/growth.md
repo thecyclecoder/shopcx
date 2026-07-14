@@ -18,6 +18,7 @@ Continuously find, test, and scale **winning static creative**, and kill losers 
 
 - **Metric:** winning-creative hit-rate + blended static-ad ROAS, week over week.
 - **Loop:** source proven static concepts → drop into the **ideas bin** → produce variants → test → scale winners / cut losers → feed learnings back.
+- **Standing supervisor:** [[../inngest/ads-supervisor-cadence]] — a persistent every-3h box agent ([[../libraries/ads-supervisor]]) that audits Bianca (media buyer) + Dahlia (ad creative), authoring fix-specs for any detected drift (crown/kill misses, bin depth below floor, zero seeded angles, live-ad LF8 or destination QA fails) and digesting findings to #director-growth-max. Embodies the north-star: it **supervises** the tools and **proposes** fixes via specs — it never moves spend / pauses / crowns / places ads directly. See [[../specs/growth-ads-supervisor-3h-agent]] ✅.
 - **Specs under this mandate:**
   - [[../specs/winning-static-creative-finder]] ⏳ — ingest winning static ads (competitor/library/our own top performers) into the ideas bin so we can make more killer statics.
   - [[../specs/killer-statics]] ✅ — cold-50+ static archetypes, both formats.
