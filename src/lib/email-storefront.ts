@@ -33,6 +33,31 @@ export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefi
 }
 
 /**
+ * Non-reviewable add-on / system product identity markers. Shipping
+ * Protection is the confirmed live case (product_type "ShopWill",
+ * handle "shipping-insurance" on the workspace's `ee261540…` product).
+ * The UUID guard above happens to exclude Shipping Protection today
+ * only because its line-item id is a Shopify numeric — if a
+ * shipping-protection line ever carried a valid product UUID (or a new
+ * add-on lands with a UUID id), it would slip back into review
+ * sourcing. Exclude by identity so the review block always sources
+ * only from real, reviewable products the customer actually bought.
+ */
+const NON_REVIEWABLE_PRODUCT_TYPES = new Set(["shopwill"]);
+const NON_REVIEWABLE_PRODUCT_HANDLES = new Set(["shipping-insurance"]);
+
+export function isReviewableProduct(product: {
+  product_type?: string | null;
+  handle?: string | null;
+}): boolean {
+  const type = (product.product_type || "").trim().toLowerCase();
+  if (NON_REVIEWABLE_PRODUCT_TYPES.has(type)) return false;
+  const handle = (product.handle || "").trim().toLowerCase();
+  if (NON_REVIEWABLE_PRODUCT_HANDLES.has(handle)) return false;
+  return true;
+}
+
+/**
  * Pull the workspace's storefront branding + transactional messaging
  * config so the email header matches the site and the from/reply-to
  * addresses match what the workspace set in Settings → Transactional
@@ -156,13 +181,27 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
   const uuidIds = uuidLineItemProductIds(productIds);
   if (uuidIds.length === 0) return null;
   const admin = createAdminClient();
+  // Semantic exclusion of non-reviewable add-ons (Shipping Protection
+  // and similar system products). The UUID guard alone would let a
+  // shipping-protection line back into review sourcing if its id ever
+  // carried a valid product UUID; resolve identity here so the
+  // exclusion holds regardless of id shape (see isReviewableProduct).
+  const { data: candidateProducts } = await admin
+    .from("products")
+    .select("id, product_type, handle")
+    .eq("workspace_id", workspaceId)
+    .in("id", uuidIds);
+  const reviewableIds = (candidateProducts || [])
+    .filter((p) => isReviewableProduct(p as { product_type?: string | null; handle?: string | null }))
+    .map((p) => p.id as string);
+  if (reviewableIds.length === 0) return null;
   // Featured first
   const sel = "reviewer_name, rating, title, body, smart_quote, product_id";
   const { data: featured } = await admin
     .from("product_reviews")
     .select(sel)
     .eq("workspace_id", workspaceId)
-    .in("product_id", uuidIds)
+    .in("product_id", reviewableIds)
     .eq("featured", true)
     .not("body", "is", null)
     .limit(20);
@@ -173,7 +212,7 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
       .from("product_reviews")
       .select(sel)
       .eq("workspace_id", workspaceId)
-      .in("product_id", uuidIds)
+      .in("product_id", reviewableIds)
       .in("status", ["published", "featured"])
       .eq("rating", 5)
       .not("body", "is", null)

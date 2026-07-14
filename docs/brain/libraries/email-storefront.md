@@ -53,9 +53,18 @@ export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefi
 
 UUID-shape guard for the featured-review query. Both `sendOrderConfirmationEmail` and `sendShippingNotificationEmail` render a social-proof review sourced by `.in('product_id', productIds)` against `product_reviews`. Some line items carry a Shopify NUMERIC product id in `product_id` rather than the internal UUID — Shipping Protection is the confirmed case (its `product_id` is the Shopify id `7634377900205`; the row's real internal UUID lives at `products.shopify_product_id`). A single non-UUID value makes Postgres raise `22P02 invalid input syntax for type uuid` and errors the WHOLE query, silently dropping the review block for every valid product in the same order. This helper strips non-UUID ids before they reach the filter; it is applied at both build sites AND as defense-in-depth inside `pickFeaturedReview`. Same join-discipline invariant as the fraud order_ids / customer-fraud-status fixes: never mix Shopify ids into a UUID column filter.
 
+### `isReviewableProduct` — function
+
+```ts
+export function isReviewableProduct(product: { product_type?: string | null; handle?: string | null }): boolean
+```
+
+Identity-based exclusion of non-reviewable add-on / system products from the featured-review sourcing set. Shipping Protection is the confirmed case (`product_type` = `ShopWill`, `handle` = `shipping-insurance` on the workspace's `ee261540…` product) — it will never carry customer reviews and must never source the social-proof block. Applied inside `pickFeaturedReview` after the UUID guard: the picker resolves candidate ids against `public.products` and drops any row that fails `isReviewableProduct` before hitting `product_reviews`. This is the SEMANTIC guard behind the [[../../tables/product_reviews]] block: the UUID shape guard (above) excludes Shipping Protection today only as a side-effect of its line-item id being Shopify-numeric — if an add-on ever carried a valid product UUID, only this identity check would keep it out of review sourcing. Add new add-on markers to `NON_REVIEWABLE_PRODUCT_TYPES` / `NON_REVIEWABLE_PRODUCT_HANDLES` in the file, not as ad-hoc checks at call sites.
+
 ## Gotchas
 
 - **Non-UUID line-item `product_id` poisons the featured-review query.** `product_reviews.product_id` is a UUID column; a Shopify-numeric id (Shipping Protection = `7634377900205`) in the `.in(...)` array 22P02s the entire query. `uuidLineItemProductIds` is the guard — always run it before calling `pickFeaturedReview`, and it's also applied inside the picker for defense-in-depth.
+- **Non-reviewable add-ons are excluded from the featured review by identity, not UUID accident.** Shipping Protection (`product_type` `ShopWill` / `handle` `shipping-insurance`) is dropped by `isReviewableProduct` inside `pickFeaturedReview` after the UUID guard, so an add-on that ever carried a valid product UUID cannot slip back into review sourcing. Register a new add-on / system product by adding its `product_type` or `handle` to the sets in `email-storefront.ts` — don't hand-roll the check at a new call site.
 
 ---
 
