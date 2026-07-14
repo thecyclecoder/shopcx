@@ -45,9 +45,17 @@ async function sendAbandonedCartEmail(opts: { workspaceId: string; to: string; f
 
 - `src/lib/inngest/abandoned-cart.ts`
 
+### `uuidLineItemProductIds` — function
+
+```ts
+export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefined>): string[]
+```
+
+UUID-shape guard for the featured-review query. Both `sendOrderConfirmationEmail` and `sendShippingNotificationEmail` render a social-proof review sourced by `.in('product_id', productIds)` against `product_reviews`. Some line items carry a Shopify NUMERIC product id in `product_id` rather than the internal UUID — Shipping Protection is the confirmed case (its `product_id` is the Shopify id `7634377900205`; the row's real internal UUID lives at `products.shopify_product_id`). A single non-UUID value makes Postgres raise `22P02 invalid input syntax for type uuid` and errors the WHOLE query, silently dropping the review block for every valid product in the same order. This helper strips non-UUID ids before they reach the filter; it is applied at both build sites AND as defense-in-depth inside `pickFeaturedReview`. Same join-discipline invariant as the fraud order_ids / customer-fraud-status fixes: never mix Shopify ids into a UUID column filter.
+
 ## Gotchas
 
-_None documented._
+- **Non-UUID line-item `product_id` poisons the featured-review query.** `product_reviews.product_id` is a UUID column; a Shopify-numeric id (Shipping Protection = `7634377900205`) in the `.in(...)` array 22P02s the entire query. `uuidLineItemProductIds` is the guard — always run it before calling `pickFeaturedReview`, and it's also applied inside the picker for defense-in-depth.
 
 ---
 
