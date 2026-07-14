@@ -37,8 +37,7 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 - `metaGet`/`metaPost` route through [[meta__graph-retry]] `graphFetchJson` —
   transient Meta errors (code 1/2, `is_transient`, 429, 5xx) retry with bounded
   backoff; fatal errors (token/permission/validation) fail fast with
-  `error_user_title`/`msg` detail. The multipart `adimages` upload uses a raw
-  `fetch` (FormData body) and is NOT wrapped.
+  `error_user_title`/`msg` detail. **The multipart `adimages` upload now routes through `graphFetchJson` as well** — `uploadAdImage` rebuilds a fresh FormData body inside the request thunk on each retry attempt (FormData-backed Blob cannot be reused across fetches) and applies the same bounded transient retry policy ([[../specs/meta-adimage-multipart-retry]] P1).
 
 ## Related
 
