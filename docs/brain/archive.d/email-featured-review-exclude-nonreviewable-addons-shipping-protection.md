@@ -1,0 +1,1 @@
+- **Semantic exclusion of non-reviewable add-ons from featured-review sourcing** · verified 2026-07-14 · → [[../libraries/email-storefront]]
