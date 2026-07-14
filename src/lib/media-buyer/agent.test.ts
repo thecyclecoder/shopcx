@@ -24,12 +24,14 @@ import {
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
   evaluateSensorTrustSnapshot,
+  executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
   readActiveCohortProductIds,
   readCurrentTestCohortSize,
   resolveReplenishAdCopy,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
+  type MediaBuyerMetaExecutor,
   type MediaBuyerPlanInputs,
   type SensorTrustSnapshot,
 } from "./agent";
@@ -1434,4 +1436,229 @@ test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the 
   assert.equal(built.metaAdsetIdForJob, "6100000000001", "legacy mode publishes INTO cohort.testMetaAdsetId directly");
   assert.equal(built.insert.meta_adset_id, "6100000000001");
   assert.equal(built.insert.create_adset_spec, null);
+});
+
+// ── media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded Phase 1 ──
+// The runner's inline Meta execute path — a decided kill MUST call updateObjectStatus and
+// flip the row decided→executed on success; a Graph failure MUST leave the row un-executed
+// so the audit trail never claims an action that never happened (no-false-promises).
+
+/** Fake admin scoped to `iteration_actions.update().eq().eq()` — captures the compare-and-set. */
+function makeFakeAdminForExecute() {
+  const updates: Array<{
+    table: string;
+    patch: Record<string, unknown>;
+    eqs: Array<{ col: string; val: unknown }>;
+  }> = [];
+  const admin = {
+    from(table: string) {
+      return {
+        update(patch: Record<string, unknown>) {
+          const eqs: Array<{ col: string; val: unknown }> = [];
+          const chain: {
+            eq: (col: string, val: unknown) => typeof chain;
+            then: (onFulfilled: (v: { data: null; error: null }) => unknown) => Promise<unknown>;
+          } = {
+            eq(col, val) {
+              eqs.push({ col, val });
+              return chain;
+            },
+            then(onFulfilled) {
+              updates.push({ table, patch, eqs });
+              return Promise.resolve(onFulfilled({ data: null, error: null }));
+            },
+          };
+          return chain;
+        },
+      };
+    },
+  } as unknown as Parameters<typeof executeDecidedActionAgainstMeta>[0]["admin"];
+  return { admin, updates };
+}
+
+test("Phase 1 — executeDecidedActionAgainstMeta (kill/pause) SUCCESS: calls updateObjectStatus(adsetId,'PAUSED') AND flips row decided→executed with the Graph response in external_result", async () => {
+  const { admin, updates } = makeFakeAdminForExecute();
+  const calls: Array<{ fn: string; args: unknown[] }> = [];
+  const executor: MediaBuyerMetaExecutor = {
+    updateObjectStatus: async (token, id, status) => {
+      calls.push({ fn: "updateObjectStatus", args: [token, id, status] });
+      return { success: true, graph_id: id };
+    },
+    updateObjectBudget: async () => {
+      throw new Error("updateObjectBudget must NOT be called for a pause");
+    },
+  };
+
+  const nowMs = Date.parse("2026-07-14T15:00:00.000Z");
+  const result = await executeDecidedActionAgainstMeta({
+    admin,
+    token: "tok-abc",
+    action: { rowId: "row-kill-1", actionType: "pause", targetLevel: "adset", targetObjectId: "6100000000123" },
+    nowMs,
+    metaExecutor: executor,
+  });
+
+  assert.equal(result.success, true, "kill success must return success:true");
+  // The exact primitive + args the spec's Phase 1 verification asserts:
+  assert.deepEqual(calls, [
+    { fn: "updateObjectStatus", args: ["tok-abc", "6100000000123", "PAUSED"] },
+  ]);
+  assert.equal(result.external_result.meta_object_id, "6100000000123");
+  assert.equal(result.external_result.applied_status, "PAUSED");
+
+  // Row flip: iteration_actions row → status='executed' with the Graph response, targeted by
+  // (id=rowId, status='decided') — the compare-and-set guard prevents a double-flip on re-run.
+  assert.equal(updates.length, 1, "exactly one iteration_actions update per successful execute");
+  const upd = updates[0];
+  assert.equal(upd.table, "iteration_actions");
+  assert.equal(upd.patch.status, "executed");
+  assert.equal(upd.patch.external_result != null, true, "external_result must be stamped on success");
+  assert.equal(typeof upd.patch.executed_at, "string", "executed_at must be stamped on success");
+  assert.deepEqual(upd.eqs, [
+    { col: "id", val: "row-kill-1" },
+    { col: "status", val: "decided" },
+  ], "compare-and-set: only flip a row still at status='decided' (re-run safety)");
+});
+
+test("Phase 1 — executeDecidedActionAgainstMeta (kill/pause) FAILURE: leaves row un-executed (status='failed' with error in external_result); NEVER stamps executed on a thrown Graph call", async () => {
+  const { admin, updates } = makeFakeAdminForExecute();
+  const executor: MediaBuyerMetaExecutor = {
+    updateObjectStatus: async () => {
+      throw new Error("meta_400: Object 6100000000123 does not exist");
+    },
+    updateObjectBudget: async () => ({}),
+  };
+
+  const nowMs = Date.parse("2026-07-14T15:00:00.000Z");
+  const result = await executeDecidedActionAgainstMeta({
+    admin,
+    token: "tok-abc",
+    action: { rowId: "row-kill-1", actionType: "pause", targetLevel: "adset", targetObjectId: "6100000000123" },
+    nowMs,
+    metaExecutor: executor,
+  });
+
+  // Contract: the runner uses `result.success` as the "may I claim this action?" gate. A
+  // Graph failure MUST return success:false — otherwise the paused_loser audit line ships
+  // for a pause that never happened (the exact spec bug: four Superfood duds stayed live
+  // while the ledger claimed a pause).
+  assert.equal(result.success, false, "kill failure must return success:false — this is the audit-line gate");
+  assert.ok(result.error && result.error.includes("meta_400"), "error message must be surfaced verbatim (max 500 chars) for CEO escalation copy");
+  assert.equal(updates.length, 1);
+  const upd = updates[0];
+  assert.notEqual(upd.patch.status, "executed", "NEVER stamp executed on a Graph failure — no-false-promises");
+  assert.equal(upd.patch.status, "failed", "failed rows are audit-visible; the coverage check (Phase 2) refuses to count them");
+  assert.equal((upd.patch.external_result as Record<string, unknown>).error, "meta_400: Object 6100000000123 does not exist");
+  assert.equal(upd.patch.executed_at, undefined, "executed_at must NOT be set on failure");
+  // The compare-and-set still fires — the row can only move decided→failed once.
+  assert.deepEqual(upd.eqs, [
+    { col: "id", val: "row-kill-1" },
+    { col: "status", val: "decided" },
+  ]);
+});
+
+test("Phase 1 — executeDecidedActionAgainstMeta (reactivate/unpause) SUCCESS: calls updateObjectStatus(adsetId,'ACTIVE') and stamps executed", async () => {
+  const { admin, updates } = makeFakeAdminForExecute();
+  const calls: Array<{ fn: string; args: unknown[] }> = [];
+  const executor: MediaBuyerMetaExecutor = {
+    updateObjectStatus: async (token, id, status) => {
+      calls.push({ fn: "updateObjectStatus", args: [token, id, status] });
+      return { success: true };
+    },
+    updateObjectBudget: async () => ({}),
+  };
+
+  const result = await executeDecidedActionAgainstMeta({
+    admin,
+    token: "tok-abc",
+    action: { rowId: "row-unpause-1", actionType: "unpause", targetLevel: "adset", targetObjectId: "6100000000999" },
+    nowMs: Date.parse("2026-07-14T15:00:00.000Z"),
+    metaExecutor: executor,
+  });
+  assert.equal(result.success, true);
+  assert.deepEqual(calls, [{ fn: "updateObjectStatus", args: ["tok-abc", "6100000000999", "ACTIVE"] }]);
+  assert.equal(updates[0].patch.status, "executed");
+});
+
+test("Phase 1 — executeDecidedActionAgainstMeta (promote/scale_up) SUCCESS: calls updateObjectBudget(adsetId, {dailyBudgetCents:X}) and stamps executed", async () => {
+  const { admin, updates } = makeFakeAdminForExecute();
+  const calls: Array<{ fn: string; args: unknown[] }> = [];
+  const executor: MediaBuyerMetaExecutor = {
+    updateObjectStatus: async () => ({}),
+    updateObjectBudget: async (token, id, budget) => {
+      calls.push({ fn: "updateObjectBudget", args: [token, id, budget] });
+      return { success: true };
+    },
+  };
+
+  const result = await executeDecidedActionAgainstMeta({
+    admin,
+    token: "tok-abc",
+    action: { rowId: "row-scale-1", actionType: "scale_up", targetLevel: "adset", targetObjectId: "6100000000123", afterBudgetCents: 23_000 },
+    nowMs: Date.parse("2026-07-14T15:00:00.000Z"),
+    metaExecutor: executor,
+  });
+  assert.equal(result.success, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].fn, "updateObjectBudget");
+  assert.deepEqual(calls[0].args[2], { dailyBudgetCents: 23_000 }, "scale_up hits daily budget by default (matches meta/execution's field convention)");
+  assert.equal(updates[0].patch.status, "executed");
+});
+
+test("Phase 1 — executeDecidedActionAgainstMeta (promote/scale_up) with null afterBudgetCents FAILS closed (CBO/ABO crossover — never guess a budget)", async () => {
+  const { admin, updates } = makeFakeAdminForExecute();
+  const executor: MediaBuyerMetaExecutor = {
+    updateObjectStatus: async () => ({}),
+    updateObjectBudget: async () => {
+      throw new Error("updateObjectBudget must NOT be called when afterBudgetCents is null");
+    },
+  };
+  const result = await executeDecidedActionAgainstMeta({
+    admin,
+    token: "tok-abc",
+    action: { rowId: "row-scale-null", actionType: "scale_up", targetLevel: "adset", targetObjectId: "6100000000123", afterBudgetCents: null },
+    nowMs: Date.parse("2026-07-14T15:00:00.000Z"),
+    metaExecutor: executor,
+  });
+  assert.equal(result.success, false);
+  assert.ok(result.error && result.error.includes("no_budget_to_set"), "CBO/ABO crossover must fail with the same rail meta/execution uses");
+  assert.equal(updates[0].patch.status, "failed");
+});
+
+// Structural pin: the runner MUST import + wire the inline Meta execute path so a stray edit
+// that regresses to the "upsert-then-forget" pre-Phase-1 shape (which claimed a pause that
+// never happened) fails this test at merge — not at runtime when four more duds have already
+// burned through $325 each waiting for the executor cron.
+test("agent.ts — runMediaBuyerLoop wires the inline Meta execute path (imports + guards the audit-line emit on `executed`)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+
+  assert.ok(
+    /import\s*\{[^}]*\bgetMetaUserToken\b[^}]*\bupdateObjectStatus\b/.test(src),
+    "agent.ts must import getMetaUserToken + updateObjectStatus from @/lib/meta-ads for the inline execute path",
+  );
+  assert.ok(
+    /executeDecidedActionAgainstMeta\(/.test(src),
+    "agent.ts must call executeDecidedActionAgainstMeta after the iteration_actions upsert — that is the Phase 1 wiring",
+  );
+  // The audit-line gate: the paused_loser / promoted_winner / reactivated_recovered emits
+  // must be behind an `executed.has(...)` check so a decided-but-unfired row never ships
+  // a false-claim audit line.
+  assert.ok(
+    /if\s*\(!executed\.has\(keyFor\(a\.targetObjectId,\s*"pause"\)\)\)\s*continue;/.test(src),
+    "runMediaBuyerLoop must gate the media_buyer_paused_loser emit on executed.has(kill-key) — no false claim (no-false-promises)",
+  );
+  assert.ok(
+    /if\s*\(!executed\.has\(keyFor\(a\.targetObjectId,\s*"scale_up"\)\)\)\s*continue;/.test(src),
+    "runMediaBuyerLoop must gate the media_buyer_promoted_winner emit on executed.has(promote-key)",
+  );
+  assert.ok(
+    /if\s*\(!executed\.has\(keyFor\(a\.targetObjectId,\s*"unpause"\)\)\)\s*continue;/.test(src),
+    "runMediaBuyerLoop must gate the media_buyer_reactivated_recovered emit on executed.has(unpause-key)",
+  );
+  // Escalation on failure — a decided-but-unfired kill must surface a CEO card, not vanish.
+  assert.ok(
+    /escalateMediaBuyerExecuteFailure\(/.test(src),
+    "runMediaBuyerLoop must call escalateMediaBuyerExecuteFailure on any Graph failure — a decided-but-unfired kill must surface, not vanish",
+  );
 });
