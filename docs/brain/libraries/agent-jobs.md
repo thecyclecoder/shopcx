@@ -348,6 +348,22 @@ The **auto-merge SUCCESS GATE**. The repo has no CI / branch protection, so GitH
 - `getLatestJobsBySlug(workspaceId)` — latest job per spec (board per-card status).
 - `getPendingFolds(workspaceId)` — specs queued for / mid- a fold-build ([[../specs/fold-build-batching]]).
 
+### `AGENT_JOB_COLUMNS` / `jobSelect` — typed column source-of-truth  *(agent-jobs-typed-column-source-of-truth Phase 1)*
+
+**File:** [[../../../src/lib/agent-jobs-columns]]
+
+```ts
+const AGENT_JOB_COLUMNS = ["id","workspace_id","spec_slug","spec_branch", …] as const;
+type AgentJobColumn = (typeof AGENT_JOB_COLUMNS)[number];
+function jobSelect(...cols: AgentJobColumn[]): string;
+```
+
+The **typed source-of-truth for [[../tables/agent_jobs]]' selectable columns** — every reader composing a `.select("…")` string against `agent_jobs` funnels through `jobSelect(...)` so a nonexistent column name is a **tsc error** at authoring time, not a silent-empty 42703 at runtime.
+
+**Why this exists.** Postgres raises **42703** on an unknown column in a SELECT list, but the Supabase JS client swallows it — the reader gets `{ data: null, error: <42703> }` and, if the caller checks only `data`, silently degrades. This bit `scripts/builder-worker.ts`' director-grade lane live: two selects requested a nonexistent `agent_jobs.merge_sha` column, so every enrichment read returned undefined and the repeat-failure logic silently no-op'd (also producing 42703 log noise that looked like a schema-drift incident). Same class chokepoint as [[specs-table]] / [[competitors]] / [[ticket-analyses]]. **Hard rule (new):** a new `.select("<literal>")` on `agent_jobs` MUST compose through `jobSelect(...)`; deliberate raw selects need an inline `// intentional override:` note explaining why.
+
+**agent_jobs has NO `merge_sha` column.** The merge SHA lives on [[../tables/spec_phases]] `merge_sha` / [[../tables/spec_status_history]] — source it there if actually needed. The drift test (`src/lib/agent-jobs-columns.test.ts`) parses `supabase/migrations/*_agent_jobs*.sql`, asserts the constant matches every migration-declared column both ways, and pins the `merge_sha`-is-not-a-column trap so a future re-add of the historic silently-empty select is caught pre-merge. Runs via `npm run test:agent-jobs-columns` — no DB credentials required (migrations are the code-side schema-of-truth).
+
 ## Tables written
 
 - [[../tables/agent_jobs]] (inserts `spec-test` rows via `enqueueSpecTestIfDue`; inserts auto-queued `build` rows via `autoQueueUnblockedBy` — [[../specs/spec-blockers]]; inserts `goal-fold` rows via `finalizePromotedGoal` / `reconcileCompletedGoalsToFolded`; flips jobs → `merged` in `reconcileMergedJobs`)

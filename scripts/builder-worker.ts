@@ -48,6 +48,10 @@ import { chunkForAuthoring, PLANNER_AUTHOR_BATCH_SIZE } from "./planner-chunk-au
 // so a spec-test check with a HARNESS/COMMAND signature (missing npm script, command-not-found,
 // ENOENT) can never survive as a `verdict='fail'` and spawn an unbuildable Bo fix phase.
 import { reclassifyHarnessFails } from "../src/lib/spec-test-harness-classifier";
+// agent-jobs-typed-column-source-of-truth Phase 1 — every agent_jobs.select() composed via this
+// typed helper so a nonexistent column (e.g. the historical `merge_sha` selects here that silently
+// 42703'd) is a tsc error, not an empty-row read at runtime.
+import { jobSelect } from "../src/lib/agent-jobs-columns";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -20160,9 +20164,12 @@ async function runDirectorGradeJob(job: Job) {
   const a = await admin();
 
   // Load per-candidate context for the prompt. Auto-approvals: the approval_decisions row + the
-  // target agent_jobs row (for the merged commit sha / PR / branch / status / log tail / approved
-  // action) + a repeat-failures count. Goal-escorts: the milestone's specs + their agent_jobs status,
-  // and the director's escorted_goal reasons for the goal.
+  // target agent_jobs row (for PR / branch / status / log tail / approved action) + a repeat-failures
+  // count. Goal-escorts: the milestone's specs + their agent_jobs status, and the director's
+  // escorted_goal reasons for the goal. NOTE — agent_jobs has NO `merge_sha` column (see
+  // [[../src/lib/agent-jobs-columns]]); the merge SHA lives on `spec_phases`/`spec_status_history`.
+  // The prompt directs the grader agent to fall back to `git diff origin/main...origin/<branch>`,
+  // which works whether the branch is merged or not.
   interface AutoApprovalCtx extends AutoApprovalCandidate {
     workspace_id: string;
     director_reasoning: string | null;
@@ -20174,7 +20181,6 @@ async function runDirectorGradeJob(job: Job) {
       pr_url: string | null;
       pr_number: number | null;
       spec_branch: string | null;
-      merge_sha: string | null;
       error: string | null;
       log_tail: string | null;
       pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
@@ -20184,7 +20190,7 @@ async function runDirectorGradeJob(job: Job) {
   interface GoalEscortCtx extends GoalEscortCandidate {
     workspace_id: string;
     escort_reasons: string[];
-    specs: Array<{ slug: string; status: string; pr_url: string | null; merge_sha: string | null }>;
+    specs: Array<{ slug: string; status: string; pr_url: string | null }>;
   }
 
   const autoApprovals: AutoApprovalCtx[] = [];
@@ -20201,12 +20207,12 @@ async function runDirectorGradeJob(job: Job) {
       if (!dec) continue;
       const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; reasoning: string | null; created_at: string };
       workspaceId = workspaceId ?? decision.workspace_id;
-      let target: AutoApprovalCtx["target"] = { id: null, kind: null, spec_slug: null, status: null, pr_url: null, pr_number: null, spec_branch: null, merge_sha: null, error: null, log_tail: null, pending_actions: null };
+      let target: AutoApprovalCtx["target"] = { id: null, kind: null, spec_slug: null, status: null, pr_url: null, pr_number: null, spec_branch: null, error: null, log_tail: null, pending_actions: null };
       let repeatFailures = 0;
       if (decision.agent_job_id) {
         const { data: jobRow } = await a
           .from("agent_jobs")
-          .select("id, kind, spec_slug, status, pr_url, pr_number, spec_branch, merge_sha, error, log_tail, pending_actions")
+          .select(jobSelect("id", "kind", "spec_slug", "status", "pr_url", "pr_number", "spec_branch", "error", "log_tail", "pending_actions"))
           .eq("id", decision.agent_job_id)
           .maybeSingle();
         if (jobRow) {
@@ -20218,12 +20224,11 @@ async function runDirectorGradeJob(job: Job) {
             pr_url: string | null;
             pr_number: number | null;
             spec_branch: string | null;
-            merge_sha: string | null;
             error: string | null;
             log_tail: string | null;
             pending_actions: Array<{ status?: string; type?: string; summary?: string; cmd?: string }> | null;
           };
-          target = { id: j.id, kind: j.kind, spec_slug: j.spec_slug, status: j.status, pr_url: j.pr_url, pr_number: j.pr_number, spec_branch: j.spec_branch, merge_sha: j.merge_sha, error: j.error, log_tail: j.log_tail, pending_actions: j.pending_actions };
+          target = { id: j.id, kind: j.kind, spec_slug: j.spec_slug, status: j.status, pr_url: j.pr_url, pr_number: j.pr_number, spec_branch: j.spec_branch, error: j.error, log_tail: j.log_tail, pending_actions: j.pending_actions };
           if (j.spec_slug) {
             const { data: laterFails } = await a
               .from("agent_jobs")
@@ -20264,20 +20269,20 @@ async function runDirectorGradeJob(job: Job) {
       if (c.spec_slugs.length) {
         const { data: specJobs } = await a
           .from("agent_jobs")
-          .select("spec_slug, status, pr_url, merge_sha, created_at")
+          .select(jobSelect("spec_slug", "status", "pr_url", "created_at"))
           .eq("workspace_id", wsRes)
           .eq("kind", "build")
           .in("spec_slug", c.spec_slugs)
           .order("created_at", { ascending: false })
           .limit(200);
         // Prefer the latest terminal row per spec_slug.
-        const bySlug = new Map<string, { status: string; pr_url: string | null; merge_sha: string | null }>();
-        for (const row of ((specJobs as Array<{ spec_slug: string; status: string; pr_url: string | null; merge_sha: string | null; created_at: string }>) || [])) {
-          if (!bySlug.has(row.spec_slug)) bySlug.set(row.spec_slug, { status: row.status, pr_url: row.pr_url, merge_sha: row.merge_sha });
+        const bySlug = new Map<string, { status: string; pr_url: string | null }>();
+        for (const row of ((specJobs as Array<{ spec_slug: string; status: string; pr_url: string | null; created_at: string }>) || [])) {
+          if (!bySlug.has(row.spec_slug)) bySlug.set(row.spec_slug, { status: row.status, pr_url: row.pr_url });
         }
         for (const slug of c.spec_slugs) {
           const row = bySlug.get(slug);
-          specs.push({ slug, status: row?.status ?? "unknown", pr_url: row?.pr_url ?? null, merge_sha: row?.merge_sha ?? null });
+          specs.push({ slug, status: row?.status ?? "unknown", pr_url: row?.pr_url ?? null });
         }
       }
       goalEscorts.push({ ...c, workspace_id: wsRes, escort_reasons: escortReasons, specs });
@@ -20312,7 +20317,6 @@ async function runDirectorGradeJob(job: Job) {
         `  target build: kind=${t.kind ?? "?"} · spec=${t.spec_slug ?? "—"} · concluded status: ${t.status ?? "?"}`,
         t.spec_branch ? `  branch: ${t.spec_branch}` : "",
         t.pr_url ? `  PR: ${t.pr_url}${t.pr_number ? ` (#${t.pr_number})` : ""}` : "",
-        t.merge_sha ? `  merged commit: ${t.merge_sha}` : "",
         approvedAction.type ? `  approved action: type=${approvedAction.type} · ${approvedAction.summary ?? "(no summary)"}` : "",
         approvedAction.cmd ? `  command run on approval: ${approvedAction.cmd}` : "",
         ``,
@@ -20334,7 +20338,7 @@ async function runDirectorGradeJob(job: Job) {
         `GOAL-ESCORT — goal "${c.goal_title}" (${c.goal_slug}) · milestone ${c.milestone || "—"}: ${c.milestone_name}`,
         `  director: ${c.director_function}`,
         `  the milestone's member specs (must all be shipped to land clean):`,
-        ...c.specs.map((s) => `    - ${s.slug}: ${s.status}${s.pr_url ? ` · PR ${s.pr_url}` : ""}${s.merge_sha ? ` · sha ${s.merge_sha}` : ""}`),
+        ...c.specs.map((s) => `    - ${s.slug}: ${s.status}${s.pr_url ? ` · PR ${s.pr_url}` : ""}`),
         ``,
         `  WHAT THE DIRECTOR DID (its escort activity for this goal):`,
         ...(c.escort_reasons.length ? c.escort_reasons.map((r) => `    • ${r}`) : ["    (no escort activity recorded for this goal)"]),
