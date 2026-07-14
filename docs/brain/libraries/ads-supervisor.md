@@ -25,7 +25,7 @@ For each hero product (any product with an active [[../tables/media_buyer_test_c
 
 For each live test creative (a `TestAdsetRow.creative` object carrying `headline / primaryText / description / link`), run two rule-based checks:
 
-- **LF8 keyword scan** — `hasAnyLf8(copyLower)` matches the joined headline + primary text against a lowercase Life-Force-8 keyword list (energy / sleep / focus / calm / protect / family / proven / unlock / boost / …). Zero matches → `live_ad_lf8_thin` finding.
+- **LF8 keyword scan** — `hasAnyLf8(copyLower)` from [[lf8]] matches the joined headline + primary text against the canonical Life-Force-8 keyword list (energy / sleep / focus / calm / protect / family / proven / unlock / boost / …). Zero matches → `live_ad_lf8_thin` finding. **Invariant (2026-07-14):** the same [[lf8]] module is shared with [[creative-brief]] `buildMetaCopy`, so a live drift re-flags only if Dahlia's brief genuinely lacks LF8-adjacent language — the generator satisfies the gate by construction (prefers LF8 supporting benefits + injects one if missing). Re-runs on the same drift class produce the SAME slug so repeat drifts are deduped.
 - **Destination scent-match** — `destinationMatchesProduct(destination, productTitle)` parses the ad link, splits the product title into ≥4-char kebab tokens, and asserts at least one appears in the URL path. Homepage-only (`/`) or a URL parse error is a mismatch → `live_ad_destination_mismatch` finding.
 
 These are DELIBERATELY rule-based (no LLM QA) so the pass is deterministic + cheap; a follow-up spec can widen the check with a vision QA if the base needs it.
