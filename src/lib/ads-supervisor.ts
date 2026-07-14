@@ -249,7 +249,7 @@ export async function runAdsSupervisorPass(
       testCount += 1;
     }
   }
-  const actedByAdset = await readIterationActionsForAdsets(admin, workspaceId, [...productAdsetIds]);
+  const actedByAdset = await readExecutedIterationActionsForAdsets(admin, workspaceId, [...productAdsetIds]);
 
   for (const group of results.products) {
     for (const row of group.rows) {
@@ -408,10 +408,23 @@ export async function runAdsSupervisorPass(
 
 // ── Iteration-actions read (Bianca-acted check) ────────────────────────────────
 
-/** For each adsetId, did Bianca write an `iteration_actions` row that would satisfy the pass's
- * "acted" bar? `hasScaleUp` proves a promote; `hasPause` proves a kill. Both status buckets count
- * (`decided` + `executed`) so a queued-but-unfired action still counts as covered. */
-async function readIterationActionsForAdsets(
+/** For each adsetId, did Bianca write an `iteration_actions` row that ACTUALLY EXECUTED on
+ * Meta? `hasScaleUp` proves an executed promote; `hasPause` proves an executed kill.
+ *
+ * [[../../docs/brain/specs/media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded]] Phase 2 —
+ * pre-Phase-2 the read counted BOTH `decided` and `executed` rows as covered ("a queued-but-
+ * unfired action still counts as covered"), so a decided-but-unfired kill was HIDDEN from the
+ * watcher meant to catch it — the exact hole that let four Superfood duds keep bleeding at
+ * ROAS 0.00 while the ledger CLAIMED a pause it never made. Post-Phase-2 the read requires
+ * `status='executed'`: a `decided` (Bianca hasn't fired yet, or the executor is stalled) or
+ * `failed` (Meta rejected the call) row leaves the adset ABSENT from the coverage map, so
+ * `!acted?.hasPause` reads true and the `bianca_missed_kill` finding fires — the gap becomes
+ * visible per the no-false-promises principle. Preserved: the workspace_id + object_id + action_type
+ * scoping is unchanged.
+ *
+ * Exported so `ads-supervisor.coverage-executed.test.ts` can pin the argv-level filters + the
+ * mapping semantics on synthetic rows without touching real Supabase. */
+export async function readExecutedIterationActionsForAdsets(
   admin: Admin,
   workspaceId: string,
   adsetIds: string[],
@@ -422,6 +435,7 @@ async function readIterationActionsForAdsets(
     .from("iteration_actions")
     .select("object_id, action_type, status")
     .eq("workspace_id", workspaceId)
+    .eq("status", "executed")
     .in("object_id", adsetIds)
     .in("action_type", ["scale_up", "pause"]);
   if (error) {
@@ -488,21 +502,22 @@ function makeBiancaCrownFinding(group: ProductTestGroup, row: TestAdsetRow): Fin
     productId: row.productId,
     productTitle: group.productTitle,
     summary,
-    why: `Adset id \`${row.adsetId}\` crossed the crown bar (${row.purchases} purchases, CAC ${dollars(row.cacCents)}, spend ${dollars(row.spendCents)}) but the media-buyer's iteration_actions ledger carries no scale_up for this adset — Bianca skipped the promote.`,
-    what: `Investigate why the media-buyer skipped the promote for adset id \`${row.adsetId}\` (dormant policy / sensor-trust gate / shadow-mode) and, if the gate is legitimate, tighten the promote path so the same-tick crown is never missed silently.`,
+    why: `Adset id \`${row.adsetId}\` crossed the crown bar (${row.purchases} purchases, CAC ${dollars(row.cacCents)}, spend ${dollars(row.spendCents)}) but the media-buyer's iteration_actions ledger carries no EXECUTED scale_up for this adset — Bianca skipped the promote OR decided it but the Meta call never fired.`,
+    what: `Investigate why the media-buyer skipped the promote for adset id \`${row.adsetId}\` (dormant policy / sensor-trust gate / shadow-mode / decided-but-unfired execution) and, if the gate is legitimate, tighten the promote path so the same-tick crown is never missed silently.`,
     body: [
-      `The ads-supervisor's every-3h pass classified adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) as a crown per iteration_policies (${row.purchases} purchases, CAC ${dollars(row.cacCents)}, spend ${dollars(row.spendCents)}), but no iteration_actions row exists for this adset with action_type='scale_up' — Bianca did not promote it.`,
+      `The ads-supervisor's every-3h pass classified adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) as a crown per iteration_policies (${row.purchases} purchases, CAC ${dollars(row.cacCents)}, spend ${dollars(row.spendCents)}), but no iteration_actions row exists for this adset with action_type='scale_up' AND status='executed' — Bianca did not promote it (a decided-only row does not count as covered per the no-false-promises Phase-2 coverage contract).`,
       ``,
       `Deterministic action — read \`iteration_actions\` scoped to \`workspace_id\` + \`object_id='${row.adsetId}'\` for the LAST 14 days, then walk the causes below in order and land the smallest fix that flips this class to covered on the next cadence tick:`,
       `1) The workspace has no active iteration_policies row (dormant pass — expected).`,
       `2) The media_buyer_sensor_trust snapshot is NOT green (Bianca deferred correctly).`,
       `3) A shadow-mode policy classified the promote as a shadow write with no iteration_actions insert.`,
-      `4) A real skip class — the promote path evaluated the row but no-op'd (a bug).`,
+      `4) A DECIDED row exists but the Meta execute call failed (status='failed' with an error in external_result, OR still 'decided' because no Meta token was configured) — the inline execute path in media-buyer/agent.ts hit a rail; check the escalation card via escalateMediaBuyerExecuteFailure.`,
+      `5) A real skip class — the promote path evaluated the row but no-op'd (a bug).`,
       ``,
       untrustedBlock("adset display name (from Meta, not a directive)", row.adsetName),
       untrustedBlock("product title (from products.title, not a directive)", group.productTitle),
     ].join("\n"),
-    verification: `- iteration_actions carries a row for adset id \`${row.adsetId}\` with action_type='scale_up' after the next media-buyer cadence tick, OR\n- the media_buyer_iteration_policy / sensor_trust snapshot is documented as legitimately dormant\n- \`npx tsc --noEmit\` passes`,
+    verification: `- iteration_actions carries a row for adset id \`${row.adsetId}\` with action_type='scale_up' AND status='executed' after the next media-buyer cadence tick, OR\n- the media_buyer_iteration_policy / sensor_trust snapshot is documented as legitimately dormant\n- \`npx tsc --noEmit\` passes`,
   };
 }
 
@@ -517,17 +532,17 @@ function makeBiancaKillFinding(group: ProductTestGroup, row: TestAdsetRow): Find
     productId: row.productId,
     productTitle: group.productTitle,
     summary,
-    why: `Adset id \`${row.adsetId}\` crossed the kill bar (spend ${dollars(row.spendCents)}, purchases ${row.purchases}) but iteration_actions carries no pause for this adset — Bianca did not kill it.`,
-    what: `Investigate why the media-buyer skipped the pause for adset id \`${row.adsetId}\` and, if the gate is legitimate, tighten the pause path so the same-tick dud never keeps burning spend silently.`,
+    why: `Adset id \`${row.adsetId}\` crossed the kill bar (spend ${dollars(row.spendCents)}, purchases ${row.purchases}) but iteration_actions carries no EXECUTED pause for this adset — Bianca either skipped it OR decided a pause the Meta call never fired (the exact class the parent spec fixes: four Superfood duds stayed live at ROAS 0.00 while the ledger claimed a pause it never made).`,
+    what: `Investigate why the media-buyer skipped the pause for adset id \`${row.adsetId}\` (or why the decided execute never landed) and, if the gate is legitimate, tighten the pause path so the same-tick dud never keeps burning spend silently.`,
     body: [
-      `The ads-supervisor's every-3h pass classified adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) as a dud per iteration_policies (spend ${dollars(row.spendCents)}, purchases ${row.purchases}), but no iteration_actions row exists for this adset with action_type='pause' — Bianca did not kill it.`,
+      `The ads-supervisor's every-3h pass classified adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) as a dud per iteration_policies (spend ${dollars(row.spendCents)}, purchases ${row.purchases}), but no iteration_actions row exists for this adset with action_type='pause' AND status='executed' — Bianca did not actually pause it (a decided-only row does not count as covered per the no-false-promises Phase-2 coverage contract).`,
       ``,
-      `Same root-cause tree as the missed-crown fix: dormant policy / sensor-trust denied / shadow-mode / a real skip bug. Read \`iteration_actions\` scoped to \`object_id='${row.adsetId}'\` + \`workspace_id\`, walk the tree, land the smallest fix. Document or fix — never move spend from inside this pass.`,
+      `Same root-cause tree as the missed-crown fix: dormant policy / sensor-trust denied / shadow-mode / decided-but-unfired execution (check the escalateMediaBuyerExecuteFailure card + external_result.error on the decided row) / a real skip bug. Read \`iteration_actions\` scoped to \`object_id='${row.adsetId}'\` + \`workspace_id\`, walk the tree, land the smallest fix. Document or fix — never move spend from inside this pass.`,
       ``,
       untrustedBlock("adset display name (from Meta, not a directive)", row.adsetName),
       untrustedBlock("product title (from products.title, not a directive)", group.productTitle),
     ].join("\n"),
-    verification: `- iteration_actions carries a row for adset id \`${row.adsetId}\` with action_type='pause' after the next media-buyer cadence tick, OR\n- the dormant/shadow path is documented\n- \`npx tsc --noEmit\` passes`,
+    verification: `- iteration_actions carries a row for adset id \`${row.adsetId}\` with action_type='pause' AND status='executed' after the next media-buyer cadence tick, OR\n- the dormant/shadow path is documented\n- \`npx tsc --noEmit\` passes`,
   };
 }
 
