@@ -49,11 +49,87 @@ import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
+import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { inngest } from "@/lib/inngest/client";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 const GROWTH_DIRECTOR_FUNCTION = "growth";
+
+/** Deep link the under-provisioned cohort escalation surfaces on the CEO's inbox card. */
+const MEDIA_BUYER_UNDER_PROVISIONED_DEEP_LINK = "/dashboard/marketing/ads";
+
+/**
+ * escalateUnderProvisionedCohort — Phase 3 of
+ * `media-buyer-cohort-adset-template-guard-backfill-and-escalate`.
+ *
+ * When Bianca's replenish defers on missing config for an ACTIVE per-test cohort, raise a
+ * visible `dashboard_notifications` card (in ADDITION to the existing quiet `director_activity`
+ * audit row) so a rail hit ESCALATES per the north star — never silently sits under target.
+ * The exact rail Superfood Tabs's stuck 2/4 hit for days.
+ *
+ * Dedupe: at most once per (cohort, reason) per UTC day. `dedupe_key` carries the yyyy-mm-dd,
+ * so a persistent under-provisioning still surfaces once per day until fixed, but the 2h
+ * media-buyer pass cadence never spams the inbox. Idempotent — a same-day, same-reason
+ * card already in the inbox short-circuits before insert.
+ */
+export async function escalateUnderProvisionedCohort(
+  admin: Admin,
+  args: {
+    workspaceId: string;
+    productId: string | null;
+    cohortId: string;
+    reason: string;
+    /** Override "now" — tests pin this so the dedupe day is deterministic. */
+    nowMs?: number;
+  },
+): Promise<{ emitted: boolean }> {
+  const day = new Date(args.nowMs ?? Date.now()).toISOString().slice(0, 10);
+  const dedupeKey = `under_provisioned_cohort:${args.workspaceId}:${args.cohortId}:${args.reason}:${day}`;
+
+  // Confirming predicate — bail if any card for this dedupe_key already exists in this workspace's
+  // inbox today (per-cohort+reason+day cap). Never enumerate then insert without re-asserting.
+  const { data: prior } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("metadata->>dedupe_key", dedupeKey)
+    .limit(1);
+  if ((prior ?? []).length > 0) return { emitted: false };
+
+  const title = `Media Buyer: under-provisioned cohort — ${args.reason.slice(0, 100)}`;
+  const body =
+    `🛠️ Bianca (Media Buyer, Growth) hit a rail replenishing an ACTIVE per-test cohort and cannot ` +
+    `fill test slots — the product is stuck under target.\n\n` +
+    `Reason: ${args.reason}\n` +
+    `Cohort: ${args.cohortId}\n` +
+    (args.productId ? `Product: ${args.productId}\n` : "") +
+    `Fix the cohort config (adset_template / test_meta_campaign_id / default publish targets) ` +
+    `to unblock the next pass.`;
+
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: args.workspaceId,
+    type: APPROVAL_REQUEST_TYPE,
+    title: title.slice(0, 200),
+    body: body.slice(0, 4000),
+    link: MEDIA_BUYER_UNDER_PROVISIONED_DEEP_LINK,
+    metadata: {
+      routed_to_function: "ceo",
+      escalated_by_director: GROWTH_DIRECTOR_FUNCTION,
+      escalation_kind: "media_buyer_replenish_missing_config",
+      escalation_reason: args.reason.slice(0, 2000),
+      dedupe_key: dedupeKey,
+      cohort_id: args.cohortId,
+      product_id: args.productId,
+      approve_action_id: null,
+    },
+    read: false,
+    dismissed: false,
+  });
+  if (error) return { emitted: false };
+  return { emitted: true };
+}
 
 /**
  * Default number of live creatives the Media Buyer keeps in the test cohort at any time.
@@ -1217,6 +1293,19 @@ export async function runMediaBuyerLoop(
         },
       });
       if (r.recorded) writes.directorActivityRows += 1;
+
+      // Phase 3 — a rail hit on an ACTIVE cohort must ESCALATE, not silently sit under target
+      // (north star). The audit row above is a quiet ledger; this raises a deduped CEO card so
+      // an under-provisioned product screams instead of stalling like Superfood Tabs did.
+      if (cohort?.isActive && cohort.id) {
+        await escalateUnderProvisionedCohort(admin, {
+          workspaceId: opts.workspaceId,
+          productId: cohort.productId ?? null,
+          cohortId: cohort.id,
+          reason: jobInsert.reason,
+          nowMs,
+        });
+      }
     }
   }
 
