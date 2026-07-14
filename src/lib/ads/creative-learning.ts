@@ -132,8 +132,10 @@ export async function recordCombinationGenerated(
 /**
  * Stamp a combination's OUTCOME (won / lost / reactivated) — called by the media buyer when it crowns /
  * trims / reactivates an adset, closing the learning loop. Resolves the pending `creative_test_outcomes`
- * row by `adCampaignId` (winners carry it) or by `metaAdsetId` → `ad_publish_jobs.ad_campaign_id`. No-op
- * when the ad wasn't system-generated (no ledger row) — the flywheel only learns from our own creatives.
+ * row by `adCampaignId` (winners carry it) or by `metaAdsetId` → `ad_publish_jobs.campaign_id` (the FK
+ * to [[../../tables/ad_campaigns]]; note: `meta_campaign_id` on ad_publish_jobs is the SEPARATE Meta
+ * campaign id, not the ad_campaigns UUID). No-op when the ad wasn't system-generated (no ledger row) —
+ * the flywheel only learns from our own creatives.
  */
 export async function stampCreativeOutcome(
   admin: Admin,
@@ -143,12 +145,12 @@ export async function stampCreativeOutcome(
   if (!adCampaignId && args.metaAdsetId) {
     const { data: pj } = await admin
       .from("ad_publish_jobs")
-      .select("ad_campaign_id")
+      .select("campaign_id")
       .eq("meta_adset_id", args.metaAdsetId)
-      .not("ad_campaign_id", "is", null)
+      .not("campaign_id", "is", null)
       .limit(1)
       .maybeSingle();
-    adCampaignId = (pj as { ad_campaign_id?: string } | null)?.ad_campaign_id ?? null;
+    adCampaignId = (pj as { campaign_id?: string } | null)?.campaign_id ?? null;
   }
   if (!adCampaignId) return; // not a system-generated combination — nothing to learn from
   await admin
