@@ -7,7 +7,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { uuidLineItemProductIds } from "./email-storefront";
+import { isReviewableProduct, uuidLineItemProductIds } from "./email-storefront";
 
 const SHIPPING_PROTECTION_SHOPIFY_ID = "7634377900205";
 const VALID_UUID = "ee261540-4b0e-4c8a-9a0f-5e3f7c9d1234";
@@ -44,4 +44,32 @@ test("almost-UUID (missing hyphen / wrong length) is rejected — the whole poin
   const tooShort = VALID_UUID.slice(0, -1);
   const out = uuidLineItemProductIds([missingHyphen, tooShort, VALID_UUID]);
   assert.deepEqual(out, [VALID_UUID]);
+});
+
+// isReviewableProduct — identity-based exclusion of non-reviewable
+// add-ons (Shipping Protection). This is the semantic guard: it holds
+// even if a shipping-protection line ever carries a valid product
+// UUID that would sneak past uuidLineItemProductIds.
+
+test("Shipping Protection by product_type=ShopWill is not reviewable — even with a valid UUID", () => {
+  assert.equal(isReviewableProduct({ product_type: "ShopWill", handle: "shipping-insurance" }), false);
+});
+
+test("Shipping Protection by handle alone is not reviewable — belt-and-suspenders", () => {
+  assert.equal(isReviewableProduct({ product_type: null, handle: "shipping-insurance" }), false);
+});
+
+test("product_type match is case-insensitive (SHOPWILL / shopwill)", () => {
+  assert.equal(isReviewableProduct({ product_type: "SHOPWILL" }), false);
+  assert.equal(isReviewableProduct({ product_type: "shopwill" }), false);
+});
+
+test("real product (coffee) IS reviewable — nothing else is excluded by accident", () => {
+  assert.equal(isReviewableProduct({ product_type: "Coffee", handle: "amazing-coffee" }), true);
+});
+
+test("missing / empty identity fields default to reviewable — only known add-on markers exclude", () => {
+  assert.equal(isReviewableProduct({}), true);
+  assert.equal(isReviewableProduct({ product_type: "", handle: "" }), true);
+  assert.equal(isReviewableProduct({ product_type: null, handle: null }), true);
 });
