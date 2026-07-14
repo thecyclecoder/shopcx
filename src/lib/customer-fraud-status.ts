@@ -117,11 +117,14 @@ export async function getCustomerFraudStatus(
   const ids = await expandLinkedCustomerIds(admin, workspaceId, customerId);
 
   // 1 + 2. fraud_cases — confirmed cases AND any amazon_reseller flags
-  const { data: cases } = await admin
+  const { data: cases, error: casesErr } = await admin
     .from("fraud_cases")
-    .select("id, rule_type, title, severity, status, first_detected_at, last_seen_at, updated_at")
+    .select("id, rule_type, title, severity, status, first_detected_at, last_seen_at")
     .eq("workspace_id", workspaceId)
     .overlaps("customer_ids", ids);
+  if (casesErr) {
+    console.warn("[customer-fraud-status] fraud_cases select failed", { workspaceId, customerId, error: casesErr });
+  }
 
   const confirmedCases: FraudStatus["confirmedCases"] = [];
   const openCases: FraudStatus["openCases"] = [];
@@ -131,7 +134,7 @@ export async function getCustomerFraudStatus(
     if (c.status === "confirmed_fraud") {
       confirmedCases.push({
         id: c.id, rule_type: c.rule_type, title: c.title, severity: c.severity,
-        confirmed_at: (c.updated_at || c.last_seen_at) as string,
+        confirmed_at: c.last_seen_at as string,
       });
     } else if (c.status === "open") {
       openCases.push({
