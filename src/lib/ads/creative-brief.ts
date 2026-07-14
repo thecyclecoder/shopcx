@@ -20,6 +20,7 @@
  */
 import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-intelligence";
 import { META_CAPS } from "@/lib/ad-tool-config";
+import { hasAnyLf8 } from "@/lib/ads/lf8";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -270,11 +271,15 @@ export function buildMetaCopy(brief: CreativeBrief): { primaryText: string; head
   const isCompetitor = brief.angle.source === "competitor";
 
   // A de-branded benefit line (always OUR words) — used as the headline for competitor imitations and as
-  // a fallback everywhere. Prefer a supporting truth, then the (de-branded) lead benefit, then the title.
-  const benefitHeadline =
-    brief.supportingBenefits.find(Boolean) ??
-    (brief.angle.leadBenefit && !/proven competitor angle/i.test(brief.angle.leadBenefit) ? brief.angle.leadBenefit : "") ??
-    "";
+  // a fallback everywhere. Prefer a supporting truth that carries a Life-Force-8 term (energy/sleep/focus
+  // /protect/family/proven/…) so the cold-scroll ad leads with a benefit that stops the scroll — the
+  // ads-supervisor `live_ad_lf8_thin` gate rejects zero-LF8 copy, so the generator satisfies the gate by
+  // construction. Falls through to the current-behavior chain when no LF8-adjacent benefit exists.
+  const supporting = brief.supportingBenefits.filter(Boolean);
+  const lf8Supporting = supporting.find((b) => hasAnyLf8(b.toLowerCase()));
+  const legacyLeadBenefit =
+    brief.angle.leadBenefit && !/proven competitor angle/i.test(brief.angle.leadBenefit) ? brief.angle.leadBenefit : "";
+  const benefitHeadline = lf8Supporting ?? supporting[0] ?? legacyLeadBenefit ?? "";
 
   // HEADLINE — the hook/benefit, NEVER the offer. Competitor imitations skip the (possibly brand-carrying)
   // raw hook in favor of the de-branded benefit.
@@ -290,16 +295,33 @@ export function buildMetaCopy(brief: CreativeBrief): { primaryText: string; head
   else if (brief.leadProof?.kind === "review" && brief.leadProof.text) opener = `"${clip(brief.leadProof.text, 120)}"${brief.leadProof.attribution ? ` — ${brief.leadProof.attribution}` : ""}`;
   else if (!isCompetitor && brief.angle.hook) opener = brief.angle.hook.trim();
 
-  const benefitLine = brief.supportingBenefits.filter(Boolean).length
-    ? `${brief.productTitle} — ${brief.supportingBenefits.filter(Boolean).slice(0, 2).join(", ")}.`
+  // BENEFIT LINE — order supporting benefits so any LF8-carrying one leads (same reason as the headline
+  // preference above); when the headline already used the LF8 supporting benefit this promotes the next
+  // LF8-adjacent term into the body if present.
+  const orderedSupporting = supporting.slice().sort((a, b) => Number(hasAnyLf8(b.toLowerCase())) - Number(hasAnyLf8(a.toLowerCase())));
+  const benefitLine = orderedSupporting.length
+    ? `${brief.productTitle} — ${orderedSupporting.slice(0, 2).join(", ")}.`
     : "";
   const proofLine = brief.proofStack.filter(Boolean).slice(0, 3).join(" · ");
   const offerLine = brief.offer?.headline ? `${brief.offer.headline}. Shop now 👉` : "Shop now 👉";
 
-  const primaryText = [opener, [benefitLine, proofLine].filter(Boolean).join("\n"), offerLine]
+  let primaryText = [opener, [benefitLine, proofLine].filter(Boolean).join("\n"), offerLine]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, META_CAPS.primary_text);
+
+  // LF8 GUARDRAIL — if the composed headline + primary text STILL carry no Life-Force-8 term (e.g. the
+  // hook is a de-branded competitor claim and every supporting benefit lacks LF8 language), prepend an
+  // LF8-carrying supporting benefit line so the caption satisfies the ads-supervisor gate. Never
+  // fabricates language: if nothing LF8-adjacent exists in the brief, leaves the copy as-is and lets the
+  // supervisor re-flag on the next pass — the human-facing path for "product has no LF8-adjacent truth".
+  if (!hasAnyLf8(`${headline} ${primaryText}`.toLowerCase())) {
+    const injectable = supporting.find((b) => hasAnyLf8(b.toLowerCase()));
+    if (injectable) {
+      const lead = injectable.trim().replace(/[.!?]+$/, "");
+      primaryText = `${lead}.\n\n${primaryText}`.slice(0, META_CAPS.primary_text);
+    }
+  }
 
   // DESCRIPTION — the allowed price treatment (never empty). Falls back to a proof line.
   const description = clip(brief.offer?.perServing ?? brief.offer?.headline ?? proofLine ?? "", META_CAPS.description);
