@@ -80,6 +80,7 @@ const { count } = await admin.from("fraud_cases")
 - Orchestrator bails (closes + escalates with confirmed-fraud reply) if customer has ANY `status='confirmed_fraud'` OR `rule_type='amazon_reseller'`. See feedback_orchestrator_fraud_gate.
 - Chargebacks don't create fraud cases anymore — only actual rules do.
 - `order_ids` holds INTERNAL `orders.id` UUIDs. Historically mixed with `shopify_order_id` numeric strings, which crashed the two `.in('id', order_ids)` readers (confirmed-fraud similarity batch + high-velocity load) with Postgres 22P02 and silently dropped every fraud order in the batch. Every writer now stores `order.id`; readers wrap `order_ids` with `orderUuids()` in [[../libraries/fraud-detector]] as defense-in-depth.
+- **One-time backfill (2026-07):** `scripts/_backfill-fraud-order-ids-to-uuid.ts` converted the ~132 legacy Shopify-numeric-id entries in `order_ids` to their internal `orders.id` UUIDs (workspace-scoped `orders.shopify_order_id` lookup). Orphan entries that resolved to no `orders` row were dropped and logged. Dry-run by default; `--apply` mutates. Safe to re-run — a re-run over an already-UUID-only column is a no-op. Once every writer stores `order.id`, no future backfill is needed.
 
 ---
 
