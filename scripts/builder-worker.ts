@@ -20776,31 +20776,39 @@ async function runCalibrateMediaBuyerPolicyJob(job: Job) {
 }
 
 /**
- * ads-supervisor lane (docs/brain/specs/growth-ads-supervisor-3h-agent.md Phase 1) — the persistent
- * every-3h supervisory pass over Bianca (media-buyer) + Dahlia (ad-creative). Phase 1 wires the
- * dispatchable lane + the node-completeness trio (owner in KIND_OWNER_FALLBACK, kill-switch coverage
- * via the `growth` department ancestor row, and the end-of-run `emitAgentHeartbeat('ads-supervisor')`
- * below). Phase 2 will fill in the actual pass logic (getTestingResults + should-happen check +
- * Dahlia bin/seeding check + live-ad LF8 QA + autonomous fix-spec authoring + Slack digest to
- * #director-growth-max) inside the `TODO` block. Until then, the lane is a heartbeat-emitting no-op —
- * the cron still fires every 3h, the box job still lands, and the Control Tower still sees the beat.
+ * ads-supervisor lane (docs/brain/specs/growth-ads-supervisor-3h-agent.md) — the persistent every-3h
+ * supervisory pass over Bianca (media-buyer) + Dahlia (ad-creative). The pass audits crown/kill drift
+ * (getTestingResults vs Bianca's iteration_actions), Dahlia's ready-to-test bin depth + competitor
+ * seeding, and live-ad LF8-copy + destination scent — and REPAIRS any drift by autonomously authoring
+ * fix-specs through authorSpecRowStructured (dedup-gated on getSpec / open repair jobs), then posts
+ * ONE consolidated digest to #director-growth-max (no-op suppressed). The pass NEVER moves spend /
+ * pauses / crowns / places ads directly — north-star: supervisable autonomy — every mutation flows
+ * through the supervised worker; this lane PROPOSES via fix-specs. See src/lib/ads-supervisor.ts.
  *
- * NEVER moves spend / pauses / crowns / places ads directly (north-star: supervisable autonomy — the
- * supervisor never becomes a proxy-optimizer). Any spend move must flow through Bianca; the pass only
- * PROPOSES via authored fix-specs.
+ * Node-completeness trio: OWNER=growth (in KIND_OWNER_FALLBACK + BUILDER_WORKER_KINDS + this Job.kind
+ * union); KILL-SWITCH via the growth-department ancestor row in kill_switches (cascade in
+ * kill-switch-resolver); HEARTBEAT emitted here (end-of-run try/finally, ok:false on throw).
  */
 async function runAdsSupervisorJob(job: Job) {
   const tag = `[ads-supervisor:${job.id.slice(0, 8)}]`;
   const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const a = await admin();
   const startedAt = Date.now();
   let ok = true;
   let detail = "";
   try {
-    // TODO(ads-supervisor Phase 2): implement the 4-step pass (getTestingResults + should-happen
-    // check against Bianca + Dahlia bin/seeding check + live-ad LF8 QA + deduped fix-spec authoring
-    // via authorSpecRowStructured) + the #director-growth-max digest.
-    detail = "phase-1 stub — lane dispatched, heartbeat emitted (phase-2 fills the pass)";
-    await update(job.id, { status: "completed", log_tail: detail });
+    const { runAdsSupervisorPass } = await import("../src/lib/ads-supervisor");
+    const result = await runAdsSupervisorPass(a, job.workspace_id, startedAt);
+    detail = `products=${result.evaluated.products} tests=${result.evaluated.tests} biancaMisses=${result.evaluated.biancaMisses} dahliaGaps=${result.evaluated.dahliaGaps} liveAdIssues=${result.evaluated.liveAdIssues} authored=${result.authoredSlugs.length} deduped=${result.dedupedSlugs.length} digest=${result.digest?.posted ? "posted" : `skipped(${result.digest?.reason ?? "unknown"})`}`;
+    await update(job.id, {
+      status: "completed",
+      log_tail: JSON.stringify({
+        evaluated: result.evaluated,
+        authoredSlugs: result.authoredSlugs,
+        dedupedSlugs: result.dedupedSlugs,
+        digest: result.digest ?? null,
+      }).slice(-4000),
+    });
     console.log(`${tag} ${detail}`);
   } catch (err) {
     ok = false;
