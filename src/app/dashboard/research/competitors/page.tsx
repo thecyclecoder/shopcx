@@ -1,10 +1,14 @@
 "use client";
 
 // Research › Competitors — the owner-facing, read-only competitor set surface
-// (docs/brain/dashboard/research__competitors.md). Phase 2: product filter + full table.
-// Read-only — discovery + approval stay on the Acquisition Research Hub. Owner-gated the
-// same way the sibling acquisition page is: the API returns 403 for non-owners, and the
-// client also short-circuits on workspace role so the layout doesn't briefly flash.
+// (docs/brain/dashboard/research__competitors.md). Renders one section per product with the
+// product title as the group header, so the set is visually organized around the deliberate
+// per-product model. The API is now strict per-product (Phase 2 of
+// [[competitor-sdk-chokepoint-and-per-product-cleanup]] — no null-scope fold), so a product
+// filter shows ONLY that product's rows. Read-only — discovery + approval stay on the
+// Acquisition Research Hub. Owner-gated the same way the sibling acquisition page is: the
+// API returns 403 for non-owners, and the client also short-circuits on workspace role so the
+// layout doesn't briefly flash.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -120,6 +124,29 @@ export default function ResearchCompetitorsPage() {
     return rows;
   }, [competitors]);
 
+  // Group competitors by product so the surface reflects the deliberate per-product model.
+  // Named-product groups render alphabetically by product title; workspace-scoped rows (null
+  // product_id — the legacy migrated seeds) render last under a "Workspace-level" heading and
+  // will disappear once Phase 3 purges them. When the productId filter is set the API returns
+  // strict per-product rows (Phase 2), so this collapses to a single labeled group.
+  const WORKSPACE_GROUP_KEY = "__workspace__" as const;
+  const groupedByProduct = useMemo(() => {
+    const groups = new Map<string, { title: string; rows: CompetitorRow[] }>();
+    for (const r of sortedRows) {
+      const key = r.product_id ?? WORKSPACE_GROUP_KEY;
+      const title = r.product_id
+        ? productTitleById.get(r.product_id) || r.product_id
+        : "Workspace-level (unscoped)";
+      if (!groups.has(key)) groups.set(key, { title, rows: [] });
+      groups.get(key)!.rows.push(r);
+    }
+    return [...groups.entries()].sort((a, b) => {
+      if (a[0] === WORKSPACE_GROUP_KEY) return 1;
+      if (b[0] === WORKSPACE_GROUP_KEY) return -1;
+      return a[1].title.localeCompare(b[1].title);
+    });
+  }, [sortedRows, productTitleById]);
+
   if (workspace.role !== "owner" || forbidden) {
     return (
       <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
@@ -163,80 +190,85 @@ export default function ResearchCompetitorsPage() {
           No competitors match this filter.
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <table className="w-full min-w-[1100px] text-sm">
-            <thead className="bg-zinc-50 text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
-              <tr>
-                <th className="px-4 py-2">Brand</th>
-                <th className="px-4 py-2">Domain</th>
-                <th className="px-4 py-2">Category</th>
-                <th className="px-4 py-2">Product scope</th>
-                <th className="px-4 py-2">Source</th>
-                <th className="px-4 py-2">Status</th>
-                <th className="px-4 py-2">Spend signal</th>
-                <th className="px-4 py-2">PDPs</th>
-                <th className="px-4 py-2">Evidence</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {sortedRows.map((c) => {
-                const brandDisplay =
-                  c.source === "whitelisted" && c.search_keyword ? c.search_keyword : c.brand;
-                const scope = c.product_id
-                  ? productTitleById.get(c.product_id) || c.product_id
-                  : "Workspace-level";
-                return (
-                  <tr key={c.id} className="bg-white dark:bg-zinc-950">
-                    <td className="px-4 py-2 font-medium text-zinc-900 dark:text-zinc-100">
-                      <div>{brandDisplay}</div>
-                      {c.source === "whitelisted" && c.runs_ads_for_brand && (
-                        <div className="mt-0.5 text-xs font-normal text-zinc-500">
-                          runs ads for{" "}
-                          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                            {c.runs_ads_for_brand}
-                          </span>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-2 text-zinc-500">{c.domain || "—"}</td>
-                    <td className="px-4 py-2 text-zinc-500">{c.category || "—"}</td>
-                    <td className="px-4 py-2 text-zinc-500">
-                      {c.product_id ? (
-                        <span className="text-zinc-700 dark:text-zinc-300">{scope}</span>
-                      ) : (
-                        <span className="italic text-zinc-400">Workspace-level</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                          SOURCE_BADGE[c.source] || SOURCE_BADGE.manual
-                        }`}
-                      >
-                        {c.source}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2">
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                          STATUS_BADGE[c.status] || ""
-                        }`}
-                      >
-                        {c.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2 text-zinc-500">{c.spend_signal || "—"}</td>
-                    <td className="px-4 py-2 text-zinc-500">
-                      {c.pdp_urls?.length ? c.pdp_urls.length : 0}
-                    </td>
-                    <td className="px-4 py-2">
-                      <EvidenceCell text={c.evidence} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="space-y-6">
+          {groupedByProduct.map(([key, group]) => (
+            <section key={key}>
+              <div className="mb-2 flex items-baseline justify-between">
+                <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  {group.title}
+                  <span className="ml-2 text-xs font-normal text-zinc-500">
+                    {group.rows.length} row{group.rows.length === 1 ? "" : "s"}
+                  </span>
+                </h2>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+                <table className="w-full min-w-[1000px] text-sm">
+                  <thead className="bg-zinc-50 text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
+                    <tr>
+                      <th className="px-4 py-2">Brand</th>
+                      <th className="px-4 py-2">Domain</th>
+                      <th className="px-4 py-2">Category</th>
+                      <th className="px-4 py-2">Source</th>
+                      <th className="px-4 py-2">Status</th>
+                      <th className="px-4 py-2">Spend signal</th>
+                      <th className="px-4 py-2">PDPs</th>
+                      <th className="px-4 py-2">Evidence</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                    {group.rows.map((c) => {
+                      const brandDisplay =
+                        c.source === "whitelisted" && c.search_keyword
+                          ? c.search_keyword
+                          : c.brand;
+                      return (
+                        <tr key={c.id} className="bg-white dark:bg-zinc-950">
+                          <td className="px-4 py-2 font-medium text-zinc-900 dark:text-zinc-100">
+                            <div>{brandDisplay}</div>
+                            {c.source === "whitelisted" && c.runs_ads_for_brand && (
+                              <div className="mt-0.5 text-xs font-normal text-zinc-500">
+                                runs ads for{" "}
+                                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                                  {c.runs_ads_for_brand}
+                                </span>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-zinc-500">{c.domain || "—"}</td>
+                          <td className="px-4 py-2 text-zinc-500">{c.category || "—"}</td>
+                          <td className="px-4 py-2">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                SOURCE_BADGE[c.source] || SOURCE_BADGE.manual
+                              }`}
+                            >
+                              {c.source}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                STATUS_BADGE[c.status] || ""
+                              }`}
+                            >
+                              {c.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-zinc-500">{c.spend_signal || "—"}</td>
+                          <td className="px-4 py-2 text-zinc-500">
+                            {c.pdp_urls?.length ? c.pdp_urls.length : 0}
+                          </td>
+                          <td className="px-4 py-2">
+                            <EvidenceCell text={c.evidence} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </div>

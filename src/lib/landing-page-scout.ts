@@ -24,6 +24,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import { loadSuppressedGapTypes, isSuppressed } from "@/lib/acquisition-gap-grader";
+import { listCompetitors } from "@/lib/competitors";
 
 export const LANDER_SHOTS_BUCKET = "lander-shots";
 export const SIGNED_TTL_SEC = 3600; // 1 hour — comfortably longer than any analysis pass
@@ -129,15 +130,17 @@ export async function loadLanderTargets(workspaceId: string, productId?: string 
   const targets: LanderTarget[] = [];
 
   // Competitor landers — approved competitors only (supervisable; never the proposed set).
-  let cq = admin
-    .from("competitors")
-    .select("id, brand, domain, pdp_urls, product_id")
-    .eq("workspace_id", workspaceId)
-    .eq("status", "approved");
-  if (productId) cq = cq.or(`product_id.eq.${productId},product_id.is.null`);
-  const { data: competitors } = await cq;
+  // Reads via the [[competitors]] SDK chokepoint. When a productId is passed, ALSO include
+  // workspace-scoped (product_id IS NULL) legacy seeds — Phase 2 of the SDK-chokepoint spec
+  // retires that null-scope fold on the owner surface; the scout keeps it until seed data is purged.
+  const competitors = await listCompetitors({
+    workspaceId,
+    status: "approved",
+    productId: productId ?? undefined,
+    includeUnscoped: !!productId,
+  });
 
-  for (const c of (competitors || []) as CompetitorTargetRow[]) {
+  for (const c of competitors as CompetitorTargetRow[]) {
     const seen = new Set<string>();
     const push = (url: string, source: LanderTargetSource) => {
       const u = (url || "").trim();
