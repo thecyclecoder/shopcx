@@ -33,6 +33,20 @@ function firstNameOverlap(a: string, b: string): boolean {
   return !!a && !!b && (a === b || (a.length >= 4 && b.includes(a)) || (b.length >= 4 && a.includes(b)));
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Keep only values that look like an internal order UUID. Used to guard
+ *  `.in('id', <fraud_cases.order_ids>)` readers so a stray legacy Shopify
+ *  numeric id (from before this spec) can never crash a `uuid` column with
+ *  Postgres 22P02 and silently drop the whole batch of fraud orders. */
+export function orderUuids(ids: unknown[]): string[] {
+  const out: string[] = [];
+  for (const v of ids) {
+    if (typeof v === "string" && UUID_RE.test(v)) out.push(v);
+  }
+  return out;
+}
+
 // ── Types ──
 
 interface FraudRule {
@@ -254,13 +268,16 @@ async function detectSharedAddress(
           severity,
           title,
           customer_ids: customerIds,
-          order_ids: (orderDetails || []).map((o) => o.shopify_order_id),
+          order_ids: (orderDetails || []).map((o) => o.id),
           last_seen_at: new Date().toISOString(),
         })
         .eq("id", existing.id);
       updatedCases++;
     } else {
-      const orderIds = (orderDetails || []).map((o) => o.shopify_order_id);
+      const orderIds = (orderDetails || []).map((o) => o.id);
+      const shopIdsForTag = (orderDetails || [])
+        .map((o) => o.shopify_order_id)
+        .filter((s): s is string => !!s);
       const { data: newCase } = await admin
         .from("fraud_cases")
         .insert({
@@ -280,9 +297,9 @@ async function detectSharedAddress(
         .select("id")
         .single();
 
-      // Tag all orders as suspicious
-      for (const oid of orderIds) {
-        if (oid) addOrderTags(workspaceId, oid, ["suspicious"]).catch(() => {});
+      // Tag all orders as suspicious (Shopify API needs numeric shopify_order_id)
+      for (const oid of shopIdsForTag) {
+        addOrderTags(workspaceId, oid, ["suspicious"]).catch(() => {});
       }
 
       if (newCase) {
@@ -357,7 +374,11 @@ async function detectHighVelocity(
 
   for (const hit of velocityHits) {
     const customerId = hit.customer_id as string;
-    const orderIds = hit.order_ids as string[];
+    // Guard: only feed valid UUIDs to `.in('id', …)` — the `orders.id` column
+    // is a uuid, so a legacy Shopify numeric id would throw Postgres 22P02 and
+    // drop the whole hit. See orderUuids() and [[../tables/fraud_cases]].
+    const orderIds = orderUuids(hit.order_ids as unknown[]);
+    if (!orderIds.length) continue;
 
     // Load full order details
     const { data: orders } = await admin
@@ -430,7 +451,7 @@ async function detectHighVelocity(
         .update({
           evidence,
           title,
-          order_ids: orders.map((o) => o.shopify_order_id),
+          order_ids: orders.map((o) => o.id),
           last_seen_at: new Date().toISOString(),
         })
         .eq("id", existing.id);
@@ -447,7 +468,7 @@ async function detectHighVelocity(
           title,
           evidence,
           customer_ids: [customerId],
-          order_ids: orders.map((o) => o.shopify_order_id),
+          order_ids: orders.map((o) => o.id),
           orders_held: true,
           first_detected_at: new Date().toISOString(),
           last_seen_at: new Date().toISOString(),
@@ -734,8 +755,11 @@ Respond with EXACTLY "FRAUD" or "OK".`;
         .eq("status", "confirmed_fraud");
 
       if (confirmedCases?.length) {
-        // Gather order IDs from confirmed cases
-        const fraudOrderIds = confirmedCases.flatMap(c => c.order_ids || []);
+        // Gather order IDs from confirmed cases. Guard: filter to valid UUIDs so
+        // a stray legacy Shopify numeric id (from before all writers were fixed
+        // to store `orders.id`) can never crash the `uuid` column with Postgres
+        // 22P02 and silently drop the whole batch. See [[../tables/fraud_cases]].
+        const fraudOrderIds = orderUuids(confirmedCases.flatMap(c => c.order_ids || []));
         // Fetch fraud orders in batches of 100
         const fraudOrders: Array<{
           id: string; order_number: string; email: string | null;
@@ -958,6 +982,8 @@ async function checkVelocitySignals(
   let fired = false;
 
   // Open (or refresh) one case per distinct velocity key, hold every order in the ring.
+  // `orderIds` are internal UUIDs (persisted to fraud_cases.order_ids); `shopOrderIdsForTag`
+  // are the numeric Shopify ids the Shopify tagsAdd API needs.
   const openCase = async (
     ruleType: string,
     velocityKey: string,
@@ -965,7 +991,8 @@ async function checkVelocitySignals(
     summary: string,
     evidence: Record<string, unknown>,
     customerIds: string[],
-    shopOrderIds: string[],
+    orderIds: string[],
+    shopOrderIdsForTag: string[],
   ): Promise<void> => {
     const fullEvidence = { ...evidence, velocity_key: velocityKey };
     const { data: existing } = await admin
@@ -981,7 +1008,7 @@ async function checkVelocitySignals(
     if (existing) {
       await admin
         .from("fraud_cases")
-        .update({ evidence: fullEvidence, title, summary, customer_ids: customerIds, order_ids: shopOrderIds, last_seen_at: new Date().toISOString() })
+        .update({ evidence: fullEvidence, title, summary, customer_ids: customerIds, order_ids: orderIds, last_seen_at: new Date().toISOString() })
         .eq("id", existing.id);
     } else {
       const { data: nc } = await admin
@@ -995,7 +1022,7 @@ async function checkVelocitySignals(
           summary,
           evidence: fullEvidence,
           customer_ids: customerIds,
-          order_ids: shopOrderIds,
+          order_ids: orderIds,
           orders_held: true,
           first_detected_at: new Date().toISOString(),
           last_seen_at: new Date().toISOString(),
@@ -1004,7 +1031,7 @@ async function checkVelocitySignals(
         .single();
       if (nc) await inngest.send({ name: "fraud/case.created", data: { caseId: nc.id, workspaceId } });
     }
-    for (const sid of shopOrderIds) if (sid) addOrderTags(workspaceId, sid, ["suspicious"]).catch(() => {});
+    for (const sid of shopOrderIdsForTag) if (sid) addOrderTags(workspaceId, sid, ["suspicious"]).catch(() => {});
     fired = true;
   };
 
@@ -1017,13 +1044,14 @@ async function checkVelocitySignals(
   if (/^\d{6,}$/.test(bin)) {
     const { data: binOrders } = await admin
       .from("orders")
-      .select("shopify_order_id, customer_id, email, shipping_address, payment_details")
+      .select("id, shopify_order_id, customer_id, email, shipping_address, payment_details")
       .eq("workspace_id", workspaceId)
       .gte("created_at", since)
       .filter("payment_details->>card_bin", "eq", bin)
       .limit(200);
     const rows = binOrders || [];
     const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
+    const uuids = rows.map((r) => r.id);
     const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
 
     // Concentration metrics over the BIN cluster.
@@ -1059,6 +1087,7 @@ async function checkVelocitySignals(
         `${rows.length} orders in the last 30 days share card BIN ${bin} across ${custs.size} distinct customers, and the cluster is concentrated (${reason}) — the fingerprint of a stolen-card batch being run through different identities rather than unrelated customers who happen to bank with the same issuer.`,
         { card_bin: bin, order_count: rows.length, customer_count: custs.size, distinct_cards: cardCounts.size, max_card_reuse: maxCardReuse, distinct_surnames: surnames.size, distinct_zips: zips.size, concentration_reason: reason, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
         [...custs],
+        uuids,
         shopIds,
       );
     }
@@ -1069,7 +1098,7 @@ async function checkVelocitySignals(
   if (domain && !FREEMAIL_DOMAINS.has(domain)) {
     const { data: domOrders } = await admin
       .from("orders")
-      .select("shopify_order_id, customer_id, email")
+      .select("id, shopify_order_id, customer_id, email")
       .eq("workspace_id", workspaceId)
       .gte("created_at", since)
       .ilike("email", `%@${domain}`)
@@ -1077,6 +1106,7 @@ async function checkVelocitySignals(
     const rows = domOrders || [];
     const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
     const emails = new Set(rows.map((r) => (r.email || "").toLowerCase()).filter(Boolean));
+    const uuids = rows.map((r) => r.id);
     const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
     if (custs.size >= DOMAIN_MIN_CUSTOMERS && emails.size >= DOMAIN_MIN_CUSTOMERS) {
       await openCase(
@@ -1086,6 +1116,7 @@ async function checkVelocitySignals(
         `${custs.size} distinct customers on the custom domain @${domain} placed orders in the last 30 days (${emails.size} distinct addresses) — characteristic of a ring spinning up throwaway accounts on one domain it controls.`,
         { email_domain: domain, customer_count: custs.size, email_count: emails.size, window_days: VELOCITY_WINDOW_DAYS, emails: [...emails].slice(0, 40) },
         [...custs],
+        uuids,
         shopIds,
       );
     }
@@ -1107,12 +1138,12 @@ async function checkVelocitySignals(
       const custIds = rows.map((r) => r.id);
       const { data: kinOrders } = await admin
         .from("orders")
-        .select("shopify_order_id")
+        .select("id, shopify_order_id")
         .eq("workspace_id", workspaceId)
         .in("customer_id", custIds)
         .gte("created_at", since)
-        .not("shopify_order_id", "is", null)
         .limit(200);
+      const uuids = (kinOrders || []).map((o) => o.id);
       const shopIds = (kinOrders || []).map((o) => o.shopify_order_id).filter(Boolean) as string[];
       await openCase(
         "surname_velocity",
@@ -1121,6 +1152,7 @@ async function checkVelocitySignals(
         `${rows.length} new accounts share the surname "${lastName}" in the last 30 days, ${nonFree.length} on custom (non-freemail) domains — characteristic of a ring reusing one identity across throwaway emails.`,
         { surname: lastName, customer_count: rows.length, non_freemail_count: nonFree.length, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
         custIds,
+        uuids,
         shopIds,
       );
     }
@@ -1294,7 +1326,7 @@ async function checkAddressDistance(
       title,
       evidence,
       customer_ids: customerId ? [customerId] : [],
-      order_ids: [order.shopify_order_id],
+      order_ids: [order.id],
       orders_held: true,
       first_detected_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
@@ -1380,7 +1412,7 @@ async function checkNameMismatch(
       title,
       evidence,
       customer_ids: [customer.id],
-      order_ids: [order.shopify_order_id],
+      order_ids: [order.id],
       orders_held: true,
       first_detected_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
@@ -1568,7 +1600,7 @@ async function checkAmazonResellerMatch(
       title,
       evidence,
       customer_ids: customerId ? [customerId] : [],
-      order_ids: [order.shopify_order_id],
+      order_ids: [order.id],
       orders_held: true,
       first_detected_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
