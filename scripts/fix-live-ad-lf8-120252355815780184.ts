@@ -98,14 +98,30 @@ function abort(reason: string): never {
  * returns false otherwise (dry-run OR --apply — the gate is unconditional).
  */
 async function passesUnderperformanceGate(admin: ReturnType<typeof createAdminClient>): Promise<boolean> {
-  const { data: pol } = await admin
+  // FAIL-CLOSED (Fix 1 of the pre-merge spec-test security-review): a Supabase read error or a
+  // missing iteration_policies row REFUSES the deactivation — the default is only applied when a
+  // row was successfully read AND the column value came back null. Silently using the default on
+  // a read error would authorize a destructive mutation on unproven policy state.
+  const { data: pol, error: polErr } = await admin
     .from("iteration_policies")
     .select("trim_max_cost_per_atc_cents")
     .eq("workspace_id", WORKSPACE_ID)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  const rawThreshold = (pol as { trim_max_cost_per_atc_cents: number | null } | null)?.trim_max_cost_per_atc_cents;
+  if (polErr) {
+    console.error(
+      `ABORT: iteration_policies read failed for workspace ${WORKSPACE_ID} — cannot PROVE the leading-indicator gate; deactivation refused (fail-closed): ${polErr.message}`,
+    );
+    return false;
+  }
+  if (pol == null) {
+    console.error(
+      `ABORT: no iteration_policies row for workspace ${WORKSPACE_ID} — cannot PROVE the leading-indicator gate; deactivation refused (fail-closed).`,
+    );
+    return false;
+  }
+  const rawThreshold = (pol as { trim_max_cost_per_atc_cents: number | null }).trim_max_cost_per_atc_cents;
   const threshold = rawThreshold == null ? LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS : Number(rawThreshold);
 
   const { data: ins, error: insErr } = await admin

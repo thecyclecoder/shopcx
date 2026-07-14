@@ -112,29 +112,74 @@ export type FindingKind =
  * supervisor deactivate on a threshold the media-buyer does not consider a failure.
  *
  * The live setpoint is read from `iteration_policies.trim_max_cost_per_atc_cents` via
- * `resolveLf8UnderperformanceThreshold`; this constant is the fallback only for a null column.
+ * `resolveLf8UnderperformanceThreshold`; this constant is the fallback ONLY when a row was
+ * successfully read AND its column value came back null — a read error or a missing row
+ * returns a fail-closed `{ ok: false }` result instead (never the default).
  */
 export const LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS = 8000;
 
 /**
+ * Discriminated result of `resolveLf8UnderperformanceThreshold`. `ok: true` carries the live
+ * threshold (in cents) and authorizes the disposition split; `ok: false` means the gate could
+ * not be PROVEN (Supabase read error, or no iteration_policies row for the workspace) and MUST
+ * fall to the non-destructive enrichment path regardless of the adset's cost-per-ATC. See
+ * `chooseLf8Disposition` for the consumer.
+ */
+export type Lf8GateThreshold =
+  | { ok: true; value: number }
+  | { ok: false; reason: string };
+
+/**
  * Read the workspace's active `iteration_policies.trim_max_cost_per_atc_cents` — the SAME
- * column Bianca's trim logic reads (`src/lib/media-buyer/agent.ts` line 933). Falls back to
- * `LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS` ONLY when the column is null. Ordered by
+ * column Bianca's trim logic reads (`src/lib/media-buyer/agent.ts` line 933).
+ *
+ * FAIL-CLOSED (Fix 1 of `lf8-live-ad-gate-broaden-vocab-and-gate-deactivation-on-performance`
+ * pre-merge spec-test security-review): a Supabase read ERROR or a MISSING iteration_policies
+ * row returns `{ ok: false, reason }` — the destructive deactivation disposition MUST NOT be
+ * authorized on a stale/erroring/missing policy read. Only when a row is SUCCESSFULLY read
+ * does the default apply, and only when the column value came back null. Ordered by
  * `created_at DESC` + `limit(1)` to mirror `resolveTestThresholds`'s row-selection convention.
  */
 export async function resolveLf8UnderperformanceThreshold(
   admin: Admin,
   workspaceId: string,
-): Promise<number> {
-  const { data } = await admin
+): Promise<Lf8GateThreshold> {
+  const { data, error } = await admin
     .from("iteration_policies")
     .select("trim_max_cost_per_atc_cents")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  const raw = (data as { trim_max_cost_per_atc_cents: number | null } | null)?.trim_max_cost_per_atc_cents;
-  return raw == null ? LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS : Number(raw);
+  if (error) {
+    return { ok: false, reason: `iteration_policies read failed: ${error.message}` };
+  }
+  if (data == null) {
+    return { ok: false, reason: `no iteration_policies row for workspace ${workspaceId}` };
+  }
+  const raw = (data as { trim_max_cost_per_atc_cents: number | null }).trim_max_cost_per_atc_cents;
+  return { ok: true, value: raw == null ? LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS : Number(raw) };
+}
+
+/**
+ * The live-ad LF8 disposition selector — the single decision that guards the destructive
+ * deactivation path. Returns `"deactivate_authorized"` ONLY when both preconditions hold:
+ *  1. `gate.ok === true` — the workspace's cost-per-ATC threshold was successfully proven.
+ *  2. `isLiveAdLf8Underperforming(row, gate.value)` — the adset's lifetime cost-per-ATC
+ *     strictly exceeds that threshold (a real leading-indicator failure).
+ * Otherwise `"enrich_only"` — the non-destructive Dahlia copy-enrichment path.
+ *
+ * FAIL-CLOSED: an un-proven gate (`gate.ok === false`) can NEVER escalate to deactivation,
+ * regardless of the adset's cost-per-ATC. This mirrors the fix-script gate at
+ * `scripts/fix-live-ad-lf8-*.ts` `passesUnderperformanceGate` — both surfaces refuse a
+ * destructive action on an unreadable policy state.
+ */
+export function chooseLf8Disposition(
+  gate: Lf8GateThreshold,
+  row: TestAdsetRow,
+): "deactivate_authorized" | "enrich_only" {
+  if (!gate.ok) return "enrich_only";
+  return isLiveAdLf8Underperforming(row, gate.value) ? "deactivate_authorized" : "enrich_only";
 }
 
 /**
@@ -251,7 +296,19 @@ export async function runAdsSupervisorPass(
   // deactivation of the live angle is authorized ONLY when the adset ALSO fails the leading
   // indicator (cost-per-ATC over `iteration_policies.trim_max_cost_per_atc_cents` — the same
   // SSOT Bianca's trim logic reads). The threshold is resolved once per pass, up front.
-  const lf8TrimMaxCostPerAtcCents = await resolveLf8UnderperformanceThreshold(admin, workspaceId);
+  //
+  // FAIL-CLOSED (Fix 1, pre-merge spec-test security-review): `resolveLf8UnderperformanceThreshold`
+  // now returns a discriminated result. On read error / missing row (`gate.ok === false`) the
+  // disposition selector `chooseLf8Disposition` forces `enrich_only` regardless of the adset's
+  // cost-per-ATC — the destructive deactivation path can never fire on a stale/erroring policy read.
+  const lf8Gate = await resolveLf8UnderperformanceThreshold(admin, workspaceId);
+  // Display-only fallback for the enrichment finding's threshold quote when the gate could not
+  // be proven; picking the default is safe because the finding is non-destructive by shape and
+  // only uses this number to explain what the leading-indicator gate would have compared against.
+  const lf8DisplayThreshold = lf8Gate.ok ? lf8Gate.value : LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS;
+  if (!lf8Gate.ok) {
+    console.warn(`[ads-supervisor] LF8 gate unresolved — forcing enrich_only disposition workspace-wide: ${lf8Gate.reason}`);
+  }
   for (const group of results.products) {
     for (const row of group.rows) {
       if (!row.active) continue;
@@ -259,10 +316,14 @@ export async function runAdsSupervisorPass(
       const copy = joinCopy(row.creative.headline, row.creative.primaryText, row.creative.description);
       if (copy && !hasAnyLf8(copy)) {
         liveAdIssues += 1;
-        if (isLiveAdLf8Underperforming(row, lf8TrimMaxCostPerAtcCents)) {
-          findings.push(makeLiveAdLf8Finding(group, row, copy, lf8TrimMaxCostPerAtcCents));
+        const disposition = chooseLf8Disposition(lf8Gate, row);
+        if (disposition === "deactivate_authorized") {
+          // Safe non-null: chooseLf8Disposition only returns "deactivate_authorized" when gate.ok
+          // is true (see fail-closed guard); TypeScript can't narrow across the helper call, so
+          // we cite lf8DisplayThreshold which is the resolved value in this branch.
+          findings.push(makeLiveAdLf8Finding(group, row, copy, lf8DisplayThreshold));
         } else {
-          findings.push(makeLiveAdLf8EnrichmentFinding(group, row, copy, lf8TrimMaxCostPerAtcCents));
+          findings.push(makeLiveAdLf8EnrichmentFinding(group, row, copy, lf8DisplayThreshold));
         }
       }
       const destination = row.creative.link ?? null;
