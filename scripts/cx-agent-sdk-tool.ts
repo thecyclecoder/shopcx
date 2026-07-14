@@ -35,7 +35,13 @@ if (existsSync(envPath)) {
 
 async function main() {
   const [, , verb, ticketId] = process.argv;
-  const { CX_SDK_VERBS, isCxSdkVerb, runCxSdkVerb } = await import("../src/lib/cx-agent-sdk");
+  const {
+    CX_SDK_VERBS,
+    isCxSdkVerb,
+    runCxSdkVerb,
+    isValidCxTicketId,
+    invalidCxTicketIdMessage,
+  } = await import("../src/lib/cx-agent-sdk");
   if (!verb || !ticketId) {
     console.error(
       `usage: cx-agent-sdk-tool.ts <verb> <ticket_id>\nverbs: ${CX_SDK_VERBS.join(" · ")}`,
@@ -46,6 +52,13 @@ async function main() {
     console.error(
       `refused: '${verb}' is not a cx-agent-sdk verb. Allowed: ${CX_SDK_VERBS.join(", ")}`,
     );
+    process.exit(2);
+  }
+  // UUID-guard the id BEFORE hitting Postgres — a malformed id (8-hex
+  // '3cc11e10' incident) would otherwise raise 22P02 and crash the tool call.
+  // Give the agent a clean, self-correcting message + a non-crash exit code.
+  if (!isValidCxTicketId(ticketId)) {
+    console.error(invalidCxTicketIdMessage(ticketId));
     process.exit(2);
   }
 
