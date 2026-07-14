@@ -127,19 +127,60 @@ export async function hasFreshMetaSignal(admin: Admin, workspaceId: string, meta
   return ageMs <= META_SIGNAL_MAX_AGE_DAYS * 24 * 3600 * 1000;
 }
 
+/**
+ * Highest-spend child ad of an adset — [[../../tables/meta_ads]] carries no `spend_cents`
+ * column (ad→adset mapping only); spend lives in [[../../tables/meta_insights_daily]] at
+ * `level='ad'`. This helper resolves the dominant creative for the audit trail by:
+ *   (1) reading the adset's child ad ids from meta_ads (workspace-scoped),
+ *   (2) summing spend_cents from meta_insights_daily (level='ad') over the lifetime lookback,
+ *   (3) returning the ad id with the highest summed spend.
+ * Fallbacks: the first child ad id if insights show none of them; the adset id itself if
+ * meta_ads has no children yet (a freshly-created adset, mid-ingest).
+ */
+async function dominantChildAdId(
+  admin: Admin,
+  opts: { workspaceId: string; metaAdsetId: string },
+): Promise<string> {
+  const { data: adRows } = await admin
+    .from("meta_ads")
+    .select("meta_ad_id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("meta_adset_id", opts.metaAdsetId);
+  const childAdIds = ((adRows ?? []) as Array<{ meta_ad_id: string }>).map((r) => r.meta_ad_id);
+  if (!childAdIds.length) return opts.metaAdsetId;
+
+  const sinceIso = new Date(Date.now() - LIFETIME_LOOKBACK_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("level", "ad")
+    .in("meta_object_id", childAdIds)
+    .gte("snapshot_date", sinceIso);
+  const totals = new Map<string, number>();
+  for (const r of (ins ?? []) as Array<{ meta_object_id: string; spend_cents: number | null }>) {
+    totals.set(r.meta_object_id, (totals.get(r.meta_object_id) ?? 0) + Number(r.spend_cents ?? 0));
+  }
+
+  let bestId = childAdIds[0];
+  let bestSpend = totals.get(bestId) ?? 0;
+  for (const [id, spend] of totals) {
+    if (spend > bestSpend) {
+      bestSpend = spend;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+
 /** Resolve a winning adset's dominant child ad + its source ad_campaign/angle (for the promote target +
  *  best-effort amplify). Campaign/angle are nullable — promote only needs the adset. */
 async function resolveWinnerSource(
   admin: Admin,
+  workspaceId: string,
   metaAdsetId: string,
 ): Promise<{ metaAdId: string; campaign: WinnerCampaign | null; angle: WinnerAngle | null }> {
-  const { data: ads } = await admin
-    .from("meta_ads")
-    .select("meta_ad_id, spend_cents")
-    .eq("meta_adset_id", metaAdsetId)
-    .order("spend_cents", { ascending: false })
-    .limit(1);
-  const metaAdId = (ads as Array<{ meta_ad_id: string }> | null)?.[0]?.meta_ad_id ?? metaAdsetId;
+  const metaAdId = await dominantChildAdId(admin, { workspaceId, metaAdsetId });
 
   // ShopCX-published ads join back to ad_campaigns via ad_publish_jobs.meta_ad_id.
   let campaign: WinnerCampaign | null = null;
@@ -197,7 +238,7 @@ export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOpti
 
   const winners: DetectedWinner[] = [];
   for (const r of qualifying) {
-    const { metaAdId, campaign, angle } = await resolveWinnerSource(admin, r.object_id);
+    const { metaAdId, campaign, angle } = await resolveWinnerSource(admin, opts.workspaceId, r.object_id);
     const roas = r.spend_cents > 0 ? Number((r.revenue_cents / r.spend_cents).toFixed(4)) : 0;
     winners.push({
       workspaceId: opts.workspaceId,
@@ -361,13 +402,7 @@ export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOption
   );
   const losers: MediaBuyerLoser[] = [];
   for (const r of losing) {
-    const { data: ads } = await admin
-      .from("meta_ads")
-      .select("meta_ad_id, spend_cents")
-      .eq("meta_adset_id", r.object_id)
-      .order("spend_cents", { ascending: false })
-      .limit(1);
-    const sourceMetaAdId = (ads as Array<{ meta_ad_id: string }> | null)?.[0]?.meta_ad_id ?? r.object_id;
+    const sourceMetaAdId = await dominantChildAdId(admin, { workspaceId: opts.workspaceId, metaAdsetId: r.object_id });
     losers.push({
       sourceMetaAdId,
       targetLevel: "adset",
@@ -448,9 +483,7 @@ export async function detectMetaCpaReactivations(
     if (m.purch <= 0) continue;
     const cpp = m.spend / m.purch;
     if (cpp > opts.crownMaxCpaCents) continue; // still not converting well enough — leave paused
-    const { data: ads } = await admin
-      .from("meta_ads").select("meta_ad_id, spend_cents").eq("meta_adset_id", adsetId).order("spend_cents", { ascending: false }).limit(1);
-    const sourceMetaAdId = (ads as Array<{ meta_ad_id: string }> | null)?.[0]?.meta_ad_id ?? adsetId;
+    const sourceMetaAdId = await dominantChildAdId(admin, { workspaceId: opts.workspaceId, metaAdsetId: adsetId });
     out.push({ targetObjectId: adsetId, sourceMetaAdId, spendCents: m.spend, cppCents: Math.round(cpp) });
   }
   return out;
