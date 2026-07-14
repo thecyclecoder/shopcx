@@ -17,7 +17,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   isHarnessCommandFailure,
+  isExternalTestRegression,
   reclassifyHarnessFails,
+  resolveUnitTestFilesFromScript,
 } from "./spec-test-harness-classifier";
 
 test("isHarnessCommandFailure recognizes the exact cs-director-leash motivating stderr", () => {
@@ -118,6 +120,93 @@ test("a mixed run downgrades ONLY harness fails, leaving real fails as regressio
   assert.equal(checks[0].verdict, "needs_human");
   assert.equal(checks[1].verdict, "fail", "real 500 breakage stays a fail");
   assert.equal(checks[2].verdict, "pass");
+});
+
+// ── pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 ───────────────────────
+//
+// The named failing state the spec pins: a unit_test failure whose failing test file the build
+// branch never touched must classify as EXTERNAL (drop from Fix-append set); a unit_test failure
+// whose test file IS in the branch diff stays NON-external (append Fix as today). These are the
+// exact (a) / (b) cases the spec's Phase-1 verification requires.
+
+test("resolveUnitTestFilesFromScript pulls positional .test.ts args from a tsx --test command", () => {
+  assert.deepEqual(
+    resolveUnitTestFilesFromScript("tsx --test src/lib/media-buyer/agent.test.ts"),
+    ["src/lib/media-buyer/agent.test.ts"],
+  );
+  // Multiple files + a leading ./ that gets normalized away.
+  assert.deepEqual(
+    resolveUnitTestFilesFromScript("tsx --test ./src/a.test.ts src/b.test.tsx"),
+    ["src/a.test.ts", "src/b.test.tsx"],
+  );
+  // Flags never leak into the file list.
+  assert.deepEqual(
+    resolveUnitTestFilesFromScript("node --test --experimental-vm-modules src/foo.test.mjs"),
+    ["src/foo.test.mjs"],
+  );
+  // Empty / no test files → empty set.
+  assert.deepEqual(resolveUnitTestFilesFromScript(""), []);
+  assert.deepEqual(resolveUnitTestFilesFromScript("npm run build"), []);
+});
+
+test("isExternalTestRegression: unit_test failure whose test file IS in the branch diff is NOT external", () => {
+  // Case (a) from the spec's verification: a unit_test whose test file appears in `touchedFiles`
+  // means the failing spec DID touch the code under test → this is a real regression → append Fix.
+  const touched = new Set<string>(["src/lib/media-buyer/agent.ts", "src/lib/media-buyer/agent.test.ts"]);
+  const pkgScripts = { "test:media-buyer-agent": "tsx --test src/lib/media-buyer/agent.test.ts" };
+  const out = isExternalTestRegression(
+    { exec_kind: "unit_test", script: "test:media-buyer-agent" },
+    touched,
+    pkgScripts,
+  );
+  assert.equal(out.external, false, "test file lives in the branch diff → this IS the spec's regression, not external");
+  assert.deepEqual(out.testFiles, ["src/lib/media-buyer/agent.test.ts"]);
+  assert.match(out.reason, /in branch diff/i);
+});
+
+test("isExternalTestRegression: unit_test failure whose test file is NOT in the branch diff IS external", () => {
+  // Case (b) from the spec's verification: the exact media-buyer-digest incident cited in § Why —
+  // the digest spec declared `test:media-buyer-agent` (a test in agent.test.ts, a file the digest
+  // spec doesn't own); an unrelated change transiently broke that test; the shipped digest spec
+  // must NOT be stranded by a Fix N for someone else's regression.
+  const touched = new Set<string>(["src/app/api/digest/route.ts", "src/lib/media-buyer/digest.ts"]);
+  const pkgScripts = { "test:media-buyer-agent": "tsx --test src/lib/media-buyer/agent.test.ts" };
+  const out = isExternalTestRegression(
+    { exec_kind: "unit_test", script: "test:media-buyer-agent" },
+    touched,
+    pkgScripts,
+  );
+  assert.equal(out.external, true, "test file is outside the branch diff → external, drop it");
+  assert.deepEqual(out.testFiles, ["src/lib/media-buyer/agent.test.ts"]);
+  assert.match(out.reason, /NOT in branch diff/i);
+});
+
+test("isExternalTestRegression: non-unit_test / unresolvable script / no test files → NOT external (append as today)", () => {
+  const touched = new Set<string>();
+  // Non-unit_test check → never external (harness has other filters).
+  assert.equal(
+    isExternalTestRegression({ exec_kind: "grep", script: null }, touched, {}).external,
+    false,
+  );
+  // exec_kind unit_test but no script name → can't resolve → don't drop.
+  assert.equal(
+    isExternalTestRegression({ exec_kind: "unit_test", script: "" }, touched, {}).external,
+    false,
+  );
+  // Script name absent from package.json → don't drop.
+  assert.equal(
+    isExternalTestRegression({ exec_kind: "unit_test", script: "unknown" }, touched, {}).external,
+    false,
+  );
+  // Script command with no *.test.* args → don't drop (nothing to classify).
+  assert.equal(
+    isExternalTestRegression(
+      { exec_kind: "unit_test", script: "build" },
+      touched,
+      { build: "next build" },
+    ).external,
+    false,
+  );
 });
 
 test("reclassifying twice is idempotent (the note is not double-prefixed)", () => {

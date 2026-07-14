@@ -58,6 +58,82 @@ export interface HarnessReclassifyResult<T extends HarnessCheckLike> {
   reclassified: number;
 }
 
+// ── pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 ─────────────────────────
+//
+// A pre-merge spec-test unit_test failure whose failing test file is NOT in the build branch's diff
+// vs main is an EXTERNAL regression — not this spec's fault — and must not append a Fix phase to the
+// origin. Media-buyer-digest was shipped/correct but declared a unit_test on agent.test.ts (a file
+// the digest spec doesn't own); an unrelated change transiently broke that test, stranding the
+// shipped digest spec behind a redundant Fix N. Filter it out the same way harness failures are
+// filtered — see isHarnessCommandFailure above.
+//
+// Pure + side-effect-free: the classifier takes ALREADY-RESOLVED `packageScripts` + `touchedFiles`
+// so the fs/git work happens in the caller (best-effort, degrade to no-filter) and the unit test
+// can drive it with hand-authored fixtures.
+
+/**
+ * Repo-relative test file paths a package.json `script` command runs. A tokenizer scan across the
+ * command string keeps positional tokens whose path ends with a test extension we recognize:
+ * `.test.{ts,tsx,mts,cts,js,jsx,mjs}`. Runners we've seen (`tsx --test`, `node --test`, `vitest`,
+ * `jest`, `mocha`) all pass file args positionally; flags start with `-`.
+ */
+export function resolveUnitTestFilesFromScript(scriptCommand: string): string[] {
+  if (!scriptCommand) return [];
+  const tokens = scriptCommand
+    .split(/\s+/)
+    .map((t) => t.replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
+  const files = new Set<string>();
+  for (const t of tokens) {
+    if (t.startsWith("-")) continue;
+    if (/\.test\.(?:tsx?|mts|cts|jsx?|mjs)$/.test(t)) files.add(t.replace(/^\.\//, ""));
+  }
+  return [...files];
+}
+
+export interface ExternalTestRegressionInput {
+  exec_kind?: string | null;
+  script?: string | null;
+}
+export interface ExternalTestRegressionResult {
+  external: boolean;
+  testFiles: string[];
+  reason: string;
+}
+
+/**
+ * Is this failing check a unit_test regression that lives OUTSIDE the branch's diff?
+ * Returns `external:true` only when:
+ *  - the check is an `exec_kind='unit_test'` with a resolvable script name
+ *  - `packageScripts` maps that script to a command
+ *  - the command's positional test file(s) are ALL absent from `touchedFiles`
+ * Every other case (unknown kind, missing script, no resolvable test files, at least one test file
+ * touched by the branch) returns `external:false` — the caller preserves today's behaviour and
+ * appends a Fix phase.
+ */
+export function isExternalTestRegression(
+  check: ExternalTestRegressionInput,
+  touchedFiles: ReadonlySet<string>,
+  packageScripts: Readonly<Record<string, string>>,
+): ExternalTestRegressionResult {
+  if ((check.exec_kind ?? null) !== "unit_test") {
+    return { external: false, testFiles: [], reason: "not a unit_test check" };
+  }
+  const script = (check.script ?? "").trim();
+  if (!script) return { external: false, testFiles: [], reason: "no script name on check" };
+  const cmd = packageScripts[script];
+  if (!cmd) return { external: false, testFiles: [], reason: `package.json has no script "${script}"` };
+  const testFiles = resolveUnitTestFilesFromScript(cmd);
+  if (testFiles.length === 0) {
+    return { external: false, testFiles: [], reason: `script "${script}" runs no resolvable test files` };
+  }
+  const touched = testFiles.filter((f) => touchedFiles.has(f));
+  if (touched.length > 0) {
+    return { external: false, testFiles, reason: `test file(s) in branch diff: ${touched.join(", ")}` };
+  }
+  return { external: true, testFiles, reason: `test file(s) NOT in branch diff: ${testFiles.join(", ")}` };
+}
+
 // reclassifyHarnessFails — walk a checks array and downgrade any `fail` whose evidence looks like a
 // HARNESS/COMMAND failure to `needs_human` (category `needs_human`) with a note prefixed onto the
 // evidence explaining WHY it was downgraded. Non-fail checks and fails with real breakage evidence
