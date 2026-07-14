@@ -128,7 +128,7 @@ On confirm:
 - Write [[../tables/customer_events]] `subscription.cancelled`.
 - Update [[../tables/customers]] subscription_status if this was their last active sub.
 - Tag the ticket `j:cancel`, `jo:negative`.
-- Write `outcome='cancelled'` to [[../tables/remedy_outcomes]] for each remedy that was shown but not accepted (so we capture the missed-save signal).
+- Write `outcome='rejected'` to [[../tables/remedy_outcomes]] for each remedy that was shown but not accepted (so we capture the missed-save signal). `'rejected'` is the `remedy_outcomes_outcome_check` value for "customer churned after seeing this remedy" — the JOURNEY-level `journey_sessions.outcome='cancelled'` is a separate, coarser column.
 
 ## Phase 4 — outcome tags
 
@@ -215,6 +215,9 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 
 **Fixed 2026-06-19 (ticket 178ae5a7):**
 - **Cancel journey no longer pre-binds a subscription.** `handleJourney` (`action-executor.ts`) now skips `subscription_id` resolution for cancel journeys (`isCancelJourney` guard) — selection is fully code-driven via the picker. Previously `find(a => a.contract_id)` could grab a side action's contract on a *different* sub, mis-bind the cancel session, and skip the picker. Jodi (ticket 178ae5a7) asked to cancel her Superfood Tabs sub but the journey bound to her Ashwavana sub (a concurrent `remove_item` was first in `actions[]`); she accepted a 20%-off save that landed on the wrong sub while the Tabs sub renewed full-price. Remedied: 20% refund on SC132928 + coupon removed from the Ashwavana sub.
+
+**Fixed 2026-07-14 (cancel-flow remedy-outcome vocabulary):**
+- **`remedy_outcomes.outcome` inserts from the completion route now use the CHECK-constraint vocabulary.** `src/app/api/journey/[token]/complete/route.ts` was inserting `outcome='cancelled'` (cancel branch) and `outcome='saved'` (saved branch), both of which violate `remedy_outcomes_outcome_check` (`NULL|'accepted'|'passed_over'|'rejected'`) — Postgres returned 23514 and, because the insert wasn't error-checked, the rows dropped silently. Live proof at fix time: 1875 rejected / 195 passed_over / 104 accepted / 296 null rows and ZERO `'cancelled'` or `'saved'`. Mapped cancelled→`rejected`, saved→`accepted`, and now log a warning on any insert error so a future vocabulary mismatch is loud instead of silent. Cancel-flow save-rate analytics that read `remedy_outcomes` were missing every route-driven completion until this landed. See [[../tables/remedy_outcomes]] `Gotchas` for the constraint vocabulary.
 
 **Fixed 2026-07-08 (ticket 472310cc):**
 - **Refund-playbook pause step is skipped when the identified subscription is already cancelled.** A `pause_subscription`/`pause` step in the Refund playbook now routes through `decidePauseSubscriptionStep` in `playbook-executor.ts`: if the target sub's status is `cancelled`, the step advances with no action and no response (nothing for the step-level claim-guard to block); on active/paused the pause still fires with `backedActions: ["pause_timed", "pause"]`. Previously the step tried to pause an already-cancelled sub, the "I've paused your subscription" claim was unbacked, and the guard dead-ended the run in escalation. See [[../playbooks/refund]] § Communication rules.
