@@ -1,0 +1,1 @@
+- **Persistent 3-hour ads-supervisor agent** · verified 2026-07-14 · → [[../inngest/ads-supervisor-cadence]]
