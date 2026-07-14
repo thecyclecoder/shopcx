@@ -14,8 +14,10 @@
  * Eligibility — a ticket qualifies for a June review when it is routine-owned + escalated + not
  * archived/closed AND does NOT already have:
  *   - an inflight `cs-director-call` job (spec_slug = ticket id) — no dup enqueue per hourly tick,
- *   - any prior `triage_runs` row — Phase 1 is one June-review per ticket; Phase 2 will add an
- *     on-demand second-opinion path (retire the routine quorum default).
+ *   - a `triage_runs` row that COVERS THE CURRENT ESCALATION LIFECYCLE — a review whose `created_at`
+ *     is at or after the ticket's current `escalated_at`. Older reviews from a PRIOR escalation
+ *     don't block a freshly re-escalated ticket (docs/brain/specs/triage-escalations-prior-review-
+ *     lifecycle-guard.md — 472310cc-shaped tickets that were resolved, then escalated again).
  *
  * The cron does NOT reason itself — it is purely the enqueue. See docs/brain/inngest/triage-
  * escalations.md.
@@ -57,6 +59,37 @@ export function passesJuneReviewSelection(ticket: {
   if (ticket.escalated_to !== null) return false;
   if (ticket.status === "archived" || ticket.status === "closed") return false;
   return true;
+}
+
+/**
+ * Lifecycle-aware prior-review guard — pinned in a unit test so the invariant is reviewable in
+ * isolation without a DB.
+ *
+ * The historical guard skipped any ticket that had *ever* had a `triage_runs` row. That treated an
+ * old June review as proof the CURRENT escalation was handled, which left re-escalated tickets
+ * (resolved once, then escalated again after a new customer message) unreviewed until a human
+ * noticed the Control Tower tile go red.
+ *
+ * The lifecycle-aware guard only suppresses a review recorded AT OR AFTER the ticket's current
+ * `escalated_at`. If the ticket's latest triage_runs row predates the current escalation, the
+ * current escalation is unreviewed and the cron should enqueue a fresh cs-director-call.
+ *
+ * Returns true when a prior review COVERS the current escalation (⇒ skip enqueue).
+ * Returns false when a fresh review is needed (⇒ enqueue).
+ */
+export function priorReviewCoversCurrentEscalation(
+  ticketEscalatedAt: string | null,
+  latestTriageRunAt: string | null,
+): boolean {
+  // A ticket without a current escalation isn't a triage candidate at all — the ticket-level
+  // predicate already filters those out; treat "no escalation" as "nothing to cover".
+  if (!ticketEscalatedAt) return false;
+  // No prior review at all ⇒ current escalation is unreviewed.
+  if (!latestTriageRunAt) return false;
+  const runAt = Date.parse(latestTriageRunAt);
+  const escAt = Date.parse(ticketEscalatedAt);
+  if (Number.isNaN(runAt) || Number.isNaN(escAt)) return false;
+  return runAt >= escAt;
 }
 
 export const triageEscalationsCron = inngest.createFunction(
@@ -111,16 +144,28 @@ export const triageEscalationsCron = inngest.createFunction(
         .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"]);
       const inflightSlugs = new Set((inflight || []).map((j) => j.spec_slug as string));
 
-      // Dedupe against any prior triage_runs row for the ticket. Phase 1 is one June-review per
-      // ticket; Phase 2 will add an on-demand second-opinion mechanism for genuinely borderline
-      // cases (the exception, not a routine re-run).
+      // Dedupe against triage_runs — lifecycle-aware. A prior review only counts if it was
+      // recorded AT OR AFTER the ticket's current `escalated_at`; older rows from a previous
+      // escalation lifecycle don't block a freshly re-escalated ticket. See
+      // {@link priorReviewCoversCurrentEscalation} — the invariant is pinned in
+      // src/lib/inngest/triage-escalations.selection.test.ts. Ordered `created_at desc` so the
+      // first row per ticket_id is that ticket's most recent triage_runs entry (uses the
+      // `triage_runs_ticket_idx (ticket_id, created_at desc)` index).
       const { data: prior } = await admin
         .from("triage_runs")
-        .select("ticket_id")
-        .in("ticket_id", ticketIds);
-      const priorTicketIds = new Set((prior || []).map((r) => r.ticket_id as string));
+        .select("ticket_id, created_at")
+        .in("ticket_id", ticketIds)
+        .order("created_at", { ascending: false });
+      const latestReviewAt = new Map<string, string>();
+      for (const r of (prior || []) as { ticket_id: string; created_at: string }[]) {
+        if (!latestReviewAt.has(r.ticket_id)) latestReviewAt.set(r.ticket_id, r.created_at);
+      }
 
-      const eligible = rows.filter((t) => !inflightSlugs.has(t.id) && !priorTicketIds.has(t.id));
+      const eligible = rows.filter(
+        (t) =>
+          !inflightSlugs.has(t.id) &&
+          !priorReviewCoversCurrentEscalation(t.escalated_at, latestReviewAt.get(t.id) ?? null),
+      );
       const capped = eligible.slice(0, JUNE_REVIEW_ENQUEUE_CAP_PER_TICK);
 
       let enqueued = 0;
