@@ -46,6 +46,21 @@ type Admin = ReturnType<typeof createAdminClient>;
  */
 export const MEDIA_BUYER_GRADE_DEFAULT_LIMIT = 50;
 
+/**
+ * Stable workspace-scoped `agent_jobs.spec_slug` for the Media Buyer grade job.
+ * The column is `NOT NULL` (supabase/migrations/20260618120000_agent_jobs.sql), so
+ * an omitted value blocks the insert and no grader row ever lands — one workspace
+ * runs one grader pass per cron tick, so a single per-workspace slug is the
+ * durable bucket for the `agent_jobs_slug_idx (workspace_id, spec_slug, ...)`
+ * Roadmap rollups (mirrors [[./media-buyer-cadence]] `mediaBuyerSpecSlug`).
+ */
+export const MEDIA_BUYER_GRADE_SPEC_SLUG = "media-buyer-grade:workspace";
+
+/** Returns the stable slug — helper form parallel to [[./media-buyer-cadence]] `mediaBuyerSpecSlug`. */
+export function mediaBuyerGradeSpecSlug(): string {
+  return MEDIA_BUYER_GRADE_SPEC_SLUG;
+}
+
 /** ISO cutoff — actions must be older than this to enter the settled window. */
 function settledCutoffIso(now: Date = new Date()): string {
   const ms = now.getTime() - REALIZED_WINDOW_MIN_DAYS * 24 * 60 * 60 * 1000;
@@ -127,6 +142,31 @@ export const mediaBuyerGradeCron = inngest.createFunction(
   },
 );
 
+/**
+ * The PURE per-workspace sweep — inserts ONE workspace-scoped `agent_jobs` row
+ * `kind='media-buyer-grade'` with a stable non-empty `spec_slug` and
+ * `instructions.limit=MEDIA_BUYER_GRADE_DEFAULT_LIMIT`. The `spec_slug` column is
+ * `NOT NULL` (the 2026-07-14 outage — Control Tower signature
+ * `inngest:c54fe7cef7e4a4ff`): an omitted value threw
+ * `null value in column "spec_slug" of relation "agent_jobs" violates not-null
+ * constraint` and no grader row ever landed.
+ *
+ * Extracted from the Inngest handler so it's testable without `step.run`.
+ */
+export async function dispatchMediaBuyerGradeSweep(
+  admin: Admin,
+  workspaceId: string,
+): Promise<{ dispatched: number }> {
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: workspaceId,
+    spec_slug: mediaBuyerGradeSpecSlug(),
+    kind: "media-buyer-grade",
+    instructions: JSON.stringify({ limit: MEDIA_BUYER_GRADE_DEFAULT_LIMIT }),
+  });
+  if (error) throw new Error(`agent_jobs insert failed: ${error.message}`);
+  return { dispatched: 1 };
+}
+
 export const mediaBuyerGradeSweep = inngest.createFunction(
   {
     id: "media-buyer-grade-sweep",
@@ -142,13 +182,7 @@ export const mediaBuyerGradeSweep = inngest.createFunction(
     };
     const result = await step.run("enqueue-media-buyer-grade-job", async () => {
       const admin = createAdminClient();
-      const { error } = await admin.from("agent_jobs").insert({
-        workspace_id,
-        kind: "media-buyer-grade",
-        instructions: JSON.stringify({ limit: MEDIA_BUYER_GRADE_DEFAULT_LIMIT }),
-      });
-      if (error) throw new Error(`agent_jobs insert failed: ${error.message}`);
-      return { dispatched: 1 };
+      return dispatchMediaBuyerGradeSweep(admin, workspace_id);
     });
     console.log(
       `[media-buyer-grade] ws=${workspace_id} dispatched=${result.dispatched}`,
