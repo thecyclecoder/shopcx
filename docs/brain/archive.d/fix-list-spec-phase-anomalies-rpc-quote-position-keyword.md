@@ -1,0 +1,1 @@
+- **Fix the list_spec_phase_anomalies migration: 'position' is a reserved keyword and must be quoted — the RPC never applied and the spec-drift anomaly sweep throws** · verified 2026-07-14 · → [[../libraries/specs-table]]
