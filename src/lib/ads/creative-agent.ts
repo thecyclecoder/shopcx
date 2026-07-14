@@ -89,6 +89,15 @@ async function resolveLandingUrl(admin: Admin, workspaceId: string, productHandl
   return null;
 }
 
+/** Angle-before-ready invariant (dahlia-creative-requires-angle-before-ready): a bin creative can only
+ *  land at `status='ready'` when it carries an `angle_id`. A null angle means no ad-copy source, so the
+ *  media buyer's replenish path skips it ([[media-buyer/agent]]:1478 — "campaign has no angle_id — no
+ *  ad-copy source; skipped to avoid a malformed Meta creative"), which silently inflates bin depth with
+ *  un-replenishable rows. Expressed once, greppable, and used at every ready-insert site. */
+export function readyStatusForAngle(angleId: string | null | undefined): "ready" | "draft" {
+  return angleId ? "ready" : "draft";
+}
+
 /** How many ready-to-test creatives a product currently has in the bin. */
 async function currentBinDepth(admin: Admin, workspaceId: string, productId: string): Promise<number> {
   const { readyToTest } = await listReadyToTest(admin, { workspaceId });
@@ -126,9 +135,17 @@ async function insertReadyCreative(
     .select("id").single();
 
   const name = `Dahlia · ${productTitle} · ${angle.source}`;
+  const angleId = (angleRow as { id?: string } | null)?.id ?? null;
+  const status = readyStatusForAngle(angleId);
+  if (!angleId) {
+    // dahlia_creative_missing_angle — the angle-row insert missed (a race, RLS deny, or a schema drift),
+    // so the creative can't be replenished (no ad-copy source). Hold the row at 'draft' rather than
+    // minting a phantom 'ready' that inflates bin depth. Named for grep + future director_activity roll-up.
+    console.warn("dahlia_creative_missing_angle", { workspaceId, productId, productTitle, hook: angle.hook.slice(0, 80) });
+  }
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
-    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleRow?.id ?? null, status: "ready" })
+    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleId, status })
     .select("id").single();
   if (cErr || !campaign) return null;
   const campaignId = (campaign as { id: string }).id;
