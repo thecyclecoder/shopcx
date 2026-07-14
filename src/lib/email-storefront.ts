@@ -16,6 +16,22 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 const FROM_NAME = "Superfoods Company";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Drop non-UUID line-item product_ids before they reach the reviews
+ * query's `.in('product_id', …)` filter. Shipping Protection carries a
+ * Shopify NUMERIC product id (7634377900205), and a single non-UUID
+ * value makes Postgres raise 22P02 for the WHOLE query — dropping the
+ * social-proof block for every valid product in the same order.
+ * Non-reviewable line items (Shipping Protection, gifts, anything with
+ * a Shopify id in that field) are silently excluded; there is nothing
+ * to resolve them to.
+ */
+export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefined>): string[] {
+  return ids.filter((id): id is string => typeof id === "string" && UUID_RE.test(id));
+}
+
 /**
  * Pull the workspace's storefront branding + transactional messaging
  * config so the email header matches the site and the from/reply-to
@@ -134,7 +150,11 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
   smart_quote: string | null;
   product_title: string | null;
 } | null> {
-  if (productIds.length === 0) return null;
+  // Defense-in-depth: strip any non-UUID id before it reaches the UUID
+  // column filter (see uuidLineItemProductIds — a single Shopify-id
+  // value 22P02s the WHOLE query and silently drops the block).
+  const uuidIds = uuidLineItemProductIds(productIds);
+  if (uuidIds.length === 0) return null;
   const admin = createAdminClient();
   // Featured first
   const sel = "reviewer_name, rating, title, body, smart_quote, product_id";
@@ -142,7 +162,7 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
     .from("product_reviews")
     .select(sel)
     .eq("workspace_id", workspaceId)
-    .in("product_id", productIds)
+    .in("product_id", uuidIds)
     .eq("featured", true)
     .not("body", "is", null)
     .limit(20);
@@ -153,7 +173,7 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
       .from("product_reviews")
       .select(sel)
       .eq("workspace_id", workspaceId)
-      .in("product_id", productIds)
+      .in("product_id", uuidIds)
       .in("status", ["published", "featured"])
       .eq("rating", 5)
       .not("body", "is", null)
@@ -504,12 +524,14 @@ export async function sendOrderConfirmationEmail(opts: {
     // bought (excluding gifts so the social proof is about something
     // they actually paid for). Random within the qualifying pool so
     // repeat customers see a different review each time.
-    const reviewProductIds = Array.from(new Set(
+    // Filter to UUID-shaped ids — Shipping Protection's line item
+    // carries the Shopify NUMERIC product id and would 22P02 the whole
+    // reviews query, dropping the block for every valid product too.
+    const reviewProductIds = uuidLineItemProductIds(Array.from(new Set(
       order.line_items
         .filter((l) => !l.is_gift)
-        .map((l) => (l as unknown as { product_id?: string }).product_id)
-        .filter((id): id is string => !!id),
-    ));
+        .map((l) => (l as unknown as { product_id?: string }).product_id),
+    )));
     const featuredReview = await pickFeaturedReview(opts.workspaceId, reviewProductIds);
     const reviewBlock = featuredReview ? renderReviewBlock(featuredReview) : "";
     const protectionBadge = order.shipping_protection_added
@@ -649,12 +671,14 @@ export async function sendShippingNotificationEmail(opts: {
     // is workspace-featured reviews on the customer's purchased
     // products; falls back to 5-star published. Random pick so the
     // shipping email doesn't repeat the confirmation's review.
-    const reviewProductIds = Array.from(new Set(
+    // Same UUID guard as the confirmation email — a Shipping Protection
+    // line item's Shopify-numeric product_id would 22P02 the whole
+    // reviews query and silently drop the block.
+    const reviewProductIds = uuidLineItemProductIds(Array.from(new Set(
       order.line_items
         .filter((l) => !l.is_gift)
-        .map((l) => (l as unknown as { product_id?: string }).product_id)
-        .filter((id): id is string => !!id),
-    ));
+        .map((l) => (l as unknown as { product_id?: string }).product_id),
+    )));
     const featuredReview = await pickFeaturedReview(opts.workspaceId, reviewProductIds);
     const reviewBlock = featuredReview ? renderReviewBlock(featuredReview) : "";
 
