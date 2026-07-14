@@ -20,6 +20,8 @@ import {
   applyMergedMigrations,
   anyApplied,
   driftSummary,
+  isDuplicateObjectError,
+  DUPLICATE_OBJECT_SQLSTATES,
   type MergedUnappliedMigration,
 } from "./migration-drift";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -500,6 +502,150 @@ test("box control loop — after a successful auto-apply the reconciler reports 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 1 —
+// A duplicate-object error during additive auto-apply means already-applied, not apply-failed.
+// The 2026-07 incident: 103 migration versions were merged-but-unrecorded (their DDL had already
+// been applied) so the reconciler kept re-running additive DDL and getting duplicate_table /
+// duplicate_object / cannot_change_return_type back — recorded as apply-failed, retried every tick.
+// The classifier + outcome fix teaches the loop that "the object already exists" means the ledger
+// is behind, not the DDL is broken. isDuplicateObjectError is the one place that reads err.code;
+// applyMergedMigrations respects both a callback-returned {alreadyApplied:true} signal AND
+// (safety-net) a thrown duplicate-object error.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("isDuplicateObjectError — recognizes every duplicate-object-class SQLSTATE (the six the spec calls out)", () => {
+  // Every code in the exported set MUST be recognized — no missing rows.
+  for (const code of DUPLICATE_OBJECT_SQLSTATES) {
+    assert.equal(isDuplicateObjectError({ code }), true, `expected ${code} to classify as duplicate-object`);
+  }
+  // The six the spec names — pinned individually so a future edit that shrinks the set fails loudly.
+  assert.equal(isDuplicateObjectError({ code: "42P07" }), true); // duplicate_table
+  assert.equal(isDuplicateObjectError({ code: "42710" }), true); // duplicate_object
+  assert.equal(isDuplicateObjectError({ code: "42723" }), true); // duplicate_function
+  assert.equal(isDuplicateObjectError({ code: "42P06" }), true); // duplicate_schema
+  assert.equal(isDuplicateObjectError({ code: "42701" }), true); // duplicate_column
+  assert.equal(isDuplicateObjectError({ code: "42P13" }), true); // cannot_change_return_type
+});
+
+test("isDuplicateObjectError — genuine failure SQLSTATEs stay apply-failed (never silently record a broken migration)", () => {
+  assert.equal(isDuplicateObjectError({ code: "42601" }), false); // syntax_error
+  assert.equal(isDuplicateObjectError({ code: "42P01" }), false); // undefined_table
+  assert.equal(isDuplicateObjectError({ code: "42703" }), false); // undefined_column
+  assert.equal(isDuplicateObjectError({ code: "22P02" }), false); // invalid_text_representation
+  assert.equal(isDuplicateObjectError({ code: "23505" }), false); // unique_violation (NOT a duplicate-object)
+});
+
+test("isDuplicateObjectError — tolerates non-Error / missing-code / non-string-code shapes without throwing", () => {
+  assert.equal(isDuplicateObjectError(null), false);
+  assert.equal(isDuplicateObjectError(undefined), false);
+  assert.equal(isDuplicateObjectError("42P07"), false); // string, not object with .code
+  assert.equal(isDuplicateObjectError(new Error("boom")), false); // vanilla Error, no code
+  assert.equal(isDuplicateObjectError({}), false);
+  assert.equal(isDuplicateObjectError({ code: 42101 }), false); // number, not string
+});
+
+test("applyMergedMigrations — an additive migration whose callback returns {alreadyApplied:true} tags outcome='already-applied' (not 'applied')", async () => {
+  const applied: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create table public.order_refunds_mirror (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      applied.push(version);
+      return { alreadyApplied: true };
+    },
+  });
+  assert.deepEqual(applied, ["20260918120000"]);
+  assert.equal(out[0]?.outcome, "already-applied");
+  assert.equal(out[0]?.severity, "additive");
+  // anyApplied is true — the reconciler should re-check so the ledger fix clears the tile.
+  assert.equal(anyApplied(out), true);
+});
+
+test("applyMergedMigrations — a callback that THROWS a duplicate-object SQLSTATE is classified as already-applied (safety net when the caller forgot to catch)", async () => {
+  const attempted: string[] = [];
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create table public.order_refunds_mirror (id uuid primary key);`,
+    applyMigration: async ({ version }) => {
+      attempted.push(version);
+      // The exact shape node-postgres surfaces — Error subclass with a `code` property.
+      const err = Object.assign(new Error(`relation "order_refunds_mirror" already exists`), {
+        code: "42P07",
+      });
+      throw err;
+    },
+  });
+  assert.deepEqual(attempted, ["20260918120000"]);
+  assert.equal(out[0]?.outcome, "already-applied");
+  assert.equal(out[0]?.severity, "additive");
+  assert.equal(out[0]?.error, undefined); // already-applied is NOT an error
+  assert.equal(anyApplied(out), true);
+});
+
+test("applyMergedMigrations — a genuine (non-duplicate-object) throw STILL yields apply-failed (regression pin — no over-swallowing)", async () => {
+  const out = await applyMergedMigrations([ADDITIVE_ORDER_REFUNDS], {
+    readSql: () => `create tabel public.typo (id uuid primary key);`, // syntax error
+    applyMigration: async () => {
+      const err = Object.assign(new Error("syntax error at or near \"tabel\""), { code: "42601" });
+      throw err;
+    },
+  });
+  assert.equal(out[0]?.outcome, "apply-failed");
+  assert.match(out[0]?.error ?? "", /syntax error/);
+});
+
+test("applyMergedMigrations — mixed batch: fresh-apply + already-applied + genuine failure route to three DISTINCT outcomes on the same tick", async () => {
+  const out = await applyMergedMigrations(
+    [ADDITIVE_ORDER_REFUNDS, ADDITIVE_INDEX, { version: "20260930120000", file: "20260930120000_broken.sql" }],
+    {
+      readSql: (file) => {
+        if (file.includes("broken")) return `create tabel public.oops (id uuid primary key);`;
+        if (file.includes("index")) return `create index idx_foo on public.foo (bar);`;
+        return `create table public.order_refunds_mirror (id uuid primary key);`;
+      },
+      applyMigration: async ({ version }) => {
+        // order_refunds — fresh apply (fine, no throw, no signal).
+        if (version === "20260918120000") return;
+        // index — already-applied via return signal.
+        if (version === "20260920120000") return { alreadyApplied: true };
+        // broken — genuine syntax error.
+        throw Object.assign(new Error("syntax error at or near \"tabel\""), { code: "42601" });
+      },
+    },
+  );
+  assert.equal(out[0]?.outcome, "applied");
+  assert.equal(out[1]?.outcome, "already-applied");
+  assert.equal(out[2]?.outcome, "apply-failed");
+  assert.equal(anyApplied(out), true);
+});
+
+test("anyApplied — an already-applied outcome triggers a re-check (the ledger row was inserted; the tile should clear on the same tick)", () => {
+  const items: MergedUnappliedMigration[] = [
+    { ...ADDITIVE_ORDER_REFUNDS, outcome: "already-applied", severity: "additive", matches: [] },
+    { ...DESTRUCTIVE_DROP, outcome: "approval-needed", severity: "irreversible_destructive", matches: ["DROP TABLE"] },
+  ];
+  assert.equal(anyApplied(items), true);
+});
+
+test("driftSummary — the outcome tail names an already-applied count when the reconciler cleared a ledger gap", () => {
+  const summary = driftSummary({
+    status: "drift",
+    missing: [],
+    allowlistedMissing: [],
+    mergedButUnapplied: [
+      { ...ADDITIVE_ORDER_REFUNDS, outcome: "already-applied", severity: "additive", matches: [] },
+      { ...ADDITIVE_INDEX, outcome: "applied", severity: "additive", matches: [] },
+    ],
+    appliedNotOnMain: [],
+    expectedCount: 0,
+    liveCount: 0,
+    parsedFiles: 0,
+    appliedCount: 0,
+    appliedCheckSkipped: false,
+  });
+  assert.match(summary, /1 applied/);
+  assert.match(summary, /1 already-applied/);
 });
 
 test("driftSummary — with Phase 2 outcomes populated, the summary tail names the outcome mix", () => {
