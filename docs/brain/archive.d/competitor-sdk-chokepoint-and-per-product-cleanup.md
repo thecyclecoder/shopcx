@@ -1,0 +1,1 @@
+- **Competitor SDK chokepoint + Research→Competitors per-product + delete orphan competitors** · verified 2026-07-14 · → [[libraries/competitors]]
