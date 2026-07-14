@@ -3501,17 +3501,22 @@ async function fetchAppliedMigrationVersions(): Promise<string[] | null> {
 // ci-guard-migrations-applied-not-just-merged spec Phase 2.
 //
 // Idempotent on already-applied objects (migration-drift-reconciler-idempotent-on-already-applied-
-// objects spec Phase 1): when the DDL throws a Postgres duplicate-object-class SQLSTATE (relation
-// already exists, cannot change return type of existing function, …) it means the object is already
-// there — an earlier apply the ledger never recorded. We swallow the DDL error, STILL record the
-// version (ON CONFLICT DO NOTHING) so the reconciler clears the tile, and return
-// `{ alreadyApplied: true }` so applyMergedMigrations tags outcome='already-applied' (distinct from
-// 'applied'). A genuine error (syntax, undefined_table, …) still throws through to 'apply-failed'.
+// objects spec Phase 1, Phase 3 upgrade to statement-level): when a statement throws a Postgres
+// duplicate-object-class SQLSTATE (relation already exists, cannot change return type of existing
+// function, …) the specific object is already there — an earlier apply the ledger never recorded.
+// Phase 3 splits the file at top-level statement boundaries (via `splitSqlStatements`) and
+// classifies each statement in its OWN nested savepoint, so a duplicate-object throw on the FIRST
+// statement of a multi-statement file no longer masks the fact that the tail statements never
+// ran. Every statement must be accounted for (applied or verified-already-present) before we
+// record the version; a genuine error on any statement rolls the whole file back and rethrows to
+// apply-failed. When at least one statement was verified-already-present AND no statement threw
+// genuinely, we return `{ alreadyApplied: true }` so applyMergedMigrations tags outcome
+// 'already-applied' (distinct from 'applied').
 async function applyMigrationAndRecord(
   input: { version: string; file: string; sql: string },
 ): Promise<void | { alreadyApplied: true }> {
   const { poolerConnectionString } = await import("./_bootstrap");
-  const { isDuplicateObjectError } = await import(
+  const { isDuplicateObjectError, splitSqlStatements } = await import(
     "../src/lib/control-tower/migration-drift"
   );
   const connectionString = poolerConnectionString();
@@ -3519,15 +3524,44 @@ async function applyMigrationAndRecord(
   const c = new Client({ connectionString });
   await c.connect();
   try {
-    // The DDL itself. A duplicate-object-class error means "already applied earlier, ledger just
-    // never got the row" — still record the version below; a real error rethrows to apply-failed.
-    let alreadyApplied = false;
+    // Statement-level classification (Phase 3 fix). Wrap the whole file in one BEGIN so the fresh
+    // DDL from earlier statements can be rolled back atomically if a later statement throws a
+    // genuine (non-duplicate-object) error. Each statement additionally runs inside its own
+    // SAVEPOINT so a duplicate-object failure rolls back that ONE statement without aborting the
+    // outer transaction. Same shape as `scripts/_reconcile-migration-ledger.ts classifyOne`.
+    const statements = splitSqlStatements(input.sql);
+    let anyAlreadyPresent = false;
+    let anyFreshApplied = false;
+    await c.query("BEGIN");
     try {
-      await c.query(input.sql);
-    } catch (ddlErr) {
-      if (!isDuplicateObjectError(ddlErr)) throw ddlErr;
-      alreadyApplied = true;
+      for (let idx = 0; idx < statements.length; idx++) {
+        const stmt = statements[idx];
+        const sp = `mig_apply_${idx}`;
+        await c.query(`SAVEPOINT ${sp}`);
+        try {
+          await c.query(stmt);
+          await c.query(`RELEASE SAVEPOINT ${sp}`);
+          anyFreshApplied = true;
+        } catch (stmtErr) {
+          await c.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+          await c.query(`RELEASE SAVEPOINT ${sp}`);
+          if (isDuplicateObjectError(stmtErr)) {
+            anyAlreadyPresent = true;
+            continue;
+          }
+          throw stmtErr;
+        }
+      }
+      await c.query("COMMIT");
+    } catch (fileErr) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw fileErr;
     }
+    // Any dup-object hit → tag already-applied. Signals ledger recovery to the operator, even
+    // when the file was partially fresh (mixed case).
+    void anyFreshApplied;
+    const alreadyApplied = anyAlreadyPresent;
+
     // Record the version so the reconciler treats it as applied on the next tick. Uses a permissive
     // shape (version + name; statements folded into an ARRAY the shape has room for) with ON
     // CONFLICT DO NOTHING so a version already recorded by a concurrent dashboard apply is a no-op.
