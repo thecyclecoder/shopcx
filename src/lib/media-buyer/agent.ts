@@ -49,6 +49,7 @@ import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
+import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { inngest } from "@/lib/inngest/client";
 
@@ -129,6 +130,208 @@ export async function escalateUnderProvisionedCohort(
   });
   if (error) return { emitted: false };
   return { emitted: true };
+}
+
+/** Deep link the execute-failure escalation surfaces on the CEO's inbox card. */
+const MEDIA_BUYER_EXECUTE_FAILED_DEEP_LINK = "/dashboard/marketing/ads";
+
+/**
+ * escalateMediaBuyerExecuteFailure — Phase 1 of
+ * `media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded`.
+ *
+ * When the runner's inline execute call to Meta throws (or when the workspace has no Meta
+ * user token so we couldn't call at all), raise a deduped [[../tables/dashboard_notifications]]
+ * CEO card so a decided-but-unfired kill/promote/unpause ESCALATES per the north star instead
+ * of silently sitting in the ledger while the ad keeps spending. The `iteration_actions` row
+ * stays at `status='failed'` (or `decided` when the token was missing) — never `executed`, so
+ * the [[../ads-supervisor]] coverage check (Phase 2) sees the miss.
+ *
+ * Dedupe: at most once per (workspace, object_id, actionKind) per UTC day, so the 2h media-buyer
+ * pass cadence never spams the inbox but a persistent Meta failure surfaces daily until fixed.
+ */
+export async function escalateMediaBuyerExecuteFailure(
+  admin: Admin,
+  args: {
+    workspaceId: string;
+    actionKind: "media_buyer_kill_execute_failed" | "media_buyer_promote_execute_failed" | "media_buyer_reactivate_execute_failed" | "media_buyer_no_meta_token";
+    targetLevel: "adset" | "campaign" | null;
+    targetObjectId: string;
+    rationale: string;
+    errorMessage: string;
+    /** Override "now" — tests pin this so the dedupe day is deterministic. */
+    nowMs?: number;
+  },
+): Promise<{ emitted: boolean }> {
+  const day = new Date(args.nowMs ?? Date.now()).toISOString().slice(0, 10);
+  const dedupeKey = `${args.actionKind}:${args.workspaceId}:${args.targetObjectId}:${day}`;
+
+  const { data: prior } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("metadata->>dedupe_key", dedupeKey)
+    .limit(1);
+  if ((prior ?? []).length > 0) return { emitted: false };
+
+  const verb =
+    args.actionKind === "media_buyer_kill_execute_failed"
+      ? "kill"
+      : args.actionKind === "media_buyer_promote_execute_failed"
+        ? "promote"
+        : args.actionKind === "media_buyer_reactivate_execute_failed"
+          ? "reactivate"
+          : "execute";
+  const title = `Media Buyer: ${verb} failed on Meta — ${args.targetObjectId}`;
+  const body =
+    `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
+    `but the Meta call FAILED. The iteration_actions row is NOT stamped executed — the audit trail ` +
+    `will not claim an action that didn't happen (no-false-promises).\n\n` +
+    `Decision rationale: ${args.rationale}\n\n` +
+    `Meta error: ${args.errorMessage}\n\n` +
+    `Investigate the Meta connection (token scope, object still exists, account rate limit) and either ` +
+    `re-run the pass to retry OR act by hand.`;
+
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: args.workspaceId,
+    type: APPROVAL_REQUEST_TYPE,
+    title: title.slice(0, 200),
+    body: body.slice(0, 4000),
+    link: MEDIA_BUYER_EXECUTE_FAILED_DEEP_LINK,
+    metadata: {
+      routed_to_function: "ceo",
+      escalated_by_director: GROWTH_DIRECTOR_FUNCTION,
+      escalation_kind: args.actionKind,
+      escalation_reason: args.errorMessage.slice(0, 2000),
+      dedupe_key: dedupeKey,
+      target_level: args.targetLevel,
+      target_object_id: args.targetObjectId,
+      approve_action_id: null,
+    },
+    read: false,
+    dismissed: false,
+  });
+  if (error) return { emitted: false };
+  return { emitted: true };
+}
+
+/**
+ * The Meta-side surface the runner needs to execute a decided action. Extracted as an
+ * injectable interface so tests can pass a fake — the real caller passes the Graph-backed
+ * exports from [[../meta-ads]]. Mirrors the two primitives [[../meta/execution]] uses.
+ */
+export interface MediaBuyerMetaExecutor {
+  updateObjectStatus(token: string, objectId: string, status: "ACTIVE" | "PAUSED"): Promise<Record<string, unknown>>;
+  updateObjectBudget(token: string, objectId: string, budget: { dailyBudgetCents?: number | null; lifetimeBudgetCents?: number | null }): Promise<Record<string, unknown>>;
+}
+
+const DEFAULT_META_EXECUTOR: MediaBuyerMetaExecutor = { updateObjectStatus, updateObjectBudget };
+
+/**
+ * The one decided action passed to the inline executor — enough to fire the right
+ * Graph primitive and stamp the `iteration_actions` row afterwards.
+ */
+export interface DecidedActionToExecute {
+  rowId: string;
+  actionType: "pause" | "unpause" | "scale_up";
+  targetLevel: "adset" | "campaign";
+  targetObjectId: string;
+  /** For scale_up — the target daily budget (cents). Ignored for pause/unpause. */
+  afterBudgetCents?: number | null;
+}
+
+export interface ExecuteDecidedActionResult {
+  success: boolean;
+  external_result: Record<string, unknown>;
+  /** Populated on failure — a short message + the Meta primitive we tried. */
+  error?: string;
+}
+
+/**
+ * Execute ONE decided `iteration_actions` row against Meta and stamp the outcome back
+ * onto the row (compare-and-set on `status='decided'` so a re-run can never double-flip).
+ *
+ * - `pause` → `updateObjectStatus(objectId, 'PAUSED')`
+ * - `unpause` → `updateObjectStatus(objectId, 'ACTIVE')`
+ * - `scale_up` → `updateObjectBudget(objectId, { dailyBudgetCents: afterBudgetCents })`
+ *
+ * On success: row → `status='executed'`, `external_result` carries the Graph response,
+ * `executed_at` stamped. Returns `{ success:true, external_result }`.
+ *
+ * On failure: row → `status='failed'`, `external_result` carries the error. Returns
+ * `{ success:false, error }`. The caller (`runMediaBuyerLoop`) is responsible for
+ * emitting the CEO-visible escalation via {@link escalateMediaBuyerExecuteFailure} —
+ * this helper stays pure (only DB + Meta).
+ *
+ * The exported {@link MediaBuyerMetaExecutor} seam lets tests inject a fake Meta client
+ * and assert the primitive + args, without touching the real Graph.
+ */
+export async function executeDecidedActionAgainstMeta(args: {
+  admin: Admin;
+  token: string;
+  action: DecidedActionToExecute;
+  nowMs: number;
+  metaExecutor?: MediaBuyerMetaExecutor;
+}): Promise<ExecuteDecidedActionResult> {
+  const meta = args.metaExecutor ?? DEFAULT_META_EXECUTOR;
+  const nowIso = new Date(args.nowMs).toISOString();
+
+  try {
+    let external_result: Record<string, unknown>;
+    if (args.action.actionType === "pause") {
+      const res = await meta.updateObjectStatus(args.token, args.action.targetObjectId, "PAUSED");
+      external_result = { meta_object_id: args.action.targetObjectId, applied_status: "PAUSED", graph_response: res };
+    } else if (args.action.actionType === "unpause") {
+      const res = await meta.updateObjectStatus(args.token, args.action.targetObjectId, "ACTIVE");
+      external_result = { meta_object_id: args.action.targetObjectId, applied_status: "ACTIVE", graph_response: res };
+    } else {
+      // scale_up — budget change, not status. A null afterBudgetCents cannot execute (CBO/ABO
+      // crossover); fail rather than guess a budget. Same rail [[../meta/execution]] enforces.
+      if (args.action.afterBudgetCents == null) {
+        throw new Error("no_budget_to_set (afterBudgetCents null — CBO/ABO crossover)");
+      }
+      const res = await meta.updateObjectBudget(args.token, args.action.targetObjectId, {
+        dailyBudgetCents: args.action.afterBudgetCents,
+      });
+      external_result = {
+        meta_object_id: args.action.targetObjectId,
+        applied_budget_cents: args.action.afterBudgetCents,
+        budget_field: "daily",
+        graph_response: res,
+      };
+    }
+
+    // Compare-and-set: only flip if still 'decided' (a concurrent pass or the executor
+    // cron may have already stamped this row — never double-flip).
+    await args.admin
+      .from("iteration_actions")
+      .update({
+        status: "executed",
+        external_result,
+        executed_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq("id", args.action.rowId)
+      .eq("status", "decided");
+    return { success: true, external_result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const external_result: Record<string, unknown> = {
+      meta_object_id: args.action.targetObjectId,
+      attempted_action: args.action.actionType,
+      error: message.slice(0, 500),
+    };
+    await args.admin
+      .from("iteration_actions")
+      .update({
+        status: "failed",
+        external_result,
+        updated_at: nowIso,
+      })
+      .eq("id", args.action.rowId)
+      .eq("status", "decided");
+    return { success: false, external_result, error: message };
+  }
 }
 
 /**
@@ -747,6 +950,17 @@ export interface RunMediaBuyerOptions {
   snapshotDate?: string;
   /** Override "now" — tests pin this so the winner window is deterministic. */
   nowMs?: number;
+  /**
+   * Injectable Meta client for the inline execute path
+   * ([[../specs/media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded]] Phase 1).
+   * Defaults to the real Graph-backed exports from [[../meta-ads]]. Tests override to a fake.
+   */
+  metaExecutor?: MediaBuyerMetaExecutor;
+  /**
+   * Injectable Meta token loader for the inline execute path (same spec Phase 1). Defaults to
+   * [[../meta-ads]] `getMetaUserToken`. Tests override to return a fixed token / null.
+   */
+  loadMetaToken?: (workspaceId: string) => Promise<string | null>;
 }
 
 export interface RunMediaBuyerResult {
@@ -1140,18 +1354,127 @@ export async function runMediaBuyerLoop(
       updated_at: nowIso,
     });
   }
+  // `iteration_actions` upsert — the ledger row lands at `status='decided'` first. We
+  // then execute against Meta inline and flip the row to `executed`/`failed`. We select
+  // the row IDs back so the inline executor's compare-and-set on `status='decided'`
+  // targets the exact row (a re-run cannot double-flip).
+  //
+  // [[../specs/media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded]] Phase 1 —
+  // BEFORE this spec, the runner upserted at `decided` and emitted the audit line
+  // ("paused_loser") without ever calling Meta; four Superfood duds stayed live at ROAS 0
+  // for hours because the ledger CLAIMED a pause it never made. The fix wires the
+  // Meta status/budget primitives into the runner directly so the audit line ships ONLY
+  // after a successful execute (no-false-promises).
+  const rowIdByKey = new Map<string, string>();
+  const keyFor = (objectId: string, actionType: "pause" | "unpause" | "scale_up") => `${objectId}:${actionType}`;
   if (iterationRows.length) {
-    const { error } = await admin
+    const { data: upsertedRows, error } = await admin
       .from("iteration_actions")
       .upsert(iterationRows, {
         onConflict: "workspace_id,meta_ad_account_id,object_id,action_type,snapshot_date",
         ignoreDuplicates: false,
+      })
+      .select("id, object_id, action_type");
+    if (!error) {
+      writes.iterationActionsInserted = iterationRows.length;
+      for (const r of (upsertedRows ?? []) as Array<{ id: string; object_id: string; action_type: string }>) {
+        if (r.action_type === "pause" || r.action_type === "unpause" || r.action_type === "scale_up") {
+          rowIdByKey.set(keyFor(r.object_id, r.action_type), r.id);
+        }
+      }
+    }
+  }
+
+  // ── Execute each decided action against Meta INLINE (Phase 1) ─────────────
+  // The audit line + stampCreativeOutcome + learning-flywheel writes below are
+  // gated on this set — only a SUCCESSFUL execute is claimed. A failed execute
+  // leaves the row at `status='failed'`, emits a deduped CEO escalation card,
+  // and skips the paused_loser/promoted_winner/reactivated_recovered emit.
+  const executed = new Set<string>();
+  const loadToken = opts.loadMetaToken ?? getMetaUserToken;
+  const token = iterationRows.length ? await loadToken(opts.workspaceId) : null;
+
+  if (iterationRows.length && !token) {
+    // No Meta token → we cannot execute any decided action. Rows stay at 'decided';
+    // emit ONE workspace-level escalation card and skip every claim-line below.
+    await escalateMediaBuyerExecuteFailure(admin, {
+      workspaceId: opts.workspaceId,
+      actionKind: "media_buyer_no_meta_token",
+      targetLevel: null,
+      targetObjectId: opts.metaAdAccountId,
+      rationale: `Media Buyer decided ${iterationRows.length} action(s) but no Meta user token is configured for workspace ${opts.workspaceId} (${opts.metaAdAccountId}).`,
+      errorMessage: "no_meta_user_token — cannot call the Graph status/budget primitives.",
+      nowMs,
+    });
+  } else if (token) {
+    const executor = opts.metaExecutor ?? DEFAULT_META_EXECUTOR;
+    for (const a of plan.kill) {
+      const key = keyFor(a.targetObjectId, "pause");
+      const rowId = rowIdByKey.get(key);
+      if (!rowId) continue; // upsert failed for this row — skip; no false claim
+      const result = await executeDecidedActionAgainstMeta({
+        admin, token, nowMs,
+        action: { rowId, actionType: "pause", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId },
+        metaExecutor: executor,
       });
-    if (!error) writes.iterationActionsInserted = iterationRows.length;
+      if (result.success) executed.add(key);
+      else await escalateMediaBuyerExecuteFailure(admin, {
+        workspaceId: opts.workspaceId,
+        actionKind: "media_buyer_kill_execute_failed",
+        targetLevel: a.targetLevel,
+        targetObjectId: a.targetObjectId,
+        rationale: a.rationale,
+        errorMessage: result.error ?? "unknown_meta_error",
+        nowMs,
+      });
+    }
+    for (const a of plan.promote) {
+      const key = keyFor(a.targetObjectId, "scale_up");
+      const rowId = rowIdByKey.get(key);
+      if (!rowId) continue;
+      const result = await executeDecidedActionAgainstMeta({
+        admin, token, nowMs,
+        action: { rowId, actionType: "scale_up", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId, afterBudgetCents: a.afterBudgetCents },
+        metaExecutor: executor,
+      });
+      if (result.success) executed.add(key);
+      else await escalateMediaBuyerExecuteFailure(admin, {
+        workspaceId: opts.workspaceId,
+        actionKind: "media_buyer_promote_execute_failed",
+        targetLevel: a.targetLevel,
+        targetObjectId: a.targetObjectId,
+        rationale: a.rationale,
+        errorMessage: result.error ?? "unknown_meta_error",
+        nowMs,
+      });
+    }
+    for (const a of reactivations) {
+      const key = keyFor(a.targetObjectId, "unpause");
+      const rowId = rowIdByKey.get(key);
+      if (!rowId) continue;
+      const result = await executeDecidedActionAgainstMeta({
+        admin, token, nowMs,
+        action: { rowId, actionType: "unpause", targetLevel: "adset", targetObjectId: a.targetObjectId },
+        metaExecutor: executor,
+      });
+      if (result.success) executed.add(key);
+      else await escalateMediaBuyerExecuteFailure(admin, {
+        workspaceId: opts.workspaceId,
+        actionKind: "media_buyer_reactivate_execute_failed",
+        targetLevel: "adset",
+        targetObjectId: a.targetObjectId,
+        rationale: `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`,
+        errorMessage: result.error ?? "unknown_meta_error",
+        nowMs,
+      });
+    }
   }
 
   // director_activity row per plan action — the "cites concrete ROAS + meta_ad_id" audit trail.
+  // ONLY emits after a successful Meta execute — the ledger must never claim an action it
+  // did not take (no-false-promises; Phase 1 of the spec above).
   for (const a of plan.promote) {
+    if (!executed.has(keyFor(a.targetObjectId, "scale_up"))) continue;
     const r = await recordDirectorActivity(admin, {
       workspaceId: opts.workspaceId,
       directorFunction: GROWTH_DIRECTOR_FUNCTION,
@@ -1176,6 +1499,7 @@ export async function runMediaBuyerLoop(
     await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, adCampaignId: a.sourceAdCampaignId, metaAdsetId: a.targetObjectId, outcome: "won", spendCents: a.spendCents }).catch(() => {});
   }
   for (const a of plan.kill) {
+    if (!executed.has(keyFor(a.targetObjectId, "pause"))) continue;
     const r = await recordDirectorActivity(admin, {
       workspaceId: opts.workspaceId,
       directorFunction: GROWTH_DIRECTOR_FUNCTION,
@@ -1198,6 +1522,7 @@ export async function runMediaBuyerLoop(
     await stampCreativeOutcome(admin, { workspaceId: opts.workspaceId, metaAdsetId: a.targetObjectId, outcome: "lost", spendCents: a.spendCents }).catch(() => {});
   }
   for (const a of reactivations) {
+    if (!executed.has(keyFor(a.targetObjectId, "unpause"))) continue;
     const r = await recordDirectorActivity(admin, {
       workspaceId: opts.workspaceId,
       directorFunction: GROWTH_DIRECTOR_FUNCTION,
