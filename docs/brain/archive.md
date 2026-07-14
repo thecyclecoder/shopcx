@@ -12,7 +12,19 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Competitor SDK chokepoint + Research→Competitors per-product + delete orphan competitors** · verified 2026-07-14 · → [[libraries/competitors]]
+- **Exclude active dunning from renewal-integrity false-positives** · verified 2026-07-14 · → [[inngest/internal-subscription-renewals]] + [[libraries/control-tower]]
+- **Internal renewal cron skips subscriptions until their dunning retry date** · verified 2026-07-14 · → [[../inngest/internal-subscription-renewals]]
+- **Retry transient Meta ad image uploads through retry wrapper** · verified 2026-07-14 · → [[libraries/meta-ads]]
+- **Stop portal bootstrap from timing out on slow optional reads** · verified 2026-07-14 · → [[../libraries/portal__handlers__bootstrap]]
+- **Let re-escalated tickets receive a fresh June review** · verified 2026-07-14 · → [[inngest/triage-escalations]]
+- **Autonomous spec-writer lanes author structured specs; retire markdown path** · verified 2026-07-13 · → [[../libraries/author-spec]]
 - **Canonical node registry — one org tree, drift reconciled** · verified 2026-07-13 · → [[../libraries/control-tower-node-registry]]
+- **Bianca kills on the crown/kill decision-tree — retire the legacy ROAS-floor kill path** · verified 2026-07-13 · → [[../libraries/media-buyer-agent]]
+- **Media-buyer replenish: per-product scope** · verified 2026-07-13 · → [[../libraries/media-buyer-agent]]
+- **Bin readiness count: exclude archived (URL-removed) creatives from listReadyToTest** · verified 2026-07-13 · → [[../libraries/ready-to-test]]
+- **Register the 2h media-buyer-test-cadence cron as a Control Tower monitored loop** · verified 2026-07-13 · → [[../inngest/media-buyer-test-cadence]]
+- **Remove the never-run 48h 'Max on the box' watch scaffolding + the /director-training skill** · verified 2026-07-13 · → [[../tables/ad_campaigns]]
 - **Add spec slugs to ad creative cadence jobs** · verified 2026-07-12 · → [[../inngest/ad-creative-cadence]]
 - **Builder self-heals a stale build branch instead of re-failing 2× to the CEO** · verified 2026-07-12 · → [[../libraries/build-lane-reconcile]]
 - **claim_agent_job RPC joins kill_switches (department cascade halts every lane)** · verified 2026-07-12 · → [[../tables/agent_jobs]]
