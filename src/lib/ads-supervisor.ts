@@ -62,27 +62,10 @@ const STATIC_AD_OPTIMIZATION_PARENT_PROSE =
 /** Every fix-spec slug this supervisor authors starts with this prefix so the dedup + audit
  * are stable across passes. */
 const FIX_SPEC_SLUG_PREFIX = "ads-supervisor-fix-";
-/** Life-Force-8 keyword list (Dr. Whitman) — one-token lowercase forms so a simple substring
- * scan hits without a natural-language pass. Kept short + broadly-appealing; the point is to
- * catch a live ad whose copy has NONE of these (i.e. reads like a feature dump rather than a
- * benefit-driven acquisition ad). */
-const LF8_KEYWORDS: readonly string[] = [
-  // 1. survival / enjoyment of life / life extension
-  "energy", "sleep", "health", "life", "years", "longevity", "vitality", "focus", "clarity", "wake",
-  // 2. enjoyment of food/drink
-  "delicious", "taste", "flavor", "coffee", "morning", "drink",
-  // 3. freedom from fear/pain/danger
-  "crash", "safe", "protect", "calm", "relief", "stress", "anxiety", "worry",
-  // 4. sexual companionship — largely off-brand for the coffee vertical; kept out.
-  // 5. comfortable living
-  "easy", "smooth", "effortless", "comfortable",
-  // 6. to be superior / win
-  "boost", "beat", "power", "better", "unlock", "peak", "sharper",
-  // 7. care and protection of loved ones
-  "family", "kids", "loved", "share",
-  // 8. social approval
-  "trust", "proven", "loved by", "customers", "reviews",
-];
+// Life-Force-8 keyword list + membership check now live in the shared [[./ads/lf8]] module so the
+// supervisor GATE and the [[./ads/creative-brief]] `buildMetaCopy` GENERATOR read from ONE source
+// of truth (a divergence would let Dahlia publish copy the supervisor immediately re-flags as thin).
+import { hasAnyLf8 as hasAnyLf8Impl } from "@/lib/ads/lf8";
 
 // ── Finding shapes ──────────────────────────────────────────────────────────────
 
@@ -655,10 +638,11 @@ export function safeName(raw: string | null | undefined, opts: { maxLen?: number
   return `\`${truncated}\``;
 }
 
-/** Any Life-Force-8 keyword hit (substring match, lowercase-normalized). Cheap + deterministic. */
+/** Any Life-Force-8 keyword hit (substring match, lowercase-normalized). Cheap + deterministic.
+ * Re-exported from the shared [[./ads/lf8]] SSOT so existing callers (and tests) keep working; the
+ * generator [[./ads/creative-brief]] `buildMetaCopy` imports the same predicate directly. */
 export function hasAnyLf8(copyLower: string): boolean {
-  for (const kw of LF8_KEYWORDS) if (copyLower.includes(kw)) return true;
-  return false;
+  return hasAnyLf8Impl(copyLower);
 }
 
 /** Loose scent-match: does the destination URL's PATH contain a kebab-cased fragment of the product
