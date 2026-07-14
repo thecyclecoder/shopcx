@@ -143,9 +143,15 @@ export async function stampCreativeOutcome(
 ): Promise<void> {
   let adCampaignId = args.adCampaignId ?? null;
   if (!adCampaignId && args.metaAdsetId) {
+    // Workspace-scoped read (defense-in-depth under service-role): without this filter, a Meta adset
+    // id collision or a mistagged ad_publish_jobs row could resolve adCampaignId to a foreign
+    // workspace's ad_campaign and then the update below (already .eq('workspace_id', args.workspaceId))
+    // would silently no-op — but the resolved id would still leak into logs. The .eq narrows the read
+    // to the caller's workspace so cross-tenant resolution can't happen in the first place.
     const { data: pj } = await admin
       .from("ad_publish_jobs")
       .select("campaign_id")
+      .eq("workspace_id", args.workspaceId)
       .eq("meta_adset_id", args.metaAdsetId)
       .not("campaign_id", "is", null)
       .limit(1)
