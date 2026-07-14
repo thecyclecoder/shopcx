@@ -1,0 +1,11 @@
+-- Enable RLS on public.order_refunds (Supabase security advisor: CRITICAL x2 —
+-- "Policy Exists RLS Disabled" + "RLS Disabled in Public").
+--
+-- order_refunds holds refund/financial records. anon + authenticated carry table-level
+-- SELECT/INSERT/UPDATE/DELETE grants, and with RLS DISABLED those grants apply with no row
+-- filtering — the table is readable AND writable via the public PostgREST API. A policy
+-- (order_refunds_service, TO service_role, USING true) already exists but is inert while RLS
+-- is off. Enabling RLS activates deny-all for anon/authenticated (no policy targets them) while
+-- service_role (createAdminClient — every app write) bypasses RLS and also matches its own policy.
+-- App behaviour is unchanged; only the anon/authenticated REST exposure is closed.
+ALTER TABLE public.order_refunds ENABLE ROW LEVEL SECURITY;
