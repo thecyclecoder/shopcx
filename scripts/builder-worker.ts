@@ -3499,15 +3499,35 @@ async function fetchAppliedMigrationVersions(): Promise<string[] | null> {
 // out the recording. Best-effort connect/teardown. Called ONLY by the migration-drift Phase 2 auto-
 // apply loop, and ONLY after classifyMigrationSql flagged the SQL 'additive'.
 // ci-guard-migrations-applied-not-just-merged spec Phase 2.
-async function applyMigrationAndRecord(input: { version: string; file: string; sql: string }): Promise<void> {
+//
+// Idempotent on already-applied objects (migration-drift-reconciler-idempotent-on-already-applied-
+// objects spec Phase 1): when the DDL throws a Postgres duplicate-object-class SQLSTATE (relation
+// already exists, cannot change return type of existing function, …) it means the object is already
+// there — an earlier apply the ledger never recorded. We swallow the DDL error, STILL record the
+// version (ON CONFLICT DO NOTHING) so the reconciler clears the tile, and return
+// `{ alreadyApplied: true }` so applyMergedMigrations tags outcome='already-applied' (distinct from
+// 'applied'). A genuine error (syntax, undefined_table, …) still throws through to 'apply-failed'.
+async function applyMigrationAndRecord(
+  input: { version: string; file: string; sql: string },
+): Promise<void | { alreadyApplied: true }> {
   const { poolerConnectionString } = await import("./_bootstrap");
+  const { isDuplicateObjectError } = await import(
+    "../src/lib/control-tower/migration-drift"
+  );
   const connectionString = poolerConnectionString();
   const { Client } = await import("pg");
   const c = new Client({ connectionString });
   await c.connect();
   try {
-    // The DDL itself.
-    await c.query(input.sql);
+    // The DDL itself. A duplicate-object-class error means "already applied earlier, ledger just
+    // never got the row" — still record the version below; a real error rethrows to apply-failed.
+    let alreadyApplied = false;
+    try {
+      await c.query(input.sql);
+    } catch (ddlErr) {
+      if (!isDuplicateObjectError(ddlErr)) throw ddlErr;
+      alreadyApplied = true;
+    }
     // Record the version so the reconciler treats it as applied on the next tick. Uses a permissive
     // shape (version + name; statements folded into an ARRAY the shape has room for) with ON
     // CONFLICT DO NOTHING so a version already recorded by a concurrent dashboard apply is a no-op.
@@ -3538,6 +3558,7 @@ async function applyMigrationAndRecord(input: { version: string; file: string; s
         );
       }
     }
+    if (alreadyApplied) return { alreadyApplied: true };
   } finally {
     await c.end();
   }
@@ -3592,6 +3613,10 @@ async function runMigrationDriftJob(): Promise<void> {
       for (const p of processed) {
         if (p.outcome === "applied") {
           console.log(`[migration-drift] auto-applied ${p.file} (version ${p.version}, additive)`);
+        } else if (p.outcome === "already-applied") {
+          console.log(
+            `[migration-drift] reconciled ${p.file} (version ${p.version}) — object already existed (duplicate-object SQLSTATE); ledger row recorded.`,
+          );
         } else if (p.outcome === "apply-failed") {
           console.error(
             `[migration-drift] APPLY FAILED for ${p.file} (version ${p.version}): ${p.error ?? "unknown"}`,

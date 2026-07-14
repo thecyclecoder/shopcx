@@ -1402,6 +1402,7 @@ function evalOutputAssertion(
         // migrations waiting for a human run) vs what auto-cleared (additive) vs what threw.
         const approvalNeeded = mergedButUnapplied.filter((m) => m.outcome === "approval-needed");
         const applyFailed = mergedButUnapplied.filter((m) => m.outcome === "apply-failed");
+        const alreadyApplied = mergedButUnapplied.filter((m) => m.outcome === "already-applied");
         const list = mergedButUnapplied
           .slice(0, 5)
           .map((m) => {
@@ -1411,13 +1412,16 @@ function evalOutputAssertion(
                 ? " — apply-failed"
                 : m.outcome === "applied"
                   ? " — applied"
-                  : "";
+                  : m.outcome === "already-applied"
+                    ? " — already-applied (ledger reconciled)"
+                    : "";
             return `${m.version} (${m.file})${oc}`;
           })
           .join(", ");
         const gateNote: string[] = [];
         if (approvalNeeded.length) gateNote.push(`${approvalNeeded.length} destructive await${approvalNeeded.length === 1 ? "s" : ""} approval`);
         if (applyFailed.length) gateNote.push(`${applyFailed.length} apply-failed`);
+        if (alreadyApplied.length) gateNote.push(`${alreadyApplied.length} already-applied`);
         const gateTail = gateNote.length ? ` — ${gateNote.join(", ")}` : "";
         statusParts.push(`${n} merged-but-unapplied migration${n === 1 ? "" : "s"}${gateTail}`);
         detailParts.push(
