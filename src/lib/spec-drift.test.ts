@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
   buildReverseDriftInboxRow,
   isGoalPendingPromotion,
+  isMergeShaAncestorOfMain,
   pickMergedPrFromList,
   pickPhasesBuiltInMerge,
   reverseDriftDedupeKey,
@@ -369,4 +370,72 @@ test("pickPhasesBuiltInMerge: build_sha set wins even when merge diff is empty �
   const v = pickPhasesBuiltInMerge([P1_BUILT], new Set());
   assert.equal(v.stamped.length, 1);
   assert.equal(v.stamped[0].reason, "build_sha");
+});
+
+// ── isMergeShaAncestorOfMain — reverse-drift-verify-merge-sha-on-main… Phase 1 ─────────────────
+//
+// The reverse-drift pre-filter was escalating just-merged phases as 'code-missing' because its
+// symbol grep uses GitHub's eventually-consistent `/search/code` index — a fresh merge lags the
+// index by minutes-to-hours, so the grep returned empty and the phase was flagged as a possible
+// revert to the CEO inbox (the lf8-live-ad-gate incident). The fix consults the IMMEDIATELY-
+// consistent `/compare/{merge_sha}...main` API BEFORE escalation. This pure helper classifies
+// the API's `status` field; the async wrapper (`mergeShaOnMain`) fetches it. Verification bullet
+// "the check uses the commits/compare API, not the laggy search index" is testable here without
+// mocking DB or GitHub — the whole classify decision lives in this one string→bool function.
+
+test("isMergeShaAncestorOfMain: status 'ahead' → true (main is ahead of merge_sha → merge_sha shipped)", () => {
+  assert.equal(isMergeShaAncestorOfMain("ahead"), true);
+});
+
+test("isMergeShaAncestorOfMain: status 'identical' → true (main IS merge_sha — hasn't moved past the merge yet)", () => {
+  assert.equal(isMergeShaAncestorOfMain("identical"), true);
+});
+
+test("isMergeShaAncestorOfMain: status 'behind' → false (main is BEHIND merge_sha — merge_sha not reachable from main)", () => {
+  // Shouldn't happen for a real merge, but the classifier must not accidentally green-light it.
+  assert.equal(isMergeShaAncestorOfMain("behind"), false);
+});
+
+test("isMergeShaAncestorOfMain: status 'diverged' → false (merge_sha lives on a discarded branch)", () => {
+  // This is the REAL revert shape — the phase's shipping commit was later removed from main
+  // (a hard reset / a revert-of-revert / a force-push). MUST escalate — never suppressed.
+  assert.equal(isMergeShaAncestorOfMain("diverged"), false);
+});
+
+test("isMergeShaAncestorOfMain: an unrecognised status string → false (fail-closed on unexpected payloads)", () => {
+  // A future GitHub API change or a garbled response falls through to escalation, never a
+  // silent auto-resolve.
+  assert.equal(isMergeShaAncestorOfMain("wat"), false);
+});
+
+test("isMergeShaAncestorOfMain: null / undefined → false (missing payload never green-lights the short-circuit)", () => {
+  assert.equal(isMergeShaAncestorOfMain(null), false);
+  assert.equal(isMergeShaAncestorOfMain(undefined), false);
+});
+
+test("isMergeShaAncestorOfMain: the merge_sha-on-main short-circuit (the spec's core assertion) — a phase whose merge_sha is on main is NOT escalated even when the search grep returns empty; a phase whose merge_sha is absent from main STILL escalates", () => {
+  // Simulates the two verdicts the pre-filter derives from this helper right before its
+  // code-missing return. This mirrors the fall-through logic in `driftPreFilterPhase`:
+  //
+  //   onMain(status) === true  → return code-present (auto-resolve — do NOT escalate)
+  //   onMain(status) === false → fall through to the existing code-missing escalation
+  //
+  // The two rows below pin both directions on the SAME symbol-grep-empty premise (the very
+  // condition the spec calls out) so a regression that flips one flips the other too.
+  const shipped: Array<{ status: string; escalate: boolean }> = [
+    { status: "ahead", escalate: false }, // merge landed on main → code shipped → NOT escalated
+    { status: "identical", escalate: false }, // main IS merge_sha → NOT escalated
+    { status: "diverged", escalate: true }, // real revert → STILL escalates
+    { status: "behind", escalate: true }, // not reachable from main → STILL escalates
+  ];
+  for (const s of shipped) {
+    const onMain = isMergeShaAncestorOfMain(s.status);
+    // Callsite semantics: `code-missing` is escalated iff the merge_sha is NOT on main.
+    const wouldEscalate = !onMain;
+    assert.equal(
+      wouldEscalate,
+      s.escalate,
+      `status '${s.status}' should ${s.escalate ? "escalate" : "auto-resolve"} — regression`,
+    );
+  }
 });

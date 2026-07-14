@@ -121,13 +121,18 @@ export interface DriftPhase {
   title: string;
   status: Phase;
   body: string; // the phase's text — what we scan for code paths
+  // The commit that shipped this phase (from `stampPhaseShipped`). Carried through so the pre-filter
+  // can answer "is the phase's code on main?" immediately-consistently via the git commits/compare API
+  // (reverse-drift-verify-merge-sha-on-main-before-escalating-code-missing) — GitHub's search index is
+  // eventually consistent and lags a fresh merge, false-flagging just-shipped phases as reverted.
+  merge_sha: string | null;
 }
 
 function driftPhasesFromRows(rows: SpecPhaseRow[]): DriftPhase[] {
   return rows
     .slice()
     .sort((a, b) => a.position - b.position)
-    .map((p, i) => ({ index: i, position: p.position, title: p.title, status: p.status, body: p.body }));
+    .map((p, i) => ({ index: i, position: p.position, title: p.title, status: p.status, body: p.body, merge_sha: p.merge_sha }));
 }
 
 // ── Code-on-main verification ────────────────────────────────────────────────────────────────────
@@ -210,6 +215,65 @@ async function pathExistsOnMain(path: string, cache: Map<string, boolean>): Prom
   }
   cache.set(path, exists);
   return exists;
+}
+
+// ── Immediately-consistent merge_sha-on-main check (reverse-drift-verify-merge-sha…) ────────────
+//
+// The reverse-drift reconciler was escalating just-merged phases as 'code-missing' because its
+// symbol grep uses GitHub's `/search/code` API — an EVENTUALLY-consistent index that lags a merge
+// by minutes to hours. During that window a genuinely-shipped phase reads as "code missing from
+// main" and lands in the CEO inbox as a possible revert. The antidote is already in hand: each
+// shipped phase stamps a `spec_phases.merge_sha` (the M5 commit that put it on main). The git
+// commits/compare API answers "is that commit reachable from main?" IMMEDIATELY-consistently, so
+// consulting it BEFORE the search-index leg closes the false-positive class.
+//
+// The check is split for testability: the pure `isMergeShaAncestorOfMain` classifies a compare-
+// API status string; the async `mergeShaOnMain` wraps the fetch. Fail-open by construction — a
+// GitHub read failure returns `null` so the caller falls through to the existing escalation
+// (never suppress a real revert on an API hiccup).
+
+/**
+ * Pure classifier for the GitHub compare-API `status` field. `GET /repos/{owner}/{repo}/compare/
+ * {merge_sha}...main` returns one of `ahead` | `behind` | `identical` | `diverged`:
+ *
+ *   - `ahead`     → main is AHEAD of merge_sha → merge_sha IS an ancestor of main (code shipped);
+ *   - `identical` → main IS merge_sha (main hasn't moved past the merge) → also on main;
+ *   - `behind`    → main is BEHIND merge_sha → merge_sha is a DESCENDANT of main (shouldn't
+ *                    happen for a real merge but harmless — NOT on main);
+ *   - `diverged`  → merge_sha is on a discarded branch → NOT on main.
+ *
+ * Pure — assertable from tests without touching GitHub or the DB.
+ */
+export function isMergeShaAncestorOfMain(compareStatus: string | null | undefined): boolean {
+  return compareStatus === "ahead" || compareStatus === "identical";
+}
+
+/**
+ * Immediately-consistent ancestry check: is `merge_sha` reachable from `main`? Uses the git
+ * commits/compare API (NOT the eventually-consistent `/search/code` index) — so a phase that
+ * merged seconds ago answers correctly, closing the search-lag false-positive class.
+ *
+ * Returns:
+ *   - `true`  → compare answered and merge_sha is an ancestor of (or IS) main → code shipped;
+ *   - `false` → compare answered and merge_sha is genuinely NOT on main → real revert;
+ *   - `null`  → couldn't verify (missing token, non-200, malformed payload, exception). The
+ *               caller falls through to the existing escalation — fail-open so a GitHub hiccup
+ *               can't suppress a real revert.
+ */
+async function mergeShaOnMain(mergeSha: string): Promise<boolean | null> {
+  if (!ghToken()) return null;
+  try {
+    // `compare/{base}...{head}` semantics: `status: 'ahead'` ⇔ head (main) is ahead of base
+    // (merge_sha) ⇔ merge_sha is an ancestor of main. Encode the sha to be safe (real merge shas
+    // are hex, but a caller-passed value goes into the URL path).
+    const res = await gh("GET", `/repos/${REPO}/compare/${encodeURIComponent(mergeSha)}...main`);
+    if (!res.ok) return null;
+    const status = typeof res.json.status === "string" ? res.json.status : null;
+    if (status === null) return null;
+    return isMergeShaAncestorOfMain(status);
+  } catch {
+    return null;
+  }
 }
 
 // ── Reconciler ─────────────────────────────────────────────────────────────────────────────────────
@@ -355,6 +419,29 @@ export async function driftPreFilterPhase(
   //     Escalate without a session. If we had NO symbols to grep at all, fall through to `ambiguous`
   //     (a body that names paths but no identifiers can't rule out a rename — let the session judge).
   if (symbols.length > 0) {
+    // MERGE-SHA ANCESTRY SHORT-CIRCUIT (reverse-drift-verify-merge-sha-on-main-before-escalating-
+    // code-missing): before we escalate a "code-missing" verdict on the back of the eventually-
+    // consistent search index, ask the IMMEDIATELY-consistent commits/compare API whether the
+    // phase's stamped merge_sha is actually on main. A recent merge whose search index hasn't
+    // caught up would otherwise be flagged as a revert — the lf8-live-ad-gate CEO false-positive
+    // shape. If the compare API confirms the commit is on main, the code shipped: return
+    // `code-present` so the drift row auto-resolves. If the compare API confirms it is NOT on
+    // main, this is a real revert → fall through to the existing escalation. If we can't verify
+    // (no token / API failure / no merge_sha stamped) also fall through — fail-open, never
+    // suppress a real revert on a hiccup.
+    if (phase.merge_sha) {
+      const onMain = await mergeShaOnMain(phase.merge_sha);
+      if (onMain === true) {
+        return {
+          verdict: "code-present",
+          reasoning: `merge_sha ${phase.merge_sha.slice(0, 7)} is on main (verified via commits/compare API — immediately consistent, unlike the search index) — the phase's code shipped; search-index-lag false positive on the symbol grep`,
+          symbolsFound: [],
+          pathsMissing,
+        };
+      }
+      // onMain === false → merge_sha genuinely not on main → real revert → fall through.
+      // onMain === null → GitHub read failed or no token → fall through (never suppress on a hiccup).
+    }
     return {
       verdict: "code-missing",
       reasoning: `paths not on main (${fmtPaths(pathsMissing)}) AND ${symbols.length} declared symbol(s) not found anywhere on main — high-confidence revert`,
