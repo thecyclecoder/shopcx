@@ -12601,9 +12601,39 @@ async function runSpecTestJob(job: Job) {
       try {
         const { spawnPreMergeFix, PRE_MERGE_FIX_LOOP_GUARD_MAX } = await import("../src/lib/pre-merge-fix");
         const { checkKey } = await import("../src/lib/spec-test-runs");
+        // pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 — enrich each failing
+        // check with its `exec_kind` + `params.script` from `spec_phase_checks` so the classifier can
+        // decide whether a unit_test failure lives in a test file the branch never touched (external
+        // regression → drop, don't append a Fix phase). Keyed by [[spec-test-runs]] `checkKey` so the
+        // mapping survives whitespace/case; best-effort — a lookup miss (an LLM-only bullet with no
+        // spec_phase_checks row) leaves exec_kind/script unset and today's Fix-append path fires.
+        const { defaultLoadChecks } = await import("../src/lib/spec-check-runner");
+        const checkMeta = new Map<string, { exec_kind: string | null; script: string | null }>();
+        try {
+          const loaded = await defaultLoadChecks(job.workspace_id, slug);
+          for (const lc of loaded) {
+            const params = (lc.params ?? null) as { script?: string } | null;
+            checkMeta.set(checkKey(lc.text), {
+              exec_kind: lc.exec_kind ?? null,
+              script: params && typeof params.script === "string" ? params.script : null,
+            });
+          }
+        } catch (e) {
+          console.warn(`${tag} could not load spec_phase_checks for external-regression classifier (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+        }
         const failingChecks = checks
           .filter((c) => c.verdict === "fail" && c.text)
-          .map((c) => ({ text: c.text, evidence: c.evidence ?? null, check_key: checkKey(c.text) }));
+          .map((c) => {
+            const key = checkKey(c.text);
+            const meta = checkMeta.get(key);
+            return {
+              text: c.text,
+              evidence: c.evidence ?? null,
+              check_key: key,
+              exec_kind: meta?.exec_kind ?? null,
+              script: meta?.script ?? null,
+            };
+          });
         if (failingChecks.length === 0) {
           console.log(`${tag} pre-merge RED on ${slug} (${branch}) — no evidence-backed failing checks, nothing to spawn`);
         } else {
