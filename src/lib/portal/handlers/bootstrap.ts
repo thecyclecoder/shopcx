@@ -7,175 +7,281 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // replaceVariants. See [[../mutation-guard]].
 import { getSuppressedVariantIds } from "@/lib/portal/mutation-guard";
 
+// Soft deadline for OPTIONAL bootstrap enrichments. The whole /api/portal
+// Lambda is capped at Vercel's 30s ceiling (see src/app/api/portal/route.ts);
+// a single slow read on catalog decoration or unlinked-account matching used
+// to hold the entire response until Vercel hard-killed it, so customers saw a
+// 30s timeout instead of a usable portal. Anything wrapped in
+// withBootstrapTimeout returns a safe fallback (empty array / zero count) if
+// it exceeds this budget — the core customer + config fields still ship.
+export const PORTAL_BOOTSTRAP_OPTIONAL_TIMEOUT_MS = 4000;
+
+export async function withBootstrapTimeout<T>(
+  work: Promise<T>,
+  fallback: T,
+  timeoutMs: number = PORTAL_BOOTSTRAP_OPTIONAL_TIMEOUT_MS,
+): Promise<T> {
+  return await new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(fallback);
+    }, timeoutMs);
+    work.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
 export const bootstrap: RouteHandler = async ({ auth, route }) => {
   const admin = createAdminClient();
 
-  let dunningCount = 0;
-  let linkedAccountCount = 0;
-  let customerFirstName = "";
-  let customerLastName = "";
-  let customerEmail = "";
-  let portalBanned = false;
+  // ── Core (essentials) reads run concurrently ──────────────────────────
+  // customer identity + workspace portal_config are required for the payload
+  // shape; they are NOT wrapped in withBootstrapTimeout — a slow core read
+  // still fails the response, which is the correct behavior.
+  const customerPromise =
+    auth.workspaceId && auth.loggedInCustomerId
+      ? admin
+          .from("customers")
+          .select("id, first_name, last_name, email, portal_banned")
+          .eq("workspace_id", auth.workspaceId)
+          .eq("shopify_customer_id", auth.loggedInCustomerId)
+          .single()
+          .then((r) => r.data as {
+            id: string;
+            first_name: string | null;
+            last_name: string | null;
+            email: string | null;
+            portal_banned: boolean | null;
+          } | null)
+      : Promise.resolve(null);
 
-  if (auth.workspaceId && auth.loggedInCustomerId) {
-    const { data: customer } = await admin
-      .from("customers")
-      .select("id, first_name, last_name, email, portal_banned")
-      .eq("workspace_id", auth.workspaceId)
-      .eq("shopify_customer_id", auth.loggedInCustomerId)
-      .single();
+  const workspacePromise = auth.workspaceId
+    ? admin
+        .from("workspaces")
+        .select("portal_config, storefront_off_platform_review_count")
+        .eq("id", auth.workspaceId)
+        .single()
+        .then((r) => r.data as {
+          portal_config: unknown;
+          storefront_off_platform_review_count: number | null;
+        } | null)
+    : Promise.resolve(null);
 
-    if (customer) {
-      customerFirstName = customer.first_name || "";
-      customerLastName = customer.last_name || "";
-      customerEmail = customer.email || "";
-      portalBanned = !!customer.portal_banned;
+  const [customer, ws] = await Promise.all([customerPromise, workspacePromise]);
 
-      // Log portal session
-      logPortalAction({
-        workspaceId: auth.workspaceId,
-        customerId: customer.id,
-        eventType: "portal.bootstrap",
-        summary: "Portal session started",
-      }).catch(() => {}); // fire and forget
+  const customerFirstName = customer?.first_name || "";
+  const customerLastName = customer?.last_name || "";
+  const customerEmail = customer?.email || "";
+  const portalBanned = !!customer?.portal_banned;
 
-      // Active dunning cycles
-      const { count } = await admin
-        .from("dunning_cycles")
-        .select("id", { count: "exact", head: true })
-        .eq("workspace_id", auth.workspaceId)
-        .eq("customer_id", customer.id)
-        .in("status", ["active", "skipped"]);
-      dunningCount = count || 0;
-
-      // Linked accounts
-      const { data: link } = await admin
-        .from("customer_links")
-        .select("group_id")
-        .eq("customer_id", customer.id)
-        .single();
-      if (link?.group_id) {
-        const { count: linkCount } = await admin
-          .from("customer_links")
-          .select("id", { count: "exact", head: true })
-          .eq("group_id", link.group_id);
-        linkedAccountCount = Math.max(0, (linkCount || 1) - 1);
-      }
-    }
+  if (customer && auth.workspaceId) {
+    // Log portal session — fire-and-forget, never blocks the response.
+    logPortalAction({
+      workspaceId: auth.workspaceId,
+      customerId: customer.id,
+      eventType: "portal.bootstrap",
+      summary: "Portal session started",
+    }).catch(() => {});
   }
 
-  // Load portal config from workspace
   let portalConfig: Record<string, unknown> = {};
-  // Off-platform base review count from the storefront settings,
-  // added to each catalog product's count so the portal swap/add
-  // modal shows the same social proof the customer saw on the PDP.
+  // Off-platform base review count from the storefront settings, added to each
+  // catalog product's count so the portal swap/add modal shows the same social
+  // proof the customer saw on the PDP.
   let reviewBump = 0;
-  if (auth.workspaceId) {
-    const { data: ws } = await admin
-      .from("workspaces")
-      .select("portal_config, storefront_off_platform_review_count")
-      .eq("id", auth.workspaceId)
-      .single();
-
-    if (ws?.portal_config && typeof ws.portal_config === "object") {
-      portalConfig = ws.portal_config as Record<string, unknown>;
-    }
-    reviewBump = Number(ws?.storefront_off_platform_review_count) || 0;
+  if (ws?.portal_config && typeof ws.portal_config === "object") {
+    portalConfig = ws.portal_config as Record<string, unknown>;
   }
+  reviewBump = Number(ws?.storefront_off_platform_review_count) || 0;
 
-  // Build product catalog for add/swap (from synced products table)
   const general = (portalConfig.general || {}) as Record<string, unknown>;
   const productIds = Array.isArray(general.products_available_to_add)
     ? general.products_available_to_add.filter(Boolean)
     : [];
-
-  let catalog: unknown[] = [];
-  if (productIds.length && auth.workspaceId) {
-    const { data: products } = await admin
-      .from("products")
-      .select(
-        "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count"
-      )
-      .eq("workspace_id", auth.workspaceId)
-      .in("shopify_product_id", productIds);
-
-    // Per-workspace "not selectable for new choice" variant set — a crisis
-    // availability lever pulled from `workspaces.portal_config`. Mixed Berry is
-    // hidden today because it's OOS (`inventory_quantity == 0` below); the
-    // suppressed set covers the in-stock case (e.g. Strawberry Lemonade).
-    const suppressed = await getSuppressedVariantIds(auth.workspaceId);
-
-    if (products) {
-      catalog = products.map((p) => ({
-        internalId: p.id,
-        productId: p.shopify_product_id,
-        title: p.title,
-        handle: p.handle,
-        image: { src: p.image_url || "", alt: p.title },
-        rating: { value: p.rating || 0, count: (p.rating_count || 0) + reviewBump },
-        variants: (Array.isArray(p.variants) ? p.variants : []).filter(
-          (v: { id?: unknown; inventory_quantity?: number }) => {
-            if (suppressed.has(String(v.id ?? ""))) return false;
-            return v.inventory_quantity == null || v.inventory_quantity > 0;
-          }
-        ),
-      })).filter(p => (p.variants as unknown[]).length > 0);
-    }
-  }
-
-  // Filter shipping protection variant IDs to only those with selling plans
-  let shippingProtectionVariantIds: string[] = [];
   const rawSpIds = Array.isArray(general.shipping_protection_product_ids)
     ? general.shipping_protection_product_ids
     : [];
 
-  if (rawSpIds.length && auth.workspaceId) {
-    // rawSpIds are Shopify PRODUCT IDs — look up the actual variant IDs
-    const { data: spProducts } = await admin
-      .from("products")
-      .select("shopify_product_id, variants")
-      .eq("workspace_id", auth.workspaceId)
-      .in("shopify_product_id", rawSpIds);
+  // ── Optional enrichments — each wrapped in withBootstrapTimeout ───────
+  // A slow read here now degrades to an empty/zero fallback instead of
+  // holding the Lambda until Vercel's 30s kill.
 
-    if (spProducts) {
-      for (const p of spProducts) {
-        const variants = Array.isArray(p.variants) ? p.variants : [];
-        // Pick the first variant with stock (shipping protection typically has one variant)
-        for (const v of variants as { id?: string; inventory_quantity?: number }[]) {
-          if (v.id) {
-            shippingProtectionVariantIds.push(String(v.id));
-            break; // one variant per product
-          }
-        }
-      }
-    }
-  }
+  // Active dunning cycles (count).
+  const dunningCountPromise: Promise<number> =
+    customer && auth.workspaceId
+      ? withBootstrapTimeout(
+          (async () => {
+            const { count } = await admin
+              .from("dunning_cycles")
+              .select("id", { count: "exact", head: true })
+              .eq("workspace_id", auth.workspaceId)
+              .eq("customer_id", customer.id)
+              .in("status", ["active", "skipped"]);
+            return count || 0;
+          })(),
+          0,
+        )
+      : Promise.resolve(0);
 
-  // Check for unlinked account matches
-  let unlinkMatches: { id: string; email: string; first_name: string | null; last_name: string | null; default_address: unknown }[] = [];
-  if (auth.workspaceId && auth.loggedInCustomerId) {
-    const { data: cust } = await admin.from("customers").select("id").eq("workspace_id", auth.workspaceId).eq("shopify_customer_id", auth.loggedInCustomerId).single();
-    if (cust) {
-      const { findUnlinkedMatches } = await import("@/lib/account-matching");
-      const rawMatches = await findUnlinkedMatches(auth.workspaceId, cust.id, admin);
-      if (rawMatches.length) {
-        // Get full details for each match
-        const matchIds = rawMatches.map(m => m.id).filter(Boolean);
-        if (matchIds.length) {
-          const { data: matchDetails } = await admin.from("customers")
-            .select("id, email, first_name, last_name, default_address")
-            .in("id", matchIds);
-          unlinkMatches = (matchDetails || []).map(m => ({
-            id: m.id,
-            email: m.email,
-            first_name: m.first_name,
-            last_name: m.last_name,
-            default_address: m.default_address,
-          }));
-        }
-      }
-    }
-  }
+  // Linked accounts count — two-hop read via customer_links.
+  const linkedAccountCountPromise: Promise<number> = customer
+    ? withBootstrapTimeout(
+        (async () => {
+          const { data: link } = await admin
+            .from("customer_links")
+            .select("group_id")
+            .eq("customer_id", customer.id)
+            .single();
+          if (!link?.group_id) return 0;
+          const { count: linkCount } = await admin
+            .from("customer_links")
+            .select("id", { count: "exact", head: true })
+            .eq("group_id", link.group_id);
+          return Math.max(0, (linkCount || 1) - 1);
+        })(),
+        0,
+      )
+    : Promise.resolve(0);
+
+  // Product catalog for add/swap (from synced products table) + suppressed
+  // variant decoration. The suppressed-variant read is intentionally inside the
+  // same soft-deadline envelope — if it stalls, the whole catalog degrades
+  // safely to empty instead of stalling the response.
+  const catalogPromise: Promise<unknown[]> =
+    productIds.length && auth.workspaceId
+      ? withBootstrapTimeout(
+          (async () => {
+            const [{ data: products }, suppressed] = await Promise.all([
+              admin
+                .from("products")
+                .select(
+                  "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count",
+                )
+                .eq("workspace_id", auth.workspaceId)
+                .in("shopify_product_id", productIds),
+              getSuppressedVariantIds(auth.workspaceId),
+            ]);
+            if (!products) return [] as unknown[];
+            return products
+              .map((p) => ({
+                internalId: p.id,
+                productId: p.shopify_product_id,
+                title: p.title,
+                handle: p.handle,
+                image: { src: p.image_url || "", alt: p.title },
+                rating: {
+                  value: p.rating || 0,
+                  count: (p.rating_count || 0) + reviewBump,
+                },
+                variants: (Array.isArray(p.variants) ? p.variants : []).filter(
+                  (v: { id?: unknown; inventory_quantity?: number }) => {
+                    if (suppressed.has(String(v.id ?? ""))) return false;
+                    return v.inventory_quantity == null || v.inventory_quantity > 0;
+                  },
+                ),
+              }))
+              .filter((p) => (p.variants as unknown[]).length > 0);
+          })(),
+          [] as unknown[],
+        )
+      : Promise.resolve([] as unknown[]);
+
+  // Shipping protection variant IDs — rawSpIds are Shopify PRODUCT IDs,
+  // look up the actual (first-in-stock) variant IDs.
+  const shippingProtectionVariantIdsPromise: Promise<string[]> =
+    rawSpIds.length && auth.workspaceId
+      ? withBootstrapTimeout(
+          (async () => {
+            const { data: spProducts } = await admin
+              .from("products")
+              .select("shopify_product_id, variants")
+              .eq("workspace_id", auth.workspaceId)
+              .in("shopify_product_id", rawSpIds);
+            const out: string[] = [];
+            if (spProducts) {
+              for (const p of spProducts) {
+                const variants = Array.isArray(p.variants) ? p.variants : [];
+                for (const v of variants as {
+                  id?: string;
+                  inventory_quantity?: number;
+                }[]) {
+                  if (v.id) {
+                    out.push(String(v.id));
+                    break; // one variant per product
+                  }
+                }
+              }
+            }
+            return out;
+          })(),
+          [] as string[],
+        )
+      : Promise.resolve([] as string[]);
+
+  // Unlinked-account match candidates — expensive matcher over customers.
+  type UnlinkMatch = {
+    id: string;
+    email: string;
+    first_name: string | null;
+    last_name: string | null;
+    default_address: unknown;
+  };
+  const unlinkMatchesPromise: Promise<UnlinkMatch[]> =
+    customer && auth.workspaceId
+      ? withBootstrapTimeout(
+          (async () => {
+            const { findUnlinkedMatches } = await import("@/lib/account-matching");
+            const rawMatches = await findUnlinkedMatches(
+              auth.workspaceId!,
+              customer.id,
+              admin,
+            );
+            if (!rawMatches.length) return [] as UnlinkMatch[];
+            const matchIds = rawMatches.map((m) => m.id).filter(Boolean);
+            if (!matchIds.length) return [] as UnlinkMatch[];
+            const { data: matchDetails } = await admin
+              .from("customers")
+              .select("id, email, first_name, last_name, default_address")
+              .in("id", matchIds);
+            return (matchDetails || []).map((m) => ({
+              id: m.id,
+              email: m.email,
+              first_name: m.first_name,
+              last_name: m.last_name,
+              default_address: m.default_address,
+            }));
+          })(),
+          [] as UnlinkMatch[],
+        )
+      : Promise.resolve([] as UnlinkMatch[]);
+
+  const [
+    dunningCount,
+    linkedAccountCount,
+    catalog,
+    shippingProtectionVariantIds,
+    unlinkMatches,
+  ] = await Promise.all([
+    dunningCountPromise,
+    linkedAccountCountPromise,
+    catalogPromise,
+    shippingProtectionVariantIdsPromise,
+    unlinkMatchesPromise,
+  ]);
 
   return jsonOk({
     ok: true,
