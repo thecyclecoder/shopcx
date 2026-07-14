@@ -6,7 +6,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -242,33 +242,60 @@ export async function getLiveJobForSlug(workspaceId: string, slug: string, admin
 
 /**
  * fold-guard-live-build (Phase 1) — cleanup backstop. When a spec has been archived (folded into the
- * brain → moved to docs/brain/archive.d/) any still-non-terminal build/spec-test job for that slug is an
- * ORPHAN: it lingers as a paused/active item whose spec page 404s and answering it is meaningless. Cancel
- * each (status → `completed` with a clear "spec archived" reason, questions/pending_actions cleared) so no
- * dead-link paused/active item survives. The preventive guard (getLiveJobForSlug, refused at the fold
- * path) makes this rare; this is the belt-and-suspenders that catches a race the gate missed.
+ * brain → moved to docs/brain/archive.d/) OR its DB status override was set to folded/deferred (the
+ * cancel-jobs-for-archived-specs-reads-db-fold-not-just-markdown fix — a DB fold with no markdown archive
+ * file no longer leaves the spec's build/spec-test jobs stuck) any still-non-terminal build/spec-test job
+ * for that slug is an ORPHAN: it lingers as a paused/active item whose spec is retired and answering it
+ * is meaningless. Cancel each (status → `completed` with a clear "spec archived" reason,
+ * questions/pending_actions cleared) so no dead paused/active item survives. The preventive guard
+ * (getLiveJobForSlug, refused at the fold path) makes this rare; this is the belt-and-suspenders that
+ * catches a race the gate missed.
  *
- * Global by default (archive.d/ is global); pass `workspaceId` to scope it (e.g. a board-load reconcile).
- * Idempotent — terminal jobs are never touched. Best-effort: a single failed update doesn't abort the rest.
+ * The FS archive (docs/brain/archive.d/) is global; DB-archived slugs (specs.status = 'folded' | 'deferred')
+ * are workspace-scoped, so we group jobs by workspace_id and check each workspace's DB-archived set
+ * separately — never treating a "slug X is folded in workspace A" as reason to cancel workspace B's job of
+ * the same slug. Global by default (all workspaces); pass `workspaceId` to scope it (e.g. a fold-merge
+ * reconcile). Idempotent — terminal jobs are never touched. Best-effort: a single failed update doesn't
+ * abort the rest.
  */
 export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; admin?: Admin }): Promise<{ cancelled: number; slugs: string[] }> {
   const admin = opts?.admin || createAdminClient();
-  const archived = await listArchivedSlugs();
-  if (!archived.length) return { cancelled: 0, slugs: [] };
 
+  // 1) Fetch every active build/spec-test job first (optionally scoped) so we can group by workspace and
+  //    apply that workspace's DB-archived set separately from the global FS archive.
   let query = admin
     .from("agent_jobs")
-    .select("id, spec_slug")
+    .select("id, spec_slug, workspace_id")
     .in("kind", ["build", "spec-test"])
-    .in("status", ACTIVE_STATUSES)
-    .in("spec_slug", archived);
+    .in("status", ACTIVE_STATUSES);
   if (opts?.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
   const { data, error } = await query;
   if (error || !data?.length) return { cancelled: 0, slugs: [] };
+  const jobs = data as { id: string; spec_slug: string; workspace_id: string }[];
 
-  const reason = "spec archived — build auto-cancelled (the spec was folded into the brain; its spec page no longer exists)";
+  // 2) FS archive (global, cross-workspace) + per-workspace DB-archived slug sets via the specs-table SDK
+  //    (folded ∪ deferred). Reading .from('specs') directly here would bypass the "database is the spec"
+  //    SDK chokepoint — listSpecs is the sanctioned reader.
+  const fsArchived = new Set(await listArchivedSlugs());
+  const workspaceIds = [...new Set(jobs.map((j) => j.workspace_id))];
+  const dbArchivedByWs = new Map<string, Set<string>>();
+  await Promise.all(
+    workspaceIds.map(async (ws) => {
+      const [folded, deferred] = await Promise.all([
+        listSpecs(ws, { status: "folded" }),
+        listSpecs(ws, { status: "deferred" }),
+      ]);
+      dbArchivedByWs.set(ws, new Set([...folded.map((s) => s.slug), ...deferred.map((s) => s.slug)]));
+    }),
+  );
+
+  // 3) A job is cancellable iff its spec is FS-archived OR DB-archived in its own workspace.
+  const cancellable = filterJobsForArchivedSpecs(jobs, fsArchived, dbArchivedByWs);
+  if (!cancellable.length) return { cancelled: 0, slugs: [] };
+
+  const reason = "spec archived — build auto-cancelled (the spec was folded/deferred; its spec page no longer exists)";
   const slugs: string[] = [];
-  for (const j of data as { id: string; spec_slug: string }[]) {
+  for (const j of cancellable) {
     const { error: upErr } = await admin
       .from("agent_jobs")
       .update({ status: "completed", error: reason, questions: [], pending_actions: [], updated_at: new Date().toISOString() })
@@ -276,6 +303,21 @@ export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; 
     if (!upErr) slugs.push(j.spec_slug);
   }
   return { cancelled: slugs.length, slugs };
+}
+
+/**
+ * PURE decision half of [[cancelJobsForArchivedSpecs]] — no DB. Given the live build/spec-test jobs, the
+ * FS-archived slug set (global), and the per-workspace DB-archived slug set, return the subset of jobs
+ * whose spec is archived (FS OR DB in its own workspace). Exported so it can be unit-tested without a
+ * Supabase client — the assertion the spec's Verification calls for: a DB-folded spec's active build job
+ * is included in the cancel set even when the FS archive is empty.
+ */
+export function filterJobsForArchivedSpecs<J extends { spec_slug: string; workspace_id: string }>(
+  jobs: J[],
+  fsArchived: ReadonlySet<string>,
+  dbArchivedByWs: ReadonlyMap<string, ReadonlySet<string>>,
+): J[] {
+  return jobs.filter((j) => fsArchived.has(j.spec_slug) || (dbArchivedByWs.get(j.workspace_id)?.has(j.spec_slug) ?? false));
 }
 
 /** Latest plan job for a goal (newest wins) — drives the goal page's Plan/Re-plan control. */
