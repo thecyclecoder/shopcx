@@ -1,0 +1,1 @@
+- **Pre-merge fix: skip external-test regressions, don't strand innocent specs** · verified 2026-07-14 · → [[lifecycles/roadmap-build-console]]
