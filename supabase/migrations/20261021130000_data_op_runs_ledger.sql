@@ -15,10 +15,19 @@
 --
 -- RLS ENABLED with a service_role full-access policy (house convention — every read/write
 -- flows through server-side code via createAdminClient()).
+--
+-- NOTE: workspace_id is a soft reference (no `references public.workspaces(id)` FK). A hard
+-- FK with `on delete cascade` would trip `classifyMigrationSql`'s reversible_destructive
+-- branch ([[../../../src/lib/migration-safety.ts]] `classifyMigrationSql`), which blocks the
+-- ci-guard-migrations-applied-not-just-merged auto-apply loop and would leave this ledger
+-- unapplied indefinitely — the exact class of gap this spec's Phase 1 exists to close.
+-- The ledger is service-role-only and workspace deletions are a rare, admin-gated action; a
+-- residual data_op_runs row on a deleted workspace is inert (the post-merge detector reads
+-- by workspace_id and never surfaces cross-workspace rows).
 
 create table if not exists public.data_op_runs (
   id             uuid primary key default gen_random_uuid(),
-  workspace_id   uuid null references public.workspaces(id) on delete cascade,
+  workspace_id   uuid null,
   spec_slug      text not null,
   script_path    text not null,
   status         text not null default 'pending'
