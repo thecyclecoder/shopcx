@@ -1,0 +1,1 @@
+- **Fraud detector: fraud_cases.order_ids must hold internal order UUIDs, not Shopify numeric ids** · verified 2026-07-14 · → [[../lifecycles/fraud-detection]]
