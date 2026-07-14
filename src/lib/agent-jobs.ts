@@ -3090,6 +3090,23 @@ export async function applyMergedBuildEffects(
   } catch {
     /* best-effort — a missed security pass is caught by the next merged diff, never blocks the merge */
   }
+  // ship-time-data-backfills-run-and-ledgered-not-silently-dead-code Phase 1: scan the merged diff for
+  // scripts/_backfill-*.ts additions, upsert them into the public.data_op_runs ledger, and ESCALATE any
+  // row without a `ran` outcome to the CEO inbox. Mirrors the migration-drift safety net — a shipped
+  // one-time data-op that silently never executes is a build-platform correctness hole. Best-effort +
+  // idempotent (the detector dedupes its own escalation per (spec, script, UTC day)); the loop beats
+  // its own heartbeat inside a try/finally so nothing here can break the merge hook.
+  try {
+    const { detectAndEscalateShipTimeBackfills } = await import("@/lib/ship-time-backfill-detector");
+    await detectAndEscalateShipTimeBackfills({
+      workspaceId,
+      specSlug: slug,
+      prNumber: opts.prNumber ?? null,
+      mergeSha: opts.mergeSha ?? null,
+    });
+  } catch {
+    /* best-effort — a missed detector pass fires again on the next merged claude/* build */
+  }
   // build-all-phases-chain: advance a "Build all" chain on this phase's merge (on fresh main, atop this
   // phase's code). Outside the shipped-check above — most phase merges leave the spec in_progress (more ⏳
   // phases remain) and the chain advances on every phase merge, not only the final one.

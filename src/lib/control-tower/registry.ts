@@ -342,6 +342,24 @@ export const MIGRATION_DRIFT_LOOP_ID = "migration-drift-check";
  */
 export const DB_HEALTH_SLOWQ_LOOP_ID = "db-health-slow-query";
 export const DB_HEALTH_SIZE_LOOP_ID = "db-health-size-sweep";
+
+/**
+ * loop_heartbeats.loop_id of the ship-time backfill detector
+ * ([[../../../docs/brain/specs/ship-time-data-backfills-run-and-ledgered-not-silently-dead-code]]
+ * Phase 1). NOT an Inngest fn / box lane — it runs INSIDE `applyMergedBuildEffects` on every
+ * merged claude/* build (the same post-merge hook that stamps phase provenance + enqueues the
+ * security review). Kind 'reactive' — a merge with no ship-time backfill in the diff beats
+ * ok:true with produced.detected=0 (idle = green, event-driven, no cadence), a merge that
+ * detects one carries the ledger + escalation counts on the beat.
+ */
+export const SHIP_TIME_BACKFILL_LOOP_ID = "ship-time-backfill-detector";
+
+/**
+ * `dashboard_notifications.metadata.escalation_kind` the ship-time backfill detector emits under.
+ * Shared by the emitter ([[../ship-time-backfill-detector]]) and any downstream router so the
+ * kind string is declared once.
+ */
+export const SHIP_TIME_BACKFILL_ESCALATION_KIND = "ship_time_backfill_unrun";
 /**
  * loop_heartbeats.loop_id of the DB Health Agent's INSTANCE-saturation pass
  * (db-health-instance-saturation-detector, Phase 1). The 2026-07-02 incident (86.8% DATABASE errors,
@@ -570,6 +588,18 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // Loose liveness window — a healthy pipeline may go long stretches without an author, so this
   // never RED-alerts on quiet workspaces.
   { id: "spec-review-gate", kind: "reactive", owner: "platform", label: "Spec-review gate (deterministic)", description: "The deterministic spec-review gate ([[../spec-review-gate]]) that replaced Vale's retired LLM lane. Runs synchronously inside `authorSpecRowStructured` / `authorSpecRowFromMarkdown` — a malformed spec is rejected with `SpecReviewGateError` naming the exact defect (Phase-N appears twice / no **Owner:** line / Parent does not resolve / Blocked-by [[x]] does not resolve / customer_id table with no data-tool plan / Phase N has no ### Verification block); a well-formed spec is build-eligible by construction. Cole watches the gate's health via author-time throw rate.", expectedCadence: "on every spec author", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-11T00:00:00Z" },
+  // ship-time-data-backfills-run-and-ledgered-not-silently-dead-code Phase 1 — the post-merge
+  // detector that scans a merged claude/* build's diff for scripts/_backfill-*.ts additions,
+  // upserts a `pending` row into public.data_op_runs per file, and ESCALATES any row without
+  // a successful `ran` outcome to the CEO inbox (routed_to_function:'ceo'). Fires INSIDE
+  // `applyMergedBuildEffects` ([[../agent-jobs]]) on every merged claude/* build — reactive-
+  // shape (no cron cadence): an idle window (no merge in the window / merges with no backfill)
+  // is healthy, so the loose 30-day livenessWindowMs never RED-alerts on a quiet pipeline.
+  // Owner:'platform' inherits Ada's kill_switches ancestry via the node-registry
+  // (parentIdForOwner('platform') → 'director:platform'). The detector's beats carry the
+  // per-run detected/ledgered/escalated counts + a githubUnavailable flag so the tile can
+  // show what the last hook actually did.
+  { id: SHIP_TIME_BACKFILL_LOOP_ID, kind: "reactive", owner: "platform", label: "Ship-time backfill detector", description: "Post-merge detector: scans every merged claude/* build's diff for scripts/_backfill-*.ts additions, ledgers them in public.data_op_runs, and escalates any unrun/failed one to the CEO inbox — the safety net for one-time data backfills a spec ships as untracked scripts (ship-time-data-backfills-run-and-ledgered-not-silently-dead-code Phase 1).", expectedCadence: "on every merged claude/* build", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-14T00:00:00Z" },
   // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
   // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
   // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
