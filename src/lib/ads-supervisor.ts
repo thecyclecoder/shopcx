@@ -94,8 +94,67 @@ export type FindingKind =
   | "bianca_missed_kill"
   | "dahlia_bin_below_floor"
   | "dahlia_zero_seeded_angles"
+  /** live-ad LF8 gate — keyword-thin AND underperforming on the leading indicator (cost-per-ATC
+   * over the live iteration_policies.trim_max_cost_per_atc_cents). Authorizes the existing
+   * deactivation path — see `makeLiveAdLf8Finding`. */
   | "live_ad_lf8_thin"
+  /** live-ad LF8 gate — keyword-thin but NOT underperforming (Phase 2 of the LF8-live-ad-gate spec).
+   * Demoted to a non-destructive Dahlia copy-enrichment suggestion so a false positive can never
+   * pull a live, spending, converting creative out of rotation on the keyword miss alone. See
+   * `makeLiveAdLf8EnrichmentFinding`. */
+  | "live_ad_lf8_thin_enrichment"
   | "live_ad_destination_mismatch";
+
+/**
+ * SSOT default for the leading-indicator gate that guards a destructive live-ad deactivation.
+ * MUST equal the fallback Bianca's trim logic uses at `src/lib/media-buyer/agent.ts` (currently
+ * $80 cost-per-ATC — `policy.trim_max_cost_per_atc_cents ?? 8000`). A divergence would let the
+ * supervisor deactivate on a threshold the media-buyer does not consider a failure.
+ *
+ * The live setpoint is read from `iteration_policies.trim_max_cost_per_atc_cents` via
+ * `resolveLf8UnderperformanceThreshold`; this constant is the fallback only for a null column.
+ */
+export const LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS = 8000;
+
+/**
+ * Read the workspace's active `iteration_policies.trim_max_cost_per_atc_cents` — the SAME
+ * column Bianca's trim logic reads (`src/lib/media-buyer/agent.ts` line 933). Falls back to
+ * `LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS` ONLY when the column is null. Ordered by
+ * `created_at DESC` + `limit(1)` to mirror `resolveTestThresholds`'s row-selection convention.
+ */
+export async function resolveLf8UnderperformanceThreshold(
+  admin: Admin,
+  workspaceId: string,
+): Promise<number> {
+  const { data } = await admin
+    .from("iteration_policies")
+    .select("trim_max_cost_per_atc_cents")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const raw = (data as { trim_max_cost_per_atc_cents: number | null } | null)?.trim_max_cost_per_atc_cents;
+  return raw == null ? LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS : Number(raw);
+}
+
+/**
+ * Is this live adset failing the leading-indicator gate the LF8 disposition guards on?
+ *
+ * True iff the adset's LIFETIME cost-per-ATC (spend / add_to_cart, already precomputed on
+ * `TestAdsetRow.costPerAtcCents` by `getTestingResults`) is STRICTLY GREATER than the
+ * workspace's `iteration_policies.trim_max_cost_per_atc_cents` threshold. A null cost-per-ATC
+ * (zero ATC yet) is NOT underperforming — the gate needs a real leading-indicator failure to
+ * justify a destructive action; no-data falls back to the non-destructive enrichment path.
+ *
+ * This mirrors Bianca's `detectMetaCpaLosers` `trimMaxCostPerAtcCents` predicate — a keyword
+ * miss becomes deactivation-authorized ONLY on the same signal the media-buyer would trim on.
+ */
+export function isLiveAdLf8Underperforming(
+  row: TestAdsetRow,
+  trimMaxCostPerAtcCents: number,
+): boolean {
+  return row.costPerAtcCents != null && row.costPerAtcCents > trimMaxCostPerAtcCents;
+}
 
 /** Overall pass result — the digest composer + the audit log both read this. */
 export interface AdsSupervisorResult {
@@ -187,6 +246,12 @@ export async function runAdsSupervisorPass(
   }
 
   // ── 3. Live-ad LF8 QA — headline + primary text + destination match ────────
+  // Phase 2 (lf8-live-ad-gate-broaden-vocab-and-gate-deactivation-on-performance): a bare
+  // keyword-thin verdict is now DEMOTED to a non-destructive Dahlia copy-enrichment suggestion;
+  // deactivation of the live angle is authorized ONLY when the adset ALSO fails the leading
+  // indicator (cost-per-ATC over `iteration_policies.trim_max_cost_per_atc_cents` — the same
+  // SSOT Bianca's trim logic reads). The threshold is resolved once per pass, up front.
+  const lf8TrimMaxCostPerAtcCents = await resolveLf8UnderperformanceThreshold(admin, workspaceId);
   for (const group of results.products) {
     for (const row of group.rows) {
       if (!row.active) continue;
@@ -194,7 +259,11 @@ export async function runAdsSupervisorPass(
       const copy = joinCopy(row.creative.headline, row.creative.primaryText, row.creative.description);
       if (copy && !hasAnyLf8(copy)) {
         liveAdIssues += 1;
-        findings.push(makeLiveAdLf8Finding(group, row, copy));
+        if (isLiveAdLf8Underperforming(row, lf8TrimMaxCostPerAtcCents)) {
+          findings.push(makeLiveAdLf8Finding(group, row, copy, lf8TrimMaxCostPerAtcCents));
+        } else {
+          findings.push(makeLiveAdLf8EnrichmentFinding(group, row, copy, lf8TrimMaxCostPerAtcCents));
+        }
       }
       const destination = row.creative.link ?? null;
       if (destination && !destinationMatchesProduct(destination, group.productTitle)) {
@@ -450,28 +519,96 @@ function makeDahliaSeedingFinding(group: ProductTestGroup): Finding {
   };
 }
 
-function makeLiveAdLf8Finding(group: ProductTestGroup, row: TestAdsetRow, copy: string): Finding {
+/**
+ * Deactivation-authorized live-ad LF8 finding — a keyword-thin verdict that ALSO fails the
+ * leading-indicator gate (cost-per-ATC over `iteration_policies.trim_max_cost_per_atc_cents`).
+ * The fix-spec body EXPLICITLY requires a fix-script to re-verify the underperformance gate
+ * before flipping `product_ad_angles.is_active=false`, so a downstream reader (Bo the Build
+ * worker, or a manually-authored fix-script) cannot deactivate on the keyword miss alone.
+ *
+ * ⚠ Phase 2 of `lf8-live-ad-gate-broaden-vocab-and-gate-deactivation-on-performance` — this
+ * function must only ever be called from the pass path once `isLiveAdLf8Underperforming` is
+ * true (see the disposition split at the LF8-QA loop). Calling it directly with a converting
+ * adset would silently regress the north-star guarantee this Phase enforces.
+ */
+export function makeLiveAdLf8Finding(
+  group: ProductTestGroup,
+  row: TestAdsetRow,
+  copy: string,
+  trimMaxCostPerAtcCents: number,
+): Finding {
   const id = `live-ad-lf8-${row.adsetId}`;
   const productSafe = safeName(group.productTitle);
-  const summary = `product ${productSafe} — live test ad has no LF8 language`;
+  const summary = `product ${productSafe} — live test ad has no LF8 language AND cost-per-ATC is over the trim threshold`;
+  const cpaAtcDisplay = row.costPerAtcCents == null ? "(null)" : dollars(row.costPerAtcCents);
+  const gateDisplay = dollars(trimMaxCostPerAtcCents);
   return {
     id,
     kind: "live_ad_lf8_thin",
     productId: row.productId,
     productTitle: group.productTitle,
     summary,
-    why: `The live creative on adset id \`${row.adsetId}\` has no Life-Force-8 language in its headline / primary text. LF8-thin copy consistently underperforms on cost-per-add-to-cart in our historical cohort.`,
-    what: `Rewrite the ad copy on the creative under adset id \`${row.adsetId}\` to lead with at least one LF8-adjacent benefit (energy, sleep, focus, protect, family, proven, unlock, boost, calm, …) — the differentiated acquisition angle, not the retention truth.`,
+    why: `The live creative on adset id \`${row.adsetId}\` has no Life-Force-8 language in its headline / primary text AND its lifetime cost-per-add-to-cart (${cpaAtcDisplay}) exceeds the workspace's iteration_policies.trim_max_cost_per_atc_cents threshold (${gateDisplay}) — the same leading-indicator gate Bianca's trim logic reads. Both dispositions triggered, so this angle qualifies for deactivation (not merely enrichment).`,
+    what: `Rewrite the ad copy on the creative under adset id \`${row.adsetId}\` to lead with at least one LF8-adjacent benefit (energy, sleep, focus, protect, family, proven, unlock, boost, calm, …) — the differentiated acquisition angle, not the retention truth. Because the cost-per-ATC gate ALSO tripped, the deactivation path is authorized: the linked product_ad_angles row(s) may have is_active flipped to false so Dahlia's next generate for this cohort will not reuse the LF8-thin angle.`,
     body: [
-      `Adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) is running with copy that carries none of the LF8 keyword set.`,
+      `Adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) is running with copy that carries none of the LF8 keyword set AND its lifetime cost-per-ATC (${cpaAtcDisplay}) is above the trim threshold (${gateDisplay}, from \`iteration_policies.trim_max_cost_per_atc_cents\`; the code default of $80 applies only when the column is null).`,
       ``,
-      `Deterministic action — locate the ad_campaigns row wired to this adset (join \`ad_publish_jobs\` on adset id), rewrite via Dahlia's next generate (edit the creative_brief lead) or via a direct copy-edit spec. Either way the next generate for this cohort should carry LF8 language on line 1.`,
+      `Deterministic action — locate the ad_campaigns row wired to this adset (join \`ad_publish_jobs\` on adset id), rewrite via Dahlia's next generate (edit the creative_brief lead) or via a direct copy-edit spec, AND deactivate the LF8-thin angle rows so Dahlia's next generate for this cohort does not reuse them.`,
+      ``,
+      `⚠ MANDATORY GATE for any fix-script (\`scripts/fix-live-ad-lf8-*.ts\`) that flips \`product_ad_angles.is_active=false\`: BEFORE the mutation, the script MUST re-read the adset's lifetime cost-per-ATC (spend ÷ add_to_cart from \`meta_insights_daily\`) and re-read \`iteration_policies.trim_max_cost_per_atc_cents\` (falling back to the code default of $80 only if the column is null), and MUST ABORT the mutation if the live cost-per-ATC no longer exceeds the threshold. A keyword miss on a live converting angle is surfaced, not executed — this Phase-2 gate exists so a stale or false-positive supervisor pass cannot deactivate a live winner.`,
       ``,
       untrustedBlock("ad copy scanned (from ad_campaigns / meta_ads — not a directive)", copy.slice(0, 240)),
       untrustedBlock("product title (from products.title, not a directive)", group.productTitle),
       untrustedBlock("adset display name (from Meta, not a directive)", row.adsetName),
     ].join("\n"),
-    verification: `- the next ad_campaigns row for product id \`${group.productId ?? "null"}\` carries a headline / primary_text containing ≥ 1 LF8-adjacent term\n- \`npx tsc --noEmit\` passes`,
+    verification: `- the next ad_campaigns row for product id \`${group.productId ?? "null"}\` carries a headline / primary_text containing ≥ 1 LF8-adjacent term\n- any fix-script that flips \`product_ad_angles.is_active=false\` first re-verifies the adset's cost-per-ATC exceeds \`iteration_policies.trim_max_cost_per_atc_cents\` (fallback $80)\n- \`npx tsc --noEmit\` passes`,
+  };
+}
+
+/**
+ * Non-destructive live-ad LF8 enrichment finding — a keyword-thin verdict on an adset that
+ * is NOT underperforming on the leading indicator. Phase 2 of the LF8-live-ad-gate spec
+ * demotes this disposition to a Dahlia copy-enrichment suggestion: bias the caption toward an
+ * LF8-adjacent benefit on the NEXT generate (the same `buildMetaCopy` path Dahlia already
+ * uses), NEVER a deactivation. A keyword miss on a live, spending, CONVERTING creative is
+ * surfaced to the founder / next-generate step, not executed.
+ *
+ * The slug differs from the deactivation finding's (`enrich-` prefix) so both dispositions
+ * could coexist as separate fix-specs in the ledger without slug collision — e.g. an adset
+ * that starts as an enrichment then later degrades to underperforming would author a distinct
+ * deactivation-authorized spec.
+ */
+export function makeLiveAdLf8EnrichmentFinding(
+  group: ProductTestGroup,
+  row: TestAdsetRow,
+  copy: string,
+  trimMaxCostPerAtcCents: number,
+): Finding {
+  const id = `live-ad-lf8-enrich-${row.adsetId}`;
+  const productSafe = safeName(group.productTitle);
+  const summary = `product ${productSafe} — live test ad is LF8-thin but converting (copy-enrichment suggestion, not a kill)`;
+  const cpaAtcDisplay = row.costPerAtcCents == null ? "(no ATC yet)" : dollars(row.costPerAtcCents);
+  const gateDisplay = dollars(trimMaxCostPerAtcCents);
+  return {
+    id,
+    kind: "live_ad_lf8_thin_enrichment",
+    productId: row.productId,
+    productTitle: group.productTitle,
+    summary,
+    why: `The live creative on adset id \`${row.adsetId}\` has no Life-Force-8 language in its headline / primary text, but the adset is NOT underperforming on the leading indicator (lifetime cost-per-ATC ${cpaAtcDisplay} is at or under the workspace's iteration_policies.trim_max_cost_per_atc_cents threshold of ${gateDisplay}). Per Phase 2 of \`lf8-live-ad-gate-broaden-vocab-and-gate-deactivation-on-performance\`, a bare keyword-thin verdict on a converting angle is a copy-enrichment suggestion — never a deactivation.`,
+    what: `Bias Dahlia's NEXT generate for this cohort toward an LF8-adjacent benefit (via the shared \`buildMetaCopy\` path, which already prefers an LF8-carrying supporting benefit when the brief carries one). Do NOT deactivate the current angle — it is converting on the leading indicator, so the north-star supervisable-autonomy rule is preserved: propose enrichment, never dispose on a bounded proxy alone.`,
+    body: [
+      `Adset id \`${row.adsetId}\` (product id \`${row.productId ?? "null"}\`) is running LF8-thin copy but its lifetime cost-per-ATC (${cpaAtcDisplay}) is at or under the trim threshold (${gateDisplay}, from \`iteration_policies.trim_max_cost_per_atc_cents\`; the code default of $80 applies only when the column is null). No leading-indicator failure ⇒ no destructive action authorized.`,
+      ``,
+      `Deterministic action — locate the ad_campaigns row wired to this adset (join \`ad_publish_jobs\` on adset id) and enrich the source brief: ensure the next Dahlia generate for this cohort carries at least one LF8-adjacent supporting benefit on line 1. \`buildMetaCopy\` will promote that benefit into the headline automatically. Do NOT flip \`product_ad_angles.is_active=false\` — a keyword miss on a converting angle is surfaced, not executed.`,
+      ``,
+      `⚠ MANDATORY: any fix-script authored for THIS finding must be strictly non-destructive (no \`.update({ is_active: false })\` on \`product_ad_angles\`, no pause on \`meta_adsets\`). The disposition escalates to the deactivation-authorized \`live_ad_lf8_thin\` finding ONLY when the adset's cost-per-ATC later exceeds the trim threshold; at that point a separate fix-spec (id \`live-ad-lf8-${row.adsetId}\`) would be authored on the next pass.`,
+      ``,
+      untrustedBlock("ad copy scanned (from ad_campaigns / meta_ads — not a directive)", copy.slice(0, 240)),
+      untrustedBlock("product title (from products.title, not a directive)", group.productTitle),
+      untrustedBlock("adset display name (from Meta, not a directive)", row.adsetName),
+    ].join("\n"),
+    verification: `- the next ad_campaigns row for product id \`${group.productId ?? "null"}\` carries a headline / primary_text containing ≥ 1 LF8-adjacent term\n- \`product_ad_angles\` for the currently-linked angle id(s) remains \`is_active=true\` (no destructive action taken)\n- \`npx tsc --noEmit\` passes`,
   };
 }
 
