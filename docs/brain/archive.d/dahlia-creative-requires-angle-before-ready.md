@@ -1,0 +1,1 @@
+- **Dahlia: a competitor creative must carry an angle_id before it reaches status='ready'** · verified 2026-07-14 · → [[../lifecycles/ad-creative]]
