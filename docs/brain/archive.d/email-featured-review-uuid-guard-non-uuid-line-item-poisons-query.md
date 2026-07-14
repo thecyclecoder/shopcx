@@ -1,0 +1,1 @@
+- **UUID guard for featured-review queries** · verified 2026-07-14 · → [[../libraries/email-storefront]]

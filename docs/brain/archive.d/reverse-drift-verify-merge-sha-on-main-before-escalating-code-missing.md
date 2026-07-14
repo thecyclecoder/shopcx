@@ -1,0 +1,1 @@
+- **Reverse drift: verify merge_sha is on main via commits/compare API before escalating code-missing** · verified 2026-07-14 · → [[../libraries/spec-drift]]
