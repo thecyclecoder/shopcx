@@ -202,6 +202,33 @@ export interface CxActionableOutcomes {
   workflows: CxActionableWorkflow[];
 }
 
+// ── Ticket id UUID guard ──────────────────────────────────────────────────────
+
+/**
+ * Canonical UUID v4-shape pattern the CX box agents' ticket tool validates ids
+ * against BEFORE hitting Postgres. Without this guard, a malformed id (the 8-hex
+ * '3cc11e10' incident) reaches `.eq('id', ticketId)` and Postgres raises 22P02
+ * (invalid input syntax for type uuid), crashing the agent's tool call instead
+ * of returning the intended clean "ticket not found" signal.
+ */
+export const CX_TICKET_ID_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidCxTicketId(ticketId: unknown): ticketId is string {
+  return typeof ticketId === "string" && CX_TICKET_ID_UUID_RE.test(ticketId);
+}
+
+/**
+ * Self-correcting message the ticket tool prints when it rejects a malformed id.
+ * The wording explicitly tells the agent to pass the FULL 36-char UUID rather
+ * than a shortened prefix — an agent copying a `.slice(0,8)` display stub gets
+ * a usable signal instead of a raw driver exception.
+ */
+export function invalidCxTicketIdMessage(ticketId: unknown): string {
+  const shown = typeof ticketId === "string" ? ticketId : String(ticketId ?? "");
+  return `"${shown}" is not a valid ticket id — pass the FULL ticket UUID (36 chars), not a shortened prefix`;
+}
+
 // ── Getters ───────────────────────────────────────────────────────────────────
 
 const RECENT_ORDER_DAYS = 180;

@@ -90,6 +90,19 @@ npx tsx scripts/cx-agent-sdk-tool.ts bundle <ticket_id>
 npx tsx scripts/cx-agent-sdk-tool.ts products <ticket_id>
 ```
 
+### Ticket-id UUID guard
+
+```typescript
+CX_TICKET_ID_UUID_RE                 // /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+isValidCxTicketId(ticketId) → boolean
+invalidCxTicketIdMessage(ticketId) → string
+```
+The tool script validates `<ticket_id>` against `CX_TICKET_ID_UUID_RE` BEFORE hitting Postgres. Without this guard, a malformed id (the 8-hex `3cc11e10` incident) reached `.eq('id', ticketId).maybeSingle()` and Postgres raised **22P02 invalid input syntax for type uuid**, crashing the agent's tool call before `maybeSingle` could return the intended clean `ticket ${id} not found`. On a malformed id the CLI now exits with code 2 and prints the self-correcting `invalidCxTicketIdMessage`:
+
+> `"<id>" is not a valid ticket id — pass the FULL ticket UUID (36 chars), not a shortened prefix`
+
+The message explicitly names the failure mode (shortened prefix) so an agent that copied a `.slice(0,8)` display stub learns to pass the full UUID rather than retry the same stub. A well-formed id whose row is absent still falls through to the existing `ticket <id> not found` path. Pinned by [`cx-agent-sdk.ticket-uuid-guard.test.ts`](../../../src/lib/cx-agent-sdk.ticket-uuid-guard.test.ts).
+
 ## Integration
 
 **Worker briefs** — all three prepared briefs wire the SDK snapshot:
