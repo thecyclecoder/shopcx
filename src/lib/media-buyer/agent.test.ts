@@ -824,7 +824,7 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 interface Filter {
-  kind: "eq" | "in" | "not_is_null";
+  kind: "eq" | "neq" | "in" | "not_is_null";
   col: string;
   val?: unknown;
   vals?: unknown[];
@@ -833,6 +833,7 @@ function matchesJoined(row: Row, filters: Filter[]): boolean {
   for (const f of filters) {
     const v = row[f.col];
     if (f.kind === "eq" && v !== f.val) return false;
+    if (f.kind === "neq" && v === f.val) return false;
     if (f.kind === "in" && !(f.vals ?? []).includes(v)) return false;
     if (f.kind === "not_is_null" && (v === null || v === undefined)) return false;
   }
@@ -848,12 +849,14 @@ function makeFakeAdminForProductScope(tables: Tables) {
     const c: {
       select: (...args: unknown[]) => typeof c;
       eq: (col: string, val: unknown) => typeof c;
+      neq: (col: string, val: unknown) => typeof c;
       in: (col: string, vals: unknown[]) => typeof c;
       not: (col: string, op: string, val: unknown) => typeof c;
       then: (onFulfilled: (v: { data: Row[]; error: null }) => unknown) => Promise<unknown>;
     } = {
       select: () => c,
       eq: (col, val) => { filters.push({ kind: "eq", col, val }); return c; },
+      neq: (col, val) => { filters.push({ kind: "neq", col, val }); return c; },
       in: (col, vals) => { filters.push({ kind: "in", col, vals }); return c; },
       not: (col, op, val) => {
         if (op === "is" && val === null) filters.push({ kind: "not_is_null", col });
@@ -868,6 +871,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
       return {
         select: (...a: unknown[]) => chain(table).select(...a),
         eq: (col: string, val: unknown) => chain(table).eq(col, val),
+        neq: (col: string, val: unknown) => chain(table).neq(col, val),
         in: (col: string, vals: unknown[]) => chain(table).in(col, vals),
         not: (col: string, op: string, val: unknown) => chain(table).not(col, op, val),
       };
