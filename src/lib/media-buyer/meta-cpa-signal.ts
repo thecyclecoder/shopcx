@@ -182,17 +182,19 @@ async function resolveWinnerSource(
 ): Promise<{ metaAdId: string; campaign: WinnerCampaign | null; angle: WinnerAngle | null }> {
   const metaAdId = await dominantChildAdId(admin, { workspaceId, metaAdsetId });
 
-  // ShopCX-published ads join back to ad_campaigns via ad_publish_jobs.meta_ad_id.
+  // ShopCX-published ads join back to ad_campaigns via ad_publish_jobs.meta_ad_id. The FK column on
+  // ad_publish_jobs is `campaign_id` (the ad_campaigns UUID) — NOT `ad_campaign_id`, which was a
+  // schema-drift name that never existed. `meta_campaign_id` on ad_publish_jobs is the separate Meta id.
   let campaign: WinnerCampaign | null = null;
   let angle: WinnerAngle | null = null;
   const { data: pj } = await admin
     .from("ad_publish_jobs")
-    .select("ad_campaign_id")
+    .select("campaign_id")
     .eq("meta_ad_id", metaAdId)
-    .not("ad_campaign_id", "is", null)
+    .not("campaign_id", "is", null)
     .limit(1)
     .maybeSingle();
-  const adCampaignId = (pj as { ad_campaign_id?: string } | null)?.ad_campaign_id ?? null;
+  const adCampaignId = (pj as { campaign_id?: string } | null)?.campaign_id ?? null;
   if (adCampaignId) {
     const { data: c } = await admin
       .from("ad_campaigns")
