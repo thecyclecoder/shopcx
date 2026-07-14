@@ -187,9 +187,14 @@ async function resolveWinnerSource(
   // schema-drift name that never existed. `meta_campaign_id` on ad_publish_jobs is the separate Meta id.
   let campaign: WinnerCampaign | null = null;
   let angle: WinnerAngle | null = null;
+  // All three follow-up reads (ad_publish_jobs, ad_campaigns, product_ad_angles) are workspace-scoped:
+  // resolveWinnerSource runs under service-role (RLS is bypassed), so tenant isolation lives in the
+  // .eq('workspace_id', workspaceId) filter here. Without it, a Meta ad id collision or a mistagged
+  // ad_publish_jobs row could resolve to a foreign workspace's ad_campaign / angle.
   const { data: pj } = await admin
     .from("ad_publish_jobs")
     .select("campaign_id")
+    .eq("workspace_id", workspaceId)
     .eq("meta_ad_id", metaAdId)
     .not("campaign_id", "is", null)
     .limit(1)
@@ -199,6 +204,7 @@ async function resolveWinnerSource(
     const { data: c } = await admin
       .from("ad_campaigns")
       .select("id, name, product_id, angle_id")
+      .eq("workspace_id", workspaceId)
       .eq("id", adCampaignId)
       .maybeSingle();
     const cc = c as { id: string; name: string | null; product_id: string | null; angle_id: string | null } | null;
@@ -208,6 +214,7 @@ async function resolveWinnerSource(
         const { data: a } = await admin
           .from("product_ad_angles")
           .select("id, hook_slug, lf8_slot, lead_benefit_anchor, hook_one_liner, meta_headline, meta_primary_text, meta_description")
+          .eq("workspace_id", workspaceId)
           .eq("id", cc.angle_id)
           .maybeSingle();
         angle = (a as WinnerAngle | null) ?? null;
