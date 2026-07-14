@@ -56,6 +56,10 @@ Input row for the plan-computer. `{ sourceMetaAdId, targetLevel, targetObjectId,
 
 Pure. Takes fully-hydrated winners + losers + ready-to-test + cohort + policy + budgets, returns the typed plan. Encodes the promote thresholds (`scale_up_roas_trigger`, `scale_up_step_pct`, `scale_up_cap_pct`) and the `never_pause_object_ids` guard on the kill path — the runner does no policy math itself. Post-Phase-1 the pure function TRUSTS its `input.losers` list (already vetted by the decision-tree source) and no longer re-gates on `roas_floor` / `pause_min_spend_cents`.
 
+### `escalateUnderProvisionedCohort(admin, args)` — function
+
+Raises a deduped [[../tables/dashboard_notifications]] CEO card (type `agent_approval_request`, routed to CEO, `escalated_by_director='growth'`) when Bianca's replenish defers on missing config for an ACTIVE per-test cohort — the visible half of the escalation Phase 3 of [[../specs/media-buyer-cohort-adset-template-guard-backfill-and-escalate]] adds on top of the existing quiet `media_buyer_replenish_missing_config` [[../tables/director_activity]] audit row. **Dedupe:** `dedupe_key = under_provisioned_cohort:{workspaceId}:{cohortId}:{reason}:{yyyy-mm-dd}` — at most one card per (cohort, reason) per UTC day, so the 2h media-buyer pass cadence never spams the inbox but a persistent under-provisioning surfaces once daily until fixed. Read-then-insert is a compare-and-set on that key. The runner gates the call on `cohort?.isActive === true` (a dormant/retired cohort silently defers per the pre-existing contract; only an ACTIVE rail hit escalates). Signature: `{ workspaceId, productId, cohortId, reason, nowMs? }` → `{ emitted: boolean }`.
+
 ### `runMediaBuyerLoop(admin, opts): Promise<{ plan, writes }>` — function
 
 The orchestrator. Reads all inputs, computes the plan, persists the writes:
@@ -96,6 +100,8 @@ The Growth Director (or a human) activates a conservative policy via `scripts/se
 ## Test-cohort defaults contract
 
 For the replenish path to actually insert `ad_publish_jobs` rows, the [[../tables/media_buyer_test_cohorts]] row needs its Phase-2 default publish targets set: `default_meta_account_id`, `default_meta_page_id`, `default_meta_instagram_user_id`. Migration `20260707130000_media_buyer_test_cohorts_publish_targets.sql` adds them (all NULLABLE). Without them, replenish is deferred with `media_buyer_replenish_missing_config` — the plan still emits the replenish action, the runner just doesn't fire the publish.
+
+**Under-provisioned ACTIVE cohorts escalate, not just audit** ([[../specs/media-buyer-cohort-adset-template-guard-backfill-and-escalate]] Phase 3). When a defer lands on an ACTIVE cohort (`cohort?.isActive === true`) — because a per-test cohort is missing `test_meta_campaign_id` / `adset_template` (the Phase-2 [[provision-cohort]] `isCohortReplenishable` predicate), or the default publish targets aren't set — the runner ALSO calls `escalateUnderProvisionedCohort` alongside the existing quiet `director_activity` row, raising a deduped CEO card on the [[../tables/dashboard_notifications]] inbox. This turns the silent 2/4 Superfood Tabs stall into a visible rail hit per [[../operational-rules]] § North star (a rail hit ESCALATES). Dormant cohorts are unchanged — only an ACTIVE cohort's rail hit fires the card.
 
 ## Callers
 

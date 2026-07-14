@@ -53,6 +53,51 @@ export function buildAdsetTemplate(opts: { pixelId: string; targeting?: Record<s
   };
 }
 
+/**
+ * Fields the replenishability check needs. Accepts the shape both callers naturally have:
+ * `provisionProductTestCohort` (the row-being-inserted) and Bianca's replenish path (`MediaBuyerTestCohort`
+ * returned by `getEffectiveMediaBuyerTestCohort`). Legacy (shared-adset) cohorts pass unconditionally —
+ * only `adset_per_test=true` requires a campaign + template + pixelId.
+ */
+export interface CohortReplenishabilityInput {
+  adsetPerTest: boolean;
+  testMetaCampaignId: string | null | undefined;
+  adsetTemplate: { pixelId?: unknown } | null | undefined;
+}
+
+function pixelIdOnTemplate(t: CohortReplenishabilityInput["adsetTemplate"]): string | null {
+  if (!t) return null;
+  const v = t.pixelId;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * PURE — true when a per-test cohort has BOTH a `test_meta_campaign_id` AND an `adset_template`
+ * whose `pixelId` is a non-empty string. Legacy cohorts (adset_per_test=false) always return true;
+ * they don't mint per-test ad sets so they don't need a template. Sibling of the replenish path's
+ * missing-config branch — both must share one definition of "replenishable" so a cohort activated
+ * by `provisionProductTestCohort` can never fall out of that predicate later.
+ */
+export function isCohortReplenishable(cohort: CohortReplenishabilityInput): boolean {
+  if (!cohort.adsetPerTest) return true;
+  if (!cohort.testMetaCampaignId) return false;
+  return pixelIdOnTemplate(cohort.adsetTemplate) !== null;
+}
+
+/**
+ * Throws `cohort_not_replenishable: missing …` when `isCohortReplenishable` would be false. Used
+ * as an insert-time invariant in `provisionProductTestCohort` so an active per-test cohort can
+ * never persist with a null/incomplete template — the exact rail Superfood Tabs's stuck 2/4 hit.
+ */
+export function assertCohortReplenishable(cohort: CohortReplenishabilityInput): void {
+  if (isCohortReplenishable(cohort)) return;
+  const missing: string[] = [];
+  if (!cohort.testMetaCampaignId) missing.push("test_meta_campaign_id");
+  if (!cohort.adsetTemplate) missing.push("adset_template");
+  else if (pixelIdOnTemplate(cohort.adsetTemplate) === null) missing.push("adset_template.pixelId");
+  throw new Error(`cohort_not_replenishable: adset_per_test cohort missing ${missing.join(", ")}`);
+}
+
 export interface ProvisionCohortOptions {
   workspaceId: string;
   productId: string;
@@ -90,6 +135,11 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
   const ceiling = opts.dailyTestCeilingCents ?? 60000;
   const perTest = opts.perTestDailyBudgetCents ?? 15000;
   const template = buildAdsetTemplate({ pixelId: opts.pixelId, targeting: opts.targeting });
+
+  // Insert-time invariant: a per-test cohort MUST carry a testing campaign + template with pixelId, or
+  // Bianca's replenish fails closed and the product freezes at whatever slot count it had (the exact
+  // rail Superfood Tabs's stuck 2/4 hit). Throw here instead of silently inserting an unreplenishable row.
+  assertCohortReplenishable({ adsetPerTest: true, testMetaCampaignId: campaignId, adsetTemplate: template });
 
   const row = {
     workspace_id: opts.workspaceId,
