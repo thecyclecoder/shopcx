@@ -6,7 +6,7 @@
 -- arrays client-side to dodge the ~16KB undici header cap (UND_ERR_HEADERS_OVERFLOW). This RPC
 -- handles anomaly #1 — the reconciler's spec-drift sweep (spec-drift.ts `detectSpecPhaseAnomalies`).
 --
--- Shape: `returns table (kind text, phase_id uuid, spec_id uuid, position int, status text,
+-- Shape: `returns table (kind text, phase_id uuid, spec_id uuid, "position" int, status text,
 -- slug text, workspace_id uuid)` — every anomaly row tagged. Two kinds:
 --   • 'orphan'         — spec_phases whose spec_id has no live specs row (parent gone). Global
 --                        by nature (no parent to read a workspace from). slug + workspace_id are null.
@@ -28,7 +28,7 @@ returns table (
   kind text,
   phase_id uuid,
   spec_id uuid,
-  position int,
+  "position" int,
   status text,
   slug text,
   workspace_id uuid
@@ -40,7 +40,7 @@ as $$
     case when s.id is null then 'orphan' else 'provenance_gap' end as kind,
     p.id       as phase_id,
     p.spec_id  as spec_id,
-    p.position as position,
+    p.position as "position",
     p.status   as status,
     s.slug     as slug,
     s.workspace_id as workspace_id
