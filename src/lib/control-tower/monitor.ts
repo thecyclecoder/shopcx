@@ -119,6 +119,17 @@ const HISTORY_LIMIT = 10;
  * genuinely-stuck analyzer (the ticket survives a whole cycle unprocessed) still trips the alert. */
 const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
 
+/**
+ * Cora's settle window for the `tickets-awaiting-qc` work probe
+ * (ticket-analyzer-workprobe-last-customer-settle-grace). Mirrors CORA_CLOSE_SETTLE_MS in
+ * src/lib/inngest/ticket-analysis-cron.ts — the cron's `passesCoraSelectionGate` requires
+ * `last_customer_message_at` to be at least this old before it will select the ticket. Keeping the
+ * probe keyed on `updated_at` alone (without this settle window) flags a ticket the cron is
+ * DELIBERATELY waiting on as "awaited but unserviced" and fires a false idle_while_work on
+ * loop:ai:ticket-analyzer. If the cron's constant moves, the sibling regression test pins the two
+ * to match so this doesn't silently drift. */
+const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
+
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
 function elapsed(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -801,11 +812,6 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // Closed AI-handled tickets never analyzed (last_analyzed_at null), updated in-window —
             // exactly what the ticket-analysis cron feeds analyzeTicket. The cron stamps
             // last_analyzed_at even on skip, so a null here is a genuinely-unprocessed ticket.
-            // Feeder-cadence grace (ticket-analyzer-workprobe-cron-grace): only count a ticket once it
-            // has survived a FULL ticket-analysis-cron cycle still unprocessed — a ticket closing
-            // between the 30-min ticks hasn't been given a chance yet, so its updated_at must also be
-            // older than the grace. Eliminates the between-ticks false positive; a genuinely-stuck
-            // analyzer (ticket still null a whole cycle later) still counts and alerts.
             // Human-veto mirror (ticket-analyzer-workprobe-exclude-analyzer-locked): analyzer_locked
             // is EXCLUDED at the source, mirroring ticket-analysis-cron.ts:48-54 — a human has
             // vetoed the analyzer on those rows (Phase 2 of human-directives-hard-gates-over-ticket-ai),
@@ -824,19 +830,61 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // source. Same for `sol_handled_at`-null tickets (never touched by Sol → cron skips).
             // Adding the two `.not(*, "is", null)` filters aligns the probe with the cron's real
             // selection universe (learning #1: change the durable predicate).
-            const graceCutoffIso = new Date(Date.now() - TICKET_ANALYSIS_FEEDER_GRACE_MS).toISOString();
-            const { count } = await admin
+            //
+            // Cora settle-window mirror (ticket-analyzer-workprobe-last-customer-settle-grace) —
+            // the cron's real eligibility gate (ticket-analysis-cron.ts `passesCoraSelectionGate`)
+            // is keyed on the LATEST CUSTOMER MESSAGE, not on `updated_at`: it requires that a
+            // customer message exists AND its `created_at` is at least CORA_CLOSE_SETTLE_MS (30 min)
+            // in the past. Keying the probe on `updated_at <= now - FEEDER_GRACE` alone lets a
+            // ticket the cron is DELIBERATELY waiting on (customer last spoke 5 min ago, ticket
+            // updated 45 min ago by an internal side-effect) count as awaited work — the exact
+            // false idle_while_work this spec repairs. We now derive the latest customer message
+            // per candidate and apply the combined cutoff = CORA_CLOSE_SETTLE_MS + the existing
+            // TICKET_ANALYSIS_FEEDER_GRACE_MS, so a normal between-tick wait stays green while a
+            // genuinely-stuck analyzer (a fully-settled + past-a-full-cycle ticket that's still
+            // last_analyzed_at null) still trips the alert. A candidate with NO customer message
+            // (outbound-only send) is dropped — the cron's gate drops it too.
+            const settlePlusFeederCutoffMs =
+              Date.now() - TICKET_ANALYSIS_CORA_SETTLE_MS - TICKET_ANALYSIS_FEEDER_GRACE_MS;
+            const { data: candidates } = await admin
               .from("tickets")
-              .select("id", { count: "exact", head: true })
+              .select("id")
               .eq("status", "closed")
               .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
               .not("closed_at", "is", null)
               .not("sol_handled_at", "is", null)
               .is("last_analyzed_at", null)
-              .gte("updated_at", sinceIso)
-              .lte("updated_at", graceCutoffIso);
-            return count ?? 0;
+              .gte("updated_at", sinceIso);
+            const candidateIds = ((candidates ?? []) as Array<{ id: string }>).map((c) => c.id);
+            if (!candidateIds.length) return 0;
+            // Latest customer message per candidate — mirrors the cron's per-run reduction
+            // (ticket-analysis-cron.ts:203-211) so the probe and the cron see the same universe
+            // of work. Volume is small (candidate cap is the base filter's natural bound).
+            const { data: custMsgRows } = await admin
+              .from("ticket_messages")
+              .select("ticket_id, created_at")
+              .in("ticket_id", candidateIds)
+              .eq("author_type", "customer");
+            const latestCustomerMsgMs = new Map<string, number>();
+            for (const m of ((custMsgRows ?? []) as Array<{ ticket_id: string; created_at: string }>)) {
+              const ms = Date.parse(m.created_at);
+              if (!Number.isFinite(ms)) continue;
+              const prev = latestCustomerMsgMs.get(m.ticket_id);
+              if (prev == null || ms > prev) latestCustomerMsgMs.set(m.ticket_id, ms);
+            }
+            let count = 0;
+            for (const id of candidateIds) {
+              const latestMs = latestCustomerMsgMs.get(id);
+              // No customer message → outbound-only → not gradeable (mirrors the cron's
+              // `if (!last_customer_message_at) return false` in passesCoraSelectionGate).
+              if (latestMs == null) continue;
+              // Not settled long enough for the next feeder tick to have legally picked it up →
+              // cron would skip → don't count as awaited work.
+              if (latestMs > settlePlusFeederCutoffMs) continue;
+              count++;
+            }
+            return count;
           }
           case "journeys-awaiting-delivery": {
             const { count } = await admin
