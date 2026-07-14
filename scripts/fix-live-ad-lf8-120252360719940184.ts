@@ -32,7 +32,7 @@
  */
 import "./_bootstrap";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { hasAnyLf8 } from "@/lib/ads-supervisor";
+import { hasAnyLf8, LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS } from "@/lib/ads-supervisor";
 
 /** Pinned scope for this one-off — the fix-spec slug's ws8 prefix is `fdc11e10`
  *  ({@link ads-supervisor.ts fixSpecSlug} = `ads-supervisor-fix-${workspaceId.slice(0,8)}-…`),
@@ -79,10 +79,74 @@ function abort(reason: string): never {
   process.exit(1);
 }
 
+/**
+ * Phase-2 underperformance gate — reads iteration_policies.trim_max_cost_per_atc_cents
+ * (fallback LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS = $80, the SAME value Bianca's trim
+ * logic uses) and the target adset's lifetime cost-per-ATC (Σ spend / Σ add_to_cart from
+ * meta_insights_daily, scoped to WORKSPACE_ID). Returns true iff the adset's cost-per-ATC
+ * is STRICTLY GREATER than the threshold — the only condition under which this script is
+ * authorized to flip product_ad_angles.is_active=false. Logs a clear ABORT reason and
+ * returns false otherwise (dry-run OR --apply — the gate is unconditional).
+ */
+async function passesUnderperformanceGate(admin: ReturnType<typeof createAdminClient>): Promise<boolean> {
+  const { data: pol } = await admin
+    .from("iteration_policies")
+    .select("trim_max_cost_per_atc_cents")
+    .eq("workspace_id", WORKSPACE_ID)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const rawThreshold = (pol as { trim_max_cost_per_atc_cents: number | null } | null)?.trim_max_cost_per_atc_cents;
+  const threshold = rawThreshold == null ? LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS : Number(rawThreshold);
+
+  const { data: ins, error: insErr } = await admin
+    .from("meta_insights_daily")
+    .select("spend_cents, add_to_cart")
+    .eq("workspace_id", WORKSPACE_ID)
+    .eq("level", "adset")
+    .eq("meta_object_id", ADSET_ID);
+  if (insErr) {
+    console.error(`ABORT: meta_insights_daily read failed while evaluating the underperformance gate: ${insErr.message}`);
+    return false;
+  }
+  const rows = (ins ?? []) as Array<{ spend_cents: number | null; add_to_cart: number | null }>;
+  let spend = 0;
+  let atc = 0;
+  for (const r of rows) {
+    spend += Number(r.spend_cents ?? 0);
+    atc += Number(r.add_to_cart ?? 0);
+  }
+  const costPerAtc = atc > 0 ? Math.round(spend / atc) : null;
+
+  const dollars = (c: number | null) => (c == null ? "(null)" : `$${(c / 100).toFixed(2)}`);
+  console.log(
+    `Underperformance gate: lifetime spend=${dollars(spend)} · atc=${atc} · cost-per-atc=${dollars(costPerAtc)} · threshold=${dollars(threshold)}`,
+  );
+  if (costPerAtc == null) {
+    console.error(
+      `ABORT: adset ${ADSET_ID} has 0 lifetime add_to_cart events — no leading-indicator data to justify deactivation. A keyword miss on a live converting angle is surfaced, not executed (Phase 2 of lf8-live-ad-gate-broaden-vocab-and-gate-deactivation-on-performance).`,
+    );
+    return false;
+  }
+  if (costPerAtc <= threshold) {
+    console.error(
+      `ABORT: adset ${ADSET_ID} cost-per-ATC (${dollars(costPerAtc)}) is at or under the trim threshold (${dollars(threshold)}) — the leading indicator does not authorize deactivation. Re-run only when Bianca's trim gate would ALSO trip on this adset.`,
+    );
+    return false;
+  }
+  console.log(`✓ underperformance gate passed — deactivation authorized.`);
+  return true;
+}
+
 async function main() {
   const admin = createAdminClient();
 
   console.log(`Scope pinned to workspace ${WORKSPACE_ID} · product ${PRODUCT_ID} · adset ${ADSET_ID}`);
+
+  // ── 0. MANDATORY UNDERPERFORMANCE GATE (Phase 2 of lf8-live-ad-gate-broaden-vocab-and-gate-
+  //       deactivation-on-performance) — see passesUnderperformanceGate. ─────────
+  const gateOk = await passesUnderperformanceGate(admin);
+  if (!gateOk) return;
 
   // ── 1. ad_publish_jobs — scoped to WORKSPACE_ID + the target adset ───────────
   const { data: pubJobs, error: pubErr } = await admin

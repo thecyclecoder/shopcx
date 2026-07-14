@@ -66,10 +66,14 @@ test("buildMetaCopy — never fabricates an LF8 term when the brief carries no L
   // ("Zephyr Blend" — no LF8 substring). The pass must NOT invent an LF8 word (that would just paper over
   // a real product-intelligence gap). ads-supervisor is still expected to re-flag on the next pass — the
   // human-facing path for this state.
+  // Angle overridden away from the "appetite suppression / craving control" default because those tokens
+  // ARE LF8 under the broadened vocabulary (weight-loss cluster). The hook here uses purely product-spec
+  // language that carries no LF8 term.
   const brief = makeBrief({
     productTitle: "Zephyr Blend",
-    supportingBenefits: ["appetite suppression", "craving control"],
-    offer: { headline: "34% off", strikethrough: null, perServing: null, disclaimer: "" },
+    angle: makeAngle({ hook: "Single-origin arabica", leadBenefit: "single-origin arabica" }),
+    supportingBenefits: ["single-origin arabica", "medium roast"],
+    offer: { headline: "12 oz bag", strikethrough: null, perServing: null, disclaimer: "" },
   });
   const copy = buildMetaCopy(brief);
   // No LF8 present anywhere — the guardrail correctly declined to fabricate.

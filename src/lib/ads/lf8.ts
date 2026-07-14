@@ -28,6 +28,18 @@ export const LF8_KEYWORDS: readonly string[] = [
   "family", "kids", "loved", "share",
   // 8. social approval
   "trust", "proven", "loved by", "customers", "reviews",
+  // weight-loss / body-transformation (#1/#5/#6/#8) — four folded live-ad-lf8 fix-specs
+  // (adsets 120252355815780184 / 120252360719940184 / 120252360719970184 / 120252363256660184)
+  // tripped on this cluster's absence; e.g. 'i lost 40+ pounds! appetite suppression/craving control'.
+  "weight", "pounds", "lbs", "lost", "slim", "lean", "shed", "appetite", "craving", "transformation", "fit",
+  // beauty / appearance (#1/#8)
+  "skin", "hair", "nails", "glow", "collagen", "youthful", "radiant",
+  // immunity / digestion (#1/#3)
+  "immune", "immunity", "gut", "digestion", "bloat", "gut health",
+  // mood / wellness (#1/#3)
+  "mood", "happy", "balance", "wellness", "thrive",
+  // offer / urgency (#5/#6)
+  "save", "off", "free shipping", "deal", "today",
 ];
 
 export function hasAnyLf8(copyLower: string): boolean {
