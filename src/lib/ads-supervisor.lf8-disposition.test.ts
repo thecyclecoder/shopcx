@@ -18,6 +18,8 @@ import {
   makeLiveAdLf8Finding,
   makeLiveAdLf8EnrichmentFinding,
   LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS,
+  resolveLf8UnderperformanceThreshold,
+  chooseLf8Disposition,
 } from "./ads-supervisor";
 
 function makeRow(overrides: Partial<TestAdsetRow> = {}): TestAdsetRow {
@@ -125,4 +127,78 @@ test("makeLiveAdLf8Finding (deactivation-authorized): only fires when underperfo
     /cost[- ]per[- ]atc|trim_max_cost_per_atc/.test(combined),
     `deactivation finding must cite the cost-per-ATC gate; got: ${combined.slice(0, 400)}`,
   );
+});
+
+// ── Phase 3 (Fix 1 — fail-closed on iteration_policies read errors) ────────────
+// Pre-merge spec-test security-review flagged a fail-OPEN bug: the resolver silently used the
+// $80 default when the iteration_policies query erred OR returned no row, so a Supabase outage
+// (or a workspace missing the row entirely) would silently authorize the destructive deactivation
+// disposition. Fix: only use the default when a row is SUCCESSFULLY read AND the column value is
+// null; on read error / no row the gate returns { ok: false } and the disposition falls to the
+// non-destructive enrichment path regardless of the adset's cost-per-ATC.
+
+/** Minimal chainable stub matching the Supabase call chain the resolver uses:
+ *  admin.from().select().eq().order().limit(1).maybeSingle().
+ *  Every intermediate returns the same chain; maybeSingle() resolves to the supplied result. */
+function makeAdminMock(result: { data: unknown; error: unknown }) {
+  const chain: Record<string, unknown> = {};
+  const chainable = () => chain;
+  chain.from = chainable;
+  chain.select = chainable;
+  chain.eq = chainable;
+  chain.order = chainable;
+  chain.limit = chainable;
+  chain.maybeSingle = async () => result;
+  return chain;
+}
+
+test("resolveLf8UnderperformanceThreshold: read ERROR → { ok: false } (fail-closed, no default)", async () => {
+  const admin = makeAdminMock({ data: null, error: { message: "connection reset" } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await resolveLf8UnderperformanceThreshold(admin as any, "ws-1");
+  assert.equal(result.ok, false, "read-error MUST NOT fall back to the default — that would be fail-open");
+});
+
+test("resolveLf8UnderperformanceThreshold: no row → { ok: false } (fail-closed, no default)", async () => {
+  const admin = makeAdminMock({ data: null, error: null });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await resolveLf8UnderperformanceThreshold(admin as any, "ws-1");
+  assert.equal(result.ok, false, "missing iteration_policies row MUST NOT fall back to the default — that would be fail-open");
+});
+
+test("resolveLf8UnderperformanceThreshold: row with null column → { ok: true, value: DEFAULT }", async () => {
+  const admin = makeAdminMock({ data: { trim_max_cost_per_atc_cents: null }, error: null });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await resolveLf8UnderperformanceThreshold(admin as any, "ws-1");
+  assert.deepEqual(result, { ok: true, value: LF8_TRIM_MAX_COST_PER_ATC_DEFAULT_CENTS });
+});
+
+test("resolveLf8UnderperformanceThreshold: row with concrete value → { ok: true, value: X }", async () => {
+  const admin = makeAdminMock({ data: { trim_max_cost_per_atc_cents: 12000 }, error: null });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await resolveLf8UnderperformanceThreshold(admin as any, "ws-1");
+  assert.deepEqual(result, { ok: true, value: 12000 });
+});
+
+test("chooseLf8Disposition: gate.ok=false → enrich_only REGARDLESS of cost-per-ATC (fail-closed)", () => {
+  // A clearly-underperforming adset (cost-per-ATC $999.99, far above any real threshold) still
+  // falls to enrichment when the gate could not be proven — the destructive path must NEVER be
+  // authorized on a stale/erroring policy read.
+  const row = makeRow({ costPerAtcCents: 99999 });
+  assert.equal(chooseLf8Disposition({ ok: false, reason: "read error" }, row), "enrich_only");
+});
+
+test("chooseLf8Disposition: gate.ok=true + over threshold → deactivate_authorized", () => {
+  const row = makeRow({ costPerAtcCents: 11000 });
+  assert.equal(chooseLf8Disposition({ ok: true, value: 8000 }, row), "deactivate_authorized");
+});
+
+test("chooseLf8Disposition: gate.ok=true + at threshold → enrich_only", () => {
+  const row = makeRow({ costPerAtcCents: 8000 });
+  assert.equal(chooseLf8Disposition({ ok: true, value: 8000 }, row), "enrich_only");
+});
+
+test("chooseLf8Disposition: gate.ok=true + null cost-per-ATC → enrich_only (no data → don't destroy)", () => {
+  const row = makeRow({ costPerAtcCents: null, addToCart: 0 });
+  assert.equal(chooseLf8Disposition({ ok: true, value: 8000 }, row), "enrich_only");
 });
