@@ -34,6 +34,7 @@ import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
 import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
 import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
+import type { SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 
 type Admin = SupabaseClient;
 
@@ -1296,7 +1297,17 @@ const MARIO_FIX_MANDATE_SLUG = "infra-devops-reliability"; // platform.md § "In
 
 /** Author a critical fix-spec via `authorSpecRowStructured` — owner='platform', critical, autoBuild.
  *  Parent is the platform **mandate** (not a bare function — that throws InvalidParentError); Vale's
- *  `assertEveryPhaseHasVerification` + `assertEveryNodeHasIntent` re-gate the payload at the DB write. */
+ *  `assertEveryPhaseHasVerification` + `assertEveryNodeHasIntent` re-gate the payload at the DB write.
+ *
+ *  mario-fix-authoring-emits-machine-checks-not-needs-human Phase 1 — attach a typed machine check per
+ *  phase. Without `checks[]`, `authorSpecRowStructured` falls back to
+ *  `parseVerificationBlobToChecks(verification)`, which stamps every prose bullet with
+ *  `exec_kind='needs_human'` → `assertEveryPhaseHasMachineCheck` throws → the fix-spec never lands →
+ *  the origin stays red → the stall detector re-fires → oscillation. A default
+ *  `{kind:'auto', exec_kind:'tsc', params:null}` check is the safe default already used by
+ *  `buildStructuredSpecInputFromMarkdown` (author-spec.ts) and by [[repair-agent]]'s
+ *  `derivedDefaultRepairChecks` — the prose verification stays on the `verification` column verbatim
+ *  for humans; the tsc check gives the deterministic runner something to actually execute. */
 async function authorMarioFixSpec(
   workspaceId: string,
   fixSpec: MarioDurableFixSpec,
@@ -1320,11 +1331,31 @@ async function authorMarioFixSpec(
         verification: p.verification,
         why: p.why,
         what: p.what,
+        checks: defaultMarioFixPhaseChecks(),
       })),
     },
     "planned",
     { intendedStatusSetBy: "mario", parentKind: "mandate", parentRef: `${MARIO_DIRECTOR_FUNCTION}#${MARIO_FIX_MANDATE_SLUG}` },
   );
+}
+
+/** mario-fix-authoring-emits-machine-checks-not-needs-human Phase 1 — the default machine check every
+ *  Mario-authored fix phase carries so `assertEveryPhaseHasMachineCheck` at the author chokepoint
+ *  cannot reject the write (which was stranding fix-specs built-but-unmerged and re-firing the stall
+ *  detector). A bare `tsc` gate — same shape `buildStructuredSpecInputFromMarkdown` uses in the
+ *  markdown author path — is safe across every Mario fix class: a pipeline-reliability fix landing on
+ *  `main` MUST typecheck. The prose the LLM proposed rides verbatim on the phase's `verification`
+ *  column (human-facing); the tsc check is what the deterministic runner actually executes. */
+function defaultMarioFixPhaseChecks(): SpecPhaseCheckInput[] {
+  return [
+    {
+      position: 1,
+      description: "Repo typechecks clean (`npx tsc --noEmit`) after this phase lands.",
+      kind: "auto",
+      exec_kind: "tsc",
+      params: null,
+    },
+  ];
 }
 
 /** Pure security predicate for `blocked_by_repair` — recompute the fifth-source class as-of NOW and reject
@@ -1476,6 +1507,12 @@ async function repairSpecBlockedBy(
     // Preserve current verification — the Verification gate throws on empty; this repair is scoped to
     // blocked_by, never touches per-phase verification (that's the fourth source's verb).
     verification: p.verification ?? "",
+    // mario-fix-authoring-emits-machine-checks-not-needs-human Phase 1 — same defect class as
+    // authorMarioFixSpec / repairSpecVerification: a re-author that falls back to
+    // parseVerificationBlobToChecks yields all-needs_human → assertEveryPhaseHasMachineCheck throws
+    // → the blocked_by repair never lands. Attach the same default tsc check so the fifth-source
+    // repair can't strand via the same gate.
+    checks: defaultMarioFixPhaseChecks(),
   }));
 
   const hasTypedMandate = cur.parent_kind === "mandate" && typeof cur.parent_ref === "string" && cur.parent_ref.includes("#");
@@ -1529,6 +1566,13 @@ async function repairSpecVerification(admin: Admin, workspaceId: string, repair:
     // Mario's corrected verification for this phase (by title or position); else keep the current one. The
     // Verification gate throws on an empty string, so a phase Mario left uncorrected must already have one.
     verification: byTitle.get(p.title) ?? byPos.get(p.position) ?? p.verification ?? "",
+    // mario-fix-authoring-emits-machine-checks-not-needs-human Phase 1 — attach a typed machine check per
+    // phase so `assertEveryPhaseHasMachineCheck` at the author chokepoint can't reject the re-author with
+    // `MissingMachineCheckError`. Without this, the re-author falls back to
+    // `parseVerificationBlobToChecks(verification)` — every prose bullet stamped `needs_human` → the
+    // machine-check gate throws → the verification repair never lands → the origin stays red → oscillation.
+    // Same default as `authorMarioFixSpec` (see [[defaultMarioFixPhaseChecks]]).
+    checks: defaultMarioFixPhaseChecks(),
   }));
 
   // Preserve a typed mandate parent when the spec has one; else fall back to the owner's reliability
