@@ -27,6 +27,7 @@
     "check:node-registry-drift": "tsx scripts/_check-node-registry-drift.ts",
     "check:no-markdown-spec-authoring": "tsx scripts/_check-no-markdown-spec-authoring.ts",
     "predeploy": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:competitors-sdk-compliance && npm run check:ticket-analyses-sdk-compliance && npm run check:sonnet-prompts-sdk-compliance && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses && npm run check:no-md-spec-commits && npm run check:rls-on-new-tables && npm run check:no-hard-destructive-migrations && npm run check:table-refs-have-migrations && npm run check:personas-no-duplicate-keys && npm run check:specs-phases-no-client-in-batching && npm run check:authinterrupts-when-forbidden-imported && npm run check:node-registry-drift && npm run check:no-markdown-spec-authoring",
+    "test:ads-lf8": "tsx --test src/lib/ads/lf8.test.ts",
     "test:cancel-jobs-archived-db-folded": "tsx --test src/lib/agent-jobs.cancel-archived-db-folded.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:cart-gifts": "tsx --test src/lib/cart-gifts.test.ts",

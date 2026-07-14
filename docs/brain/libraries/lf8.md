@@ -22,6 +22,18 @@ Exported as `LF8_KEYWORDS: readonly string[]`:
 7. **Care and protection of loved ones** — family, kids, loved, share
 8. **Social approval** — trust, proven, loved by, customers, reviews
 
+### Broadened desire clusters (added after the four false-flagged live ads)
+
+The original vocabulary was coffee/energy-centric and omitted whole Life-Force-8 desire clusters, so weight-loss transformation copy ("i lost 40+ pounds") and beauty/health copy ("skin, hair, and joints") scored zero — the ads-supervisor false-flagged four live winners in a single 3h pass (adsets `120252355815780184`, `120252360719940184`, `120252360719970184`, `120252363256660184`). These clusters are now part of the shared list; the gate and the generator both pick them up automatically:
+
+- **Weight-loss / body-transformation** (#1 / #5 / #6 / #8) — weight, pounds, lbs, lost, slim, lean, shed, appetite, craving, transformation, fit
+- **Beauty / appearance** (#1 / #8) — skin, hair, nails, glow, collagen, youthful, radiant
+- **Immunity / digestion** (#1 / #3) — immune, immunity, gut, digestion, bloat, gut health
+- **Mood / wellness** (#1 / #3) — mood, happy, balance, wellness, thrive
+- **Offer / urgency** (#5 / #6) — save, off, free shipping, deal, today
+
+Pinned by `src/lib/ads/lf8.test.ts` (`npm run test:ads-lf8`), which asserts `hasAnyLf8` returns true for each of the four previously false-flagged creatives.
+
 ## API
 
 - `hasAnyLf8(copyLower: string): boolean` — returns true if the lowercase copy contains **any** LF8 keyword as a substring. Used by ads-supervisor to detect drift and by `buildMetaCopy` to prefer LF8-carrying supporting benefits in the generated ad text.
