@@ -24,6 +24,10 @@ Bianca's replenish loop does **not** create ad accounts, campaigns, or ad sets �
 - **No spend at provision time** — the campaign is PAUSED and no ad sets exist yet; the per-test ad sets are minted (ACTIVE, $150/day) by the replenish/publish path when Bianca fills a test slot.
 - Inputs it needs (provisioning is a curated step): the account's `meta_ad_accounts.id` UUID + Meta act id, the Facebook `pageId`, and the `pixelId` to optimize against.
 
+## One-time backfill (2026-07-14)
+
+Superfood Tabs' active per-test cohort was created with `adset_template = NULL` (a legacy row that predates `provisionProductTestCohort`), so every Bianca replenish pass hit `media_buyer_replenish_missing_config` and Tabs froze at 2/4 test ads. `scripts/_backfill-cohort-adset-template.ts` rebuilds the template on any active `adset_per_test=true` cohort whose `adset_template` is null or missing `pixelId`, by cloning the pixel from a SIBLING active cohort on the same `meta_ad_account_id` (accounts share a pixel) and running `buildAdsetTemplate({pixelId})` — exactly what `provisionProductTestCohort` (`provision-cohort.ts:92,102`) would have written. It never invents a pixel; a row with no sibling is skipped + logged. Dry-run by default; `APPLY=1 npx tsx scripts/_backfill-cohort-adset-template.ts` writes. Idempotent — a row with a valid template is skipped by the read filter. Phase 2 will add a durable guard so a null template can't reappear on a per-test cohort.
+
 ## Related
 
 [[media-buyer-agent]] · [[meta-ads]] (`getOrCreateTestingCampaign` / `createAdSet`) · [[../tables/media_buyer_test_cohorts]] · [[../reference/meta-scaling-methodology]] · [[../reference/meta-scaling-methodology#the-decision-tree]]
