@@ -15,8 +15,21 @@ The daily cadence cron + per-workspace sweep that dispatches the [[../libraries/
 ### `media-buyer-grade-sweep`
 - **Trigger:** event `growth/media-buyer-grade-sweep` (data: `{ workspace_id, trigger? }`)
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.workspace_id" }]`, `retries: 1`
-- **What it does:** inserts one [[../tables/agent_jobs]] row for the workspace with `kind='media-buyer-grade'` and `instructions = { limit: 50 }` (matches the [[../libraries/media-buyer-grader]] default). The box worker's `runMediaBuyerGradeJob` lane picks it up and runs [[../libraries/media-buyer-grader]] `gradeMediaBuyerActions(admin, { workspaceId, limit })`.
+- **What it does:** calls `dispatchMediaBuyerGradeSweep(admin, workspace_id)` inside `step.run` to insert one [[../tables/agent_jobs]] row for the workspace with `kind='media-buyer-grade'`, `spec_slug` set to the stable `mediaBuyerGradeSpecSlug()` value, and `instructions = { limit: 50 }` (matches the [[../libraries/media-buyer-grader]] default). The box worker's `runMediaBuyerGradeJob` lane picks it up and runs [[../libraries/media-buyer-grader]] `gradeMediaBuyerActions(admin, { workspaceId, limit })`.
 - **Returns** `{ status: "complete", dispatched }`.
+
+### `MEDIA_BUYER_GRADE_SPEC_SLUG`
+- **Constant:** `"media-buyer-grade:workspace"`
+- **What it is:** Stable workspace-scoped `agent_jobs.spec_slug` for the Media Buyer grade job. The column is `NOT NULL`, so an omitted value blocks the insert and no grader row lands. One workspace runs one grader pass per cron tick, so a single per-workspace slug is the durable bucket for the `agent_jobs_slug_idx (workspace_id, spec_slug, ...)` Roadmap rollups.
+
+### `mediaBuyerGradeSpecSlug()`
+- **Signature:** `function mediaBuyerGradeSpecSlug(): string`
+- **What it does:** Returns the stable slug `"media-buyer-grade:workspace"` — helper form parallel to [[./media-buyer-cadence]] `mediaBuyerSpecSlug`.
+
+### `dispatchMediaBuyerGradeSweep(admin, workspaceId)`
+- **Signature:** `async function dispatchMediaBuyerGradeSweep(admin: Admin, workspaceId: string): Promise<{ dispatched: number }>`
+- **What it does:** Pure per-workspace insert extracted from the Inngest handler — inserts ONE workspace-scoped `agent_jobs` row `kind='media-buyer-grade'` with a stable non-empty `spec_slug` (via `mediaBuyerGradeSpecSlug()`) and `instructions.limit=MEDIA_BUYER_GRADE_DEFAULT_LIMIT` (50). Throws if the insert fails.
+- **Returns** `{ dispatched: 1 }` on success.
 
 ## Idempotency
 
@@ -49,6 +62,10 @@ Downstream side effect from the sweep is a `kind='media-buyer-grade'` [[../table
 ## Register-or-it's-incomplete
 
 Registered in `src/lib/control-tower/registry.ts` as a `cron` loop owned by `growth` (`livenessWindowMs` 26h, `registeredAt: 2026-07-09T14:00:00Z` for the newcron-grace) — per [[../operational-rules]], a new cron is incomplete without a Control Tower entry + an end-of-run heartbeat.
+
+## Known fixes
+
+**The `spec_slug` NOT NULL boundary (2026-07-14 outage):** The `mediaBuyerGradeSweep` handler now calls the extracted `dispatchMediaBuyerGradeSweep` helper, which always supplies the stable `mediaBuyerGradeSpecSlug()` value when inserting into `agent_jobs`. The `spec_slug` column is `NOT NULL` in the migrations — an omitted value throws `null value in column "spec_slug" of relation "agent_jobs" violates not-null constraint` and no grader row lands. The scope of the guard: the `mediaBuyerGradeSweep` event handler is the sole caller of `dispatchMediaBuyerGradeSweep`, so this guard path protects the entire grader-enqueue flow. A focused regression test (media-buyer-grade.test.ts) simulates the exact constraint error and validates that all three required fields (`spec_slug`, `kind`, `instructions.limit`) land correctly.
 
 ## Related
 
