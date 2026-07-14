@@ -103,6 +103,14 @@ The tool script validates `<ticket_id>` against `CX_TICKET_ID_UUID_RE` BEFORE hi
 
 The message explicitly names the failure mode (shortened prefix) so an agent that copied a `.slice(0,8)` display stub learns to pass the full UUID rather than retry the same stub. A well-formed id whose row is absent still falls through to the existing `ticket <id> not found` path. Pinned by [`cx-agent-sdk.ticket-uuid-guard.test.ts`](../../../src/lib/cx-agent-sdk.ticket-uuid-guard.test.ts).
 
+### Agent-read surfaces carry FULL ticket ids
+
+Phase 2 of the guard spec: the CS box agents (Sol / Cora / June) never see a `.slice(0, 8)` ticket-id stub in a surface they read. An 8-hex prefix an agent copies verbatim recreates the exact 22P02 failure the tool-side guard just fixed — the correct fix is to never hand the stub over in the first place, on top of rejecting it if one arrives.
+
+- **[`cs-director-digest`](./cs-director-digest.md) `perTicketEscalationTitle(ticketId)`** — the `per_ticket_escalation` storyline title June's `cs-director-call` session reads is composed by this exported helper and emits the FULL UUID (`Ticket <uuid> — CS Director escalated`), not `Ticket <id.slice(0,8)>`. Pinned by [`cs-director-digest.perTicketEscalationTitle.test.ts`](../../../src/lib/cs-director-digest.perTicketEscalationTitle.test.ts).
+- **Sol's session prompt** (`scripts/builder-worker.ts`) already passes the full `ticketId` to Sol's brief — kept.
+- **Founder/dashboard-only surfaces** (`console.log` tags like `${tag} ${ticketId.slice(0, 8)} …` in `scripts/builder-worker.ts` / `src/lib/cs-director.ts`, and the founder-facing dashboard tile short forms) intentionally keep their 8-hex short form — no agent consumes them, so they don't feed the 22P02 loop.
+
 ## Integration
 
 **Worker briefs** — all three prepared briefs wire the SDK snapshot:
