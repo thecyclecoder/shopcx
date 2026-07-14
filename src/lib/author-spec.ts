@@ -1458,6 +1458,68 @@ export async function authorSpecRowStructured(
  */
 export const submitSpec = authorSpecRowStructured;
 
+// ── retire-md-spec-writers-db-is-sole-spec Phase 3 — markdown-to-structured coercion helper ───────
+//
+// Every autonomous lane that used to hand `markNewSpecInReview` / `authorSpecRowFromMarkdown` a
+// markdown followup body (platform-director's `applyDirectorAuthorFollowup` was the last runtime
+// caller) now funnels through the STRUCTURED chokepoint `authorSpecRowStructured`. This helper is
+// the ONE deterministic converter that takes an already-validated markdown body (the caller's own
+// pre-write shape check — for platform-director that's `validateFollowupSpec`) and returns the
+// typed `StructuredSpecInput` shape, WITH a machine-runnable `exec_kind:'tsc'` default check per
+// phase so the every-writer-authors-machine-runnable-verifications chokepoint gate passes on the
+// first attempt. The prose Verification bullets ride verbatim on the phase's `verification`
+// column (human-facing) — only the `checks[]` column drives deterministic execution, and a bare
+// `tsc` gate is the safe default every autonomous fix spec already gates on before merge.
+export function buildStructuredSpecInputFromMarkdown(
+  slug: string,
+  markdown: string,
+): StructuredSpecInput {
+  const card = parseAuthoredSpecMarkdown(slug, markdown);
+  const phaseBodies = extractPhaseBodies(markdown);
+  const intent = extractIntentHeaders(markdown);
+  const specWhy = (intent.why ?? "").trim() ||
+    `${card.title} — the plain-language WHY was not supplied on the markdown body; the follow-up spec inherits the parent lane's intent (director-authored follow-up).`;
+  const specWhat = (intent.what ?? "").trim() || (card.summary ?? "").trim() ||
+    `${card.title} — when this spec ships, the root cause the parent lane surfaced is addressed.`;
+  const phases: StructuredPhaseInput[] = card.phases.map((p, i) => {
+    const pb = phaseBodies[i];
+    const body = (pb?.body ?? "").trim();
+    const verification = (pb?.verification ?? "").trim();
+    return {
+      title: p.title,
+      body: body || `${p.title} — body inherited from the follow-up markdown.`,
+      verification: verification || `- Repo typechecks clean after this phase lands.`,
+      why: specWhy,
+      what: specWhat,
+      status: p.status as Phase,
+      // Default typed machine check — safe across every autonomous fix-spec class (repair/coverage/
+      // director-followup), same shape as [[repair-agent]] `derivedDefaultRepairChecks`. Extra
+      // prose bullets from the markdown Verification stay on the `verification` column verbatim.
+      checks: [
+        {
+          position: 1,
+          description: "Repo typechecks clean (`npx tsc --noEmit`) after this phase lands.",
+          kind: "auto",
+          exec_kind: "tsc",
+          params: null,
+        },
+      ],
+    };
+  });
+  return {
+    title: card.title,
+    summary: card.summary || null,
+    owner: card.owner ?? "",
+    parent: card.parent ?? "",
+    blocked_by: (card.blockedBy ?? []).map((b) => b.slug),
+    critical: !!card.critical,
+    autoBuild: card.autoBuild !== false,
+    why: specWhy,
+    what: specWhat,
+    phases,
+  };
+}
+
 /**
  * Author / re-author a spec to the DB from its markdown body — the DB-only writer every markdown-holding
  * author surface calls. Idempotent: re-running with the same body produces no material change (UPSERT by

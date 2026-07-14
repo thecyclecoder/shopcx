@@ -7,6 +7,7 @@ Queries the **ready-to-test queue** — creatives produced by [[ad-static]], [[a
 ## Behavior
 
 Returns every `ad_campaigns` row that has:
+- `status ≠ 'archived'` (excludes retired campaigns whose landing URL was removed), AND
 - ≥1 `ad_videos` with `status='ready'` (or `media_kind='static'` final JPG), AND
 - `landing_url` set, AND
 - NO active `ad_publish_jobs` row in `status in ('queued','uploading','creating','published')`, AND

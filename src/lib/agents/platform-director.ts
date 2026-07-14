@@ -74,7 +74,7 @@ import {
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
 import { markSpecCardForReview, type SpecCardFlags } from "@/lib/spec-card-state";
-import { authorSpecRowFromMarkdown } from "@/lib/author-spec";
+import { authorSpecRowStructured, buildStructuredSpecInputFromMarkdown } from "@/lib/author-spec";
 import {
   driftSuspectPhases,
   isCardFullyShippedWithProvenance,
@@ -4470,7 +4470,7 @@ export async function applyDirectorDismissal(
 // Every read-only Max judgment lane (groom · init · repair-dismissal) returns the SAME three new
 // action types when a sound diagnosis exits the lane's native verdict set. This module hosts the
 // reversible DB-only halves (fold_now phase flip + enqueue_fold; dismiss_candidate ledger row) +
-// the followup-spec DB AUTHORING (author_followup_spec → public.specs via authorSpecRowFromMarkdown;
+// the followup-spec DB AUTHORING (author_followup_spec → public.specs via authorSpecRowStructured;
 // the in-memory followup markdown is the INPUT, no .md file is written). Each lane keeps its own native
 // verdicts (continue/split for groom, initiate for init, dismiss for repair) — these helpers ONLY handle
 // the three new cross-lane actions.
@@ -4552,16 +4552,22 @@ export async function applyDirectorFoldNow(
 
 /**
  * Author the new followup spec straight to the DB (public.specs + public.spec_phases via
- * author-spec.authorSpecRowFromMarkdown — the in-memory followup markdown body is the INPUT; NO `.md`
- * file is written) AND write the lane-appropriate `*_authored_spec` director_activity row carrying the
+ * author-spec.authorSpecRowStructured — the in-memory followup markdown body is coerced into the
+ * typed `StructuredSpecInput` shape by `buildStructuredSpecInputFromMarkdown`; NO `.md` file is
+ * written) AND write the lane-appropriate `*_authored_spec` director_activity row carrying the
  * dedup key for the CANDIDATE that produced it (groom_key / init_key / dismiss_key) + the followup slug.
  * The candidate's primary disposition (groom: fold_now|split · init: dismiss · repair-dismissal: keep) is
  * NOT applied here — the lane calls it separately so the same applyDirectorFoldNow / applyDirectorDismiss /
  * split machinery covers both the standalone-action path and the followup path.
  *
  * Post spec-pm-markdown-purge / db-driven-specs: the spec board reads public.specs (getRoadmap), so the
- * followup body MUST land there to render — and the repo no longer carries `docs/brain/specs/*.md`. This
- * mirrors the DB-driven split path (markNewSpecInReview → authorSpecRowFromMarkdown) the same lanes use.
+ * followup body MUST land there to render — and the repo no longer carries `docs/brain/specs/*.md`.
+ *
+ * retire-md-spec-writers-db-is-sole-spec Phase 3 — this lane now authors via `authorSpecRowStructured`
+ * (not the retired markdown chokepoint). Every phase carries a default `exec_kind:'tsc'` machine check
+ * so `assertEveryPhaseHasMachineCheck` is satisfied on the FIRST attempt (no CEO park on a prose-only
+ * followup). The pre-write `validateFollowupSpec` still gates markdown shape (H1 / Owner / Parent /
+ * Phase / ⏳); `buildStructuredSpecInputFromMarkdown` runs after that on an already-well-formed body.
  *
  * Pre-condition: `validateFollowupSpec(parentSlug, parentOwner, action.followup)` returned ok.
  */
@@ -4583,10 +4589,11 @@ export async function applyDirectorAuthorFollowup(
   const existed = !!existing;
   if (!existed) {
     try {
-      // Land the body in public.specs + public.spec_phases so the board / getRoadmap renders it. The
-      // in-memory followup markdown is the INPUT; intended `planned` (the director only authors followups
-      // she wants built).
-      await authorSpecRowFromMarkdown(workspaceId, slug, markdown, "planned", {
+      // retire-md-spec-writers-db-is-sole-spec Phase 3 — coerce the validated followup markdown into
+      // the typed `StructuredSpecInput` (every phase carries a default `exec_kind:'tsc'` check so the
+      // chokepoint's `assertEveryPhaseHasMachineCheck` gate passes) and author via the structured door.
+      const structuredInput = buildStructuredSpecInputFromMarkdown(slug, markdown);
+      await authorSpecRowStructured(workspaceId, slug, structuredInput, "planned", {
         intendedStatusSetBy: `director:${PLATFORM}`,
       });
     } catch (e) {

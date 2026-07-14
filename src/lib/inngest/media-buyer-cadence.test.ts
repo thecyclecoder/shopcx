@@ -117,40 +117,31 @@ const NOW = new Date("2026-07-08T13:00:00.000Z");
 
 // ── Behaviour tests ─────────────────────────────────────────────────────────
 
-test("dispatchMediaBuyerCadence — workspace-wide + per-account cohorts → 2 jobs, each with correct account", async () => {
+test("dispatchMediaBuyerCadence — Phase 2: N active cohorts → EXACTLY ONE workspace-scoped job (lane fans out)", async () => {
   const tables: Tables = {
     media_buyer_test_cohorts: [
       cohortRow({ meta_ad_account_id: null }),
       cohortRow({ meta_ad_account_id: ACCT_A }),
+      cohortRow({ meta_ad_account_id: ACCT_B }),
     ],
     agent_jobs: [],
   };
   const admin = makeAdmin(tables);
   const r = await dispatchMediaBuyerCadence(admin, WS, NOW);
-  assert.equal(r.evaluated, 2);
-  assert.equal(r.dispatched, 2);
+  assert.equal(r.evaluated, 3, "still reports the active-cohort count for the cron log");
+  assert.equal(r.dispatched, 1, "Phase 2 — exactly ONE workspace-scoped job per pass, not one per cohort");
   const jobs = tables.agent_jobs;
-  assert.equal(jobs.length, 2);
-  const accounts = jobs
-    .map((j) => JSON.parse(String(j.instructions)).meta_ad_account_id)
-    .sort();
-  assert.deepEqual(accounts, [null, ACCT_A].sort());
-  for (const j of jobs) {
-    assert.equal(j.kind, "media-buyer");
-    assert.equal(j.workspace_id, WS);
-    assert.ok(
-      typeof j.spec_slug === "string" && j.spec_slug.length > 0,
-      `spec_slug must be a non-empty string (NOT NULL column) — got ${String(j.spec_slug)}`,
-    );
-  }
-  const slugByAccount = new Map(
-    jobs.map((j) => [
-      JSON.parse(String(j.instructions)).meta_ad_account_id as string | null,
-      j.spec_slug as string,
-    ]),
+  assert.equal(jobs.length, 1);
+  const only = jobs[0];
+  assert.equal(only.kind, "media-buyer");
+  assert.equal(only.workspace_id, WS);
+  assert.equal(only.spec_slug, "media-buyer:workspace", "workspace-scoped slug");
+  const instr = JSON.parse(String(only.instructions));
+  assert.equal(
+    instr.meta_ad_account_id,
+    null,
+    "instructions.meta_ad_account_id=null → lane fans out across every connected meta_ad_accounts row",
   );
-  assert.equal(slugByAccount.get(ACCT_A), `media-buyer:${ACCT_A}`);
-  assert.equal(slugByAccount.get(null), "media-buyer:workspace");
 });
 
 test("mediaBuyerSpecSlug — deterministic per account, distinct workspace-wide bucket", () => {
@@ -182,11 +173,11 @@ test("dispatchMediaBuyerCadence — same-UTC-day second invocation dispatches ZE
   };
   const admin = makeAdmin(tables);
   const first = await dispatchMediaBuyerCadence(admin, WS, NOW);
-  assert.equal(first.dispatched, 2);
+  assert.equal(first.dispatched, 1, "Phase 2 — one workspace-scoped job per pass");
   const second = await dispatchMediaBuyerCadence(admin, WS, NOW);
   assert.equal(second.evaluated, 2);
   assert.equal(second.dispatched, 0);
-  assert.equal(tables.agent_jobs.length, 2, "no duplicate rows added on same-day re-fire");
+  assert.equal(tables.agent_jobs.length, 1, "no duplicate rows added on same-day re-fire");
 });
 
 test("dispatchMediaBuyerCadence — a COMPLETED job from earlier today does NOT block a fresh dispatch (only unfinished jobs count)", async () => {
@@ -209,7 +200,7 @@ test("dispatchMediaBuyerCadence — a COMPLETED job from earlier today does NOT 
   assert.equal(tables.agent_jobs.length, 2);
 });
 
-test("dispatchMediaBuyerCadence — an UNFINISHED job from earlier today BLOCKS re-dispatch for that account only", async () => {
+test("dispatchMediaBuyerCadence — Phase 2: ANY unfinished workspace job today blocks re-dispatch (workspace-scoped coverage)", async () => {
   const tables: Tables = {
     media_buyer_test_cohorts: [
       cohortRow({ meta_ad_account_id: ACCT_A }),
@@ -221,6 +212,29 @@ test("dispatchMediaBuyerCadence — an UNFINISHED job from earlier today BLOCKS 
         workspace_id: WS,
         kind: "media-buyer",
         status: "building",
+        instructions: JSON.stringify({ meta_ad_account_id: null }),
+        created_at: "2026-07-08T04:00:00.000Z",
+      },
+    ],
+  };
+  const admin = makeAdmin(tables);
+  const r = await dispatchMediaBuyerCadence(admin, WS, NOW);
+  assert.equal(r.dispatched, 0, "an unfinished workspace-scoped job covers the whole workspace slot");
+  assert.equal(tables.agent_jobs.length, 1, "no additional job inserted");
+});
+
+test("dispatchMediaBuyerCadence — Phase 2 rollout: an in-flight legacy PER-ACCOUNT job also covers the workspace (avoids duplicate during transition)", async () => {
+  const tables: Tables = {
+    media_buyer_test_cohorts: [
+      cohortRow({ meta_ad_account_id: ACCT_A }),
+      cohortRow({ meta_ad_account_id: ACCT_B }),
+    ],
+    agent_jobs: [
+      {
+        id: "legacy-per-account",
+        workspace_id: WS,
+        kind: "media-buyer",
+        status: "queued",
         instructions: JSON.stringify({ meta_ad_account_id: ACCT_A }),
         created_at: "2026-07-08T04:00:00.000Z",
       },
@@ -228,13 +242,8 @@ test("dispatchMediaBuyerCadence — an UNFINISHED job from earlier today BLOCKS 
   };
   const admin = makeAdmin(tables);
   const r = await dispatchMediaBuyerCadence(admin, WS, NOW);
-  assert.equal(r.dispatched, 1, "only the unclaimed account (B) dispatches");
-  const inserted = tables.agent_jobs.filter((j) => j.id !== "in-flight");
-  assert.equal(inserted.length, 1);
-  assert.equal(
-    JSON.parse(String(inserted[0].instructions)).meta_ad_account_id,
-    ACCT_B,
-  );
+  assert.equal(r.dispatched, 0, "any pre-Phase-2 in-flight row counts as coverage during rollout");
+  assert.equal(tables.agent_jobs.length, 1);
 });
 
 test("utcDayStartIso — floors a mid-day timestamp to 00:00:00Z of the same UTC day", () => {
