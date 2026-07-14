@@ -1,0 +1,1 @@
+- **Ads supervisor: live-ad LF8-thin fix (Amazing Creamer, adset 120252355815780184)** · verified 2026-07-14 · → [[../libraries/ads-supervisor]]
