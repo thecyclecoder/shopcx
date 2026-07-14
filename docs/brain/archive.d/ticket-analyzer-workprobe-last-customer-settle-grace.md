@@ -1,0 +1,1 @@
+- **Stop false red AI ticket analyzer alerts before Cora's next eligible cron tick** · verified 2026-07-14 · → [[../libraries/control-tower]]
