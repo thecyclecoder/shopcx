@@ -1,0 +1,1 @@
+- **LF8 live-ad gate: broaden vocabulary and gate deactivation on performance** · verified 2026-07-14 · → [[../libraries/lf8]] · [[../libraries/ads-supervisor]] · [[../libraries/creative-brief]] · [[../lifecycles/ad-creative]]
