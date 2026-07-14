@@ -629,19 +629,25 @@ export async function promoteWhitelistedPages(
 ): Promise<PromoteResult> {
   const admin = createAdminClient();
 
-  // 1. Approved competitors: id, brand, domain — the fronted-brand anchor set.
+  // 1. Approved competitors: id, brand, domain, product_id — the fronted-brand anchor set. The
+  //    `product_id` is threaded through so a whitelisted-page proposal inherits its fronted
+  //    competitor's product scope (Phase 3 of [[competitor-sdk-chokepoint-and-per-product-cleanup]]):
+  //    a page fronting an approved competitor with a product_id is a competitor FOR THAT PRODUCT,
+  //    not a workspace-level orphan.
   const { data: approvedRows } = await admin
     .from("competitors")
-    .select("id, brand, domain")
+    .select("id, brand, domain, product_id")
     .eq("workspace_id", workspaceId)
     .eq("status", "approved");
   const approvedBrandToId = new Map<string, string>();
   const knownHostToCompetitor = new Map<string, string>();
+  const competitorIdToProductId = new Map<string, string | null>();
   for (const r of approvedRows || []) {
     const brand = (r.brand as string | null) || "";
     if (brand) approvedBrandToId.set(brand, r.id as string);
     const host = normalizeHost(r.domain as string | null);
     if (host) knownHostToCompetitor.set(host, r.id as string);
+    competitorIdToProductId.set(r.id as string, (r.product_id as string | null) ?? null);
   }
 
   // Read enough skeleton rows to cover a workspace's daily sweep + a few historical days without
@@ -738,6 +744,9 @@ export async function promoteWhitelistedPages(
 
     const inserted = await upsertCandidate(workspaceId, {
       brand,
+      // Inherit the fronted competitor's product scope so whitelisted-page proposals are never
+      // orphaned (Phase 3). Null when the fronted competitor itself is workspace-level.
+      product_id: competitorIdToProductId.get(dominantCompId) ?? null,
       source: "whitelisted",
       search_keyword: stat.display, // RAW page name (verbatim, NOT normalized).
       runs_ads_for: dominantCompId,
