@@ -1,0 +1,1 @@
+- **Stop portal bootstrap from timing out on slow optional reads** · verified 2026-07-14 · → [[../libraries/portal__handlers__bootstrap]]
