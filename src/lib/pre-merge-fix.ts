@@ -18,13 +18,19 @@
  * fixes aren't converging. Never throws — the auto-merge tests-gate fails CLOSED on a missing green signal,
  * so a failed spawn never lets a red PR slip past.
  */
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, appendFixPhases } from "@/lib/specs-table";
 import { recordDirectorActivity } from "@/lib/director-activity";
 // vera-harness-error-is-not-a-code-regression Phase 2 — belt-and-suspenders on the pre-merge fix
 // authoring path: filter HARNESS/COMMAND-signature failing checks out of the set that appends a Fix
 // phase, so a slipped harness `fail` never wedges the origin's build chain with an unbuildable phase.
-import { isHarnessCommandFailure } from "@/lib/spec-test-harness-classifier";
+// pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 — also filter EXTERNAL
+// unit_test regressions (a failing test file the branch never touched) so a transient break in
+// someone else's test doesn't strand an innocent shipped spec behind a redundant Fix N.
+import { isHarnessCommandFailure, isExternalTestRegression } from "@/lib/spec-test-harness-classifier";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -40,6 +46,14 @@ export interface PreMergeFailingCheck {
   text: string;
   evidence?: string | null;
   check_key: string;
+  /**
+   * pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 — optional exec_kind +
+   * script (from the origin's `spec_phase_checks` row) so the external-regression classifier can
+   * resolve which test file(s) a unit_test check runs. Absent for callers that don't know the
+   * mapping (blocker-fix path, security-fix path); the classifier no-ops in that case.
+   */
+  exec_kind?: string | null;
+  script?: string | null;
 }
 
 export interface SpawnPreMergeFixInput {
@@ -60,6 +74,64 @@ export type SpawnPreMergeFixResult =
   | { spawned: false; escalated: false; reason: string };
 
 /**
+ * Best-effort read of the repo's package.json → `scripts` map. Returns `{}` on any fs/parse error so
+ * callers can degrade to a no-filter path (the external-regression check needs the script→command map
+ * to resolve test files).
+ */
+export function readPackageScripts(repoRoot: string = process.cwd()): Record<string, string> {
+  try {
+    const pkg = JSON.parse(readFileSync(resolvePath(repoRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    return pkg.scripts ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Best-effort `git diff --name-only main...{branch}` → the repo-relative paths the branch has changed
+ * since it diverged from `main`. Returns an empty set on any spawn error / non-zero exit — callers
+ * degrade to today's behaviour (append the Fix phase; DO NOT drop checks when we can't confirm the
+ * touched set). The three-dot form (main...branch) is the merge-base diff, not the working tree.
+ */
+export function computeBranchTouchedFiles(branch: string, repoRoot: string = process.cwd()): Set<string> {
+  const files = new Set<string>();
+  if (!branch) return files;
+  try {
+    const r = spawnSync("git", ["diff", "--name-only", `main...${branch}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    if (r.status !== 0) return files;
+    for (const line of r.stdout.split("\n")) {
+      const t = line.trim();
+      if (t) files.add(t);
+    }
+  } catch {
+    /* best-effort */
+  }
+  return files;
+}
+
+/** Best-effort `git log -1 --format=<fmt> -- <file>` → "Name <email>" or null. */
+function lastCommitterFor(file: string, repoRoot: string = process.cwd()): string | null {
+  try {
+    const r = spawnSync("git", ["log", "-1", "--format=%an <%ae>", "--", file], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0) return null;
+    const out = r.stdout.trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The chokepoint: handle a RED pre-merge spec-test for an in-flight build branch by appending fix phases to
  * the origin + resuming its build. `fixSlug` in the result is the ORIGIN slug (the fix lives on the origin
  * now). Best-effort, never throws.
@@ -73,11 +145,57 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
     // the origin's build chain (Bo can't build a nonexistent shell command). Phase 1's normalizer
     // downgrades these to `needs_human` before they reach this filter, but a slipped fail (legacy row,
     // race) still stops here — only genuine code fails can author a Bo fix phase.
-    const cleanFailing = (failing || [])
+    const harnessSafe = (failing || [])
       .filter((f) => f && f.check_key && f.text)
       .filter((f) => !isHarnessCommandFailure(f.evidence ?? null));
+
+    // pre-merge-fix-skip-external-test-regressions-not-in-spec-diff Phase 1 — a unit_test failure whose
+    // test file the branch never touched is an EXTERNAL regression (media-buyer-digest was shipped/
+    // correct but declared a unit_test on agent.test.ts; an unrelated change transiently broke that test
+    // and stranded the shipped digest spec behind a redundant Fix N). Drop it from the append set the
+    // same way harness fails are dropped, and record a `director_activity` `escalated` row naming the
+    // failing test + its last committer so the regression is owned by its breaker, not the innocent spec.
+    // Only fires when the caller enriched the check with `exec_kind` + `script`; other callers no-op.
+    const packageScripts = readPackageScripts();
+    const touchedFiles = computeBranchTouchedFiles(branch);
+    const cleanFailing: PreMergeFailingCheck[] = [];
+    const externalRegressions: Array<{ check: PreMergeFailingCheck; testFiles: string[] }> = [];
+    for (const f of harnessSafe) {
+      const ext = isExternalTestRegression(
+        { exec_kind: f.exec_kind ?? null, script: f.script ?? null },
+        touchedFiles,
+        packageScripts,
+      );
+      if (ext.external) externalRegressions.push({ check: f, testFiles: ext.testFiles });
+      else cleanFailing.push(f);
+    }
+    for (const { check, testFiles } of externalRegressions) {
+      const primary = testFiles[0] ?? "(unknown)";
+      const breaker = lastCommitterFor(primary);
+      const reason = `External-test regression on ${branch}: failing unit_test ${check.script ?? "(no script)"} runs ${testFiles.join(", ")} — none of those files are in the build branch's diff vs main. Ownership belongs to ${breaker ?? "the last committer of the test file"}, NOT [[${originSlug}]]; a Fix phase would strand the innocent spec.`;
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "escalated",
+        specSlug: originSlug,
+        reason,
+        metadata: {
+          signature: "pre-merge-external-test-regression",
+          branch,
+          origin_slug: originSlug,
+          failing_check_key: check.check_key,
+          script: check.script ?? null,
+          test_files: testFiles,
+          last_committer: breaker,
+        },
+      });
+      console.log(`[pre-merge-fix] EXTERNAL regression on ${originSlug} (branch ${branch}) — dropped check ${check.check_key} (${testFiles.join(", ")}); owner=${breaker ?? "unknown"}`);
+    }
     if (cleanFailing.length === 0) {
-      return { spawned: false, escalated: false, reason: "no evidence-backed failing checks — nothing to fix" };
+      const reason = externalRegressions.length > 0
+        ? `all failing checks are external-test regressions in files [[${originSlug}]] never touched — nothing to fix on this spec`
+        : "no evidence-backed failing checks — nothing to fix";
+      return { spawned: false, escalated: false, reason };
     }
 
     const origin = await getSpec(workspaceId, originSlug);
