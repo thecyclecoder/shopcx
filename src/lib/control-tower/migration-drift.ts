@@ -531,6 +531,146 @@ export function isDuplicateObjectError(err: unknown): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3 —
+// Statement-level duplicate-object reconciliation.
+//
+// The Phase 2 reconcile script (and, symmetrically, the Phase 1 live auto-apply path) ran the
+// whole migration file as ONE `c.query(sql)` inside a single savepoint and treated a
+// duplicate-object throw as "already applied → record the version." That's unsafe for a
+// MULTI-statement migration: Postgres aborts the batch on the first failing statement, so a
+// duplicate_table on statement #1 leaves statements #2..N NEVER EXECUTED — and yet we'd stamp the
+// version as applied and never notice the unapplied tail (the security review's finding on the
+// Phase 2 reconcile).
+//
+// The fix: split the file at top-level statement boundaries and classify each statement in its
+// own savepoint. A statement succeeds → applied-fresh. A statement throws a duplicate-object
+// SQLSTATE → verified-already-present (safe to skip; that specific object is in the live schema).
+// A statement throws anything else → the file is broken; record NOTHING and leave the version
+// unrecorded for human review. Only when EVERY statement in the file is accounted for (applied or
+// verified) does the version get recorded — matching the security review's demand: "only record a
+// version after every statement either ran successfully or was independently proven already
+// present; otherwise leave it apply-failed/unrecorded."
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Split a Postgres SQL script into top-level statements at unquoted `;` boundaries. Preserves the
+ * original statement text (whitespace/comments trimmed) — the caller re-executes each string.
+ *
+ * Handles:
+ *  - `--` line comments (skipped through the following newline)
+ *  - `/* *​/` block comments (nested per Postgres semantics — `/* /* *​/ *​/` is one comment)
+ *  - `'...'` single-quoted string literals with the SQL doubled-quote escape (`''` stays inside)
+ *  - `"..."` double-quoted identifiers
+ *  - `$$...$$` and `$tag$...$tag$` dollar-quoted string bodies — the CRITICAL case for
+ *    `CREATE FUNCTION ... AS $$ BEGIN ... END; $$` where a naive splitter would break at the
+ *    function-body `;` and hand Postgres two half-statements
+ *
+ * The output is the list of non-empty statements in source order. Consecutive terminator-only
+ * fragments produce no output. Off-format inputs (unterminated string / comment / dollar-quote)
+ * still return something — the malformed tail is emitted as a single trailing statement so the
+ * caller can attempt it and let Postgres surface the real syntax error.
+ *
+ * migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3.
+ */
+export function splitSqlStatements(sql: string): string[] {
+  const out: string[] = [];
+  const N = sql.length;
+  let i = 0;
+  let start = 0;
+  while (i < N) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    // -- line comment
+    if (ch === "-" && next === "-") {
+      while (i < N && sql[i] !== "\n") i++;
+      continue;
+    }
+    // /* block comment */ (nested)
+    if (ch === "/" && next === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < N && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth++;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth--;
+          i += 2;
+          continue;
+        }
+        i++;
+      }
+      continue;
+    }
+    // '...' single-quoted string
+    if (ch === "'") {
+      i++;
+      while (i < N) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // "..." double-quoted identifier
+    if (ch === '"') {
+      i++;
+      while (i < N) {
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === '"') {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // $tag$ dollar-quoted string (tag may be empty → $$...$$)
+    if (ch === "$") {
+      const tagMatch = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        i += tag.length;
+        const end = sql.indexOf(tag, i);
+        if (end < 0) {
+          // Unterminated dollar-quote — bail (the malformed tail becomes the final statement).
+          i = N;
+          continue;
+        }
+        i = end + tag.length;
+        continue;
+      }
+      // Bare `$` (unusual outside a dollar-quote intro) — advance one char.
+      i++;
+      continue;
+    }
+    // Top-level statement terminator.
+    if (ch === ";") {
+      const stmt = sql.slice(start, i).trim();
+      if (stmt.length > 0) out.push(stmt);
+      i++;
+      start = i;
+      continue;
+    }
+    i++;
+  }
+  const tail = sql.slice(start).trim();
+  if (tail.length > 0) out.push(tail);
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Phase 2 — close the loop: alert + apply, never leave it inert
 // (ci-guard-migrations-applied-not-just-merged spec Phase 2).
 //

@@ -22,6 +22,7 @@ import {
   driftSummary,
   isDuplicateObjectError,
   DUPLICATE_OBJECT_SQLSTATES,
+  splitSqlStatements,
   type MergedUnappliedMigration,
 } from "./migration-drift";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -646,6 +647,119 @@ test("driftSummary — the outcome tail names an already-applied count when the 
   });
   assert.match(summary, /1 applied/);
   assert.match(summary, /1 already-applied/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-reconciler-idempotent-on-already-applied-objects spec Phase 3 —
+// Statement-level duplicate-object reconciliation. Regression pin for the security review's
+// finding: the whole-file duplicate shortcut can hide unapplied tail statements when a
+// multi-statement migration throws duplicate-object on an early statement. splitSqlStatements is
+// the primitive; per-statement savepoint classification is the behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("splitSqlStatements — a single-statement file returns one element (the trivial case)", () => {
+  assert.deepEqual(splitSqlStatements(`create table public.foo (id uuid primary key);`), [
+    `create table public.foo (id uuid primary key)`,
+  ]);
+});
+
+test("splitSqlStatements — multi-statement file splits at top-level semicolons (the security-review case)", () => {
+  const sql = `create table public.foo (id uuid primary key);
+create index idx_foo on public.foo (id);
+insert into public.foo (id) values ('00000000-0000-0000-0000-000000000001');`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 3);
+  assert.match(stmts[0], /^create table/);
+  assert.match(stmts[1], /^create index/);
+  assert.match(stmts[2], /^insert into/);
+});
+
+test("splitSqlStatements — semicolons inside single-quoted string literals are NOT split points", () => {
+  const sql = `insert into public.notes (body) values ('a;b;c');
+insert into public.notes (body) values ('two');`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("'a;b;c'"));
+  assert.ok(stmts[1].includes("'two'"));
+});
+
+test("splitSqlStatements — the SQL '' escape (doubled single quote) does not close the string early", () => {
+  const sql = `insert into public.notes (body) values ('it''s fine; still one string');
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("'it''s fine; still one string'"));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — dollar-quoted function bodies protect embedded semicolons (the CREATE FUNCTION case)", () => {
+  const sql = `create or replace function public.reset_sync_data()
+returns void
+language sql
+security definer
+as $$
+  truncate public.orders, public.customers, public.sync_jobs cascade;
+$$;
+create index idx_after_function on public.orders (id);`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("$$"));
+  assert.ok(stmts[0].includes("truncate public.orders"));
+  assert.match(stmts[1], /^create index idx_after_function/);
+});
+
+test("splitSqlStatements — tagged dollar-quotes ($body$…$body$) also protect embedded semicolons", () => {
+  const sql = `create or replace function public.foo() returns int language plpgsql as $body$
+begin
+  perform 1;
+  perform 2;
+  return 3;
+end;
+$body$;
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes("$body$"));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — line comments (`--`) and block comments (`/* */`) don't hide statement boundaries", () => {
+  const sql = `-- create table public.commented (id uuid); still one statement below
+create table public.foo (id uuid primary key);
+/* multi-line
+   block; comment; nothing here */
+create table public.bar (id uuid primary key);`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.match(stmts[0], /^-- create table[\s\S]*\ncreate table public\.foo/);
+  assert.match(stmts[1], /^\/\* multi-line[\s\S]*create table public\.bar/);
+});
+
+test("splitSqlStatements — quoted identifiers with `;` inside stay intact", () => {
+  const sql = `alter table public.foo rename to "weird;name";
+select 1;`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.ok(stmts[0].includes(`"weird;name"`));
+  assert.equal(stmts[1], "select 1");
+});
+
+test("splitSqlStatements — empty / comments-only inputs return an empty array", () => {
+  assert.deepEqual(splitSqlStatements(""), []);
+  assert.deepEqual(splitSqlStatements("   "), []);
+  assert.deepEqual(splitSqlStatements(";;;"), []); // no non-empty statements between the terminators
+  assert.deepEqual(
+    splitSqlStatements(`-- comment only\n/* block */`),
+    [`-- comment only\n/* block */`],
+  );
+});
+
+test("splitSqlStatements — trailing statement without a final semicolon still counts", () => {
+  const sql = `create table public.foo (id uuid primary key);
+create table public.bar (id uuid primary key)`;
+  const stmts = splitSqlStatements(sql);
+  assert.equal(stmts.length, 2);
+  assert.match(stmts[1], /^create table public\.bar/);
 });
 
 test("driftSummary — with Phase 2 outcomes populated, the summary tail names the outcome mix", () => {
