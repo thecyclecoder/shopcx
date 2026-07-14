@@ -52,6 +52,17 @@ The parent is `growth#static-ad-optimization` (typed mandate parent — `parentK
 
 A posted digest records a `director_activity` row (`action_kind:'ads_supervisor_digest_posted'`, `director_function:'growth'`, `spec_slug:'growth-ads-supervisor-3h-agent'`) for the audit trail.
 
+## Gotchas / Known fixes
+
+**dahlia_bin_below_floor finding** — when `listReadyToTest` depth is below `DEFAULT_BIN_FLOOR` (4), the fix depends on two diagnostics:
+
+1. Check if [[../inngest/ad-creative-cadence]] is actively dispatching `kind='ad-creative'` jobs for this product by querying `agent_jobs` where `kind='ad-creative'` AND `instructions->>'product_id'` matches, scoped to the last 24h. A non-terminal status (`pending` / `running` / etc.) means the cadence is already self-healing — no dispatch needed. A terminal status (`failed` / `succeeded`) or zero matches means either the job failed or wasn't enqueued.
+2. Check if [[../tables/product_ad_angles]] has any active rows for this product. An empty result means Dahlia's generate step will starve — this is an intelligence gap (missing benefits / hooks / angles) that must be seeded by the dr-content lane (or manually, if urgent). A non-empty result means the product has angles but Dahlia isn't being invoked.
+
+Fix options:
+- **If product_ad_angles is empty:** flag the intelligence gap to the dr-content lane for backfill (not auto-writable).
+- **If product_ad_angles exists but no active ad-creative job:** enqueue a new `agent_jobs` row with `kind='ad-creative'`, `instructions={'product_id': <pid>, 'count': <deficit>}`, `spec_slug` from [[../inngest/ad-creative-cadence]] `adCreativeSpecSlug(<pid>)`. Idempotent: the cadence self-heals on its next tick anyway, or the enqueue can be done manually via `scripts/ads-supervisor-fix-{product-id}-dahlia-bin.ts --apply`.
+
 ## Node-completeness (CLAUDE.md hard rule)
 
 - **Owner:** `growth` on the cron ([[../inngest/ads-supervisor-cadence]] MONITORED_LOOPS row) AND on the `ads-supervisor` agent-kind (`KIND_OWNER_FALLBACK` + `BUILDER_WORKER_KINDS` in [[control-tower-node-registry]]).
