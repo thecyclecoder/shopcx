@@ -207,6 +207,24 @@ export const INTENTIONAL_MATERIALIZATION: AllowEntry[] = [
       "state READ (the detector labels the call site by the in-function `// ENFORCEMENT` comment, not the fn " +
       "name). Recipe: pm-flow-data-sources § round-trip materialization.",
   },
+  {
+    // retire-md-spec-writers-db-is-sole-spec Phase 3 — the deterministic in-memory markdown →
+    // StructuredSpecInput coercion helper. Autonomous lanes that used to hand a raw markdown
+    // followup body straight into markSpecNewSpecInReview / authorSpecRowFromMarkdown (the last
+    // runtime caller was platform-director's applyDirectorAuthorFollowup) now funnel through the
+    // STRUCTURED chokepoint authorSpecRowStructured; this helper is the ONE converter that takes
+    // an already-validated markdown STRING (no disk read, no HTTP fetch) + returns the typed
+    // StructuredSpecInput shape for the DB write. Same class as the deriveSpecStatusFromMarkdown
+    // entry above — round-trip materialization over an in-memory raw string, not a spec state read.
+    file: "src/lib/author-spec.ts",
+    fn: "buildStructuredSpecInputFromMarkdown",
+    reason:
+      "The deterministic markdown → StructuredSpecInput coercion helper for the retire-md-spec-writers-db-is-sole-spec " +
+      "Phase 3 chokepoint (autonomous author-followup lanes funnel a validated markdown body into the STRUCTURED " +
+      "authorSpecRowStructured writer through this converter). parseAuthoredSpecMarkdown runs over an IN-MEMORY raw " +
+      "string (no disk read, no docs/brain/specs/*.md fetch) — the markdown is the caller's input buffer being " +
+      "coerced into typed shape for the DB UPSERT, not a spec state read. Recipe: pm-flow-data-sources § round-trip materialization.",
+  },
 ];
 
 export const PENDING_PHASE_2_RETIREMENT: AllowEntry[] = [];
