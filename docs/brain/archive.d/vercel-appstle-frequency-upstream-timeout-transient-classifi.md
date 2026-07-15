@@ -1,0 +1,1 @@
+- **Treat recovered Appstle frequency upstream timeouts as transient Vercel noise** · verified 2026-07-15 · → [[../libraries/control-tower]]
