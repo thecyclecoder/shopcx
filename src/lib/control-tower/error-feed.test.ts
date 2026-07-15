@@ -18,6 +18,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
+  isTransientAppstleFrequencyUpstreamTimeout,
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
@@ -834,6 +835,98 @@ test("isTransientShopifyWebhookHmacFailure returns false on empty / nullish inpu
   assert.equal(isTransientShopifyWebhookHmacFailure(undefined, undefined), false);
   assert.equal(isTransientShopifyWebhookHmacFailure("", ""), false);
   assert.equal(isTransientShopifyWebhookHmacFailure("/api/webhooks/shopify", ""), false);
+});
+
+// ── isTransientAppstleFrequencyUpstreamTimeout (vercel-appstle-frequency-upstream-timeout-transient-classifi) ──
+// `src/lib/appstle.ts` `updateBillingInterval` logs `console.error("Appstle frequency update
+// failed:", err)` and then RECOVERS via `verifyBillingInterval` — the log-drain line is a
+// pre-recovery sighting of a 20s abort the code already knows how to handle. Classifying it
+// transient auto-resolves a first sighting (recorded, not paged); a chronic Appstle outage
+// would recur within the window and still surface. The false positive that opened Control
+// Tower `vercel:cec725132e1eef09`.
+
+test("isTransientAppstleFrequencyUpstreamTimeout matches the captured /api/inngest signature", () => {
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Appstle frequency update failed: Error: upstream_timeout",
+    ),
+    true,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout matches when the message carries a trailing stack", () => {
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Appstle frequency update failed: Error: upstream_timeout\n    at loggedAppstleFetch (src/lib/appstle.ts:120:11)",
+    ),
+    true,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-timeout Appstle failure (paged)", () => {
+  // A 4xx/5xx response from Appstle carries a different error class — not the 20s abort's
+  // upstream_timeout marker — so the first sighting stays captured and paged.
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Appstle frequency update failed: Error: Appstle API error: 500",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Appstle frequency update failed: TypeError: Cannot read properties of undefined (reading 'apiKey')",
+    ),
+    false,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-/api/inngest path even with the marker", () => {
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/portal",
+      "Appstle frequency update failed: Error: upstream_timeout",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      null,
+      "Appstle frequency update failed: Error: upstream_timeout",
+    ),
+    false,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout KEEPS an unrelated error on /api/inngest", () => {
+  // Any other Inngest error carrying the words `upstream_timeout` but WITHOUT the Appstle
+  // frequency-update label is a different signature — stays captured / paged.
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Some other job failed: Error: upstream_timeout",
+    ),
+    false,
+  );
+  // And the Appstle label WITHOUT the upstream_timeout marker (a different Appstle failure
+  // class — e.g. a schema mismatch, a 4xx) is not this signature either.
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/inngest",
+      "Appstle frequency update failed: Error: Unauthorized (401)",
+    ),
+    false,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout returns false on empty / nullish input", () => {
+  assert.equal(isTransientAppstleFrequencyUpstreamTimeout(null, null), false);
+  assert.equal(isTransientAppstleFrequencyUpstreamTimeout(undefined, undefined), false);
+  assert.equal(isTransientAppstleFrequencyUpstreamTimeout("", ""), false);
+  assert.equal(isTransientAppstleFrequencyUpstreamTimeout("/api/inngest", ""), false);
 });
 
 // ── isTransientClientNetworkAbort (error-feed-drop-safari-load-failed-client-network-abort-noise) ──
