@@ -232,3 +232,54 @@ test("evaluateQcPermission: missing / malformed inputs → denied (fail-closed)"
   assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: "not an object", allowedImagePath: ALLOWED }).decision, "deny");
   assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: {}, allowedImagePath: ALLOWED }).decision, "deny", "missing file_path denies");
 });
+
+// ── ad-creative-requires-real-packshot-never-invent-packaging Phase 2 ───────────────────────────
+// The QC session now Reads TWO files (render + reference packshot) so packagingFaithful can compare
+// the rendered pack against our real packshot. The gate + the prompt builder both need the second
+// file to be allowed, and the QC prompt must instruct the model to Read both.
+
+const PACKSHOT = "/tmp/creative-qc-packshot-xyz.jpg";
+
+test("evaluateQcPermission: comma-separated allowed-image env allows Read on BOTH the render AND the reference packshot (Phase 2)", () => {
+  const both = `${ALLOWED},${PACKSHOT}`;
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: ALLOWED }, allowedImagePath: both }).decision, "allow", "render still allowed");
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: PACKSHOT }, allowedImagePath: both }).decision, "allow", "reference packshot allowed");
+  // A THIRD tmp file (a stray QC job's leftover, or /etc/passwd) is STILL denied — comma-list is a
+  // narrowed set, not an escape hatch.
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: "/tmp/creative-qc-other.jpg" }, allowedImagePath: both }).decision, "deny", "other paths still denied");
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: "/etc/passwd" }, allowedImagePath: both }).decision, "deny", "sensitive paths still denied");
+});
+
+test("evaluateQcPermission: trailing/interior whitespace + empty comma segments do NOT smuggle unintended paths into the allow-set", () => {
+  // Trailing comma → empty segment must be dropped so `requestedPath === ""` isn't accidentally allowed.
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: "" }, allowedImagePath: `${ALLOWED},,` }).decision, "deny");
+  // Whitespace-padded entries still match after trim.
+  assert.equal(evaluateQcPermission({ toolName: "Read", toolInput: { file_path: ALLOWED }, allowedImagePath: ` ${ALLOWED} , ${PACKSHOT} ` }).decision, "allow");
+});
+
+test("buildQcPrompt: Phase-2 packshot mode adds the REFERENCE_PACKSHOT line + a compare-two-images rule OUTSIDE the DATA block; skip mode omits it and instructs packagingFaithful=true", () => {
+  const withRef = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "15 SUPERFOODS", offer: "", trust: "10k reviews" },
+    hasTransformation: false,
+    packshotPath: PACKSHOT,
+  });
+  assert.ok(withRef.includes(`REFERENCE_PACKSHOT: ${PACKSHOT}`), "reference packshot path threads through");
+  assert.ok(withRef.includes("PACKAGING-FIDELITY MODE — REFERENCE-VERIFY"), "compare-mode rule present");
+  assert.ok(!withRef.includes("PACKAGING-FIDELITY MODE — NO REFERENCE"), "skip-mode rule absent when a reference is supplied");
+  // The rule must live in the TRUSTED region — BEFORE the DATA block begins, so an untrusted copy
+  // string cannot forge the same instruction inside the block.
+  assert.ok(withRef.indexOf("PACKAGING-FIDELITY MODE — REFERENCE-VERIFY") < withRef.indexOf(QC_DATA_BLOCK_BEGIN), "packshot rule sits outside/above the DATA block");
+  // The verdict schema line teaches the model to emit packagingFaithful.
+  assert.ok(withRef.includes("packagingFaithful"), "verdict schema references packagingFaithful");
+
+  const skip = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "15 SUPERFOODS", offer: "", trust: "10k reviews" },
+    hasTransformation: false,
+    // packshotPath omitted → skip mode
+  });
+  assert.ok(!skip.includes("REFERENCE_PACKSHOT:"), "no reference line when packshot omitted");
+  assert.ok(skip.includes("PACKAGING-FIDELITY MODE — NO REFERENCE"), "skip-mode rule present when no packshot");
+  assert.ok(skip.includes("packagingFaithful"), "verdict schema still references packagingFaithful in skip mode");
+});

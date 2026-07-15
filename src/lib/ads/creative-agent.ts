@@ -15,7 +15,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle } from "@/lib/ads/creative-brief";
+import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -24,6 +24,8 @@ import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-products";
 import { META_CAPS } from "@/lib/ad-tool-config";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -96,6 +98,55 @@ async function resolveLandingUrl(admin: Admin, workspaceId: string, productHandl
  *  un-replenishable rows. Expressed once, greppable, and used at every ready-insert site. */
 export function readyStatusForAngle(angleId: string | null | undefined): "ready" | "draft" {
   return angleId ? "ready" : "draft";
+}
+
+/** True iff the brief carries a FAITHFUL product image — the isolated packshot Dahlia's composition
+ *  transfer needs to "swap in OUR product" from the competitor's winning layout. Without one, the
+ *  generator has only the competitor's graphic to work from and hallucinates a plausible-looking
+ *  pack from the brand name alone (a pink pouch in one draft, a red box in another — the exact
+ *  2026-07-14 Ashwavana Zen Relax fabrication that motivated this spec). A `role:'packshot'` ref
+ *  is added by [[creative-brief]] `buildCreativeBrief` only when `pi.media.isolatedPackshots[0]`
+ *  exists (i.e. `product_variants.isolated_image_url` was backfilled for the product). */
+export function briefHasFaithfulPackshot(brief: Pick<CreativeBrief, "imageRefs">): boolean {
+  return brief.imageRefs.some(
+    (r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url),
+  );
+}
+
+/** Discriminated outcome of `planCompositionTransfer` — pure, so a unit test can pin every branch
+ *  without spinning up Supabase / Gemini. `skip` is the packshot-missing branch (the invariant this
+ *  spec adds); `run` carries whether the actual generateCreative call should be a composition
+ *  transfer (competitor angle + refUrl + packshot present) or a plain generate. */
+export type CompositionTransferPlan =
+  | { kind: "skip"; reason: "packshot_missing" }
+  | { kind: "run"; useCompositionTransfer: boolean; designReferenceUrl: string | undefined };
+
+/**
+ * planCompositionTransfer — decide whether this (angle, brief) pair may run composition transfer.
+ *
+ * The invariant this enforces (spec `ad-creative-requires-real-packshot-never-invent-packaging`
+ * Phase 1): a competitor-angle generation may NOT use composition transfer unless the brief carries
+ * a faithful packshot ref. Composition transfer's prompt tells Nano Banana to "swap in OUR product
+ * from the other provided images" — with no such image the model fabricates one from the brand
+ * name alone. So:
+ *   • own-brand angle (source !== 'competitor') → `run { useCompositionTransfer: false }`
+ *   • competitor angle without a refUrl → `run { useCompositionTransfer: false }` (nothing to
+ *     composition-transfer against; a plain generate is fine).
+ *   • competitor angle + refUrl but NO packshot ref in the brief → `skip { packshot_missing }`.
+ *     The caller MUST escalate that the product needs an isolated packshot uploaded to
+ *     `product_variants.isolated_image_url`, then move on to the next angle without generating.
+ *   • competitor angle + refUrl + packshot ref → `run { useCompositionTransfer: true }`.
+ */
+export function planCompositionTransfer(
+  angle: Pick<ScoredAngle, "source" | "raw">,
+  brief: Pick<CreativeBrief, "imageRefs">,
+): CompositionTransferPlan {
+  const isCompetitor = angle.source === "competitor";
+  const rawImageUrl = angle.raw?.imageUrl;
+  const refUrl = isCompetitor && typeof rawImageUrl === "string" && rawImageUrl.length > 0 ? rawImageUrl : undefined;
+  if (!isCompetitor || !refUrl) return { kind: "run", useCompositionTransfer: false, designReferenceUrl: refUrl };
+  if (!briefHasFaithfulPackshot(brief)) return { kind: "skip", reason: "packshot_missing" };
+  return { kind: "run", useCompositionTransfer: true, designReferenceUrl: refUrl };
 }
 
 /** How many ready-to-test creatives a product currently has in the bin. */
@@ -264,21 +315,58 @@ async function stockProduct(
     return { angle, intent, treatment };
   });
 
+  // Product-scoped escalation dedupe: even though `escalateDiagnosisToCeo` dedupes on `dedupe_key`
+  // across passes, we ALSO guard within a single stockProduct run so a product with N competitor
+  // angles emits at most ONE escalation per invocation (never N identical warnings for the same
+  // missing packshot). Set holds product ids that already escalated in THIS call.
+  const escalatedForPackshot = new Set<string>();
+
   for (const { angle, intent, treatment } of planned) {
     const ak = angleKey(angle.hook);
     let landed = false;
+    let skipped = false;
     let lastIssues: string[] = [];
-    for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed; attempt++) {
+    for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed && !skipped; attempt++) {
       try {
         const brief = await buildCreativeBrief(pi, angle, stories);
-        // Competitor-sourced angle → COMPOSITION TRANSFER: pass its winning graphic as the design
-        // reference and instruct Nano Banana to keep the layout but swap in our product/copy/proof.
-        const isCompetitor = angle.source === "competitor";
-        const refUrl = isCompetitor ? (angle.raw?.imageUrl as string | undefined) : undefined;
-        const gen = await generateCreative(workspaceId, brief, { treatment, designReferenceUrl: refUrl, compositionTransfer: isCompetitor && !!refUrl });
+        // Composition-transfer gate (spec ad-creative-requires-real-packshot-never-invent-packaging Phase 1):
+        // a competitor angle may ONLY run composition transfer when the brief has a faithful packshot.
+        // Without one, the "swap in OUR product" prompt has no real pack to work from and Nano Banana
+        // fabricates one from the brand name alone (a per-generation invention, not a compositing bug).
+        // So skip the generation entirely for this angle, escalate ONCE per product that the packshot
+        // is missing, and never silently fall through to a competitor-only image set.
+        const plan = planCompositionTransfer(angle, brief);
+        if (plan.kind === "skip") {
+          if (!escalatedForPackshot.has(productId)) {
+            escalatedForPackshot.add(productId);
+            await escalatePackshotMissing(admin, workspaceId, productId, productTitle).catch((e) => {
+              console.warn("dahlia_packshot_escalation_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+            });
+          }
+          out.push({
+            productId, angleHook: angle.hook, campaignId: null, ok: false,
+            reason: "packshot_missing_skipped_composition_transfer",
+          });
+          skipped = true; // intentional skip — not a QA/gen failure, don't retry, don't append qa_or_gen_failed
+          break;
+        }
+        const gen = await generateCreative(workspaceId, brief, {
+          treatment,
+          designReferenceUrl: plan.designReferenceUrl,
+          compositionTransfer: plan.useCompositionTransfer,
+        });
+        // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
+        // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
+        // (an invented pack shape, a wrong-color wordmark, a competitor pack still visible). Same
+        // predicate as the Phase-1 gate: a role:'packshot' ref with a fetchable URL. Undefined
+        // signals to the QA to SKIP the check (own-brand no-packshot path — Phase 1 already
+        // refused to composition-transfer in that case).
+        const packshotRef = brief.imageRefs.find((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
+        const packshotUrl = packshotRef?.url;
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl };
         const verdict = qcDispatcher
-          ? await qaCreativeViaBoxSession({ buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation }, qcDispatcher)
-          : await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
+          ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
+          : await qaCreative(workspaceId, qaInput);
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         // Real Meta copy from the grounded brief — a proof-led caption, a benefit headline (never the
         // offer), and the offer in the description; de-branded for competitor imitations ([[creative-brief]]
@@ -298,9 +386,71 @@ async function stockProduct(
         lastIssues = [err instanceof Error ? err.message : String(err)];
       }
     }
-    if (!landed) out.push({ productId, angleHook: angle.hook, campaignId: null, ok: false, reason: "qa_or_gen_failed", qaIssues: lastIssues });
+    if (!landed && !skipped) out.push({ productId, angleHook: angle.hook, campaignId: null, ok: false, reason: "qa_or_gen_failed", qaIssues: lastIssues });
   }
   return out;
+}
+
+/**
+ * Escalate that a product needs an isolated packshot (product_variants.isolated_image_url) before
+ * Dahlia can safely composition-transfer against a competitor's winning graphic — a CEO-routed
+ * approval-request notification through the shared `escalateDiagnosisToCeo` helper (dedupe on
+ * `dahlia-packshot-missing-<workspaceIdShort>-<productId>` so one open card per product covers
+ * every subsequent pass until the packshot lands). A best-effort `director_activity` row records
+ * the same event on the growth ledger so the every-3h audit can see it. Called at most ONCE per
+ * stockProduct invocation via the `escalatedForPackshot` set.
+ */
+async function escalatePackshotMissing(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  productTitle: string,
+): Promise<void> {
+  const shortWs = workspaceId.slice(0, 8);
+  const dedupeKey = `dahlia-packshot-missing-${shortWs}-${productId}`;
+  const title = `Dahlia can't ad-generate: ${productTitle} needs an isolated packshot`;
+  const diagnosis = [
+    `Dahlia skipped a competitor-imitation ad generation for ${productTitle} because the product has no`,
+    `faithful isolated packshot in product_intelligence.media.isolatedPackshots. Without one, composition`,
+    `transfer's "swap in OUR product" prompt has nothing real to work from and Nano Banana fabricates a`,
+    `plausible-looking pack from the brand name alone — a direct product-misrepresentation risk.`,
+    ``,
+    `Upload an isolated packshot to product_variants.isolated_image_url for this product; the next`,
+    `ad-creative cadence will pick it up and resume composition-transfer generation for this product.`,
+  ].join("\n");
+  const deepLink = `/dashboard/products/${productId}`;
+  const escalation = await escalateDiagnosisToCeo(admin, {
+    workspaceId,
+    specSlug: null,
+    title,
+    diagnosis,
+    dedupeKey,
+    deepLink,
+    escalationKind: "dahlia_needs_packshot",
+    metadata: {
+      product_id: productId,
+      product_title: productTitle,
+      required_column: "product_variants.isolated_image_url",
+    },
+  });
+  if (!escalation.emitted) return; // dedupe held OR notification insert failed — the helper already surfaced it
+  // Growth-owned audit trail (distinct from the platform-owned `escalated` row the helper writes).
+  await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: "growth",
+    actionKind: "escalated_dahlia_needs_packshot",
+    specSlug: null,
+    reason: diagnosis,
+    metadata: {
+      product_id: productId,
+      product_title: productTitle,
+      dedupe_key: dedupeKey,
+      autonomous: true,
+    },
+  }).catch((e) => {
+    // Best-effort — a director_activity write failure must not fail the ad-creative loop.
+    console.warn("dahlia_packshot_activity_write_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+  });
 }
 
 /**
