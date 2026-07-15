@@ -1,0 +1,1 @@
+- **CX agent SDK ticket tool: UUID-guard the ticket id and stop showing agents truncated ticket ids** · verified 2026-07-14 · → [[../libraries/cx-agent-sdk]] · [[../libraries/cs-director-digest]]
