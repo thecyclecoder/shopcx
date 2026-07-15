@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isInngestStepWrappedNonErrorLog,
+  isTransientAppstleFrequencyUpstreamTimeout,
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
@@ -196,6 +197,7 @@ export async function POST(request: Request) {
       const transient =
         isTransientInngestStepRetryThrow(g.path, g.message) ||
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
+        isTransientAppstleFrequencyUpstreamTimeout(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
         isTransientSupabaseEdgeHtmlBody(g.message) ||
         isTransientUndiciHeadersTimeout(g.message);

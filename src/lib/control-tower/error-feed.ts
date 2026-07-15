@@ -338,6 +338,49 @@ export function isTransientShopifyWebhookHmacFailure(
 }
 
 /**
+ * Appstle frequency-update upstream-timeout noise — the appstle sibling to
+ * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored here
+ * so the vercel-logs route can reuse it
+ * ([[../specs/vercel-appstle-frequency-upstream-timeout-transient-classifi]]).
+ *
+ * `src/lib/appstle.ts` `updateBillingInterval` fetches Appstle's
+ * `subscription-contracts-update-billing-interval` endpoint through `loggedAppstleFetch`,
+ * whose 20-second abort deadline fires as `throw new Error('upstream_timeout')`. The outer
+ * catch logs `console.error("Appstle frequency update failed:", err)` and then RECOVERS the
+ * same way the explicit `res.status === 504` branch does — it re-fetches the contract via
+ * `verifyBillingInterval` and, if the interval matches, treats the timeout as a successful
+ * apply (Appstle applied the change but the response never returned inside 20s). So the
+ * log-drain line is a PRE-RECOVERY sighting of a dependency stall the code already knows
+ * how to handle; the customer-facing flow either landed or was safely verified after.
+ * Minting a fresh OPEN paged incident + repair fan-out for it churns Platform owners on a
+ * loop that already self-heals (Control Tower `vercel:cec725132e1eef09`).
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path === '/api/inngest'` (the durable Inngest step that calls updateBillingInterval),
+ *   2. the trimmed message begins with the exact `Appstle frequency update failed` prefix
+ *      (the catch's console.error label — not any other Appstle failure log), AND
+ *   3. the message carries the `Error: upstream_timeout` marker (the 20s abort's error).
+ *
+ * A non-timeout Appstle failure (a 4xx/5xx from Appstle carrying a different error class,
+ * a JSON parse throw, a downstream helper throw) carries a different marker and stays
+ * captured / paged on first sighting. Wired in `/api/webhooks/vercel-logs` as the
+ * `transient` flag to `recordError`, which auto-resolves a first sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and escalates to a real open+page ONLY if the
+ * SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a one-off Appstle stall is
+ * dropped while a chronic Appstle outage (would recur every beat) still surfaces.
+ */
+export function isTransientAppstleFrequencyUpstreamTimeout(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("Appstle frequency update failed")) return false;
+  return text.includes("Error: upstream_timeout");
+}
+
+/**
  * Browser network-abort TypeError noise — the CLIENT-feed companion to
  * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored
  * here so `/api/client-errors` can reuse it
