@@ -143,6 +143,15 @@ export interface QcPromptInput {
    *  set, the outer (trusted) prompt tells the QC to pass `headlineExact` on legibility+on-brand rather
    *  than exact-match. Set by qaCreativeViaBoxSession when expectedCopy.headline is blank. */
   imitationHeadline?: boolean;
+  /** Phase 2 of `ad-creative-requires-real-packshot-never-invent-packaging` — absolute path to the
+   *  REAL isolated packshot for the product (a second tmp jpeg written by the QC caller). When set,
+   *  the QC prompt tells the model to Read this file as the reference and judge `packagingFaithful`
+   *  by comparing wordmark / dominant pack colors / flavor art / overall pack shape against the
+   *  rendered creative's package. When null/undefined (own-brand path, or a packshot fetch failed),
+   *  the outer prompt tells the model to SKIP the check and return `packagingFaithful=true` so a
+   *  missing-reference path never false-fails a legitimate render (Phase 1 already gates competitor
+   *  composition-transfer against fabricating when a packshot is absent). */
+  packshotPath?: string | null;
 }
 
 /**
@@ -164,11 +173,24 @@ export function buildQcPrompt(input: QcPromptInput): string {
   const imitationRule = input.imitationHeadline
     ? "HEADLINE MODE — IMITATION: this ad is a competitor-imitation whose headline was rewritten for OUR brand, so there is NO exact headline string to match. Set `headlineExact` = true UNLESS the headline is garbled/misspelled (that is a `textLegible` failure, not `headlineExact`). Still apply every other check in full — and FAIL `textLegible` if ANY competitor brand name (a brand that is not ours) appears anywhere in the image. The HEADLINE field in the DATA block below is intentionally blank."
     : null;
+  // TRUSTED — the packshot rule. When we hand a reference packshot, the QC must Read BOTH files (the
+  // rendered creative + the reference packshot) and judge packagingFaithful by comparing wordmark /
+  // dominant pack colors / flavor art / overall pack shape. When we don't, the QC must SKIP the
+  // check (packagingFaithful=true) — the Phase-1 composition-transfer gate already refused to
+  // generate against a competitor graphic without a real packshot, so a no-reference render is not
+  // a hallucinated-pack risk. Same trust boundary as imitationRule: this rule comes from our code,
+  // never from the untrusted DATA block below.
+  const packshotRule = input.packshotPath
+    ? `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY: read BOTH images. The generated ad is ${input.imagePath}; the REAL isolated packshot for our product is ${input.packshotPath} (a photograph of the ACTUAL product we ship). Set \`packagingFaithful\` = true IFF the product package rendered in the generated ad matches the reference packshot on wordmark (the main brand name / product name printed on the pack), dominant pack colors, flavor art / hero graphic, and overall pack shape/silhouette. FAIL \`packagingFaithful\` on ANY of: an invented pack (a different-shaped bottle/pouch/box the reference doesn't have), a competitor's pack still visible, a wrong-color pack, a fabricated wordmark, a missing/altered flavor art. Sub-readable ingredient icons + supplement-facts fine print are still out of scope (same as the textLegible rule). Fail-closed on ambiguity — if you cannot see both packages clearly enough to compare, return \`packagingFaithful\` = false and cite what you couldn't see in \`issues\`.`
+    : "PACKAGING-FIDELITY MODE — NO REFERENCE: no reference packshot was supplied for this generation (own-brand path or no isolated packshot on record). SKIP the packagingFaithful check and set `packagingFaithful` = true — Phase 1 of the packshot spec already refused to run composition-transfer without a real packshot, so a no-reference render here is not a fabricated-pack risk.";
   return [
-    "Use the creative-qc skill to visually QC ONE rendered ad against the exact copy strings it should contain. You are on Max (no ANTHROPIC_API_KEY). READ the image with the Read tool — Claude Code renders the JPEG visually to you — then judge each of the five render defects and emit ONLY the CreativeQAVerdict JSON (no prose, no code fences, no wrapper).",
+    "Use the creative-qc skill to visually QC ONE rendered ad against the exact copy strings it should contain. You are on Max (no ANTHROPIC_API_KEY). READ the image with the Read tool — Claude Code renders the JPEG visually to you — then judge each of the render defects and emit ONLY the CreativeQAVerdict JSON (no prose, no code fences, no wrapper).",
     ...(imitationRule ? ["", imitationRule] : []),
     "",
+    packshotRule,
+    "",
     `IMAGE: ${input.imagePath}`,
+    ...(input.packshotPath ? [`REFERENCE_PACKSHOT: ${input.packshotPath}`] : []),
     "",
     QC_DATA_PROMPT_INJECTION_GUARDRAIL,
     "",
@@ -179,7 +201,7 @@ export function buildQcPrompt(input: QcPromptInput): string {
     `HAS_TRANSFORMATION: ${hasTx}`,
     QC_DATA_BLOCK_END,
     "",
-    "Return ONLY the CreativeQAVerdict JSON — { pass, issues, checks: { headlineExact, textLegible, noBarePrice, noFabricatedPhotoCaption, transformationPhotorealistic } }. Any check you cannot confidently judge is false (fail-closed).",
+    "Return ONLY the CreativeQAVerdict JSON — { pass, issues, checks: { headlineExact, textLegible, noBarePrice, noFabricatedPhotoCaption, transformationPhotorealistic, packagingFaithful } }. Any check you cannot confidently judge is false (fail-closed).",
   ].join("\n");
 }
 
@@ -190,6 +212,12 @@ export type QcPermissionDecision = "allow" | "deny";
 export interface QcPermissionInput {
   toolName: unknown;
   toolInput: unknown;
+  /** Absolute path(s) the QC child is allowed to Read. Historically a single path; Phase 2 of the
+   *  `ad-creative-requires-real-packshot-never-invent-packaging` spec adds a SECOND image (the real
+   *  isolated packshot) that the QC session must Read to run its packagingFaithful check. To keep the
+   *  env-var interface flat, the field is now a COMMA-SEPARATED list of absolute paths — a single-path
+   *  value stays semantically identical (set of one), so every existing call site + test keeps its
+   *  contract without change. Whitespace around commas is trimmed; empty entries drop out. */
   allowedImagePath: string | null | undefined;
 }
 
@@ -198,34 +226,51 @@ export interface QcPermissionResult {
   reason: string;
 }
 
+/** Split the comma-separated `AD_CREATIVE_QC_ALLOWED_IMAGE` env into a set of absolute paths.
+ *  A whitespace-only entry drops out (a trailing comma in the env doesn't smuggle "" into the set
+ *  where `requestedPath === ""` would then read the wrong file). Exported for the test's shape probe. */
+export function parseAllowedImagePaths(raw: string | null | undefined): Set<string> {
+  if (typeof raw !== "string") return new Set();
+  const out = new Set<string>();
+  for (const seg of raw.split(",")) {
+    const trimmed = seg.trim();
+    if (trimmed) out.add(trimmed);
+  }
+  return out;
+}
+
 /**
  * The pure adjudicator behind scripts/ad-creative-qc-permission-gate.ts. Only ONE thing allows:
- * a `Read` call on the exact absolute `allowedImagePath` passed in (via
- * env AD_CREATIVE_QC_ALLOWED_IMAGE). Every other tool + every other Read path is denied.
- * Fail-closed: unparseable/missing/nonstring inputs → deny.
+ * a `Read` call on one of the exact absolute paths in `allowedImagePath` (a comma-separated set
+ * carried by env AD_CREATIVE_QC_ALLOWED_IMAGE — historically one path, now up to two so the QC
+ * session can Read both the rendered creative AND the real isolated packshot for the Phase-2
+ * packagingFaithful check). Every other tool + every other Read path is denied.
+ * Fail-closed: unparseable/missing/nonstring inputs / no allowed paths after parsing → deny.
  */
 export function evaluateQcPermission(input: QcPermissionInput): QcPermissionResult {
-  const allowed = typeof input.allowedImagePath === "string" ? input.allowedImagePath : "";
-  if (!allowed) {
+  const allowedRaw = typeof input.allowedImagePath === "string" ? input.allowedImagePath : "";
+  const allowedSet = parseAllowedImagePaths(allowedRaw);
+  if (allowedSet.size === 0) {
     return { decision: "deny", reason: "ad-creative-qc gate: AD_CREATIVE_QC_ALLOWED_IMAGE not set (bug — the runner must set this)" };
   }
   const toolName = typeof input.toolName === "string" ? input.toolName : "";
   if (!toolName) return { decision: "deny", reason: "ad-creative-qc gate: missing tool_name" };
   // The QC skill's ONLY sanctioned action is TodoWrite (for the transparency checklist) or Read
-  // on the exact allowed image. TodoWrite is a UI/checklist tool — no filesystem/network side
+  // on one of the allowed images. TodoWrite is a UI/checklist tool — no filesystem/network side
   // effect — so allowing it doesn't broaden the trust boundary.
   if (toolName === "TodoWrite") {
     return { decision: "allow", reason: "ad-creative-qc gate: TodoWrite is the transparency checklist (no side effects)" };
   }
   if (toolName !== "Read") {
-    return { decision: "deny", reason: `ad-creative-qc gate: tool "${toolName}" is not allowed (QC child may only Read the supplied image + write the transparency checklist)` };
+    return { decision: "deny", reason: `ad-creative-qc gate: tool "${toolName}" is not allowed (QC child may only Read the supplied image(s) + write the transparency checklist)` };
   }
   const toolInput = input.toolInput && typeof input.toolInput === "object" ? (input.toolInput as Record<string, unknown>) : null;
   if (!toolInput) return { decision: "deny", reason: "ad-creative-qc gate: Read tool called without a tool_input object" };
   const requestedPath = typeof toolInput.file_path === "string" ? toolInput.file_path : "";
   if (!requestedPath) return { decision: "deny", reason: "ad-creative-qc gate: Read tool called without a file_path" };
-  if (requestedPath !== allowed) {
-    return { decision: "deny", reason: `ad-creative-qc gate: Read denied — path "${requestedPath}" is not the allowed QC image (allowed: "${allowed}")` };
+  if (!allowedSet.has(requestedPath)) {
+    const allowedDisplay = [...allowedSet].join(", ");
+    return { decision: "deny", reason: `ad-creative-qc gate: Read denied — path "${requestedPath}" is not one of the allowed QC images (allowed: ${allowedDisplay})` };
   }
-  return { decision: "allow", reason: "ad-creative-qc gate: Read on the allowed QC image" };
+  return { decision: "allow", reason: "ad-creative-qc gate: Read on an allowed QC image" };
 }

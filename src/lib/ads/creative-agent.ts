@@ -355,9 +355,18 @@ async function stockProduct(
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
         });
+        // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
+        // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
+        // (an invented pack shape, a wrong-color wordmark, a competitor pack still visible). Same
+        // predicate as the Phase-1 gate: a role:'packshot' ref with a fetchable URL. Undefined
+        // signals to the QA to SKIP the check (own-brand no-packshot path — Phase 1 already
+        // refused to composition-transfer in that case).
+        const packshotRef = brief.imageRefs.find((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
+        const packshotUrl = packshotRef?.url;
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl };
         const verdict = qcDispatcher
-          ? await qaCreativeViaBoxSession({ buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation }, qcDispatcher)
-          : await qaCreative(workspaceId, { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation });
+          ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
+          : await qaCreative(workspaceId, qaInput);
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
         // Real Meta copy from the grounded brief — a proof-led caption, a benefit headline (never the
         // offer), and the offer in the description; de-branded for competitor imitations ([[creative-brief]]
