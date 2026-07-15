@@ -1,0 +1,1 @@
+- **Ad-creative generation must never invent product packaging — require a real isolated packshot, and QA must reject a creative whose pack doesn't match ours** · verified 2026-07-15 · → [[../libraries/creative-agent]] · [[../libraries/creative-qa]] · [[../libraries/creative-generate]] · [[../lifecycles/ad-creative]]
