@@ -28,7 +28,7 @@ The worker builds a `dispatch(prompt) → { resultText, isError }` closure that 
 
 The pre-Phase-1 path: same 1568px JPEG normalization, but the vision pass is a direct `POST https://api.anthropic.com/v1/messages` call with `OPUS_MODEL` ([[ai-models]]) and the base64 image inline. Usage is logged via [[ai-usage]] `logAiUsage` (`purpose: "ad_creative_qa"`). Fails closed the same way — missing `ANTHROPIC_API_KEY`, an undecodable image, or a vision-service error returns `pass:false`. Retained as the `DAHLIA_QC_MODE=direct` fallback so a bad rollout is one env flag away from revert.
 
-## The five render checks (identical on both paths)
+## The six render checks (identical on both paths)
 
 | check | fails when |
 |---|---|
@@ -37,8 +37,19 @@ The pre-Phase-1 path: same 1568px JPEG normalization, but the vision pass is a d
 | `noBarePrice` | a bare sticker/MSRP price shows alone (allowed only as strikethrough→discount or per-serving) |
 | `noFabricatedPhotoCaption` | text claims an image is a real/candid/verified/authentic photo ("Candid photos from her home"). Plain "Before"/"After" labels are fine |
 | `transformationPhotorealistic` | a before/after image is a cartoon/illustration/3D-CGI render instead of a photorealistic photograph (true if no transformation image) |
+| `packagingFaithful` | the product package rendered in the ad does not match the real reference packshot on wordmark, dominant pack colors, flavor art / hero graphic, or overall pack shape (an invented pack, wrong-color pack, fabricated wordmark, competitor pack still visible). Sub-readable ingredient icons + supplement-facts fine print stay out of scope (same as `textLegible`). Fails closed on ambiguity. When no reference packshot is supplied (own-brand path — [[creative-agent]]'s Phase-1 gate already refused to composition-transfer without one), the check is **skipped** locally so a legitimate render is never false-failed |
 
-`pass` = all five true. The checks encode the CEO grey-area line (2026-07-10): an AI-generated before/after is allowed, but it must be photorealistic + never captioned as authentic. See [[../reference/meta-scaling-methodology]].
+`pass` = all six true. The checks encode the CEO grey-area line (2026-07-10): an AI-generated before/after is allowed, but it must be photorealistic + never captioned as authentic. See [[../reference/meta-scaling-methodology]].
+
+## Packaging fidelity (ad-creative-requires-real-packshot-never-invent-packaging Phase 2)
+
+The QA vision compare now takes an optional `packshotUrl` — the isolated packshot from [[../tables/product_variants]]`.isolated_image_url` (surfaced via [[creative-brief]] `pi.media.isolatedPackshots[0]` → `brief.imageRefs[role='packshot']`, threaded by [[creative-agent]] `stockProduct`). When present, the QC session Reads BOTH the rendered creative AND the reference packshot and judges `packagingFaithful` by comparing wordmark / dominant colors / flavor art / pack shape. This closes the 2026-07-14 Ashwavana Zen Relax loophole where a fabricated pack (a pink pouch in one draft, a red box in another) passed QA into the bin because no check compared the render against our real packshot.
+
+Two mechanisms make the box-session path safe for two images:
+- **`AD_CREATIVE_QC_ALLOWED_IMAGE` is now a comma-separated set.** [[creative-qc-sandbox]] `parseAllowedImagePaths` splits + trims, and `evaluateQcPermission` asserts Set membership — Read on either allowed path allows, Read on any other path (a stray QC job's leftover, /etc/passwd) still denies. A single-path env value (no commas) stays a set-of-one, so every pre-Phase-2 call site keeps its exact behavior.
+- **`buildQcPrompt` gained a TRUSTED packshot rule** outside the untrusted DATA block. With a reference: `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY` + a `REFERENCE_PACKSHOT: <path>` line and the `packagingFaithful` field in the verdict schema. Without: `PACKAGING-FIDELITY MODE — NO REFERENCE` + instructions to return `packagingFaithful=true` (skip).
+
+**Defense-in-depth for the skip path:** both `qaCreative` and `qaCreativeViaBoxSession` ALSO force `checks.packagingFaithful=true` locally when no packshot was loaded (or the fetch/tmpfile-write failed) — a model that spuriously returns false for the field in skip mode can't false-fail a legitimate own-brand render, because the local override neutralizes it. A packshot fetch failure logs `qa_packshot_fetch_failed` and downgrades to skip (rather than fail-closing the whole verdict) because Phase 1 already refused to composition-transfer against a missing packshot — a transient CDN hiccup shouldn't starve the bin on top of that.
 
 ## Related
 [[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook).

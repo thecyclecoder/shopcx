@@ -98,6 +98,19 @@ function trim(text: string, max = MAX_EVIDENCE_LEN): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+/**
+ * Title of a `per_ticket_escalation` storyline. Exposes the FULL ticket UUID (never a
+ * `.slice(0, 8)` prefix) — the CS box agents (June's `cs-director-call` session) read
+ * this storyline as context, and a copy-able 8-hex prefix would round-trip back into
+ * the cx-agent-sdk ticket tool as a malformed id (the `3cc11e10` 22P02 incident). The
+ * Phase-1 UUID guard now rejects a malformed id up front, but the correct fix is to
+ * never hand an agent a truncated stub in the first place. Founder-facing dashboard
+ * surfaces can render their own short form in the UI layer.
+ */
+export function perTicketEscalationTitle(ticketId: string): string {
+  return `Ticket ${ticketId} — CS Director escalated`;
+}
+
 /** Map a cs-director-call decision → the founder-actionable proposed_action for the storyline. */
 function proposedActionForDecision(decision: string, reasoning: string): CsStoryline["proposed_action"] {
   // `escalate_founder` → the CS Director hit her leash; the founder either widens it or codifies the
@@ -607,7 +620,7 @@ export async function appendPerTicketEscalation(
 
     const storyline: CsStoryline = {
       kind: "per_ticket_escalation",
-      title: `Ticket ${input.ticketId.slice(0, 8)} — CS Director escalated`,
+      title: perTicketEscalationTitle(input.ticketId),
       evidence: trim(input.reasoning || "(no reasoning captured)"),
       proposed_action: {
         // A per-ticket escalation typically wants a policy write-up so the SAME class of judgment

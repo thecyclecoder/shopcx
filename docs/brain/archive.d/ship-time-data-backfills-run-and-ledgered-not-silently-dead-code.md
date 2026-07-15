@@ -1,0 +1,1 @@
+- **Ship-time data backfills run and ledgered, not silently dead code** · verified 2026-07-14 · → [[libraries/ship-time-backfill-detector]] · [[tables/data_op_runs]]
