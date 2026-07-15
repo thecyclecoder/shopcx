@@ -1,0 +1,1 @@
+- **Agent_jobs reads: one typed column source-of-truth so no caller hand-rolls a nonexistent column** · verified 2026-07-15 · → [[libraries/agent-jobs]]
