@@ -12,8 +12,9 @@ Rolls up the CS Director's per-week signal into one row per (workspace, week) so
 |---|---|---|
 | `composeCsDirectorDigest` | `(admin, workspaceId, since, until) → { inserted, row, storylineCount }` | Composes and inserts (or short-circuits on an existing row) one [[../tables/cs_director_digests]] row for the workspace's period. Idempotent per `(workspace_id, digest_period_start)`. Never throws. |
 | `appendPerTicketEscalation` | `(admin, {workspaceId, ticketId, reasoning, verdictMetadata}) → { appended, digest_id, storyline_index }` | Phase 2 — append ONE `per_ticket_escalation` storyline to the LATEST digest row (or lazy-create one for the current week when none exists). Called from `runCsDirectorCallJob` on non-black-swan `escalate_founder` verdicts. Guarded UPDATE (`.eq('id',…).eq('workspace_id',…).select('id')`). Never throws. |
+| `perTicketEscalationTitle` | `(ticketId: string) → string` | Composes the `per_ticket_escalation` storyline title showing the FULL ticket UUID (Phase 2 of [[../specs/cx-agent-sdk-uuid-guard-ticket-id-and-stop-showing-agents-truncated-ids]]). Returns `"Ticket ${ticketId} — CS Director escalated"` — no `.slice()` truncation so June's `cs-director-call` session reads the full 36-char UUID an agent can pass to the cx-agent-sdk tool without malformation. Pinned by [`cs-director-digest.perTicketEscalationTitle.test.ts`](../../../src/lib/cs-director-digest.perTicketEscalationTitle.test.ts). |
 | `CsStoryline` | type | The `storylines[]` element shape — `{ kind, title, evidence, proposed_action: { type, payload? } }`. |
-| `CsStorylineKind` | type | `'early_warning' \| 'precedent_call'`. |
+| `CsStorylineKind` | type | `'early_warning' \| 'precedent_call' \| 'per_ticket_escalation'`. |
 | `CsStorylineProposedActionType` | type | `'widen_leash' \| 'tighten_leash' \| 'add_policy' \| 'add_rule' \| null` — the founder-actionable seed Phase 2's reply surface consumes. |
 | `CsDirectorDigestRow` | type | The inserted row shape (mirrors the DB columns). |
 
@@ -48,6 +49,7 @@ Before inserting, `composeCsDirectorDigest` looks up `(workspace_id, digest_peri
 - [[cs-director-black-swan]] — Phase 2's classifier that decides which `escalate_founder` verdicts route here vs `dashboard_notifications`.
 - [[cs-director-digest-reply]] — Phase 2's mutation helpers behind the founder's per-storyline reply.
 - [[../dashboard/agents-cs-director-digests]] — Phase 2's dashboard surface.
+- [[cx-agent-sdk]] — the ticket data SDK for Sol/Cora/June; `perTicketEscalationTitle` emits full UUID titles for agent-read surfaces per [[../specs/cx-agent-sdk-uuid-guard-ticket-id-and-stop-showing-agents-truncated-ids]].
 - [[../functions/cs]] · [[../goals/guaranteed-ticket-handling]] · [[../specs/cs-director-storyline-digests-to-founder-with-bidirectional-reply]]
 
 ---
