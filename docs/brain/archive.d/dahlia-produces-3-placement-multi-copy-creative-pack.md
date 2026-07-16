@@ -1,0 +1,1 @@
+- **Dahlia produces the 3-placement + 4-headline + 4-primary-text creative pack (+ right-column format)** · verified 2026-07-16 · → [[../lifecycles/ad-creative]]
