@@ -71,4 +71,4 @@ If none matches → `null`. The consumer treats "no active row" as "scaler surfa
 
 ## Related
 
-[[workspaces]] · [[meta_ad_accounts]] · [[products]] · [[media_buyer_test_cohorts]] · [[../libraries/cold-scaler-cohort]] · [[../libraries/media-buyer-publish-gate]] · [[../specs/bianca-cold-scaler-cohort-and-daily-ceiling]] · [[../goals/bianca-temperature-aware-campaign-structure]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[workspaces]] · [[meta_ad_accounts]] · [[products]] · [[media_buyer_test_cohorts]] · [[media_buyer_cold_scaler_arming_authorization]] · [[../libraries/cold-scaler-cohort]] · [[../libraries/media-buyer__cold-scaler-arming-gate]] · [[../libraries/media-buyer-publish-gate]] · [[../specs/bianca-cold-scaler-cohort-and-daily-ceiling]] · [[../specs/bianca-cold-scaler-arming-gate-shadow-to-armed]] · [[../goals/bianca-temperature-aware-campaign-structure]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)

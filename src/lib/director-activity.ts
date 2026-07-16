@@ -232,7 +232,24 @@ export type DirectorActionKind =
   // rollup surfaces every analyze decision + its reasoning. Owned by CS (director_function='cs').
   // metadata: { job_id, ticket_id, analysis_id, score, issues_types, ai_message_count,
   // trigger, autonomous:true }.
-  | "ticket_analyzed";
+  | "ticket_analyzed"
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — the goal-member serializer's
+  // auto-break. When the designated 'earliest ready' head has NO in-flight build row (never
+  // enqueued or its next chained phase was never queued) and a sibling is being serialized-and-
+  // ejected, the auto-break force-enqueues the head to advance the stall. One row per
+  // intervention, so the operator can audit WHY a head was force-enqueued (bypassing the Phase-1
+  // admission gate that would otherwise refuse). Owned by Platform (director_function='platform').
+  // metadata: { actor:'serializer-deadlock-autobreak', goal_slug, ejected_slug, job_id?,
+  // autonomous:true }.
+  | "serializer_deadlock_auto_broken"
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — the serialized rebase-merge
+  // guard's escalation. `mergeSpecBranchIntoGoalBranch` compares goal-branch vs spec-branch, and on
+  // `diverged` merges goal→spec first (rebase) before the spec→goal merge. If that rebase itself
+  // conflicts (two parallel goal-mates genuinely touched the same lines), we NEVER force-merge — we
+  // record ONE row here + skip; the standing pr-resolve flow / a human resolves the overlap. Owned
+  // by Platform (director_function='platform'). metadata: { actor:'serialized-rebase-merge-guard',
+  // goal_slug, spec_branch, rebased, autonomous:true }.
+  | "goal_branch_merge_escalated";
 
 export interface DirectorActivityInput {
   workspaceId: string;

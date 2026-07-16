@@ -1,0 +1,1 @@
+- **PR-resolve retry cap (park-once) + folding closes orphan PR** · verified 2026-07-16 · → [[libraries/github-pr-resolve]] + [[libraries/agent-jobs]]
