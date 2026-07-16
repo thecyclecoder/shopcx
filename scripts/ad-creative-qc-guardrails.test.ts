@@ -283,3 +283,31 @@ test("buildQcPrompt: Phase-2 packshot mode adds the REFERENCE_PACKSHOT line + a 
   assert.ok(skip.includes("PACKAGING-FIDELITY MODE — NO REFERENCE"), "skip-mode rule present when no packshot");
   assert.ok(skip.includes("packagingFaithful"), "verdict schema still references packagingFaithful in skip mode");
 });
+
+test("buildQcPrompt: Phase-2 offer-consistency mode adds a REAL-OFFER rule OUTSIDE the DATA block; skip mode instructs offerConsistent=true", () => {
+  const REAL_OFFER = 'HEADLINE: "Up to 34% off + free shipping" · PER_SERVING: "$1.20/serving vs a $4–8 coffee/latte"';
+  const withOffer = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "steady morning energy", offer: "Up to 34% off + free shipping", trust: "10k reviews" },
+    hasTransformation: false,
+    realOfferSummary: REAL_OFFER,
+  });
+  assert.ok(withOffer.includes("OFFER-CONSISTENCY MODE — REAL-OFFER"), "real-offer rule present");
+  assert.ok(withOffer.includes(REAL_OFFER), "the real offer summary text is embedded in the TRUSTED rule");
+  assert.ok(!withOffer.includes("OFFER-CONSISTENCY MODE — NO REFERENCE"), "skip-mode rule absent when a real offer is supplied");
+  // Trust boundary — the rule must sit OUTSIDE the untrusted DATA block so an untrusted copy string
+  // cannot forge a bogus real-offer summary that flips the verdict.
+  assert.ok(withOffer.indexOf("OFFER-CONSISTENCY MODE — REAL-OFFER") < withOffer.indexOf(QC_DATA_BLOCK_BEGIN), "offer rule sits outside/above the DATA block");
+  // The verdict schema line teaches the model to emit offerConsistent.
+  assert.ok(withOffer.includes("offerConsistent"), "verdict schema references offerConsistent");
+
+  const skip = buildQcPrompt({
+    imagePath: "/tmp/creative-qc-abc.jpg",
+    expectedCopy: { headline: "Hi", offer: "", trust: "10k reviews" },
+    hasTransformation: false,
+    // realOfferSummary omitted → skip mode
+  });
+  assert.ok(skip.includes("OFFER-CONSISTENCY MODE — NO REFERENCE"), "skip-mode rule present when no real offer");
+  assert.ok(!skip.includes("OFFER-CONSISTENCY MODE — REAL-OFFER"), "real-offer rule absent in skip mode");
+  assert.ok(skip.includes("offerConsistent"), "verdict schema still references offerConsistent in skip mode");
+});

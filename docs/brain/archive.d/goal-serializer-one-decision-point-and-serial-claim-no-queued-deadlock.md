@@ -1,0 +1,1 @@
+- **Goal serializer: one serialization point + serial claim (any unblocked member queues; kill the queued-vs-in-flight deadlock)** · verified 2026-07-16 · → [[../libraries/agent-jobs]]

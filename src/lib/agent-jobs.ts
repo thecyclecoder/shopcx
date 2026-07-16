@@ -176,16 +176,6 @@ export function isActive(status: JobStatus): boolean {
   return ACTIVE_STATUSES.includes(status);
 }
 
-/** goal-serializer-one-decision-point Phase 1 — the SHARED "in-flight for the goal serializer" set.
- *  Identical to ACTIVE_STATUSES minus `queued`: a queued row is NOT holding the goal's serial slot,
- *  it's a candidate waiting for its claim-time decision. Both `decideGoalMemberEnqueueAdmission`
- *  (enqueue-time) and `evaluateGoalMemberBuildDispatch` (claim-time) READ from this same constant so
- *  they can never diverge on whether a queued goal-mate blocks the head — the exact split that
- *  caused the 2026-07-16 dahlia deadlock. Serialization moves entirely to claim time (see
- *  `decideGoalMemberBuildDispatch`); the queue is permissive — any UNBLOCKED goal-mate always
- *  reaches `queued` and is re-evaluated each claim tick. */
-export const GOAL_INFLIGHT_STATUSES: JobStatus[] = ["claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"];
-
 type Admin = ReturnType<typeof createAdminClient>;
 
 // spec-timecard-chokepoint-instrumentation Phase 3 — emit a `job_queued` timecard whenever an enqueue
@@ -1733,12 +1723,7 @@ export function decideGoalMemberBuildDispatch(input: {
   members: GoalMemberDispatchState[];
   inflight: GoalMemberInflightRow[];
 }): GoalMemberBuildDispatchResult {
-  const { slug, goalSlug, members } = input;
-  // goal-serializer-one-decision-point Phase 1 — defense-in-depth: strip queued/queued_resume rows
-  // (a caller who forgets to align on GOAL_INFLIGHT_STATUSES would otherwise treat a queued mate as
-  // the slot-holder and hold the true earliest — the exact dahlia deadlock). Only genuinely
-  // executing rows count as in-flight for the goal's serial slot.
-  const inflight = input.inflight.filter((r) => r.status !== "queued" && r.status !== "queued_resume");
+  const { slug, goalSlug, members, inflight } = input;
   if (members.length === 0) return { ok: true };
 
   // Earliest ready head — a member is "unbuilt" if not yet on the goal branch and not shipped/folded.
@@ -1818,11 +1803,9 @@ export async function evaluateGoalMemberBuildDispatch(
   if (state.specs.length === 0) return { ok: true }; // race: goal resolved but has no members
 
   const memberSlugs = state.specs.map((s) => s.slug);
-  // goal-serializer-one-decision-point Phase 1 — the SHARED GOAL_INFLIGHT_STATUSES seam. `queued` is
-  // EXCLUDED (a queued goal-mate is a candidate for the same serial slot, not the current slot-holder
-  // — treating it as in-flight is exactly what caused the 2026-07-16 dahlia deadlock). Both the
-  // enqueue-admission reader and this dispatch reader must query with THIS constant so the two gates
-  // agree on what "in-flight" means.
+  // In-flight seam — any OTHER goal-mate build with an active status. Same ACTIVE_STATUSES seam used by
+  // [[enqueueBuildIfDue]] + fold-guard (queued/queued_resume are pre-claim; claimed/building/…
+  // /blocked_on_usage all hold a live session).
   const admin = createAdminClient();
   const { data: inflightRows } = await admin
     .from("agent_jobs")
@@ -1830,7 +1813,7 @@ export async function evaluateGoalMemberBuildDispatch(
     .eq("workspace_id", workspaceId)
     .eq("kind", "build")
     .in("spec_slug", memberSlugs)
-    .in("status", GOAL_INFLIGHT_STATUSES)
+    .in("status", ["claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"])
     .neq("spec_slug", slug);
   const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
     slug: (r as { spec_slug: string }).spec_slug,
@@ -1899,24 +1882,28 @@ export const GOAL_MEMBER_MAX_PARALLEL_LANES = 10;
 
 /** The PURE core of `evaluateGoalMemberEnqueueAdmission`.
  *
- *  goal-serializer-one-decision-point Phase 1 — PERMISSIVE queue. Any unblocked goal-mate always
- *  reaches `queued`; serialization moves entirely to claim time in
- *  `decideGoalMemberBuildDispatch`. This kills the 2026-07-16 dahlia deadlock: the enqueue-time
- *  gate can no longer refuse an earliest-ready head just because a later goal-mate is queued
- *  (queued is not "in-flight" here — see `GOAL_INFLIGHT_STATUSES`), and it can no longer refuse
- *  a member because its transitive blocker is still busy (that's `enqueueBuildIfDue`'s
- *  `blockedBy.some(!cleared)` gate's job — by the time we reach this predicate the caller has
- *  already confirmed every blocker is cleared).
+ *  Phase 2 — DAG-aware admission. Replaces the blanket "any sibling in-flight refuses" rule
+ *  (which forced dependency-independent goal-mates single-file, wasting the box's lanes) with:
+ *   1. LANE CAP — the count of in-flight OTHER goal-mates must be strictly less than `laneCap`
+ *      (default `GOAL_MEMBER_MAX_PARALLEL_LANES`). This is the global concurrency guard — a
+ *      goal never floods the box's build pool.
+ *   2. BLOCKER-IN-FLIGHT — this spec's TRANSITIVE blocked_by set within the goal's DAG must
+ *      not intersect the in-flight set. If any ancestor in the blocker chain is still building
+ *      (queued/claimed/building/…), admission is refused; the reactive path re-fires when the
+ *      blocker merges. This is the DEFENSE-IN-DEPTH belt against a race where the caller's
+ *      `enqueueBuildIfDue` `blocked` gate saw the blocker `cleared` a tick before this
+ *      admission read sees it `queued`.
  *
- *  What's LEFT here: a single LANE CAP — the count of in-flight OTHER goal-mates must be strictly
- *  less than `laneCap` (default `GOAL_MEMBER_MAX_PARALLEL_LANES`). This is the global concurrency
- *  guard so a fully-independent DAG can't drain every build lane from one goal. A queued goal-mate
- *  does NOT count toward the cap — the cap is about EXECUTION lanes, not queue depth. As
- *  defense-in-depth against a caller who forgets to filter their inflight input, this predicate
- *  strips both self-rows and any `queued`/`queued_resume` rows before the cap check.
+ *  Mutually-independent specs (no direct or transitive blocker relationship) pass BOTH checks
+ *  and admit concurrently — the whole point of Phase 2. A self-row in the input is a defense-
+ *  in-depth belt against a stale read (the reader also .neq's on slug); it MUST NOT false-
+ *  positive-refuse a legitimate re-enqueue of THIS spec.
  *
- *  `members` remains on the signature (unused today) so the reader can keep passing the goal DAG
- *  without a churn wave; future gates that need the DAG can reintroduce it here. */
+ *  `members` is REQUIRED for the DAG walk. When absent (legacy caller / a resolver miss), we
+ *  fall back to a lane-cap-only check that admits mutually-independent goal-mates concurrently
+ *  — the safer default under Phase 2 (an over-admission is handled by the claim-time
+ *  serializer + the deadlock-autobreak; an under-admission is exactly the Phase 1 stall we're
+ *  fixing). */
 export function decideGoalMemberEnqueueAdmission(input: {
   slug: string;
   goalSlug: string;
@@ -1924,17 +1911,14 @@ export function decideGoalMemberEnqueueAdmission(input: {
   members?: GoalMemberDispatchState[];
   laneCap?: number;
 }): GoalMemberEnqueueAdmissionResult {
-  const { slug, goalSlug, inflight, laneCap = GOAL_MEMBER_MAX_PARALLEL_LANES } = input;
+  const { slug, goalSlug, inflight, members, laneCap = GOAL_MEMBER_MAX_PARALLEL_LANES } = input;
 
-  // Defense-in-depth: strip self-rows (a stale read might return this spec's own row) and any
-  // `queued`/`queued_resume` rows so a caller who forgets to align on GOAL_INFLIGHT_STATUSES
-  // never accidentally counts a candidate against the cap. Only genuinely executing rows count.
-  const otherInflight = inflight.filter(
-    (r) => r.slug !== slug && r.status !== "queued" && r.status !== "queued_resume",
-  );
+  // Defense-in-depth: strip any self-row (mirrors the reader's `.neq('spec_slug', slug)`) so a
+  // legitimate re-enqueue for THIS spec is never falsely blocked.
+  const otherInflight = inflight.filter((r) => r.slug !== slug);
 
-  // LANE CAP — global concurrency guard. Refuse when the goal already saturates its parallel
-  //   EXECUTION lanes; a bulk-independent DAG must not drain the whole build pool.
+  // (1) LANE CAP — global concurrency guard. Refuse when the goal already saturates its
+  //     parallel lanes; every extra in-flight goal-mate would just pile up as a queued row.
   if (otherInflight.length >= laneCap) {
     return {
       ok: false,
@@ -1942,75 +1926,41 @@ export function decideGoalMemberEnqueueAdmission(input: {
     };
   }
 
-  // Passed the lane cap. Any unblocked goal-mate belongs in the queue; the ONE serialization
-  // decision happens at claim time (see `decideGoalMemberBuildDispatch`).
+  // (2) BLOCKER-IN-FLIGHT — transitive walk over this spec's blocked_by within the goal's DAG.
+  //     Only fires when `members` is provided (see doc comment for the fallback rationale).
+  //     Ignores external blockers (a slug not in the goal's member set) — those are the async
+  //     reader's / enqueueBuildIfDue's blocked_by gate's concern, not the goal-serializer's.
+  if (members && members.length > 0) {
+    const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
+    const thisSpec = memberBySlug.get(slug);
+    const transitiveBlockers = new Set<string>();
+    const seen = new Set<string>();
+    const queue: string[] = [];
+    if (thisSpec) {
+      for (const b of thisSpec.blockedBy) queue.push(b);
+    }
+    while (queue.length) {
+      const b = queue.shift() as string;
+      if (seen.has(b) || b === slug) continue;
+      seen.add(b);
+      const bMember = memberBySlug.get(b);
+      if (!bMember) continue; // external / cross-goal blocker — not our concern here
+      transitiveBlockers.add(b);
+      for (const bb of bMember.blockedBy) queue.push(bb);
+    }
+    const blockingInFlight = otherInflight.find((r) => transitiveBlockers.has(r.slug));
+    if (blockingInFlight) {
+      return {
+        ok: false,
+        reason: `serialized-goal-mate-blocker-in-flight: goal ${goalSlug} blocker ${blockingInFlight.slug} (${blockingInFlight.status}) is in-flight; admission held until it merges`,
+      };
+    }
+  }
+
+  // Passed both gates — mutually-independent goal-mates admit concurrently. This is the
+  // Phase 2 unlock: the CEO's board actually uses the box's parallel lanes instead of
+  // single-filing every goal through one slot.
   return { ok: true };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 2 —
-// SERIAL CLAIM-AND-DECIDE for the box's build/plan pool.
-// ─────────────────────────────────────────────────────────────────────────────
-// Under Phase 1 the queue is permissive (any unblocked goal-mate always enqueues) and the ONE
-// serialization decision happens at claim time via `decideGoalMemberBuildDispatch`. Phase 2
-// enforces the FOUNDER'S DIRECTIVE that the box worker execute that decision INLINE with each
-// claim — pull one item, decide (launch or release-back-to-queued), then advance to the next —
-// instead of racing multiple per-tick claims into parallel Max sessions before the gate fires.
-//
-// This pure predicate is the classifier the box's claim loop invokes right after each
-// `claim_agent_job` RPC returns. It captures the disposition without any DB dependency, so the
-// "one poll pass claims+dispatches exactly one same-goal mate" contract is unit-testable without
-// standing up a fake worker + Supabase. Kept next to `decideGoalMemberBuildDispatch` on purpose:
-// the two predicates share a decision surface, and the box's caller passes the dispatch verdict
-// directly into this one.
-
-/** The dispatch verdict the caller passes in — a null value means the caller SKIPPED the check
- *  (non-build kind, resume, or a throw during evaluation). A skipped check MUST fail open
- *  (`launch`) because the claim-time gate inside `runJob` is still the last line of defense. */
-export type SerialClaimDispatchVerdict = { ok: boolean; reason?: string } | null;
-
-/** Input the box's build/plan claim loop hands the classifier — a snapshot of the just-claimed
- *  agent_jobs row + the dispatch verdict. */
-export interface SerialClaimDispatchInput {
-  /** `agent_jobs.kind` — only `"build"` engages the goal-serializer decision. */
-  kind: string;
-  /** `!!agent_jobs.claude_session_id` — a resume is committed WIP (branch/PR already exists), so
-   *  the goal-serializer decision is bypassed just like the claim-time gate at line ~6010 of
-   *  `scripts/builder-worker.ts` bypasses it. */
-  isResume: boolean;
-  /** `agent_jobs.spec_slug` — a null slug means there's nothing to resolve to a goal; launch. */
-  specSlug: string | null;
-  /** The dispatch verdict from `evaluateGoalMemberBuildDispatch`, or null when the caller
-   *  skipped the DB call (non-build / resume / no slug / async throw). */
-  dispatchVerdict: SerialClaimDispatchVerdict;
-}
-
-/** The disposition — either LAUNCH the job (spawn its Max session in a lane) or RELEASE it back
- *  to `queued` (clear the claim, leave the row for a later window). Never cancel, never lose. */
-export type SerialClaimDispatchOutcome =
-  | { action: "launch" }
-  | { action: "release"; reason: string };
-
-/** The PURE core of the box's serial claim-and-decide step.
- *
- *  A `build` job with a spec slug and a `dispatchVerdict.ok === false` RELEASES to `queued` (the
- *  caller stamps a short cooldown so the RPC won't re-pick it in the same window; the row stays
- *  claimable next tick). Everything else LAUNCHES — non-build kinds skip serialization, resumes
- *  are committed WIP, and a null verdict (skipped check / evaluator throw) fails open so the
- *  claim-time gate inside `runJob` still guards. Two goal-mates claimed in adjacent iterations
- *  of the loop see this predicate SERIALLY — the second's `evaluateGoalMemberBuildDispatch` call
- *  reads the first as in-flight and refuses, so exactly one launches per pass. */
-export function decideSerialClaimDispatchOutcome(input: SerialClaimDispatchInput): SerialClaimDispatchOutcome {
-  const { kind, isResume, specSlug, dispatchVerdict } = input;
-  if (kind !== "build") return { action: "launch" }; // plan / other kinds don't goal-serialize
-  if (isResume) return { action: "launch" }; // committed WIP — branch/PR already exists
-  if (!specSlug) return { action: "launch" }; // nothing to resolve to a goal
-  if (dispatchVerdict === null) return { action: "launch" }; // skipped/threw — fail open
-  if (dispatchVerdict.ok) return { action: "launch" };
-  return {
-    action: "release",
-    reason: dispatchVerdict.reason ?? "goal-serializer refused the claim (no reason provided)",
-  };
 }
 
 /** The DB reader — resolve the goal, list its members (with blocked_by via `getSpecFromDb`),
@@ -2036,24 +1986,20 @@ export async function evaluateGoalMemberEnqueueAdmission(
 
   const memberSlugs = state.specs.map((s) => s.slug);
   const admin = createAdminClient();
-  // goal-serializer-one-decision-point Phase 1 — read using the SHARED GOAL_INFLIGHT_STATUSES so
-  // admission and dispatch can never disagree on what counts as in-flight. `queued` is not in-flight:
-  // it means "a candidate waiting for its claim decision". This is the fix for the dahlia deadlock
-  // where admission counted queued as in-flight and refused to enqueue an unblocked head.
   const { data: inflightRows } = await admin
     .from("agent_jobs")
     .select("spec_slug, status")
     .eq("workspace_id", workspaceId)
     .eq("kind", "build")
     .in("spec_slug", memberSlugs)
-    .in("status", GOAL_INFLIGHT_STATUSES);
+    .in("status", ACTIVE_STATUSES);
   const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
     slug: (r as { spec_slug: string }).spec_slug,
     status: (r as { status: string }).status,
   }));
 
-  // Read each member's blocked_by so the DAG walk in the pure predicate knows the goal-mate chain.
-  // Mirrors the pattern in `evaluateGoalMemberBuildDispatch`.
+  // Phase 2 — read each member's blocked_by so the transitive DAG walk in the pure predicate
+  // knows the true blocker chain. Mirrors the pattern in `evaluateGoalMemberBuildDispatch`.
   const members: GoalMemberDispatchState[] = [];
   for (const m of state.specs) {
     const spec = await getSpecFromDb(workspaceId, m.slug);
@@ -2418,127 +2364,6 @@ export async function autoBreakGoalMemberDeadlockIfDue(
       e instanceof Error ? e.message : e,
     );
     return { autoBroken: false, reason: "threw" };
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 3 —
-// READY-GOAL-NEVER-FROZEN invariant + auto-break.
-// ─────────────────────────────────────────────────────────────────────────────
-// Belt-and-suspenders over Phases 1 (permissive queue, shared GOAL_INFLIGHT_STATUSES) + 2 (serial
-// claim-and-decide). Even with both, a future change could reintroduce a wedge — or a chained-
-// phase reactive path could fail to enqueue the next head, leaving a goal frozen with a queued
-// later member and no earliest-ready row. Today that state requires a hand-run unwedge
-// (cancel the mis-prioritized queued job, re-enqueue the head — the 2026-07-16 dahlia stall).
-// Phase 3 elevates that manual fix to a STANDING invariant surfaced through the existing stall
-// diagnostics (`whyIsSpecNotBuilding`) + an async wrapper that fires the existing
-// `autoBreakGoalMemberDeadlockIfDue` when the invariant flips to 'deadlock'.
-//
-// The invariant is a THIN wrapper over `decideGoalMemberDeadlockAutoBreak` — same head-has-no-row
-// predicate, expressed as `{ verdict: 'deadlock' | 'ok', ... }` so the diagnostics layer can
-// switch on it cleanly. Pure — the tests exercise it without a DB seam (see
-// `src/lib/ready-goal-never-frozen.test.ts`).
-
-/** Verdict from the ready-goal-never-frozen invariant. `deadlock` carries the earliest-ready
- *  head slug the caller / auto-break should dispatch; `ok` carries the underlying reason so a
- *  log line can quote why the invariant held. */
-export type ReadyGoalNeverFrozenVerdict =
-  | { verdict: "deadlock"; earliest: string }
-  | { verdict: "ok"; reason: string };
-
-/** The PURE core of the Phase 3 invariant.
- *
- *  Given a goal's member DAG + the current in-flight goal-mate rows (any active status, incl.
- *  `queued` — the caller reads with `ACTIVE_STATUSES` because the invariant cares about "does the
- *  head have ANY row at all"), returns `deadlock` iff a Kahn ready head exists but has NO row in
- *  the inflight set (the persistent dahlia state); else `ok`. Kept a thin wrapper over
- *  `decideGoalMemberDeadlockAutoBreak` so the two predicates stay lockstep — if the invariant
- *  says 'deadlock' the auto-break is legitimate to fire, no daisy-chained divergence. */
-export function checkReadyGoalNeverFrozenInvariant(input: {
-  members: GoalMemberDispatchState[];
-  inflight: GoalMemberInflightRow[];
-}): ReadyGoalNeverFrozenVerdict {
-  const decision = decideGoalMemberDeadlockAutoBreak(input);
-  if (decision.deadlocked) return { verdict: "deadlock", earliest: decision.earliest };
-  return { verdict: "ok", reason: decision.reason };
-}
-
-/** Result of the async invariant + auto-break wrapper. `verdict === 'ok'` means the goal is not
- *  frozen (either building healthily or has no ready head). `verdict === 'deadlock'` carries the
- *  auto-break outcome — either the head was enqueued (`autoBroken: true`) or the auto-break
- *  couldn't land (cooldown, admission miss — `autoBroken: false` with a reason). Never throws
- *  (fail-open per the existing autobreak's contract). */
-export type ReadyGoalNeverFrozenOutcome =
-  | { verdict: "ok"; reason: string }
-  | {
-      verdict: "deadlock";
-      earliest: string;
-      autoBroken: boolean;
-      autoBreakReason: string | null;
-    };
-
-/** The DB reader — resolve the goal's members, read every in-flight goal-mate row (across ALL
- *  ACTIVE_STATUSES, incl. `queued` — the invariant asks whether the head has ANY row at all),
- *  invoke `checkReadyGoalNeverFrozenInvariant`, and on `deadlock` fire the existing
- *  `autoBreakGoalMemberDeadlockIfDue` to dispatch the earliest-ready member. Best-effort: any
- *  DB / resolver failure returns `verdict:'ok'` with a reason so a transient blip never wedges
- *  the caller (the diagnostics layer). Idempotent: the auto-break's own 3-min cooldown dedupes
- *  rapid re-checks. */
-export async function assertReadyGoalNeverFrozenAndAutoBreak(
-  workspaceId: string,
-  goalSlug: string,
-): Promise<ReadyGoalNeverFrozenOutcome> {
-  if (!goalSlug) return { verdict: "ok", reason: "not-goal-bound" };
-  try {
-    const { goalBranchState } = await import("@/lib/specs-table");
-    const state = await goalBranchState(workspaceId, goalSlug);
-    if (state.specs.length === 0) return { verdict: "ok", reason: "goal-has-no-members" };
-
-    const memberSlugs = state.specs.map((s) => s.slug);
-    const admin = createAdminClient();
-    // Any-active-status read — the invariant cares whether the head has any row at all, not just
-    // an executing one. Mirrors the `autoBreakGoalMemberDeadlockIfDue` reader on purpose.
-    const { data: inflightRows } = await admin
-      .from("agent_jobs")
-      .select("spec_slug, status")
-      .eq("workspace_id", workspaceId)
-      .eq("kind", "build")
-      .in("spec_slug", memberSlugs)
-      .in("status", ACTIVE_STATUSES);
-    const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
-      slug: (r as { spec_slug: string }).spec_slug,
-      status: (r as { status: string }).status,
-    }));
-
-    const members: GoalMemberDispatchState[] = [];
-    for (const m of state.specs) {
-      const spec = await getSpecFromDb(workspaceId, m.slug);
-      members.push({
-        slug: m.slug,
-        onGoalBranch: m.onGoalBranch,
-        status: m.status,
-        blockedBy: spec?.blocked_by ?? [],
-      });
-    }
-
-    const verdict = checkReadyGoalNeverFrozenInvariant({ members, inflight });
-    if (verdict.verdict === "ok") return verdict;
-
-    // 'deadlock' — fire the existing autobreak against the earliest slug. It handles cooldown,
-    // audit-row emission, and the bypass-admission enqueue. Best-effort: an autobreak failure
-    // just carries its reason back through so the diagnostics caller can surface it.
-    const autoBreak = await autoBreakGoalMemberDeadlockIfDue(workspaceId, verdict.earliest);
-    return {
-      verdict: "deadlock",
-      earliest: verdict.earliest,
-      autoBroken: autoBreak.autoBroken,
-      autoBreakReason: autoBreak.autoBroken ? null : autoBreak.reason,
-    };
-  } catch (e) {
-    return {
-      verdict: "ok",
-      reason: `assertReadyGoalNeverFrozenAndAutoBreak threw (best-effort, no-op): ${e instanceof Error ? e.message : String(e)}`,
-    };
   }
 }
 
