@@ -37,6 +37,7 @@ This SUPERSEDES the post-hoc `required_outcomes` honor step ([[ticket_required_o
 - A `direct_action` runs **action-only** — the executor blanks `decision.response_message` so the queue never sends a customer message. Sol's `first_reply` (composed from the result) is the SOLE customer touch; no double-send.
 - On success/failure the executor also writes a [[ticket_required_outcomes]] row reflecting the REAL terminal status (`verified`/`failed`) so the existing claim-guard's false-promise protection still holds for the money/state kinds. A `dry_run` writes NO ledger row.
 - Journeys/playbooks are NOT enqueued — Sol keeps those on her `chosen_path`/`plan`.
+- **Ticket hard-delete dependency.** When a ticket is deleted (owner/admin route), the delete handler must clear `agent_action_requests` rows BEFORE deleting the ticket row — the foreign key `ticket_id` → `tickets.id` blocks hard-delete otherwise. The route validates the parent ticket (id + workspace_id), then deletes all matching action requests with explicit `.eq('workspace_id', workspaceId)` scoping (no cross-tenant row deletion), then deletes dependent rows (returns, store_credit_log, ticket_messages), then finally the ticket. Same tenant-scoped pattern applied to all children — a multi-tenant safeguard against workspace boundary violations when service-role RLS is bypassed.
 
 ## Migration
 
