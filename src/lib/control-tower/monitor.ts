@@ -592,10 +592,36 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
   return { ...base, color: "green", statusText: `ran ${elapsed(latest.ran_at)} ago`, violation: null };
 }
 
-export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+/**
+ * True iff the box build worker itself is currently non-live per the SAME inputs `evalWorker` uses
+ * to open a `liveness` red: no heartbeat row, no `last_poll_at`, stale beyond `livenessWindowMs`,
+ * or crash-looping (`status='needs_attention'`). Kept as a pure predicate so `evalAgentKind` and
+ * the worker tile share ONE definition of "worker unavailable" — a lane can never disagree with
+ * the box tile about whether the worker is actually up. (control-tower-suppress-agent-stuck-during-worker-outage)
+ */
+export function isWorkerUnavailable(row: WorkerRow | null, livenessWindowMs: number = 5 * 60_000): boolean {
+  if (!row || !row.last_poll_at) return true;
+  if (ageMs(row.last_poll_at) > livenessWindowMs) return true;
+  if (row.status === "needs_attention") return true;
+  return false;
+}
+
+export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+  // control-tower-suppress-agent-stuck-during-worker-outage Phase 1 — when the box build worker
+  // itself is stale/absent/crash-looping, its `liveness` red is the useful alert and every
+  // queued/queued_resume row is waiting on the SAME parent (the worker can't claim while it's
+  // down). Opening a stuck_jobs red on each healthy agent lane (pr-resolve, spec-test, …) just
+  // duplicates the box-tile page and pins the wrong lane. Building/claimed jobs are NOT
+  // suppressed — a genuinely-wedged in-flight job is still a lane-specific failure and stays
+  // red. Once the worker recovers (isWorkerUnavailable=false) every stuck threshold behaves as
+  // before; the worker-restart clamp (workerStartedAt → jobStuckSince) then grants the fresh
+  // uptime a fair drain window before any queued row can trip red.
+  const relevantForStuck = workerUnavailable
+    ? activeJobs.filter((j) => j.kind === loop.agentKind && j.status !== "queued" && j.status !== "queued_resume")
+    : activeJobs.filter((j) => j.kind === loop.agentKind);
   const mine = activeJobs.filter((j) => j.kind === loop.agentKind);
   const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
-  const stuck = mine.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
+  const stuck = relevantForStuck.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -1740,6 +1766,17 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const queuedCount = activeJobs.filter((j) => j.status === "queued" || j.status === "queued_resume").length;
   const manualDrain = !!(workerCtrl as { drain_for_update: boolean } | null)?.drain_for_update;
 
+  // Attribute queued agent-kind backlog to the box worker when the worker itself is stale/absent/
+  // crash-looping, instead of opening a stuck_jobs red on every healthy agent lane
+  // (pr-resolve, spec-test, …). Read the worker loop's livenessWindowMs from the same registry row
+  // evalWorker uses — falls back to the same 5m default — so the two tiles can never disagree.
+  // (control-tower-suppress-agent-stuck-during-worker-outage Phase 1)
+  const workerLoop = MONITORED_LOOPS.find((l) => l.kind === "worker");
+  const workerUnavailable = isWorkerUnavailable(
+    workerRow as WorkerRow | null,
+    workerLoop?.livenessWindowMs ?? 5 * 60_000,
+  );
+
   // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
   // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
   // decides "behind" — a plain prefix mismatch can't tell stale-code (worker-behind) from deploy
@@ -1796,7 +1833,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
-    else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
+    else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null, workerUnavailable);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
     // carry several (the renewal cron: renewal-integrity + outcome-distribution) — first to fail wins.

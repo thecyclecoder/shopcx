@@ -76,13 +76,17 @@ interface SeedInput {
   directions: FakeDirection[];
   tickets?: FakeTicket[];
   channel_configs?: FakeChannelConfig[];
+  /** Pre-existing agent_jobs rows — used by the Phase-1 `hasActiveTicketHandleJob` probe to
+   *  distinguish the "concurrent duplicate" case (a non-terminal ticket-handle row already
+   *  exists → bail) from the "genuine no-Direction" case (no such row → enqueue fallback). */
+  jobs?: FakeJob[];
   nextJobId?: string;
 }
 
 function makeAdmin(seed: SeedInput) {
   const state = {
     directions: seed.directions.map((d) => ({ ...d })),
-    jobs: [] as FakeJob[],
+    jobs: (seed.jobs ?? []).map((j) => ({ ...j })),
     tickets: (seed.tickets ?? []).map((t) => ({ ...t })),
     channel_configs: (seed.channel_configs ?? []).map((c) => ({ ...c })),
     resolution_events: [] as FakeResolutionEvent[],
@@ -142,7 +146,43 @@ function makeAdmin(seed: SeedInput) {
   }
 
   function fromAgentJobs() {
+    // Two disjoint call shapes hit this table:
+    //   (a) insert path (both the step-(6) enqueue and the Phase-1 fallback enqueue):
+    //         .from('agent_jobs').insert(row).select('id').single()
+    //   (b) probe path (Phase-1 `hasActiveTicketHandleJob`):
+    //         .from('agent_jobs').select('id').eq('workspace_id',ws).eq('spec_slug',slug)
+    //           .in('status', ACTIVE_STATUSES).limit(1)  → awaitable Promise<{data,error}>
+    // Model both here — the shared object exposes `.insert()` for (a) and `.select()` for (b).
+    const filters: Record<string, unknown> = {};
+    const inFilters: Record<string, Set<unknown>> = {};
+
+    const selectBuilder = {
+      eq(col: string, val: unknown) {
+        filters[col] = val;
+        return selectBuilder;
+      },
+      in(col: string, vals: unknown[]) {
+        inFilters[col] = new Set(vals);
+        return selectBuilder;
+      },
+      limit(_n: number) {
+        const matches = state.jobs.filter((j) => {
+          for (const [k, v] of Object.entries(filters)) {
+            if ((j as unknown as Record<string, unknown>)[k] !== v) return false;
+          }
+          for (const [k, set] of Object.entries(inFilters)) {
+            if (!set.has((j as unknown as Record<string, unknown>)[k])) return false;
+          }
+          return true;
+        });
+        return Promise.resolve({ data: matches.map((m) => ({ id: m.id })), error: null });
+      },
+    };
+
     return {
+      select(_cols: string) {
+        return selectBuilder;
+      },
       insert(row: Record<string, unknown>) {
         const job: FakeJob = {
           id: nextJobId,
@@ -314,13 +354,80 @@ test("drift branch: same supersede+enqueue shape — the holding-message policy 
   assert.equal(state.ticketMessageWrites, 0);
 });
 
-test("no live Direction (racing supersede won) → NO enqueue (compare-and-set guard)", async () => {
-  // The only direction row is already superseded — mimics a racing caller stamping it first.
-  const superseded = seedLive({ id: "dir-old", superseded_at: "2026-07-08T00:00:01Z" });
+// ── Phase 1 of sol-resession-enqueue-first-touch-when-no-live-direction — ─────
+// fallback enqueue when getLiveDirection returns null. The marker string
+// "no-live-direction fallback" in each name is asserted by the spec's structural
+// check so a future refactor cannot silently reinstate the drop.
+
+test("no-live-direction fallback: enqueues on genuine no-Direction (nothing ever authored + no active ticket-handle job)", async () => {
+  // A pre-Sol legacy ticket: no direction row exists AND no active session is in flight.
+  // The Phase-2 gate has already sent the "we're looking into that for you" holding message,
+  // so bailing would strand the customer. The fallback must enqueue a fresh first-touch-shaped
+  // session so the promise is kept.
   const { admin, state } = makeAdmin({
-    directions: [superseded],
+    directions: [],
     tickets: [seedTicket()],
     channel_configs: [seedConfig()],
+    jobs: [],
+    nextJobId: "job-fallback",
+  });
+  const res = await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+    turn_index: 2,
+  });
+  assert.equal(res.enqueued, true, "fallback must enqueue when there is no live Direction and no active job");
+  assert.equal(res.superseded, false, "nothing to supersede — no live Direction");
+  assert.equal(res.cap_hit, false);
+  assert.equal(res.superseded_direction_id, null);
+  assert.equal(res.job_id, "job-fallback");
+
+  // Exactly one agent_jobs insert fired.
+  assert.equal(state.jobs.length, 1);
+  const job = state.jobs[0]!;
+  assert.equal(job.kind, "ticket-handle");
+  assert.equal(job.workspace_id, WS);
+  assert.equal(job.status, "queued");
+  assert.equal(job.spec_slug, `ticket-handle-${TID.slice(0, 8)}`);
+
+  const parsed = JSON.parse(job.instructions);
+  assert.equal(parsed.ticket_id, TID);
+  assert.equal(parsed.workspace_id, WS);
+  assert.equal(parsed.turn_index, 2);
+  assert.equal(parsed.reason, "inflection");
+  assert.equal(parsed.kind, "frustration");
+  assert.equal(parsed.superseded_direction_id, null, "no prior Direction to link — must be null");
+  assert.deepEqual(parsed.evidence, EV);
+
+  // Observability ledger row stamped with the distinguishing reasoning marker.
+  const ev = state.resolution_events.find((e) => e.reasoning === "sol:resession-no-direction");
+  assert.ok(ev, "must stamp sol:resession-no-direction ledger row for observability");
+  assert.equal(ev!.turn_index, 2);
+  assert.deepEqual(ev!.chosen, {
+    kind: "frustration",
+    fallback: "first_touch_no_live_direction",
+  });
+});
+
+test("no-live-direction fallback: bails on concurrent duplicate (no live Direction + an active ticket-handle job present)", async () => {
+  // True race: a concurrent caller already superseded the live row and enqueued its own
+  // follow-up. That job is in-flight in agent_jobs, so the dedup guard MUST make us bail
+  // rather than fan out a duplicate session.
+  const activeJob: FakeJob = {
+    id: "job-in-flight",
+    workspace_id: WS,
+    kind: "ticket-handle",
+    spec_slug: `ticket-handle-${TID.slice(0, 8)}`,
+    status: "building", // non-terminal — matches ACTIVE_STATUSES from @/lib/agent-jobs
+    instructions: "",
+  };
+  const { admin, state } = makeAdmin({
+    directions: [],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    jobs: [activeJob],
   });
   const res = await reSessionSol(admin, TID, {
     workspace_id: WS,
@@ -328,39 +435,42 @@ test("no live Direction (racing supersede won) → NO enqueue (compare-and-set g
     kind: "frustration",
     evidence: EV,
   });
-  assert.equal(res.superseded, false, "no live row → no supersede");
-  assert.equal(res.enqueued, false, "must not fan out a redundant session when the race is lost");
+  assert.equal(res.enqueued, false, "must bail when a concurrent ticket-handle session is in flight");
+  assert.equal(res.superseded, false);
   assert.equal(res.cap_hit, false);
-  assert.equal(state.jobs.length, 0, "no agent_jobs row");
   assert.equal(res.superseded_direction_id, null);
   assert.equal(res.job_id, null);
-});
 
-test("no Direction row at all for this ticket → NO enqueue (idempotent no-op)", async () => {
-  const { admin, state } = makeAdmin({
-    directions: [],
-    tickets: [seedTicket()],
-    channel_configs: [seedConfig()],
-  });
-  const res = await reSessionSol(admin, TID, {
-    workspace_id: WS,
-    channel: CH,
-    kind: "drift",
-    evidence: EV,
-  });
-  assert.equal(res.superseded, false);
-  assert.equal(res.enqueued, false);
-  assert.equal(res.cap_hit, false);
-  assert.equal(state.jobs.length, 0);
+  // No NEW insert fired — only the pre-existing seeded job remains.
+  assert.equal(state.jobs.length, 1);
+  assert.equal(state.jobs[0]!.id, "job-in-flight", "no new agent_jobs row inserted");
+
+  // No observability ledger row either — the bail is silent (mirrors the pre-Phase-1 no-op).
+  assert.equal(
+    state.resolution_events.filter((e) => e.reasoning === "sol:resession-no-direction").length,
+    0,
+    "no ledger stamp on the bail path",
+  );
 });
 
 test("workspace scoping: a same-ticket-id row in a DIFFERENT workspace is NOT superseded", async () => {
   const otherWs = "99999999-0000-0000-0000-0000000000ws";
   const foreign = seedLive({ id: "dir-foreign", workspace_id: otherWs });
+  // Seed a same-workspace active job so the Phase-1 fallback bails cleanly — this test
+  // isolates the workspace-scoping of the supersede path, not the fallback enqueue.
+  const activeJob: FakeJob = {
+    id: "job-in-flight",
+    workspace_id: WS,
+    kind: "ticket-handle",
+    spec_slug: `ticket-handle-${TID.slice(0, 8)}`,
+    status: "queued",
+    instructions: "",
+  };
   const { admin, state } = makeAdmin({
     directions: [foreign],
     tickets: [seedTicket()],
     channel_configs: [seedConfig()],
+    jobs: [activeJob],
   });
   const res = await reSessionSol(admin, TID, {
     workspace_id: WS,
