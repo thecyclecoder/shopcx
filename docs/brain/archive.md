@@ -12,10 +12,15 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ada reacts to routed approvals immediately — approve-fast-or-escalate-fast, never sits** · verified 2026-07-16 · → [[../libraries/platform-director]]
+- **Ads supervisor: product `Amazing Coffee` — Dahlia's ready-to-test bin is thin (0/4)** · verified 2026-07-16 · → [[libraries/ads-supervisor]]
+- **Orders classification SDK** · verified 2026-07-16 · → [[libraries/orders-classification]]
+- **Archived-spec job cleanup reaps needs_attention jobs** · verified 2026-07-16 · → [[libraries/agent-jobs]]
 - **Ad-creative generation must never invent product packaging — require a real isolated packshot, and QA must reject a creative whose pack doesn't match ours** · verified 2026-07-15 · → [[../libraries/creative-agent]] · [[../libraries/creative-qa]] · [[../libraries/creative-generate]] · [[../lifecycles/ad-creative]]
 - **Ads supervisor: product Superfood Tabs — Dahlia's ready-to-test bin is thin (2/4)** · verified 2026-07-15 · → [[../libraries/ads-supervisor]]
 - **Ads supervisor: product `Ashwavana Zen Relax` — Dahlia's ready-to-test bin is thin (2/4)** · verified 2026-07-15 · → [[../lifecycles/ad-creative]]
 - **Agent_jobs reads: one typed column source-of-truth so no caller hand-rolls a nonexistent column** · verified 2026-07-15 · → [[libraries/agent-jobs]]
+- **Treat recovered Appstle frequency upstream timeouts as transient Vercel noise** · verified 2026-07-15 · → [[../libraries/control-tower]]
 - **Ads supervisor: product Amazing Creamer — Dahlia's ready-to-test bin is thin (3/4)** · verified 2026-07-14 · → [[../libraries/ads-supervisor]]
 - **Ads supervisor: product `Creatine Prime+` — Dahlia's ready-to-test bin is thin (2/4)** · verified 2026-07-14 · → [[../libraries/ads-supervisor]] · [[../lifecycles/ad-creative]]
 - **Ads supervisor: product Ashwavana Guru Focus — Dahlia's ready-to-test bin is thin (3/4)** · verified 2026-07-14 · → [[../lifecycles/ad-creative]]
