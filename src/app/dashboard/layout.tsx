@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/auth"; // db-load-auth-cache
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import { SectionNavProvider } from "@/lib/section-nav-context";
@@ -22,8 +22,7 @@ export default function DashboardLayout({
 }
 
 async function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
 
   if (!user) redirect("/login");
 
