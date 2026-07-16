@@ -30,6 +30,10 @@ function verdictJson(overrides: Record<string, unknown>): string {
       noFabricatedPhotoCaption: true,
       transformationPhotorealistic: true,
       packagingFaithful: true,
+      // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — default the
+      // new field to true so pre-Phase-2 test call sites (which don't thread realOffer) stay green
+      // via the local skip semantic.
+      offerConsistent: true,
     },
   };
   const merged = { ...defaults, ...overrides, checks: { ...defaults.checks, ...((overrides.checks as Record<string, unknown> | undefined) ?? {}) } };
@@ -136,4 +140,82 @@ test("qaCreativeViaBoxSession — a packshot URL that fails to fetch is treated 
   );
   assert.equal(verdict.checks.packagingFaithful, true, "packshot fetch failure → skip, packagingFaithful stays true");
   assert.equal(verdict.pass, true, "verdict still passes — Phase 1 already gated the fabricate risk upstream");
+});
+
+// ── Phase 2: ad-creative-only-our-real-offer-discount-shown-never-a-competitors ─────────────────
+// Fixture: the image's rendered discount doesn't match our real offer (e.g. a competitor's "50%
+// OFF" leaked into the headline while our real offer is "Up to 34% off + free shipping") — QA now
+// rejects that pair via `offerConsistent`, forcing regeneration. When the caller doesn't thread a
+// realOffer, the check is skipped locally so a legitimate no-offer render is never false-failed.
+
+test("qaCreativeViaBoxSession — a QC session that fails ONLY on offerConsistent (with a realOffer supplied) FAILS the whole verdict", async () => {
+  // The mismatch this fixture reproduces: our REAL offer is "Up to 34% off + free shipping" but the
+  // rendered image shows a competitor's "50% OFF" leaked from a reused hook (the 2026-07-14 Amazing
+  // Creamer regression). A cooperative QC session reports offerConsistent:false and every other
+  // check true — the whole verdict must fail so Dahlia regenerates rather than binning the mis-stated
+  // discount.
+  const buffer = await makeRedJpeg();
+  let capturedPrompt = "";
+  const dispatch = async (prompt: string, _allowedImagePath: string) => {
+    capturedPrompt = prompt;
+    return { resultText: verdictJson({ checks: { offerConsistent: false } }), isError: false };
+  };
+  const verdict = await qaCreativeViaBoxSession(
+    {
+      buffer,
+      expectedCopy: { headline: "steady morning energy", offer: "Up to 34% off + free shipping", trust: "10k reviews" },
+      realOffer: { headline: "Up to 34% off + free shipping", strikethrough: null, perServing: null },
+    },
+    dispatch,
+  );
+  // The QC session must have been told what our real offer actually is (via the TRUSTED outer rule).
+  assert.match(capturedPrompt, /OFFER-CONSISTENCY MODE — REAL-OFFER/);
+  assert.match(capturedPrompt, /Up to 34% off \+ free shipping/, "the real-offer text is embedded in the QC prompt so the vision model has a source of truth to compare against");
+  // Enforcement — realOffer was threaded, model said false → verdict fails.
+  assert.equal(verdict.checks.offerConsistent, false, "offerConsistent mirrors the QC verdict when a realOffer was threaded");
+  assert.equal(verdict.pass, false, "a single failing check fails the whole QC verdict — the mis-stated discount does not land");
+  assert.ok(verdict.issues.some((i) => i.includes("offerConsistent")), "the failure carries an offerConsistent issue so the regenerate-loop's log surfaces the reason");
+});
+
+test("qaCreativeViaBoxSession — no realOffer supplied → skip forces checks.offerConsistent=true regardless of the model's answer", async () => {
+  // Symmetric to the packagingFaithful skip fixture (test 1 above): a caller that doesn't thread
+  // realOffer (own-brand no-offer render, or a legacy invocation) must never be false-failed by a
+  // spuriously-false CHECK. The local override neutralizes the field, and the outer TRUSTED
+  // prompt tells the QC to skip the check up front. Same shape as that fixture — pass:true is
+  // supplied explicitly because our top-level `pass` gate trusts the model's summary when true
+  // (the local override is defence-in-depth against a spuriously-false CHECK field, not against
+  // a spuriously-false top-level pass).
+  const buffer = await makeRedJpeg();
+  let capturedPrompt = "";
+  const dispatch = async (prompt: string, _allowedImagePath: string) => {
+    capturedPrompt = prompt;
+    return { resultText: verdictJson({ pass: true, checks: { offerConsistent: false } }), isError: false };
+  };
+  const verdict = await qaCreativeViaBoxSession(
+    { buffer, expectedCopy: { headline: "Hi", offer: null, trust: "10k reviews" } },
+    dispatch,
+  );
+  // The outer rule tells the QC to SKIP the check when no real offer is threaded.
+  assert.match(capturedPrompt, /OFFER-CONSISTENCY MODE — NO REFERENCE/);
+  assert.equal(verdict.checks.offerConsistent, true, "no realOffer supplied → local skip forces the field to true");
+  assert.equal(verdict.pass, true, "verdict passes on skip — no legitimate no-offer render is false-failed");
+});
+
+test("qaCreativeViaBoxSession — all checks true INCLUDING offerConsistent with a threaded realOffer → verdict passes", async () => {
+  // Positive path — real offer threaded, image is consistent with it, every check passes: the ad
+  // reaches the bin. Also serves as the smoke test that the new field being present in the response
+  // doesn't accidentally regress the pass semantic.
+  const buffer = await makeRedJpeg();
+  const dispatch = async () => ({ resultText: verdictJson({}), isError: false });
+  const verdict = await qaCreativeViaBoxSession(
+    {
+      buffer,
+      expectedCopy: { headline: "steady morning energy", offer: "Up to 34% off + free shipping", trust: "10k reviews" },
+      realOffer: { headline: "Up to 34% off + free shipping", strikethrough: null, perServing: "$1.20/serving vs a $4–8 coffee/latte" },
+    },
+    dispatch,
+  );
+  assert.equal(verdict.checks.offerConsistent, true);
+  assert.equal(verdict.pass, true);
+  assert.deepEqual(verdict.issues, []);
 });

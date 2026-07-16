@@ -363,7 +363,15 @@ async function stockProduct(
         // refused to composition-transfer in that case).
         const packshotRef = brief.imageRefs.find((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
         const packshotUrl = packshotRef?.url;
-        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl };
+        // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — thread
+        // our REAL store offer to the QA vision compare so offerConsistent can reject a creative
+        // whose rendered discount doesn't match the real offer (a "50% OFF" leaked from a
+        // competitor hook when our real offer is "Up to 34% off + free shipping" — the 2026-07-14
+        // Amazing Creamer regression). Undefined signals SKIP (own-brand no-offer render).
+        const realOffer = brief.offer
+          ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
+          : null;
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
           : await qaCreative(workspaceId, qaInput);
