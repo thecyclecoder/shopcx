@@ -94,6 +94,8 @@ A denial writes ONE `media_buyer_sensor_trust_denied` [[../tables/director_activ
 
 The pure `evaluateSensorTrustSnapshot` (DB-free) is the seam the unit tests pin the gate math against; the orchestrator's `readLatestSensorTrust` handles the read, and the runner writes the audit row + returns the dormant plan. This mirrors the pure/orchestrator split in [[media-buyer__sensor-trust-probe]] itself so the two libraries stay symmetric.
 
+**Related scripts — cold-test purchaser-overlap measurement** ([[../specs/bianca-measure-cold-test-purchaser-overlap]] Phase 1). `scripts/_measure-cold-test-purchaser-overlap.ts` is a one-shot dry-run-by-default measurement that produces the CITED overlap number the [[../goals/bianca-temperature-aware-campaign-structure]] M2 recent-purchaser-exclusion build is gated on. It enumerates every ACTIVE per-test cohort, joins [[../tables/meta_attribution_daily]] (attributed spend) with [[../tables/storefront_events]] (clicker identity, with orders.attributed_utm_content as a belt-and-suspenders fallback), expands each clicker's link group via `public.resolve_customer_link_group`, flags prior-purchasers by pre-first-click order, and writes ONE `media_buyer_purchaser_overlap_measured` [[../tables/director_activity]] row per cohort carrying `{ cohort_id, window_days, distinct_clickers, prior_purchasers, overlap_ratio, spend_cents_total, spend_cents_allocated_to_prior_purchasers, verdict }`. Verdict is `'proceed'` at overlap ≥ 15% (the goal's threshold), else `'defer'`. Idempotent same-UTC-day short-circuit. See [[../recipes/measure-cold-test-purchaser-overlap]].
+
 ## Policy contract — dormant without it
 
 The Media Buyer refuses to autonomously act without an active [[../tables/iteration_policies]] row. On a pass with no policy:
