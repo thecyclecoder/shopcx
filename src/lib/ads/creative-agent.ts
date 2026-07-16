@@ -16,6 +16,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
+import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -158,9 +159,27 @@ async function currentBinDepth(admin: Admin, workspaceId: string, productId: str
   return (data ?? []).length;
 }
 
+/** Discriminated result for `insertReadyCreative` — 'ok' carries the new campaign id, 'skip'
+ *  names a deterministic-gate refusal (author session catches it and revises the copy), 'failed'
+ *  is the legacy null case (angle-insert missed / RLS deny / cErr on the campaign insert). */
+export type InsertReadyCreativeResult =
+  | { kind: "ok"; campaignId: string }
+  | { kind: "skip"; reason: "cold_offer_leak" }
+  | { kind: "failed" };
+
 /** Insert one finished static creative into the ready-to-test bin (mirrors the canonical
  *  /api/ads/upload-static path: angle → campaign(ready) → static ad_videos(ready) in the ad-tool
- *  bucket → landing_url). Returns the campaign id. */
+ *  bucket → landing_url). Returns a discriminated result: `ok` with the new campaign id, `skip`
+ *  when the deterministic Phase-2 cold-offer gate refuses the row, or `failed` when the
+ *  angle/campaign insert missed.
+ *
+ *  DETERMINISTIC COLD-OFFER GATE (docs/brain/specs/dahlia-audience-temperature-marking-and-cold-offer-gate.md
+ *  Phase 2): if the caller marks the row as 'cold' audience AND the composed copy trips
+ *  [[../ads/lf8]] `hasColdOfferLeak`, refuse the insert before any DB write. The MSRP + packaging
+ *  rails remain their own separate gates; a warm/hot/null-temperature row bypasses this gate. The
+ *  temperature the caller passes is also written to ad_campaigns.audience_temperature so the row
+ *  is self-describing (M1 keystone author session sets 'cold'/'warm'/'hot'; the deterministic
+ *  buildMetaCopy path leaves the option undefined → NULL, gate skips). */
 async function insertReadyCreative(
   admin: Admin,
   workspaceId: string,
@@ -170,7 +189,16 @@ async function insertReadyCreative(
   angle: ScoredAngle,
   metaCopy: { headline: string; primaryText: string; description: string },
   image: { buffer: Buffer; mimeType: string },
-): Promise<string | null> {
+  opts?: { audienceTemperature?: "cold" | "warm" | "hot" | null },
+): Promise<InsertReadyCreativeResult> {
+  // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. NULL /
+  // warm / hot pass through untouched (the deterministic buildMetaCopy path is temperature-agnostic
+  // and always leaves audience_temperature undefined here). See [[../ads/lf8]] `hasColdOfferLeak`.
+  const audienceTemperature: "cold" | "warm" | "hot" | null = opts?.audienceTemperature ?? null;
+  if (audienceTemperature === "cold" && hasColdOfferLeak(metaCopy)) {
+    return { kind: "skip", reason: "cold_offer_leak" };
+  }
+
   const { data: angleRow } = await admin
     .from("product_ad_angles")
     .insert({
@@ -196,9 +224,9 @@ async function insertReadyCreative(
   }
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
-    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleId, status })
+    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleId, status, audience_temperature: audienceTemperature })
     .select("id").single();
-  if (cErr || !campaign) return null;
+  if (cErr || !campaign) return { kind: "failed" };
   const campaignId = (campaign as { id: string }).id;
 
   const ext = image.mimeType.includes("png") ? "png" : "jpg";
@@ -217,7 +245,7 @@ async function insertReadyCreative(
   const landingUrl = await resolveLandingUrl(admin, workspaceId, productHandle);
   if (landingUrl) await admin.from("ad_campaigns").update({ landing_url: landingUrl }).eq("id", campaignId);
 
-  return campaignId;
+  return { kind: "ok", campaignId };
 }
 
 /** Generate + QA + bin-insert `count` fresh creatives for one product, cycling through its top unused
@@ -373,7 +401,19 @@ async function stockProduct(
         // buildMetaCopy). Replaces the old hook+fragment concatenation that shipped "I lost 40+ pounds!
         // Appetite suppression/craving control" with the discount jammed into the headline (2026-07-13).
         const metaCopy = buildMetaCopy(brief);
-        const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        // Deterministic buildMetaCopy path is temperature-agnostic — no audienceTemperature is
+        // passed, so insertReadyCreative treats the row as NULL/untagged and the Phase-2 cold-offer
+        // gate skips. The M1 keystone author session (future spec) will thread 'cold'/'warm'/'hot'
+        // through opts.audienceTemperature; the gate activates for cold rows automatically.
+        const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        if (result.kind === "skip") {
+          // cold_offer_leak — deterministic Phase-2 refusal (not a QA/gen failure). Treat like the
+          // packshot skip: no retry (the copy needs a revise, not another regen), distinct reason.
+          out.push({ productId, angleHook: angle.hook, campaignId: null, ok: false, reason: `cold_offer_leak` });
+          skipped = true;
+          break;
+        }
+        const campaignId = result.kind === "ok" ? result.campaignId : null;
         // Record the COMBINATION (concept × creative treatment × copy × destination) as pending — the
         // media buyer stamps its outcome later, feeding the learning flywheel.
         await recordCombinationGenerated(admin, {

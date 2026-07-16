@@ -46,3 +46,42 @@ export function hasAnyLf8(copyLower: string): boolean {
   for (const kw of LF8_KEYWORDS) if (copyLower.includes(kw)) return true;
   return false;
 }
+
+/**
+ * COLD_OFFER_TOKENS — the offer / urgency cluster that must NEVER appear in a cold-audience
+ * creative's caption (docs/brain/specs/dahlia-audience-temperature-marking-and-cold-offer-gate.md
+ * Phase 2). Deliberately the SAME cluster already SSOT'd in LF8_KEYWORDS (offer/urgency, lines
+ * 41-42) — a divergent list would let a hallucinated cold caption ship with an LF8-flagged token
+ * the ads-supervisor gate would still see, defeating the whole point.
+ *
+ * Under Advantage+ the creative IS the audience selector, so a cold-audience creative that leaks
+ * offer/price language is the #1 DTC creative error: it retargets warm-shopper language at a
+ * cold viewer who's never heard of the brand.
+ */
+export const COLD_OFFER_TOKENS: readonly string[] = [
+  "save", "off", "free shipping", "deal", "today",
+];
+
+/** Bare-percent leak (e.g. "20%", "43%"). Word-boundary + 1-3 digits + '%'. */
+const BARE_PERCENT_RE = /\b\d{1,3}%/;
+/** Bare-currency leak (e.g. "$29", "$5"). '$' followed by any digit. */
+const BARE_CURRENCY_RE = /\$\d/;
+
+/**
+ * hasColdOfferLeak — DETERMINISTIC gate the persister chokepoint (insertReadyCreative) runs
+ * before writing a status='ready' row. Given the three Meta copy fields, return true iff:
+ *   (a) any COLD_OFFER_TOKENS substring hits (case-insensitive), OR
+ *   (b) a bare-percent pattern hits (BARE_PERCENT_RE), OR
+ *   (c) a bare-currency pattern hits (BARE_CURRENCY_RE).
+ *
+ * The temperature check itself lives at the CALLER — this predicate just classifies the copy.
+ * The caller fires it only when the row's audience_temperature is 'cold'; warm/hot/null rows
+ * pass through untouched. See [[../ads/creative-agent]] insertReadyCreative.
+ */
+export function hasColdOfferLeak(copy: { headline: string; primaryText: string; description: string }): boolean {
+  const joined = `${copy.headline} ${copy.primaryText} ${copy.description}`.toLowerCase();
+  for (const t of COLD_OFFER_TOKENS) if (joined.includes(t)) return true;
+  if (BARE_PERCENT_RE.test(joined)) return true;
+  if (BARE_CURRENCY_RE.test(joined)) return true;
+  return false;
+}
