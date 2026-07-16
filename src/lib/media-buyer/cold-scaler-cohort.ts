@@ -109,6 +109,31 @@ export async function getEffectiveMediaBuyerColdScalerCohort(
 }
 
 /**
+ * Fetch ONE cold-scaler cohort by id, scoped to the workspace. Consumed by
+ * the CAC:LTV sensor orchestrator ([[media-buyer__cold-scaler-cac-ltv-sensor]]
+ * `runColdScalerCacLtvSensor`) to resolve the `scaler_meta_campaign_id` +
+ * `meta_ad_account_id` for a passed-in `coldScalerCohortId`. Returns `null`
+ * when no row matches (`workspace_id` mismatch or missing id) or the row is
+ * dormant (`is_active=false`) — the sensor treats a dormant/absent cohort as
+ * "nothing to sense" and writes an empty-metrics snapshot with a flag.
+ */
+export async function getMediaBuyerColdScalerCohortById(
+  admin: Admin,
+  args: { workspaceId: string; id: string },
+): Promise<MediaBuyerColdScalerCohort | null> {
+  const { data, error } = await admin
+    .from("media_buyer_cold_scaler_cohorts")
+    .select("*")
+    .eq("workspace_id", args.workspaceId)
+    .eq("id", args.id)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return toColdScalerCohort(data as MediaBuyerColdScalerCohortRow);
+}
+
+/**
  * Enumerate every ACTIVE scaler cohort for one `(workspace, meta_ad_account)`
  * pair, sorted by `product_id` with nulls last — same shape as the
  * `readActiveCohortProductIds` pattern the Phase 3 media-buyer dispatcher uses

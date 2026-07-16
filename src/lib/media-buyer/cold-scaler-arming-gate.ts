@@ -44,6 +44,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { computeBlendedCacLtv, DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
+import { readLatestColdScalerCacLtvSnapshot } from "./cold-scaler-cac-ltv-sensor";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -285,7 +286,7 @@ export async function runColdScalerArmingGate(
   const windowEndDate = isoDate(now);
   const target = input.targetCacLtv ?? DEFAULT_COLD_SCALER_CAC_LTV_TARGET;
 
-  const [shadowReviews, trustSnapshots, blended] = await Promise.all([
+  const [shadowReviews, trustSnapshots, snapshot] = await Promise.all([
     loadColdScalerShadowReviews(admin, {
       workspaceId: input.workspaceId,
       metaAdAccountId: input.metaAdAccountId ?? null,
@@ -296,24 +297,37 @@ export async function runColdScalerArmingGate(
       metaAdAccountId: input.metaAdAccountId ?? null,
       sinceDate: windowStartDate,
     }),
-    // Fallback path per spec — the Phase-8
-    // `media_buyer_cold_scaler_cac_ltv_snapshot` sensor row is the eventual
-    // source of truth, but until that spec ships we compute the same 14d
-    // blended CAC:LTV directly. The pure gate reads a decoupled `CacLtvInput`,
-    // so swapping in the sensor row later is a one-line change.
-    computeBlendedCacLtv({
+    // Prefer the campaign-scoped snapshot from the Phase-2
+    // [[../../../docs/brain/libraries/media-buyer__cold-scaler-cac-ltv-sensor.md]]
+    // sensor (bianca-cold-scaler-campaign-cac-ltv-sensor Phase 2). When a row
+    // exists for the cohort, use its cacLtvRatio + flags verbatim — a scaler
+    // campaign's own CAC:LTV is what should gate the scaler's arming, not
+    // the workspace-blended composite. When absent (sensor hasn't run yet for
+    // this cohort) fall through to `computeBlendedCacLtv` for the same 14d
+    // window — the pure gate's decoupled `CacLtvInput` shape makes the swap
+    // one branch here.
+    readLatestColdScalerCacLtvSnapshot(admin, {
       workspaceId: input.workspaceId,
-      startDate: windowStartDate,
-      endDate: windowEndDate,
-      targetCacLtv: target,
+      coldScalerCohortId: input.coldScalerCohortId,
     }),
   ]);
 
-  const cacLtv: CacLtvInput = {
-    cacLtvRatio: blended.cacLtvRatio,
-    target,
-    unknownFlags: blended.flags,
-  };
+  const cacLtv: CacLtvInput = snapshot
+    ? {
+        cacLtvRatio: snapshot.cacLtvRatio,
+        target,
+        unknownFlags: snapshot.flags,
+      }
+    : await computeBlendedCacLtv({
+        workspaceId: input.workspaceId,
+        startDate: windowStartDate,
+        endDate: windowEndDate,
+        targetCacLtv: target,
+      }).then((blended) => ({
+        cacLtvRatio: blended.cacLtvRatio,
+        target,
+        unknownFlags: blended.flags,
+      }));
 
   const evaluation = evaluateColdScalerArmingPure({ shadowReviews, trustSnapshots, cacLtv });
 
