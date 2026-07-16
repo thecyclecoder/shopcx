@@ -34,6 +34,7 @@
     "test:pr-resolve-retry-cap-counts-parked": "tsx --test src/lib/github-pr-resolve.retry-cap-counts-parked.test.ts",
     "test:fold-closes-orphan-pr": "tsx --test src/lib/agent-jobs.fold-closes-orphan-pr.test.ts",
     "test:stuck-build-terminal-spec": "tsx --test src/lib/agents/platform-director.stuck-build-terminal-spec.test.ts",
+    "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:cart-gifts": "tsx --test src/lib/cart-gifts.test.ts",
