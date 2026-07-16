@@ -672,6 +672,10 @@ async function readStuckQueuedBuildStalls(
  *  or `failed` state — the retry-cap surface in [[github-pr-resolve]] `surfaceExhaustedPrResolve`
  *  already stamps a single `needs_attention` sentinel per PR, so 3 rows means Mario is looking at a
  *  repeat pattern the deduper alone did not stop. */
+/** Orphaned-PR detector age ceiling: only a build row updated within this window is considered for an
+ *  orphaned open PR. A genuinely orphaned PR is days-old at most; older `completed` rows are settled
+ *  history (pre-`merged`-status convention) and must never be re-litigated (911 2026-07-16). */
+const MARIO_ORPHANED_PR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MARIO_PR_RESOLVE_STORM_MIN_PARKED = 3;
 
 /** Rolling window Mario looks back to count parked pr-resolve rows for one PR. 24 h is wide enough to
@@ -814,6 +818,13 @@ async function readOrphanedFoldedPrs(
   workspace_id: string,
 ): Promise<Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }>> {
   const now = Date.now();
+  // AGE CEILING (911 fix `mario-orphaned-pr-age-ceiling` 2026-07-16): only consider RECENT build rows.
+  // The detector's real job is catching a just-folded spec whose PR is still open (e.g. #1893 at 7h) —
+  // NOT months-old settled PRs. Ancient `completed` build rows (pre-`merged`-status convention, e.g.
+  // June PRs #1216/#1218) have no `merged` sibling for the #1914 dedupe to catch, so they re-surfaced as
+  // false orphans and mass-enqueued ~99 no-op mario jobs every cron tick. A genuinely orphaned PR is
+  // days-old at most; cap at MARIO_ORPHANED_PR_MAX_AGE_MS so settled history is never re-litigated.
+  const orphanCutoff = new Date(now - MARIO_ORPHANED_PR_MAX_AGE_MS).toISOString();
   const { data: builds, error } = await admin
     .from("agent_jobs")
     .select("spec_slug, pr_number, spec_branch, status, updated_at")
@@ -821,6 +832,7 @@ async function readOrphanedFoldedPrs(
     .eq("kind", "build")
     .not("pr_number", "is", null)
     .neq("status", "merged")
+    .gte("updated_at", orphanCutoff)
     .limit(1000);
   if (error) throw error;
   const rows = (builds ?? []) as Array<{
