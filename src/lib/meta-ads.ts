@@ -259,6 +259,143 @@ export interface DualAssetCreativeArgs {
  * publishes into a regular ad set. (Pinning `ad_formats:["SINGLE_VIDEO"]` is what
  * triggers the "Dynamic Creative Ad Sets" rejection; AUTOMATIC_FORMAT does not.)
  */
+export interface PlacementCreativeArgs {
+  accountId: string;
+  name: string;
+  pageId: string;
+  instagramUserId?: string | null;
+  /** 4 headlines — each is adlabel'd to every placement so Meta rotates all four per placement. */
+  headlines: string[];
+  /** 4 primary texts — each is adlabel'd to every placement so Meta rotates all four per placement. */
+  primaryTexts: string[];
+  description?: string | null;
+  ctaType: string;
+  destinationUrl: string;
+  displayUrl?: string | null;
+  urlTags?: string | null;
+  /** Feed 4:5 static (also serves as the `default` placement asset via a shared adlabel). */
+  feedImageHash: string;
+  /** Stories/reels 9:16 static. */
+  storyImageHash: string;
+  /** Right-column 1:1 static (also targets FB search). */
+  rightColumnImageHash: string;
+}
+
+/**
+ * 3-bucket PLACEMENT-customized static creative — ONE **portable** (NOT Dynamic
+ * Creative) ad that serves a 4:5 in feed, 9:16 in stories/reels, and 1:1 in
+ * right-column/search, carrying N headlines + N primary texts each rotated across
+ * every placement. Battle-tested 2026-07-16 by creative `780957111743379` / ad
+ * `120252471398980184` (PAUSED in the Amazing Coffee advertorial adset), which
+ * proved Meta accepts this exact shape and renders it across feed / IG story /
+ * FB story / IG standard / right column. Because it stays portable (no
+ * `is_dynamic_creative`, no pinned SINGLE_* format), a winner can be duplicated
+ * into scaling campaigns.
+ *
+ * Shape (each field carries a load-bearing invariant):
+ * - `object_story_spec: { page_id, instagram_user_id }` — page identity only,
+ *   never a `link_data` / `image_data` here (any placement-bearing content on
+ *   the story spec fights `asset_customization_rules`).
+ * - `asset_feed_spec.ad_formats: ['AUTOMATIC_FORMAT']` — a pinned `SINGLE_IMAGE`
+ *   is what flips the creative to Dynamic Creative and gets it rejected outside
+ *   a DCO adset. `AUTOMATIC_FORMAT` keeps the ad portable into scaling.
+ * - `asset_feed_spec.optimization_type: 'PLACEMENT'` — the customization rules
+ *   only apply under `PLACEMENT`; `DEGREES_OF_FREEDOM` ignores them.
+ * - `images` — 3 hashes each `adlabels`-tagged. The feed image carries BOTH the
+ *   `feed` and `default` adlabels so the `default` customization rule (priority 4)
+ *   has an asset to render if a placement isn't covered by rules 1-3. Stories
+ *   image carries only the `stories` label; right-column image only `rightcol`.
+ * - `titles` / `bodies` — each entry is `adlabels`-tagged to ALL FOUR placement
+ *   labels (feed, stories, rightcol, default), so Meta rotates every headline
+ *   and every primary text across every placement.
+ * - `link_urls: [{ website_url, [display_url], adlabels: <all> }]` — one link,
+ *   tagged to every placement.
+ * - `call_to_action_types: [ctaType]` — a single CTA rotated across placements.
+ * - `asset_customization_rules` — one rule per bucket, each pointing at its
+ *   image/title/body/link adlabel plus a `customization_spec` narrowing the
+ *   platform + positions: feed rule (priority 1) → FB feed/profile_feed/marketplace
+ *   + IG stream/explore_home/profile_feed; stories rule (priority 2) → FB
+ *   story/facebook_reels/video_feeds + IG story/reels; rightcol rule (priority 3)
+ *   → FB right_hand_column + search; default rule (priority 4) → empty spec,
+ *   catches everything not matched above.
+ * - `degrees_of_freedom_spec.creative_features_spec.text_optimizations.enroll_status:
+ *   'OPT_OUT'` — Meta must NOT rewrite our copy.
+ */
+export async function createPlacementCreative(token: string, a: PlacementCreativeArgs): Promise<string> {
+  const prefix = `cx_${Date.now()}`;
+  const lbl = (kind: string, p: string) => ({ name: `${prefix}_${kind}_${p}` });
+
+  const PLACEMENTS = ["feed", "stories", "rightcol", "default"] as const;
+  const allBody = PLACEMENTS.map((p) => lbl("body", p));
+  const allTitle = PLACEMENTS.map((p) => lbl("title", p));
+  const allUrl = PLACEMENTS.map((p) => lbl("url", p));
+
+  const labeledBodies = a.primaryTexts.filter(Boolean).map((text) => ({ text, adlabels: allBody }));
+  const labeledTitles = a.headlines.filter(Boolean).map((text) => ({ text, adlabels: allTitle }));
+  const labeledLinkUrls = [{
+    website_url: a.destinationUrl,
+    ...(a.displayUrl ? { display_url: a.displayUrl } : {}),
+    adlabels: allUrl,
+  }];
+
+  // 3 images. Feed image also carries the `default` adlabel — the priority-4 rule
+  // renders it for any placement not matched by rules 1-3.
+  const images = [
+    { hash: a.feedImageHash, adlabels: [lbl("img", "feed"), lbl("img", "default")] },
+    { hash: a.storyImageHash, adlabels: [lbl("img", "stories")] },
+    { hash: a.rightColumnImageHash, adlabels: [lbl("img", "rightcol")] },
+  ];
+
+  const rule = (p: string, priority: number, spec: Record<string, unknown>) => ({
+    customization_spec: { age_min: 13, age_max: 65, ...spec },
+    image_label: lbl("img", p),
+    body_label: lbl("body", p),
+    title_label: lbl("title", p),
+    link_url_label: lbl("url", p),
+    priority,
+  });
+
+  const body: Record<string, unknown> = {
+    name: a.name,
+    object_story_spec: {
+      page_id: a.pageId,
+      ...(a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {}),
+    },
+    asset_feed_spec: {
+      ad_formats: ["AUTOMATIC_FORMAT"],
+      optimization_type: "PLACEMENT",
+      images,
+      bodies: labeledBodies,
+      titles: labeledTitles,
+      descriptions: [{ text: (a.description || "").trim() }],
+      call_to_action_types: [a.ctaType],
+      link_urls: labeledLinkUrls,
+      asset_customization_rules: [
+        rule("feed", 1, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["feed", "profile_feed", "marketplace"],
+          instagram_positions: ["stream", "explore_home", "profile_feed"],
+        }),
+        rule("stories", 2, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["story", "facebook_reels", "video_feeds"],
+          instagram_positions: ["story", "reels"],
+        }),
+        rule("rightcol", 3, {
+          publisher_platforms: ["facebook"],
+          facebook_positions: ["right_hand_column", "search"],
+        }),
+        rule("default", 4, {}),
+      ],
+    },
+    degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
+    ...(a.urlTags ? { url_tags: a.urlTags } : {}),
+  };
+  const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
+  if (!j.id) throw new Error("meta_creative_no_id");
+  return j.id;
+}
+
 export async function createDualAssetCreative(token: string, a: DualAssetCreativeArgs): Promise<string> {
   const isVideo = !!(a.feedVideoId && a.storyVideoId);
   const prefix = `cx_${Date.now()}`;
