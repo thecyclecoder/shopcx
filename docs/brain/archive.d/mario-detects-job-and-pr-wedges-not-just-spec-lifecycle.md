@@ -1,0 +1,1 @@
+- **Mario detects job/PR wedges (storms, unclaimed & never-enqueued builds), not just spec-lifecycle stalls** · verified 2026-07-16 · → [[../libraries/mario]]
