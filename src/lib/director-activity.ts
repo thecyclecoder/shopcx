@@ -232,7 +232,16 @@ export type DirectorActionKind =
   // rollup surfaces every analyze decision + its reasoning. Owned by CS (director_function='cs').
   // metadata: { job_id, ticket_id, analysis_id, score, issues_types, ai_message_count,
   // trigger, autonomous:true }.
-  | "ticket_analyzed";
+  | "ticket_analyzed"
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — the goal-member serializer's
+  // auto-break. When the designated 'earliest ready' head has NO in-flight build row (never
+  // enqueued or its next chained phase was never queued) and a sibling is being serialized-and-
+  // ejected, the auto-break force-enqueues the head to advance the stall. One row per
+  // intervention, so the operator can audit WHY a head was force-enqueued (bypassing the Phase-1
+  // admission gate that would otherwise refuse). Owned by Platform (director_function='platform').
+  // metadata: { actor:'serializer-deadlock-autobreak', goal_slug, ejected_slug, job_id?,
+  // autonomous:true }.
+  | "serializer_deadlock_auto_broken";
 
 export interface DirectorActivityInput {
   workspaceId: string;

@@ -6045,16 +6045,27 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   // Phase 1's fail-open path (transient DB error → admission returns ok:true) ever admits a
   // second goal-mate, this claim-gate still catches it + we know to look. Cross-GOAL
   // parallelism is preserved (one-off + members of different goals no-op here).
-  const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
+  const { evaluateGoalMemberBuildDispatch, autoBreakGoalMemberDeadlockIfDue } = await import("../src/lib/agent-jobs");
   const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
   if (!serial.ok) {
     console.warn(
       `[phase1-gate-leak] claim-time goal-member serializer fired for ${slug} — the enqueue-time admission gate should have caught this. serial verdict: ${serial.reason}`,
     );
+    // parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — advance the stalled head.
+    // The serializer just ejected THIS spec because it isn't the earliest ready head. If the
+    // earliest ALSO has no in-flight build (never enqueued / chained phase never queued), the
+    // whole goal deadlocks: siblings claim→eject forever and the head never starts. Run the
+    // auto-break BEFORE returning the requeue verdict so the next tick sees the head enqueued
+    // and the requeue converges. Best-effort — a resolver miss / cooldown skip / not-goal-bound
+    // spec just returns `autoBroken:false` and the requeue disposition is unchanged.
+    const autoBreak = await autoBreakGoalMemberDeadlockIfDue(job.workspace_id, slug);
+    const suffix = autoBreak.autoBroken
+      ? ` (auto-broke stalled head: enqueued ${autoBreak.earliest})`
+      : "";
     return {
       ok: false,
       disposition: "requeue",
-      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}`,
+      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}${suffix}`,
     };
   }
 

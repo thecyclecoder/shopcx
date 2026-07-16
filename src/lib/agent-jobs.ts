@@ -739,7 +739,18 @@ export async function enqueueSpecTestIfDue(
 export async function enqueueBuildIfDue(
   workspaceId: string,
   slug: string,
-  opts?: { createdBy?: string | null; instructions?: string | null },
+  opts?: {
+    createdBy?: string | null;
+    instructions?: string | null;
+    /** parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — skip the
+     *  Phase-1 goal-mate admission gate. Only the deadlock auto-break sets this:
+     *  when a goal's designated head-of-line has no in-flight build but other
+     *  race-artifact mates are queued, admission would refuse the head; the
+     *  auto-break has already verified this is the head, so it must land. Every
+     *  other caller MUST leave this false — bypassing admission for a non-head
+     *  would re-open the goal-mate collision Phase 1 closed. */
+    bypassGoalMemberAdmission?: boolean;
+  },
 ): Promise<{ enqueued: boolean; reason?: string; jobId?: string }> {
   const admin = createAdminClient();
 
@@ -782,8 +793,15 @@ export async function enqueueBuildIfDue(
   // the CEO's board still showed both cards live. Gate here so the loser never enqueues; the
   // reactive path (buildOnEligible / autoQueueUnblockedBy) re-fires when the sibling completes.
   // Fail-open on any resolve error (the claim-time serializer is still in place as a backstop).
-  const admission = await evaluateGoalMemberEnqueueAdmission(workspaceId, slug);
-  if (!admission.ok) return { enqueued: false, reason: admission.reason };
+  //
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — the auto-break passes
+  // `bypassGoalMemberAdmission:true` when it needs to force-enqueue a designated head-of-line
+  // that admission would otherwise refuse (its own siblings are race-artifact `queued` rows).
+  // Only that one narrow caller sets it; everything else falls through the gate as before.
+  if (!opts?.bypassGoalMemberAdmission) {
+    const admission = await evaluateGoalMemberEnqueueAdmission(workspaceId, slug);
+    if (!admission.ok) return { enqueued: false, reason: admission.reason };
+  }
 
   const { data: inserted, error } = await admin
     .from("agent_jobs")
@@ -1919,6 +1937,238 @@ export async function admitNextGoalMemberOnCompletion(
       e instanceof Error ? e.message : e,
     );
     return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — advance a
+// stalled goal-serializer head-of-line.
+// ─────────────────────────────────────────────────────────────────────────────
+// `decideGoalMemberBuildDispatch` (above) names an 'earliest ready head' and
+// holds every non-earliest sibling. If that head has NO active build job (never
+// enqueued, or the next chained phase was never queued), the whole goal
+// DEADLOCKS: the ejected siblings claim→reject every tick, the head never
+// starts, and Phase 2's `admitNextGoalMemberOnCompletion` release only fires on
+// completion — which never comes. Observed 2026-07-15 on
+// bianca-cold-scaler-cohort-and-daily-ceiling: 'cohort-and-ceiling' was the
+// earliest but never enqueued; siblings behind it churned on the requeue
+// cooldown until a human intervened.
+//
+// This auto-break runs from the same claim-time hook that ejects the sibling:
+// when the claim-time serializer refuses this spec, we ALSO check whether the
+// earliest actually has an in-flight job. If NOT, we auto-enqueue the earliest
+// (`enqueueBuildIfDue`, bypassing the Phase-1 goal-mate admission gate that
+// would otherwise refuse — the earliest IS the designated slot-holder; the
+// non-earliest queued mates are race artifacts that will re-eject at claim
+// time). A `director_activity` audit row records the break. A short cooldown
+// (dedupe against recent auto-break rows) prevents thrash — the auto-break
+// fires ONCE per stall per grace window; if the resulting enqueue also stalls,
+// the operator sees the audit trail rather than a churn loop.
+//
+// Fail-open per unit — a resolver miss returns { autoBroken: false } and the
+// caller's requeue path is unaffected. Cross-goal parallelism is untouched
+// (one-off / not-goal-bound specs no-op here).
+
+/** Verdict from the deadlock-auto-break pure predicate — either the earliest
+ *  head is missing from the in-flight set (deadlocked, auto-break should fire)
+ *  or a reason we skip. */
+export type GoalMemberDeadlockAutoBreakDecision =
+  | { deadlocked: true; earliest: string }
+  | { deadlocked: false; reason: string };
+
+/** The PURE core of `autoBreakGoalMemberDeadlockIfDue`. Given the member
+ *  roster + the current in-flight set (ANY active status, incl. `queued`),
+ *  compute the earliest-ready head (Kahn head, alphabetically ties-break) and
+ *  return `deadlocked: true` iff that head has NO row in the in-flight set.
+ *  Kept pure so the named failing state — "earliest ready head has no in-flight
+ *  build job → auto-break fires" — is unit-testable without a Supabase seam. */
+export function decideGoalMemberDeadlockAutoBreak(input: {
+  members: GoalMemberDispatchState[];
+  inflight: GoalMemberInflightRow[];
+}): GoalMemberDeadlockAutoBreakDecision {
+  const { members, inflight } = input;
+  if (members.length === 0) return { deadlocked: false, reason: "no-members" };
+
+  const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
+  const unbuilt = members.filter(
+    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
+  );
+  if (unbuilt.length === 0) {
+    return { deadlocked: false, reason: "no-unbuilt-members" };
+  }
+
+  const readyHeads: string[] = [];
+  for (const c of unbuilt) {
+    let ready = true;
+    for (const b of c.blockedBy) {
+      if (b === c.slug) continue;
+      const bMember = memberBySlug.get(b);
+      if (!bMember) continue; // external / cross-goal blocker — not our concern here
+      if (!bMember.onGoalBranch) {
+        ready = false;
+        break;
+      }
+    }
+    if (ready) readyHeads.push(c.slug);
+  }
+  if (readyHeads.length === 0) {
+    return {
+      deadlocked: false,
+      reason: "no-ready-head: every unbuilt member still has a goal-mate blocker unbuilt",
+    };
+  }
+  readyHeads.sort();
+  const earliest = readyHeads[0];
+
+  // Deadlock iff the earliest is NOT in the in-flight set at all (no queued /
+  // claimed / building / needs_input / etc. row). If the earliest is present in
+  // any active status, the serializer is working correctly — the head owns the
+  // slot; no auto-break needed.
+  const headInFlight = inflight.some((r) => r.slug === earliest);
+  if (headInFlight) {
+    return {
+      deadlocked: false,
+      reason: `head-in-flight: earliest ready head ${earliest} already has an active build row`,
+    };
+  }
+
+  return { deadlocked: true, earliest };
+}
+
+/** Result of the async auto-break — carries the enqueued slug on success so the
+ *  caller can log it in its requeue reason. */
+export type GoalMemberDeadlockAutoBreakResult =
+  | { autoBroken: true; earliest: string; jobId: string | null }
+  | { autoBroken: false; reason: string };
+
+/** How long a fresh auto-break for the same earliest slug is suppressed after
+ *  we already broke it once. Short enough that a truly-stuck goal (e.g. the
+ *  auto-broken build itself immediately failed pre-flight and left no in-flight
+ *  row) recovers on the next standing tick; long enough that we don't hammer
+ *  director_activity every 90s claim-cooldown. Kept module-level so the tests
+ *  and the caller share the constant. */
+export const GOAL_MEMBER_DEADLOCK_AUTOBREAK_COOLDOWN_MS = 3 * 60 * 1000;
+
+/** The DB reader — resolve the goal, list its members, read the in-flight
+ *  goal-mate rows (across ALL ACTIVE_STATUSES — we need to know if the earliest
+ *  is queued/claimed/building/etc., not just building), invoke the pure
+ *  predicate, and if it says `deadlocked` enqueue the earliest via a bypass
+ *  path (the Phase-1 admission gate would refuse because non-earliest race
+ *  artifacts are queued; the earliest IS the designated slot-holder so the
+ *  bypass is safe). Emits ONE `director_activity` audit row (`actor` =
+ *  `serializer-deadlock-autobreak`) so the operator sees the intervention.
+ *  Fail-open: any resolver miss returns `autoBroken:false` with a reason. */
+export async function autoBreakGoalMemberDeadlockIfDue(
+  workspaceId: string,
+  ejectedSlug: string,
+): Promise<GoalMemberDeadlockAutoBreakResult> {
+  try {
+    const goalSlug = await resolveGoalSlugForSpec(workspaceId, ejectedSlug);
+    if (!goalSlug) return { autoBroken: false, reason: "not-goal-bound" };
+
+    const { goalBranchState } = await import("@/lib/specs-table");
+    const state = await goalBranchState(workspaceId, goalSlug);
+    if (state.specs.length === 0) return { autoBroken: false, reason: "goal-has-no-members" };
+
+    const memberSlugs = state.specs.map((s) => s.slug);
+    const admin = createAdminClient();
+
+    // Load in-flight goal-mate rows — ALL active statuses, INCLUDING the
+    // caller's own. If the earliest is already in-flight (queued / claimed /
+    // building / …), the predicate short-circuits with `head-in-flight` and we
+    // never enqueue.
+    const { data: inflightRows } = await admin
+      .from("agent_jobs")
+      .select("spec_slug, status")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "build")
+      .in("spec_slug", memberSlugs)
+      .in("status", ACTIVE_STATUSES);
+    const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
+      slug: (r as { spec_slug: string }).spec_slug,
+      status: (r as { status: string }).status,
+    }));
+
+    const members: GoalMemberDispatchState[] = [];
+    for (const m of state.specs) {
+      const spec = await getSpecFromDb(workspaceId, m.slug);
+      members.push({
+        slug: m.slug,
+        onGoalBranch: m.onGoalBranch,
+        status: m.status,
+        blockedBy: spec?.blocked_by ?? [],
+      });
+    }
+
+    const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight });
+    if (!decision.deadlocked) return { autoBroken: false, reason: decision.reason };
+    const { earliest } = decision;
+
+    // Grace window — if we already auto-broke for this earliest within the
+    // cooldown, skip. The auto-break's insert may still be settling (or the
+    // resulting build may have failed pre-flight and vanished); do NOT hammer
+    // the audit trail on every 90s requeue tick.
+    const cooldownCutoff = new Date(Date.now() - GOAL_MEMBER_DEADLOCK_AUTOBREAK_COOLDOWN_MS).toISOString();
+    const { data: recentBreaks } = await admin
+      .from("director_activity")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("action_kind", "serializer_deadlock_auto_broken")
+      .eq("spec_slug", earliest)
+      .gte("created_at", cooldownCutoff)
+      .limit(1);
+    if (recentBreaks && recentBreaks.length) {
+      return { autoBroken: false, reason: `cooldown: recent auto-break for ${earliest} within ${GOAL_MEMBER_DEADLOCK_AUTOBREAK_COOLDOWN_MS}ms` };
+    }
+
+    // Bypass the Phase-1 goal-mate admission gate — the earliest IS the
+    // designated slot-holder; the other queued mates are race artifacts that
+    // will re-eject at the next claim tick. `enqueueBuildIfDue` still applies
+    // shipped/deferred/blocked_by/auto_build gates on the earliest itself, so
+    // the bypass is scoped narrowly to the goal-mate serializer.
+    const enq = await enqueueBuildIfDue(workspaceId, earliest, {
+      instructions: `serializer-deadlock-autobreak: goal ${goalSlug} head-of-line ${earliest} had no in-flight build while sibling ${ejectedSlug} was serialized-and-ejected; auto-enqueuing the head to break the stall.`,
+      bypassGoalMemberAdmission: true,
+    });
+    if (!enq.enqueued) {
+      return {
+        autoBroken: false,
+        reason: `earliest ${earliest} not admissible: ${enq.reason ?? "unknown"}`,
+      };
+    }
+
+    // Supervisor-visible audit — one row per intervention, so the operator can
+    // see WHY the earliest was force-enqueued and correlate with the log.
+    try {
+      const { recordDirectorActivity } = await import("@/lib/director-activity");
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: "platform",
+        actionKind: "serializer_deadlock_auto_broken",
+        specSlug: earliest,
+        reason: `goal-member serializer auto-break: goal ${goalSlug} head-of-line ${earliest} had no in-flight build; sibling ${ejectedSlug} was serialized-and-ejected. Force-enqueued ${earliest} to advance the stalled head.`,
+        metadata: {
+          actor: "serializer-deadlock-autobreak",
+          goal_slug: goalSlug,
+          ejected_slug: ejectedSlug,
+          job_id: enq.jobId ?? null,
+          autonomous: true,
+        },
+      });
+    } catch {
+      /* audit is best-effort — the enqueue already landed */
+    }
+
+    console.log(
+      `[serializer-deadlock-autobreak] goal=${goalSlug} advanced stalled head ${earliest} (ejected sibling ${ejectedSlug}); jobId=${enq.jobId ?? "(unknown)"}`,
+    );
+    return { autoBroken: true, earliest, jobId: enq.jobId ?? null };
+  } catch (e) {
+    console.warn(
+      `[serializer-deadlock-autobreak] auto-break threw for ${ejectedSlug} (best-effort, no-op):`,
+      e instanceof Error ? e.message : e,
+    );
+    return { autoBroken: false, reason: "threw" };
   }
 }
 
