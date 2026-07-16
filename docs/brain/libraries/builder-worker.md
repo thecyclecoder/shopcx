@@ -118,6 +118,12 @@ The Growth-owned lane that scores each concluded Media Buyer action against real
 - **Idempotency guards** — the `.upsert(onConflict='director_activity_id')` + `.select('id')` write pattern collapses re-runs and compare-and-sets so a concurrent grader can't silently no-op. No active policy → grader is a no-op (grading a null-policy action is a category error).
 - **Write chokepoint** — [[media-buyer-grader]] `gradeMediaBuyerActions` is the ONLY writer to [[../tables/media_buyer_action_grades]]. The lane never touches the table directly.
 
+## Claim-RPC cooldown verification — pre-claim gate check
+
+Before opening the build/plan claim block each poll pass, the worker calls `ensureClaimAgentJobCooldownVerified()` to verify the live `public.claim_agent_job(text[])` RPC still honors the `(claimed_at is null or claimed_at <= now())` cooldown predicate (see [[claim-rpc-verify]]). The RPC is the mechanism gate-held builds back off without churning — a released build gets a future `claimed_at` that the RPC skips until the hold expires. If DDL drift removed the predicate, a released row is immediately re-claimable and the poll loop wedges on the same row forever without writing its heartbeat.
+
+The verification **caches its result** with a 10-minute TTL (`CLAIM_COOLDOWN_VERIFY_INTERVAL_MS`) — a cheap memory read on the hot path after the first check. On a failed verification, the **entire build/plan claim block is skipped for that poll pass** (non-build lanes like fold, ticket-*, grades, … keep claiming); the next `writeHeartbeat` call escalates the box tile to `needs_attention` with the verifier's reason. An operator sees the exact predicate-missing signal instead of a silent stale-worker mystery.
+
 ## The build-claim gate — five-leg `evaluateClaimTimeBuildGate`
 
 A `kind='build'` job's **claim** (the moment Bo attempts to dispatch it from the queue) is guarded by a **five-leg gate** that runs LAST before dispatch. Goal-member serialization (Phase 1) + goal-mate blocker clearance fit here (post-blocked_by resolution, pre-Vale):
