@@ -136,11 +136,11 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
 }
 
 /**
- * ada-reacts-to-approvals-immediately-never-sits Phase 2 — the pure tag decision at the build
- * worker's raise chokepoint (`scripts/builder-worker.ts` — the primary `needs_approval` handler +
- * `normalizeDevActions`). Given the model's self-declared action `type` + `cmd` + `preview`, plus
- * a working-tree `readFile` hook, returns the effective `PendingAction['type']` string the worker
- * stores.
+ * ada-reacts-to-approvals-immediately-never-sits Phase 3 (Fix 1 — security-review remediation
+ * for Phase 2). The pure tag decision at the build worker's raise chokepoint
+ * (`scripts/builder-worker.ts` — the primary `needs_approval` handler + `normalizeDevActions`).
+ * Given the model's self-declared action `type` + `cmd` + `preview`, plus a working-tree `readFile`
+ * hook, returns the effective `PendingAction['type']` string the worker stores.
  *
  * The problem this closes: a build model that couches a MIGRATION in the shell form
  * `npx tsx scripts/apply-<slug>-migration.ts` self-tags the action `run_prod_script`. The leash
@@ -149,16 +149,38 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
  * backfill). So Ada, reacting instantly per Phase 1, has to escalate to the CEO — instead of the
  * ~1-min self-approve the additive classifier already earns for a directly-tagged apply_migration.
  *
+ * ⭐ FAIL-CLOSED (Fix 1 — security-review coaching #2, untrusted capability boundary):
+ *   The cmd string is a MODEL-AUTHORED, PARTIALLY-EXECUTED CAPABILITY. Any reclassification path
+ *   that lets Ada in-leash-approve MUST validate the ENTIRE cmd surface at read time, not just
+ *   scan for a substring match. The rails:
+ *     1. `parseSingleApplyMigrationCommand` enforces the ENTIRE cmd matches ONE anchored shape:
+ *          `[npx ]tsx scripts/apply-<slug>-migration.ts`
+ *        — start-of-string anchor, end-of-string anchor, NO extra argv, NO leading-dash tokens
+ *        anywhere, NO shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `<`, backticks, `$(…)`,
+ *        newlines). ANY extra token or metachar → the cmd is REJECTED (compound-command attack:
+ *        `npx tsx scripts/apply-foo-migration.ts; rm -rf /` no longer reclassifies).
+ *     2. The apply script itself must be READABLE (`readFile` returns non-null). A missing /
+ *        unreadable script → fail-closed to `run_prod_script`. Prevents the "preview spoof" where
+ *        the model narrates additive-looking SQL in `preview` while pointing at a script the
+ *        classifier can't inspect.
+ *     3. EVERY `<slug>.sql` filename the script string-references must be READABLE. A dynamically-
+ *        constructed / missing / unreadable reference → fail-closed to `run_prod_script`.
+ *     4. Classification is over the ON-DISK sources ONLY (script src + every referenced SQL file).
+ *        The model-declared `preview` is NEVER trusted as input to the additive verdict — it's
+ *        stored on the pending action for the human/grader to see, but the leash decision uses
+ *        the immutable disk contents. Prevents the "preview spoof" ⇒ additive-declaration ⇒
+ *        classifier-passes attack vector at the source.
+ *
  * The decision (deterministic — the classifier errs safe on any missed keyword):
  *   - `merge_pr` stays `merge_pr` (unchanged).
- *   - `run_prod_script` whose cmd matches `scripts/apply-<slug>-migration.ts`, AND the union of
- *     cmd + preview + the apply script's source + every referenced supabase/migrations/*.sql
- *     classifies as `additive` — re-tag to `apply_migration`. The Phase-1 leash gate then hits
+ *   - `run_prod_script` whose ENTIRE cmd is one of the two anchored shapes above, AND whose
+ *     apply script + every referenced `supabase/migrations/*.sql` reads AND classifies as
+ *     `additive` — re-tag to `apply_migration`. The Phase-1 leash gate then hits
  *     `LEASH_ACTION_TYPES['apply_migration']` (`additive_migration`), classifyMigrationSql
  *     re-verifies the same additive verdict, and Ada auto-approves in-leash.
- *   - A `run_prod_script` whose script is NOT a `scripts/apply-*-migration.ts` path (a real shell
- *     command, not a migration wrapper), OR whose wrapped SQL classifies non-additive (DROP /
- *     TRUNCATE / DELETE-WHERE / ALTER DROP CONSTRAINT / ON DELETE CASCADE / …) — stays
+ *   - EVERY other `run_prod_script` — compound command, extra argv, missing script,
+ *     unreadable SQL reference, or a script whose union of on-disk SQL classifies non-additive
+ *     (DROP / TRUNCATE / DELETE-WHERE / ALTER DROP CONSTRAINT / ON DELETE CASCADE / …) — stays
  *     `run_prod_script`. The lone-shell fail-safe holds (categoryFor returns null → escalate),
  *     and `routeOutOfLeashAction` (migration-safety.ts:578) is NEVER relaxed for non-additive or
  *     non-migration scripts — the destructive-preapproval boundary is preserved.
@@ -168,12 +190,52 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
  *
  * PURE — no I/O. `readFile` is injected: production binds it to the build worker's working-tree
  * `fs.readFileSync(resolve(wt, relPath), 'utf8')` (returning `null` on ENOENT); tests drive an
- * in-memory fake. A `null` return from `readFile` (missing file / read error) is treated the same
- * as an empty string — the classifier scans the cmd + preview alone. Errs safe by design: if the
- * apply script can't be found, cmd + preview must SOLELY carry additive evidence to earn the
- * apply_migration tag.
+ * in-memory fake.
  */
+
+/** Kept for back-compat with the sanity test that pins the on-disk convention; NEVER used for
+ *  reclassification (that path uses the fail-closed `parseSingleApplyMigrationCommand` below).
+ *  Callers that walk the source for `.sql` references still use this shape to name-match. */
 export const APPLY_MIGRATION_SCRIPT_REGEX = /scripts\/(apply-[a-z0-9_-]+-migration\.ts)/i;
+
+/**
+ * Parse an ENTIRE cmd string as a single, well-formed apply-migration invocation. Returns
+ * `{ scriptFileName }` on success, `null` on ANY malformed / unsafe shape.
+ *
+ * The two accepted shapes (both anchored to start + end):
+ *   1. `npx tsx scripts/apply-<slug>-migration.ts`
+ *   2. `tsx scripts/apply-<slug>-migration.ts`
+ *
+ * Explicitly REJECTED (all return null — the tagger keeps the action as `run_prod_script`):
+ *   - Compound commands: `; & | && || & \n`, `>`, `<`, backticks, `$(…)`.
+ *   - Extra argv: any token after the `.ts` filename (e.g. `--apply`, `--flag=value`, another
+ *     file path).
+ *   - Leading-dash tokens anywhere (e.g. `npx --yes tsx scripts/apply-foo-migration.ts` — the
+ *     `--yes` is out of shape). The two accepted shapes have NO flags in them by design.
+ *   - Any script name that doesn't match the on-disk convention `apply-<slug>-migration.ts`
+ *     (the slug is `[a-z0-9_-]+`).
+ *
+ * Same character class as `_check-worker-lanes` / the destructive-migration classifier: the
+ * safety property is "the entire string is EXACTLY one of these two shapes, byte-for-byte, no
+ * extras." A single mismatched byte → null → stays run_prod_script.
+ */
+export function parseSingleApplyMigrationCommand(
+  cmd: string | null | undefined,
+): { scriptFileName: string } | null {
+  if (typeof cmd !== "string") return null;
+  const trimmed = cmd.trim();
+  if (!trimmed) return null;
+  // Reject ANY shell metacharacter or newline anywhere — even inside would-be paths. These are
+  // never legitimate parts of the two accepted shapes above.
+  if (/[;&|`$><\n\r]/.test(trimmed)) return null;
+  // Anchored full-string match, EXACTLY one of the two shapes. Slug is `[a-z0-9_-]+` — matches
+  // the on-disk apply-*-migration.ts naming convention. No flags, no extra tokens.
+  const m = trimmed.match(
+    /^(?:npx\s+)?tsx\s+scripts\/(apply-[a-z0-9_-]+-migration\.ts)$/,
+  );
+  if (!m) return null;
+  return { scriptFileName: m[1] };
+}
 
 export function tagPendingActionType(
   rawType: unknown,
@@ -182,47 +244,72 @@ export function tagPendingActionType(
   readFile: (relPath: string) => string | null,
 ): "apply_migration" | "run_prod_script" | "merge_pr" {
   if (rawType === "merge_pr") return "merge_pr";
-  if (rawType === "run_prod_script") {
-    const cmdStr = typeof cmd === "string" ? cmd : "";
-    const scriptMatch = cmdStr.match(APPLY_MIGRATION_SCRIPT_REGEX);
-    if (!scriptMatch) return "run_prod_script";
-    const sql = resolveMigrationSqlForClassification(cmdStr, preview ?? "", readFile);
-    return classifyMigrationSql(sql).severity === "additive" ? "apply_migration" : "run_prod_script";
+  if (rawType !== "run_prod_script") return "apply_migration";
+  // Fail-closed gate #1: the ENTIRE cmd must be exactly one apply-*-migration.ts invocation.
+  const parsed = parseSingleApplyMigrationCommand(cmd);
+  if (!parsed) return "run_prod_script";
+  // Fail-closed gate #2: the script itself must be readable.
+  const scriptRel = `scripts/${parsed.scriptFileName}`;
+  const scriptSrc = readFile(scriptRel);
+  if (scriptSrc == null) return "run_prod_script";
+  // Fail-closed gate #3: EVERY referenced .sql file must be readable.
+  const sqlRefs = extractSqlReferences(scriptSrc);
+  const sqlContents: string[] = [];
+  for (const rel of sqlRefs) {
+    const sql = readFile(`supabase/migrations/${rel}`);
+    if (sql == null) return "run_prod_script";
+    sqlContents.push(sql);
   }
-  return "apply_migration";
+  // Classification is over ON-DISK sources ONLY — preview (model-declared) is NEVER trusted as
+  // input to the leash decision, even though we store it on the action for human review.
+  const fullSql = [scriptSrc, ...sqlContents].join("\n");
+  return classifyMigrationSql(fullSql).severity === "additive"
+    ? "apply_migration"
+    : "run_prod_script";
 }
 
 /**
- * Concatenate every text surface that carries the effective SQL for classification: the shell cmd
- * itself, the model's preview, the referenced `scripts/apply-<slug>-migration.ts` source, and each
- * `supabase/migrations/*.sql` file that script string-references. All read through the injected
- * `readFile`. A missing file simply contributes nothing — the classifier still scans what remains.
- * PURE. Callers pass the working-tree-bound `readFile`.
+ * The union of on-disk SQL surfaces the classifier will scan for a given apply-migration cmd.
+ *
+ * ⭐ FAIL-CLOSED (Fix 1): returns `null` if the cmd is malformed / compound / has extra argv,
+ * OR if the script is unreadable, OR if ANY referenced `.sql` file is unreadable. `null` is the
+ * caller's signal to stay `run_prod_script` (the tagger's semantics). The model-declared `cmd`
+ * and `preview` are NEVER included in the returned string — the leash decision runs over
+ * trusted on-disk content only, so a spoofed preview can't downgrade the verdict.
+ *
+ * When callers pass this to `classifyMigrationSql`, an empty script that references no .sql
+ * files (rare — a valid apply script always contains at least the migration text or a
+ * STATEMENTS array) STILL classifies as additive by the classifier's defensive fallback; that's
+ * fine because the classifier is over the SCRIPT SOURCE itself, which the caller has confirmed
+ * is readable and represents the exact bytes that will run.
  */
 export function resolveMigrationSqlForClassification(
   cmd: string | null | undefined,
-  preview: string | null | undefined,
+  _previewIgnoredForClassification: string | null | undefined,
   readFile: (relPath: string) => string | null,
-): string {
-  const parts: string[] = [];
-  if (cmd) parts.push(cmd);
-  if (preview) parts.push(preview);
-  const cmdStr = typeof cmd === "string" ? cmd : "";
-  const scriptMatch = cmdStr.match(APPLY_MIGRATION_SCRIPT_REGEX);
-  if (scriptMatch) {
-    const scriptRel = `scripts/${scriptMatch[1]}`;
-    const src = readFile(scriptRel);
-    if (src != null) {
-      parts.push(src);
-      const sqlRefs = new Set<string>();
-      for (const m of src.matchAll(/([a-z0-9_-]+\.sql)/gi)) sqlRefs.add(m[1]);
-      for (const rel of sqlRefs) {
-        const sql = readFile(`supabase/migrations/${rel}`);
-        if (sql != null) parts.push(sql);
-      }
-    }
+): string | null {
+  const parsed = parseSingleApplyMigrationCommand(cmd);
+  if (!parsed) return null;
+  const scriptRel = `scripts/${parsed.scriptFileName}`;
+  const scriptSrc = readFile(scriptRel);
+  if (scriptSrc == null) return null;
+  const sqlRefs = extractSqlReferences(scriptSrc);
+  const parts: string[] = [scriptSrc];
+  for (const rel of sqlRefs) {
+    const sql = readFile(`supabase/migrations/${rel}`);
+    if (sql == null) return null;
+    parts.push(sql);
   }
   return parts.join("\n");
+}
+
+/** Extract every `<slug>.sql` filename string-referenced by an apply-migration script's source.
+ *  A single script may reference many (e.g. `const MIGRATIONS = ['a.sql', 'b.sql']`); the tagger
+ *  fail-closes if any one is unreadable so we can't get a partial-classification pass. */
+function extractSqlReferences(scriptSrc: string): string[] {
+  const refs = new Set<string>();
+  for (const m of scriptSrc.matchAll(/([a-z0-9_-]+\.sql)/gi)) refs.add(m[1]);
+  return Array.from(refs);
 }
 
 // ── Phase 3 — computed blast-radius via transactional dry-run ─────────────────────
