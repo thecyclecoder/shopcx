@@ -858,8 +858,27 @@ async function readOrphanedFoldedPrs(
     if (s.status === "folded" || s.status === "shipped") terminalSpecs.set(s.slug, s.status);
   }
 
+  // A PR that has ANY build row already `merged` is NOT orphaned — it merged via a DIFFERENT build
+  // row for the same PR. The primary scan above excludes `merged` rows (`.neq('status','merged')`), so
+  // a PR with an earlier `completed`/`needs_attention` build row (same pr_number) survives as a FALSE
+  // orphan and re-enqueues a mario job every cron tick (911 2026-07-16: ~24 long-merged PRs like #868 —
+  // a `merged` build row AND a `completed` build row both carry pr_number=868 — mass-enqueued mario jobs
+  // that just no-op on the already-closed PR). Fetch the merged pr_numbers among our candidates and drop them.
+  const candidatePrs = [...new Set([...bySlug.values()].map((b) => b.pr_number))];
+  const { data: mergedRows } = candidatePrs.length
+    ? await admin
+        .from("agent_jobs")
+        .select("pr_number")
+        .eq("workspace_id", workspace_id)
+        .eq("kind", "build")
+        .eq("status", "merged")
+        .in("pr_number", candidatePrs)
+    : { data: [] as Array<{ pr_number: number | null }> };
+  const mergedPrs = new Set(((mergedRows ?? []) as Array<{ pr_number: number | null }>).map((r) => r.pr_number));
+
   const out: Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }> = [];
   for (const [slug, b] of bySlug) {
+    if (mergedPrs.has(b.pr_number)) continue; // PR already merged (a sibling build row is `merged`) — not orphaned
     const specStatus = terminalSpecs.get(slug) ?? null;
     if (
       !shouldSurfaceOrphanedFoldedPr({
