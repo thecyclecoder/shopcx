@@ -158,7 +158,53 @@ async function autoBreakGoalMemberDeadlockIfDue(workspaceId: string, ejectedSlug
 
 The **deadlock auto-break** that unblocks a stalled goal serializer ([[../specs/parallel-build-serialized-merge-and-deadlock-autobreak]] Phase 1). The serializer refuses to claim a goal-mate whenever the 'earliest ready' head has no in-flight build row — a fully-serialized flow where the head never even enqueued (a chain pause, a director override, or a transient early failure) leaves **every sibling claimed → ejected forever** (observed 2026-07-15 on `bianca-cold-scaler-cohort-and-daily-ceiling`: the head never queued, so the serializer ejected its siblings every tick for hours). `decideGoalMemberDeadlockAutoBreak` is the **pure predicate**: given the goal's member roster + the in-flight row set, it computes the Kahn topological head (earliest ready goal-mate whose blockers are all on-goal-branch), and returns `{ deadlocked: true, earliest }` iff that head has **NO** row in ANY active status. `autoBreakGoalMemberDeadlockIfDue` is the **async wrapper**: resolves the goal via `resolveGoalSlugForSpec`, reads the member roster + in-flight rows, invokes the pure predicate, and if it detects deadlock **applies a 3-minute cooldown** by dedupe against recent `director_activity` rows for the same earliest slug (fail-safe against re-enqueuing on every standing-pass tick), then force-enqueues the earliest via `enqueueBuildIfDue` with `bypassGoalMemberAdmission:true` (the head IS the designated slot-holder; race artifacts like stale `queued` mates from a prior tick would otherwise refuse), and writes ONE `director_activity` audit row (`actor='serializer-deadlock-autobreak'`, `action_kind='serializer_deadlock_auto_broken'` — see [[director-activity]]). Wired into the claim-time serializer's ejection path (`scripts/builder-worker.ts` → `evaluateGoalMemberBuildDispatch` → the requeue disposition body): when `evaluateGoalMemberBuildDispatch` refuses this spec, the auto-break fires BEFORE the requeue reason returns, appending its outcome (`autoBroken: true/false`) to the log. Fail-open at every seam — a resolver miss / not-goal-bound spec / cooldown-hit / non-deadlock returns `autoBroken:false` and the requeue disposition is unchanged. **Verification pinned:** a goal whose earliest-ready head has no in-flight job and a sibling is repeatedly ejected → the auto-break detects deadlock and enqueues the head; when the head has an active job → no auto-break fires. See `src/lib/goal-member-deadlock-autobreak.test.ts`.
 
-### `evaluateGoalMemberBuildDispatch` / `decideGoalMemberBuildDispatch` — functions  *(serialize-goal-member-spec-builds Phase 1)*
+### `checkReadyGoalNeverFrozenInvariant` / `assertReadyGoalNeverFrozenAndAutoBreak` — functions  *(goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 3)*
+
+```ts
+type ReadyGoalNeverFrozenVerdict = { verdict: "deadlock"; earliest: string } | { verdict: "ok"; reason: string };
+type ReadyGoalNeverFrozenOutcome =
+  | { verdict: "ok"; reason: string }
+  | { verdict: "deadlock"; earliest: string; autoBroken: boolean; autoBreakReason: string | null };
+function checkReadyGoalNeverFrozenInvariant(input: { members: GoalMemberDispatchState[]; inflight: GoalMemberInflightRow[] }): ReadyGoalNeverFrozenVerdict
+async function assertReadyGoalNeverFrozenAndAutoBreak(workspaceId: string, goalSlug: string): Promise<ReadyGoalNeverFrozenOutcome>
+```
+
+The **ready-goal-never-frozen invariant** — belt-and-suspenders over Phases 1 (permissive queue + shared `GOAL_INFLIGHT_STATUSES`) + 2 (serial claim-and-decide). Even with both, a future change could re-introduce a wedge (a chained-phase reactive path failing to enqueue the next head, a chain pause, a director override) that leaves a ready goal frozen with a queued later member and no earliest-ready row — the 2026-07-16 dahlia state, which today required a hand-run unwedge. `checkReadyGoalNeverFrozenInvariant` is the pure predicate — a thin wrapper over `decideGoalMemberDeadlockAutoBreak` re-shaped as `{ verdict: 'deadlock' | 'ok', ... }`. Returns 'deadlock' iff the goal has ≥1 Kahn ready head AND that head has NO row (not queued, not building) in the inflight set. Returns 'ok' when the head has any row (dispatcher will admit it next tick) OR when no ready head exists (nothing to advance).
+
+`assertReadyGoalNeverFrozenAndAutoBreak` is the **async wrapper**: resolves the goal's members via `goalBranchState`, reads every in-flight goal-mate row across `ACTIVE_STATUSES` (incl. `queued` — the invariant cares whether the head has ANY row, not just an executing one — same reader as `autoBreakGoalMemberDeadlockIfDue`), invokes the pure predicate, and on 'deadlock' fires the existing `autoBreakGoalMemberDeadlockIfDue` against the earliest slug (its own 3-min cooldown dedupes rapid re-checks; it writes the `serializer_deadlock_auto_broken` director_activity audit row + enqueues the earliest via `enqueueBuildIfDue` with `bypassGoalMemberAdmission:true`). Best-effort — a resolver / DB blip returns `verdict:'ok'` so a transient failure never wedges the caller.
+
+Wired into [[spec-investigation]] `whyIsSpecNotBuilding`: when a spec has no live build job AND is goal-bound, the diagnostics call the wrapper before returning the generic `no_build_job` reason. On 'deadlock' it returns `reason:'ready_goal_deadlock'` with a detail line that includes the auto-break outcome (enqueued the earliest, or the reason it didn't land — cooldown / admission miss). This is the automated form of today's manual fix: any stall investigation that hits a dahlia-shaped state surfaces AND self-heals in one call. **Verification pinned:** the invariant returns 'deadlock' with the exact earliest slug for the 2026-07-16 dahlia state (head with no job, later member `queued`) and 'ok' otherwise. See `src/lib/ready-goal-never-frozen.test.ts`.
+
+### `decideSerialClaimDispatchOutcome` — function  *(goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 2)*
+
+```ts
+type SerialClaimDispatchVerdict = { ok: boolean; reason?: string } | null;
+interface SerialClaimDispatchInput { kind: string; isResume: boolean; specSlug: string | null; dispatchVerdict: SerialClaimDispatchVerdict; }
+type SerialClaimDispatchOutcome = { action: "launch" } | { action: "release"; reason: string };
+function decideSerialClaimDispatchOutcome(input: SerialClaimDispatchInput): SerialClaimDispatchOutcome
+```
+
+The **pure classifier** the box's `build/plan` pool invokes right after every `claim_agent_job` RPC return — the SERIAL claim-and-decide step that replaces the old per-tick fan-out. Under the previous behavior the poll loop filled every free lane in one tick (each `claim_agent_job` call ran concurrently) and left the goal-serializer to fire INSIDE `runJob`, so two same-goal same-priority mates both flipped to `building` in the same tick and mutually blocked — the amplifier of the 2026-07-16 dahlia deadlock. Phase 2 pulls one item at a time, decides (launch or release-back-to-queued), and only THEN advances to the next — build EXECUTION stays parallel across MAX_CONCURRENT lanes; only the CLAIM step is serialized. The predicate is pure so the "one poll pass claims+dispatches exactly one same-goal mate" invariant is unit-testable without a fake worker + Supabase (`src/lib/serial-claim-dispatch.test.ts`).
+
+Verdict handling:
+- **`kind !== "build"`** (plan / other pool kinds) → **launch** (they don't goal-serialize).
+- **`isResume`** (`agent_jobs.claude_session_id` set) → **launch** (committed WIP — its branch/PR exists; matches the claim-time gate's resume exemption at `scripts/builder-worker.ts:~6010`).
+- **`specSlug == null`** → **launch** (nothing to resolve to a goal).
+- **`dispatchVerdict == null`** (caller skipped the check / evaluator threw) → **launch** (fail open — the claim-time gate inside `runJob` still guards).
+- **`dispatchVerdict.ok`** → **launch**.
+- Else → **release** with the serializer's reason. The caller re-stamps `status='queued'` + a future `claimed_at` (BUILD_GATE_HOLD_COOLDOWN_MS — same cooldown the claim-time gate uses) so the RPC skips the row until the next window, then fires `autoBreakGoalMemberDeadlockIfDue` in case the earliest ready head has no in-flight row at all.
+
+Wired into `scripts/builder-worker.ts` at the `[serial-claim-decide]` block right after the `while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT)` claim, so no `launch()` fires without a settled disposition. Two goal-mates fetched in adjacent iterations see the classifier SERIALLY: the second's `evaluateGoalMemberBuildDispatch` reads the first as in-flight (GOAL_INFLIGHT_STATUSES) and refuses, so exactly one launches per pass.
+
+### `GOAL_INFLIGHT_STATUSES` — constant  *(goal-serializer-one-decision-point Phase 1)*
+
+```ts
+export const GOAL_INFLIGHT_STATUSES: JobStatus[] = ["claimed", "building", "needs_input", "needs_approval", "queued_resume", "blocked_on_usage"];
+```
+
+The **single shared "in-flight for the goal serializer" set** — identical to `ACTIVE_STATUSES` minus `queued`. Both `decideGoalMemberEnqueueAdmission` (enqueue-time) and `evaluateGoalMemberBuildDispatch` (claim-time) READ from this constant so they can never diverge on whether a queued goal-mate counts as in-flight — the exact split that caused the 2026-07-16 dahlia deadlock (`dahlia-imitate-then-innovate-copy-engine`), where admission counted a `queued` sibling as in-flight and refused the earliest-ready head while dispatch did NOT count `queued` and held the queued member behind the (non-existent) head — mutual deadlock, zero in-flight for hours. Post-fix: **the queue is permissive** — any unblocked goal-mate always reaches `queued` — and **serialization moves entirely to the claim-time dispatcher** (one decision point). `queued` is a candidate for the serial slot, not a slot-holder. The deadlock-autobreak's reader is deliberately different: it still queries `ACTIVE_STATUSES` (includes `queued`) because it asks a different question — "does the head have ANY row at all, incl. queued?" (see `decideGoalMemberDeadlockAutoBreak`).
+
+### `evaluateGoalMemberBuildDispatch` / `decideGoalMemberBuildDispatch` — functions  *(serialize-goal-member-spec-builds Phase 1 · goal-serializer-one-decision-point Phase 1)*
 
 ```ts
 async function evaluateGoalMemberBuildDispatch(workspaceId: string, slug: string): Promise<GoalMemberBuildDispatchVerdict>
@@ -172,27 +218,27 @@ Goal-bound specs of the SAME goal must serialize on build (concurrent builds col
 
 `evaluateGoalMemberBuildDispatch` is the **DB reader** — calls `resolveGoalSlugForSpec` (get the goal), `getGoalSpecMembersInOrder` (list goal-mates in blocked_by order), `listAgentJobs` (check for in-flight builds), and invokes the pure predicate. Wired into `scripts/builder-worker.ts` `evaluateClaimTimeBuildGate` **leg 4** (the 4-leg claim gate: 1-goal-bound-validation, 2-blocked_by-clear, 3-vale-pass, **4-goal-member-serialize**, 5-one-off-fallback) — after blocked_by clearance, before Vale check. Never throws; fails OPEN (a read error → treat as `'ineligible'` → no-op gate, the downstream tests still protect).
 
-### `evaluateGoalMemberEnqueueAdmission` / `decideGoalMemberEnqueueAdmission` — functions  *(goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 · parallel-build-serialized-merge-and-deadlock-autobreak Phase 2)*
+*goal-serializer-one-decision-point Phase 1:* the reader queries `agent_jobs` using the shared `GOAL_INFLIGHT_STATUSES` constant (no `queued`) — the SAME set the admission-gate reader uses, so the two gates can never diverge on which mate holds the serial slot. The pure predicate additionally strips any `queued`/`queued_resume` rows from its `inflight` input as defense-in-depth, so a caller who forgets the filter can't wedge dispatch by treating a candidate as a slot-holder. This is what re-establishes the dahlia head's dispatch when a later mate is `queued`: `queued` never counts, the head is the alphabetically-first ready mate, and it wins the slot.
+
+### `evaluateGoalMemberEnqueueAdmission` / `decideGoalMemberEnqueueAdmission` — functions  *(goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 · parallel-build-serialized-merge-and-deadlock-autobreak Phase 2 · goal-serializer-one-decision-point Phase 1)*
 
 ```ts
 type GoalMemberEnqueueAdmissionResult = { ok: true } | { ok: false; reason: string };
-function decideGoalMemberEnqueueAdmission(input: { 
-  slug: string; 
-  goalSlug: string; 
-  inflight: GoalMemberInflightRow[]; 
-  members?: GoalMemberDispatchState[]; 
+function decideGoalMemberEnqueueAdmission(input: {
+  slug: string;
+  goalSlug: string;
+  inflight: GoalMemberInflightRow[];
+  members?: GoalMemberDispatchState[]; // unused today; retained for future gates
   laneCap?: number;
 }): GoalMemberEnqueueAdmissionResult
 async function evaluateGoalMemberEnqueueAdmission(workspaceId, slug): Promise<GoalMemberEnqueueAdmissionResult>
 ```
 
-The **enqueue-time admission gate** — replaced the blanket "any sibling in-flight" serializer with **DAG-aware parallel admission**. `evaluateGoalMemberBuildDispatch` (above) serializes goal-mate builds at CLAIM time — N goal-mates land as `queued` rows and the claim-gate then re-queues the losers each tick. That prevents the race but leaves the CEO's board looking like the whole goal is a live pile-up. This helper moves the admission UP to enqueue and **unlocks parallel lanes for dependency-independent specs** ([[../specs/parallel-build-serialized-merge-and-deadlock-autobreak]] Phase 2). Before `enqueueBuildIfDue` / `queueNextChainedPhase` / `queueRoadmapBuild` (in [[roadmap-actions]]) inserts a `kind='build'` row, it consults the admission gate with TWO checks:
+The **enqueue-time admission gate**, now PERMISSIVE. *goal-serializer-one-decision-point Phase 1* removed the DAG-aware blocker-in-flight refusal: any UNBLOCKED goal-mate always reaches `queued` (its transitive blockers are already tested by `enqueueBuildIfDue`'s `blockedBy.some(!cleared)` gate one call earlier), and serialization moves entirely to the CLAIM-time dispatcher (`decideGoalMemberBuildDispatch`) — **one decision point, no queue-vs-in-flight disagreement**. This kills the 2026-07-16 dahlia deadlock (`dahlia-imitate-then-innovate-copy-engine`), where admission counted a `queued` sibling as in-flight and refused the earliest-ready head while dispatch did NOT count `queued` and held the queued mate behind the (non-existent) head — mutual deadlock, zero in-flight for hours.
 
-**(1) LANE CAP** — refuse when `GOAL_MEMBER_MAX_PARALLEL_LANES` (default 10, exported constant to match box `MAX_CONCURRENT`) in-flight goal-mates saturate the cap. Multiple goal-mates below the cap are admitted concurrently **instead of the Phase-1 blanket refusal** — the CEO's board now shows parallel lanes in use, not a pile-up. Reason `serialized-goal-mate-lane-cap: goal … already has N in-flight goal-mates (>= cap 10); admission held until a slot frees`.
+**LANE CAP** — the ONE remaining refusal. Refuse when the count of goal-mates in `GOAL_INFLIGHT_STATUSES` (see above — GENUINELY executing; `queued`/`queued_resume` are NOT counted) reaches `GOAL_MEMBER_MAX_PARALLEL_LANES` (default 10, matches box `MAX_CONCURRENT`). This is the global concurrency guard so a fully-independent DAG can't drain every build lane from one goal. Reason `serialized-goal-mate-lane-cap: goal … already has N in-flight goal-mate build(s) (>= cap 10); admission held until a slot frees`.
 
-**(2) BLOCKER-IN-FLIGHT** — BFS the transitive `blocked_by` closure over the goal's member DAG and refuse if any transitive blocker is in an ACTIVE status. External / cross-goal blockers (not in the goal's member set) are ignored — the async `enqueueBuildIfDue` gate handles those. Reason `serialized-goal-mate-blocker-in-flight: goal … blocker X (status) is in-flight; admission held until it merges`.
-
-Mutually-independent goal-mates pass both gates and **admit concurrently** — this is the Phase 2 unlock. The pure `decideGoalMemberEnqueueAdmission` predicate takes optional `members` (the DAG) + `laneCap` and defaults to lane-cap-only when `members` is absent (safe fallback). The reader `evaluateGoalMemberEnqueueAdmission` does the DB work: `resolveGoalSlugForSpec` (one-off / null goal ⇒ ok:true) → `goalBranchState` (list member slugs + their `blocked_by`) → `getSpecFromDb` per member (to load `blocked_by`) → `agent_jobs` query (any goal-mate in ACTIVE) → predicate with full DAG input. Fail-OPEN on any resolve error (the claim-time serializer is still in place as a backstop). Does NOT retire `evaluateGoalMemberBuildDispatch` / the claim-gate leg 4 — the claim-gate still fires as defense-in-depth but is now a WARN-only assertion (`[phase1-gate-leak]` if it ever refuses a second mate — the healthy run shows NO such logs).
+The pure `decideGoalMemberEnqueueAdmission` predicate defensively strips self-rows AND any `queued`/`queued_resume` rows before the cap check, so a caller who forgets to align on `GOAL_INFLIGHT_STATUSES` never accidentally counts a candidate as a slot-holder. The reader `evaluateGoalMemberEnqueueAdmission` does the DB work: `resolveGoalSlugForSpec` (one-off / null goal ⇒ ok:true) → `goalBranchState` (list member slugs + `blocked_by`) → `getSpecFromDb` per member → `agent_jobs` query using the shared `GOAL_INFLIGHT_STATUSES` (matches the dispatch reader) → predicate. Fail-OPEN on any resolve error (the claim-time dispatcher is still the ONE decision point, so an over-admission is caught there). The claim-time dispatcher stays in place as the single serialization point; the enqueue gate is now just the cap-guard.
 
 ### `admitNextGoalMemberOnCompletion` / `pickNextGoalMemberCandidates` — functions  *(goal-member-builds-gate-at-enqueue-not-at-claim Phase 2)*
 

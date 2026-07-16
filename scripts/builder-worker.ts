@@ -26014,6 +26014,17 @@ async function main() {
         launch(job);
       }
       // Fill the build/plan pool.
+      // goal-serializer-one-decision-point Phase 2 — SERIAL claim-and-decide. The box used to claim
+      // multiple build jobs per poll tick (this `while` loop fills every free lane at once) and let
+      // each one fire the goal-member serializer LATER, inside runJob. Two same-goal mates queued at
+      // the same priority both flipped to `building` in the same tick, then each was post-hoc
+      // re-queued by the claim-time gate — a claim-race that amplified the 2026-07-16 dahlia
+      // deadlock (both mates churned at the 90s cooldown with zero forward progress). The founder's
+      // directive: pull one item at a time, decide (build or release), then advance to the next.
+      // Build EXECUTION stays parallel across the MAX_CONCURRENT lanes; only the CLAIM-and-DECIDE
+      // step is serialized here so two goal-mates can never both spawn Max sessions in the same
+      // tick. Non-goal / one-off jobs pass the decision instantly (evaluateGoalMemberBuildDispatch
+      // returns ok:true), so unrelated builds fan out at full lane throughput as before.
       while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
@@ -26022,6 +26033,64 @@ async function main() {
         // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
         // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
         if (await claimHeldForUnreviewedSpec(job)) continue;
+        // goal-serializer-one-decision-point Phase 2 — the ONE serialization decision. Fires here
+        // (BEFORE launch → BEFORE Max session) so a not-admitted goal-mate is released to `queued`
+        // without wasting a claude -p session on the wrong mate. Skips resumes (committed WIP —
+        // their branch/PR exists; runJob's claim-gate exempts them for the same reason) and
+        // non-build kinds (plan doesn't goal-serialize; evaluateGoalMemberBuildDispatch on a plan
+        // job would resolve as not-goal-bound and return ok:true, but we bypass the DB round trip).
+        // Any throw fails OPEN (launch normally) — the claim-time gate inside runJob remains as
+        // defense-in-depth.
+        if (job.kind === "build" && !job.claude_session_id && job.spec_slug) {
+          let verdict: import("../src/lib/agent-jobs").SerialClaimDispatchVerdict = null;
+          try {
+            const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
+            verdict = await evaluateGoalMemberBuildDispatch(job.workspace_id, job.spec_slug);
+          } catch (e) {
+            // Fail open — the claim-time gate inside runJob will catch it on the way down. Log so
+            // a persistent DB flake is visible in the box tile.
+            console.warn(
+              `[serial-claim-decide] evaluateGoalMemberBuildDispatch threw for ${job.spec_slug} (proceeding — claim-time gate still guards):`,
+              e instanceof Error ? e.message : e,
+            );
+          }
+          const { decideSerialClaimDispatchOutcome, autoBreakGoalMemberDeadlockIfDue } = await import("../src/lib/agent-jobs");
+          const outcome = decideSerialClaimDispatchOutcome({
+            kind: job.kind,
+            isResume: !!job.claude_session_id,
+            specSlug: job.spec_slug,
+            dispatchVerdict: verdict,
+          });
+          if (outcome.action === "release") {
+            // Release the claim back to `queued` with the standard hold cooldown (mirrors the
+            // claim-time gate at line ~23906 — the RPC skips a queued row whose `claimed_at` is
+            // still in the future, so the released mate backs off ~BUILD_GATE_HOLD_COOLDOWN_MS
+            // before being re-picked). Not cancelled, not lost — its spot in the queue is
+            // preserved and it's re-evaluated on the next window. Then fire the deadlock
+            // auto-break in case the goal's earliest head has no in-flight row at all
+            // (parallel-build-serialized-merge-and-deadlock-autobreak's contract — same call the
+            // runJob-side gate makes on ejection).
+            const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
+            await update(job.id, {
+              status: "queued",
+              claimed_at: holdUntil,
+              log_tail: `serial-claim-decide held — ${outcome.reason}`.slice(-2000),
+            });
+            try {
+              const autoBreak = await autoBreakGoalMemberDeadlockIfDue(job.workspace_id, job.spec_slug);
+              const suffix = autoBreak.autoBroken ? ` (auto-broke stalled head: enqueued ${autoBreak.earliest})` : "";
+              console.log(
+                `[serial-claim-decide] ${job.spec_slug} released → queued (cooldown ${Math.round(BUILD_GATE_HOLD_COOLDOWN_MS / 1000)}s): ${outcome.reason}${suffix}`,
+              );
+            } catch (e) {
+              console.warn(
+                `[serial-claim-decide] ${job.spec_slug} released → queued (cooldown ${Math.round(BUILD_GATE_HOLD_COOLDOWN_MS / 1000)}s): ${outcome.reason}; auto-break threw:`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+            continue;
+          }
+        }
         console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
         launch(job);
       }
