@@ -1,0 +1,1 @@
+- **Ada reacts to routed approvals immediately — approve-fast-or-escalate-fast, never sits** · verified 2026-07-16 · → [[../libraries/platform-director]]

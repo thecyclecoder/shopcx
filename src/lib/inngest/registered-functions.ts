@@ -157,6 +157,7 @@ import { marioStallCron } from "@/lib/inngest/mario-stall-cron";
 import { dailyDigestCron } from "@/lib/inngest/daily-digest-cron";
 import { platformDirectorCron } from "@/lib/inngest/platform-director-cron";
 import { buildOnEligible } from "@/lib/inngest/build-on-eligible";
+import { approvalEnqueueDirector } from "@/lib/inngest/approval-enqueue-director";
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-cron";
 import { refundSettlementReconcileCron } from "@/lib/inngest/refund-settlement-reconcile";
@@ -334,6 +335,7 @@ export const registeredInngestFunctions = [
   dailyDigestCron,
   platformDirectorCron,
   buildOnEligible,
+  approvalEnqueueDirector,
   securityDepWatch,
   securityDiffBackstopCron,
   refundSettlementReconcileCron,
