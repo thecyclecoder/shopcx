@@ -130,6 +130,19 @@ const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
  * to match so this doesn't silently drift. */
 const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
 
+/**
+ * Settle window for the `tickets-awaiting-handler-dispatch` work probe
+ * (control-tower-unified-handler-dispatch-workprobe). Mirrors INTENT_SETTLE_MS in
+ * src/lib/inngest/unanswered-inbound-backstop-cron.ts — every ingest chokepoint stamps
+ * `dispatch_pending_at` BEFORE firing `ticket/inbound-message`, and the handler's
+ * `clearDispatchIntent` clears it at the top of every claimed run. A stamp older than this window
+ * with no clear is the same signal the backstop reconciler uses to re-fire a lost send. Keeping
+ * the probe on the SAME boundary means the tile alerts on exactly the set of dispatched inbounds
+ * the reconciler is about to re-fire — never on a raw inbound still inside the Inngest delivery
+ * window. If the cron's constant moves, the sibling regression test pins the two to match so this
+ * doesn't silently drift. */
+const HANDLER_DISPATCH_SETTLE_MS = 3 * 60_000;
+
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
 function elapsed(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -1048,6 +1061,47 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 - (solFirstTouchAckRes.count ?? 0)
                 - solFirstTouchDispatchExcluded,
             );
+          }
+          case "tickets-awaiting-handler-dispatch": {
+            // The handler's OWN work signal (control-tower-unified-handler-dispatch-workprobe).
+            //
+            // Every ingest chokepoint routes through [[../inngest/dispatch-inbound-message]]
+            // `dispatchInboundMessage`, which stamps `dispatch_pending_at = now` on the just-inserted
+            // inbound `ticket_messages` row BEFORE firing `ticket/inbound-message`. The counterpart in
+            // [[../inngest/unified-ticket-handler]] `clearDispatchIntent` clears the stamp at the TOP
+            // of every claimed run (regardless of disposition — real turn, ai_disabled skip, empty
+            // inbound, spam), so an un-cleared stamp survives ONLY when the handler never received
+            // the event. Aging that stamp past `HANDLER_DISPATCH_SETTLE_MS` (mirrors INTENT_SETTLE_MS
+            // in the unanswered-inbound-backstop cron) turns it into an unambiguous LOST handler
+            // dispatch — the exact signal loop:unified-ticket-handler is supposed to alert on.
+            //
+            // Why the shift from `tickets-awaiting-decision` (which counts inbound customer messages
+            // in-window and subtracts several bypass classes): that probe measures the AI orchestrator's
+            // upstream demand, which is a strict superset of the handler's. A raw inbound row that
+            // was NOT stamped (because its ingest path deliberately bypassed the handler — CSAT
+            // reopen inserts, sentinel merges) still counted as "handler work" under the old probe
+            // and could fire idle_while_work on a quiet-window inbound that never should have
+            // invoked the handler at all. Keying the probe on `dispatch_pending_at` eliminates that
+            // class at the source: no stamp ⇒ no work ⇒ no alert.
+            //
+            // Filter shape:
+            //   - `dispatch_pending_at IS NOT NULL` — a real dispatch intent exists on this row.
+            //   - `dispatch_pending_at <= now - HANDLER_DISPATCH_SETTLE_MS` — settled past the same
+            //     boundary the backstop reconciler uses (`INTENT_SETTLE_MS`), so a fresh dispatch
+            //     still inside the Inngest delivery window doesn't count as awaited work.
+            //   - `direction = 'inbound'` AND `author_type = 'customer'` — defensive, since only
+            //     inbound customer messages ever receive a stamp today, but pinning the filter
+            //     matches the semantic of "the handler is supposed to service THIS class" so a
+            //     future outbound-side use of the column can't accidentally leak into the count.
+            const dispatchCutoff = new Date(Date.now() - HANDLER_DISPATCH_SETTLE_MS).toISOString();
+            const { count } = await admin
+              .from("ticket_messages")
+              .select("id", { count: "exact", head: true })
+              .eq("direction", "inbound")
+              .eq("author_type", "customer")
+              .not("dispatch_pending_at", "is", null)
+              .lte("dispatch_pending_at", dispatchCutoff);
+            return count ?? 0;
           }
           default:
             return 0;

@@ -56,7 +56,7 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 // control-tower-canonical-node-registry P2 — routing owner comes from the canonical registry so
 // the platform-director's leash + the approval router agree on every kind by construction.
 import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
-import { setSpecStatus } from "@/lib/specs-table";
+import { setSpecStatus, listSpecs } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
@@ -521,6 +521,79 @@ export async function enqueuePlatformDirectorJobs(admin: Admin): Promise<{ enque
     if (!error) slugs.push(t.spec_slug || String(t.kind));
   }
   return { enqueued: slugs.length, slugs };
+}
+
+/**
+ * ada-reacts-to-approvals-immediately Phase 1 — the REACTIVE per-target enqueuer the
+ * `approval-enqueue-director` Inngest fn calls on a Platform-routed `needs_approval` insert.
+ *
+ * Sub-minute counterpart to `enqueuePlatformDirectorJobs` (the ~1-min box sweep + the standing-pass
+ * cron backstop). Given ONE target agent_jobs row already in hand + the chart/autonomy fixtures the
+ * caller has loaded, it enforces the same three invariants and inserts at most one
+ * `platform-director` decision job:
+ *
+ *   1. Platform must be live+autonomous (`platformIsAutoApprover`) — the dormant fail-safe.
+ *   2. The target must still be `needs_approval` (races between event fire + delivery are common).
+ *   3. The target's job must route to Platform (`routesToPlatformForJob` walks the approver up the
+ *      chart — a plan whose goal belongs to a live+autonomous department routes THERE, not here).
+ *   4. Dedup on `target_job_id` — if any `platform-director` row already carries this target, skip.
+ *      Matches the sweep's dedup (`enqueuePlatformDirectorJobs` above) so repeat delivery of the
+ *      same event is a no-op regardless of which lane got there first.
+ *
+ * PURE seam for testability — the caller (the Inngest fn's `step.run`) loads `admin` / `chart` /
+ * `autonomy` once and passes them in. Best-effort at the DB write: an insert error surfaces via the
+ * returned `reason` so the reactive fn logs it, but the standing-pass cron's every-5-min backstop
+ * (plus the newly-added `needs_approval` EXISTS branch in `platformHasPendingWork`) still recovers
+ * the target on the very next tick — the reactive fn is a latency-only optimization, never the sole
+ * carrier of correctness.
+ */
+export async function reactiveEnqueuePlatformDirectorForTarget(
+  admin: Admin,
+  target: {
+    id: string;
+    workspace_id: string;
+    kind: string;
+    spec_slug: string | null;
+    status: string;
+    pending_actions?: DirectorActionLike[] | null;
+  },
+  chart: OrgChartGraph,
+  autonomy: AutonomyMap,
+): Promise<{ enqueued: boolean; reason: string }> {
+  if (!platformIsAutoApprover(autonomy)) return { enqueued: false, reason: "platform-dormant" };
+  if (target.status !== "needs_approval") return { enqueued: false, reason: `target-status:${target.status}` };
+  const routes = await routesToPlatformForJob(admin, target, chart, autonomy);
+  if (!routes) return { enqueued: false, reason: "not-platform-routed" };
+
+  // Dedup: never queue a second director job for a target that already has one (any status). Matches
+  // the sweep's `seen` set so the reactive fn and the ~1-min box sweep can't both insert a duplicate.
+  const { data: existing } = await admin
+    .from("agent_jobs")
+    .select("instructions")
+    .eq("kind", "platform-director")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const seen = new Set<string>();
+  for (const e of existing || []) {
+    try {
+      const i = JSON.parse((e.instructions as string) || "{}");
+      if (i.target_job_id) seen.add(String(i.target_job_id));
+    } catch {
+      /* not JSON — skip */
+    }
+  }
+  if (seen.has(String(target.id))) return { enqueued: false, reason: "already-queued" };
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: target.workspace_id,
+    spec_slug: target.spec_slug || String(target.kind),
+    kind: "platform-director",
+    status: "queued",
+    created_by: null,
+    instructions: JSON.stringify({ target_job_id: target.id, target_kind: target.kind }),
+  });
+  if (error) return { enqueued: false, reason: `insert-error:${error.message}` };
+  return { enqueued: true, reason: "queued" };
 }
 
 // ── Phase 2 — escort approved goals through their milestones ─────────────────────────────────────
@@ -4735,6 +4808,56 @@ export interface PlatformPendingWorkResult {
 }
 
 /**
+ * reap-needs-attention-jobs-for-archived-specs Phase 2 — the PURE decision half of the standing-pass
+ * stuck-build lister. Given the raw parked/stalled `agent_jobs` rows and the set of TERMINAL spec slugs
+ * for this workspace (folded), return the subset that is still a legitimate stuck-build signal:
+ *   - a `build`/`spec-test` job whose spec is TERMINAL is FILTERED OUT (the spec has shipped/folded;
+ *     the Phase 1 reaper is on its way to cancel it, and the wake gate must not re-flag an already-
+ *     shipped spec as stuck between fold and the next reaper sweep — the 2026-07-12 false-positive
+ *     class this spec closes).
+ *   - a `build`/`spec-test` job with NO `spec_slug` (rare edge; the worker's own bookkeeping) is KEPT.
+ *   - any NON-build/spec-test parked/stalled job (repair, ticket-handle, triage-sweep, …) is KEPT —
+ *     the reaper's archived-spec cleanup is scoped to build/spec-test kinds, so those other kinds
+ *     are unaffected by the fold/reap window.
+ *
+ * Exported so the spec's Verification bullet ("a folded spec's parked job is NOT reported as a stuck
+ * build; a live-spec needs_attention job IS still reported") can be unit-tested without a Supabase
+ * client — the pure decision seam pinned in `platform-director.stuck-build-terminal-spec.test.ts`.
+ */
+export function filterStuckJobsForTerminalSpecs<J extends { kind: string; spec_slug: string | null }>(
+  jobs: J[],
+  terminalSpecSlugs: ReadonlySet<string>,
+): J[] {
+  return jobs.filter((j) => {
+    if (j.kind !== "build" && j.kind !== "spec-test") return true; // non-build kinds unaffected
+    if (!j.spec_slug) return true; // a build/spec-test job with no slug never resolves to a terminal spec
+    return !terminalSpecSlugs.has(j.spec_slug);
+  });
+}
+
+/**
+ * reap-needs-attention-jobs-for-archived-specs Phase 2 — resolve the TERMINAL spec-slug set for a
+ * workspace via the [[../libraries/specs-table]] SDK. `folded` is the only DB-persisted terminal spec
+ * status (`shipped` is derived — a spec that's genuinely shipped but not yet folded still has DB
+ * `status=NULL` and is legitimately buildable via a chained next-phase or fix). Reading via `listSpecs`
+ * respects the "database is the spec" SDK chokepoint (a raw `.from('specs')` here is banned). Fail-OPEN:
+ * a read error yields an empty set (the reaper is the durable backstop; a transient blip must not stall
+ * the pass by broadening the filter).
+ */
+async function listTerminalSpecSlugsForStuckBuildFilter(workspaceId: string): Promise<ReadonlySet<string>> {
+  try {
+    const folded = await listSpecs(workspaceId, { status: "folded" });
+    return new Set(folded.map((s) => s.slug));
+  } catch (e) {
+    console.warn(
+      `[platform-director] listTerminalSpecSlugsForStuckBuildFilter read failed ws=${workspaceId}:`,
+      e instanceof Error ? e.message : e,
+    );
+    return new Set();
+  }
+}
+
+/**
  * Cheap EXISTS/COUNT gate over everything the standing pass monitors. Returns `pending=true` on the
  * FIRST signal (cheap checks first, expensive last) so an idle workspace short-circuits after one
  * `.select("id").limit(1)`. A `pending=false` verdict means the pass can safely skip every lane this
@@ -4744,7 +4867,7 @@ export interface PlatformPendingWorkResult {
  * Signals scanned:
  *  1. active [[director_directives]] for platform (headlines the pass + the daily watch)
  *  2. open [[spec_drift]] rows (the drift-supervision lane's input)
- *  3. [[agent_jobs]] `needs_attention` OR building > 90m (self-watch + park-route + backstop input)
+ *  3. [[agent_jobs]] `needs_attention`, `needs_approval`, OR building > 90m (self-watch + park-route + backstop input)
  *  4. open [[error_events]] (reconcileErrorBacklog input)
  *  5. open [[loop_alerts]] (reconcileErrorBacklog input)
  *  6. non-terminal [[specs]] `in_review｜planned｜in_progress` (escort / init / groom input)
@@ -4788,23 +4911,57 @@ export async function platformHasPendingWork(workspaceId: string): Promise<Platf
   }
 
   // (3) any parked or long-running build — self-watch + park-route input.
+  // reap-needs-attention-jobs-for-archived-specs Phase 2 — defense-in-depth for the reap-window: filter
+  // out a needs_attention/building `build`/`spec-test` job whose spec is TERMINAL (folded). The Phase 1
+  // reaper widening handles the durable case (a folded-spec parked job is reaped on the next builder-
+  // worker sweep), but between fold and the next sweep this signal would otherwise re-surface the
+  // shipped spec as "stuck" — the 2026-07-12 director-sms-cockpit-per-director / claim-rpc-kill-switch-
+  // enforcement false-positive class. Resolves folded slugs via [[../libraries/specs-table]] `listSpecs`
+  // (the SDK chokepoint, per the operational-rules "database is the spec" rule; a raw `.from('specs')`
+  // is banned). Non-build/spec-test parked jobs (repair, ticket-handle, triage-sweep, …) are UNCHANGED
+  // — the reaper never touches them, so they're unaffected by the fold/reap window.
   {
-    const { data: parked } = await admin
+    const terminalSpecSlugs = await listTerminalSpecSlugsForStuckBuildFilter(workspaceId);
+
+    const { data: parkedRows } = await admin
       .from("agent_jobs")
-      .select("id")
+      .select("id, kind, spec_slug")
       .eq("workspace_id", workspaceId)
       .eq("status", "needs_attention")
-      .limit(1);
-    if (parked?.length) return { pending: true, reason: "agent_jobs needs_attention" };
+      .limit(500);
+    const parked = filterStuckJobsForTerminalSpecs(
+      (parkedRows ?? []) as Array<{ id: string; kind: string; spec_slug: string | null }>,
+      terminalSpecSlugs,
+    );
+    if (parked.length) return { pending: true, reason: "agent_jobs needs_attention" };
+
     const stalledCutoffIso = new Date(Date.now() - 90 * 60 * 1000).toISOString();
-    const { data: stalled } = await admin
+    const { data: stalledRows } = await admin
       .from("agent_jobs")
-      .select("id")
+      .select("id, kind, spec_slug")
       .eq("workspace_id", workspaceId)
       .eq("status", "building")
       .lt("claimed_at", stalledCutoffIso)
+      .limit(500);
+    const stalled = filterStuckJobsForTerminalSpecs(
+      (stalledRows ?? []) as Array<{ id: string; kind: string; spec_slug: string | null }>,
+      terminalSpecSlugs,
+    );
+    if (stalled.length) return { pending: true, reason: "agent_jobs building >90m" };
+
+    // ada-reacts-to-approvals-immediately Phase 1 — a needs_approval agent_jobs row IS pending work
+    // for the standing pass (Ada's own approve-or-escalate decision). Without this signal the cron
+    // backs off to hourly (`platformStandingPassRecentlyActive` returned false on an otherwise-idle
+    // workspace), so a routed approval could sit up to the next hourly tick. Adding the EXISTS check
+    // keeps the cron on */5 as a backstop to the reactive `approval-enqueue-director` fn, which is
+    // the primary sub-minute reactor.
+    const { data: approvals } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "needs_approval")
       .limit(1);
-    if (stalled?.length) return { pending: true, reason: "agent_jobs building >90m" };
+    if (approvals?.length) return { pending: true, reason: "agent_jobs needs_approval" };
   }
 
   // (4-5) open error backlog / open loop alerts — reconcileErrorBacklog input.
