@@ -35,6 +35,10 @@ Before this, the two paths disagreed: internal renewals (`internal_subscription_
 - `order_type` and `tags` are **null** on internal orders — don't rely on them for internal; use `subscription_id`.
 - The live ROAS path must load `workspaces.order_source_mapping` and pass it in, or mapped sources (e.g. numeric Shopify ids → replacement) fall back to checkout-family.
 
+## Consumers of this SoT
+
+- [[orders-classification]] — wraps `bucketOrder` in the four-facet `classifyOrder` + `queryOrders` chokepoint that also adds source (shopify | internal | amazon) and first-vs-repeat discrimination. Callers that need those facets go through the SDK; `bucketOrder` stays the SoT for `origin` / `cartType`.
+
 ## Related
 
-[[../tables/daily_order_snapshots]] · [[../tables/orders]] · [[../inngest/daily-order-snapshot]]
+[[../tables/daily_order_snapshots]] · [[../tables/orders]] · [[../inngest/daily-order-snapshot]] · [[orders-classification]]
