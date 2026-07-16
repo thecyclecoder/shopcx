@@ -42,4 +42,4 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 
 ## Related
 
-[[../lifecycles/ad-publish]] · [[../integrations/meta-marketing]] · [[../tables/ad_publish_jobs]] · [[crypto]] · [[meta__graph-retry]]
+[[../lifecycles/ad-publish]] · [[ads__placement-publish]] · [[ads__creative-pack-gate]] · [[../integrations/meta-marketing]] · [[../tables/ad_publish_jobs]] · [[crypto]] · [[meta__graph-retry]]

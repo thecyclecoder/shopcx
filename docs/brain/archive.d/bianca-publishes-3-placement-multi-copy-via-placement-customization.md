@@ -1,0 +1,1 @@
+- **Bianca publishes 3-placement + 4-headline + 4-primary-text ads (battle-tested PLACEMENT method, portable)** · verified 2026-07-16 · → [[../lifecycles/ad-publish]]
