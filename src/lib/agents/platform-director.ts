@@ -523,6 +523,79 @@ export async function enqueuePlatformDirectorJobs(admin: Admin): Promise<{ enque
   return { enqueued: slugs.length, slugs };
 }
 
+/**
+ * ada-reacts-to-approvals-immediately Phase 1 — the REACTIVE per-target enqueuer the
+ * `approval-enqueue-director` Inngest fn calls on a Platform-routed `needs_approval` insert.
+ *
+ * Sub-minute counterpart to `enqueuePlatformDirectorJobs` (the ~1-min box sweep + the standing-pass
+ * cron backstop). Given ONE target agent_jobs row already in hand + the chart/autonomy fixtures the
+ * caller has loaded, it enforces the same three invariants and inserts at most one
+ * `platform-director` decision job:
+ *
+ *   1. Platform must be live+autonomous (`platformIsAutoApprover`) — the dormant fail-safe.
+ *   2. The target must still be `needs_approval` (races between event fire + delivery are common).
+ *   3. The target's job must route to Platform (`routesToPlatformForJob` walks the approver up the
+ *      chart — a plan whose goal belongs to a live+autonomous department routes THERE, not here).
+ *   4. Dedup on `target_job_id` — if any `platform-director` row already carries this target, skip.
+ *      Matches the sweep's dedup (`enqueuePlatformDirectorJobs` above) so repeat delivery of the
+ *      same event is a no-op regardless of which lane got there first.
+ *
+ * PURE seam for testability — the caller (the Inngest fn's `step.run`) loads `admin` / `chart` /
+ * `autonomy` once and passes them in. Best-effort at the DB write: an insert error surfaces via the
+ * returned `reason` so the reactive fn logs it, but the standing-pass cron's every-5-min backstop
+ * (plus the newly-added `needs_approval` EXISTS branch in `platformHasPendingWork`) still recovers
+ * the target on the very next tick — the reactive fn is a latency-only optimization, never the sole
+ * carrier of correctness.
+ */
+export async function reactiveEnqueuePlatformDirectorForTarget(
+  admin: Admin,
+  target: {
+    id: string;
+    workspace_id: string;
+    kind: string;
+    spec_slug: string | null;
+    status: string;
+    pending_actions?: DirectorActionLike[] | null;
+  },
+  chart: OrgChartGraph,
+  autonomy: AutonomyMap,
+): Promise<{ enqueued: boolean; reason: string }> {
+  if (!platformIsAutoApprover(autonomy)) return { enqueued: false, reason: "platform-dormant" };
+  if (target.status !== "needs_approval") return { enqueued: false, reason: `target-status:${target.status}` };
+  const routes = await routesToPlatformForJob(admin, target, chart, autonomy);
+  if (!routes) return { enqueued: false, reason: "not-platform-routed" };
+
+  // Dedup: never queue a second director job for a target that already has one (any status). Matches
+  // the sweep's `seen` set so the reactive fn and the ~1-min box sweep can't both insert a duplicate.
+  const { data: existing } = await admin
+    .from("agent_jobs")
+    .select("instructions")
+    .eq("kind", "platform-director")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const seen = new Set<string>();
+  for (const e of existing || []) {
+    try {
+      const i = JSON.parse((e.instructions as string) || "{}");
+      if (i.target_job_id) seen.add(String(i.target_job_id));
+    } catch {
+      /* not JSON — skip */
+    }
+  }
+  if (seen.has(String(target.id))) return { enqueued: false, reason: "already-queued" };
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: target.workspace_id,
+    spec_slug: target.spec_slug || String(target.kind),
+    kind: "platform-director",
+    status: "queued",
+    created_by: null,
+    instructions: JSON.stringify({ target_job_id: target.id, target_kind: target.kind }),
+  });
+  if (error) return { enqueued: false, reason: `insert-error:${error.message}` };
+  return { enqueued: true, reason: "queued" };
+}
+
 // ── Phase 2 — escort approved goals through their milestones ─────────────────────────────────────
 // The chain-driving the operator did by HAND becomes the director's job: for each approved goal it owns,
 // drive every UNBLOCKED, unshipped spec through self-sequence → build → merge → fold. It LEANS on the
@@ -4744,7 +4817,7 @@ export interface PlatformPendingWorkResult {
  * Signals scanned:
  *  1. active [[director_directives]] for platform (headlines the pass + the daily watch)
  *  2. open [[spec_drift]] rows (the drift-supervision lane's input)
- *  3. [[agent_jobs]] `needs_attention` OR building > 90m (self-watch + park-route + backstop input)
+ *  3. [[agent_jobs]] `needs_attention`, `needs_approval`, OR building > 90m (self-watch + park-route + backstop input)
  *  4. open [[error_events]] (reconcileErrorBacklog input)
  *  5. open [[loop_alerts]] (reconcileErrorBacklog input)
  *  6. non-terminal [[specs]] `in_review｜planned｜in_progress` (escort / init / groom input)
@@ -4805,6 +4878,19 @@ export async function platformHasPendingWork(workspaceId: string): Promise<Platf
       .lt("claimed_at", stalledCutoffIso)
       .limit(1);
     if (stalled?.length) return { pending: true, reason: "agent_jobs building >90m" };
+    // ada-reacts-to-approvals-immediately Phase 1 — a needs_approval agent_jobs row IS pending work
+    // for the standing pass (Ada's own approve-or-escalate decision). Without this signal the cron
+    // backs off to hourly (`platformStandingPassRecentlyActive` returned false on an otherwise-idle
+    // workspace), so a routed approval could sit up to the next hourly tick. Adding the EXISTS check
+    // keeps the cron on */5 as a backstop to the reactive `approval-enqueue-director` fn, which is
+    // the primary sub-minute reactor.
+    const { data: approvals } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "needs_approval")
+      .limit(1);
+    if (approvals?.length) return { pending: true, reason: "agent_jobs needs_approval" };
   }
 
   // (4-5) open error backlog / open loop alerts — reconcileErrorBacklog input.

@@ -600,6 +600,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // per-run detected/ledgered/escalated counts + a githubUnavailable flag so the tile can
   // show what the last hook actually did.
   { id: SHIP_TIME_BACKFILL_LOOP_ID, kind: "reactive", owner: "platform", label: "Ship-time backfill detector", description: "Post-merge detector: scans every merged claude/* build's diff for scripts/_backfill-*.ts additions, ledgers them in public.data_op_runs, and escalates any unrun/failed one to the CEO inbox — the safety net for one-time data backfills a spec ships as untracked scripts (ship-time-data-backfills-run-and-ledgered-not-silently-dead-code Phase 1).", expectedCadence: "on every merged claude/* build", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-14T00:00:00Z" },
+  // ada-reacts-to-approvals-immediately-never-sits Phase 1 — the sub-minute reactor for Platform-
+  // routed approvals. The `platform-director-cron` every-5-min cron is the backstop; this reactive
+  // fn fires on a needs_approval insert (event `platform/approval-needed`) and immediately enqueues
+  // Ada's `platform-director` decision job (dedup on target_job_id). Owner:'platform' inherits
+  // Ada's kill_switches ancestry via parentIdForOwner('platform') → 'director:platform'. Loose
+  // 30-day livenessWindowMs — an idle window (no routed approval to react to) is healthy, so it
+  // never RED-alerts on a quiet workspace; failures still surface via ok:false beats.
+  { id: "approval-enqueue-director", kind: "reactive", owner: "platform", label: "Approval enqueue → director", description: "Reactive sub-minute enqueue: on a `platform/approval-needed` event (fired on any needs_approval insert), route-check + insert exactly one `platform-director` decision job for the target (dedup on target_job_id). The primary reactor behind Ada's approve-fast-or-escalate-fast SLO; the every-5-min platform-director-cron is the backstop (ada-reacts-to-approvals-immediately-never-sits Phase 1).", expectedCadence: "on a Platform-routed needs_approval insert", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-16T00:00:00Z" },
   // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
   // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
   // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the

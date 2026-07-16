@@ -2590,6 +2590,39 @@ async function update(id: string, patch: Record<string, unknown>) {
       metadata: { job_id: id, ...(pendingWaitTransition.extra ?? {}) },
     });
   }
+  // ada-reacts-to-approvals-immediately-never-sits Phase 1 — fire the reactive `platform/approval-needed`
+  // event whenever this write parks the row in needs_approval. The deployed `approval-enqueue-director`
+  // Inngest fn ([[../src/lib/inngest/approval-enqueue-director]]) then enqueues Ada's decision job in
+  // seconds (dedup on target_job_id), rather than waiting on the ~1-min box sweep or the platform-
+  // director cron. Fire-and-forget: a broken event pipe never fails the status write, and the
+  // every-5-min cron + the newly-added needs_approval EXISTS branch in `platformHasPendingWork` are
+  // the backstop. Best-effort: workspace_id is derived from the pre-write read when available; else
+  // a lightweight lookup. Skips silently when neither is resolvable.
+  if (attemptedStatus === "needs_approval") {
+    void emitApprovalNeededEvent(id, pendingWaitTransition?.workspace_id ?? null);
+  }
+}
+
+async function emitApprovalNeededEvent(jobId: string, hintedWorkspaceId: string | null): Promise<void> {
+  try {
+    let workspaceId = hintedWorkspaceId;
+    if (!workspaceId) {
+      const { data } = await db
+        .from("agent_jobs")
+        .select("workspace_id")
+        .eq("id", jobId)
+        .maybeSingle();
+      const row = data as { workspace_id?: string | null } | null;
+      workspaceId = row?.workspace_id ?? null;
+    }
+    if (!workspaceId) return;
+    const { inngest } = await import("../src/lib/inngest/client");
+    await inngest
+      .send({ name: "platform/approval-needed", data: { workspace_id: workspaceId, target_job_id: jobId } })
+      .catch(() => {});
+  } catch {
+    /* best-effort — the DB write already landed; the cron backstop will catch a dropped event. */
+  }
 }
 
 // spec-timecard-chokepoint-instrumentation Phase 4 — the pre-write half of the wait-span guard. Given
