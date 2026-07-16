@@ -312,6 +312,52 @@ export async function closeDuplicatePr(
 }
 
 /**
+ * pr-resolve-fold-closes-orphan-pr (Phase 2) — close a still-open claude/* PR whose spec was folded
+ * or shipped. Called from [[cancelJobsForArchivedSpecs]] once we have identified an archived-spec
+ * build job whose PR is still open (the orphan). Idempotent + safe:
+ *
+ *   1. GET the PR fresh. If it's ALREADY CLOSED or MERGED → return ok=true, reason='not-open'
+ *      (a common no-op; the human merged/closed it before the fold path caught up).
+ *   2. Read the current head SHA off the same fetch and pass it as `expectedHeadSha` to
+ *      [[closeDuplicatePr]] — same authorization contract (state/repo/branch/SHA re-verify
+ *      immediately before PATCH; ref-SHA re-verify before branch DELETE). A concurrent push during
+ *      the tiny window between GET and PATCH fails-closed on the re-verify (no mutation on stale
+ *      state) — the caller treats fail-closed as a no-op and moves on; the next fold-reconcile pass
+ *      picks it up.
+ *   3. Comment cites the folded spec so the reader sees WHY the auto-close happened.
+ *
+ * The returned `reason` values the caller renders:
+ *   - `ok=true, reason=undefined` → closed + branch deleted
+ *   - `ok=true, reason='not-open'` → PR was already closed/merged (idempotent no-op)
+ *   - `ok=true, reason='closed; branch delete skipped: …'` → PATCH-close succeeded, branch DELETE skipped
+ *   - `ok=false, reason=…` → nothing mutated (auth-drift, GH read failure, PATCH failed)
+ */
+export async function closeArchivedSpecPr(
+  prNumber: number,
+  branch: string,
+  specSlug: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!ghToken()) return { ok: false, reason: "no github token" };
+  let pr: { state?: string; merged?: boolean; head?: { ref?: string; sha?: string } };
+  try {
+    const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}`);
+    if (!r.ok) return { ok: false, reason: `pr fetch failed (${r.status})` };
+    pr = r.json as { state?: string; merged?: boolean; head?: { ref?: string; sha?: string } };
+  } catch (e) {
+    return { ok: false, reason: `pr fetch threw: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  // Idempotent: already closed/merged → no-op (a human, closeDuplicatePr, or a merge-into-main path
+  // beat us to it). Same-shape return as `ok=true` so the caller doesn't error-log a normal race.
+  if (pr.state !== "open" || pr.merged) return { ok: true, reason: "not-open" };
+  const headSha = pr.head?.sha;
+  if (typeof headSha !== "string" || headSha.length < 40) {
+    return { ok: false, reason: "head.sha missing on fresh read" };
+  }
+  const comment = `Closing as an orphan: this spec (\`${specSlug}\`) was folded/shipped — its brain entry was archived, so this PR's build has nothing left to merge into a live spec. Auto-closed by the archived-spec cleanup (pr-resolve-fold-closes-orphan-pr).`;
+  return closeDuplicatePr(prNumber, branch, comment, { expectedHeadSha: headSha });
+}
+
+/**
  * Enqueue ONE `pr-resolve` job for a dirty PR. Idempotent: no-op if an active pr-resolve job already
  * exists for this PR (so a burst of push + synchronize events for the same PR enqueues once).
  */
