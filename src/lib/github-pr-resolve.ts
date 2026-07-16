@@ -713,13 +713,165 @@ async function squashMergeAndDelete(
  *    rather than silently dropping the spec. (Goal-branch conflicts shouldn't normally happen — specs build
  *    in blocked_by order OFF the goal branch — but a concurrent author can still produce one.)
  *  - `created` — the goal branch `goal/{goalSlug}` did not exist and was seeded from `origin/main` first.
+ *  - `escalated` — parallel-build-serialized-merge-and-deadlock-autobreak Phase 3. An irreducible conflict
+ *    surfaced during the pre-merge REBASE (the goal branch has advanced beneath this spec branch and merging
+ *    the newer goal-branch changes INTO the spec branch conflicts). NOT merged, NOT force-merged; the caller
+ *    escalates via `director_activity` and holds the promotion so a human resolves the conflict.
+ *  - `rebased` — the pre-merge rebase (goal-branch → spec-branch) ran and merged cleanly; the subsequent
+ *    spec→goal merge below used the rebased head. Purely informational — mostly for tests / logs.
  */
 export interface GoalBranchMergeResult {
   merged: boolean;
   conflict: boolean;
   created: boolean;
+  escalated: boolean;
+  rebased: boolean;
   mergeSha: string | null;
   reason?: string;
+}
+
+/**
+ * parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — the shape of a GitHub `compare` result
+ * the rebase-decision predicate reads. Kept independent of the raw API payload so the predicate is
+ * unit-testable without a fetch stub. Fields mirror `GET /repos/{owner}/{repo}/compare/{base}...{head}`:
+ *  - `status` — GitHub's own classification. `identical` = head is base; `ahead` = head has commits base
+ *    doesn't (fast-forwardable); `behind` = base has commits head doesn't (spec already integrated);
+ *    `diverged` = both have distinct commits (needs a rebase to avoid a spurious merge / file-overlap
+ *    collision when the goal branch advanced beneath this spec branch).
+ *  - `aheadBy` / `behindBy` — commit counts; useful for the reason string.
+ *  - `headSha` / `baseSha` — the two branch tips (informational).
+ */
+export interface GoalBranchCompareResult {
+  status: "identical" | "ahead" | "behind" | "diverged";
+  aheadBy: number;
+  behindBy: number;
+  headSha: string | null;
+  baseSha: string | null;
+}
+
+/**
+ * parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — the decision the merge helper reads.
+ *  - `merge` — spec branch is `ahead` (or `identical`-behind-idempotent path) of goal branch; direct merge
+ *    is safe (no goal-branch drift to reconcile).
+ *  - `rebase-then-merge` — spec branch has DIVERGED from goal branch (a sibling merged something new since
+ *    this spec branched off); pull the goal branch's advances INTO the spec branch first, THEN merge. This
+ *    is the guard that stops Phase-2's parallel builds from producing a #1893-style file-overlap collision
+ *    at merge time — even when two specs pass blocked_by independence, if they touch one file, one must
+ *    rebase on top of the other before landing.
+ *  - `skip` — no-op path (identical / already-integrated). Idempotent success upstream.
+ *  - `escalate` — the prior rebase attempt itself hit an irreducible conflict, OR the attempt budget is
+ *    exhausted. Never force-merge; the caller writes `director_activity` + holds the promotion.
+ */
+export type GoalBranchRebaseDecision =
+  | { action: "merge"; reason: string }
+  | { action: "rebase-then-merge"; reason: string }
+  | { action: "skip"; reason: string }
+  | { action: "escalate"; reason: string };
+
+/** How many rebase attempts we make before escalating an irreducible conflict. One retry is enough to
+ *  catch a "goal branch advanced during the compare→merge window" race; a second means the conflict is
+ *  real. Kept module-level so the predicate + async wrapper + tests share the constant. */
+export const GOAL_BRANCH_REBASE_MAX_ATTEMPTS = 2;
+
+/** PURE predicate — given the compare result + the number of PRIOR rebase attempts, decide the next action.
+ *  Kept pure so the named failing state — "two goal-mate branches touching the same file merge cleanly via
+ *  serialized rebase; an irreducible conflict escalates rather than force-merging" — is unit-testable
+ *  without a GitHub stub. Fail-safe on missing `status` (defaults to `escalate`) so a malformed compare
+ *  payload never accidentally authorizes a direct merge. */
+export function decideGoalBranchRebaseMerge(input: {
+  compare: GoalBranchCompareResult;
+  priorRebaseAttempts?: number;
+  maxAttempts?: number;
+}): GoalBranchRebaseDecision {
+  const { compare, priorRebaseAttempts = 0, maxAttempts = GOAL_BRANCH_REBASE_MAX_ATTEMPTS } = input;
+  if (!compare || !compare.status) {
+    return { action: "escalate", reason: "compare payload missing status — fail closed" };
+  }
+  if (compare.status === "identical") {
+    return { action: "skip", reason: "identical: spec branch head equals goal branch head — nothing to merge" };
+  }
+  if (compare.status === "behind") {
+    return { action: "skip", reason: `spec branch is behind goal branch by ${compare.behindBy} — already integrated (no-op)` };
+  }
+  if (compare.status === "ahead") {
+    return { action: "merge", reason: `ahead by ${compare.aheadBy} — fast-forwardable, direct merge is safe` };
+  }
+  // diverged — a sibling has advanced the goal branch beneath us; rebase first (bring the goal-branch's
+  // advances INTO the spec branch) so the subsequent spec→goal merge is a clean fast-forward against the
+  // now-current base. Two goal-mate branches touching one file are the exact scenario this guards.
+  if (priorRebaseAttempts >= maxAttempts) {
+    return {
+      action: "escalate",
+      reason: `irreducible conflict: attempted ${priorRebaseAttempts} rebase(s), goal branch still diverged (ahead=${compare.aheadBy}, behind=${compare.behindBy}) — escalating rather than force-merging`,
+    };
+  }
+  return {
+    action: "rebase-then-merge",
+    reason: `diverged (ahead=${compare.aheadBy}, behind=${compare.behindBy}) — merging goal branch into spec branch to bring in the sibling's advances, then the spec→goal merge is a clean fast-forward`,
+  };
+}
+
+/** Read `compare(base=goal, head=spec)` via the GitHub API and normalize into a
+ *  `GoalBranchCompareResult`. Returns `null` on any failure so the caller fails CLOSED (no rebase-decision
+ *  authorized without a positive read). */
+export async function compareGoalBranchToSpecBranch(
+  goalBranch: string,
+  specBranch: string,
+): Promise<GoalBranchCompareResult | null> {
+  if (!ghToken()) return null;
+  const r = await gh(
+    "GET",
+    `/repos/${GH_REPO}/compare/${encodeURIComponent(goalBranch)}...${encodeURIComponent(specBranch)}`,
+  );
+  if (!r.ok) return null;
+  const body = (r.json || {}) as Record<string, unknown>;
+  const statusRaw = (body.status as string) || "";
+  const status =
+    statusRaw === "identical" || statusRaw === "ahead" || statusRaw === "behind" || statusRaw === "diverged"
+      ? statusRaw
+      : null;
+  if (!status) return null;
+  const aheadBy = typeof body.ahead_by === "number" ? (body.ahead_by as number) : 0;
+  const behindBy = typeof body.behind_by === "number" ? (body.behind_by as number) : 0;
+  const baseSha = ((body.base_commit as { sha?: string } | undefined)?.sha ?? null) as string | null;
+  const headSha = ((body.head_commit as { sha?: string } | undefined)?.sha ?? null) as string | null;
+  return { status, aheadBy, behindBy, baseSha, headSha };
+}
+
+// parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — per-goal in-process serialization
+// mutex for `mergeSpecBranchIntoGoalBranch`. The M4 loop in `promoteEligibleSpecsToGoalBranch` is
+// already sequential within one invocation; this mutex is the belt against RE-ENTRANT invocations
+// (the standing pass and a github webhook both firing at overlapping times). We chain each new merge
+// onto the prior completion promise per-goal, so two concurrent calls for the same goal queue rather
+// than race the GitHub `POST /merges` endpoint. Cross-goal invocations are independent.
+const goalBranchMergeSerializer = new Map<string, Promise<unknown>>();
+async function withGoalBranchMergeLock<T>(goalBranch: string, body: () => Promise<T>): Promise<T> {
+  const prior = goalBranchMergeSerializer.get(goalBranch) ?? Promise.resolve();
+  const next = prior.then(body, body);
+  // Store the "in-progress" promise so the NEXT caller chains after it; on completion, only clear the
+  // slot if we're still the current tail (a still-newer caller may have already chained after us).
+  const stored: Promise<unknown> = next.finally(() => {
+    if (goalBranchMergeSerializer.get(goalBranch) === stored) {
+      goalBranchMergeSerializer.delete(goalBranch);
+    }
+  });
+  goalBranchMergeSerializer.set(goalBranch, stored);
+  return next;
+}
+
+/** Test-only accessor — for the pure serialization test to observe the in-flight promise per goal.
+ *  Not intended for production callers; the mutex is transparent above the caller. */
+export function _peekGoalBranchMergeSerializer(goalBranch: string): Promise<unknown> | undefined {
+  return goalBranchMergeSerializer.get(goalBranch);
+}
+
+/** Test-only accessor — directly drive the per-goal serialization mutex used by
+ *  `mergeSpecBranchIntoGoalBranch`. Kept exported ONLY so the pure Phase-3 unit test can pin the
+ *  serialization contract (two concurrent bodies for the SAME goal-branch run strictly one-at-a-time)
+ *  without needing a live GitHub. Production callers MUST use `mergeSpecBranchIntoGoalBranch` — this
+ *  helper does no argument validation and no network work. */
+export function _withGoalBranchMergeLockForTests<T>(goalBranch: string, body: () => Promise<T>): Promise<T> {
+  return withGoalBranchMergeLock(goalBranch, body);
 }
 
 /** Resolve a branch ref's tip SHA (`refs/heads/{branch}`). Null if the ref doesn't exist. */
@@ -746,9 +898,21 @@ export async function mergeSpecBranchIntoGoalBranch(
   specBranch: string,
   goalSlug: string,
 ): Promise<GoalBranchMergeResult> {
-  const out: GoalBranchMergeResult = { merged: false, conflict: false, created: false, mergeSha: null };
+  const out: GoalBranchMergeResult = {
+    merged: false,
+    conflict: false,
+    created: false,
+    escalated: false,
+    rebased: false,
+    mergeSha: null,
+  };
   if (!ghToken()) return { ...out, reason: "no GitHub token" };
   const goalBranch = `goal/${goalSlug}`;
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — SERIALIZED, ONE AT A TIME per goal
+  // (in-process mutex). Two concurrent invocations for the same goal (standing pass + webhook) queue
+  // behind each other so the compare → rebase → merge sequence is never interleaved with itself. Different
+  // goals proceed in parallel — the mutex is per-goal-branch.
+  return withGoalBranchMergeLock(goalBranch, async () => {
 
   // Seed the goal branch from origin/main if it doesn't exist yet (first spec of the goal).
   let goalHead = await branchHeadSha(goalBranch);
@@ -770,6 +934,53 @@ export async function mergeSpecBranchIntoGoalBranch(
       out.created = true;
       goalHead = mainHead;
     }
+  }
+
+  // parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — REBASE-BEFORE-MERGE. If the goal
+  // branch has advanced beneath this spec branch (another goal-mate merged since this branch forked),
+  // the straight `POST /merges spec→goal` risks a file-overlap collision (two independent-by-DAG specs
+  // touching one file). Compare first; on `diverged` do the rebase (merge goal INTO spec) before the
+  // spec→goal merge. Up to `GOAL_BRANCH_REBASE_MAX_ATTEMPTS` attempts; an irreducible conflict escalates
+  // via `escalated:true` — the caller writes a `director_activity` row + HOLDS the promotion instead of
+  // force-merging.
+  for (let attempt = 0; attempt < GOAL_BRANCH_REBASE_MAX_ATTEMPTS; attempt++) {
+    const cmp = await compareGoalBranchToSpecBranch(goalBranch, specBranch);
+    if (!cmp) break; // compare failed — fall through to the original merge (fail-safe: the merge itself will 409 on real conflict)
+    const decision = decideGoalBranchRebaseMerge({ compare: cmp, priorRebaseAttempts: attempt });
+    if (decision.action === "merge") break; // proceed to the spec→goal merge below
+    if (decision.action === "skip") {
+      out.merged = true;
+      out.mergeSha = cmp.baseSha ?? goalHead;
+      out.reason = decision.reason;
+      return out;
+    }
+    if (decision.action === "escalate") {
+      out.escalated = true;
+      out.reason = decision.reason;
+      return out;
+    }
+    // rebase-then-merge — pull the goal branch's advances INTO the spec branch first.
+    const rebase = await gh("POST", `/repos/${GH_REPO}/merges`, {
+      base: specBranch,
+      head: goalBranch,
+      commit_message: `goal-branch rebase: merge ${goalBranch} into ${specBranch} (parallel-build-serialized-merge Phase 3, attempt ${attempt + 1})`,
+    });
+    if (rebase.status === 201 || rebase.status === 204) {
+      out.rebased = true;
+      continue; // loop → re-compare; on the next iteration `ahead` / `identical` should hold
+    }
+    if (rebase.status === 409) {
+      // The rebase itself conflicts — the two branches genuinely touched the same lines. Escalate; a
+      // human resolves via the existing pr-resolve flow. NEVER force-merge.
+      out.escalated = true;
+      out.reason = `irreducible rebase conflict (409) on ${goalBranch}→${specBranch} — parallel goal-mates touched the same file. Escalated; NOT force-merged.`;
+      return out;
+    }
+    // Any other rebase failure — treat as escalate rather than blindly falling through to merge.
+    const rmsg = (rebase.json as Record<string, unknown>)?.message;
+    out.escalated = true;
+    out.reason = `rebase ${goalBranch}→${specBranch} failed (${rebase.status}${rmsg ? `: ${rmsg}` : ""}) — escalated`;
+    return out;
   }
 
   // Merge the spec branch into the goal branch (real merge commit).
@@ -799,6 +1010,7 @@ export async function mergeSpecBranchIntoGoalBranch(
   }
   const msg = (r.json as Record<string, unknown>)?.message;
   return { ...out, reason: `merge ${specBranch} → ${goalBranch} failed (${r.status}${msg ? `: ${msg}` : ""})` };
+  });
 }
 
 /**

@@ -1492,6 +1492,34 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
       try {
         const merge = await mergeSpecBranchIntoGoalBranch(c.branch, c.goalSlug);
         if (merge.created) result.goalBranchesCreated.push(c.goalSlug);
+        // parallel-build-serialized-merge-and-deadlock-autobreak Phase 3 — an irreducible rebase
+        // conflict (two parallel goal-mates touched the same file at merge time) escalates rather
+        // than force-merging. Record one `director_activity` row per escalation + skip; the human
+        // resolves via the existing pr-resolve flow.
+        if (merge.escalated) {
+          result.conflicts.push(c.slug);
+          console.warn(`[goal-promote] ${c.slug} → goal/${c.goalSlug}: ESCALATED (irreducible rebase conflict) — ${merge.reason}`);
+          try {
+            const { recordDirectorActivity } = await import("@/lib/director-activity");
+            await recordDirectorActivity(admin, {
+              workspaceId: c.workspaceId,
+              directorFunction: "platform",
+              actionKind: "goal_branch_merge_escalated",
+              specSlug: c.slug,
+              reason: `serialized rebase-merge (parallel-build Phase 3) escalated: ${merge.reason}. Spec branch ${c.branch} → goal/${c.goalSlug} held; the standing pr-resolve flow (or a human) must reconcile the file overlap before promotion.`,
+              metadata: {
+                actor: "serialized-rebase-merge-guard",
+                goal_slug: c.goalSlug,
+                spec_branch: c.branch,
+                rebased: merge.rebased,
+                autonomous: true,
+              },
+            });
+          } catch {
+            /* audit is best-effort — the escalation already surfaced via the conflicts array */
+          }
+          continue;
+        }
         if (merge.conflict) {
           result.conflicts.push(c.slug);
           console.warn(`[goal-promote] ${c.slug} → goal/${c.goalSlug}: CONFLICT — surfaced, not dropped (${merge.reason})`);
@@ -1505,7 +1533,7 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
         await stampSpecGoalBranchSha(c.workspaceId, c.slug, merge.mergeSha);
         result.promoted.push(c.slug);
         console.log(
-          `[goal-promote] merged ${c.branch} → goal/${c.goalSlug}${merge.created ? " (seeded from main)" : ""}; stamped goal_branch_sha=${merge.mergeSha.slice(0, 8)}`,
+          `[goal-promote] merged ${c.branch} → goal/${c.goalSlug}${merge.created ? " (seeded from main)" : ""}${merge.rebased ? " (rebased first)" : ""}; stamped goal_branch_sha=${merge.mergeSha.slice(0, 8)}`,
         );
       } catch (e) {
         result.skipped.push(c.slug);
