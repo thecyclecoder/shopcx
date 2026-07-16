@@ -21,6 +21,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import {
+  isBoxEmittedCronLoop,
   MONITORED_LOOPS,
   OWNER_FUNCTIONS,
   RENEWAL_BAD_OUTCOMES,
@@ -468,7 +469,22 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+/**
+ * The box worker (worker_heartbeats.id=WORKER_BOX_ID) is UNAVAILABLE — either it has never
+ * emitted a heartbeat OR its `last_poll_at` is older than the worker's own liveness window.
+ * Box-emitted cron lanes (migration-drift-check, db-health-*) beat from inside that process, so
+ * when the worker is unavailable a stale child beat is a guaranteed cascade of the parent
+ * loop:box outage, not a new failure of the child. Callers use this predicate to suppress
+ * cron_freshness on box-emitted crons while the parent worker outage is the true root cause
+ * (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1). Defaults the
+ * liveness window to 5 min to match the WORKER_BOX_ID loop entry.
+ */
+export function isWorkerUnavailableForBoxCron(row: WorkerRow | null, livenessWindowMs = 5 * 60_000): boolean {
+  if (!row || !row.last_poll_at) return true;
+  return ageMs(row.last_poll_at) > livenessWindowMs;
+}
+
+export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -580,6 +596,17 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
   }
   const stale = ageMs(latest.ran_at) > (loop.livenessWindowMs ?? 26 * 60 * 60_000);
   if (stale && !beatsReadFailed) {
+    // BOX-EMITTED CRON + WORKER OUTAGE (control-tower-suppress-box-cron-freshness-during-worker-outage
+    // Phase 1). migration-drift-check + db-health-* beats are written by lanes INSIDE the box worker
+    // process, so when the worker is stale/missing these child freshness alerts are a guaranteed
+    // cascade of the parent loop:box outage — the child jobs literally cannot beat while the process
+    // that runs them is down. Suppress cron_freshness to AMBER "waiting on box worker" so the outage
+    // pages ONCE via loop:box instead of fan-outing to every child tile; the moment the worker is
+    // healthy again the normal freshness window still pages a genuinely-dead child (its next beat
+    // must land within `livenessWindowMs` post-recovery or the red returns).
+    if (workerUnavailable && isBoxEmittedCronLoop(loop.id)) {
+      return { ...base, color: "amber", statusText: `waiting on box worker — last beat ${elapsed(latest.ran_at)} ago`, violation: null };
+    }
     // (Defensive: a failed read returns no latest, so this path won't normally run with
     // beatsReadFailed — but a partial/stale read must not page cron_freshness either.)
     return { ...base, color: "red", statusText: `hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence})`, violation: { reason: "cron_freshness", detail: `Cron ${loop.id} hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence}; last beat ${latest.ran_at}).` } };
@@ -1717,6 +1744,18 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   // as the deployAgeMs==null guard that keeps a missing deploy-age reference from false-alarming.
   const beatsReadFailed = beatsError != null;
 
+  // Box-worker-outage dependency signal for evalCron
+  // (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1). The box worker's
+  // liveness window is the WORKER_BOX_ID loop's livenessWindowMs (5 min); read it from
+  // MONITORED_LOOPS so the guard tracks the registry value rather than duplicating the constant.
+  // When the worker is stale/missing, box-emitted cron freshness reds are suppressed to amber
+  // "waiting on box worker" so a single outage pages ONCE via loop:box.
+  const workerLoop = MONITORED_LOOPS.find((l) => l.id === WORKER_BOX_ID);
+  const workerUnavailable = isWorkerUnavailableForBoxCron(
+    workerRow as WorkerRow | null,
+    workerLoop?.livenessWindowMs,
+  );
+
   // Group heartbeats by loop_id (the RPC returns them ordered by loop_id, rn=newest-first, already
   // capped at HISTORY_LIMIT per loop). PRESENCE in this map is the ever-beaten signal: the lateral-
   // join RPC no longer returns an all-time count (the costly per-row window is gone) — a loop with
@@ -1795,7 +1834,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null, workerUnavailable);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may

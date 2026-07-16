@@ -22,6 +22,7 @@ import {
   firstScheduledFiringMs,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isOrderAwaitingFraudScreen,
+  isWorkerUnavailableForBoxCron,
   jobStuckSince,
   nextFiringAtOrAfter,
   parseCronExpr,
@@ -30,7 +31,14 @@ import {
   type LoopHistoryRow,
   type WorkerRow,
 } from "./monitor";
-import { INLINE_AGENT_IDS, MONITORED_LOOPS, type MonitoredLoop } from "./registry";
+import {
+  DB_HEALTH_SLOWQ_LOOP_ID,
+  INLINE_AGENT_IDS,
+  MIGRATION_DRIFT_LOOP_ID,
+  MONITORED_LOOPS,
+  isBoxEmittedCronLoop,
+  type MonitoredLoop,
+} from "./registry";
 import { SPEC_TEST_FIXTURES } from "@/lib/spec-test-sandbox";
 import type { createAdminClient } from "@/lib/supabase/admin";
 
@@ -373,6 +381,161 @@ test("evalCron still flips RED never_fired once the newcron grace itself expires
     const result = evalCron(receivedSmsRollupLoop, null, deployAgeMs, 0, false, null, firstObservedMs);
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "never_fired");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+// ─── Box-emitted cron freshness suppressed while the worker is stale ───
+// (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1).
+// migration-drift-check + db-health-* beats are written by lanes INSIDE the box worker process.
+// When loop:box is already red for the outage, the child freshness reds are guaranteed cascades —
+// the child jobs literally cannot beat while the process that runs them is down. evalCron takes a
+// workerUnavailable flag and, for box-emitted crons only, replaces the cron_freshness red with an
+// amber "waiting on box worker" tile so the outage pages ONCE via loop:box. A healthy worker still
+// pages a genuinely-dead child (control case).
+
+const dbHealthSlowQueryLoop: MonitoredLoop = {
+  id: DB_HEALTH_SLOWQ_LOOP_ID,
+  kind: "cron",
+  owner: "platform",
+  label: "DB Health — slow-query root-cause",
+  description: "Box job: top pg_stat_statements offenders → EXPLAIN → classify cause.",
+  expectedCadence: "every ~hour (box job)",
+  livenessWindowMs: 2 * 60 * 60_000, // 2h
+  registeredAt: "2026-06-23T00:00:00Z",
+};
+
+const migrationDriftLoop: MonitoredLoop = {
+  id: MIGRATION_DRIFT_LOOP_ID,
+  kind: "cron",
+  owner: "platform",
+  label: "Migration drift check",
+  description: "Box job: diff migration-created tables against live schema.",
+  expectedCadence: "every ~30 min (box job)",
+  livenessWindowMs: 90 * 60_000,
+};
+
+const nonBoxCronLoop: MonitoredLoop = {
+  id: "supabase-log-poll-cron",
+  kind: "cron",
+  owner: "platform",
+  label: "Supabase log poll",
+  description: "Polls the Supabase Management Logs API.",
+  expectedCadence: "every 15 min (*/15 * * * *)",
+  livenessWindowMs: 45 * 60_000,
+};
+
+const staleLatest = (ranAt: string): LoopHistoryRow => ({
+  ran_at: ranAt,
+  ok: true,
+  produced: null,
+  detail: null,
+  duration_ms: null,
+});
+
+test("isBoxEmittedCronLoop names the box-emitted cron loop ids and rejects Inngest-driven crons", () => {
+  assert.equal(isBoxEmittedCronLoop(DB_HEALTH_SLOWQ_LOOP_ID), true);
+  assert.equal(isBoxEmittedCronLoop(MIGRATION_DRIFT_LOOP_ID), true);
+  assert.equal(isBoxEmittedCronLoop("db-health-instance-saturation"), true);
+  assert.equal(isBoxEmittedCronLoop("db-health-size-sweep"), true);
+  assert.equal(isBoxEmittedCronLoop("supabase-log-poll-cron"), false);
+  assert.equal(isBoxEmittedCronLoop("control-tower-monitor"), false);
+});
+
+test("isWorkerUnavailableForBoxCron flags missing/never-reported/stale workers as unavailable", () => {
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-15T12:00:00Z");
+  try {
+    // No row at all — worker never registered.
+    assert.equal(isWorkerUnavailableForBoxCron(null), true);
+    // Row exists but has never emitted a beat.
+    const neverPolled: WorkerRow = {
+      running_sha: "abc",
+      status: null,
+      active_builds: 0,
+      detail: null,
+      last_poll_at: null,
+      started_at: "2026-07-15T11:00:00Z",
+      accounts: null,
+    };
+    assert.equal(isWorkerUnavailableForBoxCron(neverPolled), true);
+    // Stale beyond the default 5-min window.
+    const stale: WorkerRow = { ...neverPolled, last_poll_at: "2026-07-15T11:50:00Z" };
+    assert.equal(isWorkerUnavailableForBoxCron(stale), true);
+    // Fresh beat well within the window.
+    const fresh: WorkerRow = { ...neverPolled, last_poll_at: "2026-07-15T11:59:30Z" };
+    assert.equal(isWorkerUnavailableForBoxCron(fresh), false);
+    // Custom window (matches the WORKER_BOX_ID registry entry override).
+    assert.equal(isWorkerUnavailableForBoxCron(fresh, 10 * 1000), true); // 10s window → 30s beat = stale
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron suppresses cron_freshness to amber for db-health-slow-query when the box worker is unavailable (regression)", () => {
+  // The originating incident: DB Health slow-query tile went red during a box worker outage even
+  // though the box liveness tile already identified the root failure. The DB Health pass recovered
+  // immediately after the worker restarted → child alert was a cascade, not a DB Health defect.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-15T12:00:00Z");
+  try {
+    // Last beat 4h ago — well past the 2h livenessWindowMs. Without the guard this would fire
+    // cron_freshness RED.
+    const latest = staleLatest("2026-07-15T08:00:00Z");
+    const result = evalCron(dbHealthSlowQueryLoop, latest, null, 5, false, null, null, /* workerUnavailable */ true);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on box worker/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron suppresses cron_freshness to amber for migration-drift-check when the box worker is unavailable", () => {
+  // Same suppression for the other box-emitted lane: migration-drift-check is written by the box
+  // worker too, so the same cascade rule applies.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-15T12:00:00Z");
+  try {
+    const latest = staleLatest("2026-07-15T09:30:00Z"); // 2h30m ago, past 90-min window
+    const result = evalCron(migrationDriftLoop, latest, null, 3, false, null, null, /* workerUnavailable */ true);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on box worker/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron STILL flips RED cron_freshness for db-health-slow-query when the box worker is healthy (control case)", () => {
+  // Healthy-worker control: the suppression is scoped to worker outages ONLY. A dead box job
+  // whose worker is up must still page — otherwise we'd hide the exact class of failure the tile
+  // exists to catch (an individual lane silently stopping while the worker itself is fine).
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-15T12:00:00Z");
+  try {
+    const latest = staleLatest("2026-07-15T08:00:00Z");
+    const result = evalCron(dbHealthSlowQueryLoop, latest, null, 5, false, null, null, /* workerUnavailable */ false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
+    assert.match(result.statusText, /hasn't run in/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron STILL flips RED cron_freshness for a NON-box cron even when the box worker is unavailable", () => {
+  // Suppression is opt-in per box-emitted loop id — Inngest-driven crons (supabase-log-poll-cron
+  // etc.) don't run on the box worker, so a worker outage tells us nothing about their liveness
+  // and must not silence their freshness reds.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-15T12:00:00Z");
+  try {
+    const latest = staleLatest("2026-07-15T10:00:00Z"); // 2h ago, past 45-min window
+    const result = evalCron(nonBoxCronLoop, latest, null, 20, false, null, null, /* workerUnavailable */ true);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
   } finally {
     Date.now = realNow;
   }

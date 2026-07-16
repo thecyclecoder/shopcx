@@ -391,6 +391,27 @@ export const SHIP_TIME_BACKFILL_ESCALATION_KIND = "ship_time_backfill_unrun";
  */
 export const DB_HEALTH_INSTANCE_LOOP_ID = "db-health-instance-saturation";
 
+/**
+ * BOX-EMITTED cron loops (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1).
+ * These cron beats are written by lanes inside the box worker (scripts/builder-worker.ts) rather
+ * than by an Inngest schedule the deployed Next runtime invokes. When the worker itself is stale,
+ * these tiles' freshness alerts are guaranteed cascade duplicates of the parent loop:box outage —
+ * the child jobs literally cannot beat while the process that runs them is down. The monitor uses
+ * this predicate to suppress cron_freshness on box-emitted crons while the worker is unavailable,
+ * so a single worker outage pages ONCE via loop:box instead of fan-outing to every child tile.
+ * Once the worker is healthy again, the normal freshness windows still page a genuinely-dead child.
+ */
+export const BOX_EMITTED_CRON_LOOP_IDS: ReadonlySet<string> = new Set([
+  MIGRATION_DRIFT_LOOP_ID,
+  DB_HEALTH_SLOWQ_LOOP_ID,
+  DB_HEALTH_INSTANCE_LOOP_ID,
+  DB_HEALTH_SIZE_LOOP_ID,
+]);
+
+export function isBoxEmittedCronLoop(loopId: string): boolean {
+  return BOX_EMITTED_CRON_LOOP_IDS.has(loopId);
+}
+
 export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ── The box build worker (worker_heartbeats) ──────────────────────────────
   {
