@@ -1947,6 +1947,72 @@ export function decideGoalMemberEnqueueAdmission(input: {
   return { ok: true };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 2 —
+// SERIAL CLAIM-AND-DECIDE for the box's build/plan pool.
+// ─────────────────────────────────────────────────────────────────────────────
+// Under Phase 1 the queue is permissive (any unblocked goal-mate always enqueues) and the ONE
+// serialization decision happens at claim time via `decideGoalMemberBuildDispatch`. Phase 2
+// enforces the FOUNDER'S DIRECTIVE that the box worker execute that decision INLINE with each
+// claim — pull one item, decide (launch or release-back-to-queued), then advance to the next —
+// instead of racing multiple per-tick claims into parallel Max sessions before the gate fires.
+//
+// This pure predicate is the classifier the box's claim loop invokes right after each
+// `claim_agent_job` RPC returns. It captures the disposition without any DB dependency, so the
+// "one poll pass claims+dispatches exactly one same-goal mate" contract is unit-testable without
+// standing up a fake worker + Supabase. Kept next to `decideGoalMemberBuildDispatch` on purpose:
+// the two predicates share a decision surface, and the box's caller passes the dispatch verdict
+// directly into this one.
+
+/** The dispatch verdict the caller passes in — a null value means the caller SKIPPED the check
+ *  (non-build kind, resume, or a throw during evaluation). A skipped check MUST fail open
+ *  (`launch`) because the claim-time gate inside `runJob` is still the last line of defense. */
+export type SerialClaimDispatchVerdict = { ok: boolean; reason?: string } | null;
+
+/** Input the box's build/plan claim loop hands the classifier — a snapshot of the just-claimed
+ *  agent_jobs row + the dispatch verdict. */
+export interface SerialClaimDispatchInput {
+  /** `agent_jobs.kind` — only `"build"` engages the goal-serializer decision. */
+  kind: string;
+  /** `!!agent_jobs.claude_session_id` — a resume is committed WIP (branch/PR already exists), so
+   *  the goal-serializer decision is bypassed just like the claim-time gate at line ~6010 of
+   *  `scripts/builder-worker.ts` bypasses it. */
+  isResume: boolean;
+  /** `agent_jobs.spec_slug` — a null slug means there's nothing to resolve to a goal; launch. */
+  specSlug: string | null;
+  /** The dispatch verdict from `evaluateGoalMemberBuildDispatch`, or null when the caller
+   *  skipped the DB call (non-build / resume / no slug / async throw). */
+  dispatchVerdict: SerialClaimDispatchVerdict;
+}
+
+/** The disposition — either LAUNCH the job (spawn its Max session in a lane) or RELEASE it back
+ *  to `queued` (clear the claim, leave the row for a later window). Never cancel, never lose. */
+export type SerialClaimDispatchOutcome =
+  | { action: "launch" }
+  | { action: "release"; reason: string };
+
+/** The PURE core of the box's serial claim-and-decide step.
+ *
+ *  A `build` job with a spec slug and a `dispatchVerdict.ok === false` RELEASES to `queued` (the
+ *  caller stamps a short cooldown so the RPC won't re-pick it in the same window; the row stays
+ *  claimable next tick). Everything else LAUNCHES — non-build kinds skip serialization, resumes
+ *  are committed WIP, and a null verdict (skipped check / evaluator throw) fails open so the
+ *  claim-time gate inside `runJob` still guards. Two goal-mates claimed in adjacent iterations
+ *  of the loop see this predicate SERIALLY — the second's `evaluateGoalMemberBuildDispatch` call
+ *  reads the first as in-flight and refuses, so exactly one launches per pass. */
+export function decideSerialClaimDispatchOutcome(input: SerialClaimDispatchInput): SerialClaimDispatchOutcome {
+  const { kind, isResume, specSlug, dispatchVerdict } = input;
+  if (kind !== "build") return { action: "launch" }; // plan / other kinds don't goal-serialize
+  if (isResume) return { action: "launch" }; // committed WIP — branch/PR already exists
+  if (!specSlug) return { action: "launch" }; // nothing to resolve to a goal
+  if (dispatchVerdict === null) return { action: "launch" }; // skipped/threw — fail open
+  if (dispatchVerdict.ok) return { action: "launch" };
+  return {
+    action: "release",
+    reason: dispatchVerdict.reason ?? "goal-serializer refused the claim (no reason provided)",
+  };
+}
+
 /** The DB reader — resolve the goal, list its members (with blocked_by via `getSpecFromDb`),
  *  query agent_jobs for any goal-mate row in ACTIVE_STATUSES, then invoke the pure predicate.
  *  Fail-open: any resolver miss returns {ok:true} so a transient DB error never falsely blocks

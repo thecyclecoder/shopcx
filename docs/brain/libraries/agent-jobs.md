@@ -158,6 +158,27 @@ async function autoBreakGoalMemberDeadlockIfDue(workspaceId: string, ejectedSlug
 
 The **deadlock auto-break** that unblocks a stalled goal serializer ([[../specs/parallel-build-serialized-merge-and-deadlock-autobreak]] Phase 1). The serializer refuses to claim a goal-mate whenever the 'earliest ready' head has no in-flight build row — a fully-serialized flow where the head never even enqueued (a chain pause, a director override, or a transient early failure) leaves **every sibling claimed → ejected forever** (observed 2026-07-15 on `bianca-cold-scaler-cohort-and-daily-ceiling`: the head never queued, so the serializer ejected its siblings every tick for hours). `decideGoalMemberDeadlockAutoBreak` is the **pure predicate**: given the goal's member roster + the in-flight row set, it computes the Kahn topological head (earliest ready goal-mate whose blockers are all on-goal-branch), and returns `{ deadlocked: true, earliest }` iff that head has **NO** row in ANY active status. `autoBreakGoalMemberDeadlockIfDue` is the **async wrapper**: resolves the goal via `resolveGoalSlugForSpec`, reads the member roster + in-flight rows, invokes the pure predicate, and if it detects deadlock **applies a 3-minute cooldown** by dedupe against recent `director_activity` rows for the same earliest slug (fail-safe against re-enqueuing on every standing-pass tick), then force-enqueues the earliest via `enqueueBuildIfDue` with `bypassGoalMemberAdmission:true` (the head IS the designated slot-holder; race artifacts like stale `queued` mates from a prior tick would otherwise refuse), and writes ONE `director_activity` audit row (`actor='serializer-deadlock-autobreak'`, `action_kind='serializer_deadlock_auto_broken'` — see [[director-activity]]). Wired into the claim-time serializer's ejection path (`scripts/builder-worker.ts` → `evaluateGoalMemberBuildDispatch` → the requeue disposition body): when `evaluateGoalMemberBuildDispatch` refuses this spec, the auto-break fires BEFORE the requeue reason returns, appending its outcome (`autoBroken: true/false`) to the log. Fail-open at every seam — a resolver miss / not-goal-bound spec / cooldown-hit / non-deadlock returns `autoBroken:false` and the requeue disposition is unchanged. **Verification pinned:** a goal whose earliest-ready head has no in-flight job and a sibling is repeatedly ejected → the auto-break detects deadlock and enqueues the head; when the head has an active job → no auto-break fires. See `src/lib/goal-member-deadlock-autobreak.test.ts`.
 
+### `decideSerialClaimDispatchOutcome` — function  *(goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 2)*
+
+```ts
+type SerialClaimDispatchVerdict = { ok: boolean; reason?: string } | null;
+interface SerialClaimDispatchInput { kind: string; isResume: boolean; specSlug: string | null; dispatchVerdict: SerialClaimDispatchVerdict; }
+type SerialClaimDispatchOutcome = { action: "launch" } | { action: "release"; reason: string };
+function decideSerialClaimDispatchOutcome(input: SerialClaimDispatchInput): SerialClaimDispatchOutcome
+```
+
+The **pure classifier** the box's `build/plan` pool invokes right after every `claim_agent_job` RPC return — the SERIAL claim-and-decide step that replaces the old per-tick fan-out. Under the previous behavior the poll loop filled every free lane in one tick (each `claim_agent_job` call ran concurrently) and left the goal-serializer to fire INSIDE `runJob`, so two same-goal same-priority mates both flipped to `building` in the same tick and mutually blocked — the amplifier of the 2026-07-16 dahlia deadlock. Phase 2 pulls one item at a time, decides (launch or release-back-to-queued), and only THEN advances to the next — build EXECUTION stays parallel across MAX_CONCURRENT lanes; only the CLAIM step is serialized. The predicate is pure so the "one poll pass claims+dispatches exactly one same-goal mate" invariant is unit-testable without a fake worker + Supabase (`src/lib/serial-claim-dispatch.test.ts`).
+
+Verdict handling:
+- **`kind !== "build"`** (plan / other pool kinds) → **launch** (they don't goal-serialize).
+- **`isResume`** (`agent_jobs.claude_session_id` set) → **launch** (committed WIP — its branch/PR exists; matches the claim-time gate's resume exemption at `scripts/builder-worker.ts:~6010`).
+- **`specSlug == null`** → **launch** (nothing to resolve to a goal).
+- **`dispatchVerdict == null`** (caller skipped the check / evaluator threw) → **launch** (fail open — the claim-time gate inside `runJob` still guards).
+- **`dispatchVerdict.ok`** → **launch**.
+- Else → **release** with the serializer's reason. The caller re-stamps `status='queued'` + a future `claimed_at` (BUILD_GATE_HOLD_COOLDOWN_MS — same cooldown the claim-time gate uses) so the RPC skips the row until the next window, then fires `autoBreakGoalMemberDeadlockIfDue` in case the earliest ready head has no in-flight row at all.
+
+Wired into `scripts/builder-worker.ts` at the `[serial-claim-decide]` block right after the `while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT)` claim, so no `launch()` fires without a settled disposition. Two goal-mates fetched in adjacent iterations see the classifier SERIALLY: the second's `evaluateGoalMemberBuildDispatch` reads the first as in-flight (GOAL_INFLIGHT_STATUSES) and refuses, so exactly one launches per pass.
+
 ### `GOAL_INFLIGHT_STATUSES` — constant  *(goal-serializer-one-decision-point Phase 1)*
 
 ```ts
