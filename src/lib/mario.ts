@@ -1209,8 +1209,17 @@ export async function evaluateStalledSpecs(
     // source (`orphaned_folded_pr`) EXPECTS a folded/shipped spec — that's the exact class it chases
     // (a terminal spec with a still-open PR). Skip the drop for those from_events so the terminal
     // spec survives to the M4 agent's `close_orphaned_pr` verdict. Any other from_event hitting a
-    // folded/deferred spec is still dropped fail-safe.
-    if (specRow.status === "folded" || specRow.status === "deferred") {
+    // terminal (folded / deferred / shipped) spec is still dropped fail-safe.
+    //
+    // 911 fix (mario-skip-shipped-specs 2026-07-16): a fully-SHIPPED spec presents with a NULL raw
+    // `specRow.status` (that override column is only stamped for folded / deferred / in_review), so
+    // the folded/deferred check alone does NOT catch it — Mario would fire on a long-shipped spec that
+    // merely had a rough build history. A pipeline visibility increase surfaced ~50 such specs and
+    // mass-enqueued mario jobs against them. Derive shipped from the phase rollup (every phase shipped)
+    // and drop it under the SAME terminal-source relax as folded/deferred.
+    const derivedShipped =
+      specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
+    if (specRow.status === "folded" || specRow.status === "deferred" || derivedShipped) {
       if (!TERMINAL_OK_FROM_EVENTS.has(c.from_event)) continue;
     }
 
