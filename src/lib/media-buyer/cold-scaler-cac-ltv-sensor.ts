@@ -170,6 +170,15 @@ export function isoWeekWindow(isoWeek: string): { startDate: string; endDate: st
 
 // ── DB-touching orchestrator ──────────────────────────────────────────────────
 
+/** Signature of the LTV-numerator computer the orchestrator invokes.
+ *  Exposed as an injectable seam so the in-memory orchestrator round-trip
+ *  test can pin the LTV without spinning up `computeBlendedCacLtv`'s upstream
+ *  data-layer (mapped groups, on-site + Amazon revenue, LTV proxy). */
+export type ColdScalerLtvComputer = (
+  admin: Admin,
+  args: { workspaceId: string; isoWeek: string; target: number; flags: string[] },
+) => Promise<number>;
+
 export interface RunColdScalerCacLtvSensorInput {
   workspaceId: string;
   coldScalerCohortId: string;
@@ -178,6 +187,11 @@ export interface RunColdScalerCacLtvSensorInput {
   target?: number;
   /** Injected clock — tests pin `evaluated_at`. */
   now?: Date;
+  /** Test seam — override the LTV-numerator computer. Defaults to
+   *  `computeScalerLtvNumeratorCents` (which delegates to
+   *  [[../blended-cac-ltv]] `computeBlendedCacLtv`). Production callers omit
+   *  this. */
+  computeLtvCents?: ColdScalerLtvComputer;
 }
 
 export interface RunColdScalerCacLtvSensorResult {
@@ -235,7 +249,8 @@ export async function runColdScalerCacLtvSensor(
     for (const f of totals.flags) flags.push(f);
   }
 
-  const ltvCents = await computeScalerLtvNumeratorCents(admin, {
+  const ltvComputer = input.computeLtvCents ?? computeScalerLtvNumeratorCents;
+  const ltvCents = await ltvComputer(admin, {
     workspaceId: input.workspaceId,
     isoWeek: input.isoWeek,
     target,
