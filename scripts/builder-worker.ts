@@ -14969,9 +14969,24 @@ async function loadDevThread(threadId: string): Promise<DevThreadRow | null> {
 // The model's final JSON for a turn. A pure investigation/analytics answer carries just {reply}. When the
 // answer needs a DB write (db_mutation) or it spots a gap worth a spec (spec), it ALSO returns a typed
 // pending_actions card — it NEVER executes the write/migration/handoff itself.
-function normalizeDevActions(raw: unknown, ts: string): PendingAction[] {
+//
+// ada-reacts-to-approvals-immediately-never-sits Phase 2 — a `db_mutation` whose cmd wraps
+// `scripts/apply-<slug>-migration.ts` is reclassified as `apply_migration` iff the union of the
+// script + referenced SQL classifies as additive (deterministic). Everything else (or a non-
+// additive migration) stays `run_prod_script` — the destructive-preapproval boundary in
+// `routeOutOfLeashAction` holds. Async because `tagPendingActionType` is imported dynamically to
+// avoid pulling the pg client + migration classifier into every hot import path.
+async function normalizeDevActions(raw: unknown, ts: string): Promise<PendingAction[]> {
   if (!Array.isArray(raw)) return [];
   const out: PendingAction[] = [];
+  const { tagPendingActionType } = await import("../src/lib/migration-safety");
+  const cwdReadFile = (rel: string): string | null => {
+    try {
+      return require("fs").readFileSync(require("path").resolve(process.cwd(), rel), "utf8") as string;
+    } catch {
+      return null;
+    }
+  };
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i] as Record<string, unknown>;
     if (!a || typeof a !== "object") continue;
@@ -14979,12 +14994,19 @@ function normalizeDevActions(raw: unknown, ts: string): PendingAction[] {
     if (t === "db_mutation") {
       const cmd = typeof a.cmd === "string" ? a.cmd : "";
       if (!cmd) continue; // a write with no command to run is not executable — drop it
+      const preview = typeof a.preview === "string" ? a.preview : undefined;
+      // Tag as run_prod_script by default (raw self-declared type is db_mutation, not one the
+      // tagger recognizes). Pass "run_prod_script" so the tagger can reclassify to apply_migration
+      // only when the wrapped SQL is verifiably additive (`scripts/apply-*-migration.ts` cmd path
+      // + classifier reports 'additive'). Otherwise stays run_prod_script (escalates via the
+      // routeOutOfLeashAction boundary in migration-safety.ts:578).
+      const type = tagPendingActionType("run_prod_script", cmd, preview, cwdReadFile);
       out.push({
         id: `da${ts}${i}`,
-        type: "run_prod_script",
+        type,
         summary: String(a.summary || "Proposed database write"),
         cmd,
-        preview: typeof a.preview === "string" ? a.preview : undefined,
+        preview,
         status: "pending",
       });
     } else if (t === "spec") {
@@ -15182,7 +15204,7 @@ async function runDeveloperMessageJob(job: Job) {
       return;
     }
     const ts = Date.now().toString(36);
-    const newActions = normalizeDevActions(parsed?.pending_actions, ts);
+    const newActions = await normalizeDevActions(parsed?.pending_actions, ts);
     const fresh = await loadDevThread(threadId);
     const messages = [...(fresh?.messages ?? thread.messages), { role: "assistant" as const, content: reply }];
     await db.from("dev_message_threads").update({
@@ -24765,9 +24787,26 @@ async function dispatchJob(job: Job) {
       const pending: PendingAction[] = [];
       let autoSettled = 0;
       let loopGuardTripped = false;
+      // ada-reacts-to-approvals-immediately-never-sits Phase 2 — reclassify a `run_prod_script`
+      // whose cmd wraps `scripts/apply-<slug>-migration.ts` as `apply_migration` iff the union of
+      // the script source + every referenced `supabase/migrations/*.sql` classifies as additive
+      // (deterministic — `classifyMigrationSql`). Under Phase 1's reactive Ada, that reclassify is
+      // the last-mile fix that lets an additive migration self-approve in ~1min instead of sitting
+      // on the CEO's inbox. A non-migration script OR a non-additive migration stays
+      // `run_prod_script` — the destructive-preapproval boundary in `routeOutOfLeashAction` is
+      // NEVER relaxed. See src/lib/migration-safety.ts `tagPendingActionType`.
+      const { tagPendingActionType } = await import("../src/lib/migration-safety");
+      const wtReadFile = (rel: string): string | null => {
+        try {
+          return require("fs").readFileSync(require("path").resolve(wt, rel), "utf8") as string;
+        } catch {
+          return null;
+        }
+      };
       incoming.forEach((a, i) => {
         const cmd = typeof a.cmd === "string" ? a.cmd : undefined;
-        const type = a.type === "merge_pr" || a.type === "run_prod_script" ? (a.type as PendingAction["type"]) : "apply_migration";
+        const preview = typeof a.preview === "string" ? a.preview : undefined;
+        const type = tagPendingActionType(a.type, cmd, preview, wtReadFile);
         const prior = cmd ? priorDone.get(cmd) : undefined;
         if (prior) {
           prior.autoSettled = (prior.autoSettled ?? 0) + 1;

@@ -135,6 +135,96 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
   return { severity, matches };
 }
 
+/**
+ * ada-reacts-to-approvals-immediately-never-sits Phase 2 — the pure tag decision at the build
+ * worker's raise chokepoint (`scripts/builder-worker.ts` — the primary `needs_approval` handler +
+ * `normalizeDevActions`). Given the model's self-declared action `type` + `cmd` + `preview`, plus
+ * a working-tree `readFile` hook, returns the effective `PendingAction['type']` string the worker
+ * stores.
+ *
+ * The problem this closes: a build model that couches a MIGRATION in the shell form
+ * `npx tsx scripts/apply-<slug>-migration.ts` self-tags the action `run_prod_script`. The leash
+ * gate (`categoryFor` in platform-director.ts) returns null for a LONE `run_prod_script` — even
+ * when the wrapped SQL is 100% additive (`ADD COLUMN IF NOT EXISTS` / nullable / CHECK / no
+ * backfill). So Ada, reacting instantly per Phase 1, has to escalate to the CEO — instead of the
+ * ~1-min self-approve the additive classifier already earns for a directly-tagged apply_migration.
+ *
+ * The decision (deterministic — the classifier errs safe on any missed keyword):
+ *   - `merge_pr` stays `merge_pr` (unchanged).
+ *   - `run_prod_script` whose cmd matches `scripts/apply-<slug>-migration.ts`, AND the union of
+ *     cmd + preview + the apply script's source + every referenced supabase/migrations/*.sql
+ *     classifies as `additive` — re-tag to `apply_migration`. The Phase-1 leash gate then hits
+ *     `LEASH_ACTION_TYPES['apply_migration']` (`additive_migration`), classifyMigrationSql
+ *     re-verifies the same additive verdict, and Ada auto-approves in-leash.
+ *   - A `run_prod_script` whose script is NOT a `scripts/apply-*-migration.ts` path (a real shell
+ *     command, not a migration wrapper), OR whose wrapped SQL classifies non-additive (DROP /
+ *     TRUNCATE / DELETE-WHERE / ALTER DROP CONSTRAINT / ON DELETE CASCADE / …) — stays
+ *     `run_prod_script`. The lone-shell fail-safe holds (categoryFor returns null → escalate),
+ *     and `routeOutOfLeashAction` (migration-safety.ts:578) is NEVER relaxed for non-additive or
+ *     non-migration scripts — the destructive-preapproval boundary is preserved.
+ *   - Any other self-declared type (unknown, missing, or malformed) defaults to `apply_migration`
+ *     to preserve the pre-Phase-2 behavior at the same chokepoint (a bug-shaped tag that used to
+ *     fall through is unchanged — Phase 2 does NOT widen or narrow that path).
+ *
+ * PURE — no I/O. `readFile` is injected: production binds it to the build worker's working-tree
+ * `fs.readFileSync(resolve(wt, relPath), 'utf8')` (returning `null` on ENOENT); tests drive an
+ * in-memory fake. A `null` return from `readFile` (missing file / read error) is treated the same
+ * as an empty string — the classifier scans the cmd + preview alone. Errs safe by design: if the
+ * apply script can't be found, cmd + preview must SOLELY carry additive evidence to earn the
+ * apply_migration tag.
+ */
+export const APPLY_MIGRATION_SCRIPT_REGEX = /scripts\/(apply-[a-z0-9_-]+-migration\.ts)/i;
+
+export function tagPendingActionType(
+  rawType: unknown,
+  cmd: string | null | undefined,
+  preview: string | null | undefined,
+  readFile: (relPath: string) => string | null,
+): "apply_migration" | "run_prod_script" | "merge_pr" {
+  if (rawType === "merge_pr") return "merge_pr";
+  if (rawType === "run_prod_script") {
+    const cmdStr = typeof cmd === "string" ? cmd : "";
+    const scriptMatch = cmdStr.match(APPLY_MIGRATION_SCRIPT_REGEX);
+    if (!scriptMatch) return "run_prod_script";
+    const sql = resolveMigrationSqlForClassification(cmdStr, preview ?? "", readFile);
+    return classifyMigrationSql(sql).severity === "additive" ? "apply_migration" : "run_prod_script";
+  }
+  return "apply_migration";
+}
+
+/**
+ * Concatenate every text surface that carries the effective SQL for classification: the shell cmd
+ * itself, the model's preview, the referenced `scripts/apply-<slug>-migration.ts` source, and each
+ * `supabase/migrations/*.sql` file that script string-references. All read through the injected
+ * `readFile`. A missing file simply contributes nothing — the classifier still scans what remains.
+ * PURE. Callers pass the working-tree-bound `readFile`.
+ */
+export function resolveMigrationSqlForClassification(
+  cmd: string | null | undefined,
+  preview: string | null | undefined,
+  readFile: (relPath: string) => string | null,
+): string {
+  const parts: string[] = [];
+  if (cmd) parts.push(cmd);
+  if (preview) parts.push(preview);
+  const cmdStr = typeof cmd === "string" ? cmd : "";
+  const scriptMatch = cmdStr.match(APPLY_MIGRATION_SCRIPT_REGEX);
+  if (scriptMatch) {
+    const scriptRel = `scripts/${scriptMatch[1]}`;
+    const src = readFile(scriptRel);
+    if (src != null) {
+      parts.push(src);
+      const sqlRefs = new Set<string>();
+      for (const m of src.matchAll(/([a-z0-9_-]+\.sql)/gi)) sqlRefs.add(m[1]);
+      for (const rel of sqlRefs) {
+        const sql = readFile(`supabase/migrations/${rel}`);
+        if (sql != null) parts.push(sql);
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
 // ── Phase 3 — computed blast-radius via transactional dry-run ─────────────────────
 //
 // The Phase-1 classifier is a mechanical rail on the SQL text alone. Phase 3 layers
