@@ -3,41 +3,27 @@
 // read per userId, instead of 2–3 auths and 3 member reads (dashboard layout +
 // getActiveWorkspaceId + getUserWorkspaces).
 //
-// db-load-getclaims: prefer local JWT verification (getClaims) over the GoTrue
-// round-trip getUser(). On asymmetric signing keys getClaims verifies against a
-// once-fetched, in-memory-cached JWKS — zero auth-table reads. On legacy HS256
-// keys getClaims internally falls back to getUser() → identical behavior, safe
-// to ship before the key migration. The Phase 1 accessor's callers (dashboard
-// layout + workspace helpers) automatically inherit the local-verify path.
+// Phase 3 / Fix 1 — this accessor stays on supabase.auth.getUser() (fresh
+// server-side validation), NOT getClaims(), because its two callers are authz
+// gates: src/app/dashboard/layout.tsx (login gate for protected dashboard SSR)
+// and src/lib/workspace.ts getActiveWorkspaceId (its app_metadata.workspace_id
+// fallback drives service-role dashboard reads — see e.g.
+// src/app/dashboard/storefront/blog/page.tsx:39). A local-verify path would
+// accept a signed-but-revoked JWT until natural expiry — the pre-merge
+// spec-test flagged this as an authz regression on the [check
+// blocker:real_blocker] check. Phase 2's getClaims swap is retained at the
+// middleware site (src/lib/supabase/middleware.ts) where the gate is coarse
+// ("logged in? redirect to /login" + ADMIN_EMAIL) and the fine-grained authz
+// happens downstream in this accessor.
 import { cache } from "react";
-import type { AuthError } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export type ClaimsUser = {
-  id: string;
-  email: string | undefined;
-  app_metadata: Record<string, unknown>;
-  user_metadata: Record<string, unknown>;
-};
-
-export const getAuthedUser = cache(
-  async (): Promise<{ user: ClaimsUser | null; error: AuthError | null }> => {
-    const supabase = await createClient();
-    const { data, error } = await supabase.auth.getClaims();
-    if (!data?.claims) return { user: null, error: error ?? null };
-    const c = data.claims;
-    return {
-      user: {
-        id: c.sub,
-        email: c.email,
-        app_metadata: c.app_metadata ?? {},
-        user_metadata: c.user_metadata ?? {},
-      },
-      error: null,
-    };
-  }
-);
+export const getAuthedUser = cache(async () => {
+  const supabase = await createClient();
+  const { data, error } = await supabase.auth.getUser();
+  return { user: data.user, error };
+});
 
 export type WorkspaceMembership = {
   workspace_id: string;
