@@ -420,6 +420,38 @@ export async function getPr(
 }
 
 /**
+ * mario-detects-job-and-pr-wedges Phase 3 — read a PR's OPEN head shape (ref + sha + repo). Sibling
+ * of `getPr` that ALSO returns the internal-repo head ref/sha so a caller can pass them straight to
+ * `closeDuplicatePr({ expectedHeadSha })`. Fail-closed: any GitHub error → `{ok:false}`; a PR that
+ * is already closed / merged / on a fork head returns `{ok:false}` too, so a caller never receives
+ * a head SHA for a state that isn't safe to authorize a mutation against.
+ */
+export async function getPrHead(
+  prNumber: number,
+): Promise<{ ok: true; state: string; headRef: string; headSha: string } | { ok: false; reason: string }> {
+  if (!ghToken()) return { ok: false, reason: "no gh token" };
+  try {
+    const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}`);
+    if (!r.ok) return { ok: false, reason: `pr fetch failed (${r.status})` };
+    const pr = r.json as {
+      state?: string;
+      merged?: boolean;
+      head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
+    };
+    if (pr.state !== "open" || pr.merged) return { ok: false, reason: `state=${pr.state} merged=${pr.merged}` };
+    const headRepo = pr.head?.repo?.full_name;
+    if (headRepo !== GH_REPO) return { ok: false, reason: `head.repo=${headRepo} (expected ${GH_REPO})` };
+    const headRef = pr.head?.ref;
+    const headSha = pr.head?.sha;
+    if (typeof headRef !== "string" || !headRef) return { ok: false, reason: "head.ref missing" };
+    if (typeof headSha !== "string" || !headSha) return { ok: false, reason: "head.sha missing" };
+    return { ok: true, state: pr.state, headRef, headSha };
+  } catch {
+    return { ok: false, reason: "fetch threw" };
+  }
+}
+
+/**
  * accumulation-stamp-gap-and-rollback-guard P2 — list the set of branch refs backing an OPEN claude/build-*
  * PR right now. The stuck-accumulation backstop uses this to decide "is a build branch NOT already visible as
  * an open PR?" (the wedge signature). Returns `null` on ANY GitHub failure (no token, list failed, bad payload)

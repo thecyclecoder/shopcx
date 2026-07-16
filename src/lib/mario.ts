@@ -768,6 +768,112 @@ async function readPrResolveStorms(
 const JOB_PR_SCOPED_FROM_EVENTS: ReadonlySet<string> = new Set(["build_queued", "pr_resolve_storm"]);
 
 /**
+ * The set of `from_event` values whose whole point is a TERMINAL spec (folded/shipped) with an open
+ * PR — the ninth-source's class (mario-detects-job-and-pr-wedges Phase 3). The (d) folded/deferred
+ * drop is relaxed for these so a genuinely-terminal spec with a still-open orphaned PR survives to
+ * `applyBoxMario`, where the `close_orphaned_pr` verb closes the PR + deletes the branch through
+ * `closeDuplicatePr`. Kept as a small opt-in set so the drop's default remains fail-safe: a folded
+ * spec that surfaced under any OTHER from_event (e.g. a stale timecard event) is still dropped.
+ */
+const TERMINAL_OK_FROM_EVENTS: ReadonlySet<string> = new Set(["orphaned_folded_pr"]);
+
+/**
+ * Pure decision predicate — is this build row the ninth-source's orphaned-folded-PR class?
+ * Fanned out of `readOrphanedFoldedPrs` so the exact "surface?" logic is unit-testable without a
+ * stubbed Supabase client (mirrors [[shouldSurfacePrResolveStorm]] +
+ * [[shouldSurfaceStuckQueuedBuild]]'s split of I/O from decision). Returns true ONLY when:
+ * (1) the spec's stored status is `folded` OR `shipped` (a terminal override — the PR should not be
+ *     open anymore; a `planned`/`in_progress`/`in_review`/`deferred` spec has a genuine reason for
+ *     its PR to stay open), AND
+ * (2) the build row's status is NOT `merged` (a merged build had its PR merged on GitHub, so there
+ *     is nothing to close). Other build statuses (completed / needs_attention / failed / queued /
+ *     claimed / building) can all leave an open PR behind on a folded spec — we surface all of them.
+ */
+export function shouldSurfaceOrphanedFoldedPr(input: {
+  specStatus: string | null;
+  buildJobStatus: string;
+}): boolean {
+  if (input.specStatus !== "folded" && input.specStatus !== "shipped") return false;
+  if (input.buildJobStatus === "merged") return false;
+  return true;
+}
+
+/**
+ * NINTH candidate source (orphaned folded/shipped-spec open PR). PR #1893 sat open + conflicting for
+ * 7 h before Mario noticed nothing — the spec had folded, but no detector caught the orphaned PR
+ * (the ultimate cause of the pr-resolve storm Phase 2 handles: a superseded PR that kept re-firing
+ * the resolver). This reads the class straight from `agent_jobs` + `specs`: `kind='build' AND
+ * pr_number IS NOT NULL AND status NOT IN ('merged')`, cross-referenced with `specs.status IN
+ * ('folded','shipped')`. Survivors flow through the SAME (b)/(c)/(d) drop filters — (d) is relaxed
+ * via `TERMINAL_OK_FROM_EVENTS` for THIS from_event so the folded/shipped drop doesn't front-run.
+ * The M4 agent's `close_orphaned_pr` verb re-confirms the spec is still terminal + closes the PR
+ * via [[github-pr-resolve]] `closeDuplicatePr` (with a mario-branded comment + branch delete).
+ */
+async function readOrphanedFoldedPrs(
+  admin: Admin,
+  workspace_id: string,
+): Promise<Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }>> {
+  const now = Date.now();
+  const { data: builds, error } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, pr_number, spec_branch, status, updated_at")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .not("pr_number", "is", null)
+    .neq("status", "merged")
+    .limit(1000);
+  if (error) throw error;
+  const rows = (builds ?? []) as Array<{
+    spec_slug: string | null;
+    pr_number: number | null;
+    spec_branch: string | null;
+    status: string;
+    updated_at: string | null;
+  }>;
+  if (rows.length === 0) return [];
+
+  // Newest row per spec_slug wins so a folded spec with N historical builds doesn't fan out into N
+  // orphan candidates (only the most recent PR/branch is the one still open on GitHub in practice).
+  const bySlug = new Map<string, { pr_number: number; spec_branch: string | null; status: string; updated_at: string | null }>();
+  for (const b of rows) {
+    if (!b.spec_slug || b.pr_number == null) continue;
+    const cur = bySlug.get(b.spec_slug);
+    const curUpd = cur?.updated_at ? Date.parse(cur.updated_at) : 0;
+    const newUpd = b.updated_at ? Date.parse(b.updated_at) : 0;
+    if (!cur || newUpd > curUpd) {
+      bySlug.set(b.spec_slug, { pr_number: b.pr_number, spec_branch: b.spec_branch, status: b.status, updated_at: b.updated_at });
+    }
+  }
+  if (bySlug.size === 0) return [];
+
+  const slugs = [...bySlug.keys()];
+  const { data: specs } = await admin
+    .from("specs")
+    .select("slug, status")
+    .eq("workspace_id", workspace_id)
+    .in("slug", slugs)
+    .in("status", ["folded", "shipped"]);
+  const terminalSpecs = new Map<string, string>();
+  for (const s of ((specs ?? []) as Array<{ slug: string; status: string | null }>)) {
+    if (s.status === "folded" || s.status === "shipped") terminalSpecs.set(s.slug, s.status);
+  }
+
+  const out: Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }> = [];
+  for (const [slug, b] of bySlug) {
+    const specStatus = terminalSpecs.get(slug) ?? null;
+    if (
+      !shouldSurfaceOrphanedFoldedPr({
+        specStatus,
+        buildJobStatus: b.status,
+      })
+    ) continue;
+    const ageMs = b.updated_at ? now - Date.parse(b.updated_at) : 0;
+    out.push({ workspace_id, spec_slug: slug, pr_number: b.pr_number, branch: b.spec_branch, age_ms: ageMs });
+  }
+  return out;
+}
+
+/**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
  *
@@ -1024,6 +1130,37 @@ export async function evaluateStalledSpecs(
         },
       });
     }
+
+    // (a9) NINTH candidate source — orphaned folded/shipped-spec open PR (see readOrphanedFoldedPrs).
+    // PR #1893 sat open + conflicting for 7 h because its spec had folded and no detector caught it.
+    // The candidate carries the REAL spec_slug (the spec exists in `public.specs` — it's just terminal),
+    // pr_number + branch pre-seeded on `job_pr_context` for the M4 agent's `close_orphaned_pr` verdict.
+    // The (d) folded/deferred drop is RELAXED for this from_event via TERMINAL_OK_FROM_EVENTS so the
+    // terminal spec survives — this is the ONE class where a folded spec IS the target, not a drop.
+    const orphans = await readOrphanedFoldedPrs(admin, ws);
+    for (const orph of orphans) {
+      const key = `${orph.workspace_id}::${orph.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: orph.workspace_id,
+        spec_slug: orph.spec_slug,
+        // Semantic: the spec IS terminal (folded/shipped) but the PR is STILL open — the merge/close
+        // step that owns dropping the PR after fold never happened.
+        from_event: "orphaned_folded_pr",
+        to_event: "pr_closed",
+        gap_ms: orph.age_ms,
+        // Reuses the review-verification grace (1h) as the "how stale is the observation" pin so a
+        // freshly-folded spec's PR isn't touched before the fold cleanup path has room to run.
+        sla_ms: MARIO_REVIEW_VERIFICATION_GRACE_MS,
+        brief: {
+          last_events: [],
+          blocked_by_state: [],
+          current_job_status: "orphaned_folded_pr_open",
+          job_pr_context: { job_id: null, pr_number: orph.pr_number, parked_count: null },
+        },
+      });
+    }
   }
 
   const survivors: StalledCandidate[] = [];
@@ -1068,7 +1205,14 @@ export async function evaluateStalledSpecs(
       });
       continue;
     }
-    if (specRow.status === "folded" || specRow.status === "deferred") continue;
+    // RELAX for TERMINAL-TARGETED sources (mario-detects-job-and-pr-wedges Phase 3): the ninth
+    // source (`orphaned_folded_pr`) EXPECTS a folded/shipped spec — that's the exact class it chases
+    // (a terminal spec with a still-open PR). Skip the drop for those from_events so the terminal
+    // spec survives to the M4 agent's `close_orphaned_pr` verdict. Any other from_event hitting a
+    // folded/deferred spec is still dropped fail-safe.
+    if (specRow.status === "folded" || specRow.status === "deferred") {
+      if (!TERMINAL_OK_FROM_EVENTS.has(c.from_event)) continue;
+    }
 
     // (d2) GOAL MEMBER AWAITING ATOMIC PROMOTION → legit wait, drop. A goal member's correct
     // integration target is its GOAL BRANCH; it only reaches `main` via M5's atomic goal→main
@@ -1217,7 +1361,7 @@ const MARIO_ACTOR = "mario";
 
 /** One non-destructive live fix in the M4 vocabulary — the exact action key + its target. */
 export interface MarioLiveFix {
-  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | cancel_pr_resolve_storm | ...open slot. */
+  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | cancel_pr_resolve_storm | close_orphaned_pr | ...open slot. */
   action: string;
   /** The specific row/slug/box/PR the action mutates — Phase 3 helpers each read exactly one field.
    *  `pr_number` (mario-detects-job-and-pr-wedges Phase 2) is set for the `cancel_pr_resolve_storm`
@@ -1547,6 +1691,62 @@ async function requeueUnclaimedJob(admin: Admin, targetJobId: string, workspaceI
     .select("id");
   if (error) throw new Error(`requeue_unclaimed_job: ${error.message}`);
   if (!Array.isArray(updated) || updated.length === 0) throw new Error("requeue_unclaimed_job: no queued row matched");
+}
+
+/** `close_orphaned_pr` — close an open claude/build-* PR whose spec has folded/shipped (mario-detects-
+ *  job-and-pr-wedges Phase 3). The full case #1893: a folded-spec PR sat open + conflicting for 7 h,
+ *  storming pr-resolve until Mario Phase 2 catches the storm — but the root cause is the orphaned PR
+ *  itself. This applier CONFIRMS the spec is still folded/shipped RIGHT BEFORE firing (guard-before-
+ *  mutation — a between-detection-and-apply un-fold means we do NOT close the PR), reads the branch
+ *  from `agent_jobs.spec_branch`, fetches the PR's current head sha via `getPrHead`, then calls
+ *  [[github-pr-resolve]] `closeDuplicatePr` (with `expectedHeadSha` so the mutation is authorized
+ *  against the exact head we saw + a mario-branded comment). Any drift (spec un-folded, no build row,
+ *  PR already closed/merged, head SHA moved) fails closed with a reason on the mario_fired row —
+ *  never destructive. Throws when the confirm-at-fire guard rejects the write. */
+async function closeOrphanedPr(admin: Admin, workspaceId: string, specSlug: string): Promise<{ prNumber: number; closed: boolean; reason?: string }> {
+  // Guard 1: re-read the spec status right now. Between detection (source a9) and this applier fire
+  // the spec could have been re-opened (un-folded, un-shipped-with-error-correction); do NOT close a
+  // PR whose spec is no longer terminal.
+  const spec = await getSpecFromDb(workspaceId, specSlug);
+  if (!spec) throw new Error(`close_orphaned_pr: spec ${specSlug} not found`);
+  if (spec.status !== "folded" && spec.status !== "shipped") {
+    throw new Error(`close_orphaned_pr: spec ${specSlug} status is ${spec.status ?? "null"} (not folded/shipped) — refusing to close PR`);
+  }
+
+  // Guard 2: read the ONE most-recent build row for this spec that carries a pr_number and is not
+  // already `merged`. This is the same enumeration the detector used, applied fresh at fire time.
+  const { data: builds, error: buildErr } = await admin
+    .from("agent_jobs")
+    .select("pr_number, spec_branch, status, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", specSlug)
+    .eq("kind", "build")
+    .not("pr_number", "is", null)
+    .neq("status", "merged")
+    .order("updated_at", { ascending: false })
+    .limit(1);
+  if (buildErr) throw new Error(`close_orphaned_pr: build lookup failed: ${buildErr.message}`);
+  const build = (builds ?? [])[0] as { pr_number: number | null; spec_branch: string | null; status: string } | undefined;
+  if (!build || build.pr_number == null) throw new Error(`close_orphaned_pr: no open-PR build row for ${specSlug}`);
+  if (build.status === "merged") throw new Error(`close_orphaned_pr: build row already merged (${specSlug})`);
+  const prNumber = build.pr_number;
+  const branch = build.spec_branch;
+  if (!branch || !branch.startsWith("claude/")) {
+    // Mario NEVER touches a human PR — the branch shape is the guard, matching detectAndEnqueueDirtyPrs.
+    throw new Error(`close_orphaned_pr: branch ${branch ?? "null"} not a claude/* branch — refusing to close`);
+  }
+
+  // Guard 3: fetch the PR's current head SHA — `closeDuplicatePr` needs it as an authorization anchor
+  // (fail-closed on any state=closed / merged / fork-head / head.sha drift between our read + PATCH).
+  const { getPrHead, closeDuplicatePr } = await import("@/lib/github-pr-resolve");
+  const head = await getPrHead(prNumber);
+  if (!head.ok) throw new Error(`close_orphaned_pr: PR #${prNumber} head fetch failed: ${head.reason}`);
+  if (head.headRef !== branch) throw new Error(`close_orphaned_pr: head.ref=${head.headRef} does not match agent_jobs.spec_branch=${branch}`);
+
+  const comment = `Closing as an orphaned PR: this spec (\`${specSlug}\`) has already ${spec.status === "folded" ? "folded" : "shipped"} — the work is settled and this open PR is superseded. Auto-closed by mario (\`close_orphaned_pr\` — mario-detects-job-and-pr-wedges Phase 3).`;
+  const res = await closeDuplicatePr(prNumber, branch, comment, { expectedHeadSha: head.headSha });
+  if (!res.ok) throw new Error(`close_orphaned_pr: closeDuplicatePr refused: ${res.reason ?? "unknown"}`);
+  return { prNumber, closed: true, reason: res.reason };
 }
 
 /** `cancel_pr_resolve_storm` — cancel every parked pr-resolve row for one PR (mario-detects-job-and-pr-
@@ -2187,6 +2387,18 @@ export async function applyBoxMario(
             // status keeps the write bounded to the exact PR's parked storm rows.
             if (!lf.target.pr_number) throw new Error("target.pr_number required");
             await cancelPrResolveStorm(admin, row.workspace_id, lf.target.pr_number);
+            fixExecuted = true;
+            break;
+          }
+          case "close_orphaned_pr": {
+            // mario-detects-job-and-pr-wedges Phase 3 verb. The M4 agent's verdict MUST carry
+            // target.spec_slug (real spec — the ninth source carries the real slug); target.pr_number
+            // is redundant (the applier re-derives it from agent_jobs.spec_branch/pr_number) but is
+            // accepted for cross-check symmetry with the storm verb. The applier confirms the spec
+            // is still folded/shipped RIGHT BEFORE firing (guard-before-mutation) — a spec that has
+            // been re-opened between detection and apply is refused, not closed.
+            const targetSlug = lf.target.spec_slug ?? row.spec_slug;
+            await closeOrphanedPr(admin, row.workspace_id, targetSlug);
             fixExecuted = true;
             break;
           }
