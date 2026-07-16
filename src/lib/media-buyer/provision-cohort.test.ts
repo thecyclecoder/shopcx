@@ -31,3 +31,24 @@ test("buildAdsetTemplate: caller targeting overrides the default", () => {
   const custom = { age_min: 50, age_max: 65, geo_locations: { countries: ["US"] } };
   assert.deepEqual(buildAdsetTemplate({ pixelId: "PX", targeting: custom }).targeting, custom);
 });
+
+// Regression-pin: DEFAULT_TEST_TARGETING is the F50-65 converter cohort (docs/brain/reference/meta-scaling-methodology.md).
+// A stray edit reverting to the old 18-65 / no-gender shape confounds the per-creative CPA read the M4 crown
+// depends on — the goal's M1 clean-cold-read fix. If any assertion here fails, DO NOT relax the test; fix the
+// constant (or open a spec if the converter cohort has legitimately changed).
+test("DEFAULT_TEST_TARGETING: pinned to the F50-65 converter cohort (US women 50-65, home+recent, Advantage+ on)", () => {
+  const t = DEFAULT_TEST_TARGETING as {
+    age_min: number;
+    age_max: number;
+    genders: number[];
+    geo_locations: { countries: string[]; location_types: string[] };
+    targeting_automation: { advantage_audience: number };
+  };
+  assert.equal(t.age_min, 50);
+  assert.equal(t.age_max, 65);
+  assert.deepEqual(t.genders, [2]);
+  assert.deepEqual(t.geo_locations.countries, ["US"]);
+  assert.deepEqual(t.geo_locations.location_types, ["home", "recent"]);
+  assert.equal(t.targeting_automation.advantage_audience, 1);
+  assert.notEqual(t.age_min, 18); // explicit regression guard against the old default
+});

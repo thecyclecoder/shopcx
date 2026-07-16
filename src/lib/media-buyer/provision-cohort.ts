@@ -17,11 +17,16 @@ import { getMetaUserToken, getOrCreateTestingCampaign } from "@/lib/meta-ads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** The proven cold-test audience (cloned from Amazing Coffee's live MB test adsets): US 18–65, home+recent,
- *  Advantage+ Audience on. Callers override per product/account as needed. */
+/** The proven cold-test converter cohort (docs/brain/reference/meta-scaling-methodology.md § "Test audience
+ *  held constant = our proven converter (US women 50-65, matches the cold-50+ creative)"): US women 50-65,
+ *  home+recent, Advantage+ Audience on. Aligning the cold-test default to F50-65 makes every per-creative
+ *  CPA read a clean signal against the customer the ad is actually meant to sell — a per-test cohort
+ *  minted against 18-65 confounds the crown/kill call the Media Buyer downstream is trying to make.
+ *  Callers override per product/account as needed. */
 export const DEFAULT_TEST_TARGETING: Record<string, unknown> = {
-  age_min: 18,
+  age_min: 50,
   age_max: 65,
+  genders: [2],
   geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
   targeting_automation: { advantage_audience: 1 },
 };
