@@ -231,10 +231,17 @@ function withExclusion(t: Record<string, unknown>, audienceId: string): Record<s
 
       // Compare-and-set: re-assert (a) `excluded_purchaser_audience_id IS NULL` (we're the
       // first to stamp it) AND (b) `adset_per_test=true`+`is_active=true` (a concurrent
-      // retire can't have swapped in) AND (c) the template's current no-exclusion shape
-      // (`excluded_custom_audiences` still empty / absent) — enforced via `contains` on the
-      // `adset_template` cell. A hand-edit between the read above and the write here fails
-      // the predicate, the update matches zero rows, and we count it as raced.
+      // retire can't have swapped in) AND (c) the template's CURRENT no-exclusion shape
+      // ALWAYS. A hand-edit adding an exclusion between the read above and the write here
+      // fails the predicate, the update matches zero rows, and we count it as raced — the
+      // rail must hold for BOTH read-time shapes:
+      //   • absent key   — the pre-Phase-3 common case: the write filters on the JSON path
+      //     `adset_template->targeting->excluded_custom_audiences IS NULL`. `->` returns SQL
+      //     NULL when the key is missing OR the value is JSON null, so this covers both.
+      //   • empty array  — a legacy row whose template already carries `[]`: the write uses
+      //     `.contains('adset_template', { targeting: { excluded_custom_audiences: [] } })`,
+      //     the jsonb subset-match that only holds while the array is still empty.
+      // A concurrent hand-edit that adds an entry drops both predicates and races us out.
       const nextTemplate = withExclusion(row.adset_template ?? {}, audienceId);
       let upQ = admin
         .from("media_buyer_test_cohorts")
@@ -247,10 +254,15 @@ function withExclusion(t: Record<string, unknown>, audienceId: string): Record<s
         .eq("adset_per_test", true)
         .eq("is_active", true)
         .is("excluded_purchaser_audience_id", null);
-      // Re-assert the empty-or-absent exclusion shape when the template already carried a
-      // targeting object with an empty array (contains is deep-subset on jsonb).
       if (targeting && Array.isArray(targeting.excluded_custom_audiences)) {
+        // Read-time shape was `[]` (empty array). Compare-and-set on the SAME empty array —
+        // a concurrent hand-edit that appends an entry drops the subset match.
         upQ = upQ.contains("adset_template", { targeting: { excluded_custom_audiences: [] } });
+      } else {
+        // Read-time shape was absent-key (or JSON null). Compare-and-set on the JSON path
+        // being NULL at write time — a concurrent hand-edit that sets the key to any array
+        // (empty or non-empty) drops this predicate.
+        upQ = upQ.filter("adset_template->targeting->excluded_custom_audiences", "is", "null");
       }
       const { data: upData, error: upErr } = await upQ.select("id");
       if (upErr) throw new Error(`update failed cohort=${row.id}: ${upErr.message}`);

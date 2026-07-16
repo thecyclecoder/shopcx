@@ -46,15 +46,38 @@ export function maxConcurrentTests(cohort: { daily_test_ceiling_cents: number; p
   return Math.max(1, Math.floor(cohort.daily_test_ceiling_cents / per));
 }
 
-/** Build the adset template that every per-test ad set clones (only the CREATIVE varies across a cohort). */
-export function buildAdsetTemplate(opts: { pixelId: string; targeting?: Record<string, unknown> }): AdsetTemplate {
+/**
+ * Build the adset template that every per-test ad set clones (only the CREATIVE varies across a cohort).
+ *
+ * `excludedCustomAudienceIds` ([[../../../docs/brain/specs/bianca-cold-test-recent-purchaser-exclusion]]
+ * Phase 2) merges into the resolved targeting as `excluded_custom_audiences: [{ id }, …]` — Meta's
+ * required shape for a custom-audience exclusion on an ad set. Caller-supplied `targeting` that
+ * ALREADY carries its own `excluded_custom_audiences` key wins (caller intent is respected — e.g.
+ * a founder-crafted template that carries an extra list beyond the audience id). When the caller
+ * passes NO `targeting`, DEFAULT_TEST_TARGETING is the base and the exclusion is layered on.
+ * Omitting `excludedCustomAudienceIds` (or passing `[]`) leaves targeting exactly as the caller
+ * asked (no empty `excluded_custom_audiences` key is added — the shape stays clean).
+ */
+export function buildAdsetTemplate(opts: {
+  pixelId: string;
+  targeting?: Record<string, unknown>;
+  excludedCustomAudienceIds?: string[];
+}): AdsetTemplate {
+  const base = opts.targeting ?? DEFAULT_TEST_TARGETING;
+  const ids = opts.excludedCustomAudienceIds ?? [];
+  const callerAlreadyHasExclusion =
+    Object.prototype.hasOwnProperty.call(base, "excluded_custom_audiences");
+  const targeting: Record<string, unknown> =
+    ids.length === 0 || callerAlreadyHasExclusion
+      ? { ...base }
+      : { ...base, excluded_custom_audiences: ids.map((id) => ({ id })) };
   return {
     optimizationGoal: "OFFSITE_CONVERSIONS",
     billingEvent: "IMPRESSIONS",
     bidStrategy: "LOWEST_COST_WITHOUT_CAP",
     pixelId: opts.pixelId,
     customEventType: "PURCHASE",
-    targeting: opts.targeting ?? DEFAULT_TEST_TARGETING,
+    targeting,
   };
 }
 

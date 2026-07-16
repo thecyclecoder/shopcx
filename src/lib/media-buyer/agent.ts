@@ -1859,6 +1859,29 @@ export type BuildReplenishJobInsertResult =
   | { ok: true; insert: ReplenishJobInsertBody; createAdsetSpec: CreateAdsetSpec | null; metaAdsetIdForJob: string | null }
   | { ok: false; reason: string };
 
+/**
+ * PURE — ensure `targeting.excluded_custom_audiences` lists an entry whose `id === audienceId`.
+ * When `audienceId` is null the targeting is returned unchanged (legacy pre-Phase-2 cohort).
+ * When the current targeting already lists an entry with that id (the template composed it at
+ * provision time), the targeting is returned unchanged. Otherwise a fresh copy is returned with
+ * the id APPENDED to any existing exclusion list (Meta accepts multiple entries — the sibling
+ * customer-list audience composes into the same list via bianca-full-order-history-customer-list-exclusion-audience).
+ *
+ * bianca-cold-test-recent-purchaser-exclusion Phase 2.
+ */
+export function ensureExcludedPurchaserAudience(
+  targeting: Record<string, unknown>,
+  audienceId: string | null,
+): Record<string, unknown> {
+  if (!audienceId) return targeting;
+  const raw = targeting.excluded_custom_audiences;
+  const existing = Array.isArray(raw) ? raw : [];
+  for (const entry of existing) {
+    if (entry && typeof entry === "object" && (entry as Record<string, unknown>).id === audienceId) return targeting;
+  }
+  return { ...targeting, excluded_custom_audiences: [...existing, { id: audienceId }] };
+}
+
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
   const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts } = input;
 
@@ -1877,6 +1900,15 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
         reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
       };
     }
+    // bianca-cold-test-recent-purchaser-exclusion Phase 2 — the freshly-minted per-test ad
+    // set MUST publish with the cohort's declared purchaser-exclusion audience listed under
+    // `targeting.excluded_custom_audiences` (Meta's `[{ id }, …]` shape). Prefer the
+    // template's own targeting (buildAdsetTemplate composes the exclusion at provision time),
+    // but if the cohort has stamped an id and the template's targeting doesn't carry it, layer
+    // it on here as a belt-and-suspenders — the publish-gate refuses `missing_purchaser_exclusion`
+    // on any per-test publish whose spec doesn't. A cohort with a null
+    // `excludedPurchaserAudienceId` (legacy pre-Phase-2 row) forwards the template unchanged.
+    const targeting = ensureExcludedPurchaserAudience(tmpl.targeting, cohort.excludedPurchaserAudienceId);
     createAdsetSpec = {
       campaign_id: campaignId,
       name: adName,
@@ -1886,7 +1918,7 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
       optimization_goal: tmpl.optimizationGoal,
       billing_event: tmpl.billingEvent,
       bid_strategy: tmpl.bidStrategy,
-      targeting: tmpl.targeting,
+      targeting,
     };
     metaAdsetIdForJob = null;
   }
