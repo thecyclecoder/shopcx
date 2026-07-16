@@ -745,3 +745,143 @@ export async function getOrCreateRecentPurchaserAudience(
   if (!j.id) throw new Error("meta_customaudience_no_id");
   return j.id as string;
 }
+
+// ── CUSTOMER_LIST audience (bianca full-order-history exclusion) ─────────────
+// The upload-based audience Bianca excludes on every per-test ad set alongside
+// the pixel WEBSITE audience. Uploads SHA256(email) + SHA256(phone) for every
+// customer who has ever ordered (all three sources — Shopify, Internal,
+// Amazon), giving complete existing-customer coverage the 180d pixel audience
+// misses. See docs/brain/specs/bianca-full-order-history-customer-list-exclusion-audience.md
+// Phase 1. Both audience ids compose into targeting.excluded_custom_audiences
+// through the sibling spec's provision/replenish/publish-gate plumbing.
+//
+// Compliance: only SHA256 hex leaves the box; email is lowercase-trimmed and
+// phone is normalized to E.164 before hashing. Plaintext PII is never uploaded
+// and never logged (the uploader logs counts only). Chunks are ≤10k rows per
+// Meta's docs on the customaudience users endpoint.
+
+/**
+ * Find-or-create the CUSTOMER_LIST (upload-based) custom audience the cohort
+ * uses to exclude our ENTIRE existing-customer base (across all three order
+ * sources) from cold-prospecting reach. Idempotent by exact name match — the
+ * canonical name is `MB — All customers (all sources) — hashed`, so repeat
+ * calls return the existing audience id rather than creating a duplicate.
+ * Returns the BARE Meta customaudience id (not our uuid).
+ *
+ * The audience carries no rule — a CUSTOMER_LIST is populated by uploading
+ * hashed users via {@link addUsersToCustomAudience}. `customer_file_source`
+ * is `USER_PROVIDED_ONLY` (we own the data; not partner-supplied).
+ */
+export async function getOrCreateAllCustomersAudience(
+  token: string,
+  accountId: string,
+  opts?: { name?: string; description?: string },
+): Promise<string> {
+  const name = opts?.name ?? "MB — All customers (all sources) — hashed";
+  const description =
+    opts?.description ??
+    "Full-history existing-customer exclusion for cold-prospecting adsets. Hashed email+phone, all three order sources. Refreshed weekly.";
+  const existing = await listCustomAudiences(token, accountId);
+  const hit = existing.find((a) => a.name === name);
+  if (hit) return hit.id;
+  const j = await metaPost(
+    `${actId(accountId)}/customaudiences`,
+    {
+      name,
+      subtype: "CUSTOMER_LIST",
+      customer_file_source: "USER_PROVIDED_ONLY",
+      description,
+    },
+    token,
+  );
+  if (!j.id) throw new Error("meta_customaudience_no_id");
+  return j.id as string;
+}
+
+/**
+ * Normalize a raw email for hashing per Meta's rules: lowercase + trim. Empty
+ * strings and non-strings return null (skip the row's email slot).
+ */
+export function normalizeEmailForHash(email: string | null | undefined): string | null {
+  if (typeof email !== "string") return null;
+  const trimmed = email.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Normalize a phone number to E.164 (digits only, `+` stripped) for hashing.
+ * Meta's docs specify country code + digits, no punctuation. Numbers with 10
+ * digits are assumed US (`1` prefixed); numbers already carrying a country
+ * code pass through digit-only.
+ */
+export function normalizePhoneForHash(phone: string | null | undefined): string | null {
+  if (typeof phone !== "string") return null;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 0) return null;
+  if (digits.length === 10) return `1${digits}`;
+  return digits;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const enc = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  const bytes = new Uint8Array(buf);
+  let hex = "";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
+
+export const META_CUSTOMAUDIENCE_USERS_CHUNK = 10_000;
+
+export interface CustomAudienceUserRow {
+  email?: string | null;
+  phone?: string | null;
+}
+
+/**
+ * Upload hashed users to a CUSTOMER_LIST custom audience. Chunks at
+ * {@link META_CUSTOMAUDIENCE_USERS_CHUNK} rows per POST (Meta's upper bound),
+ * emits SHA256 hex per column with normalized inputs, and skips rows whose
+ * email AND phone both normalize to null. Returns per-chunk POST responses
+ * (the audience_id + num_received) so callers can sum totals for observability.
+ *
+ * Plaintext PII never leaves the box: emails are lowercase-trimmed and phones
+ * digit-normalized in-process before hashing, and only the hex outputs are
+ * placed on the Graph body.
+ */
+export async function addUsersToCustomAudience(
+  token: string,
+  audienceId: string,
+  rows: CustomAudienceUserRow[],
+  opts?: { chunkSize?: number },
+): Promise<Array<{ audience_id: string; num_received: number }>> {
+  const chunkSize = Math.min(
+    Math.max(1, opts?.chunkSize ?? META_CUSTOMAUDIENCE_USERS_CHUNK),
+    META_CUSTOMAUDIENCE_USERS_CHUNK,
+  );
+  const results: Array<{ audience_id: string; num_received: number }> = [];
+  const hashed: Array<[string, string]> = [];
+  for (const row of rows) {
+    const email = normalizeEmailForHash(row.email);
+    const phone = normalizePhoneForHash(row.phone);
+    if (!email && !phone) continue;
+    hashed.push([email ? await sha256Hex(email) : "", phone ? await sha256Hex(phone) : ""]);
+  }
+  for (let i = 0; i < hashed.length; i += chunkSize) {
+    const slice = hashed.slice(i, i + chunkSize);
+    const payload = {
+      schema: ["EMAIL_SHA256", "PHONE_SHA256"],
+      data: slice,
+    };
+    const j = await metaPost(
+      `${audienceId}/users`,
+      { payload },
+      token,
+    );
+    results.push({
+      audience_id: (j.audience_id as string) ?? audienceId,
+      num_received: (j.num_received as number) ?? slice.length,
+    });
+  }
+  return results;
+}
