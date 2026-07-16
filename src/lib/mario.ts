@@ -84,6 +84,16 @@ export interface MarioBrief {
     body: string;
     vale_needs_fix_reason: string | null;
   } | null;
+  /** Set ONLY on the Phase-2 job/PR-scoped sources (mario-detects-job-and-pr-wedges Phase 2):
+   *  the stuck-queued-build source pre-seeds `job_id` so the M4 agent's `requeue_unclaimed_job`
+   *  verdict can target the exact starved row; the pr-resolve-storm source pre-seeds `pr_number`
+   *  so the `cancel_pr_resolve_storm` verdict can target every parked storm row for that PR
+   *  without re-scanning agent_jobs. Null on every other source. */
+  job_pr_context?: {
+    job_id?: string | null;
+    pr_number?: number | null;
+    parked_count?: number | null;
+  } | null;
 }
 
 /**
@@ -574,6 +584,189 @@ async function readEligibleNeverEnqueuedStalls(
   return out;
 }
 
+/** Grace before a queued build with no claim is treated as a stall. A build normally claims within seconds
+ *  of enqueue; a build sitting `queued` past this window with `claimed_at IS NULL` is a lane wedge (no
+ *  worker picked it up: the worker restarted mid-poll, the concurrency cap starved it, or the enqueue
+ *  raced with a shutdown). 45 min is well past the polling interval + normal claim latency, and past the
+ *  20 min `MARIO_FAILED_BUILD_GRACE_MS` so it never front-runs the failed-build source. */
+const MARIO_STUCK_QUEUED_BUILD_GRACE_MS = 45 * 60 * 1000;
+
+/**
+ * Pure decision predicate — is this build row the seventh-source's stuck-queued-unclaimed class?
+ * Fanned out of `readStuckQueuedBuildStalls` so the exact "surface?" logic is unit-testable
+ * without a stubbed Supabase client. Returns true ONLY when: (1) status is `queued` (a starved
+ * enqueue, not a mid-flight build — `redrive_dropped_job` owns the `building`/`claimed` class),
+ * (2) `claimed_at` is null (no worker has ever touched it — a re-queued row that got claimed
+ * once but rolled back is a different class), and (3) it is aged past the grace window.
+ * The 45-min grace is comfortably past the failed-build source's 20-min grace so a wedge
+ * that later flips to `failed` is caught by the failed-build source first (no double-fire).
+ */
+export function shouldSurfaceStuckQueuedBuild(input: {
+  status: string;
+  claimedAt: string | null;
+  ageMs: number;
+  graceMs: number;
+}): boolean {
+  if (input.status !== "queued") return false;
+  if (input.claimedAt !== null) return false;
+  if (input.ageMs <= input.graceMs) return false;
+  return true;
+}
+
+/**
+ * SEVENTH candidate source (stuck-queued-build lane wedge). A build sitting `status='queued'` for hours
+ * with `claimed_at IS NULL` — no worker ever picked it up — emits no failed-build signal (there is no
+ * `failed` row), no timecard gap (the enqueue landed, so `build_queued` fired, but nothing progressed),
+ * and no Vale signal. Overnight 2026-07-15 the rubric keystone's build sat queued for 7.9h before Mario
+ * (spec-lifecycle-only eyes) noticed nothing. This reads the wedge signal straight from `agent_jobs`:
+ * `kind='build' AND status='queued' AND claimed_at IS NULL AND created_at < now - grace`. The caller
+ * runs these through the SAME (b)/(c)/(d) drop filters, then hands the survivor to the M4 agent, whose
+ * existing `requeue_unclaimed_job` verb flips `updated_at` so the next poll re-picks it. If the requeue
+ * is a no-op (the queue drained itself in the meantime), the verb throws and the applier records the
+ * reason on the mario_fired row → the escalate path can then surface to Ada.
+ */
+async function readStuckQueuedBuildStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; job_id: string; age_ms: number }>> {
+  const now = Date.now();
+  const cutoff = new Date(now - graceMs).toISOString();
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("id, spec_slug, status, claimed_at, created_at")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .eq("status", "queued")
+    .is("claimed_at", null)
+    .lt("created_at", cutoff)
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{
+    id: string;
+    spec_slug: string | null;
+    status: string;
+    claimed_at: string | null;
+    created_at: string;
+  }>;
+  const out: Array<{ workspace_id: string; spec_slug: string; job_id: string; age_ms: number }> = [];
+  for (const j of rows) {
+    if (!j.spec_slug || !j.created_at) continue;
+    const age = now - Date.parse(j.created_at);
+    if (
+      !shouldSurfaceStuckQueuedBuild({
+        status: j.status,
+        claimedAt: j.claimed_at,
+        ageMs: age,
+        graceMs,
+      })
+    ) continue;
+    out.push({ workspace_id, spec_slug: j.spec_slug, job_id: j.id, age_ms: age });
+  }
+  return out;
+}
+
+/** Minimum parked-count in the pr-resolve storm window before a PR is treated as storming. 3 rows
+ *  in the window means the resolver keeps running and keeps landing in a non-terminal `needs_attention`
+ *  or `failed` state — the retry-cap surface in [[github-pr-resolve]] `surfaceExhaustedPrResolve`
+ *  already stamps a single `needs_attention` sentinel per PR, so 3 rows means Mario is looking at a
+ *  repeat pattern the deduper alone did not stop. */
+const MARIO_PR_RESOLVE_STORM_MIN_PARKED = 3;
+
+/** Rolling window Mario looks back to count parked pr-resolve rows for one PR. 24 h is wide enough to
+ *  catch an overnight storm (2026-07-15: 61 rows over ~8 h) but narrow enough not to conflate today's
+ *  storm with a stale one from a week ago. */
+const MARIO_PR_RESOLVE_STORM_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Pure decision predicate — is this pr_number's parked-count in the window enough to be a storm?
+ * Fanned out of `readPrResolveStorms` so the exact "surface?" logic is unit-testable without any
+ * Supabase stub. Returns true ONLY when the parked count meets or exceeds the minimum (the min gate
+ * lives in the predicate so a caller can pin the exact boundary the deployed cron uses).
+ */
+export function shouldSurfacePrResolveStorm(input: {
+  parkedCount: number;
+  minCount: number;
+}): boolean {
+  return input.parkedCount >= input.minCount;
+}
+
+/**
+ * EIGHTH candidate source (pr-resolve storm — a single PR's parked resolver rows piling up). The
+ * dirty-PR resolver at [[github-pr-resolve]] re-enqueues on each webhook, but a PR that keeps
+ * conflicting (or a resolver that keeps landing in `needs_attention`) accumulates dozens of parked
+ * rows per PR — 2026-07-15 overnight: 61 rows for one PR over ~8 h. Each row carries a pseudo-slug
+ * `pr-<number>` (no matching `public.specs` row by design), so every earlier source misses it AND
+ * the `!specRow` drop at (d0) discards a job/PR candidate anyway. This reads the storm signal
+ * straight from `agent_jobs`: `kind='pr-resolve' AND status IN ('needs_attention','failed') AND
+ * created_at > now - window`, grouped by `pr_number`. A pr_number with `≥ MARIO_PR_RESOLVE_STORM_MIN_PARKED`
+ * parked rows is surfaced with the pseudo-slug (`pr-<number>`) as the candidate's `spec_slug`. Survivors
+ * flow through the SAME (b)/(c) drop filters (both are safe for a pseudo-slug — no blockers, no active
+ * job under this slug once the storm parks), skip the specRow gate (relaxed at (d0) for job/PR-scoped
+ * candidates), and reach the M4 agent, whose new `cancel_pr_resolve_storm` verb flips every parked
+ * row to `completed` with a cancellation reason — the deduper's active-row guard then lets a fresh
+ * resolve enqueue on the next webhook without a phantom pile.
+ */
+async function readPrResolveStorms(
+  admin: Admin,
+  workspace_id: string,
+  windowMs: number,
+  minCount: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; pr_number: number; parked_count: number; age_ms: number }>> {
+  const now = Date.now();
+  const cutoff = new Date(now - windowMs).toISOString();
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("pr_number, status, created_at")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "pr-resolve")
+    .in("status", ["needs_attention", "failed"])
+    .gte("created_at", cutoff)
+    .not("pr_number", "is", null)
+    .limit(5000);
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{
+    pr_number: number | null;
+    status: string;
+    created_at: string;
+  }>;
+  const byPr = new Map<number, { count: number; oldest: number }>();
+  for (const r of rows) {
+    if (r.pr_number === null || !r.created_at) continue;
+    const at = Date.parse(r.created_at);
+    const cur = byPr.get(r.pr_number);
+    if (cur) {
+      cur.count += 1;
+      if (at < cur.oldest) cur.oldest = at;
+    } else {
+      byPr.set(r.pr_number, { count: 1, oldest: at });
+    }
+  }
+  const out: Array<{ workspace_id: string; spec_slug: string; pr_number: number; parked_count: number; age_ms: number }> = [];
+  for (const [prNumber, agg] of byPr) {
+    if (!shouldSurfacePrResolveStorm({ parkedCount: agg.count, minCount })) continue;
+    out.push({
+      workspace_id,
+      spec_slug: `pr-${prNumber}`, // pseudo-slug: matches [[github-pr-resolve]] `prSpecSlug`
+      pr_number: prNumber,
+      parked_count: agg.count,
+      age_ms: now - agg.oldest,
+    });
+  }
+  return out;
+}
+
+/**
+ * The set of `from_event` values marking a Phase-2 job/PR-scoped candidate — these carry a pseudo
+ * spec_slug that has no `public.specs` row by design (pr-resolve storms use `pr-<number>`; a stuck
+ * queued build uses a real slug but is included here for symmetry so the (d0) relax covers both).
+ * The (d0) `!specRow` drop is relaxed for candidates in this set so the phantom-guard no longer
+ * discards a genuine job/PR wedge (the drop was designed for phantom spec-lifecycle candidates from
+ * a failed authorship — a wedge with no spec is DIFFERENT semantics, not a phantom).
+ */
+const JOB_PR_SCOPED_FROM_EVENTS: ReadonlySet<string> = new Set(["build_queued", "pr_resolve_storm"]);
+
 /**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
@@ -766,6 +959,71 @@ export async function evaluateStalledSpecs(
         brief: { last_events: [], blocked_by_state: [], current_job_status: "eligible_never_enqueued" },
       });
     }
+
+    // (a7) SEVENTH candidate source — stuck-queued-build lane wedge (see readStuckQueuedBuildStalls).
+    // A build sitting `queued` past the grace with `claimed_at IS NULL` — no worker ever picked it up —
+    // emits no failed-build signal and no timecard gap. The pre-seeded `job_pr_context.job_id` lets the
+    // M4 agent's `requeue_unclaimed_job` verdict target the exact starved row without re-scanning
+    // agent_jobs. Deduped against the timecard / failed-build / eligible-never-enqueued sources via
+    // `seen` — a spec whose stuck-queued row is already surfaced under another class does not double-fire.
+    const stuck = await readStuckQueuedBuildStalls(admin, ws, MARIO_STUCK_QUEUED_BUILD_GRACE_MS);
+    for (const sb of stuck) {
+      const key = `${sb.workspace_id}::${sb.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: sb.workspace_id,
+        spec_slug: sb.spec_slug,
+        // Semantic: build_queued fired (the enqueue landed) but build_started never followed (nothing claimed).
+        // The from_event is on JOB_PR_SCOPED_FROM_EVENTS so the (d0) !specRow relax applies uniformly
+        // (a stuck-queued build normally has a real spec, but symmetry avoids a subtle-drift class).
+        from_event: "build_queued",
+        to_event: "build_started",
+        gap_ms: sb.age_ms,
+        sla_ms: MARIO_STUCK_QUEUED_BUILD_GRACE_MS,
+        brief: {
+          last_events: [],
+          blocked_by_state: [],
+          current_job_status: "queued_unclaimed",
+          job_pr_context: { job_id: sb.job_id, pr_number: null, parked_count: null },
+        },
+      });
+    }
+
+    // (a8) EIGHTH candidate source — pr-resolve storm (see readPrResolveStorms). A single PR whose
+    // dirty-resolver keeps parking rows in `needs_attention`/`failed` piles up dozens per PR overnight.
+    // The candidate carries the pseudo-slug `pr-<number>` (no matching specs row by design), so the
+    // (d0) `!specRow` gate is RELAXED for this from_event so the candidate survives. The pre-seeded
+    // `job_pr_context.pr_number` + `parked_count` lets the M4 agent's `cancel_pr_resolve_storm` verdict
+    // target the exact PR without re-scanning.
+    const storms = await readPrResolveStorms(
+      admin,
+      ws,
+      MARIO_PR_RESOLVE_STORM_WINDOW_MS,
+      MARIO_PR_RESOLVE_STORM_MIN_PARKED,
+    );
+    for (const st of storms) {
+      const key = `${st.workspace_id}::${st.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: st.workspace_id,
+        spec_slug: st.spec_slug,
+        // Semantic: pr-resolve keeps parking (needs_attention/failed) — the dirty-PR resolver is
+        // storming on this PR. The from_event is on JOB_PR_SCOPED_FROM_EVENTS so the (d0) !specRow
+        // relax lets the pseudo-slug candidate survive to applyBoxMario.
+        from_event: "pr_resolve_storm",
+        to_event: "pr_resolve_settled",
+        gap_ms: st.age_ms,
+        sla_ms: MARIO_PR_RESOLVE_STORM_WINDOW_MS,
+        brief: {
+          last_events: [],
+          blocked_by_state: [],
+          current_job_status: "pr_resolve_storm",
+          job_pr_context: { job_id: null, pr_number: st.pr_number, parked_count: st.parked_count },
+        },
+      });
+    }
   }
 
   const survivors: StalledCandidate[] = [];
@@ -788,7 +1046,28 @@ export async function evaluateStalledSpecs(
     // never became a real spec. There is no pipeline to plumb — drop it so Mario is never fired on a ghost.
     // (Previously the `specRow && …` guard below short-circuited to false on a null row, letting the phantom
     // survive the filter chain and enqueue a mario job — the false-trigger class from Mario's first sweep.)
-    if (!specRow) continue;
+    //
+    // RELAX for JOB/PR-scoped candidates (mario-detects-job-and-pr-wedges Phase 2): a pr-resolve storm
+    // carries a pseudo-slug `pr-<number>` that has NO matching public.specs row by design (the resolver
+    // runs against a PR, not a spec); the unconditional drop discards every genuine job/PR wedge.
+    // JOB_PR_SCOPED_FROM_EVENTS marks the sources whose from_event guarantees a job/PR class — those
+    // candidates survive the no-specRow case, and skip the specRow-dependent (d)/(d2) filters below.
+    if (!specRow) {
+      if (!JOB_PR_SCOPED_FROM_EVENTS.has(c.from_event)) continue;
+      // Job/PR-scoped candidate with no spec — safe to fall through to the brief-attach step (e). The
+      // specRow-dependent gates below (folded/deferred, goal-member-awaiting-promotion) don't apply.
+      const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
+      survivors.push({
+        ...c,
+        brief: {
+          ...c.brief,
+          last_events: lastEvents,
+          blocked_by_state: blockers.map((b) => ({ slug: b.slug, cleared: b.cleared })),
+          current_job_status: currentJobStatus ?? c.brief.current_job_status,
+        },
+      });
+      continue;
+    }
     if (specRow.status === "folded" || specRow.status === "deferred") continue;
 
     // (d2) GOAL MEMBER AWAITING ATOMIC PROMOTION → legit wait, drop. A goal member's correct
@@ -826,6 +1105,9 @@ export async function evaluateStalledSpecs(
         // failed-build source) so the brief never hides a dead build behind a null.
         current_job_status: currentJobStatus ?? c.brief.current_job_status,
         review_failed_context: reviewFailedCtx,
+        // mario-detects-job-and-pr-wedges Phase 2: preserve the pre-seeded job/PR target context so the
+        // M4 agent can target the exact job_id / pr_number without re-scanning agent_jobs.
+        job_pr_context: c.brief.job_pr_context ?? null,
       },
     });
   }
@@ -935,10 +1217,12 @@ const MARIO_ACTOR = "mario";
 
 /** One non-destructive live fix in the M4 vocabulary — the exact action key + its target. */
 export interface MarioLiveFix {
-  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | ...open slot. */
+  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | cancel_pr_resolve_storm | ...open slot. */
   action: string;
-  /** The specific row/slug/box the action mutates — Phase 3 helpers each read exactly one field. */
-  target: { spec_slug?: string; job_id?: string; box_id?: string };
+  /** The specific row/slug/box/PR the action mutates — Phase 3 helpers each read exactly one field.
+   *  `pr_number` (mario-detects-job-and-pr-wedges Phase 2) is set for the `cancel_pr_resolve_storm`
+   *  verdict — the target row-set is every parked pr-resolve row for that PR. */
+  target: { spec_slug?: string; job_id?: string; box_id?: string; pr_number?: number };
   /** Plain-language why — persisted verbatim on the director_activity row. */
   reasoning: string;
 }
@@ -1040,12 +1324,18 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
     const action = typeof lf.action === "string" ? lf.action : "";
     if (action) {
       const target = (lf.target && typeof lf.target === "object" ? lf.target : {}) as Record<string, unknown>;
+      // pr_number is a plain integer — accept it verbatim only when it is a finite positive integer,
+      // so a stray string or negative can never reach the applier's `.eq('pr_number', …)` compare-and-set.
+      const rawPrNumber = target.pr_number;
+      const prNumberValid =
+        typeof rawPrNumber === "number" && Number.isFinite(rawPrNumber) && rawPrNumber > 0 && Number.isInteger(rawPrNumber);
       live_fix = {
         action,
         target: {
           spec_slug: typeof target.spec_slug === "string" ? target.spec_slug : undefined,
           job_id: typeof target.job_id === "string" ? target.job_id : undefined,
           box_id: typeof target.box_id === "string" ? target.box_id : undefined,
+          pr_number: prNumberValid ? rawPrNumber : undefined,
         },
         reasoning: typeof lf.reasoning === "string" ? lf.reasoning : "",
       };
@@ -1257,6 +1547,31 @@ async function requeueUnclaimedJob(admin: Admin, targetJobId: string, workspaceI
     .select("id");
   if (error) throw new Error(`requeue_unclaimed_job: ${error.message}`);
   if (!Array.isArray(updated) || updated.length === 0) throw new Error("requeue_unclaimed_job: no queued row matched");
+}
+
+/** `cancel_pr_resolve_storm` — cancel every parked pr-resolve row for one PR (mario-detects-job-and-pr-
+ *  wedges Phase 2). The dirty-PR resolver re-enqueues on each webhook, and a PR whose resolver keeps
+ *  landing `needs_attention`/`failed` piles up rows the deduper alone can't clear (each parked row is
+ *  its own storm). Flip every parked row (`needs_attention`/`failed`) for this pr_number to `completed`
+ *  with a mario cancellation reason on `error` so the deduper's active-row guard lets a fresh resolve
+ *  enqueue on the next webhook. Compare-and-set on `kind='pr-resolve'` + `pr_number` + status; workspace-
+ *  scoped so a cross-workspace pr_number collision cannot cross-write. Returns the count for the
+ *  audit-metadata `mario_fired` row; throws when zero rows matched (the storm cleared itself). */
+async function cancelPrResolveStorm(admin: Admin, workspaceId: string, prNumber: number): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const reason = `mario cancel_pr_resolve_storm: PR #${prNumber} — pr-resolve storm cancelled (dedupe: one live resolve per PR is enough; next webhook re-enqueues cleanly)`;
+  const { data: cancelled, error } = await admin
+    .from("agent_jobs")
+    .update({ status: "completed", error: reason, updated_at: nowIso })
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "pr-resolve")
+    .eq("pr_number", prNumber)
+    .in("status", ["needs_attention", "failed"])
+    .select("id");
+  if (error) throw new Error(`cancel_pr_resolve_storm: ${error.message}`);
+  const count = Array.isArray(cancelled) ? cancelled.length : 0;
+  if (count === 0) throw new Error(`cancel_pr_resolve_storm: no parked pr-resolve rows matched for PR #${prNumber}`);
+  return count;
 }
 
 /** `queue_box_restart` — set `worker_controls.drain_for_update=true` for the target box so the worker
@@ -1862,6 +2177,16 @@ export async function applyBoxMario(
               break;
             }
             await reclaimAndRedrive(admin, row.workspace_id, targetSlug);
+            fixExecuted = true;
+            break;
+          }
+          case "cancel_pr_resolve_storm": {
+            // mario-detects-job-and-pr-wedges Phase 2 verb. The M4 agent's verdict MUST carry
+            // target.pr_number — a storm has no spec_slug to fall back to (the surfaced pseudo-slug is
+            // `pr-<number>` by design). The applier's compare-and-set on `pr_number` + workspace_id +
+            // status keeps the write bounded to the exact PR's parked storm rows.
+            if (!lf.target.pr_number) throw new Error("target.pr_number required");
+            await cancelPrResolveStorm(admin, row.workspace_id, lf.target.pr_number);
             fixExecuted = true;
             break;
           }
