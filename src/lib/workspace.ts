@@ -61,8 +61,7 @@ export const getActiveWorkspaceId = cache(async (): Promise<string | null> => {
   const { user } = await getAuthedUser();
   if (!user) return null;
 
-  // app_metadata is Record<string, unknown> on the db-load-getclaims path.
-  const wsId = user.app_metadata?.workspace_id as string | undefined;
+  const wsId = user.app_metadata?.workspace_id;
   if (wsId) {
     // Re-set the cookie so subsequent requests don't need this fallback
     cookieStore.set(WORKSPACE_COOKIE, wsId, {
