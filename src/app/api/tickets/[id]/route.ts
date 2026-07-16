@@ -477,6 +477,25 @@ export async function DELETE(
     return NextResponse.json({ error: "Only owner or admin can delete tickets" }, { status: 403 });
   }
 
+  // Validated-parent gate: confirm the target ticket lives in THIS workspace
+  // BEFORE any cleanup writes fire. Without it, a cross-workspace ticket id
+  // would let the service-role cleanups (which bypass RLS) mutate another
+  // tenant's agent_action_requests / returns / store_credit_log / merged_into
+  // rows before the final ticket delete's workspace check rejected them.
+  const { data: parent, error: parentErr } = await admin
+    .from("tickets")
+    .select("id")
+    .eq("id", ticketId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (parentErr) {
+    console.error("[delete-ticket] parent ticket lookup failed:", parentErr.message);
+    return NextResponse.json({ error: `Failed to load ticket: ${parentErr.message}` }, { status: 500 });
+  }
+  if (!parent) {
+    return NextResponse.json({ error: "Ticket not found or not in this workspace" }, { status: 404 });
+  }
+
   // Pre-clear FK references that would block the delete. Most refs use
   // ON DELETE SET NULL or CASCADE, but a few are NO ACTION and need
   // explicit handling:
@@ -487,12 +506,40 @@ export async function DELETE(
   //   • returns.ticket_id, store_credit_log.ticket_id → also NO ACTION;
   //     null them out to allow the delete. The returns/credit history
   //     stays; only the back-pointer to the ticket is cleared.
-  await admin.from("tickets").update({ merged_into: null }).eq("merged_into", ticketId);
-  await admin.from("returns").update({ ticket_id: null }).eq("ticket_id", ticketId);
-  await admin.from("store_credit_log").update({ ticket_id: null }).eq("ticket_id", ticketId);
+  // Every cleanup below is workspace-scoped as belt-and-suspenders on top
+  // of the validated-parent gate above.
+  await admin
+    .from("tickets")
+    .update({ merged_into: null })
+    .eq("merged_into", ticketId)
+    .eq("workspace_id", workspaceId);
+  await admin
+    .from("returns")
+    .update({ ticket_id: null })
+    .eq("ticket_id", ticketId)
+    .eq("workspace_id", workspaceId);
+  await admin
+    .from("store_credit_log")
+    .update({ ticket_id: null })
+    .eq("ticket_id", ticketId)
+    .eq("workspace_id", workspaceId);
+
+  // Sol cheap-execution queue keeps a required FK to tickets, so hard-delete
+  // fails for any ticket with action-request history unless we clear it first.
+  const { error: aarErr } = await admin
+    .from("agent_action_requests")
+    .delete()
+    .eq("ticket_id", ticketId)
+    .eq("workspace_id", workspaceId);
+  if (aarErr) {
+    console.error("[delete-ticket] agent_action_requests delete failed:", aarErr.message);
+    return NextResponse.json({ error: `Failed to delete action requests: ${aarErr.message}` }, { status: 500 });
+  }
 
   // Messages cascade on FK so this is belt-and-suspenders, but explicit
-  // is fine and surfaces errors if the table ever changes.
+  // is fine and surfaces errors if the table ever changes. ticket_messages
+  // has no workspace_id column; the validated-parent gate above is what
+  // scopes this delete to the current workspace.
   const { error: msgErr } = await admin.from("ticket_messages").delete().eq("ticket_id", ticketId);
   if (msgErr) {
     console.error("[delete-ticket] ticket_messages delete failed:", msgErr.message);
