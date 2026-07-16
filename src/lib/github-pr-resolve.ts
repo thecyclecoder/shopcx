@@ -50,6 +50,57 @@ const ACTIVE_JOB_STATUSES = [
 const MAX_PR_RESOLVE_ATTEMPTS = 3;
 
 /**
+ * pr-resolve-retry-cap-counts-parked-attempts (Phase 1): the surfaced-cap sentinel row inserted by
+ * `surfaceExhaustedPrResolve` has this exact error prefix. It is a MARKER that the owner has been
+ * notified — NOT an attempt — so the genuine-attempt counter excludes it. Every other `needs_attention`
+ * pr-resolve row (advisory-supersede park from builder-worker.ts, etc.) DID run the resolver to a verdict
+ * and MUST count toward the cap; otherwise the standing-pass dirty-PR backstop re-enqueues every pass
+ * (the 7h / 61-job storm on #1893 — the cap was structurally unreachable).
+ */
+const EXHAUSTED_SENTINEL_ERROR_PREFIX = "pr-resolve retry cap reached";
+
+/**
+ * Regex identifying INFRASTRUCTURE failures (`git worktree add` blew up, a push/fetch died, the box
+ * crashed before the resolver started). An infra failure is NOT the resolver giving up on a hard
+ * conflict; counting it burns the 3-strike human-escalation budget on a box bug (see growth-adopt-
+ * storefront-optimizer #878 + kpi-audit #847). Exported for the pure counting helper's tests.
+ */
+export const PR_RESOLVE_INFRA_FAILURE_RE =
+  /worktree add failed|git (?:push|fetch|checkout|merge|worktree) failed|ENOSPC|could not lock|no space left/i;
+
+/**
+ * Pure decision helper for the pr-resolve retry cap. Counts prior pr-resolve rows that represent a
+ * GENUINE resolver attempt against a hard conflict — i.e. rows that ran the resolver to a verdict.
+ * Excluded:
+ *   - the surfaced-cap sentinel row (`needs_attention` with the retry-cap-reached error prefix) — a
+ *     marker, not an attempt (pr-resolve-retry-cap-counts-parked-attempts Phase 1).
+ *   - `failed` rows whose error matches `PR_RESOLVE_INFRA_FAILURE_RE` (worktree add / git push
+ *     failed / ENOSPC …) — a box bug, not a resolve verdict; must not burn the cap.
+ * Included (the fix): `needs_attention` rows parked from advisory-supersede in builder-worker.ts.
+ * Those DID run the resolver's static pre-flight to a verdict of "needs human"; counting them makes
+ * the cap trip and stops the standing-pass dirty-PR backstop from re-enqueuing forever (#1893).
+ */
+export function countGenuinePrResolveAttempts(
+  rows: ReadonlyArray<{ status: string; error: string | null }>,
+): number {
+  return rows.filter((row) => {
+    if (
+      row.status === "needs_attention" &&
+      (row.error ?? "").startsWith(EXHAUSTED_SENTINEL_ERROR_PREFIX)
+    ) {
+      return false; // the surfaced sentinel — a marker, not an attempt
+    }
+    if (row.status === "failed" && PR_RESOLVE_INFRA_FAILURE_RE.test(row.error ?? "")) {
+      return false; // box/infra, not a resolve verdict
+    }
+    return true;
+  }).length;
+}
+
+/** Exported for unit tests. */
+export const PR_RESOLVE_MAX_ATTEMPTS_FOR_TESTS = MAX_PR_RESOLVE_ATTEMPTS;
+
+/**
  * Verify the `X-Hub-Signature-256` header GitHub sends on a webhook delivery. GitHub signs the raw
  * body with HMAC-SHA256(secret, body) and sends `sha256=<hex>`. Constant-time compare; reject a
  * missing/malformed header, an unconfigured secret, or a length/digest mismatch. Mirrors
@@ -283,28 +334,21 @@ export async function enqueuePrResolveJob(
   // Retry cap (dirty-pr-resolver-duplicate-detection Phase 1): stop looping after MAX_PR_RESOLVE_ATTEMPTS
   // GENUINE resolve attempts — surface to the owner once and do NOT enqueue again.
   //
-  // pr-resolve-cap-ignores-infra-failures: count only attempts that actually RAN the resolver to a verdict.
-  // An INFRASTRUCTURE failure — `git worktree add` blew up, a push/fetch died, the box crashed before the
-  // resolver started — is NOT the resolver giving up on a hard conflict; counting it burned the 3-strike
-  // human-escalation budget on a box bug. That's exactly what wedged growth-adopt-storefront-optimizer (#878)
-  // + kpi-audit (#847): all 3 of each PR's pr-resolve jobs `failed` with "worktree add failed" during the 5h
-  // crash-loop's unstable window → cap reached → surfaced needs-human → the green branch never resolved/merged
-  // even though the box bug (the missing removeWorktreeForBranch precondition) is now fixed. We also exclude
-  // the `needs_attention` sentinel surfaceExhaustedPrResolve leaves (a marker, not an attempt). So once the
-  // infra bug is fixed, the standing-pass dirty-PR backstop re-enqueues a fresh, now-succeeding resolve.
+  // pr-resolve-cap-ignores-infra-failures + pr-resolve-retry-cap-counts-parked-attempts (Phase 1):
+  // count only attempts that actually RAN the resolver to a verdict. See countGenuinePrResolveAttempts
+  // for the full inclusion/exclusion rules. Advisory-supersede parks (needs_attention rows from
+  // builder-worker.ts) DID run the resolver to a verdict and MUST count — otherwise the standing-pass
+  // dirty-PR backstop re-enqueues every pass and the cap is structurally unreachable (#1893 storm).
+  // Infra failures (worktree add failed, git push failed, ENOSPC) and the retry-cap sentinel do NOT.
   const { data: priorJobs } = await admin
     .from("agent_jobs")
     .select("status, error")
     .eq("workspace_id", input.workspaceId)
     .eq("kind", "pr-resolve")
     .eq("spec_slug", slug);
-  const INFRA_FAILURE_RE = /worktree add failed|git (?:push|fetch|checkout|merge|worktree) failed|ENOSPC|could not lock|no space left/i;
-  const genuineAttempts = (priorJobs ?? []).filter((j) => {
-    const job = j as { status: string; error: string | null };
-    if (job.status === "needs_attention") return false; // the surfaced sentinel — not an attempt
-    if (job.status === "failed" && INFRA_FAILURE_RE.test(job.error ?? "")) return false; // box/infra, not a resolve verdict
-    return true;
-  }).length;
+  const genuineAttempts = countGenuinePrResolveAttempts(
+    (priorJobs ?? []) as Array<{ status: string; error: string | null }>,
+  );
   if (genuineAttempts >= MAX_PR_RESOLVE_ATTEMPTS) {
     await surfaceExhaustedPrResolve(admin, input.workspaceId, input.prNumber, genuineAttempts);
     return { enqueued: false, reason: `retry cap reached (${genuineAttempts} attempts) — surfaced to owner` };
