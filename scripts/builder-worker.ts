@@ -482,6 +482,14 @@ const MIGRATION_DRIFT_INTERVAL_MS = 30 * 60 * 1000;
 let lastMigrationDriftCheck = 0; // 0 ⇒ run on the first poll so there's a beat right away.
 let migrationDriftInFlight = false;
 
+// db-load-usage-rollup-throttle: the per-account usage rollup (account_usage_snapshots) was fired every
+// 5s poll tick — ~20 PostgREST calls/tick (10 agent_job_costs reads + 10 upserts ≈ 12.6K/hr), measured
+// as the single largest internal DB-call driver, for a slowly-changing token tally. Throttle to 60s: the
+// fleet-usage cockpit reads account_usage_snapshots ON DEMAND and live cap state already rides
+// worker_heartbeats every tick, so a ≤60s-stale 5h/weekly rollup is fine. 0 ⇒ run on the first tick.
+const USAGE_ROLLUP_INTERVAL_MS = 60 * 1000;
+let lastUsageRollupAt = 0;
+
 // DB Health Agent (db-health-agent P1): two box-side passes on different cadences. The FREQUENT
 // slow-query root-cause pass (~hourly) reads pg_stat_statements + EXPLAINs each top offender; the
 // DAILY size sweep snapshots per-table size/stats + flags growth/index/bloat. Both run here (not as
@@ -1259,7 +1267,8 @@ async function recordUsageWallEventBestEffort(p: {
 }
 // Standing per-account snapshot pass. Reads the live cap state from the in-memory accounts pool +
 // codexState and writes source='box' rows to public.account_usage_snapshots for each Max lane + Codex.
-// Called each heartbeat tick — cheap (10 UPSERTs / tick, one per account × window). Never throws.
+// Called from writeHeartbeat but THROTTLED to USAGE_ROLLUP_INTERVAL_MS (60s), not every 5s tick —
+// 10 UPSERTs + 10 reads per run; the on-demand cockpit tolerates ≤60s staleness. Never throws.
 async function runAccountUsageRollupBestEffort(): Promise<void> {
   try {
     const workspaceId = await resolveOwnerWorkspaceId();
@@ -3309,9 +3318,15 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
   // round-robin least-loaded selection reads. Belt-and-suspenders alongside the scattered `inFlight--`.
   reconcileAccountLoad();
-  // fleet-usage-cockpit Phase 1 — per-tick per-account 5h + weekly rollup into public.account_usage_
-  // snapshots. Cheap (10 UPSERTs), fire-and-forget: a rollup failure must never break the heartbeat.
-  void runAccountUsageRollupBestEffort();
+  // fleet-usage-cockpit Phase 1 — per-account 5h + weekly rollup into public.account_usage_snapshots.
+  // Fire-and-forget (a rollup failure must never break the heartbeat) and THROTTLED to
+  // USAGE_ROLLUP_INTERVAL_MS: writeHeartbeat runs every 5s poll tick, but the rollup's ~20 PostgREST
+  // calls/tick were the top internal DB-call driver (~12.6K/hr) for a slowly-changing tally. The gate
+  // lives here (not inside the fn) so every writeHeartbeat caller shares one throttle clock.
+  if (Date.now() - lastUsageRollupAt > USAGE_ROLLUP_INTERVAL_MS) {
+    lastUsageRollupAt = Date.now();
+    void runAccountUsageRollupBestEffort();
+  }
   try {
     await db.from("worker_heartbeats").upsert({
       id: WORKER_BOX_ID,
