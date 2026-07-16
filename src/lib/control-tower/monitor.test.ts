@@ -22,6 +22,7 @@ import {
   firstScheduledFiringMs,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isOrderAwaitingFraudScreen,
+  isWorkerUnavailable,
   jobStuckSince,
   nextFiringAtOrAfter,
   parseCronExpr,
@@ -199,6 +200,112 @@ test("evalAgentKind still flags genuinely-stuck queued jobs after a long post-re
   Date.now = () => Date.parse("2026-06-25T13:00:00Z");
   try {
     const result = evalAgentKind(agentKindLoop, null, queued, "2026-06-25T11:45:00Z");
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+// ─── Worker-unavailable suppression of child-agent stuck reds
+// (control-tower-suppress-agent-stuck-during-worker-outage Phase 1) ───
+
+test("isWorkerUnavailable is true when the worker has no row, no last_poll_at, is stale, or needs_attention", () => {
+  const livenessWindowMs = 5 * 60_000;
+  const now = Date.parse("2026-07-16T12:00:00Z");
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    // No row (never reported).
+    assert.equal(isWorkerUnavailable(null, livenessWindowMs), true);
+    // Row exists but no last_poll_at.
+    assert.equal(isWorkerUnavailable({ running_sha: null, status: "ok", active_builds: 0, detail: null, last_poll_at: null, started_at: null, accounts: null }, livenessWindowMs), true);
+    // Stale — last poll 30 min ago, window 5 min.
+    assert.equal(isWorkerUnavailable({ running_sha: null, status: "ok", active_builds: 0, detail: null, last_poll_at: "2026-07-16T11:30:00Z", started_at: null, accounts: null }, livenessWindowMs), true);
+    // Crash-loop.
+    assert.equal(isWorkerUnavailable({ running_sha: null, status: "needs_attention", active_builds: 0, detail: "crash-loop", last_poll_at: "2026-07-16T11:59:00Z", started_at: null, accounts: null }, livenessWindowMs), true);
+    // Healthy — last poll 1 min ago.
+    assert.equal(isWorkerUnavailable({ running_sha: null, status: "ok", active_builds: 0, detail: null, last_poll_at: "2026-07-16T11:59:00Z", started_at: null, accounts: null }, livenessWindowMs), false);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind suppresses stuck_jobs on queued/queued_resume rows when the worker is unavailable", () => {
+  // The originating false-page: the box worker is stale, so a healthy pr-resolve lane has a
+  // stack of queued jobs waiting on the SAME parent outage. Opening a stuck_jobs red on the
+  // pr-resolve tile just duplicates the box `liveness` page and points at the wrong root cause.
+  const prResolveLoop: MonitoredLoop = {
+    id: "agent:pr-resolve",
+    kind: "agent-kind",
+    owner: "platform",
+    label: "PR resolve agent",
+    description: "pr-resolve agent kind",
+    expectedCadence: "on demand",
+    agentKind: "pr-resolve",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const enqueuedAt = "2026-07-16T09:00:00Z"; // 3h before now — well past the 60-min threshold.
+  const queued: ActiveJob[] = [
+    { id: "aaaaaaaa-0000-0000-0000-000000000000", kind: "pr-resolve", status: "queued", created_at: enqueuedAt, claimed_at: null, updated_at: enqueuedAt },
+    { id: "bbbbbbbb-0000-0000-0000-000000000000", kind: "pr-resolve", status: "queued_resume", created_at: enqueuedAt, claimed_at: null, updated_at: enqueuedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-16T12:00:00Z");
+  try {
+    // Worker unavailable → the queued rows are attributed to the worker outage. No stuck_jobs red.
+    const suppressed = evalAgentKind(prResolveLoop, null, queued, null, true);
+    assert.notEqual(suppressed.color, "red");
+    assert.equal(suppressed.violation, null);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind keeps building/claimed stuck reds even when the worker is unavailable", () => {
+  // A queued-only backlog is waiting on the parent outage — suppress. But a job the worker
+  // ALREADY claimed and is midway through (or that got stuck in the `building` status) is a
+  // lane-specific defect: the outage predicate doesn't let it hide. This is the seam that
+  // keeps the guard from becoming a blanket "skip all stuck detection when the worker is down."
+  const specTestLoop: MonitoredLoop = {
+    id: "agent:spec-test",
+    kind: "agent-kind",
+    owner: "platform",
+    label: "Spec-test agent",
+    description: "spec-test agent kind",
+    expectedCadence: "on demand",
+    agentKind: "spec-test",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const claimedAt = "2026-07-16T09:00:00Z";
+  const claimed: ActiveJob[] = [
+    { id: "cccccccc-0000-0000-0000-000000000000", kind: "spec-test", status: "building", created_at: claimedAt, claimed_at: claimedAt, updated_at: claimedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-16T12:00:00Z");
+  try {
+    const result = evalAgentKind(specTestLoop, null, claimed, null, true);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind still flags queued stuck jobs when the worker is healthy (regression guard)", () => {
+  // The existing behavior — the guard must ONLY suppress when the worker really is unavailable.
+  // A healthy worker + a queued row past its threshold is a genuinely-wedged lane and must still
+  // page. This is the "healthy-worker case still returns red" the spec's verification calls for.
+  const enqueuedAt = "2026-07-16T09:00:00Z";
+  const queued: ActiveJob[] = [
+    { id: "dddddddd-0000-0000-0000-000000000000", kind: "spec-test", status: "queued", created_at: enqueuedAt, claimed_at: null, updated_at: enqueuedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-16T12:00:00Z");
+  try {
+    // workerStartedAt older than enqueuedAt so the clamp doesn't lift the floor above the threshold,
+    // workerUnavailable=false so the new guard is off — the queued job is 3h past the 60-min threshold.
+    const result = evalAgentKind(agentKindLoop, null, queued, "2026-07-16T08:00:00Z", false);
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "stuck_jobs");
   } finally {
