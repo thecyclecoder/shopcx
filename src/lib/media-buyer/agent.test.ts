@@ -99,6 +99,7 @@ function cohort(overrides: Partial<MediaBuyerTestCohort> = {}): MediaBuyerTestCo
     testMetaCampaignId: null,
     perTestDailyBudgetCents: 15_000,
     adsetTemplate: null,
+    excludedPurchaserAudienceId: null,
     ...overrides,
   };
 }

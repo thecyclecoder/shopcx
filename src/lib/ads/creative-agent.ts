@@ -15,7 +15,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
+import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -26,6 +26,13 @@ import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import {
+  buildMetaCopyPack,
+  placementPackPlan,
+  planCreativePackInserts,
+  type MetaCopyPack,
+  type RenderedPlacement,
+} from "@/lib/ads/creative-pack";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -158,9 +165,15 @@ async function currentBinDepth(admin: Admin, workspaceId: string, productId: str
   return (data ?? []).length;
 }
 
-/** Insert one finished static creative into the ready-to-test bin (mirrors the canonical
- *  /api/ads/upload-static path: angle → campaign(ready) → static ad_videos(ready) in the ad-tool
- *  bucket → landing_url). Returns the campaign id. */
+/** Insert one finished creative PACK into the ready-to-test bin. A pack = one angle row carrying
+ *  the 4-headline + 4-primary-text copy variations (persisted on the angle's scalar columns AND on
+ *  its `metadata.copy_pack` JSONB for the sibling publish path to read) + one campaign row + THREE
+ *  placement statics (`feed_4x5` canonical + `stories_9x16` + `right_column_1x1` siblings pointing
+ *  at the canonical via `format_variant_of_id`). The 3 statics carry the SAME core conversion
+ *  psychology by construction — they're rendered from ONE brief; only aspect/crop varies.
+ *  (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
+ *
+ *  Returns the campaign id (the pack's handle for the ready-to-test bin). */
 async function insertReadyCreative(
   admin: Admin,
   workspaceId: string,
@@ -168,8 +181,8 @@ async function insertReadyCreative(
   productHandle: string,
   productTitle: string,
   angle: ScoredAngle,
-  metaCopy: { headline: string; primaryText: string; description: string },
-  image: { buffer: Buffer; mimeType: string },
+  copyPack: MetaCopyPack,
+  renders: { canonical: RenderedPlacement; siblings: RenderedPlacement[] },
 ): Promise<string | null> {
   const { data: angleRow } = await admin
     .from("product_ad_angles")
@@ -179,9 +192,10 @@ async function insertReadyCreative(
       lead_benefit_anchor: angle.leadBenefit.slice(0, 120),
       hook_one_liner: angle.hook.slice(0, 120),
       urgency_lever: "none", generated_by: "ad-creative-agent", is_active: true,
-      meta_headline: metaCopy.headline.slice(0, META_CAPS.headline),
-      meta_primary_text: metaCopy.primaryText.slice(0, META_CAPS.primary_text),
-      meta_description: metaCopy.description.slice(0, META_CAPS.description),
+      meta_headline: copyPack.headlines[0].slice(0, META_CAPS.headline),
+      meta_primary_text: copyPack.primaryTexts[0].slice(0, META_CAPS.primary_text),
+      meta_description: copyPack.description.slice(0, META_CAPS.description),
+      metadata: { copy_pack: copyPack },
     })
     .select("id").single();
 
@@ -201,23 +215,62 @@ async function insertReadyCreative(
   if (cErr || !campaign) return null;
   const campaignId = (campaign as { id: string }).id;
 
-  const ext = image.mimeType.includes("png") ? "png" : "jpg";
-  const { data: vrow } = await admin
-    .from("ad_videos")
-    .insert({ workspace_id: workspaceId, campaign_id: campaignId, format: "feed_4x5", media_kind: "static", status: "pending", meta: { archetype: "before_after", generated_by: "ad-creative-agent" } })
-    .select("id").single();
-  const videoId = (vrow as { id: string } | null)?.id;
-  if (videoId) {
-    const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
-    await uploadBuffer(storagePath, image.buffer, image.mimeType);
-    const url = await signedUrl(storagePath);
-    await admin.from("ad_videos").update({ static_jpg_url: url, status: "ready", meta: { archetype: "before_after", generated_by: "ad-creative-agent", storage_path: storagePath } }).eq("id", videoId);
+  // Pure planner emits the exact write bodies for the pack's 3 ad_videos rows (canonical +
+  // siblings). Throws when the pack shape is malformed — Phase 3's `isCreativePackComplete`
+  // re-checks persisted rows; this catches an authoring-time regression BEFORE we write.
+  const plan = planCreativePackInserts({
+    workspaceId,
+    campaignId,
+    canonicalRender: renders.canonical,
+    siblingRenders: renders.siblings,
+    copyPack,
+    archetype: "before_after",
+    generatedBy: "ad-creative-agent",
+  });
+
+  // Canonical (feed_4x5) — insert row, upload buffer, sign URL, flip to ready.
+  const canonicalId = await insertOnePlacementRender(admin, workspaceId, plan.canonical, renders.canonical, null);
+  if (!canonicalId) return null;
+
+  // Siblings (stories_9x16 + right_column_1x1) — point at the canonical via format_variant_of_id
+  // so the same-psychology invariant is expressible in the DB: "these three rows are ONE concept."
+  for (let i = 0; i < plan.siblings.length; i++) {
+    await insertOnePlacementRender(admin, workspaceId, plan.siblings[i], renders.siblings[i], canonicalId);
   }
 
   const landingUrl = await resolveLandingUrl(admin, workspaceId, productHandle);
   if (landingUrl) await admin.from("ad_campaigns").update({ landing_url: landingUrl }).eq("id", campaignId);
 
   return campaignId;
+}
+
+/** Insert one placement render (canonical OR a sibling): open a pending ad_videos row, upload the
+ *  buffer under `finals/{ws}/{video_id}.{ext}`, sign the URL, flip to `ready` with the storage
+ *  path in `meta`. When `variantOfId` is set, the row is a sibling and its `format_variant_of_id`
+ *  points at the canonical row's id (same-psychology invariant). Returns the row id. */
+async function insertOnePlacementRender(
+  admin: Admin,
+  workspaceId: string,
+  insertBody: { workspace_id: string; campaign_id: string; format: string; media_kind: string; status: string; meta: { archetype: string; generated_by: string } },
+  render: RenderedPlacement,
+  variantOfId: string | null,
+): Promise<string | null> {
+  const { data: vrow } = await admin
+    .from("ad_videos")
+    .insert({ ...insertBody, format_variant_of_id: variantOfId })
+    .select("id").single();
+  const videoId = (vrow as { id: string } | null)?.id;
+  if (!videoId) return null;
+  const ext = render.mimeType.includes("png") ? "png" : "jpg";
+  const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
+  await uploadBuffer(storagePath, render.buffer, render.mimeType);
+  const url = await signedUrl(storagePath);
+  await admin.from("ad_videos").update({
+    static_jpg_url: url,
+    status: "ready",
+    meta: { ...insertBody.meta, storage_path: storagePath },
+  }).eq("id", videoId);
+  return videoId;
 }
 
 /** Generate + QA + bin-insert `count` fresh creatives for one product, cycling through its top unused
@@ -350,10 +403,18 @@ async function stockProduct(
           skipped = true; // intentional skip — not a QA/gen failure, don't retry, don't append qa_or_gen_failed
           break;
         }
+        // Render the CANONICAL placement (feed 4:5) first + QA it — that's the vision-gate anchor for the
+        // whole pack. If canonical passes, we render the two sibling placements (9:16 + right-column 1:1)
+        // from the SAME brief so the 3 statics share their conversion psychology by construction (only
+        // aspect/crop varies) — the same-psychology invariant. If ANY placement render fails, we bail on
+        // this creative rather than persist a half-pack.
+        // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
+        const packPlan = placementPackPlan();
         const gen = await generateCreative(workspaceId, brief, {
           treatment,
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
+          aspectRatio: packPlan.canonical.aspectRatio,
         });
         // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
         // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
@@ -376,17 +437,35 @@ async function stockProduct(
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
           : await qaCreative(workspaceId, qaInput);
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
-        // Real Meta copy from the grounded brief — a proof-led caption, a benefit headline (never the
-        // offer), and the offer in the description; de-branded for competitor imitations ([[creative-brief]]
-        // buildMetaCopy). Replaces the old hook+fragment concatenation that shipped "I lost 40+ pounds!
-        // Appetite suppression/craving control" with the discount jammed into the headline (2026-07-13).
-        const metaCopy = buildMetaCopy(brief);
-        const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        // Canonical passed the vision gate; render the two sibling placements from the SAME brief.
+        // A sibling render failure fails the WHOLE pack (never persist a half-pack) — the retry loop
+        // takes another attempt at the canonical too, so a transient sibling failure gets a full pack
+        // regenerated. Aspect-ratio-only variation is why we don't re-QA each sibling (would 3× cost);
+        // canonical passing signals the concept is legibly renderable.
+        const siblingRenders: RenderedPlacement[] = [];
+        for (const sib of packPlan.siblings) {
+          const sibGen = await generateCreative(workspaceId, brief, {
+            treatment,
+            designReferenceUrl: plan.designReferenceUrl,
+            compositionTransfer: plan.useCompositionTransfer,
+            aspectRatio: sib.aspectRatio,
+          });
+          siblingRenders.push({ format: sib.format, buffer: sibGen.buffer, mimeType: sibGen.mimeType });
+        }
+        // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
+        // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
+        // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
+        // pack, not just the first pair.
+        const copyPack = buildMetaCopyPack(brief);
+        const campaignId = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
+          canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType },
+          siblings: siblingRenders,
+        });
         // Record the COMBINATION (concept × creative treatment × copy × destination) as pending — the
         // media buyer stamps its outcome later, feeding the learning flywheel.
         await recordCombinationGenerated(admin, {
           workspaceId, productId, angleKey: ak, adCampaignId: campaignId, intent,
-          elements: { treatment, headline: metaCopy.headline, description: metaCopy.primaryText, cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
+          elements: { treatment, headline: copyPack.headlines[0], description: copyPack.primaryTexts[0], cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
         });
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;

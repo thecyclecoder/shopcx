@@ -1,6 +1,6 @@
 # ad_videos
 
-Rendered media outputs for an [[ad_campaigns|ad campaign]]. One ad = 4 sibling rows (Reels MP4 + Feed-4:5 MP4 + Stories JPG + Feed-4:5 JPG) joined via `format_variant_of_id`.
+Rendered media outputs for an [[ad_campaigns|ad campaign]]. One ad = N sibling rows joined via `format_variant_of_id` — the canonical row plus a placement-sized variant per format (video: Reels MP4 + Feed-4:5 MP4 + Stories JPG + Feed-4:5 JPG; the finished static "placement pack" = feed 4:5 + stories/reels 9:16 + right-column 1:1, one per placement family).
 
 **Primary key:** `id`
 
@@ -11,7 +11,7 @@ Rendered media outputs for an [[ad_campaigns|ad campaign]]. One ad = 4 sibling r
 | `id` | `uuid` | — | PK · default: `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id |
 | `campaign_id` | `uuid` | — | → [[ad_campaigns]].id |
-| `format` | `text` | — | default: `'reels_9x16'` · `reels_9x16` \| `feed_4x5` \| `stories_9x16` |
+| `format` | `text` | — | default: `'reels_9x16'` · `reels_9x16` \| `feed_4x5` \| `stories_9x16` \| `right_column_1x1` (static-only, 1:1 placement pack sibling) |
 | `media_kind` | `text` | — | default: `'video'` · `video` \| `static` |
 | `format_variant_of_id` | `uuid` | ✓ | → [[ad_videos]].id (SELF) — siblings link to canonical row |
 | `final_mp4_url` | `text` | ✓ |  |
@@ -67,7 +67,7 @@ const { count } = await admin.from("ad_videos")
 ## Gotchas
 
 - Enum values are **lowercase** (`format`, `media_kind`, `status`).
-- `format_variant_of_id` is **self-referential**: the canonical row has it `NULL`, the 3 format siblings point back at the canonical row. One ad = 4 rows.
+- `format_variant_of_id` is **self-referential**: the canonical row has it `NULL`, the format siblings point back at the canonical row. One ad = N rows — video ads render 4 sibling formats, and Dahlia's finished static "placement pack" ([[../specs/dahlia-produces-3-placement-multi-copy-creative-pack]]) renders 3: `feed_4x5` + `stories_9x16` (or `reels_9x16`) + `right_column_1x1`.
 - **Finding static ads by archetype** (review = testimonial, offer, benefit_authority): query `ad_videos` where `media_kind='static'` AND `meta->>'archetype'='review'` (filter by `workspace_id`/`campaign_id`); the image is `static_jpg_url` or re-sign `meta.storage_path` → `finals/{ws}/{video_id}.jpg`. See [[../lifecycles/ad-static]]. (Legacy `media_kind='static'` rows from old video renders may have a null archetype + be frame extracts — filter on `meta->>'archetype'`.)
 - 30s ads split talking-head footage into two clips in `talking_head_segments_url[]`.
 

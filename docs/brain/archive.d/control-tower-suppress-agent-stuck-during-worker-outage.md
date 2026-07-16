@@ -1,0 +1,1 @@
+- **Stop child agent stuck alerts during box worker outages** · verified 2026-07-16 · → [[../inngest/control-tower-monitor]]
