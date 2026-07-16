@@ -184,12 +184,31 @@ export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
  *                                 tag), which reopen + route to a human and emit no
  *                                 ticket/inbound-message event, so they never drive a beat
  *                                 (control-tower-ticket-decision-workprobe-scope).
+ *   - tickets-awaiting-handler-dispatch — aged, un-cleared `ticket_messages.dispatch_pending_at`
+ *                                 rows for inbound customer messages (control-tower-unified-handler-
+ *                                 dispatch-workprobe). This is the handler's OWN work signal:
+ *                                 [[../inngest/dispatch-inbound-message]] `dispatchInboundMessage`
+ *                                 stamps `dispatch_pending_at` on the just-inserted row BEFORE
+ *                                 firing `ticket/inbound-message`, and [[../inngest/unified-ticket-
+ *                                 handler]] `clearDispatchIntent` clears the stamp at the TOP of
+ *                                 every claimed run (regardless of disposition). So an un-cleared
+ *                                 stamp older than the settle window is an unambiguous LOST
+ *                                 handler dispatch — exactly the loop:unified-ticket-handler tile
+ *                                 is supposed to alert on. Uses the same INTENT_SETTLE_MS boundary
+ *                                 as [[../inngest/unanswered-inbound-backstop-cron]] so the probe
+ *                                 and the reconciler see the same universe of lost sends. Non-
+ *                                 dispatched raw inbounds (rows created by paths that did NOT go
+ *                                 through `dispatchInboundMessage` — the same paths that don't drive
+ *                                 the handler either: CSAT-reopen, sentinel merges) carry NO stamp
+ *                                 and are NOT counted, so the tile can't false-page on a customer
+ *                                 message that never should have invoked the handler.
  */
 export type InlineWorkSignalId =
   | "tickets-awaiting-qc"
   | "journeys-awaiting-delivery"
   | "orders-awaiting-fraud-screen"
-  | "tickets-awaiting-decision";
+  | "tickets-awaiting-decision"
+  | "tickets-awaiting-handler-dispatch";
 
 /**
  * loop_heartbeats.loop_id the Auto-Ship Pipeline's auto-merge gate beats under (auto-ship-pipeline spec,
@@ -972,7 +991,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "THE inbound pipeline — every customer message, all channels (unifiedTicketHandler). If it silently stops, customers go unanswered.",
     expectedCadence: "per inbound customer message",
     livenessWindowMs: 2 * HOUR,
-    inlineWorkSignal: "tickets-awaiting-decision",
+    // control-tower-unified-handler-dispatch-workprobe: the handler and the orchestrator are
+    // different loops with different upstream contracts. The handler's real work signal is the
+    // durable dispatch intent ([[../inngest/dispatch-inbound-message]] `dispatch_pending_at`),
+    // not the broader AI-orchestrator decision surface — `tickets-awaiting-decision` counts
+    // inbound customer messages that DRIVE the per-ticket decision agent (callSonnetOrchestratorV2),
+    // which is a superset of what the handler is actually meant to claim. Using this handler-
+    // specific probe means the tile only alerts when a dispatched inbound event remains unclaimed
+    // (an un-cleared intent stamp older than the settle window = an unambiguous lost handler
+    // dispatch), never on a raw inbound the handler was never supposed to service.
+    inlineWorkSignal: "tickets-awaiting-handler-dispatch",
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
   },
