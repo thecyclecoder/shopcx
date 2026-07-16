@@ -522,3 +522,89 @@ export async function createAdSet(
   if (!j.id) throw new Error("meta_adset_no_id");
   return j.id as string;
 }
+
+// ── Custom audiences (bianca cold-test recent-purchaser exclusion) ───────────
+// The pixel-side purchaser audience Bianca excludes on every per-test ad set so
+// the cold read is against actual cold traffic (docs/brain/specs/
+// bianca-cold-test-recent-purchaser-exclusion.md Phase 1). One of TWO exclusion
+// audiences composed into targeting.excluded_custom_audiences — the sibling
+// customer-list audience ships as bianca-full-order-history-customer-list-exclusion-audience.
+
+export interface MetaCustomAudience {
+  id: string;
+  name: string;
+  subtype?: string;
+  retention_days?: number;
+}
+
+/**
+ * List custom audiences on a Meta ad account. The find-first idempotency
+ * source behind {@link getOrCreateRecentPurchaserAudience} — a bare
+ * `GET /act_{id}/customaudiences` with the fields the caller needs to match
+ * by name.
+ */
+export async function listCustomAudiences(
+  token: string,
+  accountId: string,
+): Promise<MetaCustomAudience[]> {
+  const j = await metaGet(
+    `${actId(accountId)}/customaudiences?fields=id,name,subtype,retention_days&limit=200`,
+    token,
+  );
+  return (j.data || []) as MetaCustomAudience[];
+}
+
+/**
+ * Find-or-create the pixel-side "recent purchasers" website custom audience
+ * for a given (ad account, pixel). Idempotent by exact name match — the
+ * canonical name is `MB — Purchasers (${retentionDays}d) — pixel ${pixelId}`,
+ * so repeat calls (for the same retention window against the same pixel)
+ * return the existing audience id rather than creating a duplicate. Returns
+ * the BARE Meta customaudience id (not our uuid).
+ *
+ * The rule matches Meta's `Purchase` pixel event across the retention window
+ * (default 180 days — Meta's max, per the founder refinement 2026-07-15). The
+ * bianca cold-test spec composes this id into every per-test ad set's
+ * `targeting.excluded_custom_audiences` so existing buyers cannot see the cold
+ * ad and contaminate the read.
+ */
+export async function getOrCreateRecentPurchaserAudience(
+  token: string,
+  accountId: string,
+  pixelId: string,
+  opts?: { retentionDays?: number; name?: string },
+): Promise<string> {
+  const retentionDays = opts?.retentionDays ?? 180;
+  const name = opts?.name ?? `MB — Purchasers (${retentionDays}d) — pixel ${pixelId}`;
+  const existing = await listCustomAudiences(token, accountId);
+  const hit = existing.find((a) => a.name === name);
+  if (hit) return hit.id;
+  const rule = {
+    inclusions: {
+      operator: "or",
+      rules: [
+        {
+          event_sources: [{ id: pixelId, type: "pixel" }],
+          retention_seconds: retentionDays * 86400,
+          filter: {
+            operator: "and",
+            filters: [{ field: "event", operator: "=", value: "Purchase" }],
+          },
+        },
+      ],
+    },
+  };
+  const j = await metaPost(
+    `${actId(accountId)}/customaudiences`,
+    {
+      name,
+      subtype: "WEBSITE",
+      pixel_id: pixelId,
+      retention_days: retentionDays,
+      rule,
+    },
+    token,
+  );
+  if (!j.id) throw new Error("meta_customaudience_no_id");
+  return j.id as string;
+}
