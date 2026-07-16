@@ -1,0 +1,1 @@
+- **Scope inbound handler liveness to dispatched ticket events** · verified 2026-07-16 · → [[lifecycles/control-tower]]
