@@ -36,7 +36,7 @@ CEO (fail-safe root — approvals fall through here when no live+autonomous dire
 ├── dept:platform        Ada — build system, agent platform, dev tooling, spec process
 │   └── director:platform
 │       ├── box (WORKER_BOX_ID)                  — the box build worker (tool)
-│       ├── every cron/reactive owner="platform" — control-tower-monitor, spec-drift, db-health-*, deploy-guardian-cron, mario-*, brain-index-refresh, …
+│       ├── every cron/reactive owner="platform" — control-tower-monitor, spec-drift, db-health-*, deploy-guardian-cron, mario-*, brain-index-refresh, [[../inngest/approval-enqueue-director]] (sub-min approval reactor), …
 │       ├── agent:build (Bo), agent:plan (Pia), agent:fold (Fenn), agent:spec-test (Vera),
 │       │   agent:repair (Rafa), agent:regression (Remi),
 │       │   agent:security-review (Vault), agent:coverage-register (Cole), agent:pr-resolve (Pax),
