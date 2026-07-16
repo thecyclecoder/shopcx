@@ -474,6 +474,106 @@ async function readReviewFailedBlockerStalls(
   return out;
 }
 
+/** Grace before a planned+auto_build spec that has NO build job is treated as a stall. Wider than the
+ *  failed/promote graces (60 min) so Mario never races the roadmap enqueue path or a human who just
+ *  authored the spec — an enqueue attempt should have landed inside this window if the pipeline is
+ *  healthy. Mirrors `MARIO_REVIEW_VERIFICATION_GRACE_MS`. */
+const MARIO_ELIGIBLE_NEVER_ENQUEUED_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Pure decision predicate — is this spec row the sixth-source's eligible-never-enqueued class?
+ * Fanned out of `readEligibleNeverEnqueuedStalls` so the exact "surface?" logic is unit-testable
+ * without a stubbed Supabase client (mirrors [[shouldSurfaceMissingBlocker]] +
+ * [[isGoalMemberAwaitingPromotion]]'s split of I/O from decision). Returns true ONLY when:
+ * (1) `auto_build` is true, (2) the stored status is NOT a terminal override (folded/deferred),
+ * (3) it has NO row in `agent_jobs` with `kind='build'` for this slug (active OR terminal — a
+ * completed/failed build means the failed-build source or the shipped state owns it), and
+ * (4) it is aged past the grace window. Blocker state is deliberately NOT checked here — the
+ * step-(b) `getSpecBlockers` drop in `evaluateStalledSpecs` runs on every surviving candidate
+ * and handles the uncleared-blocker case uniformly across every source.
+ */
+export function shouldSurfaceEligibleNeverEnqueued(input: {
+  status: string | null;
+  autoBuild: boolean;
+  hasAnyBuildJob: boolean;
+  ageMs: number;
+  graceMs: number;
+}): boolean {
+  if (!input.autoBuild) return false;
+  if (input.status === "folded" || input.status === "deferred") return false;
+  if (input.status === "shipped") return false;
+  if (input.hasAnyBuildJob) return false;
+  if (input.ageMs <= input.graceMs) return false;
+  return true;
+}
+
+/**
+ * SIXTH candidate source (eligible-never-enqueued keystone). A spec sitting `auto_build=true` with
+ * every declared blocker shipped but NO build job on it — the most damaging wedge, because it strands
+ * every downstream dependent (the 2026-07-15 overnight sweep: the rubric keystone froze 8 downstream
+ * specs). Emits NO timecard signal (the roadmap enqueue never happened, so no `build_started` event to
+ * open a gap), NO failed-build signal (there is no failed row — there is no row at all), and NO Vale
+ * bounce (Vale passed cleanly). This reads the eligibility signal straight from `specs` + a single
+ * `agent_jobs` scan: `auto_build=true`, status not folded/deferred/shipped, no `kind='build'` row for
+ * the slug, aged past the grace window. The caller runs these through the SAME (b)/(c)/(d) drop
+ * filters — the (b) `getSpecBlockers` drop handles the uncleared-blocker case for us, so this source
+ * intentionally does NOT re-check blocker state (any blocker check drift would silently mis-surface).
+ * Survivors flow through the M4 agent, whose existing `reclaim_and_redrive` verb enqueues the missing
+ * build via `queueRoadmapBuild` (owner-gated, blocker-gated, active-build-gated — every safety rail
+ * that owns "should this build fire" still applies).
+ */
+async function readEligibleNeverEnqueuedStalls(
+  admin: Admin,
+  workspace_id: string,
+  graceMs: number,
+): Promise<Array<{ workspace_id: string; spec_slug: string; age_ms: number }>> {
+  const now = Date.now();
+  const { data: specs, error } = await admin
+    .from("specs")
+    .select("slug, status, auto_build, updated_at")
+    .eq("workspace_id", workspace_id)
+    .eq("auto_build", true)
+    .limit(1000);
+  if (error) throw error;
+  const rows = (specs ?? []) as Array<{
+    slug: string;
+    status: string | null;
+    auto_build: boolean;
+    updated_at: string | null;
+  }>;
+  if (rows.length === 0) return [];
+
+  // One scan for every build row across the candidate slugs — a single IN() query is much cheaper
+  // than N per-spec probes (a workspace with hundreds of auto_build specs would fan out otherwise).
+  const slugs = rows.map((r) => r.slug);
+  const { data: builds } = await admin
+    .from("agent_jobs")
+    .select("spec_slug")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .in("spec_slug", slugs)
+    .limit(5000);
+  const slugsWithBuild = new Set<string>(
+    ((builds ?? []) as Array<{ spec_slug: string | null }>).map((b) => b.spec_slug ?? "").filter((s) => s.length > 0),
+  );
+
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const s of rows) {
+    if (!s.updated_at) continue;
+    const age = now - Date.parse(s.updated_at);
+    const surfaced = shouldSurfaceEligibleNeverEnqueued({
+      status: s.status,
+      autoBuild: s.auto_build,
+      hasAnyBuildJob: slugsWithBuild.has(s.slug),
+      ageMs: age,
+      graceMs,
+    });
+    if (!surfaced) continue;
+    out.push({ workspace_id, spec_slug: s.slug, age_ms: age });
+  }
+  return out;
+}
+
 /**
  * `evaluateStalledSpecs` — the M3 detector cron's core. Returns EXACTLY the specs
  * whose next lifecycle step is genuinely overdue.
@@ -640,6 +740,30 @@ export async function evaluateStalledSpecs(
           current_job_status: "review_failed_missing_blocker",
           review_failed_context: { blocked_by: bf.blocked_by, body: bf.body, vale_needs_fix_reason: null },
         },
+      });
+    }
+
+    // (a6) SIXTH candidate source — eligible-never-enqueued keystones (see
+    // readEligibleNeverEnqueuedStalls). The highest-value class: a spec `auto_build=true` with every
+    // declared blocker shipped but NO build job on it strands every downstream dependent (last
+    // night: the rubric keystone froze 8 specs) and emits no timecard/failed-build/Vale signal, so
+    // every prior source misses it. Survivors flow through the SAME (b)/(c)/(d) drop filters and
+    // then to the M4 agent, whose existing `reclaim_and_redrive` verb enqueues the missing build.
+    const eligible = await readEligibleNeverEnqueuedStalls(admin, ws, MARIO_ELIGIBLE_NEVER_ENQUEUED_GRACE_MS);
+    for (const en of eligible) {
+      const key = `${en.workspace_id}::${en.spec_slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      initial.push({
+        workspace_id: en.workspace_id,
+        spec_slug: en.spec_slug,
+        // Semantic: the spec was AUTHORED (and passed review) but never STARTED a build — the
+        // roadmap enqueue never fired, so the ledger has no `build_started` event to open a gap.
+        from_event: "spec_authored",
+        to_event: "build_started",
+        gap_ms: en.age_ms,
+        sla_ms: MARIO_ELIGIBLE_NEVER_ENQUEUED_GRACE_MS,
+        brief: { last_events: [], blocked_by_state: [], current_job_status: "eligible_never_enqueued" },
       });
     }
   }
