@@ -2422,6 +2422,127 @@ export async function autoBreakGoalMemberDeadlockIfDue(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 3 —
+// READY-GOAL-NEVER-FROZEN invariant + auto-break.
+// ─────────────────────────────────────────────────────────────────────────────
+// Belt-and-suspenders over Phases 1 (permissive queue, shared GOAL_INFLIGHT_STATUSES) + 2 (serial
+// claim-and-decide). Even with both, a future change could reintroduce a wedge — or a chained-
+// phase reactive path could fail to enqueue the next head, leaving a goal frozen with a queued
+// later member and no earliest-ready row. Today that state requires a hand-run unwedge
+// (cancel the mis-prioritized queued job, re-enqueue the head — the 2026-07-16 dahlia stall).
+// Phase 3 elevates that manual fix to a STANDING invariant surfaced through the existing stall
+// diagnostics (`whyIsSpecNotBuilding`) + an async wrapper that fires the existing
+// `autoBreakGoalMemberDeadlockIfDue` when the invariant flips to 'deadlock'.
+//
+// The invariant is a THIN wrapper over `decideGoalMemberDeadlockAutoBreak` — same head-has-no-row
+// predicate, expressed as `{ verdict: 'deadlock' | 'ok', ... }` so the diagnostics layer can
+// switch on it cleanly. Pure — the tests exercise it without a DB seam (see
+// `src/lib/ready-goal-never-frozen.test.ts`).
+
+/** Verdict from the ready-goal-never-frozen invariant. `deadlock` carries the earliest-ready
+ *  head slug the caller / auto-break should dispatch; `ok` carries the underlying reason so a
+ *  log line can quote why the invariant held. */
+export type ReadyGoalNeverFrozenVerdict =
+  | { verdict: "deadlock"; earliest: string }
+  | { verdict: "ok"; reason: string };
+
+/** The PURE core of the Phase 3 invariant.
+ *
+ *  Given a goal's member DAG + the current in-flight goal-mate rows (any active status, incl.
+ *  `queued` — the caller reads with `ACTIVE_STATUSES` because the invariant cares about "does the
+ *  head have ANY row at all"), returns `deadlock` iff a Kahn ready head exists but has NO row in
+ *  the inflight set (the persistent dahlia state); else `ok`. Kept a thin wrapper over
+ *  `decideGoalMemberDeadlockAutoBreak` so the two predicates stay lockstep — if the invariant
+ *  says 'deadlock' the auto-break is legitimate to fire, no daisy-chained divergence. */
+export function checkReadyGoalNeverFrozenInvariant(input: {
+  members: GoalMemberDispatchState[];
+  inflight: GoalMemberInflightRow[];
+}): ReadyGoalNeverFrozenVerdict {
+  const decision = decideGoalMemberDeadlockAutoBreak(input);
+  if (decision.deadlocked) return { verdict: "deadlock", earliest: decision.earliest };
+  return { verdict: "ok", reason: decision.reason };
+}
+
+/** Result of the async invariant + auto-break wrapper. `verdict === 'ok'` means the goal is not
+ *  frozen (either building healthily or has no ready head). `verdict === 'deadlock'` carries the
+ *  auto-break outcome — either the head was enqueued (`autoBroken: true`) or the auto-break
+ *  couldn't land (cooldown, admission miss — `autoBroken: false` with a reason). Never throws
+ *  (fail-open per the existing autobreak's contract). */
+export type ReadyGoalNeverFrozenOutcome =
+  | { verdict: "ok"; reason: string }
+  | {
+      verdict: "deadlock";
+      earliest: string;
+      autoBroken: boolean;
+      autoBreakReason: string | null;
+    };
+
+/** The DB reader — resolve the goal's members, read every in-flight goal-mate row (across ALL
+ *  ACTIVE_STATUSES, incl. `queued` — the invariant asks whether the head has ANY row at all),
+ *  invoke `checkReadyGoalNeverFrozenInvariant`, and on `deadlock` fire the existing
+ *  `autoBreakGoalMemberDeadlockIfDue` to dispatch the earliest-ready member. Best-effort: any
+ *  DB / resolver failure returns `verdict:'ok'` with a reason so a transient blip never wedges
+ *  the caller (the diagnostics layer). Idempotent: the auto-break's own 3-min cooldown dedupes
+ *  rapid re-checks. */
+export async function assertReadyGoalNeverFrozenAndAutoBreak(
+  workspaceId: string,
+  goalSlug: string,
+): Promise<ReadyGoalNeverFrozenOutcome> {
+  if (!goalSlug) return { verdict: "ok", reason: "not-goal-bound" };
+  try {
+    const { goalBranchState } = await import("@/lib/specs-table");
+    const state = await goalBranchState(workspaceId, goalSlug);
+    if (state.specs.length === 0) return { verdict: "ok", reason: "goal-has-no-members" };
+
+    const memberSlugs = state.specs.map((s) => s.slug);
+    const admin = createAdminClient();
+    // Any-active-status read — the invariant cares whether the head has any row at all, not just
+    // an executing one. Mirrors the `autoBreakGoalMemberDeadlockIfDue` reader on purpose.
+    const { data: inflightRows } = await admin
+      .from("agent_jobs")
+      .select("spec_slug, status")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "build")
+      .in("spec_slug", memberSlugs)
+      .in("status", ACTIVE_STATUSES);
+    const inflight: GoalMemberInflightRow[] = (inflightRows ?? []).map((r) => ({
+      slug: (r as { spec_slug: string }).spec_slug,
+      status: (r as { status: string }).status,
+    }));
+
+    const members: GoalMemberDispatchState[] = [];
+    for (const m of state.specs) {
+      const spec = await getSpecFromDb(workspaceId, m.slug);
+      members.push({
+        slug: m.slug,
+        onGoalBranch: m.onGoalBranch,
+        status: m.status,
+        blockedBy: spec?.blocked_by ?? [],
+      });
+    }
+
+    const verdict = checkReadyGoalNeverFrozenInvariant({ members, inflight });
+    if (verdict.verdict === "ok") return verdict;
+
+    // 'deadlock' — fire the existing autobreak against the earliest slug. It handles cooldown,
+    // audit-row emission, and the bypass-admission enqueue. Best-effort: an autobreak failure
+    // just carries its reason back through so the diagnostics caller can surface it.
+    const autoBreak = await autoBreakGoalMemberDeadlockIfDue(workspaceId, verdict.earliest);
+    return {
+      verdict: "deadlock",
+      earliest: verdict.earliest,
+      autoBroken: autoBreak.autoBroken,
+      autoBreakReason: autoBreak.autoBroken ? null : autoBreak.reason,
+    };
+  } catch (e) {
+    return {
+      verdict: "ok",
+      reason: `assertReadyGoalNeverFrozenAndAutoBreak threw (best-effort, no-op): ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // serialize-goal-member-spec-builds Phase 2 — auto-re-drive a DIRTY goal-member PR.
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 1 serialized within-goal dispatch (only one goal-mate builds at a time). Phase 2 handles the
