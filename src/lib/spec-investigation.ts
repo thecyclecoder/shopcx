@@ -26,6 +26,7 @@ import {
   getLiveJobForSlug,
   resolveGoalSlugForSpec,
   isSpecPromoteEligible,
+  assertReadyGoalNeverFrozenAndAutoBreak,
   type AgentJob,
   type SpecPromoteEligibility,
 } from "./agent-jobs";
@@ -148,6 +149,7 @@ export interface NotBuildingReason {
     | "blocked_by"
     | "not_review_passed"
     | "goal_member_serialized"
+    | "ready_goal_deadlock"
     | "parked_needs_input"
     | "parked_needs_approval"
     | "usage_cap"
@@ -437,6 +439,29 @@ export async function whyIsSpecNotBuilding(workspaceId: string, slug: string): P
   }
 
   if (!liveBuild) {
+    // goal-serializer-one-decision-point-and-serial-claim-no-queued-deadlock Phase 3 —
+    // ready-goal-never-frozen invariant. When this spec has no build job at all AND is a member
+    // of a goal, check whether the goal's earliest-ready head is missing (the persistent
+    // 2026-07-16 dahlia state). If so, surface the diagnostic AND fire the auto-break (it has
+    // its own 3-min cooldown so a rapid re-check doesn't hammer director_activity). The
+    // auto-break writes a director_activity audit row + enqueues the earliest via
+    // `enqueueBuildIfDue` with `bypassGoalMemberAdmission:true`. Best-effort — a resolver/DB
+    // blip returns verdict:'ok' from the wrapper, and this code falls through to the existing
+    // no_build_job reason below.
+    if (goalSlug) {
+      const invariant = await assertReadyGoalNeverFrozenAndAutoBreak(workspaceId, goalSlug);
+      if (invariant.verdict === "deadlock") {
+        const detail = invariant.autoBroken
+          ? `Ready-goal-never-frozen invariant TRIGGERED on goal ${goalSlug}: earliest ready head '${invariant.earliest}' had no in-flight build row. Auto-break enqueued ${invariant.earliest}.`
+          : `Ready-goal-never-frozen invariant TRIGGERED on goal ${goalSlug}: earliest ready head '${invariant.earliest}' had no in-flight build row; auto-break did NOT land (${invariant.autoBreakReason ?? "reason unknown"}).`;
+        return {
+          building: false,
+          reason: "ready_goal_deadlock",
+          detail,
+          suggestedAction: invariant.autoBroken ? null : `Manually re-enqueue ${invariant.earliest} — the earliest ready goal-member of ${goalSlug}.`,
+        };
+      }
+    }
     // No build job at all + eligible → the chain never enqueued it (an outlier stall).
     return { building: false, reason: "no_build_job", detail: "No build job exists for this spec, yet it is not terminal/blocked — the chain likely never enqueued it (re-drive candidate).", suggestedAction: "Re-fire queueNextChainedPhase / re-queue the build." };
   }
