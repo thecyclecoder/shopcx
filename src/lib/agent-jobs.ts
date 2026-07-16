@@ -1836,6 +1836,42 @@ export async function evaluateGoalMemberBuildDispatch(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// box-serial-claim-cooldown-wedge-guard Phase 1 — pre-launch serial-claim decision.
+// ─────────────────────────────────────────────────────────────────────────────
+// The box's build/plan claim loop atomically claims a queued row via public.claim_agent_job,
+// then fires `launch(job)` and continues to fill the pool. The goal-member serializer used
+// to run INSIDE runBuild (via evaluateClaimTimeBuildGate); on a "held" verdict, runBuild
+// wrote a FUTURE claimed_at cooldown and returned. Because launch() is async, the release
+// write raced the poll loop's next claim RPC — if the live claim_agent_job ever regressed
+// on its `(claimed_at is null or claimed_at <= now())` predicate, the same row could be
+// re-claimed on the same tick, wedging the loop into re-holding forever WITHOUT ever writing
+// the box's own heartbeat (the Control Tower box tile then correctly reports the worker
+// stale, but the operator has no clean recovery signal).
+//
+// This pure predicate is the pre-launch decision the poll loop calls SYNCHRONOUSLY after
+// claim_agent_job returns a build/plan row. When the goal-member serializer holds, the
+// caller RELEASES the row (writes the future claimed_at cooldown) BEFORE launching, and
+// EXITS the build/plan claim loop for that poll pass — so even a broken RPC cannot re-claim
+// the same row on the same tick. The serializer verdict is still authoritative; this helper
+// just decouples the DECISION from the DB read so it stays testable, and gives the loop a
+// single named branch (`.action === "release"`) to key its exit off.
+export type SerialClaimDispatchAction = "dispatch" | "release";
+export interface SerialClaimDispatchOutcome {
+  action: SerialClaimDispatchAction;
+  reason?: string;
+}
+/** Pure decision: given the goal-member serial-claim verdict for a freshly-claimed build/plan
+ *  row, should the caller launch it (`dispatch`) or release it with a cooldown (`release`)?
+ *  A one-off spec or a member of a different goal returns `serial.ok:true`, so the outcome
+ *  is `dispatch` — the caller never needs to special-case the non-serialized path. */
+export function decideSerialClaimDispatchOutcome(input: {
+  serial: GoalMemberBuildDispatchResult;
+}): SerialClaimDispatchOutcome {
+  if (input.serial.ok) return { action: "dispatch" };
+  return { action: "release", reason: input.serial.reason };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate.
 // parallel-build-serialized-merge-and-deadlock-autobreak Phase 2 — DAG-aware admission.
 // ─────────────────────────────────────────────────────────────────────────────
