@@ -2071,6 +2071,68 @@ export function mergeBlockedByForRepair(input: {
   return { ok: true, merged };
 }
 
+/** Parse a pr-resolve pseudo-slug `pr-<number>` back to its integer PR number. Returns `null` on any
+ *  slug that isn't a bare `pr-<positive integer>` shape (a real spec slug, a `pr-abc` typo, `pr--5`, …).
+ *  Used by `checkCancelPrResolveStormScope` to derive the DETERMINISTIC surfaced pr_number from the
+ *  Mario job row's `spec_slug` (mario-detects-job-and-pr-wedges Phase 4 — bind live-fix targets to the
+ *  job row context so an LLM verdict cannot retarget a mutation to a sibling PR). */
+export function parsePrResolvePseudoSlug(slug: string): number | null {
+  const m = slug.match(/^pr-(\d+)$/);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+/** Pure security predicate for `cancel_pr_resolve_storm` (mario-detects-job-and-pr-wedges Phase 4 fix).
+ *  Recompute the DETERMINISTIC surfaced pr_number from the Mario job row's `spec_slug` (the eighth source
+ *  stamps the pseudo-slug `pr-<number>` on the surfacing candidate → applyBoxMario reads `row.spec_slug`)
+ *  and reject any verdict that either (a) is missing target.pr_number entirely, (b) targets a pr_number
+ *  the Mario job row was NOT surfaced for, or (c) was surfaced under a non-pr pseudo-slug (defensive:
+ *  the deterministic source ONLY emits `pr-<n>` for this class; any other shape is a mis-routed verdict).
+ *  Split out of `applyBoxMario`'s switch so the exact security contract is unit-testable without a
+ *  Supabase stub. */
+export function checkCancelPrResolveStormScope(input: {
+  jobSpecSlug: string;
+  target: { pr_number?: number };
+}): { ok: true; prNumber: number } | { ok: false; reason: string } {
+  const surfacedPrNumber = parsePrResolvePseudoSlug(input.jobSpecSlug);
+  if (surfacedPrNumber === null) {
+    return { ok: false, reason: `job_spec_slug_not_pseudo_pr: ${input.jobSpecSlug}` };
+  }
+  if (typeof input.target.pr_number !== "number") {
+    return { ok: false, reason: "target_pr_number_missing" };
+  }
+  if (input.target.pr_number !== surfacedPrNumber) {
+    return {
+      ok: false,
+      reason: `pr_number_mismatch: job=${surfacedPrNumber} verdict=${input.target.pr_number}`,
+    };
+  }
+  return { ok: true, prNumber: surfacedPrNumber };
+}
+
+/** Pure security predicate for `close_orphaned_pr` (mario-detects-job-and-pr-wedges Phase 4 fix). The
+ *  ninth source stamps the REAL spec_slug on the surfacing candidate → applyBoxMario reads it off
+ *  `row.spec_slug`. Reject any verdict whose target.spec_slug differs from the Mario job row's spec_slug
+ *  (an injected verdict cannot retarget the close to a SIBLING folded/shipped spec in the same
+ *  workspace). Reject a target.pr_number that is provided but positive (should be re-derived from
+ *  agent_jobs.spec_branch/pr_number inside `closeOrphanedPr`; a caller supplying a mismatched pr_number
+ *  is the same class of authority drift). A missing target.spec_slug (verdict target = {}) is accepted
+ *  as an implicit "use the job row's slug" — matches the pre-fix behavior for the well-formed case. */
+export function checkCloseOrphanedPrScope(input: {
+  jobSpecSlug: string;
+  target: { spec_slug?: string; pr_number?: number };
+}): { ok: true; specSlug: string } | { ok: false; reason: string } {
+  if (typeof input.target.spec_slug === "string" && input.target.spec_slug !== input.jobSpecSlug) {
+    return {
+      ok: false,
+      reason: `spec_slug_mismatch: job=${input.jobSpecSlug} verdict=${input.target.spec_slug}`,
+    };
+  }
+  return { ok: true, specSlug: input.jobSpecSlug };
+}
+
 /** Repair a spec's MISSING blocked_by entry (the fifth candidate source class). Re-authors the spec with
  *  the merged `blocked_by` (UNION of existing + verdict.add_blocked_by) via the SAME author-spec gate that
  *  the verification repair uses — a content change re-opens the spec to Vale (`markSpecCardBackToReview`
@@ -2381,24 +2443,28 @@ export async function applyBoxMario(
             break;
           }
           case "cancel_pr_resolve_storm": {
-            // mario-detects-job-and-pr-wedges Phase 2 verb. The M4 agent's verdict MUST carry
-            // target.pr_number — a storm has no spec_slug to fall back to (the surfaced pseudo-slug is
-            // `pr-<number>` by design). The applier's compare-and-set on `pr_number` + workspace_id +
-            // status keeps the write bounded to the exact PR's parked storm rows.
-            if (!lf.target.pr_number) throw new Error("target.pr_number required");
-            await cancelPrResolveStorm(admin, row.workspace_id, lf.target.pr_number);
+            // mario-detects-job-and-pr-wedges Phase 4 fix (security binding). Bind the target pr_number
+            // to the DETERMINISTIC surfaced pr_number derived from the Mario job row's spec_slug (the
+            // eighth source stamps the pseudo-slug `pr-<number>` — parseable) BEFORE any GitHub/DB
+            // mutation. An injected verdict targeting a sibling PR in the same workspace is rejected at
+            // the predicate boundary — never reaches `cancelPrResolveStorm`. See
+            // [[checkCancelPrResolveStormScope]] for the exact contract.
+            const scope = checkCancelPrResolveStormScope({ jobSpecSlug: row.spec_slug, target: lf.target });
+            if (!scope.ok) throw new Error(`cancel_pr_resolve_storm: ${scope.reason}`);
+            await cancelPrResolveStorm(admin, row.workspace_id, scope.prNumber);
             fixExecuted = true;
             break;
           }
           case "close_orphaned_pr": {
-            // mario-detects-job-and-pr-wedges Phase 3 verb. The M4 agent's verdict MUST carry
-            // target.spec_slug (real spec — the ninth source carries the real slug); target.pr_number
-            // is redundant (the applier re-derives it from agent_jobs.spec_branch/pr_number) but is
-            // accepted for cross-check symmetry with the storm verb. The applier confirms the spec
-            // is still folded/shipped RIGHT BEFORE firing (guard-before-mutation) — a spec that has
-            // been re-opened between detection and apply is refused, not closed.
-            const targetSlug = lf.target.spec_slug ?? row.spec_slug;
-            await closeOrphanedPr(admin, row.workspace_id, targetSlug);
+            // mario-detects-job-and-pr-wedges Phase 4 fix (security binding). Bind the target spec_slug
+            // to the DETERMINISTIC Mario job row's spec_slug (the ninth source stamps the REAL slug) so
+            // an injected verdict targeting a sibling folded/shipped spec in the same workspace is
+            // rejected at the predicate boundary — never reaches `closeOrphanedPr`'s GitHub PATCH. The
+            // applier itself STILL confirms the spec is still folded/shipped RIGHT BEFORE firing
+            // (guard-before-mutation). See [[checkCloseOrphanedPrScope]] for the exact contract.
+            const scope = checkCloseOrphanedPrScope({ jobSpecSlug: row.spec_slug, target: lf.target });
+            if (!scope.ok) throw new Error(`close_orphaned_pr: ${scope.reason}`);
+            await closeOrphanedPr(admin, row.workspace_id, scope.specSlug);
             fixExecuted = true;
             break;
           }

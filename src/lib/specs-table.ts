@@ -390,8 +390,7 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
  * duplicates without lengthening the freshness window meaningfully.
  *
  * Design invariants:
- *  - **TTL is short (2s)** — bounds any staleness a caller could observe to under one poll tick, even
- *    if a mutation happens through a path this SDK cannot see (a raw SQL migration, an admin script
+ *  - **TTL bounds staleness at any path this SDK cannot see** (a raw SQL migration, an admin script
  *    outside this module). All in-module writers below invalidate proactively; the TTL is the belt.
  *  - **Every writer in this file calls `invalidateSpecCache(ws, slug)` on success.** The read-after-
  *    write pattern in `author-spec.ts` (`getSpec` → `upsertSpec` → `getSpec` to verify persistence)
@@ -399,8 +398,13 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
  *  - **Null results are cached** so a nonexistent slug in a tight retry loop doesn't hammer the RPC
  *    either. Null entries invalidate the same way — a write for that (ws, slug) evicts the null.
  *  - **`clearSpecCacheForTests()` is exported** so tests that share process state can reset.
+ *
+ * db-load-getspec-cache — raised from 2_000 to 15_000 so the cache survives the box's 5_000ms poll
+ * tick (scripts/builder-worker.ts `POLL_MS`) — the 2s TTL only collapsed within-burst duplicates
+ * and re-fired the RPC every tick. Writers still invalidate proactively via `invalidateSpecCache`,
+ * so 15s is only an upper bound on staleness for out-of-module writes (raw SQL / admin scripts).
  */
-const SPEC_CACHE_TTL_MS = 2_000;
+const SPEC_CACHE_TTL_MS = 15_000;
 
 type SpecCacheEntry = { row: SpecRow | null; expiresAt: number };
 const specCache = new Map<string, SpecCacheEntry>();
@@ -424,9 +428,28 @@ function writeSpecCache(workspaceId: string, slug: string, row: SpecRow | null):
   specCache.set(specCacheKey(workspaceId, slug), { row, expiresAt: Date.now() + SPEC_CACHE_TTL_MS });
 }
 
+// db-load-getspec-cache — listener API so a downstream wrapper cache (brain-roadmap.getSpec) can
+// evict its (workspaceId, slug) entry in lockstep with the inner cache. Every writer path in this
+// file already calls `invalidateSpecCache`, so subscribing here means the wrapper cache stays
+// consistent without duplicating the writer list.
+type SpecCacheInvalidator = (workspaceId: string, slug: string) => void;
+const specCacheInvalidators = new Set<SpecCacheInvalidator>();
+
+export function onSpecCacheInvalidate(cb: SpecCacheInvalidator): () => void {
+  specCacheInvalidators.add(cb);
+  return () => specCacheInvalidators.delete(cb);
+}
+
 /** Evict a cached (workspace, slug) entry. Called by every writer in this module on success. */
 export function invalidateSpecCache(workspaceId: string, slug: string): void {
   specCache.delete(specCacheKey(workspaceId, slug));
+  for (const cb of specCacheInvalidators) {
+    try {
+      cb(workspaceId, slug);
+    } catch {
+      // Best-effort — a listener error must never wedge a mutator path.
+    }
+  }
 }
 
 /** Test-only cache reset. Never called by production code paths. */
