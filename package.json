@@ -98,6 +98,7 @@
     "test:media-buyer-cold-scaler-cohort": "tsx --test src/lib/media-buyer/cold-scaler-cohort.test.ts",
     "test:media-buyer-cold-scaler-arming-gate": "tsx --test src/lib/media-buyer/cold-scaler-arming-gate.test.ts",
     "test:media-buyer-cold-scaler-cac-ltv-sensor": "tsx --test src/lib/media-buyer/cold-scaler-cac-ltv-sensor.test.ts",
+    "test:media-buyer-purchaser-overlap": "tsx --test src/lib/media-buyer/purchaser-overlap.test.ts",
     "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
     "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts",
     "test:check-table-refs-have-migrations": "tsx --test scripts/_check-table-refs-have-migrations.test.ts",
