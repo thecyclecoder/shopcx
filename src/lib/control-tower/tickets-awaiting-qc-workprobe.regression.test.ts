@@ -26,6 +26,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ticketAnalyzerEligibilityReadyAt } from "./monitor";
 
 const MONITOR = "src/lib/control-tower/monitor.ts";
 const CRON = "src/lib/inngest/ticket-analysis-cron.ts";
@@ -132,6 +133,113 @@ test("monitor's Cora settle constant matches ticket-analysis-cron.CORA_CLOSE_SET
     monitorMs,
     cronMs,
     "TICKET_ANALYSIS_CORA_SETTLE_MS in monitor.ts must equal CORA_CLOSE_SETTLE_MS in ticket-analysis-cron.ts — the probe and the cron must see the same settle window or the between-tick false alert returns.",
+  );
+});
+
+// ── ticket-analyzer-workprobe-eligibility-grace ──────────────────────────────────────────────
+// Pin the fresh-close eligibility helper: a ticket the cron will legitimately process on the
+// NEXT feeder tick (customer message settled hours ago, close/handled stamps only minutes ago)
+// must NOT be counted as awaited work yet. The prior probe used customer-message settle as the
+// only clock, so a freshly-closed ticket looked overdue in the between-tick gap it landed in —
+// a false idle_while_work on loop:ai:ticket-analyzer.
+
+test("ticketAnalyzerEligibilityReadyAt: fresh close/handled on an old customer message defers eligibility to the fresh anchor", () => {
+  // Ticket the customer last messaged 3h ago (long past settle) but that only closed and got
+  // Sol-handled 5 minutes ago. Ready-at MUST anchor on the fresh close/handled stamps, so the
+  // effective wait time (now - readyAt) is ~5 min — well under a 40-min feeder-grace window —
+  // and the probe caller does not count it as awaited work.
+  const now = Date.now();
+  const readyAt = ticketAnalyzerEligibilityReadyAt({
+    closedAtMs: now - 5 * 60_000,
+    aiHandledAtMs: null,
+    solHandledAtMs: now - 5 * 60_000,
+    latestCustomerMessageAtMs: now - 3 * 60 * 60_000,
+    coraSettleMs: 30 * 60_000,
+  });
+  assert.ok(readyAt != null, "readyAt should be non-null — ticket has closed_at, handled, and customer msg");
+  const waitedMs = now - readyAt!;
+  assert.ok(
+    waitedMs < 40 * 60_000,
+    `freshly-closed ticket must not have waited a full feeder grace yet (got ${waitedMs}ms) — the probe would false-alert on it`,
+  );
+  assert.ok(
+    Math.abs(waitedMs - 5 * 60_000) < 1_000,
+    `readyAt should anchor on the fresh close/handled stamp (~5 min), got ${waitedMs}ms — the customer-message clock alone would make it look 3h stale`,
+  );
+});
+
+test("ticketAnalyzerEligibilityReadyAt: fully-settled and past-a-cycle ticket IS eligible", () => {
+  // Contrast case — everything happened hours ago, cron had multiple ticks to service it and
+  // did not, so the probe SHOULD count it as awaited work.
+  const now = Date.now();
+  const readyAt = ticketAnalyzerEligibilityReadyAt({
+    closedAtMs: now - 3 * 60 * 60_000,
+    aiHandledAtMs: now - 3 * 60 * 60_000,
+    solHandledAtMs: now - 3 * 60 * 60_000,
+    latestCustomerMessageAtMs: now - 3 * 60 * 60_000,
+    coraSettleMs: 30 * 60_000,
+  });
+  assert.ok(readyAt != null);
+  assert.ok((now - readyAt!) >= 40 * 60_000, "fully-settled past-a-cycle ticket must be counted");
+});
+
+test("ticketAnalyzerEligibilityReadyAt: missing customer message / handled / closed_at → null (cron would skip)", () => {
+  const now = Date.now();
+  const base = {
+    closedAtMs: now - 3 * 60 * 60_000,
+    aiHandledAtMs: now - 3 * 60 * 60_000,
+    solHandledAtMs: null as number | null,
+    latestCustomerMessageAtMs: now - 3 * 60 * 60_000 as number | null,
+    coraSettleMs: 30 * 60_000,
+  };
+  assert.equal(ticketAnalyzerEligibilityReadyAt({ ...base, latestCustomerMessageAtMs: null }), null);
+  assert.equal(ticketAnalyzerEligibilityReadyAt({ ...base, closedAtMs: null }), null);
+  assert.equal(ticketAnalyzerEligibilityReadyAt({ ...base, aiHandledAtMs: null, solHandledAtMs: null }), null);
+});
+
+test("ticketAnalyzerEligibilityReadyAt: settle window still gates when close + handled are older than settle", () => {
+  // Close and handled happened days ago, but the customer sent a fresh message 2 min ago.
+  // The cron's `passesCoraSelectionGate` would refuse to grade the ticket until CORA_CLOSE_SETTLE_MS
+  // has passed since that customer message — so the probe must not count it either.
+  const now = Date.now();
+  const readyAt = ticketAnalyzerEligibilityReadyAt({
+    closedAtMs: now - 2 * 24 * 60 * 60_000,
+    aiHandledAtMs: now - 2 * 24 * 60 * 60_000,
+    solHandledAtMs: null,
+    latestCustomerMessageAtMs: now - 2 * 60_000,
+    coraSettleMs: 30 * 60_000,
+  });
+  assert.ok(readyAt != null);
+  // ready-at should be ~28 min in the FUTURE (customer msg + 30 min settle), so waited < 0.
+  const waitedMs = now - readyAt!;
+  assert.ok(waitedMs < 0, `settle window should push readyAt into the future while customer is still active (got ${waitedMs}ms)`);
+});
+
+// ── ticket-analyzer-workprobe-eligibility-grace: probe-block wiring ─────────────────────────
+// Ensure the probe actually consumes the helper AND selects the fresh anchors it needs. A
+// refactor that reverts to the customer-message-only cutoff would silently re-open the between-
+// tick false alert.
+
+test("tickets-awaiting-qc probe calls ticketAnalyzerEligibilityReadyAt and requires the readyAt to have aged past a feeder cycle", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /ticketAnalyzerEligibilityReadyAt\s*\(/,
+    "`tickets-awaiting-qc` probe must call the ticketAnalyzerEligibilityReadyAt helper — customer-message settle alone lets a freshly-closed ticket false-alert in the between-tick gap.",
+  );
+  assert.match(
+    block,
+    /(?:nowMs|Date\.now\(\))\s*-\s*readyAt\s*<\s*TICKET_ANALYSIS_FEEDER_GRACE_MS/,
+    "`tickets-awaiting-qc` probe must skip a candidate whose readyAt has not yet aged past TICKET_ANALYSIS_FEEDER_GRACE_MS — otherwise a freshly-closed ticket is counted before the next cron tick could legally service it.",
+  );
+});
+
+test("tickets-awaiting-qc probe selects closed_at, ai_handled_at, and sol_handled_at (fresh-anchor inputs)", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /\.select\(\s*"[^"]*closed_at[^"]*ai_handled_at[^"]*sol_handled_at[^"]*"\s*\)|\.select\(\s*"[^"]*sol_handled_at[^"]*ai_handled_at[^"]*closed_at[^"]*"\s*\)|\.select\(\s*"[^"]*(?:closed_at|ai_handled_at|sol_handled_at)[^"]*(?:closed_at|ai_handled_at|sol_handled_at)[^"]*(?:closed_at|ai_handled_at|sol_handled_at)[^"]*"\s*\)/,
+    "`tickets-awaiting-qc` candidate select must include closed_at, ai_handled_at, and sol_handled_at — the helper needs the fresh anchors to defer eligibility past a between-tick close.",
   );
 });
 

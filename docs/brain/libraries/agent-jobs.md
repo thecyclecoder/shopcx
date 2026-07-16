@@ -172,6 +172,20 @@ Goal-bound specs of the SAME goal must serialize on build (concurrent builds col
 
 `evaluateGoalMemberBuildDispatch` is the **DB reader** — calls `resolveGoalSlugForSpec` (get the goal), `getGoalSpecMembersInOrder` (list goal-mates in blocked_by order), `listAgentJobs` (check for in-flight builds), and invokes the pure predicate. Wired into `scripts/builder-worker.ts` `evaluateClaimTimeBuildGate` **leg 4** (the 4-leg claim gate: 1-goal-bound-validation, 2-blocked_by-clear, 3-vale-pass, **4-goal-member-serialize**, 5-one-off-fallback) — after blocked_by clearance, before Vale check. Never throws; fails OPEN (a read error → treat as `'ineligible'` → no-op gate, the downstream tests still protect).
 
+### `decideSerialClaimDispatchOutcome` — function  *(box-serial-claim-cooldown-wedge-guard Phase 1)*
+
+```ts
+function decideSerialClaimDispatchOutcome(input: { serial: { ok: boolean; reason?: string } }): { action: 'dispatch' | 'release'; reason?: string }
+```
+
+**Pure predicate** — converts a goal-member serial dispatch decision (the verdict from a goal-mate serializer like `decideGoalMemberBuildDispatch`) into a concrete build/plan claim action. Given a serial verdict struct, returns the action the claim loop should execute:
+- **`{ action: 'dispatch' }`** when `serial.ok===true` (this spec is eligible to build NOW; claim and dispatch the job).
+- **`{ action: 'release', reason }`** when `serial.ok===false` (this spec must wait; release the claim with the serializer's reason preserved for the log line + the future `claimed_at` cooldown update).
+
+The **invariant** this guards: a held goal-mate verdict (`ok:false`) **must** convert to `release`, NEVER `dispatch`. Dispatching a held spec would launch a same-goal build the gate holds — the collision the goal-member serializer was written to prevent. A released build gets a future `claimed_at` cooldown, so the poll loop doesn't re-claim it every tick until the serializer's gate opens (see [[claim-rpc-verify]] — the RPC respects the cooldown predicate).
+
+**Test:** `src/lib/serial-claim-dispatch-outcome.test.ts` pins the three failing states a held goal-mate can return and verifies each converts to `release`, never `dispatch`.
+
 ### `evaluateGoalMemberEnqueueAdmission` / `decideGoalMemberEnqueueAdmission` — functions  *(goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 · parallel-build-serialized-merge-and-deadlock-autobreak Phase 2)*
 
 ```ts
