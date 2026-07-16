@@ -600,6 +600,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // per-run detected/ledgered/escalated counts + a githubUnavailable flag so the tile can
   // show what the last hook actually did.
   { id: SHIP_TIME_BACKFILL_LOOP_ID, kind: "reactive", owner: "platform", label: "Ship-time backfill detector", description: "Post-merge detector: scans every merged claude/* build's diff for scripts/_backfill-*.ts additions, ledgers them in public.data_op_runs, and escalates any unrun/failed one to the CEO inbox — the safety net for one-time data backfills a spec ships as untracked scripts (ship-time-data-backfills-run-and-ledgered-not-silently-dead-code Phase 1).", expectedCadence: "on every merged claude/* build", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-14T00:00:00Z" },
+  // ada-reacts-to-approvals-immediately-never-sits Phase 1 — the sub-minute reactor for Platform-
+  // routed approvals. The `platform-director-cron` every-5-min cron is the backstop; this reactive
+  // fn fires on a needs_approval insert (event `platform/approval-needed`) and immediately enqueues
+  // Ada's `platform-director` decision job (dedup on target_job_id). Owner:'platform' inherits
+  // Ada's kill_switches ancestry via parentIdForOwner('platform') → 'director:platform'. Loose
+  // 30-day livenessWindowMs — an idle window (no routed approval to react to) is healthy, so it
+  // never RED-alerts on a quiet workspace; failures still surface via ok:false beats.
+  { id: "approval-enqueue-director", kind: "reactive", owner: "platform", label: "Approval enqueue → director", description: "Reactive sub-minute enqueue: on a `platform/approval-needed` event (fired on any needs_approval insert), route-check + insert exactly one `platform-director` decision job for the target (dedup on target_job_id). The primary reactor behind Ada's approve-fast-or-escalate-fast SLO; the every-5-min platform-director-cron is the backstop (ada-reacts-to-approvals-immediately-never-sits Phase 1).", expectedCadence: "on a Platform-routed needs_approval insert", livenessWindowMs: 30 * DAY, registeredAt: "2026-07-16T00:00:00Z" },
   // The M3 detector tick — every minute, evaluates timecard-based stall candidates against
   // mario_thresholds and enqueues one kind='mario' job per surviving candidate. Emits a cron
   // heartbeat via emitCronHeartbeat("mario-stall-cron", ...) — registering it here so the
@@ -719,7 +727,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // director-loop-grading spec, Phase 1: the Platform/DevOps Director's standing cadence — a daily cron
   // enqueueing the platform-director agent_jobs kind so escorting + watching happen on a reliable beat,
   // not only on inbound approvals. registeredAt graces the first-tick window (newcron-grace).
-  { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Daily enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the event-driven approval processing.", expectedCadence: "daily (15 12 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
+  // ada-reacts-to-approvals-immediately-never-sits Phase 2 — the registry entry was carrying the
+  // ORIGINAL (director-loop-grading Phase 1) daily cadence + 30h window, but the deployed Inngest
+  // fn ([[../inngest/platform-director-cron]]) tightened to every 5 min in director-initiation-
+  // throughput Phase 3 (see the cron's own trigger + the `every 5 min` header comment). Left as
+  // "daily" the registry is DRIFTED from the runtime — the tile evaluates against a 30h window
+  // and never RED-alerts a genuinely-dead */5 cron. Corrected to match the deployed */5 with a
+  // 20-min window (5 min × 1.2 = 6 min floor from REGISTRY_LIVENESS_JITTER_GRACE; 20 min matches
+  // the every-5-min-crons convention across the registry). Passes assertRegistryInvariants — the
+  // parsed cron cadence (300s) is at the MONITOR_TICK_FLOOR_MS floor (also 300s) and the window
+  // (1200s) exceeds cadence × 1.2 (360s).
+  { id: "platform-director-cron", kind: "cron", owner: "platform", label: "Platform Director cadence", description: "Every-5-min enqueue of the Platform/DevOps Director standing pass (escort approved goals through milestones + watch the platform), in addition to the reactive `approval-enqueue-director` fn that fires on a needs_approval insert.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 20 * MIN, registeredAt: "2026-06-23T00:00:00Z" },
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
