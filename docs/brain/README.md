@@ -422,6 +422,7 @@ Most relevant entry points:
 - [[libraries/email]] · [[libraries/email-tracking]] · [[libraries/crypto]] · [[libraries/rag]] · [[libraries/embeddings]]
 - [[libraries/fraud-detector]] · [[libraries/pattern-matcher]] · [[libraries/rules-engine]]
 - [[libraries/ticket-tags]] · [[libraries/first-touch]] · [[libraries/escalation]]
+- [[libraries/order-bucketing]] · [[libraries/orders-classification]] — SoT for `origin`/`cartType` (bucketOrder) + the 4-facet `classifyOrder`/`queryOrders` chokepoint that adds source + first-vs-repeat
 
 ## Recipes (`recipes/`)
 
