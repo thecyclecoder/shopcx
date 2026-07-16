@@ -158,6 +158,48 @@ function ageMs(iso: string | null | undefined): number {
   return Date.now() - new Date(iso).getTime();
 }
 
+/**
+ * When the ticket-analyzer's `tickets-awaiting-qc` work probe should FIRST regard a candidate
+ * ticket as truly eligible for the next feeder cycle to service
+ * (ticket-analyzer-workprobe-eligibility-grace).
+ *
+ * The prior probe used only `last_customer_message_at + CORA_SETTLE` as the eligibility clock,
+ * so a ticket the customer last messaged hours ago but that only closed / was handled a few
+ * minutes ago was already "past cutoff" and counted as awaited work — even though the ticket
+ * literally became gradeable a moment earlier, before any 30-min cron tick could have picked
+ * it up. Result: a false `idle_while_work` on loop:ai:ticket-analyzer during the between-tick
+ * gap the fresh close landed in.
+ *
+ * The real eligibility ready-at is the LATEST of the anchors the cron's `passesCoraSelectionGate`
+ * requires simultaneously:
+ *   1. the later handled stamp (ai_handled_at OR sol_handled_at — the cron treats either as
+ *      "we handled it"; whichever fired last is when the current handling cycle began);
+ *   2. `closed_at` (the cron requires the ticket to be closed at all);
+ *   3. `last_customer_message_at + CORA_SETTLE` (the settle window on customer activity).
+ *
+ * A candidate with no customer message OR no handled stamp OR no closed_at is not eligible at
+ * all — the cron would skip it — so this returns `null` in those cases and the probe skips it
+ * too. The probe caller then only counts a candidate whose ready-at is older than a full feeder
+ * cycle (TICKET_ANALYSIS_FEEDER_GRACE_MS), giving the ticket-analysis-cron a fair chance to run.
+ */
+export function ticketAnalyzerEligibilityReadyAt(args: {
+  closedAtMs: number | null;
+  aiHandledAtMs: number | null;
+  solHandledAtMs: number | null;
+  latestCustomerMessageAtMs: number | null;
+  coraSettleMs: number;
+}): number | null {
+  if (args.closedAtMs == null) return null;
+  if (args.latestCustomerMessageAtMs == null) return null;
+  const handledMs =
+    args.aiHandledAtMs != null && args.solHandledAtMs != null
+      ? Math.max(args.aiHandledAtMs, args.solHandledAtMs)
+      : (args.aiHandledAtMs ?? args.solHandledAtMs);
+  if (handledMs == null) return null;
+  const settleReadyAt = args.latestCustomerMessageAtMs + args.coraSettleMs;
+  return Math.max(args.closedAtMs, handledMs, settleReadyAt);
+}
+
 /** Compact duration string from a millisecond span (e.g. "3m", "2h", "1d"). */
 function fmtDur(ms: number): string {
   const sec = Math.max(0, Math.floor(ms / 1000));
@@ -592,10 +634,36 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
   return { ...base, color: "green", statusText: `ran ${elapsed(latest.ran_at)} ago`, violation: null };
 }
 
-export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+/**
+ * True iff the box build worker itself is currently non-live per the SAME inputs `evalWorker` uses
+ * to open a `liveness` red: no heartbeat row, no `last_poll_at`, stale beyond `livenessWindowMs`,
+ * or crash-looping (`status='needs_attention'`). Kept as a pure predicate so `evalAgentKind` and
+ * the worker tile share ONE definition of "worker unavailable" — a lane can never disagree with
+ * the box tile about whether the worker is actually up. (control-tower-suppress-agent-stuck-during-worker-outage)
+ */
+export function isWorkerUnavailable(row: WorkerRow | null, livenessWindowMs: number = 5 * 60_000): boolean {
+  if (!row || !row.last_poll_at) return true;
+  if (ageMs(row.last_poll_at) > livenessWindowMs) return true;
+  if (row.status === "needs_attention") return true;
+  return false;
+}
+
+export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+  // control-tower-suppress-agent-stuck-during-worker-outage Phase 1 — when the box build worker
+  // itself is stale/absent/crash-looping, its `liveness` red is the useful alert and every
+  // queued/queued_resume row is waiting on the SAME parent (the worker can't claim while it's
+  // down). Opening a stuck_jobs red on each healthy agent lane (pr-resolve, spec-test, …) just
+  // duplicates the box-tile page and pins the wrong lane. Building/claimed jobs are NOT
+  // suppressed — a genuinely-wedged in-flight job is still a lane-specific failure and stays
+  // red. Once the worker recovers (isWorkerUnavailable=false) every stuck threshold behaves as
+  // before; the worker-restart clamp (workerStartedAt → jobStuckSince) then grants the fresh
+  // uptime a fair drain window before any queued row can trip red.
+  const relevantForStuck = workerUnavailable
+    ? activeJobs.filter((j) => j.kind === loop.agentKind && j.status !== "queued" && j.status !== "queued_resume")
+    : activeJobs.filter((j) => j.kind === loop.agentKind);
   const mine = activeJobs.filter((j) => j.kind === loop.agentKind);
   const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
-  const stuck = mine.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
+  const stuck = relevantForStuck.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -851,17 +919,26 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // in the past. Keying the probe on `updated_at <= now - FEEDER_GRACE` alone lets a
             // ticket the cron is DELIBERATELY waiting on (customer last spoke 5 min ago, ticket
             // updated 45 min ago by an internal side-effect) count as awaited work — the exact
-            // false idle_while_work this spec repairs. We now derive the latest customer message
-            // per candidate and apply the combined cutoff = CORA_CLOSE_SETTLE_MS + the existing
-            // TICKET_ANALYSIS_FEEDER_GRACE_MS, so a normal between-tick wait stays green while a
-            // genuinely-stuck analyzer (a fully-settled + past-a-full-cycle ticket that's still
-            // last_analyzed_at null) still trips the alert. A candidate with NO customer message
-            // (outbound-only send) is dropped — the cron's gate drops it too.
-            const settlePlusFeederCutoffMs =
-              Date.now() - TICKET_ANALYSIS_CORA_SETTLE_MS - TICKET_ANALYSIS_FEEDER_GRACE_MS;
+            // false idle_while_work the first pass of this spec repairs. We derive the latest
+            // customer message per candidate and combine it with CORA_CLOSE_SETTLE_MS + the
+            // existing TICKET_ANALYSIS_FEEDER_GRACE_MS below.
+            //
+            // Fresh-close eligibility grace (ticket-analyzer-workprobe-eligibility-grace) —
+            // customer-message settle alone still lets a NEWLY CLOSED ticket look overdue: if a
+            // customer last spoke hours ago and Sol closed the ticket 5 min ago, the cron will
+            // legitimately service it on the NEXT 30-min tick (~25 min from now), yet the
+            // customer-message-only cutoff already treats it as awaited work — a false
+            // idle_while_work in the between-tick gap the fresh close landed in. We now compute
+            // `ticketAnalyzerEligibilityReadyAt` = MAX(handled_at, closed_at, last_customer_msg +
+            // CORA_SETTLE) — the moment ALL of the cron's real gates first hold — and only count
+            // the candidate once (now - readyAt) >= TICKET_ANALYSIS_FEEDER_GRACE_MS. That gives
+            // a freshly-closed / freshly-handled ticket one full feeder cycle to be picked up
+            // before we flag it, while a truly-stuck analyzer (a fully-settled ticket that's
+            // survived a full cycle unprocessed) still trips the alert.
+            const nowMs = Date.now();
             const { data: candidates } = await admin
               .from("tickets")
-              .select("id")
+              .select("id, closed_at, ai_handled_at, sol_handled_at")
               .eq("status", "closed")
               .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
@@ -869,8 +946,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               .not("sol_handled_at", "is", null)
               .is("last_analyzed_at", null)
               .gte("updated_at", sinceIso);
-            const candidateIds = ((candidates ?? []) as Array<{ id: string }>).map((c) => c.id);
-            if (!candidateIds.length) return 0;
+            type Candidate = {
+              id: string;
+              closed_at: string | null;
+              ai_handled_at: string | null;
+              sol_handled_at: string | null;
+            };
+            const candidateRows = (candidates ?? []) as Candidate[];
+            if (!candidateRows.length) return 0;
+            const candidateIds = candidateRows.map((c) => c.id);
             // Latest customer message per candidate — mirrors the cron's per-run reduction
             // (ticket-analysis-cron.ts:203-211) so the probe and the cron see the same universe
             // of work. Volume is small (candidate cap is the base filter's natural bound).
@@ -887,14 +971,23 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               if (prev == null || ms > prev) latestCustomerMsgMs.set(m.ticket_id, ms);
             }
             let count = 0;
-            for (const id of candidateIds) {
-              const latestMs = latestCustomerMsgMs.get(id);
+            for (const c of candidateRows) {
+              const latestMs = latestCustomerMsgMs.get(c.id);
               // No customer message → outbound-only → not gradeable (mirrors the cron's
               // `if (!last_customer_message_at) return false` in passesCoraSelectionGate).
               if (latestMs == null) continue;
-              // Not settled long enough for the next feeder tick to have legally picked it up →
-              // cron would skip → don't count as awaited work.
-              if (latestMs > settlePlusFeederCutoffMs) continue;
+              const readyAt = ticketAnalyzerEligibilityReadyAt({
+                closedAtMs: c.closed_at ? Date.parse(c.closed_at) : null,
+                aiHandledAtMs: c.ai_handled_at ? Date.parse(c.ai_handled_at) : null,
+                solHandledAtMs: c.sol_handled_at ? Date.parse(c.sol_handled_at) : null,
+                latestCustomerMessageAtMs: latestMs,
+                coraSettleMs: TICKET_ANALYSIS_CORA_SETTLE_MS,
+              });
+              // No cron-eligibility yet (missing an anchor) → cron would skip → don't count.
+              if (readyAt == null) continue;
+              // Not old enough for a full feeder cycle to have legally picked it up → cron
+              // would service on the next tick → don't count as awaited work.
+              if (nowMs - readyAt < TICKET_ANALYSIS_FEEDER_GRACE_MS) continue;
               count++;
             }
             return count;
@@ -1740,6 +1833,17 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   const queuedCount = activeJobs.filter((j) => j.status === "queued" || j.status === "queued_resume").length;
   const manualDrain = !!(workerCtrl as { drain_for_update: boolean } | null)?.drain_for_update;
 
+  // Attribute queued agent-kind backlog to the box worker when the worker itself is stale/absent/
+  // crash-looping, instead of opening a stuck_jobs red on every healthy agent lane
+  // (pr-resolve, spec-test, …). Read the worker loop's livenessWindowMs from the same registry row
+  // evalWorker uses — falls back to the same 5m default — so the two tiles can never disagree.
+  // (control-tower-suppress-agent-stuck-during-worker-outage Phase 1)
+  const workerLoop = MONITORED_LOOPS.find((l) => l.kind === "worker");
+  const workerUnavailable = isWorkerUnavailable(
+    workerRow as WorkerRow | null,
+    workerLoop?.livenessWindowMs ?? 5 * 60_000,
+  );
+
   // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
   // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
   // decides "behind" — a plain prefix mismatch can't tell stale-code (worker-behind) from deploy
@@ -1796,7 +1900,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
-    else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null);
+    else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null, workerUnavailable);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
     // carry several (the renewal cron: renewal-integrity + outcome-distribution) — first to fail wins.

@@ -32,7 +32,7 @@ Idempotent. Called by the shutdown hook — end the pool + release its pooler sl
 Egress-guard read — mirrors the exact predicate `claim_agent_job` uses (`status IN ('queued','queued_resume')` AND `(claimed_at IS NULL OR claimed_at <= now())`) so a `false` result means no lane is starved. `null` on pool failure → caller (builder-worker's `hasClaimableJob`) falls back to supabase-js.
 
 ### `queuedAgentJobKinds(): Promise<string[] | null>`
-DISTINCT kinds across all queued/queued_resume rows. Feeds the self-update "unknown-queued-kind" probe. Pool path pushes the DISTINCT to Postgres (rows-shipped drop); `null` on failure → caller falls back to the supabase-js path (which pulls all rows + DISTINCTs in JS).
+**Phase 2 addition** ([[../specs/db-load-cut-getspec-amplifier-claim-fan-sidebar-spray]] Phase 2, tag `db-load-claim-consolidation`) — DISTINCT kinds across all queued/queued_resume rows in one server-side query. Feeds the poll loop's per-lane claim-gate ([[scripts/builder-worker.ts]]) so per-kind claim blocks skip the RPC for kinds that have no queued row (prior gate was kind-agnostic, firing all 41 RPCs when ANY single kind had work). Pool path pushes the DISTINCT to Postgres (rows-shipped drop); `null` on failure → caller falls back to the supabase-js path and issues RPCs as before (fail-open — no lane is starved on pool unavailability). Cheap indexed read against the existing `agent_jobs` table, same contract as `hasClaimableAgentJob`.
 
 ### `getSpecWithPhases<S, P>(workspaceId, slug): Promise<{ spec, phases } | null | undefined>`
 Server-side single-spec + phases join via the `public.get_spec_with_phases(uuid, text)` RPC ([[../specs/cut-internal-egress-pooler-and-spec-rpcs]] Phase 2, sibling of `list_specs_with_phases`). One pooled query — no PostgREST preamble, no auth churn, no two-round-trip `.from()` fan-out. Return contract:
@@ -43,6 +43,7 @@ Server-side single-spec + phases join via the `public.get_spec_with_phases(uuid,
 ## Consumers
 
 - `scripts/builder-worker.ts` — `hasClaimableJob()` and the self-update queued-kind probe. Both wrap the pool path in a try + fall-through to the pre-existing supabase-js path when `null` is returned. Same fail-open contract as before.
+- [[claim-rpc-verify]] `verifyClaimAgentJobCooldown()` — reads the live `claim_agent_job(text[])` function body via `pg_get_functiondef` to verify the cooldown predicate is present. Called from `ensureClaimAgentJobCooldownVerified` before the build/plan claim block each poll pass (throttled with a 10-minute TTL). Fails open on pool unavailability (returns `ok:true` with a "cannot verify" reason).
 - [[specs-table]] `getSpec` — prefers the pooled `getSpecWithPhases` call, falls through to `admin.rpc('get_spec_with_phases', ...)` on pool unavailability. Same fail-open contract; SpecRow shape byte-identical to the pre-Phase-2 path.
 
 ## Verification / measurement

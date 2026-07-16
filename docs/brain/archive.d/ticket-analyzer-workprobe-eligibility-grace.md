@@ -1,0 +1,1 @@
+- **Stop false ticket analyzer silence alerts for freshly closed tickets** · verified 2026-07-16 · → [[../libraries/control-tower]]

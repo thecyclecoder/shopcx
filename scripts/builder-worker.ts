@@ -52,6 +52,11 @@ import { reclassifyHarnessFails } from "../src/lib/spec-test-harness-classifier"
 // typed helper so a nonexistent column (e.g. the historical `merge_sha` selects here that silently
 // 42703'd) is a tsc error, not an empty-row read at runtime.
 import { jobSelect } from "../src/lib/agent-jobs-columns";
+// box-serial-claim-cooldown-wedge-guard Phase 1 — live-DB verifier for the
+// `public.claim_agent_job(text[])` cooldown predicate. Called before the build/plan claim
+// loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
+// an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
+import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -76,6 +81,12 @@ const POLL_MS = 5000;
 // re-picking the same held build every POLL_MS tick. Bounded short — long enough to stop the churn, short
 // enough that a build releases promptly once Vale passes / its blocker ships (the escort also re-releases).
 const BUILD_GATE_HOLD_COOLDOWN_MS = 90 * 1000; // 90s back-off on a gate hold
+// box-serial-claim-cooldown-wedge-guard Phase 1 — how often the poll loop re-verifies the
+// live `public.claim_agent_job(text[])` cooldown predicate. Bounded so a DDL-drift regression
+// surfaces within minutes on the box tile, but not so frequent that pg_get_functiondef
+// (indexed catalog read) dominates the shared pool. Cached between checks so the hot claim
+// loop pays a memory read instead of a DB round-trip.
+const CLAIM_COOLDOWN_VERIFY_INTERVAL_MS = 10 * 60 * 1000; // 10 min TTL
 // Build liveness (build-all-phases-chain Part B): a multi-phase build can legitimately work for
 // 40+ min, so don't guillotine on wall-clock. Instead kill only if the build subprocess goes
 // SILENT for BUILD_IDLE_TIMEOUT_MS (hung), with BUILD_HARD_CAP_MS as a generous backstop against a
@@ -474,6 +485,40 @@ let lastSelfUpdateCheck = 0;
 // the fully-current fast-path + the successful update path. The poll loop passes this into writeHeartbeat.
 let selfUpdateSkipReason: string | null = null;
 
+// box-serial-claim-cooldown-wedge-guard Phase 1 — cached verdict + TTL for the live
+// claim_agent_job cooldown check. The build/plan claim loop asks
+// `ensureClaimAgentJobCooldownVerified()` each pass; the helper re-probes only after
+// CLAIM_COOLDOWN_VERIFY_INTERVAL_MS has elapsed. On a failed probe the poll loop skips
+// the build/plan claim block AND writes a `needs_attention` worker heartbeat carrying the
+// verifier's reason — the operator sees the exact predicate-missing signal on the box tile
+// instead of a silent stale-worker mystery.
+let cachedClaimCooldownVerdict: ClaimCooldownVerification | null = null;
+let lastClaimCooldownVerifyAt = 0;
+async function ensureClaimAgentJobCooldownVerified(): Promise<ClaimCooldownVerification> {
+  const now = Date.now();
+  if (cachedClaimCooldownVerdict && now - lastClaimCooldownVerifyAt < CLAIM_COOLDOWN_VERIFY_INTERVAL_MS) {
+    return cachedClaimCooldownVerdict;
+  }
+  lastClaimCooldownVerifyAt = now;
+  try {
+    cachedClaimCooldownVerdict = await verifyClaimAgentJobCooldown();
+  } catch (e) {
+    // Any unexpected throw from the verifier itself is treated as fail-open — the verifier is
+    // defensive; wedging the box on its OWN check would be worse than the regression it detects.
+    cachedClaimCooldownVerdict = {
+      ok: true,
+      probed: false,
+      reason: `verifyClaimAgentJobCooldown threw (failing open): ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (!cachedClaimCooldownVerdict.ok) {
+    console.error(`[claim-cooldown-verify] ${cachedClaimCooldownVerdict.reason}`);
+  } else if (cachedClaimCooldownVerdict.probed) {
+    console.log(`[claim-cooldown-verify] ${cachedClaimCooldownVerdict.reason}`);
+  }
+  return cachedClaimCooldownVerdict;
+}
+
 // Control Tower migration-drift check (control-tower-migration-drift-check P1): a periodic box job
 // that diffs every migration-created table against the live public schema. Runs here (not as an
 // Inngest cron) because the deployed runtime can't read the .sql files. Gated to ~30 min + an
@@ -481,6 +526,14 @@ let selfUpdateSkipReason: string | null = null;
 const MIGRATION_DRIFT_INTERVAL_MS = 30 * 60 * 1000;
 let lastMigrationDriftCheck = 0; // 0 ⇒ run on the first poll so there's a beat right away.
 let migrationDriftInFlight = false;
+
+// db-load-usage-rollup-throttle: the per-account usage rollup (account_usage_snapshots) was fired every
+// 5s poll tick — ~20 PostgREST calls/tick (10 agent_job_costs reads + 10 upserts ≈ 12.6K/hr), measured
+// as the single largest internal DB-call driver, for a slowly-changing token tally. Throttle to 60s: the
+// fleet-usage cockpit reads account_usage_snapshots ON DEMAND and live cap state already rides
+// worker_heartbeats every tick, so a ≤60s-stale 5h/weekly rollup is fine. 0 ⇒ run on the first tick.
+const USAGE_ROLLUP_INTERVAL_MS = 60 * 1000;
+let lastUsageRollupAt = 0;
 
 // DB Health Agent (db-health-agent P1): two box-side passes on different cadences. The FREQUENT
 // slow-query root-cause pass (~hourly) reads pg_stat_statements + EXPLAINs each top offender; the
@@ -1259,7 +1312,8 @@ async function recordUsageWallEventBestEffort(p: {
 }
 // Standing per-account snapshot pass. Reads the live cap state from the in-memory accounts pool +
 // codexState and writes source='box' rows to public.account_usage_snapshots for each Max lane + Codex.
-// Called each heartbeat tick — cheap (10 UPSERTs / tick, one per account × window). Never throws.
+// Called from writeHeartbeat but THROTTLED to USAGE_ROLLUP_INTERVAL_MS (60s), not every 5s tick —
+// 10 UPSERTs + 10 reads per run; the on-demand cockpit tolerates ≤60s staleness. Never throws.
 async function runAccountUsageRollupBestEffort(): Promise<void> {
   try {
     const workspaceId = await resolveOwnerWorkspaceId();
@@ -3309,9 +3363,15 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   // active-lane set each tick, so a leaked/double-counted increment can't permanently inflate the count the
   // round-robin least-loaded selection reads. Belt-and-suspenders alongside the scattered `inFlight--`.
   reconcileAccountLoad();
-  // fleet-usage-cockpit Phase 1 — per-tick per-account 5h + weekly rollup into public.account_usage_
-  // snapshots. Cheap (10 UPSERTs), fire-and-forget: a rollup failure must never break the heartbeat.
-  void runAccountUsageRollupBestEffort();
+  // fleet-usage-cockpit Phase 1 — per-account 5h + weekly rollup into public.account_usage_snapshots.
+  // Fire-and-forget (a rollup failure must never break the heartbeat) and THROTTLED to
+  // USAGE_ROLLUP_INTERVAL_MS: writeHeartbeat runs every 5s poll tick, but the rollup's ~20 PostgREST
+  // calls/tick were the top internal DB-call driver (~12.6K/hr) for a slowly-changing tally. The gate
+  // lives here (not inside the fn) so every writeHeartbeat caller shares one throttle clock.
+  if (Date.now() - lastUsageRollupAt > USAGE_ROLLUP_INTERVAL_MS) {
+    lastUsageRollupAt = Date.now();
+    void runAccountUsageRollupBestEffort();
+  }
   try {
     await db.from("worker_heartbeats").upsert({
       id: WORKER_BOX_ID,
@@ -3386,6 +3446,35 @@ async function hasClaimableJob(): Promise<boolean | null> {
   } catch {
     return null;
   }
+}
+
+// db-load-claim-consolidation — the DISTINCT set of queued/queued_resume kinds this tick, read via
+// the pooled `queuedAgentJobKinds` (src/lib/pg-pool.ts) so per-lane claim blocks skip firing
+// `claim_agent_job` for kinds that have no queued row. The prior hasClaimableJob gate is kind-
+// AGNOSTIC — one queued row of ANY kind opened the door for ALL 41 per-kind claim RPCs; this
+// tightens the door to per-lane. Returns null on pool unavailable / read error → the caller falls
+// through to the pre-consolidation per-kind claim behavior (fail-open — no lane is ever starved,
+// preserving the same fail-open contract as hasClaimableJob).
+async function readQueuedKindsForTick(): Promise<Set<string> | null> {
+  try {
+    const { queuedAgentJobKinds } = await import("../src/lib/pg-pool");
+    const kinds = await queuedAgentJobKinds();
+    if (kinds === null) return null;
+    return new Set(kinds);
+  } catch {
+    return null;
+  }
+}
+
+// db-load-claim-consolidation — per-lane gate that pairs with readQueuedKindsForTick.
+// - queuedKinds === null (pool unavailable) → true (fail-open, claim as normal).
+// - any of `laneKinds` present in the snapshot → true (this lane has queued work).
+// - otherwise → false (skip the RPC).
+// Called from the ~41 per-kind claim `while` loops below in the poll tick.
+function laneHasQueued(queuedKinds: Set<string> | null, laneKinds: readonly string[]): boolean {
+  if (queuedKinds === null) return true;
+  for (const k of laneKinds) if (queuedKinds.has(k)) return true;
+  return false;
 }
 async function clearDrain(reason: string): Promise<void> {
   try {
@@ -6045,16 +6134,27 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   // Phase 1's fail-open path (transient DB error → admission returns ok:true) ever admits a
   // second goal-mate, this claim-gate still catches it + we know to look. Cross-GOAL
   // parallelism is preserved (one-off + members of different goals no-op here).
-  const { evaluateGoalMemberBuildDispatch } = await import("../src/lib/agent-jobs");
+  const { evaluateGoalMemberBuildDispatch, autoBreakGoalMemberDeadlockIfDue } = await import("../src/lib/agent-jobs");
   const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, slug);
   if (!serial.ok) {
     console.warn(
       `[phase1-gate-leak] claim-time goal-member serializer fired for ${slug} — the enqueue-time admission gate should have caught this. serial verdict: ${serial.reason}`,
     );
+    // parallel-build-serialized-merge-and-deadlock-autobreak Phase 1 — advance the stalled head.
+    // The serializer just ejected THIS spec because it isn't the earliest ready head. If the
+    // earliest ALSO has no in-flight build (never enqueued / chained phase never queued), the
+    // whole goal deadlocks: siblings claim→eject forever and the head never starts. Run the
+    // auto-break BEFORE returning the requeue verdict so the next tick sees the head enqueued
+    // and the requeue converges. Best-effort — a resolver miss / cooldown skip / not-goal-bound
+    // spec just returns `autoBroken:false` and the requeue disposition is unchanged.
+    const autoBreak = await autoBreakGoalMemberDeadlockIfDue(job.workspace_id, slug);
+    const suffix = autoBreak.autoBroken
+      ? ` (auto-broke stalled head: enqueued ${autoBreak.earliest})`
+      : "";
     return {
       ok: false,
       disposition: "requeue",
-      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}`,
+      reason: `claim-gate defensive assertion (phase1-gate-leak): ${serial.reason}${suffix}`,
     };
   }
 
@@ -25503,8 +25603,13 @@ async function main() {
       // (read error) ⇒ poll as normal (fail-open — never stalls the queue). See hasClaimableJob.
       const claimable = await hasClaimableJob();
       if (!draining && claimable !== false) {
+      // db-load-claim-consolidation — one pooled DISTINCT-kinds read per tick, so per-lane claim
+      // blocks below skip the RPC when none of the lane's kinds have a queued row. Null = pool
+      // unavailable / read error ⇒ every lane falls through to its per-kind claim (fail-open, no
+      // lane starved). Cheap indexed read against agent_jobs, mirroring hasClaimableJob's contract.
+      const queuedKinds = await readQueuedKindsForTick();
       // Fill the fold lane first (cheap, doc-only, keeps the fleet mergeable).
-      while (countFold() < MAX_FOLD) {
+      while (laneHasQueued(queuedKinds, ["fold", "goal-fold"]) && countFold() < MAX_FOLD) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["fold", "goal-fold"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25512,7 +25617,7 @@ async function main() {
         launch(job);
       }
       // Fill the product-seed lane (Max `claude -p` seed-product skill; box-product-seeding).
-      while (countSeed() < MAX_SEED) {
+      while (laneHasQueued(queuedKinds, ["product-seed"]) && countSeed() < MAX_SEED) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["product-seed"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25520,7 +25625,7 @@ async function main() {
         launch(job);
       }
       // Fill the spec-chat lane (box-spec-chat; concurrency-1 interactive authoring-chat turns on Max).
-      while (countSpecChat() < MAX_SPEC_CHAT) {
+      while (laneHasQueued(queuedKinds, ["spec-chat"]) && countSpecChat() < MAX_SPEC_CHAT) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-chat"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25530,7 +25635,7 @@ async function main() {
       // Fill the ticket-handle lane (sol-ticket-direction-artifact-and-first-touch-box-session): Sol's
       // first-touch box session per inbound ticket, concurrency-1 so a first-touch session never races
       // the self-update reset of REPO_DIR (mirrors the ticket-improve lane's discipline).
-      while (countTicketHandle() < MAX_TICKET_HANDLE) {
+      while (laneHasQueued(queuedKinds, ["ticket-handle"]) && countTicketHandle() < MAX_TICKET_HANDLE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-handle"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25538,7 +25643,7 @@ async function main() {
         launch(job);
       }
       // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
-      while (countImprove() < MAX_TICKET_IMPROVE) {
+      while (laneHasQueued(queuedKinds, ["ticket-improve"]) && countImprove() < MAX_TICKET_IMPROVE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-improve"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25546,7 +25651,7 @@ async function main() {
         launch(job);
       }
       // Fill the escalation-triage lane (box-escalation-triage): hourly solver→skeptic→quorum sweep, concurrency-1.
-      while (countTriage() < MAX_TRIAGE) {
+      while (laneHasQueued(queuedKinds, ["triage-escalations"]) && countTriage() < MAX_TRIAGE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["triage-escalations"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25555,7 +25660,7 @@ async function main() {
       }
       // Fill the spec-test lane (spec-test-agent): non-destructive QA pass over a shipped spec, concurrency-1.
       // Gated on the Claude-down breaker (Phase 2) — parked jobs drain on recovery.
-      while (!claudeDown && countSpecTest() < MAX_SPEC_TEST) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["spec-test"]) && countSpecTest() < MAX_SPEC_TEST) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["spec-test"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25563,7 +25668,7 @@ async function main() {
         launch(job);
       }
       // Fill the migration-fix lane (migration-fix-agent): event-fired gated billing repair, concurrency-1.
-      while (countMigrationFix() < MAX_MIGRATION_FIX) {
+      while (laneHasQueued(queuedKinds, ["migration-fix"]) && countMigrationFix() < MAX_MIGRATION_FIX) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["migration-fix"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25576,7 +25681,7 @@ async function main() {
       // and emits ONE JSON verdict; Phase 3's applyBoxDeployReview applies it. Concurrency-1 so two
       // reviews never race on the same shared main. Gated on the Claude-down breaker (Reva can't
       // judge causal plausibility if Claude is down — jobs park blocked_on_dependency + drain).
-      while (!claudeDown && countDeployReview() < MAX_DEPLOY_REVIEW) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["deploy-review"]) && countDeployReview() < MAX_DEPLOY_REVIEW) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["deploy-review"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25590,7 +25695,7 @@ async function main() {
       // so two Marios never race a live fix on the same box. Gated on the Claude-down breaker — Mario
       // needs Claude to reason about the timecard; parked jobs park blocked_on_dependency + drain on
       // recovery, matching the deploy-review pattern.
-      while (!claudeDown && countMario() < MAX_MARIO) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["mario"]) && countMario() < MAX_MARIO) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["mario"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25602,7 +25707,7 @@ async function main() {
       // (💬 June) hard-calls. Concurrency-1 so the hourly triage sweep never overlaps a call still being
       // judged. Gated on the Claude-down breaker — a director call needs Claude to reason; parked
       // jobs drain on recovery, matching the deploy-review pattern.
-      while (!claudeDown && countCsDirectorCall() < MAX_CS_DIRECTOR_CALL) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["cs-director-call"]) && countCsDirectorCall() < MAX_CS_DIRECTOR_CALL) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["cs-director-call"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25616,7 +25721,7 @@ async function main() {
       // `compiled_trees`. Concurrency-1 so a Monday cron sweep never overlaps a manually-triggered
       // out-of-band run on the same workspace. Gated on the Claude-down breaker — the compiler needs
       // Claude to reason; parked jobs drain on recovery, matching the cs-director-call pattern.
-      while (!claudeDown && countPlaybookCompile() < MAX_PLAYBOOK_COMPILE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["playbook-compile"]) && countPlaybookCompile() < MAX_PLAYBOOK_COMPILE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["playbook-compile"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25629,7 +25734,7 @@ async function main() {
       // rows drain on recovery) — matches the analyzer's prior park-and-drain but at the lane, not
       // the cron. `already_in_flight` dedup on the enqueue side (enqueueTicketAnalyzeJob) means the
       // claim never races the same ticket_id twice.
-      while (!claudeDown && countTicketAnalyze() < MAX_TICKET_ANALYZE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["ticket-analyze"]) && countTicketAnalyze() < MAX_TICKET_ANALYZE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ticket-analyze"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25641,7 +25746,7 @@ async function main() {
       // enqueued. Concurrency-1 so a slow review never starves the CS lane. Gated on the Claude-down
       // breaker — jobs park blocked_on_dependency + drain on recovery, matching the deploy-review /
       // cs-director-call pattern.
-      while (!claudeDown && countPromptReview() < MAX_PROMPT_REVIEW) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["prompt-review"]) && countPromptReview() < MAX_PROMPT_REVIEW) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["prompt-review"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25649,7 +25754,7 @@ async function main() {
         launch(job);
       }
       // Fill the dev-ask lane (developer-message-center): interactive Max turns w/ read-only DB + WebSearch, concurrency-1.
-      while (countDevAsk() < MAX_DEV_ASK) {
+      while (laneHasQueued(queuedKinds, ["dev-ask"]) && countDevAsk() < MAX_DEV_ASK) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dev-ask"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25660,7 +25765,7 @@ async function main() {
       // bridge to the box — a resumable Max `claude -p` turn under a HARD per-tool permission
       // gate (no --dangerously-skip-permissions). Concurrency-1 interactive; every non-safe
       // tool call inserts a god_mode_approvals row and blocks. `mode:'kill'` tears down.
-      while (countGodMode() < MAX_GOD_MODE) {
+      while (laneHasQueued(queuedKinds, ["god-mode"]) && countGodMode() < MAX_GOD_MODE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["god-mode"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25668,7 +25773,7 @@ async function main() {
         launch(job);
       }
       // Fill the director-coach lane (worker-grading P7): CEO↔Director coaching chat turns, concurrency-1.
-      while (countDirectorCoach() < MAX_DIRECTOR_COACH) {
+      while (laneHasQueued(queuedKinds, ["director-coach"]) && countDirectorCoach() < MAX_DIRECTOR_COACH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["director-coach"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25676,7 +25781,7 @@ async function main() {
         launch(job);
       }
       // Fill the pr-resolve lane (dirty-pr-resolver-agent): webhook-fired dirty claude/* PR resolve, concurrency-1.
-      while (countPrResolve() < MAX_PR_RESOLVE) {
+      while (laneHasQueued(queuedKinds, ["pr-resolve"]) && countPrResolve() < MAX_PR_RESOLVE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["pr-resolve"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25686,7 +25791,7 @@ async function main() {
       // Fill the repair lane (repair-agent): event-fired Control Tower triage, read-only diagnose → propose-fix.
       // Gated on the Claude-down breaker (Phase 2) — the repair agent needs Claude to triage, so during a
       // Claude outage its jobs park `blocked_on_dependency` (it would just 529) and drain on recovery.
-      while (!claudeDown && countRepair() < MAX_REPAIR) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["repair"]) && countRepair() < MAX_REPAIR) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["repair"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25695,7 +25800,7 @@ async function main() {
       }
       // Fill the regression lane (regression-agent): spec-test-fired ✅-now-failing review, read-only
       // review → dismiss-with-reasoning OR author the fix spec directly + route to the inbox. Concurrency-1.
-      while (countRegression() < MAX_REGRESSION) {
+      while (laneHasQueued(queuedKinds, ["regression"]) && countRegression() < MAX_REGRESSION) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["regression"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25705,7 +25810,7 @@ async function main() {
       // Fill the security-review lane (security-dependency-agent): per merged claude/* diff, give it an
       // autonomous security pass read-only → classify findings → author a fix spec + surface for owner Build
       // (or surface needs-human); also the daily npm-audit dep-watch scan. Concurrency-1, read-only on Max.
-      while (!claudeDown && countSecurityReview() < MAX_SECURITY_REVIEW) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["security-review"]) && countSecurityReview() < MAX_SECURITY_REVIEW) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["security-review"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25719,7 +25824,7 @@ async function main() {
       // via applyBoxGrade (same UNIQUE(agent_job_id) upsert + human-override invariant as the deployed
       // gradeAgentAction path). Concurrency-1, read-only on Max. Enqueued by platform-director-cron's
       // grade-and-coach-workers step in batches (gated on agentGradingBatchReady — ≥5 ungraded OR oldest >~3h).
-      while (!claudeDown && countAgentGrade() < MAX_AGENT_GRADE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["agent-grade"]) && countAgentGrade() < MAX_AGENT_GRADE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["agent-grade"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25733,7 +25838,7 @@ async function main() {
       // agent_instructions via `applyBoxCoaching` (which re-checks the rollup + loop-guard and calls
       // `coachAgent` — pure DB write is unchanged). Concurrency-1, read-only on Max. Enqueued by
       // `detectGradeDropCoaching` (agent-grader.ts) on slip, with dedup — one box session per slip.
-      while (!claudeDown && countAgentCoach() < MAX_AGENT_COACH) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["agent-coach"]) && countAgentCoach() < MAX_AGENT_COACH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["agent-coach"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25749,7 +25854,7 @@ async function main() {
       // as the deployed gradeDirectorCall path). Concurrency-1, read-only on Max. Enqueued by
       // platform-director-cron's grade-concluded-director-calls step (one batched box session per
       // beat, dedup-gated).
-      while (!claudeDown && countDirectorGrade() < MAX_DIRECTOR_GRADE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["director-grade"]) && countDirectorGrade() < MAX_DIRECTOR_GRADE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["director-grade"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25765,7 +25870,7 @@ async function main() {
       // UNIQUE(experiment_id) upsert + graded_by='human' override invariant as the deployed
       // gradeCampaign path). Concurrency-1, read-only on Max. Enqueued from experiment-refresh
       // (initial mode) and storefront-ltv-reconcile (revised mode).
-      while (!claudeDown && countCampaignGrade() < MAX_CAMPAIGN_GRADE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["campaign-grade"]) && countCampaignGrade() < MAX_CAMPAIGN_GRADE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["campaign-grade"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25779,7 +25884,7 @@ async function main() {
       // Writes acquisition_gap_grades via applyBoxGapGrade (same UNIQUE(workspace_id, gap_source,
       // gap_id) upsert + graded_by='human' override invariant as the deployed gradeGap path).
       // Concurrency-1, read-only on Max. Enqueued from acquisition-research-cadence.
-      while (!claudeDown && countGapGrade() < MAX_GAP_GRADE) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["gap-grade"]) && countGapGrade() < MAX_GAP_GRADE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["gap-grade"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25791,7 +25896,7 @@ async function main() {
       // scripts/research-capture.ts Playwright helper, and Rhea classifies (page_type vocab) +
       // teardown_verdict + rationale. Writes ONLY research_urls via the Phase-1 SDK. Concurrency-1;
       // enqueued from acquisition-research-cadence (dedup-gated per workspace).
-      while (!claudeDown && countResearch() < MAX_RESEARCH) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["research"]) && countResearch() < MAX_RESEARCH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["research"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25804,7 +25909,7 @@ async function main() {
       // session executes each verdict via the lander-blueprints SDK chokepoint
       // (writeCategorizedProductMedia / openContentGap / setBlueprintContent / setBlueprintStatus).
       // Concurrency-1 mirrors research; enqueued by Cleo's blueprint sweep in cleo-blueprint.ts.
-      while (!claudeDown && countDrContent() < MAX_DR_CONTENT) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["dr-content"]) && countDrContent() < MAX_DR_CONTENT) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["dr-content"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25817,7 +25922,7 @@ async function main() {
       // iteration_actions + ad_publish_jobs + director_activity chokepoints —
       // the agent NEVER writes Meta objects directly. Concurrency-1 mirrors
       // dr-content — one pass per workspace at a time is plenty at weekly cadence.
-      while (countMediaBuyer() < MAX_MEDIA_BUYER) {
+      while (laneHasQueued(queuedKinds, ["media-buyer"]) && countMediaBuyer() < MAX_MEDIA_BUYER) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25827,7 +25932,7 @@ async function main() {
       // Fill the media-buyer-grade lane (media-buyer-test-winner-loop Phase 3):
       // deterministic-Node grading pass — scores media-buyer director_activity rows
       // against realized ROAS from meta_attribution_daily. Same concurrency shape.
-      while (countMediaBuyerGrade() < MAX_MEDIA_BUYER_GRADE) {
+      while (laneHasQueued(queuedKinds, ["media-buyer-grade"]) && countMediaBuyerGrade() < MAX_MEDIA_BUYER_GRADE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["media-buyer-grade"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25837,7 +25942,7 @@ async function main() {
       // Fill the ad-creative lane (Dahlia — the Ad Creative Agent): deterministic-Node pass that
       // generates + vision-QAs fresh statics and stocks Bianca's ready-to-test bin. Same concurrency
       // shape as media-buyer; the daily ad-creative-cadence cron enqueues one job per thin-bin product.
-      while (countAdCreative() < MAX_AD_CREATIVE) {
+      while (laneHasQueued(queuedKinds, ["ad-creative"]) && countAdCreative() < MAX_AD_CREATIVE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-creative"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25850,7 +25955,7 @@ async function main() {
       // meta_ad_account, snapshot_date). Phase 3 short-circuits the Media Buyer loop
       // against the newest row. Concurrency-1 mirrors media-buyer-grade — one pass
       // per workspace at a time is plenty at daily cadence.
-      while (countSensorTrustProbe() < MAX_SENSOR_TRUST_PROBE) {
+      while (laneHasQueued(queuedKinds, ["sensor-trust-probe"]) && countSensorTrustProbe() < MAX_SENSOR_TRUST_PROBE) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["sensor-trust-probe"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25864,7 +25969,7 @@ async function main() {
       // via a `media_buyer_calibration_deferred` director_activity row). Concurrency-1
       // mirrors sensor-trust-probe — one calibration proposal per (workspace, account)
       // at a time is plenty at daily/weekly cadence.
-      while (countCalibrateMediaBuyerPolicy() < MAX_CALIBRATE_MEDIA_BUYER_POLICY) {
+      while (laneHasQueued(queuedKinds, ["calibrate-media-buyer-policy"]) && countCalibrateMediaBuyerPolicy() < MAX_CALIBRATE_MEDIA_BUYER_POLICY) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["calibrate-media-buyer-policy"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25876,7 +25981,7 @@ async function main() {
       // fills in the getTestingResults + should-happen check + Dahlia bin/seeding check + live-ad
       // LF8 QA + autonomous fix-spec authoring + #director-growth-max digest. Concurrency-1
       // mirrors media-buyer — one supervisory pass per workspace at a time.
-      while (countAdsSupervisor() < MAX_ADS_SUPERVISOR) {
+      while (laneHasQueued(queuedKinds, ["ads-supervisor"]) && countAdsSupervisor() < MAX_ADS_SUPERVISOR) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ads-supervisor"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25885,7 +25990,7 @@ async function main() {
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —
       // materialize the pre-authored fix spec to main + queue its build. Concurrency-1, fast.
-      while (!claudeDown && countDbHealth() < MAX_DB_HEALTH) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["db_health"]) && countDbHealth() < MAX_DB_HEALTH) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["db_health"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25896,7 +26001,7 @@ async function main() {
       // surfaced unregistered-loop proposal — materialize the chosen registry fix spec + queue its build.
       // director-trust-phase-pr-provenance Phase 2: `audit-spec-shipped-state` shares this small
       // deterministic-no-LLM lane — same shape (read DB + restamp + write an activity row, fast).
-      while (countCoverageRegister() < MAX_COVERAGE_REGISTER) {
+      while (laneHasQueued(queuedKinds, ["coverage-register", "audit-spec-shipped-state"]) && countCoverageRegister() < MAX_COVERAGE_REGISTER) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["coverage-register", "audit-spec-shipped-state"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25910,7 +26015,7 @@ async function main() {
       // growth-director-agent Phase 3: `growth-director` shares the SAME concurrency-1 director lane —
       // both directors run read-only Max investigations against the SAME Anthropic account, so co-locating
       // them here avoids a second-director starvation lane and keeps director rate-limit cost bounded.
-      while (countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
+      while (laneHasQueued(queuedKinds, ["platform-director", "director-bounce-back", "growth-director", "ceo-authorized-out-of-leash"]) && countPlatformDirector() < MAX_PLATFORM_DIRECTOR) {
         // ceo-authorized-out-of-leash rides this lane too: on CEO decision the /api/roadmap/approve gate
         // flips the row to queued_resume, and `runCeoAuthorizedOutOfLeashJob` (Phase 2) executes the
         // approved `run_prod_script`/`apply_migration` via `shAsync` (or logs the decline audit) — a scoped,
@@ -25929,14 +26034,14 @@ async function main() {
       // Fill the proposed-model-tier resume lane (box-agent-model-tiers P3): on supervisor approval the
       // inbox flips the job queued_resume; this lane lands runProposedModelTierJob, which APPLIES the
       // registry change. Without this lane an approved tier change sits queued_resume forever.
-      while (countProposedModelTier() < MAX_PROPOSED_MODEL_TIER) {
+      while (laneHasQueued(queuedKinds, ["proposed-model-tier"]) && countProposedModelTier() < MAX_PROPOSED_MODEL_TIER) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["proposed-model-tier"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed proposed-model-tier ${job.id.slice(0, 8)} → ${countProposedModelTier() + 1}/${MAX_PROPOSED_MODEL_TIER} proposed-model-tier lane`);
         launch(job);
       }
-      while (countProposedGoal() < MAX_PROPOSED_GOAL) {
+      while (laneHasQueued(queuedKinds, ["proposed-goal"]) && countProposedGoal() < MAX_PROPOSED_GOAL) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["proposed-goal"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
@@ -25946,24 +26051,77 @@ async function main() {
       // Fill the storefront-optimizer lane (storefront-optimizer-agent): scheduled campaign cycle —
       // read funnel+lever map+proxy → propose a hypothesis/variant → stand up an M1 experiment (or
       // surface a missing-capability spec). Own concurrency-1 lane, read-only diagnose on Max.
-      while (!claudeDown && countStorefrontOptimizer() < MAX_STOREFRONT_OPTIMIZER) {
+      while (!claudeDown && laneHasQueued(queuedKinds, ["storefront-optimizer"]) && countStorefrontOptimizer() < MAX_STOREFRONT_OPTIMIZER) {
         const { data } = await db.rpc("claim_agent_job", { p_kinds: ["storefront-optimizer"] });
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed storefront-optimizer ${job.id.slice(0, 8)} → ${countStorefrontOptimizer() + 1}/${MAX_STOREFRONT_OPTIMIZER} storefront-optimizer lane`);
         launch(job);
       }
-      // Fill the build/plan pool.
-      while (countOther() < MAX_CONCURRENT) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
-        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
-        if (!job || !job.id) break;
-        // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
-        // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
-        // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
-        if (await claimHeldForUnreviewedSpec(job)) continue;
-        console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
-        launch(job);
+      // box-serial-claim-cooldown-wedge-guard Phase 1 — verify the live claim RPC still
+      // honors the `(claimed_at is null or claimed_at <= now())` cooldown BEFORE opening the
+      // build/plan claim block. If DDL drift removed the predicate, a gate-released build with
+      // a future claimed_at is immediately re-claimable and the poll loop wedges on the same
+      // row forever — silent to the operator. On a failed probe we SKIP the build/plan claim
+      // block entirely for this tick; the writeHeartbeat below escalates the box tile to
+      // `needs_attention` with the verifier's reason. Non-build lanes (fold, ticket-*, grades,
+      // …) keep claiming — a claim-RPC cooldown regression only bites the build/plan gate
+      // path that stamps future claimed_at values. Verdict is cached with a TTL so this is a
+      // cheap memory read on the hot path.
+      const claimCooldownVerdict = await ensureClaimAgentJobCooldownVerified();
+      if (!claimCooldownVerdict.ok) {
+        console.warn(
+          `[build-plan-claim] skipped this tick — live claim_agent_job cooldown check failed: ${claimCooldownVerdict.reason}`,
+        );
+      } else {
+        // Fill the build/plan pool.
+        while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT) {
+          const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
+          const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+          if (!job || !job.id) break;
+          // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
+          // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
+          // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
+          if (await claimHeldForUnreviewedSpec(job)) continue;
+          // box-serial-claim-cooldown-wedge-guard Phase 1 — SYNCHRONOUS pre-launch serial-claim
+          // decision. The goal-member serializer used to run INSIDE runBuild (async, fire-and-
+          // forget from launch), so on a "held" verdict the cooldown write raced the next
+          // claim RPC — a broken RPC could re-claim the same row on the same tick and wedge
+          // the loop without ever writing a heartbeat. We now evaluate the same verdict
+          // synchronously here: on `action === "release"`, write the future claimed_at
+          // cooldown AND `break` out of the loop for this poll pass, so the next iteration
+          // can't hand us the same row. The claim-gate inside runBuild still runs as
+          // defense-in-depth (it also covers spec_row_missing / cross-goal blockers). Only
+          // `build` is serialized — a `plan` kind is short-lived scheduling, never a
+          // goal-mate collision, so it falls through to launch. Best-effort: a serializer
+          // error just falls through to launch (the in-runBuild gate remains).
+          if (job.kind === "build" && job.spec_slug) {
+            try {
+              const { evaluateGoalMemberBuildDispatch, decideSerialClaimDispatchOutcome } = await import("../src/lib/agent-jobs");
+              const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, job.spec_slug);
+              const outcome = decideSerialClaimDispatchOutcome({ serial });
+              if (outcome.action === "release") {
+                const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
+                await update(job.id, {
+                  status: "queued",
+                  claimed_at: holdUntil,
+                  log_tail: `serial-claim released (pre-launch) — ${outcome.reason ?? ""}`.slice(-2000),
+                });
+                console.log(
+                  `[serial-claim] released ${job.spec_slug} (${job.id.slice(0, 8)}) cooldown=${Math.round(BUILD_GATE_HOLD_COOLDOWN_MS / 1000)}s — exiting build/plan claim loop this pass: ${outcome.reason ?? ""}`,
+                );
+                break; // exit the poll pass so a broken claim RPC cannot re-hand us the same row
+              }
+            } catch (e) {
+              console.error(
+                `[serial-claim] pre-launch decision failed for ${job.spec_slug} (${job.id.slice(0, 8)}); falling through to launch (runBuild gate remains):`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+          }
+          console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
+          launch(job);
+        }
       }
       // claim-rpc-kill-switch-enforcement Phase 2 — after every per-kind claim loop has run,
       // ask public.claim_agent_job_diag which queued rows the current kill_switches state
@@ -26011,7 +26169,19 @@ async function main() {
       // box-self-update-persist-skip-reason: surface WHY maybeSelfUpdate skipped on the box tile (Control
       // Tower's evalWorker already puts row.detail into the red-tile payload). Null on the fully-current
       // fast-path so a green tile stays green; a set reason flips 'stuck for 1h' → 'stuck for 1h · <cause>'.
-      await writeHeartbeat(active.size, "healthy", selfUpdateSkipReason ?? undefined, lanes);
+      //
+      // box-serial-claim-cooldown-wedge-guard Phase 1 — escalate to `needs_attention` when the
+      // live claim_agent_job cooldown verifier failed. The operator sees "claim RPC contract
+      // broken" on the box tile instead of a silent stale-worker mystery; the build/plan
+      // claim block above is already gated off for the same reason. A `needs_attention`
+      // status also blocks the self-update path (below) — self-updating onto a broken DB
+      // contract wouldn't help. Verifier reason wins over selfUpdateSkipReason on a red tick.
+      const claimCooldownFailedNow = cachedClaimCooldownVerdict && !cachedClaimCooldownVerdict.ok;
+      const boxStatus = claimCooldownFailedNow ? "needs_attention" : "healthy";
+      const boxDetail = claimCooldownFailedNow
+        ? cachedClaimCooldownVerdict!.reason
+        : (selfUpdateSkipReason ?? undefined);
+      await writeHeartbeat(active.size, boxStatus, boxDetail, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
       // on its ~30 min cadence, with an in-flight guard so a slow DB read never overlaps or stalls the

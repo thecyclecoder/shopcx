@@ -15,7 +15,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, buildMetaCopy, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
+import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
@@ -27,6 +27,13 @@ import { isAdvertisedProduct, listAdvertisedProductIds } from "@/lib/advertised-
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import {
+  buildMetaCopyPack,
+  placementPackPlan,
+  planCreativePackInserts,
+  type MetaCopyPack,
+  type RenderedPlacement,
+} from "@/lib/ads/creative-pack";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -160,26 +167,31 @@ async function currentBinDepth(admin: Admin, workspaceId: string, productId: str
 }
 
 /** Discriminated result for `insertReadyCreative` — 'ok' carries the new campaign id, 'skip'
- *  names a deterministic-gate refusal (author session catches it and revises the copy), 'failed'
- *  is the legacy null case (angle-insert missed / RLS deny / cErr on the campaign insert). */
+ *  names the deterministic cold-offer-gate refusal (author session catches it and revises the copy),
+ *  'failed' is the insert-missed case (angle-insert missed / RLS deny / cErr on the campaign insert). */
 export type InsertReadyCreativeResult =
   | { kind: "ok"; campaignId: string }
   | { kind: "skip"; reason: "cold_offer_leak" }
   | { kind: "failed" };
 
-/** Insert one finished static creative into the ready-to-test bin (mirrors the canonical
- *  /api/ads/upload-static path: angle → campaign(ready) → static ad_videos(ready) in the ad-tool
- *  bucket → landing_url). Returns a discriminated result: `ok` with the new campaign id, `skip`
- *  when the deterministic Phase-2 cold-offer gate refuses the row, or `failed` when the
- *  angle/campaign insert missed.
+/** Insert one finished creative PACK into the ready-to-test bin. A pack = one angle row carrying
+ *  the 4-headline + 4-primary-text copy variations (persisted on the angle's scalar columns AND on
+ *  its `metadata.copy_pack` JSONB for the sibling publish path to read) + one campaign row + THREE
+ *  placement statics (`feed_4x5` canonical + `stories_9x16` + `right_column_1x1` siblings pointing
+ *  at the canonical via `format_variant_of_id`). The 3 statics carry the SAME core conversion
+ *  psychology by construction — they're rendered from ONE brief; only aspect/crop varies.
+ *  (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
  *
- *  DETERMINISTIC COLD-OFFER GATE (docs/brain/specs/dahlia-audience-temperature-marking-and-cold-offer-gate.md
- *  Phase 2): if the caller marks the row as 'cold' audience AND the composed copy trips
- *  [[../ads/lf8]] `hasColdOfferLeak`, refuse the insert before any DB write. The MSRP + packaging
- *  rails remain their own separate gates; a warm/hot/null-temperature row bypasses this gate. The
- *  temperature the caller passes is also written to ad_campaigns.audience_temperature so the row
- *  is self-describing (M1 keystone author session sets 'cold'/'warm'/'hot'; the deterministic
- *  buildMetaCopy path leaves the option undefined → NULL, gate skips). */
+ *  DETERMINISTIC COLD-OFFER GATE (dahlia-audience-temperature-marking-and-cold-offer-gate Phase 2):
+ *  if the caller marks the pack 'cold' audience AND ANY of the pack's rotated copy trips
+ *  [[../ads/lf8]] `hasColdOfferLeak`, refuse the insert before any DB write (returns `skip`). The
+ *  MSRP + packaging rails remain their own separate gates; a warm/hot/null-temperature pack bypasses
+ *  this gate. The temperature is written to `ad_campaigns.audience_temperature` so the row is
+ *  self-describing (M1 keystone author session sets 'cold'/'warm'/'hot'; the deterministic
+ *  buildMetaCopyPack path leaves the option undefined → NULL, gate skips).
+ *
+ *  Returns a discriminated result: `ok` with the campaign id, `skip` on a cold-offer refusal, or
+ *  `failed` when the angle/campaign insert missed. */
 async function insertReadyCreative(
   admin: Admin,
   workspaceId: string,
@@ -187,15 +199,24 @@ async function insertReadyCreative(
   productHandle: string,
   productTitle: string,
   angle: ScoredAngle,
-  metaCopy: { headline: string; primaryText: string; description: string },
-  image: { buffer: Buffer; mimeType: string },
+  copyPack: MetaCopyPack,
+  renders: { canonical: RenderedPlacement; siblings: RenderedPlacement[] },
   opts?: { audienceTemperature?: "cold" | "warm" | "hot" | null },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. NULL /
-  // warm / hot pass through untouched (the deterministic buildMetaCopy path is temperature-agnostic
-  // and always leaves audience_temperature undefined here). See [[../ads/lf8]] `hasColdOfferLeak`.
+  // warm / hot pass through untouched (the deterministic buildMetaCopyPack path is temperature-
+  // agnostic and always leaves audience_temperature undefined here). Check ALL rotated pack copy
+  // (headlines + primary texts joined) so the pack is refused if ANY variant leaks a cold offer.
+  // See [[../ads/lf8]] `hasColdOfferLeak`.
   const audienceTemperature: "cold" | "warm" | "hot" | null = opts?.audienceTemperature ?? null;
-  if (audienceTemperature === "cold" && hasColdOfferLeak(metaCopy)) {
+  if (
+    audienceTemperature === "cold" &&
+    hasColdOfferLeak({
+      headline: copyPack.headlines.join(" "),
+      primaryText: copyPack.primaryTexts.join(" "),
+      description: copyPack.description,
+    })
+  ) {
     return { kind: "skip", reason: "cold_offer_leak" };
   }
 
@@ -207,9 +228,10 @@ async function insertReadyCreative(
       lead_benefit_anchor: angle.leadBenefit.slice(0, 120),
       hook_one_liner: angle.hook.slice(0, 120),
       urgency_lever: "none", generated_by: "ad-creative-agent", is_active: true,
-      meta_headline: metaCopy.headline.slice(0, META_CAPS.headline),
-      meta_primary_text: metaCopy.primaryText.slice(0, META_CAPS.primary_text),
-      meta_description: metaCopy.description.slice(0, META_CAPS.description),
+      meta_headline: copyPack.headlines[0].slice(0, META_CAPS.headline),
+      meta_primary_text: copyPack.primaryTexts[0].slice(0, META_CAPS.primary_text),
+      meta_description: copyPack.description.slice(0, META_CAPS.description),
+      metadata: { copy_pack: copyPack },
     })
     .select("id").single();
 
@@ -229,23 +251,62 @@ async function insertReadyCreative(
   if (cErr || !campaign) return { kind: "failed" };
   const campaignId = (campaign as { id: string }).id;
 
-  const ext = image.mimeType.includes("png") ? "png" : "jpg";
-  const { data: vrow } = await admin
-    .from("ad_videos")
-    .insert({ workspace_id: workspaceId, campaign_id: campaignId, format: "feed_4x5", media_kind: "static", status: "pending", meta: { archetype: "before_after", generated_by: "ad-creative-agent" } })
-    .select("id").single();
-  const videoId = (vrow as { id: string } | null)?.id;
-  if (videoId) {
-    const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
-    await uploadBuffer(storagePath, image.buffer, image.mimeType);
-    const url = await signedUrl(storagePath);
-    await admin.from("ad_videos").update({ static_jpg_url: url, status: "ready", meta: { archetype: "before_after", generated_by: "ad-creative-agent", storage_path: storagePath } }).eq("id", videoId);
+  // Pure planner emits the exact write bodies for the pack's 3 ad_videos rows (canonical +
+  // siblings). Throws when the pack shape is malformed — Phase 3's `isCreativePackComplete`
+  // re-checks persisted rows; this catches an authoring-time regression BEFORE we write.
+  const plan = planCreativePackInserts({
+    workspaceId,
+    campaignId,
+    canonicalRender: renders.canonical,
+    siblingRenders: renders.siblings,
+    copyPack,
+    archetype: "before_after",
+    generatedBy: "ad-creative-agent",
+  });
+
+  // Canonical (feed_4x5) — insert row, upload buffer, sign URL, flip to ready.
+  const canonicalId = await insertOnePlacementRender(admin, workspaceId, plan.canonical, renders.canonical, null);
+  if (!canonicalId) return { kind: "failed" };
+
+  // Siblings (stories_9x16 + right_column_1x1) — point at the canonical via format_variant_of_id
+  // so the same-psychology invariant is expressible in the DB: "these three rows are ONE concept."
+  for (let i = 0; i < plan.siblings.length; i++) {
+    await insertOnePlacementRender(admin, workspaceId, plan.siblings[i], renders.siblings[i], canonicalId);
   }
 
   const landingUrl = await resolveLandingUrl(admin, workspaceId, productHandle);
   if (landingUrl) await admin.from("ad_campaigns").update({ landing_url: landingUrl }).eq("id", campaignId);
 
   return { kind: "ok", campaignId };
+}
+
+/** Insert one placement render (canonical OR a sibling): open a pending ad_videos row, upload the
+ *  buffer under `finals/{ws}/{video_id}.{ext}`, sign the URL, flip to `ready` with the storage
+ *  path in `meta`. When `variantOfId` is set, the row is a sibling and its `format_variant_of_id`
+ *  points at the canonical row's id (same-psychology invariant). Returns the row id. */
+async function insertOnePlacementRender(
+  admin: Admin,
+  workspaceId: string,
+  insertBody: { workspace_id: string; campaign_id: string; format: string; media_kind: string; status: string; meta: { archetype: string; generated_by: string } },
+  render: RenderedPlacement,
+  variantOfId: string | null,
+): Promise<string | null> {
+  const { data: vrow } = await admin
+    .from("ad_videos")
+    .insert({ ...insertBody, format_variant_of_id: variantOfId })
+    .select("id").single();
+  const videoId = (vrow as { id: string } | null)?.id;
+  if (!videoId) return null;
+  const ext = render.mimeType.includes("png") ? "png" : "jpg";
+  const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
+  await uploadBuffer(storagePath, render.buffer, render.mimeType);
+  const url = await signedUrl(storagePath);
+  await admin.from("ad_videos").update({
+    static_jpg_url: url,
+    status: "ready",
+    meta: { ...insertBody.meta, storage_path: storagePath },
+  }).eq("id", videoId);
+  return videoId;
 }
 
 /** Generate + QA + bin-insert `count` fresh creatives for one product, cycling through its top unused
@@ -378,10 +439,18 @@ async function stockProduct(
           skipped = true; // intentional skip — not a QA/gen failure, don't retry, don't append qa_or_gen_failed
           break;
         }
+        // Render the CANONICAL placement (feed 4:5) first + QA it — that's the vision-gate anchor for the
+        // whole pack. If canonical passes, we render the two sibling placements (9:16 + right-column 1:1)
+        // from the SAME brief so the 3 statics share their conversion psychology by construction (only
+        // aspect/crop varies) — the same-psychology invariant. If ANY placement render fails, we bail on
+        // this creative rather than persist a half-pack.
+        // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
+        const packPlan = placementPackPlan();
         const gen = await generateCreative(workspaceId, brief, {
           treatment,
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
+          aspectRatio: packPlan.canonical.aspectRatio,
         });
         // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
         // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
@@ -391,21 +460,47 @@ async function stockProduct(
         // refused to composition-transfer in that case).
         const packshotRef = brief.imageRefs.find((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
         const packshotUrl = packshotRef?.url;
-        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl };
+        // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — thread
+        // our REAL store offer to the QA vision compare so offerConsistent can reject a creative
+        // whose rendered discount doesn't match the real offer (a "50% OFF" leaked from a
+        // competitor hook when our real offer is "Up to 34% off + free shipping" — the 2026-07-14
+        // Amazing Creamer regression). Undefined signals SKIP (own-brand no-offer render).
+        const realOffer = brief.offer
+          ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
+          : null;
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
           : await qaCreative(workspaceId, qaInput);
         if (!verdict.pass) { lastIssues = verdict.issues; continue; }
-        // Real Meta copy from the grounded brief — a proof-led caption, a benefit headline (never the
-        // offer), and the offer in the description; de-branded for competitor imitations ([[creative-brief]]
-        // buildMetaCopy). Replaces the old hook+fragment concatenation that shipped "I lost 40+ pounds!
-        // Appetite suppression/craving control" with the discount jammed into the headline (2026-07-13).
-        const metaCopy = buildMetaCopy(brief);
-        // Deterministic buildMetaCopy path is temperature-agnostic — no audienceTemperature is
-        // passed, so insertReadyCreative treats the row as NULL/untagged and the Phase-2 cold-offer
-        // gate skips. The M1 keystone author session (future spec) will thread 'cold'/'warm'/'hot'
-        // through opts.audienceTemperature; the gate activates for cold rows automatically.
-        const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, metaCopy, { buffer: gen.buffer, mimeType: gen.mimeType });
+        // Canonical passed the vision gate; render the two sibling placements from the SAME brief.
+        // A sibling render failure fails the WHOLE pack (never persist a half-pack) — the retry loop
+        // takes another attempt at the canonical too, so a transient sibling failure gets a full pack
+        // regenerated. Aspect-ratio-only variation is why we don't re-QA each sibling (would 3× cost);
+        // canonical passing signals the concept is legibly renderable.
+        const siblingRenders: RenderedPlacement[] = [];
+        for (const sib of packPlan.siblings) {
+          const sibGen = await generateCreative(workspaceId, brief, {
+            treatment,
+            designReferenceUrl: plan.designReferenceUrl,
+            compositionTransfer: plan.useCompositionTransfer,
+            aspectRatio: sib.aspectRatio,
+          });
+          siblingRenders.push({ format: sib.format, buffer: sibGen.buffer, mimeType: sibGen.mimeType });
+        }
+        // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
+        // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
+        // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
+        // pack, not just the first pair.
+        const copyPack = buildMetaCopyPack(brief);
+        // Deterministic buildMetaCopyPack path is temperature-agnostic — no audienceTemperature is
+        // passed, so insertReadyCreative treats the pack as NULL/untagged and the Phase-2 cold-offer
+        // gate skips. The M1 keystone author session (future spec) threads 'cold'/'warm'/'hot' through
+        // opts.audienceTemperature; the gate then activates for cold packs automatically.
+        const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
+          canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType },
+          siblings: siblingRenders,
+        });
         if (result.kind === "skip") {
           // cold_offer_leak — deterministic Phase-2 refusal (not a QA/gen failure). Treat like the
           // packshot skip: no retry (the copy needs a revise, not another regen), distinct reason.
@@ -418,7 +513,7 @@ async function stockProduct(
         // media buyer stamps its outcome later, feeding the learning flywheel.
         await recordCombinationGenerated(admin, {
           workspaceId, productId, angleKey: ak, adCampaignId: campaignId, intent,
-          elements: { treatment, headline: metaCopy.headline, description: metaCopy.primaryText, cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
+          elements: { treatment, headline: copyPack.headlines[0], description: copyPack.primaryTexts[0], cta: "Shop now", destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle) },
         });
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;

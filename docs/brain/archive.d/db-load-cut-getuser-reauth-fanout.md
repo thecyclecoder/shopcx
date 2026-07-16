@@ -1,0 +1,1 @@
+- **DB-load: cut the getUser() re-auth fan-out** · verified 2026-07-16 · → [[../libraries/auth]]

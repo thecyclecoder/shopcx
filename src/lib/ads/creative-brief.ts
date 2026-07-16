@@ -25,6 +25,44 @@ import { hasAnyLf8 } from "@/lib/ads/lf8";
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
+// ── Competitor-hook discount sanitizer ──────────────────────────────────────
+// A `source:'competitor'` angle's raw hook comes from a rival's live ad text — and a competitor
+// often bakes their promotional NUMBER into the hook itself ("MUD\WTR Mushroom Tea Blend — 50% OFF",
+// "Save 40% Today", "Free Shipping"). Reused verbatim as OUR headline, that number lands on our
+// creative and CONTRADICTS the real offer the same brief renders from `brief.offer` (e.g. image
+// screams "50% OFF" while our own badge says "Up to 34% off" — the 2026-07-14 Amazing Creamer bin
+// draft). The discount shown on our ad must come SOLELY from `brief.offer` (our real store offer);
+// a competitor's promotional number must never leak in through their hook.
+// Note: patterns ending in "%" don't use `\b` at the end — `%` is non-word so `%\b` would require a
+// following WORD char (fails on "40% on" because " " is non-word). We use a whitespace / EOL lookahead
+// instead so "40% on your first bag" scrubs cleanly.
+const DISCOUNT_TOKEN_PATTERNS: readonly RegExp[] = [
+  /\b(?:up to\s+)?\d{1,3}\s*%\s*(?:off|discount|savings?)\b/gi,        // "50% OFF" · "up to 40% off"
+  /\bsave\s+(?:up to\s+)?(?:\$\d[\d.,]*|\d{1,3}\s*%)(?=\s|$|[^\w%])/gi, // "save 40%" · "save $10"
+  /\b\$\d[\d.,]*\s*off\b/gi,                                            // "$10 off"
+  /\bfree\s+shipping\b/gi,                                              // "free shipping"
+  /\b(?:bogo|buy\s+one\s+get\s+one(?:\s+free)?)\b/gi,                   // "BOGO" · "buy one get one"
+  /\b\d+\s+for\s+\$?\d[\d.,]*\b/gi,                                     // "2 for $30"
+  /\b\d+\s+for\s+the\s+price\s+of\s+\d+\b/gi,                           // "3 for the price of 2"
+];
+
+/**
+ * Strip promotional discount/offer tokens (percent-off, dollar-off, free-shipping, BOGO,
+ * "X for $Y") out of a competitor-sourced hook before it becomes an ad-copy input. The
+ * ONLY discount rendered on the creative must come from `brief.offer` (our real store offer).
+ * Own-brand hooks pass through unchanged — this is called only for `source:'competitor'`.
+ */
+export function sanitizeCompetitorHook(hook: string): string {
+  let out = hook;
+  for (const re of DISCOUNT_TOKEN_PATTERNS) out = out.replace(re, " ");
+  // A stripped token often leaves an orphan separator between two spaces ("Coffee  —  today")
+  // and dangling punctuation at either end. Collapse both so what remains reads naturally.
+  out = out.replace(/\s+[—–\-|·+&]\s+/g, " ");
+  out = out.replace(/^[\s,;:.|\-·—–+&]+|[\s,;:.|\-·—–+&]+$/g, "");
+  out = out.replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
 // ── Angle-scoring lexicons ───────────────────────────────────────────────────
 // Commodity = high customer-satisfaction (retention) but zero differentiation for a cold stranger.
 const COMMODITY = /\b(no (jitter|crash)|jitter[- ]?free|clean energy|without (the )?(jitter|crash)|steady energy|energy (boost|without)|smooth energy)\b/i;
@@ -170,6 +208,15 @@ function money(cents: number | null | undefined): string | null {
  */
 export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredAngle, transformationStories: PIReview[] = []): Promise<CreativeBrief> {
   const productTitle = str((pi.product as Row | null)?.title) || "the product";
+
+  // Competitor hook sanitization: strip any percent-off / $-off / free-shipping / BOGO claim the
+  // rival baked into their hook BEFORE it becomes part of the brief. brief.angle.hook is the
+  // single source of the headline for every downstream consumer (buildPrompt, buildMetaCopy,
+  // expectedCopy for QA), so scrubbing it once here means a competitor's promotional number can
+  // never surface on our ad. Own-brand angles are untouched.
+  angle = angle.source === "competitor"
+    ? { ...angle, hook: sanitizeCompetitorHook(angle.hook) }
+    : angle;
 
   // Lead proof: prefer a real review backing this benefit; else an ingredient citation.
   let leadProof: CreativeBrief["leadProof"] = null;

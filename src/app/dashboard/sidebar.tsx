@@ -265,92 +265,54 @@ export default function Sidebar({
   // end of this effect. Route changes must not tear down the interval and re-fire
   // the whole fan-out (that was the dominant multiplier on the RLS `set_config`
   // hot query — the failure mode this session addresses).
+  //
+  // db-load-sidebar-counts — the 13-17 per-badge fetches have COLLAPSED into ONE authenticated
+  // call to /api/dashboard/sidebar-counts. Each per-badge fetch used to pay its own auth.getUser()
+  // + PostgREST set_config preamble; one call now shares the auth. Owner/CS-manager gating is
+  // enforced server-side inside the endpoint — this client just spreads whatever came back and
+  // leaves the owner-scoped state slots at 0 for non-owners.
   useEffect(() => {
     const fetchCounts = () => {
-      fetch(`/api/workspaces/${workspace.id}/ticket-views`)
-        .then(r => r.json())
-        .then(d => { if (Array.isArray(d)) setTicketViews(d); })
-        .catch(() => {});
-      Promise.all([
-        fetch(`/api/tickets?status=open&escalation_mine=true&limit=1`).then(r => r.json()),
-        fetch(`/api/tickets?status=pending&escalation_mine=true&limit=1`).then(r => r.json()),
-        fetch(`/api/tickets?status=closed&escalation_mine=true&limit=1`).then(r => r.json()),
-      ]).then(([o, p, c]) => {
-        setEscalationCounts({ open: o?.total || 0, pending: p?.total || 0, closed: c?.total || 0 });
-      }).catch(() => {});
-      // Fraud case count (admin/owner only)
-      fetch(`/api/workspaces/${workspace.id}/fraud-cases?status=open&limit=1`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => {
+      fetch(`/api/dashboard/sidebar-counts`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
           if (!d) return;
-          const count = d.total || 0;
-          const cases = d.cases || [];
-          const maxSeverity = cases.some((c: { severity: string }) => c.severity === "high") ? "high"
-            : cases.some((c: { severity: string }) => c.severity === "medium") ? "medium" : "low";
-          setFraudCount({ count, maxSeverity });
+          if (Array.isArray(d.ticket_views)) setTicketViews(d.ticket_views);
+          if (d.escalation) {
+            setEscalationCounts({
+              open: d.escalation.open ?? 0,
+              pending: d.escalation.pending ?? 0,
+              closed: d.escalation.closed ?? 0,
+            });
+          }
+          if (d.fraud) {
+            setFraudCount({
+              count: d.fraud.count ?? 0,
+              maxSeverity: d.fraud.maxSeverity ?? "low",
+            });
+          }
+          if (typeof d.pending_reviews === "number") setPendingReviewCount(d.pending_reviews);
+          if (typeof d.todos_approvable === "number") setTodoCount(d.todos_approvable);
+          if (typeof d.rejected_me === "number") setRejectedCount(d.rejected_me);
+          if (typeof d.improve_waiting === "number") setImproveWaitingCount(d.improve_waiting);
+          if (typeof d.branches === "number") setBranchesCount(d.branches);
+          if (d.owner) {
+            setHumanTestCount(d.owner.human_test_waiting ?? 0);
+            setRegressionCount(d.owner.regressions ?? 0);
+            setApprovalsCount(d.owner.approvals_escalated ?? 0);
+            setSecurityCount(d.owner.security_surfaced ?? 0);
+            setLanderUploadCount(d.owner.lander_uploads_pending ?? 0);
+          }
         })
         .catch(() => {});
-
-      fetch(`/api/workspaces/${workspace.id}/reviews?status=pending&limit=1`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d?.stats?.pending != null) setPendingReviewCount(d.stats.pending); })
-        .catch(() => {});
-
-      // Agent To-Do system: approvable-queue bubble + "Rejected → me" pile.
-      fetch(`/api/todos?status=pending&limit=1`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d?.approvable_count != null) setTodoCount(d.approvable_count); })
-        .catch(() => {});
-      fetch(`/api/escalated`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d?.chips?.rejected_me != null) setRejectedCount(d.chips.rejected_me); })
-        .catch(() => {});
-      // Improve Queue: count of box Improve sessions waiting on you (Answered / Needs approval / Error).
-      fetch(`/api/tickets/improve-queue`)
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d?.counts?.waiting != null) setImproveWaitingCount(d.counts.waiting); })
-        .catch(() => {});
-      if (["owner", "admin"].includes(workspace.role)) {
-        fetch(`/api/branches`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.total != null) setBranchesCount(d.total); })
-          .catch(() => {});
-      }
-      // Spec-test human-test queue + regressions — both surfaced from the same endpoint, split into
-      // two badges: needs-human checks (Human-test queue) vs shipped specs failing their own spec-test (Regressions).
-      if (workspace.role === "owner") {
-        fetch(`/api/developer/spec-test/human-queue`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => {
-            if (d?.counts) {
-              setHumanTestCount(d.counts.waiting || 0);
-              setRegressionCount(d.counts.regressions || 0);
-            }
-          })
-          .catch(() => {});
-        // Approvals escalated to the CEO (Henry) — the routed-to-CEO queue, lightweight count-only path.
-        fetch(`/api/developer/approvals?count=1`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.escalatedCount != null) setApprovalsCount(d.escalatedCount); })
-          .catch(() => {});
-        // Vault's surfaced security findings (real-vuln fix awaiting Build / needs-human) — count-only.
-        fetch(`/api/developer/security-tests?count=1`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.surfacedCount != null) setSecurityCount(d.surfacedCount); })
-          .catch(() => {});
-        // Lander uploads: open lander_content_gaps on awaiting_upload blueprints (owner surface).
-        fetch(`/api/marketing/landers/blueprints?workspaceId=${workspace.id}&count=1`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.pending_uploads != null) setLanderUploadCount(d.pending_uploads); })
-          .catch(() => {});
-      }
     };
     fetchCounts();
-    // Poll every 60s: this effect fires ~13 authenticated API requests per tick
-    // (up to ~5 more for owner/admin), each making several PostgREST round-trips
-    // that re-run the per-request RLS set_config statement — the dominant
-    // high_call_volume family. Prior widens 10s→30s (queryid -7821780334453251234)
-    // and 30s→60s (queryid -7726440967385220442) each addressed a follow-on offender;
+    // Poll every 60s: this effect NOW fires ONE authenticated request per tick (post
+    // db-load-sidebar-counts — see the comment block above; the effect used to fire
+    // ~13 requests, up to ~5 more for owner/admin, each with its own auth + PostgREST
+    // set_config preamble). The single-request path shares one auth and computes every
+    // count server-side. Prior widens 10s→30s (queryid -7821780334453251234) and
+    // 30s→60s (queryid -7726440967385220442) each addressed a follow-on offender;
     // the DB Health Agent then flagged queryid 2430642232831032083 (same
     // set_config-class high_call_volume pattern) and the lever was the RE-FIRING
     // multiplier from the `[workspace.id, pathname]` dep list — dropping `pathname`

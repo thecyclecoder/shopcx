@@ -576,20 +576,22 @@ export async function updateSession(
     }
   );
 
-  // Bound the upstream — a hanging Supabase GoTrue auth call must not lock the
-  // middleware invocation until Vercel's 300s ceiling. supabase-js's auth
-  // methods do not accept an AbortSignal, so race the call against a 2s timer
-  // that resolves to `{ data: { user: null } }`; on timeout we fall through to
-  // the existing unauthenticated branch below (public routes pass, protected
-  // routes redirect to /login), which is the correct safe degradation.
-  const {
-    data: { user },
-  } = await Promise.race([
-    supabase.auth.getUser(),
-    new Promise<{ data: { user: null } }>((resolve) =>
-      setTimeout(() => resolve({ data: { user: null } }), 2_000),
-    ),
-  ]);
+  // db-load-getclaims: local JWT verify (zero auth-table reads) once the project
+  // moves to asymmetric signing keys; on legacy HS256 getClaims() falls back to
+  // getUser() internally — identical behavior, safe to ship pre-migration. Local
+  // verify has no upstream to hang on, so the 2s Promise.race the previous
+  // getUser() call needed is dropped along with the swap. Middleware only reads
+  // { id, email, app_metadata } — all present on JwtPayload — so we map the
+  // claim into the same `user`-shaped local used by the downstream branches.
+  const { data: claimsData } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims ?? null;
+  const user = claims
+    ? {
+        id: claims.sub,
+        email: claims.email,
+        app_metadata: claims.app_metadata ?? {},
+      }
+    : null;
 
   const pathname = request.nextUrl.pathname;
   const isPublicRoute = PUBLIC_ROUTES.some((r) => pathname.startsWith(r));

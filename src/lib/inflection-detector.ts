@@ -22,6 +22,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 import { classifyCheckoutStuck } from "@/lib/checkout-stuck-intent";
 import { getLiveDirection, incrementResessionCount, superseDirection } from "@/lib/ticket-directions";
@@ -449,6 +450,31 @@ export interface ReSessionResult {
   cap_hit: boolean;
 }
 
+/**
+ * Race guard for the `reSessionSol` no-live-Direction fallback: returns `true` iff an
+ * `agent_jobs` row already exists for this ticket's `ticket-handle-<first8>` slug in a
+ * non-terminal state. Sourced from the canonical `ACTIVE_STATUSES` set exported by
+ * [[./agent-jobs]] — the same list the box worker treats as in-flight — so a concurrent
+ * caller that already superseded the live Direction and enqueued its own follow-up
+ * cannot be duplicated by a stale caller falling into the `!live` branch.
+ */
+async function hasActiveTicketHandleJob(
+  admin: SupabaseClient,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<boolean> {
+  const slug = `ticket-handle-${ticket_id.slice(0, 8)}`;
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .eq("spec_slug", slug)
+    .in("status", ACTIVE_STATUSES)
+    .limit(1);
+  if (error) throw error;
+  return ((data as Array<{ id: string }> | null) ?? []).length > 0;
+}
+
 export async function reSessionSol(
   admin: SupabaseClient,
   ticket_id: string,
@@ -474,11 +500,72 @@ export async function reSessionSol(
     workspace_id: input.workspace_id,
   });
   if (!live) {
+    // No live Direction on this ticket. Two distinct cases:
+    //   (a) genuine no-Direction — nothing was ever authored (a pre-Sol legacy ticket, or a
+    //       ticket whose first-touch enqueue failed / has not landed yet). The Phase-2 gate has
+    //       already sent the "we're looking into that for you" holding message, so silently
+    //       bailing here strands the customer with a broken promise. Enqueue a fresh
+    //       first-touch-shaped `ticket-handle` session so the promise is kept — the fresh
+    //       session authors the first Direction, after which later inflections flow through the
+    //       normal capped path (steps 2-6, `sol_max_resessions`).
+    //   (b) true concurrent race — another caller already superseded the live row and enqueued
+    //       its own follow-up. That job is in-flight in `agent_jobs`, so we still bail.
+    // The `hasActiveTicketHandleJob` dedup below is the race guard: it caps concurrency at one
+    // in-flight session per ticket and prevents a duplicate fan-out on the (a) path too.
+    const activeJob = await hasActiveTicketHandleJob(admin, input.workspace_id, ticket_id);
+    if (activeJob) {
+      return {
+        superseded: false,
+        enqueued: false,
+        superseded_direction_id: null,
+        job_id: null,
+        cap_hit: false,
+      };
+    }
+
+    const { data: jobRow, error } = await admin
+      .from("agent_jobs")
+      .insert({
+        workspace_id: input.workspace_id,
+        kind: "ticket-handle",
+        spec_slug: `ticket-handle-${ticket_id.slice(0, 8)}`,
+        status: "queued",
+        instructions: JSON.stringify({
+          ticket_id,
+          workspace_id: input.workspace_id,
+          turn_index: input.turn_index ?? null,
+          reason: "inflection",
+          kind: input.kind,
+          evidence: input.evidence,
+          superseded_direction_id: null,
+        }),
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+
+    // Best-effort observability ledger — mirrors the cap-hit branch's diagnostic stamp so a
+    // failed ledger write cannot wedge the enqueue that keeps the customer promise.
+    try {
+      await admin.from("ticket_resolution_events").insert({
+        workspace_id: input.workspace_id,
+        ticket_id,
+        turn_index: input.turn_index ?? null,
+        reasoning: "sol:resession-no-direction",
+        chosen: {
+          kind: input.kind,
+          fallback: "first_touch_no_live_direction",
+        } as Record<string, unknown>,
+      });
+    } catch {
+      // Ledger is diagnostic — do not block the fallback enqueue.
+    }
+
     return {
       superseded: false,
-      enqueued: false,
+      enqueued: true,
       superseded_direction_id: null,
-      job_id: null,
+      job_id: (jobRow?.id as string) ?? null,
       cap_hit: false,
     };
   }

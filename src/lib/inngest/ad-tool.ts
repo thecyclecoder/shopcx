@@ -40,7 +40,12 @@ import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
 import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthorityProps, DEFAULT_BRAND, type StaticArchetype } from "@/lib/ad-static";
 import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
-import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createAd, createAdSet } from "@/lib/meta-ads";
+import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createPlacementCreative, createAd, createAdSet } from "@/lib/meta-ads";
+import { resolvePlacementPublish } from "@/lib/ads/placement-publish";
+import { evaluateCreativePackGate, missingCreativePackDiagnosis, MISSING_CREATIVE_PACK_REASON } from "@/lib/ads/creative-pack-gate";
+import type { CreativePackSnapshot } from "@/lib/ads/creative-pack";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
+import { recordDirectorActivity } from "@/lib/director-activity";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 import {
   MEDIA_BUYER_TEST_ORIGIN,
@@ -837,20 +842,36 @@ export const adToolPublishToMeta = inngest.createFunction(
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
-      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id").eq("id", job.campaign_id).single();
+      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id, angle_id").eq("id", job.campaign_id).single();
       // Gather BOTH ratios for the campaign so we can publish one placement-customized
-      // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Falls back to a
-      // single asset when only one ratio is ready.
+      // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Also grab the
+      // right_column_1x1 sibling so a complete Dahlia pack routes through Bianca's
+      // 3-bucket PLACEMENT builder (bianca-publishes-3-placement-multi-copy-via-
+      // placement-customization Phase 2). Falls back to a single asset when only
+      // one ratio is ready.
       const { data: vids } = await admin
         .from("ad_videos")
         .select("id, format, media_kind, meta, final_mp4_url, static_jpg_url")
         .eq("campaign_id", job.campaign_id).eq("status", "ready");
+      // For the Phase 3 pack-complete gate: load the FULL row set (regardless of
+      // status) so `isCreativePackComplete` can distinguish `canonical_missing`
+      // (never authored) from `canonical_not_ready` (authored but still rendering
+      // / failed) rather than reading a status-filtered view as "missing".
+      const { data: allVidsForGate } = await admin
+        .from("ad_videos")
+        .select("id, format, media_kind, status, format_variant_of_id")
+        .eq("campaign_id", job.campaign_id);
+      const angleId = (campaign as { angle_id?: string | null } | null)?.angle_id ?? null;
+      const { data: angleRow } = angleId
+        ? await admin.from("product_ad_angles").select("metadata").eq("id", angleId).maybeSingle()
+        : { data: null };
       const all = vids || [];
       const anchor = all.find((v) => v.id === job.video_id) || all[0] || null;
       const mediaKind = (anchor?.media_kind as string) || "video";
       const sameKind = all.filter((v) => (v.media_kind as string) === mediaKind);
       const feed = sameKind.find((v) => v.format === "feed_4x5") || null;
       const story = sameKind.find((v) => v.format === "reels_9x16" || v.format === "stories_9x16") || null;
+      const rightColumn = sameKind.find((v) => v.format === "right_column_1x1") || null;
       // Fresh signed URL so Meta can download the media (stored URL may be stale).
       const urlFor = async (v: (typeof all)[number] | null) => {
         if (!v) return null;
@@ -860,7 +881,25 @@ export const adToolPublishToMeta = inngest.createFunction(
       };
       const feedUrl = await urlFor(feed);
       const storyUrl = await urlFor(story);
+      const rightColumnUrl = await urlFor(rightColumn);
       const singleUrl = storyUrl || feedUrl || (await urlFor(anchor));
+      // 3-bucket PLACEMENT routing decision (Phase 2). Pure predicate on the
+      // already-loaded row set + the job's 4×4 copy pack — falls back cleanly to
+      // the 2-bucket / single-image path when the pack isn't complete. Phase 3
+      // will wrap this with a REFUSAL gate; today an incomplete pack simply
+      // renders as the legacy single-asset ad.
+      const placementDecision = resolvePlacementPublish({
+        mediaKind,
+        headlines: (job.headlines as string[] | null) ?? [],
+        primaryTexts: (job.primary_texts as string[] | null) ?? [],
+        readyAdVideos: sameKind.map((v) => ({
+          id: v.id,
+          format: v.format,
+          media_kind: v.media_kind,
+          static_jpg_url: v.static_jpg_url,
+          meta: v.meta as { storage_path?: string | null } | null,
+        })),
+      });
       const token = await getMetaUserToken(workspace_id);
       // Engine-created jobs carry an explicit [ie]-tagged ad_name (Phase 6b); the
       // studio path falls back to the campaign name.
@@ -877,14 +916,94 @@ export const adToolPublishToMeta = inngest.createFunction(
         .eq("meta_account_id", job.meta_account_id)
         .maybeSingle();
       const metaAdAccountRowId = (acctRow as { id: string } | null)?.id ?? null;
-      return { job, adName, mediaKind, feedUrl, storyUrl, singleUrl, token, productId, metaAdAccountRowId };
+      // Phase 3 — pack-complete publish gate. `evaluateCreativePackGate` is a pure
+      // predicate over the FULL ad_videos row set + the angle's `metadata.copy_pack`.
+      // A Dahlia-authored static campaign whose pack is incomplete REFUSES rather
+      // than silently degrading to a single-image ad (bianca-publishes-3-placement-
+      // multi-copy-via-placement-customization Phase 3). Video / non-Dahlia campaigns
+      // are `skipped` so the legacy paths keep running.
+      const gateAdVideos = (allVidsForGate || []).map((r) => ({
+        format: String(r.format),
+        media_kind: String(r.media_kind),
+        status: String(r.status),
+        format_variant_of_id: (r.format_variant_of_id as string | null) ?? null,
+      }));
+      const canonicalRow = (allVidsForGate || []).find(
+        (r) => r.format === "feed_4x5" && ((r as { format_variant_of_id?: string | null }).format_variant_of_id ?? null) === null,
+      ) as { id?: string } | undefined;
+      const packSnapshot: CreativePackSnapshot = {
+        adVideos: gateAdVideos,
+        canonicalId: canonicalRow?.id ?? null,
+        angleMetadata: (angleRow?.metadata as { copy_pack?: { headlines?: unknown; primaryTexts?: unknown } | null } | null) ?? null,
+      };
+      const packGate = evaluateCreativePackGate({ mediaKind, snapshot: packSnapshot });
+      return { job, adName, mediaKind, feedUrl, storyUrl, rightColumnUrl, singleUrl, token, productId, metaAdAccountRowId, placementDecision, packGate };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
+    // Phase 3 refusal — a Dahlia-authored static campaign whose pack is incomplete
+    // MUST NOT ship as a degraded single-image ad. `evaluateCreativePackGate`
+    // returns `allowed:false` only when the campaign is Dahlia-authored (a
+    // `feed_4x5` canonical row exists) AND the pack is incomplete; video / legacy
+    // studio campaigns are `skipped` and fall through to the normal publish paths.
+    // On refusal: status=failed with reason=`missing_creative_pack`, publish_active
+    // cleared so no ad exists, and a deduped CEO escalation + growth-owned
+    // director_activity row records what to fix.
+    const j0 = ctx.job as any;
+    if (!ctx.packGate.allowed) {
+      const diagnosis = missingCreativePackDiagnosis({
+        packReason: ctx.packGate.packReason,
+        detail: ctx.packGate.detail,
+        campaignId: String(j0.campaign_id ?? ""),
+      });
+      await setStatus("failed", {
+        error: `${MISSING_CREATIVE_PACK_REASON}:${ctx.packGate.packReason}`,
+        publish_active: false,
+      });
+      const dedupeKey = `bianca_pack_gate:${workspace_id}:${String(j0.campaign_id ?? "")}:${ctx.packGate.packReason}`;
+      const escalationMetadata = {
+        origin: (j0.origin as string | null) ?? null,
+        reason: MISSING_CREATIVE_PACK_REASON,
+        pack_reason: ctx.packGate.packReason,
+        job_id,
+        campaign_id: (j0.campaign_id as string) ?? null,
+        product_id: ctx.productId ?? null,
+        media_kind: ctx.mediaKind,
+      } as const;
+      const ceo = await escalateDiagnosisToCeo(admin, {
+        workspaceId: workspace_id,
+        specSlug: null,
+        title: `Bianca publish refused: incomplete creative pack (${ctx.packGate.packReason})`,
+        diagnosis,
+        dedupeKey,
+        deepLink: "/dashboard/marketing/ads",
+        escalationKind: "bianca_missing_creative_pack",
+        metadata: escalationMetadata,
+      });
+      if (ceo.emitted) {
+        await recordDirectorActivity(admin, {
+          workspaceId: workspace_id,
+          directorFunction: "growth",
+          actionKind: "bianca_missing_creative_pack",
+          specSlug: null,
+          reason: diagnosis,
+          metadata: { ...escalationMetadata, dedupe_key: dedupeKey, autonomous: true },
+        });
+      }
+      return { ok: false, reason: MISSING_CREATIVE_PACK_REASON, packReason: ctx.packGate.packReason };
+    }
     if (!ctx.singleUrl) { await setStatus("failed", { error: "no_media_url" }); return { ok: false, reason: "no_media_url" }; }
     const j = ctx.job as any;
     const isStatic = ctx.mediaKind === "static";
     const dual = !!(ctx.feedUrl && ctx.storyUrl);
+    // 3-bucket PLACEMENT publish is eligible when the pack is complete AND all
+    // three signed URLs resolved (the resolver already asserts the pack shape;
+    // the URL check catches a storage_path that failed to sign).
+    const placementReady = isStatic
+      && ctx.placementDecision.ready
+      && !!ctx.feedUrl
+      && !!ctx.storyUrl
+      && !!ctx.rightColumnUrl;
 
     const result = await step.run("publish", async () => {
       try {
@@ -908,7 +1027,32 @@ export const adToolPublishToMeta = inngest.createFunction(
         let videoId: string | null = null;
         const fetchBytes = async (u: string) => Buffer.from(await (await fetch(u)).arrayBuffer());
 
-        if (dual && isStatic) {
+        if (placementReady) {
+          // Complete Dahlia pack → ONE portable (non-DCO) 3-placement PLACEMENT ad:
+          // 4:5 in feed, 9:16 in stories/reels, 1:1 in right-column + FB search,
+          // rotating the 4 headlines + 4 primary texts across every placement.
+          // Battle-tested by creative 780957111743379 (bianca-publishes-3-placement-
+          // multi-copy-via-placement-customization Phase 2 wiring; Phase 1 built the
+          // meta-ads.ts builder).
+          await setStatus("uploading");
+          const [fb, sb, rb] = await Promise.all([
+            fetchBytes(ctx.feedUrl!),
+            fetchBytes(ctx.storyUrl!),
+            fetchBytes(ctx.rightColumnUrl!),
+          ]);
+          const [feedImageHash, storyImageHash, rightColumnImageHash] = await Promise.all([
+            uploadAdImage(ctx.token!, j.meta_account_id, fb, "feed.jpg"),
+            uploadAdImage(ctx.token!, j.meta_account_id, sb, "story.jpg"),
+            uploadAdImage(ctx.token!, j.meta_account_id, rb, "rightcol.jpg"),
+          ]);
+          await setStatus("creating");
+          creativeId = await createPlacementCreative(ctx.token!, {
+            ...baseCreative,
+            feedImageHash,
+            storyImageHash,
+            rightColumnImageHash,
+          });
+        } else if (dual && isStatic) {
           // Both ratios → one placement-customized image ad (4:5 feed, 9:16 stories).
           await setStatus("uploading");
           const [fb, sb] = await Promise.all([fetchBytes(ctx.feedUrl!), fetchBytes(ctx.storyUrl!)]);
