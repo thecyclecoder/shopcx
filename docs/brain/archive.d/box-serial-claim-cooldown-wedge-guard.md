@@ -1,0 +1,1 @@
+- **Stop box serial-claim cooldown loops from hiding worker liveness** · verified 2026-07-16 · → [[lifecycles/roadmap-build-console]]
