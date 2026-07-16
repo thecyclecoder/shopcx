@@ -1,0 +1,1 @@
+- **Ad-creative must show only OUR real offer — strip a competitor's discount from a reused hook, and QA must reject any discount that doesn't match our offer** · verified 2026-07-16 · → [[../libraries/creative-brief]] · [[../libraries/creative-generate]] · [[../libraries/creative-qa]] · [[../lifecycles/ad-creative]]
