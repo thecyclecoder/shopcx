@@ -56,7 +56,7 @@ import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
 // control-tower-canonical-node-registry P2 — routing owner comes from the canonical registry so
 // the platform-director's leash + the approval router agree on every kind by construction.
 import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
-import { setSpecStatus } from "@/lib/specs-table";
+import { setSpecStatus, listSpecs } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
@@ -4808,6 +4808,56 @@ export interface PlatformPendingWorkResult {
 }
 
 /**
+ * reap-needs-attention-jobs-for-archived-specs Phase 2 — the PURE decision half of the standing-pass
+ * stuck-build lister. Given the raw parked/stalled `agent_jobs` rows and the set of TERMINAL spec slugs
+ * for this workspace (folded), return the subset that is still a legitimate stuck-build signal:
+ *   - a `build`/`spec-test` job whose spec is TERMINAL is FILTERED OUT (the spec has shipped/folded;
+ *     the Phase 1 reaper is on its way to cancel it, and the wake gate must not re-flag an already-
+ *     shipped spec as stuck between fold and the next reaper sweep — the 2026-07-12 false-positive
+ *     class this spec closes).
+ *   - a `build`/`spec-test` job with NO `spec_slug` (rare edge; the worker's own bookkeeping) is KEPT.
+ *   - any NON-build/spec-test parked/stalled job (repair, ticket-handle, triage-sweep, …) is KEPT —
+ *     the reaper's archived-spec cleanup is scoped to build/spec-test kinds, so those other kinds
+ *     are unaffected by the fold/reap window.
+ *
+ * Exported so the spec's Verification bullet ("a folded spec's parked job is NOT reported as a stuck
+ * build; a live-spec needs_attention job IS still reported") can be unit-tested without a Supabase
+ * client — the pure decision seam pinned in `platform-director.stuck-build-terminal-spec.test.ts`.
+ */
+export function filterStuckJobsForTerminalSpecs<J extends { kind: string; spec_slug: string | null }>(
+  jobs: J[],
+  terminalSpecSlugs: ReadonlySet<string>,
+): J[] {
+  return jobs.filter((j) => {
+    if (j.kind !== "build" && j.kind !== "spec-test") return true; // non-build kinds unaffected
+    if (!j.spec_slug) return true; // a build/spec-test job with no slug never resolves to a terminal spec
+    return !terminalSpecSlugs.has(j.spec_slug);
+  });
+}
+
+/**
+ * reap-needs-attention-jobs-for-archived-specs Phase 2 — resolve the TERMINAL spec-slug set for a
+ * workspace via the [[../libraries/specs-table]] SDK. `folded` is the only DB-persisted terminal spec
+ * status (`shipped` is derived — a spec that's genuinely shipped but not yet folded still has DB
+ * `status=NULL` and is legitimately buildable via a chained next-phase or fix). Reading via `listSpecs`
+ * respects the "database is the spec" SDK chokepoint (a raw `.from('specs')` here is banned). Fail-OPEN:
+ * a read error yields an empty set (the reaper is the durable backstop; a transient blip must not stall
+ * the pass by broadening the filter).
+ */
+async function listTerminalSpecSlugsForStuckBuildFilter(workspaceId: string): Promise<ReadonlySet<string>> {
+  try {
+    const folded = await listSpecs(workspaceId, { status: "folded" });
+    return new Set(folded.map((s) => s.slug));
+  } catch (e) {
+    console.warn(
+      `[platform-director] listTerminalSpecSlugsForStuckBuildFilter read failed ws=${workspaceId}:`,
+      e instanceof Error ? e.message : e,
+    );
+    return new Set();
+  }
+}
+
+/**
  * Cheap EXISTS/COUNT gate over everything the standing pass monitors. Returns `pending=true` on the
  * FIRST signal (cheap checks first, expensive last) so an idle workspace short-circuits after one
  * `.select("id").limit(1)`. A `pending=false` verdict means the pass can safely skip every lane this
@@ -4861,23 +4911,44 @@ export async function platformHasPendingWork(workspaceId: string): Promise<Platf
   }
 
   // (3) any parked or long-running build — self-watch + park-route input.
+  // reap-needs-attention-jobs-for-archived-specs Phase 2 — defense-in-depth for the reap-window: filter
+  // out a needs_attention/building `build`/`spec-test` job whose spec is TERMINAL (folded). The Phase 1
+  // reaper widening handles the durable case (a folded-spec parked job is reaped on the next builder-
+  // worker sweep), but between fold and the next sweep this signal would otherwise re-surface the
+  // shipped spec as "stuck" — the 2026-07-12 director-sms-cockpit-per-director / claim-rpc-kill-switch-
+  // enforcement false-positive class. Resolves folded slugs via [[../libraries/specs-table]] `listSpecs`
+  // (the SDK chokepoint, per the operational-rules "database is the spec" rule; a raw `.from('specs')`
+  // is banned). Non-build/spec-test parked jobs (repair, ticket-handle, triage-sweep, …) are UNCHANGED
+  // — the reaper never touches them, so they're unaffected by the fold/reap window.
   {
-    const { data: parked } = await admin
+    const terminalSpecSlugs = await listTerminalSpecSlugsForStuckBuildFilter(workspaceId);
+
+    const { data: parkedRows } = await admin
       .from("agent_jobs")
-      .select("id")
+      .select("id, kind, spec_slug")
       .eq("workspace_id", workspaceId)
       .eq("status", "needs_attention")
-      .limit(1);
-    if (parked?.length) return { pending: true, reason: "agent_jobs needs_attention" };
+      .limit(500);
+    const parked = filterStuckJobsForTerminalSpecs(
+      (parkedRows ?? []) as Array<{ id: string; kind: string; spec_slug: string | null }>,
+      terminalSpecSlugs,
+    );
+    if (parked.length) return { pending: true, reason: "agent_jobs needs_attention" };
+
     const stalledCutoffIso = new Date(Date.now() - 90 * 60 * 1000).toISOString();
-    const { data: stalled } = await admin
+    const { data: stalledRows } = await admin
       .from("agent_jobs")
-      .select("id")
+      .select("id, kind, spec_slug")
       .eq("workspace_id", workspaceId)
       .eq("status", "building")
       .lt("claimed_at", stalledCutoffIso)
-      .limit(1);
-    if (stalled?.length) return { pending: true, reason: "agent_jobs building >90m" };
+      .limit(500);
+    const stalled = filterStuckJobsForTerminalSpecs(
+      (stalledRows ?? []) as Array<{ id: string; kind: string; spec_slug: string | null }>,
+      terminalSpecSlugs,
+    );
+    if (stalled.length) return { pending: true, reason: "agent_jobs building >90m" };
+
     // ada-reacts-to-approvals-immediately Phase 1 — a needs_approval agent_jobs row IS pending work
     // for the standing pass (Ada's own approve-or-escalate decision). Without this signal the cron
     // backs off to hourly (`platformStandingPassRecentlyActive` returned false on an otherwise-idle

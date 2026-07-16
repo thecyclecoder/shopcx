@@ -258,16 +258,28 @@ export async function getLiveJobForSlug(workspaceId: string, slug: string, admin
  * reconcile). Idempotent — terminal jobs are never touched. Best-effort: a single failed update doesn't
  * abort the rest.
  */
+// reap-needs-attention-jobs-for-archived-specs Phase 1 — the reaper's status set is a LOCAL
+// superset of ACTIVE_STATUSES that ALSO includes 'needs_attention'. A folded/deferred/FS-archived
+// spec's parked needs_attention build job is superseded by definition (its spec page no longer
+// exists), so it should be reaped alongside its still-active siblings. ACTIVE_STATUSES stays
+// intact for every other caller (fold-guard, in-flight seams, resume gates) — the widening only
+// applies to the archived-spec cleanup path, gated by the same filterJobsForArchivedSpecs
+// membership check. Ada's platform-director 'builds stuck >90m' signal used to re-flag an
+// already-shipped spec every standing pass because this uncatchable job lingered forever.
+export const REAPABLE_STATUSES_FOR_ARCHIVED_SPECS: JobStatus[] = [...ACTIVE_STATUSES, "needs_attention"];
+
 export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; admin?: Admin }): Promise<{ cancelled: number; slugs: string[] }> {
   const admin = opts?.admin || createAdminClient();
 
-  // 1) Fetch every active build/spec-test job first (optionally scoped) so we can group by workspace and
-  //    apply that workspace's DB-archived set separately from the global FS archive.
+  // 1) Fetch every reapable build/spec-test job first (optionally scoped) so we can group by
+  //    workspace and apply that workspace's DB-archived set separately from the global FS archive.
+  //    "Reapable" = ACTIVE_STATUSES ∪ {'needs_attention'}: an archived spec's parked
+  //    needs_attention job is orphaned and must be swept alongside its still-active siblings.
   let query = admin
     .from("agent_jobs")
     .select("id, spec_slug, workspace_id")
     .in("kind", ["build", "spec-test"])
-    .in("status", ACTIVE_STATUSES);
+    .in("status", REAPABLE_STATUSES_FOR_ARCHIVED_SPECS);
   if (opts?.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
   const { data, error } = await query;
   if (error || !data?.length) return { cancelled: 0, slugs: [] };
