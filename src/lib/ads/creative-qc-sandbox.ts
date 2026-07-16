@@ -152,6 +152,15 @@ export interface QcPromptInput {
    *  missing-reference path never false-fails a legitimate render (Phase 1 already gates competitor
    *  composition-transfer against fabricating when a packshot is absent). */
   packshotPath?: string | null;
+  /** Phase 2 of `ad-creative-only-our-real-offer-discount-shown-never-a-competitors` — the REAL
+   *  store offer summary (a single line of the form `HEADLINE: "…" · STRIKETHROUGH: "…" ·
+   *  PER_SERVING: "…"`, from `summarizeOfferForQa`). When set, the outer TRUSTED prompt tells the
+   *  QC to compare every rendered discount/percent-off/free-shipping/BOGO claim on the image
+   *  against this string and FAIL `offerConsistent` on any mismatch or on two conflicting discount
+   *  numbers. When null/undefined, the outer prompt tells the QC to SKIP `offerConsistent` (return
+   *  true) so a legitimate no-offer render is never false-failed. TRUSTED — this is a legitimate
+   *  rule from our code, not from the untrusted DATA block below. */
+  realOfferSummary?: string | null;
 }
 
 /**
@@ -183,11 +192,23 @@ export function buildQcPrompt(input: QcPromptInput): string {
   const packshotRule = input.packshotPath
     ? `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY: read BOTH images. The generated ad is ${input.imagePath}; the REAL isolated packshot for our product is ${input.packshotPath} (a photograph of the ACTUAL product we ship). Set \`packagingFaithful\` = true IFF the product package rendered in the generated ad matches the reference packshot on wordmark (the main brand name / product name printed on the pack), dominant pack colors, flavor art / hero graphic, and overall pack shape/silhouette. FAIL \`packagingFaithful\` on ANY of: an invented pack (a different-shaped bottle/pouch/box the reference doesn't have), a competitor's pack still visible, a wrong-color pack, a fabricated wordmark, a missing/altered flavor art. Sub-readable ingredient icons + supplement-facts fine print are still out of scope (same as the textLegible rule). Fail-closed on ambiguity — if you cannot see both packages clearly enough to compare, return \`packagingFaithful\` = false and cite what you couldn't see in \`issues\`.`
     : "PACKAGING-FIDELITY MODE — NO REFERENCE: no reference packshot was supplied for this generation (own-brand path or no isolated packshot on record). SKIP the packagingFaithful check and set `packagingFaithful` = true — Phase 1 of the packshot spec already refused to run composition-transfer without a real packshot, so a no-reference render here is not a fabricated-pack risk.";
+  // TRUSTED — the offer-consistency rule (Phase 2 of ad-creative-only-our-real-offer-...). When we
+  // thread a real offer summary, the QC must compare every rendered discount/percent-off /
+  // free-shipping / BOGO / X-for-$Y claim against that summary and FAIL offerConsistent on any
+  // mismatch OR on two conflicting discount numbers on the same ad. When we don't (no offer, or
+  // caller didn't thread it), the QC must SKIP the check and set offerConsistent = true — same
+  // defence-in-depth pattern as packshotRule. Same trust boundary as imitationRule / packshotRule:
+  // this rule comes from our code, never from the untrusted DATA block below.
+  const offerRule = input.realOfferSummary && input.realOfferSummary.trim().length > 0
+    ? `OFFER-CONSISTENCY MODE — REAL-OFFER: our REAL store offer is: ${input.realOfferSummary}. Set \`offerConsistent\` = true IFF every discount / percent-off / dollar-off / "free shipping" / BOGO / "X for $Y" claim rendered ANYWHERE on the image (headline, subhead, badges, corner stickers, footer, on the pack) is consistent with this real offer. FAIL \`offerConsistent\` on ANY of: a discount NUMBER on the image that does not match the real offer (e.g. image shows "50% OFF" but the real offer is "Up to 34% off + free shipping"), an offer TYPE the image adds that the real offer doesn't include (e.g. a "BOGO" or "free shipping" badge when the real offer doesn't include it), OR two conflicting discount numbers on the same ad (headline "50% OFF" + badge "34% off"). A per-serving value or strikethrough-MSRP consistent with the real offer is fine; an image with NO discount/offer claim at all is fine. Sub-readable pack fine print (an ingredient panel that happens to say "20%" but isn't a promotional claim) is out of scope. Fail-closed on ambiguity — if you cannot tell whether a rendered discount matches, return \`offerConsistent\` = false and cite the mismatch in \`issues\`.`
+    : "OFFER-CONSISTENCY MODE — NO REFERENCE: no real store offer was supplied for this render. SKIP the offerConsistent check and set `offerConsistent` = true — a caller that doesn't thread the real offer / an ad rendered with no offer is not a mis-stated-discount risk here.";
   return [
     "Use the creative-qc skill to visually QC ONE rendered ad against the exact copy strings it should contain. You are on Max (no ANTHROPIC_API_KEY). READ the image with the Read tool — Claude Code renders the JPEG visually to you — then judge each of the render defects and emit ONLY the CreativeQAVerdict JSON (no prose, no code fences, no wrapper).",
     ...(imitationRule ? ["", imitationRule] : []),
     "",
     packshotRule,
+    "",
+    offerRule,
     "",
     `IMAGE: ${input.imagePath}`,
     ...(input.packshotPath ? [`REFERENCE_PACKSHOT: ${input.packshotPath}`] : []),
@@ -201,7 +222,7 @@ export function buildQcPrompt(input: QcPromptInput): string {
     `HAS_TRANSFORMATION: ${hasTx}`,
     QC_DATA_BLOCK_END,
     "",
-    "Return ONLY the CreativeQAVerdict JSON — { pass, issues, checks: { headlineExact, textLegible, noBarePrice, noFabricatedPhotoCaption, transformationPhotorealistic, packagingFaithful } }. Any check you cannot confidently judge is false (fail-closed).",
+    "Return ONLY the CreativeQAVerdict JSON — { pass, issues, checks: { headlineExact, textLegible, noBarePrice, noFabricatedPhotoCaption, transformationPhotorealistic, packagingFaithful, offerConsistent } }. Any check you cannot confidently judge is false (fail-closed).",
   ].join("\n");
 }
 

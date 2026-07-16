@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMetaCopy, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import { buildMetaCopy, sanitizeCompetitorHook, type CreativeBrief, type ScoredAngle } from "./creative-brief";
 import { hasAnyLf8 } from "./lf8";
 
 function makeAngle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
@@ -81,6 +81,39 @@ test("buildMetaCopy — never fabricates an LF8 term when the brief carries no L
     !hasAnyLf8(`${copy.headline} ${copy.primaryText}`.toLowerCase()),
     `expected no LF8; got headline="${copy.headline}" primary="${copy.primaryText}"`,
   );
+});
+
+test("sanitizeCompetitorHook — strips a percent-off claim baked into the competitor's hook", () => {
+  // The 2026-07-14 Amazing Creamer bin draft: hook "50% OFF" leaked from the competitor's ad
+  // into our headline while our real offer said "up to 34% off" — the contradiction Phase 1 kills.
+  assert.equal(sanitizeCompetitorHook("MUD\\WTR Mushroom Tea Blend — 50% OFF"), "MUD\\WTR Mushroom Tea Blend");
+  assert.equal(sanitizeCompetitorHook("Up to 43% Off Today"), "Today");
+  assert.equal(sanitizeCompetitorHook("Save 40% on your first bag"), "on your first bag");
+  assert.equal(sanitizeCompetitorHook("Free Shipping · Best Coffee"), "Best Coffee");
+  assert.equal(sanitizeCompetitorHook("BOGO — start your morning right"), "start your morning right");
+  assert.equal(sanitizeCompetitorHook("2 for $30 today only"), "today only");
+  // Own-brand-style hooks (no promotional token) are untouched.
+  assert.equal(sanitizeCompetitorHook("Unlock steady morning energy"), "Unlock steady morning energy");
+});
+
+test("buildMetaCopy — a competitor hook's '50% OFF' never leaks into headline or primary text (only our offer is shown)", () => {
+  // Simulate what buildCreativeBrief now does for a competitor angle: sanitize the hook before it
+  // becomes brief.angle.hook. Every downstream consumer (buildMetaCopy here, buildPrompt in
+  // creative-generate, expectedCopy for QA) reads from that single sanitized source.
+  const rawHook = "The Coffee 50% OFF — appetite control today";
+  const brief = makeBrief({
+    angle: makeAngle({ hook: sanitizeCompetitorHook(rawHook), leadBenefit: "appetite control" }),
+    supportingBenefits: ["appetite control", "steady energy — no crash"],
+    // Our REAL offer — the only discount that may surface on the ad.
+    offer: { headline: "Up to 34% off + free shipping", strikethrough: null, perServing: null, disclaimer: "" },
+  });
+  const copy = buildMetaCopy(brief);
+  const composed = `${copy.headline} ${copy.primaryText}`;
+  // The competitor's promotional number is gone from every field.
+  assert.ok(!/50\s*%/i.test(composed), `50% leaked into copy — headline="${copy.headline}" primary="${copy.primaryText}"`);
+  // The offer text (which carries "34%") only appears via the caption's offer/CTA line, sourced from
+  // brief.offer — the legitimate path. Sanity: our real offer's percentage IS present somewhere.
+  assert.ok(/34\s*%/i.test(composed), `expected our real offer's 34% to still surface via brief.offer`);
 });
 
 test("buildMetaCopy — own-brand angle keeps its raw hook when the hook itself carries LF8 language", () => {

@@ -14,6 +14,7 @@ Returns `{ buffer, mimeType, prompt, expectedCopy }`. `expectedCopy` is the exac
 - **Supporting** = 1–2 retention truths as a small secondary line.
 - **Trust bar** = first 4 of `brief.proofStack`.
 - **Offer** = shown ONCE as a single badge (`offer.headline`), optionally the per-serving value or the strikethrough+disclaimer. **Never a bare MSRP** (hard rule).
+- **OFFER FIDELITY (2026-07-16)** — the ONLY discount / percent-off / dollar-off / free-shipping / BOGO / "X for $Y" claim allowed **anywhere** on the image is `brief.offer`. The prompt now carries a hard rule forbidding the model from inventing / echoing / carrying over a *different* discount number from a headline, subhead, or badge — and when no offer is supplied, the ad must show NO discount claim at all. Paired with the sanitization pass in [[creative-brief]] `sanitizeCompetitorHook` (which strips a competitor hook's baked-in "50% OFF" before it ever reaches this prompt), together they close the 2026-07-14 Amazing Creamer contradiction where the headline screamed "50% OFF" while our offer badge said "Up to 34% off".
 
 `opts.designReferenceUrl` passes a proven winner as the FIRST image to match its design language; `opts.compositionTransfer` = a competitor imitation (reuse layout, swap ALL content to ours). The regenerate-on-fail cap ([[creative-agent]] `MAX_QA_ATTEMPTS`) is **3** (bumped from 2 on 2026-07-13) so the stricter packaging-text QC has room to land a clean take instead of starving the batch count.
 
