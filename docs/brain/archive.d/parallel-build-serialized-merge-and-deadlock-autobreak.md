@@ -1,0 +1,1 @@
+- **Goal builds parallelize across lanes (serialized rebase-merge) + serializer deadlock auto-break** · verified 2026-07-16 · → [[lifecycles/spec-goal-branch-pm-flow]]
