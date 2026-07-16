@@ -240,3 +240,124 @@ export function planCreativePackInserts(input: CreativePackInsertsInput): Creati
     angleMetadataCopyPack: { copy_pack: copyPack },
   };
 }
+
+// ── Phase 3 — deterministic 'pack complete' gate Bianca's publish can require ────────────────────
+//
+// The publish-time RE-check on ALREADY-PERSISTED rows. Where `planCreativePackInserts` refuses
+// a malformed pack at AUTHORING time (Dahlia's write side), `isCreativePackComplete` refuses to
+// let Bianca PUBLISH a half-pack — a creative that lost a sibling render, had its copy overwritten
+// to <4 variations, or was manually inserted without going through the planner. Pure predicate:
+// no DB, no fetch — the caller loads the ad_videos siblings + the angle's copy_pack and hands
+// the snapshot in.
+//
+// Reason strings are STABLE (grep-able) so downstream logs / director-activity rows can categorize
+// a not-ready creative rather than shrug at a boolean. Each verification bullet in the spec's
+// Phase 3 maps to one of these reasons — the test file pins each one.
+
+/** The subset of an `ad_videos` row `isCreativePackComplete` needs to inspect one placement static.
+ *  Any field the predicate doesn't read is left out — the caller can pass a wider row and TS is
+ *  happy. `format_variant_of_id` is `null` on the canonical row + the campaign_id of that row is
+ *  the two siblings' `format_variant_of_id` — same-psychology invariant. */
+export interface PackAdVideoLike {
+  format: string;
+  media_kind: string;
+  status: string;
+  format_variant_of_id: string | null;
+}
+
+/** The subset of an angle's `metadata` JSONB `isCreativePackComplete` needs — the 4×4 copy pack
+ *  Dahlia persists under `copy_pack` (via `planCreativePackInserts.angleMetadataCopyPack`). Field
+ *  keys mirror `MetaCopyPack` (camelCase: `primaryTexts` — the shape Phase 2 writes into JSONB).
+ *  When the angle row is missing (or its metadata carries no `copy_pack`), the pack is not
+ *  complete and the predicate says why. */
+export interface PackAngleMetadataLike {
+  copy_pack?: { headlines?: unknown; primaryTexts?: unknown } | null;
+}
+
+/** What `isCreativePackComplete` inspects for one campaign. */
+export interface CreativePackSnapshot {
+  /** ALL `ad_videos` rows for the campaign — the predicate finds the canonical (`format='feed_4x5'`
+   *  AND `format_variant_of_id IS NULL`) and its siblings by `format_variant_of_id = canonical.id`.
+   *  Rows must be `media_kind='static'` AND `status='ready'` to count. */
+  adVideos: PackAdVideoLike[];
+  /** The canonical row's id — Bianca's publish path already knows it (it queries by campaign_id +
+   *  format_variant_of_id IS NULL); passed in so the predicate can filter siblings by that id
+   *  without re-deriving. When null, the canonical row itself is missing. */
+  canonicalId: string | null;
+  /** The angle's `metadata` JSONB (or null if the campaign carries no `angle_id`). */
+  angleMetadata: PackAngleMetadataLike | null;
+}
+
+/** Stable reason strings for a not-ready pack — the sibling publish gate branches on these
+ *  (never on free-text). Add sparingly; every one is asserted by the Phase-3 test. */
+export type CreativePackIncompleteReason =
+  | "canonical_missing"
+  | "canonical_not_ready"
+  | "missing_9x16_sibling"
+  | "missing_right_column_1x1_sibling"
+  | "copy_pack_missing"
+  | "headlines_below_min"
+  | "primary_texts_below_min";
+
+export type CreativePackReadiness =
+  | { ready: true }
+  | { ready: false; reason: CreativePackIncompleteReason; detail: string };
+
+const isReadyStatic = (r: PackAdVideoLike): boolean => r.media_kind === "static" && r.status === "ready";
+
+/**
+ * isCreativePackComplete — the deterministic gate. Returns `{ ready: true }` when the campaign
+ * carries all 3 placement statics (canonical `feed_4x5` + a 9:16 sibling + a `right_column_1x1`
+ * sibling, all `media_kind='static'` AND `status='ready'`) AND its angle's `metadata.copy_pack`
+ * holds ≥4 headlines + ≥4 primary texts. Otherwise `{ ready: false, reason, detail }` — one of
+ * the seven stable `CreativePackIncompleteReason` values so Bianca's publish gate + any downstream
+ * telemetry can BRANCH on the machine-readable reason (never a free-text string).
+ *
+ * The ORDER of checks matters: canonical first (nothing else matters without it), then each
+ * sibling by placement, then the copy pack. The first failure short-circuits, so `detail` names
+ * only the FIRST missing piece — a half-pack is diagnosed on its most-fundamental defect.
+ */
+export function isCreativePackComplete(snap: CreativePackSnapshot): CreativePackReadiness {
+  const { adVideos, canonicalId, angleMetadata } = snap;
+
+  // 1. Canonical row — feed_4x5, format_variant_of_id NULL, media_kind='static', status='ready'.
+  const canonical = canonicalId
+    ? adVideos.find((r) => r.format === "feed_4x5" && r.format_variant_of_id === null)
+    : undefined;
+  if (!canonical) {
+    return { ready: false, reason: "canonical_missing", detail: "no feed_4x5 canonical ad_videos row for this campaign" };
+  }
+  if (!isReadyStatic(canonical)) {
+    return { ready: false, reason: "canonical_not_ready", detail: `canonical feed_4x5 is media_kind=${canonical.media_kind}, status=${canonical.status} (need static+ready)` };
+  }
+
+  // 2. Siblings — everything that points at the canonical via format_variant_of_id and is a
+  //    ready static. Then check placement coverage (a 9:16 AND a right_column_1x1).
+  const siblings = adVideos.filter((r) => r.format_variant_of_id === canonicalId && isReadyStatic(r));
+  const covers9x16 = siblings.some((r) => r.format === "stories_9x16" || r.format === "reels_9x16");
+  if (!covers9x16) {
+    return { ready: false, reason: "missing_9x16_sibling", detail: "no stories_9x16 or reels_9x16 sibling ad_videos row (media_kind=static+status=ready) linked to canonical" };
+  }
+  const coversRightColumn = siblings.some((r) => r.format === "right_column_1x1");
+  if (!coversRightColumn) {
+    return { ready: false, reason: "missing_right_column_1x1_sibling", detail: "no right_column_1x1 sibling ad_videos row (media_kind=static+status=ready) linked to canonical" };
+  }
+
+  // 3. Copy pack — 4×4 on the angle's metadata JSONB (Dahlia writes it at authoring time via
+  //    planCreativePackInserts). A missing pack, a wrong shape, or a below-min count are each a
+  //    named reason so downstream can distinguish "never authored" from "shrunk after author".
+  const pack = angleMetadata?.copy_pack ?? null;
+  if (!pack) {
+    return { ready: false, reason: "copy_pack_missing", detail: "no copy_pack on angle metadata (Dahlia's 4x4 headlines + primary texts missing)" };
+  }
+  const headlines = Array.isArray(pack.headlines) ? (pack.headlines as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0) : [];
+  const primaryTexts = Array.isArray(pack.primaryTexts) ? (pack.primaryTexts as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0) : [];
+  if (headlines.length < CREATIVE_PACK_MIN.headlines) {
+    return { ready: false, reason: "headlines_below_min", detail: `copy_pack.headlines has ${headlines.length} non-empty entries (need ≥${CREATIVE_PACK_MIN.headlines})` };
+  }
+  if (primaryTexts.length < CREATIVE_PACK_MIN.primaryTexts) {
+    return { ready: false, reason: "primary_texts_below_min", detail: `copy_pack.primaryTexts has ${primaryTexts.length} non-empty entries (need ≥${CREATIVE_PACK_MIN.primaryTexts})` };
+  }
+
+  return { ready: true };
+}

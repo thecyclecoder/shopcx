@@ -19,8 +19,12 @@ import {
   buildMetaCopyPack,
   placementPackPlan,
   planCreativePackInserts,
+  isCreativePackComplete,
   CREATIVE_PACK_MIN,
   type RenderedPlacement,
+  type CreativePackSnapshot,
+  type PackAdVideoLike,
+  type PackAngleMetadataLike,
 } from "./creative-pack";
 
 function makeAngle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
@@ -171,4 +175,137 @@ test("planCreativePackInserts — rejects a copy pack with fewer than 4 headline
     }),
     /≥4 primary texts/,
   );
+});
+
+// ── Phase 3 — `isCreativePackComplete` (the deterministic gate Bianca's publish consults) ────────
+
+const CANONICAL_ID = "canonical-video-id";
+
+/** Build a snapshot with the canonical + N siblings + a full 4×4 copy pack, ALL ready-static. Each
+ *  test then mutates ONE piece to prove the corresponding named reason fires. */
+function fullPackSnapshot(): CreativePackSnapshot {
+  const canonical: PackAdVideoLike & { id: string } = {
+    id: CANONICAL_ID,
+    format: "feed_4x5",
+    media_kind: "static",
+    status: "ready",
+    format_variant_of_id: null,
+  };
+  const sib9x16: PackAdVideoLike = {
+    format: "stories_9x16",
+    media_kind: "static",
+    status: "ready",
+    format_variant_of_id: CANONICAL_ID,
+  };
+  const sibRightColumn: PackAdVideoLike = {
+    format: "right_column_1x1",
+    media_kind: "static",
+    status: "ready",
+    format_variant_of_id: CANONICAL_ID,
+  };
+  const angleMetadata: PackAngleMetadataLike = {
+    copy_pack: {
+      headlines: ["h1", "h2", "h3", "h4"],
+      primaryTexts: ["p1", "p2", "p3", "p4"],
+    },
+  };
+  return { adVideos: [canonical, sib9x16, sibRightColumn], canonicalId: CANONICAL_ID, angleMetadata };
+}
+
+test("isCreativePackComplete — returns ready=true when all 3 placement statics + 4×4 copy pack are present", () => {
+  const result = isCreativePackComplete(fullPackSnapshot());
+  assert.equal(result.ready, true, `expected ready=true; got ${JSON.stringify(result)}`);
+});
+
+test("isCreativePackComplete — reels_9x16 counts as the 9:16 sibling (Meta rotates Stories + Reels on the same static)", () => {
+  const snap = fullPackSnapshot();
+  const sib = snap.adVideos.find((r) => r.format === "stories_9x16");
+  if (sib) sib.format = "reels_9x16";
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, true, `reels_9x16 should satisfy 9:16 coverage; got ${JSON.stringify(result)}`);
+});
+
+test("isCreativePackComplete — canonical missing → ready=false + reason=canonical_missing", () => {
+  const snap = fullPackSnapshot();
+  snap.adVideos = snap.adVideos.filter((r) => r.format !== "feed_4x5");
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "canonical_missing");
+  assert.ok(result.detail.length > 0, "detail string must be non-empty (diagnosable)");
+});
+
+test("isCreativePackComplete — canonical present but not ready (status=pending) → reason=canonical_not_ready", () => {
+  const snap = fullPackSnapshot();
+  const canonical = snap.adVideos.find((r) => r.format === "feed_4x5");
+  if (canonical) canonical.status = "pending";
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "canonical_not_ready");
+});
+
+test("isCreativePackComplete — no 9:16 sibling (only right-column) → reason=missing_9x16_sibling", () => {
+  const snap = fullPackSnapshot();
+  snap.adVideos = snap.adVideos.filter((r) => r.format !== "stories_9x16" && r.format !== "reels_9x16");
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "missing_9x16_sibling");
+});
+
+test("isCreativePackComplete — no right-column sibling (Phase-1 DB format) → reason=missing_right_column_1x1_sibling", () => {
+  const snap = fullPackSnapshot();
+  snap.adVideos = snap.adVideos.filter((r) => r.format !== "right_column_1x1");
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "missing_right_column_1x1_sibling");
+});
+
+test("isCreativePackComplete — angle metadata has no copy_pack → reason=copy_pack_missing", () => {
+  const snap = fullPackSnapshot();
+  snap.angleMetadata = {};
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "copy_pack_missing");
+});
+
+test("isCreativePackComplete — <4 headlines → reason=headlines_below_min", () => {
+  const snap = fullPackSnapshot();
+  snap.angleMetadata = { copy_pack: { headlines: ["only", "three", "here"], primaryTexts: ["p1", "p2", "p3", "p4"] } };
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "headlines_below_min");
+  assert.ok(/3/.test(result.detail) || /below/i.test(result.reason), "detail should name the actual count");
+});
+
+test("isCreativePackComplete — <4 primary texts → reason=primary_texts_below_min", () => {
+  const snap = fullPackSnapshot();
+  snap.angleMetadata = { copy_pack: { headlines: ["h1", "h2", "h3", "h4"], primaryTexts: ["only", "two"] } };
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "primary_texts_below_min");
+});
+
+test("isCreativePackComplete — empty-string headlines don't count toward the min (whitespace-only is not a headline)", () => {
+  const snap = fullPackSnapshot();
+  snap.angleMetadata = { copy_pack: { headlines: ["real", "", "  ", "another"], primaryTexts: ["p1", "p2", "p3", "p4"] } };
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "headlines_below_min");
+});
+
+test("isCreativePackComplete — a sibling that ISN'T status=ready doesn't satisfy its placement", () => {
+  const snap = fullPackSnapshot();
+  const sib = snap.adVideos.find((r) => r.format === "right_column_1x1");
+  if (sib) sib.status = "pending";
+  const result = isCreativePackComplete(snap);
+  assert.equal(result.ready, false);
+  if (result.ready) return;
+  assert.equal(result.reason, "missing_right_column_1x1_sibling");
 });
