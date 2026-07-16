@@ -1,6 +1,7 @@
 /**
- * ada-reacts-to-approvals-immediately-never-sits Phase 2 verification — the pure tag decision
- * (`tagPendingActionType`) the build worker's raise chokepoint runs on every incoming action.
+ * ada-reacts-to-approvals-immediately-never-sits Phase 2 (+ Fix 1 fail-closed hardening)
+ * verification — the pure tag decision (`tagPendingActionType`) the build worker's raise
+ * chokepoint runs on every incoming action.
  *
  * The failing state Phase 2 closes: an additive `apply-*-migration.ts` action arrives self-tagged
  * `run_prod_script` (the model couched it as a shell command), the leash gate returns null for a
@@ -9,6 +10,11 @@
  * exact shape to `apply_migration` iff the wrapped SQL is verifiably additive, and preserves the
  * `routeOutOfLeashAction` boundary (destructive / non-migration scripts still escalate).
  *
+ * The Fix-1 hardening layer (security-review coaching, "untrusted capability boundary") locks the
+ * reclassify path to a SINGLE, ANCHORED cmd shape — no compound commands, no extra argv, no shell
+ * metacharacters, missing / unreadable script or SQL fail-closed to run_prod_script, and the
+ * model-declared `preview` is NEVER trusted as input to the additive verdict.
+ *
  *   npx tsx --test src/lib/migration-safety-tag-pending-action.test.ts
  */
 import test from "node:test";
@@ -16,6 +22,7 @@ import assert from "node:assert/strict";
 import {
   tagPendingActionType,
   resolveMigrationSqlForClassification,
+  parseSingleApplyMigrationCommand,
   APPLY_MIGRATION_SCRIPT_REGEX,
   classifyMigrationSql,
 } from "./migration-safety";
@@ -56,6 +63,7 @@ test("(V1) an additive scripts/apply-*-migration.ts action self-tagged run_prod_
     "add usage_snapshots table + trial_ended_at column",
     readFile,
   );
+  assert.ok(sql != null, "the resolver must return a non-null string for the happy path");
   assert.equal(classifyMigrationSql(sql).severity, "additive");
 });
 
@@ -136,6 +144,221 @@ test("(V2 preview-only spoof) a run_prod_script that DECLARES additive SQL in pr
     readFile,
   );
   assert.equal(type, "run_prod_script");
+});
+
+// ── Fix 1 regression suite — fail-closed hardening (security-review remediation) ─────────────────
+
+test("(F1 compound `;`) a compound cmd `apply-foo-migration.ts; rm -rf /` stays run_prod_script — reclassification MUST NOT happen when a second command trails the apply", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts; rm -rf /",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 compound `&&`) a compound cmd chained with `&&` stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts && curl https://evil.example.com",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 pipe `|`) a piped cmd stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts | tee out.log",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 substitution `$(...)`) a cmd with command substitution stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts $(cat /etc/passwd)",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 backticks) a cmd with backtick expansion stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts `whoami`",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 redirect `>`) a cmd with output redirection stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts > /tmp/x",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 extra argv) a cmd with extra positional argv AFTER the script filename stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  // `--apply` on the end is a flag many other scripts accept — accepting it here would let an
+  // attacker sneak args through the "same shape" test even though the accepted apply-migration
+  // shape has NO flags in it.
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts --apply",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 leading-dash between) a `--yes`-style flag between npx and tsx (option-looking value) stays run_prod_script", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx --yes tsx scripts/apply-foo-migration.ts",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 missing script) a cmd whose apply script cannot be read stays run_prod_script (fail-closed on unreadable script — prevents preview-spoof reclassify)", () => {
+  const readFile = makeReadFile({
+    // NO entry for scripts/apply-foo-migration.ts
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "additive-sounding preview that must not carry the leash decision alone",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 missing SQL ref) an apply script whose referenced .sql file cannot be read stays run_prod_script (fail-closed on unreadable SQL — no partial-classification pass)", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_missing.sql"];`,
+    // NO entry for supabase/migrations/20260101000000_missing.sql
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 disk source is truth) a script whose SOURCE is destructive stays run_prod_script even if the ACTION preview declares additive SQL — preview never trusted for the leash decision", () => {
+  // The disk source contains a `DROP TABLE`; a would-be attacker fills preview with harmless
+  // additive text. The classifier must run on-disk contents only, so this MUST NOT reclassify.
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_drop.sql"];`,
+    "supabase/migrations/20260101000000_drop.sql": `DROP TABLE public.important;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "ALTER TABLE t ADD COLUMN c int;", // spoofed additive-looking preview
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F1 bare `tsx`) the shape `tsx scripts/apply-<slug>-migration.ts` (no npx prefix) IS accepted — matches deployment convention where tsx is on PATH", () => {
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": `const M = ["20260101000000_add.sql"];`,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "tsx scripts/apply-foo-migration.ts",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "apply_migration");
+});
+
+test("(F1 parser) parseSingleApplyMigrationCommand: pinning the exact accepted argv shape (canonical rejection matrix)", () => {
+  // Accept: two anchored shapes only
+  assert.deepEqual(
+    parseSingleApplyMigrationCommand("npx tsx scripts/apply-foo-migration.ts"),
+    { scriptFileName: "apply-foo-migration.ts" },
+  );
+  assert.deepEqual(
+    parseSingleApplyMigrationCommand("tsx scripts/apply-foo-migration.ts"),
+    { scriptFileName: "apply-foo-migration.ts" },
+  );
+  // Reject: every deviation
+  const rejects = [
+    "", // empty
+    "   ", // whitespace
+    "scripts/apply-foo-migration.ts", // missing tsx runner
+    "node scripts/apply-foo-migration.ts", // wrong runner (only tsx/npx tsx accepted)
+    "npx tsx scripts/apply-foo-migration.ts --apply", // trailing flag
+    "npx tsx scripts/apply-foo-migration.ts extra-arg", // trailing positional
+    "npx tsx scripts/apply-foo-migration.ts ;", // trailing semi
+    "npx tsx scripts/apply-foo-migration.ts && echo done", // compound &&
+    "npx tsx scripts/apply-foo-migration.ts | tee out", // pipe
+    "npx tsx scripts/apply-foo-migration.ts > out", // redirect
+    "npx tsx scripts/apply-foo-migration.ts $(id)", // substitution
+    "`npx tsx scripts/apply-foo-migration.ts`", // backticks
+    "npx --yes tsx scripts/apply-foo-migration.ts", // flag between npx and tsx
+    "npx tsx scripts/apply-foo.ts", // wrong suffix
+    "npx tsx scripts/_backfill-foo.ts", // wrong prefix
+    "npx tsx scripts/apply-foo-migration.ts\nrm -rf /", // newline injection
+    "npx tsx /etc/passwd", // path traversal (missing scripts/ prefix)
+    "npx tsx scripts/../etc/passwd", // path traversal via `..`
+  ];
+  for (const cmd of rejects) {
+    assert.equal(
+      parseSingleApplyMigrationCommand(cmd),
+      null,
+      `parser must REJECT ${JSON.stringify(cmd)}`,
+    );
+  }
 });
 
 test("(V2 mixed) an apply-*-migration.ts referencing MULTIPLE .sql files with ANY non-additive statement stays run_prod_script", () => {
