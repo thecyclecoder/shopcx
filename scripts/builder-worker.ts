@@ -52,6 +52,11 @@ import { reclassifyHarnessFails } from "../src/lib/spec-test-harness-classifier"
 // typed helper so a nonexistent column (e.g. the historical `merge_sha` selects here that silently
 // 42703'd) is a tsc error, not an empty-row read at runtime.
 import { jobSelect } from "../src/lib/agent-jobs-columns";
+// box-serial-claim-cooldown-wedge-guard Phase 1 — live-DB verifier for the
+// `public.claim_agent_job(text[])` cooldown predicate. Called before the build/plan claim
+// loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
+// an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
+import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -76,6 +81,12 @@ const POLL_MS = 5000;
 // re-picking the same held build every POLL_MS tick. Bounded short — long enough to stop the churn, short
 // enough that a build releases promptly once Vale passes / its blocker ships (the escort also re-releases).
 const BUILD_GATE_HOLD_COOLDOWN_MS = 90 * 1000; // 90s back-off on a gate hold
+// box-serial-claim-cooldown-wedge-guard Phase 1 — how often the poll loop re-verifies the
+// live `public.claim_agent_job(text[])` cooldown predicate. Bounded so a DDL-drift regression
+// surfaces within minutes on the box tile, but not so frequent that pg_get_functiondef
+// (indexed catalog read) dominates the shared pool. Cached between checks so the hot claim
+// loop pays a memory read instead of a DB round-trip.
+const CLAIM_COOLDOWN_VERIFY_INTERVAL_MS = 10 * 60 * 1000; // 10 min TTL
 // Build liveness (build-all-phases-chain Part B): a multi-phase build can legitimately work for
 // 40+ min, so don't guillotine on wall-clock. Instead kill only if the build subprocess goes
 // SILENT for BUILD_IDLE_TIMEOUT_MS (hung), with BUILD_HARD_CAP_MS as a generous backstop against a
@@ -473,6 +484,40 @@ let lastSelfUpdateCheck = 0;
 // gives no cause without SSHing to the box). Set at every early-return branch below; cleared to null on
 // the fully-current fast-path + the successful update path. The poll loop passes this into writeHeartbeat.
 let selfUpdateSkipReason: string | null = null;
+
+// box-serial-claim-cooldown-wedge-guard Phase 1 — cached verdict + TTL for the live
+// claim_agent_job cooldown check. The build/plan claim loop asks
+// `ensureClaimAgentJobCooldownVerified()` each pass; the helper re-probes only after
+// CLAIM_COOLDOWN_VERIFY_INTERVAL_MS has elapsed. On a failed probe the poll loop skips
+// the build/plan claim block AND writes a `needs_attention` worker heartbeat carrying the
+// verifier's reason — the operator sees the exact predicate-missing signal on the box tile
+// instead of a silent stale-worker mystery.
+let cachedClaimCooldownVerdict: ClaimCooldownVerification | null = null;
+let lastClaimCooldownVerifyAt = 0;
+async function ensureClaimAgentJobCooldownVerified(): Promise<ClaimCooldownVerification> {
+  const now = Date.now();
+  if (cachedClaimCooldownVerdict && now - lastClaimCooldownVerifyAt < CLAIM_COOLDOWN_VERIFY_INTERVAL_MS) {
+    return cachedClaimCooldownVerdict;
+  }
+  lastClaimCooldownVerifyAt = now;
+  try {
+    cachedClaimCooldownVerdict = await verifyClaimAgentJobCooldown();
+  } catch (e) {
+    // Any unexpected throw from the verifier itself is treated as fail-open — the verifier is
+    // defensive; wedging the box on its OWN check would be worse than the regression it detects.
+    cachedClaimCooldownVerdict = {
+      ok: true,
+      probed: false,
+      reason: `verifyClaimAgentJobCooldown threw (failing open): ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (!cachedClaimCooldownVerdict.ok) {
+    console.error(`[claim-cooldown-verify] ${cachedClaimCooldownVerdict.reason}`);
+  } else if (cachedClaimCooldownVerdict.probed) {
+    console.log(`[claim-cooldown-verify] ${cachedClaimCooldownVerdict.reason}`);
+  }
+  return cachedClaimCooldownVerdict;
+}
 
 // Control Tower migration-drift check (control-tower-migration-drift-check P1): a periodic box job
 // that diffs every migration-created table against the live public schema. Runs here (not as an
@@ -26013,17 +26058,70 @@ async function main() {
         console.log(`claimed storefront-optimizer ${job.id.slice(0, 8)} → ${countStorefrontOptimizer() + 1}/${MAX_STOREFRONT_OPTIMIZER} storefront-optimizer lane`);
         launch(job);
       }
-      // Fill the build/plan pool.
-      while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT) {
-        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
-        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
-        if (!job || !job.id) break;
-        // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
-        // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
-        // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
-        if (await claimHeldForUnreviewedSpec(job)) continue;
-        console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
-        launch(job);
+      // box-serial-claim-cooldown-wedge-guard Phase 1 — verify the live claim RPC still
+      // honors the `(claimed_at is null or claimed_at <= now())` cooldown BEFORE opening the
+      // build/plan claim block. If DDL drift removed the predicate, a gate-released build with
+      // a future claimed_at is immediately re-claimable and the poll loop wedges on the same
+      // row forever — silent to the operator. On a failed probe we SKIP the build/plan claim
+      // block entirely for this tick; the writeHeartbeat below escalates the box tile to
+      // `needs_attention` with the verifier's reason. Non-build lanes (fold, ticket-*, grades,
+      // …) keep claiming — a claim-RPC cooldown regression only bites the build/plan gate
+      // path that stamps future claimed_at values. Verdict is cached with a TTL so this is a
+      // cheap memory read on the hot path.
+      const claimCooldownVerdict = await ensureClaimAgentJobCooldownVerified();
+      if (!claimCooldownVerdict.ok) {
+        console.warn(
+          `[build-plan-claim] skipped this tick — live claim_agent_job cooldown check failed: ${claimCooldownVerdict.reason}`,
+        );
+      } else {
+        // Fill the build/plan pool.
+        while (laneHasQueued(queuedKinds, ["build", "plan"]) && countOther() < MAX_CONCURRENT) {
+          const { data } = await db.rpc("claim_agent_job", { p_kinds: ["build", "plan"] });
+          const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+          if (!job || !job.id) break;
+          // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
+          // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
+          // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
+          if (await claimHeldForUnreviewedSpec(job)) continue;
+          // box-serial-claim-cooldown-wedge-guard Phase 1 — SYNCHRONOUS pre-launch serial-claim
+          // decision. The goal-member serializer used to run INSIDE runBuild (async, fire-and-
+          // forget from launch), so on a "held" verdict the cooldown write raced the next
+          // claim RPC — a broken RPC could re-claim the same row on the same tick and wedge
+          // the loop without ever writing a heartbeat. We now evaluate the same verdict
+          // synchronously here: on `action === "release"`, write the future claimed_at
+          // cooldown AND `break` out of the loop for this poll pass, so the next iteration
+          // can't hand us the same row. The claim-gate inside runBuild still runs as
+          // defense-in-depth (it also covers spec_row_missing / cross-goal blockers). Only
+          // `build` is serialized — a `plan` kind is short-lived scheduling, never a
+          // goal-mate collision, so it falls through to launch. Best-effort: a serializer
+          // error just falls through to launch (the in-runBuild gate remains).
+          if (job.kind === "build" && job.spec_slug) {
+            try {
+              const { evaluateGoalMemberBuildDispatch, decideSerialClaimDispatchOutcome } = await import("../src/lib/agent-jobs");
+              const serial = await evaluateGoalMemberBuildDispatch(job.workspace_id, job.spec_slug);
+              const outcome = decideSerialClaimDispatchOutcome({ serial });
+              if (outcome.action === "release") {
+                const holdUntil = new Date(Date.now() + BUILD_GATE_HOLD_COOLDOWN_MS).toISOString();
+                await update(job.id, {
+                  status: "queued",
+                  claimed_at: holdUntil,
+                  log_tail: `serial-claim released (pre-launch) — ${outcome.reason ?? ""}`.slice(-2000),
+                });
+                console.log(
+                  `[serial-claim] released ${job.spec_slug} (${job.id.slice(0, 8)}) cooldown=${Math.round(BUILD_GATE_HOLD_COOLDOWN_MS / 1000)}s — exiting build/plan claim loop this pass: ${outcome.reason ?? ""}`,
+                );
+                break; // exit the poll pass so a broken claim RPC cannot re-hand us the same row
+              }
+            } catch (e) {
+              console.error(
+                `[serial-claim] pre-launch decision failed for ${job.spec_slug} (${job.id.slice(0, 8)}); falling through to launch (runBuild gate remains):`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+          }
+          console.log(`claimed ${job.spec_slug} → ${countOther() + 1}/${MAX_CONCURRENT} build lanes`);
+          launch(job);
+        }
       }
       // claim-rpc-kill-switch-enforcement Phase 2 — after every per-kind claim loop has run,
       // ask public.claim_agent_job_diag which queued rows the current kill_switches state
@@ -26071,7 +26169,19 @@ async function main() {
       // box-self-update-persist-skip-reason: surface WHY maybeSelfUpdate skipped on the box tile (Control
       // Tower's evalWorker already puts row.detail into the red-tile payload). Null on the fully-current
       // fast-path so a green tile stays green; a set reason flips 'stuck for 1h' → 'stuck for 1h · <cause>'.
-      await writeHeartbeat(active.size, "healthy", selfUpdateSkipReason ?? undefined, lanes);
+      //
+      // box-serial-claim-cooldown-wedge-guard Phase 1 — escalate to `needs_attention` when the
+      // live claim_agent_job cooldown verifier failed. The operator sees "claim RPC contract
+      // broken" on the box tile instead of a silent stale-worker mystery; the build/plan
+      // claim block above is already gated off for the same reason. A `needs_attention`
+      // status also blocks the self-update path (below) — self-updating onto a broken DB
+      // contract wouldn't help. Verifier reason wins over selfUpdateSkipReason on a red tick.
+      const claimCooldownFailedNow = cachedClaimCooldownVerdict && !cachedClaimCooldownVerdict.ok;
+      const boxStatus = claimCooldownFailedNow ? "needs_attention" : "healthy";
+      const boxDetail = claimCooldownFailedNow
+        ? cachedClaimCooldownVerdict!.reason
+        : (selfUpdateSkipReason ?? undefined);
+      await writeHeartbeat(active.size, boxStatus, boxDetail, lanes);
 
       // Control Tower migration-drift check (control-tower-migration-drift-check P1): fire-and-forget
       // on its ~30 min cadence, with an in-flight guard so a slow DB read never overlaps or stalls the
