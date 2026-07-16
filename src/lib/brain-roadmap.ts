@@ -39,7 +39,7 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
@@ -1430,34 +1430,110 @@ export function deriveSpecStatusFromMarkdown(raw: string): SpecStatus {
   return parseAuthoredSpecMarkdown("_", raw).status;
 }
 
+// db-load-getspec-cache — wrapper-level result cache. `getSpec` fires four round-trips per uncached
+// call: (1) the inner `getSpecFromDb` (~12.6% of DB calls in the pg_stat audit), plus three
+// full-workspace scans — (2) `listSpecsFromDb` for the blocker set, (3) `listGoalsFromDb` inside
+// `buildGoalMembershipMap`, (4) `getSpecCardStates`. The inner `specs-table` cache only skips (1)
+// on hit; this wrapper skips ALL FOUR. TTL matches the inner cache (`SPEC_CACHE_TTL_MS = 15_000`)
+// so a wrapper hit and an inner hit lapse together, and freshness is bounded the same way.
+// Invalidation: every writer path in `specs-table.ts` calls `invalidateSpecCache(ws, slug)`, which
+// fires the listener below to evict this wrapper's (ws, slug) entry AND the workspace-level maps
+// under (b) — the exact write-set specs-table already invalidates, so no writer path is missed.
+const GET_SPEC_WRAPPER_TTL_MS = 15_000;
+type GetSpecCached = { raw: string; card: SpecCard } | null;
+type GetSpecCacheEntry = { value: GetSpecCached; expiresAt: number };
+const getSpecWrapperCache = new Map<string, GetSpecCacheEntry>();
+
+// db-load-getspec-cache (b) — workspace-scoped memoization for the two full-workspace scans
+// `resolveBlockedBy` needs on a wrapper miss (the goal-membership index + the spec_card_state
+// overlay). Same TTL as the wrapper cache, invalidated on any write to any spec in the workspace
+// (conservative — recomputation on the next miss is cheap; correctness matters more than shaving
+// a rare recompute).
+type WorkspaceMapsEntry = {
+  goalByBlockerSlug: ReadonlyMap<string, GoalMembership>;
+  cardStates: Record<string, import("@/lib/spec-card-state").SpecCardState>;
+  allRows: SpecRow[];
+  expiresAt: number;
+};
+const workspaceMapsCache = new Map<string, WorkspaceMapsEntry>();
+
+function getSpecCacheKey(workspaceId: string, slug: string): string {
+  return `${workspaceId}::${slug}`;
+}
+
+onSpecCacheInvalidate((workspaceId, slug) => {
+  getSpecWrapperCache.delete(getSpecCacheKey(workspaceId, slug));
+  // Any spec write in the workspace may shift the goal-membership index (a milestone reassignment,
+  // a status flip, a blocker rewrite), so drop the workspace maps too — the next miss rebuilds.
+  workspaceMapsCache.delete(workspaceId);
+});
+
+async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<WorkspaceMapsEntry> {
+  const now = Date.now();
+  const cached = workspaceMapsCache.get(workspaceId);
+  if (cached && now < cached.expiresAt) return cached;
+  const allRows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
+  const goalByBlockerSlug = await buildGoalMembershipMap(workspaceId, allRows);
+  let cardStates: Record<string, import("@/lib/spec-card-state").SpecCardState> = {};
+  try {
+    const { getSpecCardStates } = await import("@/lib/spec-card-state");
+    cardStates = await getSpecCardStates(workspaceId);
+  } catch {
+    /* best-effort — the canonical row is still correct without the overlay. */
+  }
+  const entry: WorkspaceMapsEntry = {
+    goalByBlockerSlug,
+    cardStates,
+    allRows,
+    expiresAt: now + GET_SPEC_WRAPPER_TTL_MS,
+  };
+  workspaceMapsCache.set(workspaceId, entry);
+  return entry;
+}
+
+/** Test-only cache reset for the wrapper + workspace-maps caches. Never called by production paths. */
+export function clearGetSpecWrapperCacheForTests(): void {
+  getSpecWrapperCache.clear();
+  workspaceMapsCache.clear();
+}
+
 export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {
   if (!/^[a-z0-9-]+$/i.test(slug)) return null;
   const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
   if (!wsId) return null;
+  // db-load-getspec-cache — wrapper hit skips all four round-trips.
+  const cacheKey = getSpecCacheKey(wsId, slug);
+  const cached = getSpecWrapperCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
   // spec-readers-from-db-retire-parser Phase 1: ONE SQL query for the card + reconstruct raw from the row.
   // No fs read, no parseSpec. Folded specs are archive territory — return null (matches the old
   // "file gone from disk" shape that the fold worker produced).
   const row = await getSpecFromDb(wsId, slug);
-  if (!row || !isBoardableStatus(row.status)) return null;
+  if (!row || !isBoardableStatus(row.status)) {
+    getSpecWrapperCache.set(cacheKey, { value: null, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+    return null;
+  }
   let card = dbRowToSpecCard(row);
   // Resolve Blocked-by against the live workspace set so the detail page's BuildButton sees the same
   // cleared/uncleared state as the board (spec-blockers). one-off-spec-depending-on-goal-work-blocks-
   // on-the-goal-not-the-member-spec Phase 1 — the workspace goal-membership index (loaded once from
   // the SAME listSpecs rows readSpecsFromDb consumes) so the outside-dependent normalization runs on
   // the single-slug getSpec path (BuildButton) with the exact same predicate as the board.
-  const allRows = (await listSpecsFromDb(wsId)).filter((r) => isBoardableStatus(r.status));
-  const specs = allRows.map(dbRowToSpecCard);
-  const goalByBlockerSlug = await buildGoalMembershipMap(wsId, allRows);
-  card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])), goalByBlockerSlug);
-  // Card-state overlay for the transient short-circuit / one-shot-PR flags that aren't on `public.specs`.
-  try {
-    const { getSpecCardStates } = await import("@/lib/spec-card-state");
-    const cardStates = await getSpecCardStates(wsId);
-    card = overlayCardFlags(card, cardStates[slug]);
-  } catch {
-    /* best-effort overlay — the canonical row is still correct without it. */
+  // db-load-getspec-cache (c) — memoized per-workspace maps; skip the load entirely when the card
+  // has no raw blockers AND the card-state overlay is empty for this slug (nothing to resolve).
+  if (card.blockedBy.length === 0) {
+    // No blockers to resolve — still need the card-state overlay, but keep it cheap via the memo.
+    const maps = await loadWorkspaceMapsMemoized(wsId);
+    card = overlayCardFlags(card, maps.cardStates[slug]);
+  } else {
+    const maps = await loadWorkspaceMapsMemoized(wsId);
+    const specs = maps.allRows.map(dbRowToSpecCard);
+    card.blockedBy = resolveBlockedBy(card, new Map(specs.map((c) => [c.slug, c])), maps.goalByBlockerSlug);
+    card = overlayCardFlags(card, maps.cardStates[slug]);
   }
-  return { raw: serializeSpecRowToMarkdown(row), card };
+  const result: GetSpecCached = { raw: serializeSpecRowToMarkdown(row), card };
+  getSpecWrapperCache.set(cacheKey, { value: result, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+  return result;
 }
 
 /**
