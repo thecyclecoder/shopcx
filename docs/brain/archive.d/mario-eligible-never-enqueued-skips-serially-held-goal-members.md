@@ -1,0 +1,1 @@
+- **Mario's eligible-never-enqueued source must skip goal members the serial-build gate is legitimately holding** · verified 2026-07-16 · → [[../libraries/mario]]
