@@ -29,6 +29,8 @@ Candidates come from `product_ad_angles` (ready hooks), the biggest real transfo
 
 **`META_CAPS` ([[ad-tool-config]]) raised 2026-07-13:** `primary_text` 125 → **600** (125 was the "…See more" fold length used as a HARD cap — it forced story-less captions; the fold is a display detail, not a reason to gut the copy), `description` 30 → **90**; `headline` stays 40. The [[ad-validator]] fatal-caps and the [[ad-angles]] LLM prompt read the same constants, so every copy path loosens together.
 
+**Cold-offer rail lives at the PERSISTER, not here (dahlia-audience-temperature-marking-and-cold-offer-gate Phase 2):** `buildMetaCopy` remains **temperature-agnostic** — under Advantage+ the creative IS the audience selector, but this pass has no `audience_temperature` input and never should (it composes copy from the grounded brief). The deterministic rail refusing a cold-audience creative whose caption leaks offer/price language lives one step later, at [[creative-agent]] `insertReadyCreative` — the SOLE bin-insert chokepoint — which reads the row's `audience_temperature` and runs [[lf8]] `hasColdOfferLeak` before writing the [[../tables/ad_campaigns]] row. Placing the rail at the persister (a) keeps `buildMetaCopy` pure, (b) makes the refusal atomic (no half-written row to unwind), and (c) leaves the M1 Max QC free to catch subtler mismatches without owning the offer-leak class probabilistically.
+
 ## Next
 
 The generation step (Nano Banana Pro from the brief) + QA + bin insertion + the cadence lane + the agent's persona (peer to Bianca under Max) build on this. [[../functions/growth]] · [[product-intelligence]] · [[gemini]] · [[winning-creative-detect]].
