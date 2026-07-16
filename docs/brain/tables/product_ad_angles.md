@@ -29,7 +29,7 @@ Generated ad angles per product — each row is one hook × Life Force 8 slot, a
 | `last_performance` | `jsonb` | ✓ |  |
 | `is_active` | `bool` | — | default: `true` |
 | `status` | `text` | — | default: `'approved'` · CHECK in (`proposed`, `approved`, `archived`) — voice-mined candidates land at `proposed` and flip to `approved` on Director sign-off |
-| `metadata` | `jsonb` | — | default: `'{}'` · voice-mining provenance: `{mined_from:{review_ids,cancel_event_ids,ticket_ids}, matrix_overlap, density, score, mechanism_claim, offer}` |
+| `metadata` | `jsonb` | — | default: `'{}'` · voice-mining provenance: `{mined_from:{review_ids,cancel_event_ids,ticket_ids}, matrix_overlap, density, score, mechanism_claim, offer}`; Dahlia's finished creative pack ([[../libraries/creative-pack]]) stamps `{copy_pack:{headlines:[...4], primaryTexts:[...4], description}}` here so Bianca's publish path can read the full 4×4 copy pack without a new column |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |
 
