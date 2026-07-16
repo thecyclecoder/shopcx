@@ -252,10 +252,16 @@ export function tagPendingActionType(
   const scriptRel = `scripts/${parsed.scriptFileName}`;
   const scriptSrc = readFile(scriptRel);
   if (scriptSrc == null) return "run_prod_script";
-  // Fail-closed gate #3: EVERY referenced .sql file must be readable.
-  const sqlRefs = extractSqlReferences(scriptSrc);
+  // Fail-closed gate #3 (Fix 2 — static-analysis rail): if the script does ANY file-read
+  // machinery, every SQL filename must be a STATICALLY EXTRACTABLE literal AND no dynamic
+  // path-construction pattern may appear. Closes the split-suffix attack (`"drop.s" + "ql"`) +
+  // template-interpolation attack (`` `${slug}.sql` ``) that let a script name a SQL file we
+  // never read + never classify. See `analyzeMigrationScriptStatically` for the exact patterns.
+  const scriptShape = analyzeMigrationScriptStatically(scriptSrc);
+  if (scriptShape.verdict === "fail_closed") return "run_prod_script";
+  // Fail-closed gate #4: EVERY referenced .sql file must be readable.
   const sqlContents: string[] = [];
-  for (const rel of sqlRefs) {
+  for (const rel of scriptShape.staticSqlRefs) {
     const sql = readFile(`supabase/migrations/${rel}`);
     if (sql == null) return "run_prod_script";
     sqlContents.push(sql);
@@ -293,9 +299,13 @@ export function resolveMigrationSqlForClassification(
   const scriptRel = `scripts/${parsed.scriptFileName}`;
   const scriptSrc = readFile(scriptRel);
   if (scriptSrc == null) return null;
-  const sqlRefs = extractSqlReferences(scriptSrc);
+  // Fix 2 — the same static-analysis rail as `tagPendingActionType`. Fail-closed when the script
+  // performs dynamic path construction the extractor can't resolve; the caller sees `null` and
+  // stays `run_prod_script`.
+  const scriptShape = analyzeMigrationScriptStatically(scriptSrc);
+  if (scriptShape.verdict === "fail_closed") return null;
   const parts: string[] = [scriptSrc];
-  for (const rel of sqlRefs) {
+  for (const rel of scriptShape.staticSqlRefs) {
     const sql = readFile(`supabase/migrations/${rel}`);
     if (sql == null) return null;
     parts.push(sql);
@@ -305,11 +315,152 @@ export function resolveMigrationSqlForClassification(
 
 /** Extract every `<slug>.sql` filename string-referenced by an apply-migration script's source.
  *  A single script may reference many (e.g. `const MIGRATIONS = ['a.sql', 'b.sql']`); the tagger
- *  fail-closes if any one is unreadable so we can't get a partial-classification pass. */
+ *  fail-closes if any one is unreadable so we can't get a partial-classification pass. Contiguous
+ *  literal `.sql` names only — see `analyzeMigrationScriptStatically` for the dynamic-path
+ *  detection that rejects split-suffix / interpolation attacks BEFORE this extractor runs. */
 function extractSqlReferences(scriptSrc: string): string[] {
   const refs = new Set<string>();
   for (const m of scriptSrc.matchAll(/([a-z0-9_-]+\.sql)/gi)) refs.add(m[1]);
   return Array.from(refs);
+}
+
+/**
+ * ada-reacts-to-approvals-immediately-never-sits Fix 2 — the static-analysis rail. Given an
+ * apply-migration script's SOURCE, classify its shape as `ok` (safe to run the read-every-SQL
+ * gate) or `fail_closed` (unresolvable dynamic path construction detected — the tagger MUST
+ * return `run_prod_script`).
+ *
+ * The observed attack (pre-merge security review):
+ *   ```
+ *   const f = "20260101000000_drop.s" + "ql";
+ *   readFileSync("supabase/migrations/" + f, "utf8");
+ *   ```
+ *   The pre-Fix-2 `extractSqlReferences` regex `/([a-z0-9_-]+\.sql)/gi` matches CONTIGUOUS names
+ *   only — the split `.s" + "ql` produces zero matches, the "every SQL must be readable" gate
+ *   skips over the destructive `drop.sql` at runtime, and the classifier scans only the script
+ *   source (which has no SQL keywords), returning `additive` — Ada in-leash-approves a DROP.
+ *
+ * The rail (all patterns fail-closed to prevent the bypass class):
+ *
+ *   (a) fs machinery + dynamic path construction — a `readFile*` call whose argument list
+ *       contains `+` string concatenation or `${…}` interpolation. Real apply scripts pass the
+ *       path via `resolve(__dirname, "../supabase/migrations", literalName)` (no `+`, no `${}`);
+ *       the attack pattern above hits this rail.
+ *   (b) split `.sql` suffix — any string literal that ENDS in `.s`, `sq`, `sql` when the very
+ *       next token is a `+` concatenation (or a `+` sits immediately BEFORE a string literal
+ *       starting with `ql`, `l`, `sql`). Covers the exact attack + case variants.
+ *   (c) fs machinery + template literal ending in `.sql` with `${…}` interpolation before the
+ *       suffix — a `` `${slug}.sql` `` shape whose filename can't be statically resolved.
+ *   (d) fs machinery + reference to `migrations/` inside a template literal that carries
+ *       `${…}` interpolation — the dynamically-constructed migration path anti-pattern.
+ *   (e) fs machinery with ZERO statically-extractable `.sql` literals AND at least one plausible
+ *       readFile-of-a-variable — the script names no SQL file the extractor can see; if it
+ *       reads at all, it's reading something the classifier can't inspect. Fail closed.
+ *
+ * A script with NO fs machinery (pure inline STATEMENTS array — the `apply-account-matching-
+ * indexes-migration.ts` shape) is `ok`: the script source IS the SQL, and the classifier scans
+ * it directly. Additive real apply scripts (e.g. `apply-account-usage-snapshots-migration.ts`
+ * using `readFileSync(resolve(__dirname, "../supabase/migrations", file), "utf8")` where `file`
+ * ranges over a literal `MIGRATIONS` array) are also `ok` — no `+` in the readFile call, all
+ * SQL names are contiguous string literals extractable by the existing regex.
+ *
+ * PURE — no I/O.
+ */
+export function analyzeMigrationScriptStatically(scriptSrc: string): {
+  verdict: "ok" | "fail_closed";
+  reason?: string;
+  staticSqlRefs: string[];
+} {
+  const staticSqlRefs = extractSqlReferences(scriptSrc);
+  const hasFsMachinery = scriptHasFileReadMachinery(scriptSrc);
+
+  // Rail (b) — split `.sql` suffix, regardless of fs machinery: a script that constructs `.sql`
+  // in fragments is suspicious even without an obvious readFile call (the attacker could evolve
+  // the shape). The five sub-patterns cover the two most common ways to split the suffix.
+  if (hasSplitSqlSuffix(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "split .sql suffix (dynamic filename construction)", staticSqlRefs };
+  }
+
+  // From here down, the fs-free case is safe — no way to read an unclassified SQL file.
+  if (!hasFsMachinery) {
+    return { verdict: "ok", staticSqlRefs };
+  }
+
+  // Rail (a) — `+` string concatenation inside a `readFile*` argument list. Real apply scripts
+  // pass paths via `resolve(...)` / template literals WITHOUT interpolation, so this rail is
+  // narrow enough not to false-positive on the on-disk convention.
+  if (/readFile(?:Sync)?\s*\([^)]*\+[^)]*\)/.test(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "readFile* with `+` concatenation in the path", staticSqlRefs };
+  }
+
+  // Rail (a2) — ANY `${…}` interpolation inside a `readFile*` argument. A template literal is a
+  // dynamic string even when the surrounding regex-visible chars look benign; the leash decision
+  // can't guarantee what the interpolation resolves to at runtime. Real safe scripts pass paths
+  // via `resolve(...)` / plain `"…"` / `'…'` literals — no `${…}` inside the argument list.
+  if (/readFile(?:Sync)?\s*\([^)]*\$\{[^)]*\)/.test(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "readFile* with `${…}` interpolation in the path", staticSqlRefs };
+  }
+
+  // Rail (c) — template literal ending in .sql with `${…}` interpolation before the suffix.
+  if (/`[^`]*\$\{[^}]*\}[^`]*\.sql[^`]*`/.test(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "template-literal `.sql` path with `${…}` interpolation", staticSqlRefs };
+  }
+
+  // Rail (d) — template literal referencing `migrations/` with `${…}` interpolation.
+  if (/`[^`]*migrations[^`]*\$\{[^}]*\}[^`]*`/.test(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "template-literal `migrations/` path with `${…}` interpolation", staticSqlRefs };
+  }
+  if (/`[^`]*\$\{[^}]*\}[^`]*migrations[^`]*`/.test(scriptSrc)) {
+    return { verdict: "fail_closed", reason: "template-literal `migrations/` path with `${…}` interpolation", staticSqlRefs };
+  }
+
+  // Rail (e) — fs machinery is present but the script exposes ZERO statically-extractable .sql
+  // literals. Any dynamic filename the extractor can't see is one we can't classify — fail closed.
+  // Real apply scripts always name at least one .sql literal (per the on-disk convention).
+  if (staticSqlRefs.length === 0) {
+    return { verdict: "fail_closed", reason: "fs machinery with no statically-extractable .sql literal", staticSqlRefs };
+  }
+
+  return { verdict: "ok", staticSqlRefs };
+}
+
+/** True iff the script imports/requires `fs` or calls `readFile*` — signals the script reads
+ *  files from disk, so we must be strict about which files it names.
+ *  PURE. */
+export function scriptHasFileReadMachinery(scriptSrc: string): boolean {
+  if (/\breadFileSync\b/.test(scriptSrc)) return true;
+  if (/\breadFile\b/.test(scriptSrc)) return true;
+  if (/\bfs\.readFile(?:Sync)?\b/.test(scriptSrc)) return true;
+  if (/\brequire\s*\(\s*['"]fs['"]\s*\)/.test(scriptSrc)) return true;
+  if (/\bfrom\s+['"]fs['"]/.test(scriptSrc)) return true;
+  if (/\bimport\s+['"]fs['"]/.test(scriptSrc)) return true;
+  return false;
+}
+
+/** True iff the script contains any fragment-concatenation pattern that could split the `.sql`
+ *  suffix (or the migration path) across `+` string concatenations — the exact bypass the Fix-2
+ *  security review demonstrated. Covers case variants + whitespace. PURE. */
+export function hasSplitSqlSuffix(scriptSrc: string): boolean {
+  const splitPatterns: RegExp[] = [
+    // "…drop.s" + "ql"  or  '…drop.s' + 'ql'
+    /['"][^'"]*\.s['"]\s*\+\s*['"]ql/i,
+    // "…s" + "ql"     (e.g. `"foo.s" + "ql"` → produces `foo.sql`)
+    /['"][^'"]*[^.]s['"]\s*\+\s*['"]ql/i,
+    // "…sq" + "l"
+    /['"][^'"]*sq['"]\s*\+\s*['"]l['"]/i,
+    // "…s" + "ql"    (permissive — matches even when the preceding literal has no `.`)
+    /['"]s['"]\s*\+\s*['"]ql['"]/i,
+    // "…" + "sql"    (a bare "sql" fragment concatenated on)
+    /\+\s*['"]sql['"]/i,
+    // "…" + ".sql"   (fragment ".sql" concatenated on)
+    /\+\s*['"]\.sql['"]/i,
+    // "…." + "sql"
+    /['"][^'"]*\.['"]\s*\+\s*['"]sql/i,
+    // "sql"+ "…"    reversed order
+    /['"]sql['"]\s*\+/i,
+  ];
+  for (const p of splitPatterns) if (p.test(scriptSrc)) return true;
+  return false;
 }
 
 // ── Phase 3 — computed blast-radius via transactional dry-run ─────────────────────

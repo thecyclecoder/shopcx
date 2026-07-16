@@ -23,6 +23,9 @@ import {
   tagPendingActionType,
   resolveMigrationSqlForClassification,
   parseSingleApplyMigrationCommand,
+  analyzeMigrationScriptStatically,
+  scriptHasFileReadMachinery,
+  hasSplitSqlSuffix,
   APPLY_MIGRATION_SCRIPT_REGEX,
   classifyMigrationSql,
 } from "./migration-safety";
@@ -39,11 +42,15 @@ test("(V1) an additive scripts/apply-*-migration.ts action self-tagged run_prod_
     ALTER TABLE public.customers ADD COLUMN IF NOT EXISTS trial_ended_at timestamptz;
     CREATE TABLE IF NOT EXISTS public.usage_snapshots (id uuid primary key);
   `;
+  // Uses the CANONICAL safe apply-migration shape: fs machinery + literal MIGRATIONS array +
+  // path built via `resolve(__dirname, "../supabase/migrations", file)` — no `+` in the readFile
+  // argument, no `${…}` interpolation, all SQL filenames are contiguous string literals.
   const scriptSrc = `
     import { pgClient } from "./_bootstrap";
     import { readFileSync } from "fs";
+    import { resolve } from "path";
     const MIGRATIONS = ["20260814120000_usage_snapshots.sql"];
-    async function main() { for (const f of MIGRATIONS) await c.query(readFileSync('supabase/migrations/' + f, 'utf8')); }
+    async function main() { for (const f of MIGRATIONS) await c.query(readFileSync(resolve(__dirname, "../supabase/migrations", f), "utf8")); }
   `;
   const readFile = makeReadFile({
     "scripts/apply-usage-snapshots-migration.ts": scriptSrc,
@@ -319,6 +326,307 @@ test("(F1 bare `tsx`) the shape `tsx scripts/apply-<slug>-migration.ts` (no npx 
     readFile,
   );
   assert.equal(type, "apply_migration");
+});
+
+// ── Fix 2 regression suite — static-analysis rail (security-review coaching #2, dynamic path) ────
+
+test("(F2 attack replay) split .sql suffix `\"drop.s\" + \"ql\"` inside readFileSync stays run_prod_script — the exact bypass the pre-merge security review demonstrated", () => {
+  // This is the LITERAL harness the security review ran against the pre-Fix-2 code. Under the
+  // old `extractSqlReferences` regex there were ZERO contiguous `.sql` literals, so the
+  // read-every-SQL gate skipped, the script source alone had no destructive keywords, and Ada
+  // in-leash-approved a destructive migration. Fix 2 fails-closed at the static-analysis rail.
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    async function main() {
+      const f = "20260101000000_drop.s" + "ql";
+      await c.query(readFileSync("supabase/migrations/" + f, "utf8"));
+    }
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": scriptSrc,
+    // If the pre-Fix-2 code had classified via the script source alone, it would have called
+    // this destructive .sql at runtime — the whole point of the attack. We include it so the
+    // test proves we DO NOT let it through even when it exists.
+    "supabase/migrations/20260101000000_drop.sql": `DROP TABLE public.important;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "additive-sounding preview",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script", "the split-suffix attack MUST fail-closed");
+});
+
+test("(F2 split-suffix variants) every fragment-concat split of `.sql` fails-closed", () => {
+  const attackVariants = [
+    `const f = "20260101000000_drop.s" + "ql";`, // canonical: `.s"+"ql`
+    `const f = "20260101000000_drop.s" + 'ql';`, // mixed quotes
+    `const f = "20260101000000_drop." + "sql";`, // `."+"sql`
+    `const f = "20260101000000_drop" + ".sql";`, // `+".sql"`
+    `const f = "20260101000000_drop" + ".s" + "ql";`, // triple split
+    `const f = "20260101000000_drop.sq" + "l";`, // `.sq"+"l`
+    `const path = "20260101000000_drop.s" +\n  "ql";`, // whitespace/newlines
+  ];
+  for (const attack of attackVariants) {
+    const scriptSrc = `
+      import { readFileSync } from "fs";
+      async function main() {
+        ${attack}
+        await c.query(readFileSync("supabase/migrations/" + f, "utf8"));
+      }
+    `;
+    const readFile = makeReadFile({
+      "scripts/apply-foo-migration.ts": scriptSrc,
+      "supabase/migrations/20260101000000_drop.sql": `DROP TABLE t;`,
+    });
+    const type = tagPendingActionType(
+      "run_prod_script",
+      "npx tsx scripts/apply-foo-migration.ts",
+      "additive?",
+      readFile,
+    );
+    assert.equal(type, "run_prod_script", `split-suffix variant must fail-closed: ${attack}`);
+  }
+});
+
+test("(F2 readFile `+` concat) a readFile*(...) call whose path contains `+` concatenation fails-closed even when no split .sql suffix", () => {
+  // The migration filename is a contiguous string literal, but the path is still constructed
+  // dynamically via `+`. This anti-pattern lets an attacker sneak an unlisted path in.
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    const M = "20260101000000_add.sql";
+    await c.query(readFileSync("supabase/migrations/" + M, "utf8"));
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": scriptSrc,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "add column c",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script", "any `+` inside readFile*(...) argument fails-closed");
+});
+
+test("(F2 template `.sql` interpolation) a template literal ending in .sql with `${…}` fails-closed", () => {
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    const slug = "20260101000000_drop";
+    await c.query(readFileSync(\`supabase/migrations/\${slug}.sql\`, "utf8"));
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": scriptSrc,
+    "supabase/migrations/20260101000000_drop.sql": `DROP TABLE t;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "run migration",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F2 template `migrations/` interpolation) a template literal building the migrations/ path via `${…}` fails-closed", () => {
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    const dir = "migrations";
+    const file = "20260101000000_add.sql";
+    await c.query(readFileSync(\`supabase/\${dir}/\${file}\`, "utf8"));
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": scriptSrc,
+    "supabase/migrations/20260101000000_add.sql": `ALTER TABLE t ADD COLUMN c int;`,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "add column",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F2 fs without .sql literal) fs machinery is present but NO statically-extractable .sql literal — fails-closed (the extractor can't see what will be read)", () => {
+  // No `.sql` string literal anywhere; the script generates the name at runtime via a helper.
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    function pickMigration() { return process.env.MIGRATION_NAME + "." + "sql"; }
+    async function main() {
+      const p = "supabase/migrations/" + pickMigration();
+      await c.query(readFileSync(p, "utf8"));
+    }
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": scriptSrc,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-foo-migration.ts",
+    "run migration",
+    readFile,
+  );
+  assert.equal(type, "run_prod_script");
+});
+
+test("(F2 canonical safe apply) the on-disk convention (`const MIGRATIONS = [<literal>.sql]` + `readFileSync(resolve(__dirname, \"../supabase/migrations\", file), \"utf8\")`) still reclassifies to apply_migration — fs machinery + resolve() path-join is the safe shape", () => {
+  // This is the LITERAL apply-account-usage-snapshots-migration.ts shape (verified against the
+  // real script on disk). It uses fs, but the migration filename is a contiguous string literal
+  // in the MIGRATIONS array, and the readFileSync path is built via `resolve(__dirname, ...)`
+  // (no `+`, no template interpolation). MUST reclassify safely.
+  const additiveSql = `
+    CREATE TABLE IF NOT EXISTS public.account_usage_snapshots (id uuid primary key);
+    CREATE TABLE IF NOT EXISTS public.usage_wall_events (id uuid primary key);
+  `;
+  const scriptSrc = `
+    import { readFileSync } from "fs";
+    import { resolve } from "path";
+    import { pgClient } from "./_bootstrap";
+    const MIGRATIONS = ["20260814120000_account_usage_snapshots.sql"];
+    async function main() {
+      const c = pgClient();
+      for (const file of MIGRATIONS) {
+        await c.query(readFileSync(resolve(__dirname, "../supabase/migrations", file), "utf8"));
+      }
+    }
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-account-usage-snapshots-migration.ts": scriptSrc,
+    "supabase/migrations/20260814120000_account_usage_snapshots.sql": additiveSql,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-account-usage-snapshots-migration.ts",
+    "add usage-snapshots tables",
+    readFile,
+  );
+  assert.equal(type, "apply_migration", "the canonical safe apply-migration shape MUST still reclassify");
+});
+
+test("(F2 canonical inline) the inline-STATEMENTS shape (no fs machinery) still reclassifies to apply_migration — the fs-free path is unchanged", () => {
+  const scriptSrc = `
+    import { pgClient } from "./_bootstrap";
+    const STATEMENTS = [
+      \`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_customers_phone
+         ON public.customers (workspace_id, phone) WHERE phone IS NOT NULL\`,
+    ];
+    async function main() {
+      const c = pgClient();
+      for (const sql of STATEMENTS) await c.query(sql);
+    }
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-account-matching-indexes-migration.ts": scriptSrc,
+  });
+  const type = tagPendingActionType(
+    "run_prod_script",
+    "npx tsx scripts/apply-account-matching-indexes-migration.ts",
+    "add per-branch customer indexes",
+    readFile,
+  );
+  assert.equal(type, "apply_migration");
+});
+
+test("(F2 analyzer) analyzeMigrationScriptStatically: pinning the OK/fail-closed decisions with reasons", () => {
+  // No fs, no .sql references — ok (an inline-only script with STATEMENTS-array shape).
+  const inline = `const S = [\`CREATE TABLE t (id uuid);\`]; for (const s of S) await c.query(s);`;
+  const inlineVerdict = analyzeMigrationScriptStatically(inline);
+  assert.equal(inlineVerdict.verdict, "ok");
+  assert.deepEqual(inlineVerdict.staticSqlRefs, []);
+
+  // fs + safe MIGRATIONS-array-of-literals + resolve() path — ok.
+  const safe = `
+    import { readFileSync } from "fs";
+    import { resolve } from "path";
+    const MIGRATIONS = ["20260101000000_add.sql"];
+    for (const f of MIGRATIONS) await c.query(readFileSync(resolve(__dirname, "../supabase/migrations", f), "utf8"));
+  `;
+  const safeVerdict = analyzeMigrationScriptStatically(safe);
+  assert.equal(safeVerdict.verdict, "ok");
+  assert.deepEqual(safeVerdict.staticSqlRefs, ["20260101000000_add.sql"]);
+
+  // fs + split .sql suffix — fail_closed.
+  const split = `
+    import { readFileSync } from "fs";
+    const f = "20260101000000_drop.s" + "ql";
+    await c.query(readFileSync("supabase/migrations/" + f, "utf8"));
+  `;
+  const splitVerdict = analyzeMigrationScriptStatically(split);
+  assert.equal(splitVerdict.verdict, "fail_closed");
+  assert.match(splitVerdict.reason ?? "", /split \.sql suffix/);
+
+  // fs + `+` concat in readFile — fail_closed.
+  const concatInRead = `
+    import { readFileSync } from "fs";
+    const F = "20260101000000_add.sql";
+    await c.query(readFileSync("supabase/migrations/" + F, "utf8"));
+  `;
+  const concatVerdict = analyzeMigrationScriptStatically(concatInRead);
+  assert.equal(concatVerdict.verdict, "fail_closed");
+  assert.match(concatVerdict.reason ?? "", /readFile.*\+/);
+
+  // fs + template `${…}.sql` — fail_closed.
+  const tmpl = `
+    import { readFileSync } from "fs";
+    const s = "add";
+    await c.query(readFileSync(\`supabase/migrations/\${s}.sql\`, "utf8"));
+  `;
+  const tmplVerdict = analyzeMigrationScriptStatically(tmpl);
+  assert.equal(tmplVerdict.verdict, "fail_closed");
+
+  // fs + no .sql literal at all — fail_closed.
+  const noLiteral = `
+    import { readFileSync } from "fs";
+    const p = process.env.M;
+    await c.query(readFileSync(p, "utf8"));
+  `;
+  const noLitVerdict = analyzeMigrationScriptStatically(noLiteral);
+  assert.equal(noLitVerdict.verdict, "fail_closed");
+});
+
+test("(F2 fs detector) scriptHasFileReadMachinery: covers readFileSync, readFile, fs.readFile*, require('fs'), import from 'fs'", () => {
+  assert.equal(scriptHasFileReadMachinery(`import { readFileSync } from "fs";`), true);
+  assert.equal(scriptHasFileReadMachinery(`import { readFile } from "fs/promises";`), true);
+  assert.equal(scriptHasFileReadMachinery(`const fs = require("fs"); fs.readFileSync(...)`), true);
+  assert.equal(scriptHasFileReadMachinery(`import fs from "fs";`), true);
+  assert.equal(scriptHasFileReadMachinery(`const raw = readFileSync(p, "utf8");`), true);
+  // No fs machinery — the STATEMENTS-only shape.
+  assert.equal(scriptHasFileReadMachinery(`const S = [\`CREATE TABLE t (id uuid);\`];`), false);
+});
+
+test("(F2 split detector) hasSplitSqlSuffix: matches every fragment-concat variant + rejects contiguous literals", () => {
+  // Rejects — contiguous literal (the safe shape).
+  assert.equal(hasSplitSqlSuffix(`const M = ["20260101000000_add.sql"];`), false);
+  // Matches — every attack variant.
+  const variants = [
+    `const f = "20260101000000_drop.s" + "ql";`,
+    `const f = "20260101000000_drop." + "sql";`,
+    `const f = "20260101000000_drop" + ".sql";`,
+    `const f = "20260101000000_drop.sq" + "l";`,
+    `const f = "20260101000000_drop.s" + \n  "ql";`,
+  ];
+  for (const v of variants) assert.equal(hasSplitSqlSuffix(v), true, `must match split variant: ${v}`);
+});
+
+test("(F2 resolveMigrationSqlForClassification) returns null when the static-analysis rail rejects the script", () => {
+  const attack = `
+    import { readFileSync } from "fs";
+    const f = "20260101000000_drop.s" + "ql";
+    await c.query(readFileSync("supabase/migrations/" + f, "utf8"));
+  `;
+  const readFile = makeReadFile({
+    "scripts/apply-foo-migration.ts": attack,
+    "supabase/migrations/20260101000000_drop.sql": `DROP TABLE t;`,
+  });
+  const sql = resolveMigrationSqlForClassification(
+    "npx tsx scripts/apply-foo-migration.ts",
+    "additive?",
+    readFile,
+  );
+  assert.equal(sql, null, "the resolver must return null when the static rail fails-closed");
 });
 
 test("(F1 parser) parseSingleApplyMigrationCommand: pinning the exact accepted argv shape (canonical rejection matrix)", () => {
