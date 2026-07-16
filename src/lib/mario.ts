@@ -32,7 +32,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
 import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
-import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
+import {
+  ACTIVE_STATUSES,
+  evaluateGoalMemberBuildDispatch,
+  type GoalMemberBuildDispatchResult,
+} from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
 import type { SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 
@@ -928,6 +932,11 @@ async function readOrphanedFoldedPrs(
  *      integration target is the goal branch, not `main`, so the ledger's silence is
  *      the promotion gate's job, not Mario's. Removes the `mario_fired` row + the
  *      loop-guard oscillation risk that Phase 1's applier-level catch still accrued.
+ *  (d3) DROPS an eligible-never-enqueued goal member (sixth source only) whose goal
+ *      build-dispatch serializer is legitimately holding it — a conflicting goal-mate
+ *      build is in-flight, so this member correctly has no build job and correctly
+ *      ages past the grace window. Same class as (d2): a legit pre-build serial wait,
+ *      not a stall. See [[shouldDropSeriallyHeldGoalMember]] for the pure predicate.
  *  (e) attaches a MarioBrief to every surviving candidate so the M4 reasoning
  *      agent picks up the last 10 events + blockedBy state + current job status
  *      without another read.
@@ -1266,6 +1275,26 @@ export async function evaluateStalledSpecs(
     // accrue on `MARIO_LOOP_GUARD_MAX`. Same class as folded/deferred/uncleared-blocker: a legit
     // wait, not a stall. See [[isGoalMemberAwaitingPromotion]] for the pure predicate.
     if (await isSpecRowAwaitingGoalPromotion(admin, specRow)) continue;
+
+    // (d3) SERIALLY-HELD GOAL MEMBER (sixth source only) → legit wait, drop. An eligible-never-
+    // enqueued goal member has `auto_build=true`, every blocker cleared, and no build job — but
+    // the goal build-dispatch serializer admits ONE conflicting member build at a time, so a
+    // waiting member correctly has no job and correctly ages past the grace window. The sixth
+    // source reads that legitimate serial wait as a stall and fires Mario; each firing burns a
+    // Max session and accrues oscillation-guard pressure on a spec that is behaving as designed.
+    // Consult the serializer BEFORE surfacing: ok:false ⇒ drop; ok:true (one-off spec, member of
+    // a different goal, or an admissible member) ⇒ keep. Scoped to `spec_authored` so the other
+    // sources (failed-build, stuck-queued, pr-resolve-storm, orphaned-folded-pr, …) are untouched.
+    // Fail-open on any serializer error so a transient DB fault never silently hides a real stall.
+    if (c.from_event === "spec_authored") {
+      try {
+        const dispatch = await evaluateGoalMemberBuildDispatch(c.workspace_id, c.spec_slug);
+        if (shouldDropSeriallyHeldGoalMember({ fromEvent: c.from_event, dispatch })) continue;
+      } catch {
+        // Fail-open — let the candidate survive to the M4 agent so a transient serializer read
+        // failure cannot mask a real eligible-never-enqueued stall.
+      }
+    }
 
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
@@ -1899,6 +1928,35 @@ export function isGoalMemberAwaitingPromotion(input: {
   if (input.goalBranchSha === null) return false;
   if (input.goalMainMergeSha !== null) return false;
   return true;
+}
+
+/**
+ * PURE predicate — should the eligible-never-enqueued candidate be DROPPED because the goal-member
+ * build-dispatch serializer is legitimately holding it? An eligible-but-serially-held goal member
+ * has `auto_build=true`, every declared blocker cleared, and NO build job — the exact shape the
+ * sixth source (`from_event === "spec_authored"`) surfaces — but the goal serializer is
+ * intentionally holding it (a conflicting goal-mate build is in flight OR this mate is not the
+ * earliest ready head). There is no honest live fix: a reclaim would be refused by the same gate
+ * and queueing anew would churn on the claim-time serializer. Dropping the candidate at the source
+ * means no `mario_fired` row, no oscillation-guard pressure, and no wasted Max session.
+ *
+ * SCOPED to the sixth source's `from_event` so the other sources (failed-build, stuck-queued,
+ * pr-resolve-storm, orphaned-folded-pr, …) are UNTOUCHED — those classes carry a real job to act
+ * on and the serial-build gate does not apply.
+ *
+ * A one-off spec (resolveGoalSlugForSpec → null → dispatch ok:true) and an admissible goal member
+ * (no conflicting mate → ok:true) return `false` from this predicate — they are NEVER dropped by
+ * this filter. Only a member the serializer is actively refusing (ok:false) returns `true`.
+ *
+ * Kept pure so the drop decision is unit-testable without a stubbed Supabase client (mirrors
+ * [[shouldSurfaceEligibleNeverEnqueued]] and [[isGoalMemberAwaitingPromotion]]).
+ */
+export function shouldDropSeriallyHeldGoalMember(input: {
+  fromEvent: string;
+  dispatch: GoalMemberBuildDispatchResult;
+}): boolean {
+  if (input.fromEvent !== "spec_authored") return false;
+  return input.dispatch.ok === false;
 }
 
 /**
