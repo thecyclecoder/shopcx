@@ -93,10 +93,11 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/layout.tsx` — component
 - `src/app/dashboard/sidebar.tsx` — component
 - `src/app/dashboard/layout.tsx` — layout wrapper
+- `src/app/api/dashboard/sidebar-counts/route.ts` — consolidated sidebar badge-count endpoint ([[sidebar-counts]])
 
 ## Status / open work
 
-**Performance tuning:** The always-on sidebar's `fetchCounts()` poll interval was widened 30s→60s (2026-07-04, spec `db-reduce-calls-q-7726440967385220442`) to cut authenticated RLS `set_config(...)` call volume — a follow-on to the prior 10s→30s widen targeting the same high-frequency round-trip family. Both changes reduce the dominant authenticated load source without materially hurting responsiveness (badge counts tolerate 60s staleness).
+**Performance tuning:** The always-on sidebar's `fetchCounts()` poll interval was widened 30s→60s (2026-07-04, spec `db-reduce-calls-q-7726440967385220442`) to cut authenticated RLS `set_config(...)` call volume — a follow-on to the prior 10s→30s widen targeting the same high-frequency round-trip family. Both changes reduce the dominant authenticated load source without materially hurting responsiveness (badge counts tolerate 60s staleness). Phase 3 consolidation ([[../specs/db-load-cut-getspec-amplifier-claim-fan-sidebar-spray]]) further collapsed the 13-17 per-badge endpoint fetches into ONE authenticated round-trip via the [[sidebar-counts]] endpoint.
 
 ---
 
