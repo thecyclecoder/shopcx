@@ -268,22 +268,25 @@ export async function getLiveJobForSlug(workspaceId: string, slug: string, admin
 // already-shipped spec every standing pass because this uncatchable job lingered forever.
 export const REAPABLE_STATUSES_FOR_ARCHIVED_SPECS: JobStatus[] = [...ACTIVE_STATUSES, "needs_attention"];
 
-export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; admin?: Admin }): Promise<{ cancelled: number; slugs: string[] }> {
+export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; admin?: Admin }): Promise<{ cancelled: number; slugs: string[]; prsClosedOk: number; prResolveCancelled: number }> {
   const admin = opts?.admin || createAdminClient();
 
   // 1) Fetch every reapable build/spec-test job first (optionally scoped) so we can group by
   //    workspace and apply that workspace's DB-archived set separately from the global FS archive.
   //    "Reapable" = ACTIVE_STATUSES ∪ {'needs_attention'}: an archived spec's parked
   //    needs_attention job is orphaned and must be swept alongside its still-active siblings.
+  //    pr-resolve-fold-closes-orphan-pr (Phase 2): also select pr_number + spec_branch — a folded
+  //    spec's still-open PR is the orphan the storm rides on; we close it here (and reap its
+  //    pr-resolve jobs) so the standing-pass dirty-PR backstop has nothing left to re-enqueue.
   let query = admin
     .from("agent_jobs")
-    .select("id, spec_slug, workspace_id")
+    .select("id, spec_slug, workspace_id, kind, pr_number, spec_branch")
     .in("kind", ["build", "spec-test"])
     .in("status", REAPABLE_STATUSES_FOR_ARCHIVED_SPECS);
   if (opts?.workspaceId) query = query.eq("workspace_id", opts.workspaceId);
   const { data, error } = await query;
-  if (error || !data?.length) return { cancelled: 0, slugs: [] };
-  const jobs = data as { id: string; spec_slug: string; workspace_id: string }[];
+  if (error || !data?.length) return { cancelled: 0, slugs: [], prsClosedOk: 0, prResolveCancelled: 0 };
+  const jobs = data as { id: string; spec_slug: string; workspace_id: string; kind: string; pr_number: number | null; spec_branch: string | null }[];
 
   // 2) FS archive (global, cross-workspace) + per-workspace DB-archived slug sets via the specs-table SDK
   //    (folded ∪ deferred). Reading .from('specs') directly here would bypass the "database is the spec"
@@ -303,7 +306,7 @@ export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; 
 
   // 3) A job is cancellable iff its spec is FS-archived OR DB-archived in its own workspace.
   const cancellable = filterJobsForArchivedSpecs(jobs, fsArchived, dbArchivedByWs);
-  if (!cancellable.length) return { cancelled: 0, slugs: [] };
+  if (!cancellable.length) return { cancelled: 0, slugs: [], prsClosedOk: 0, prResolveCancelled: 0 };
 
   const reason = "spec archived — build auto-cancelled (the spec was folded/deferred; its spec page no longer exists)";
   const slugs: string[] = [];
@@ -314,7 +317,71 @@ export async function cancelJobsForArchivedSpecs(opts?: { workspaceId?: string; 
       .eq("id", j.id);
     if (!upErr) slugs.push(j.spec_slug);
   }
-  return { cancelled: slugs.length, slugs };
+
+  // 4) pr-resolve-fold-closes-orphan-pr (Phase 2): for each cancelled BUILD job carrying an open PR
+  //    (pr_number != null + spec_branch startsWith 'claude/'), close the PR + reap its pr-resolve
+  //    jobs. Only build-kind jobs mint the claude/* PR, so spec-test jobs contribute nothing here.
+  //    Both mutations are guarded (workspace_id scope + kind='pr-resolve' filter on the cancel; the
+  //    GH close re-verifies state/repo/branch/SHA before PATCH), and both are best-effort — a GH
+  //    failure never rolls back the build-job cancellation above.
+  const orphanPrs = collectArchivedSpecOpenPrs(cancellable);
+  let prsClosedOk = 0;
+  let prResolveCancelled = 0;
+  if (orphanPrs.length) {
+    const { closeArchivedSpecPr } = await import("./github-pr-resolve");
+    const nowIso = new Date().toISOString();
+    for (const p of orphanPrs) {
+      // (a) Reap this PR's pr-resolve jobs (compare-and-set scoped to workspace + kind + pr_number
+      //     + REAPABLE_STATUSES so a race that transitioned the row to terminal never overwrites it).
+      const cancelReason = `spec archived — pr-resolve reaped (${p.specSlug} was folded/shipped; the PR is being auto-closed)`;
+      const { data: reaped } = await admin
+        .from("agent_jobs")
+        .update({ status: "completed", error: cancelReason, questions: [], pending_actions: [], updated_at: nowIso })
+        .eq("workspace_id", p.workspaceId)
+        .eq("kind", "pr-resolve")
+        .eq("pr_number", p.prNumber)
+        .in("status", REAPABLE_STATUSES_FOR_ARCHIVED_SPECS)
+        .select("id");
+      prResolveCancelled += Array.isArray(reaped) ? reaped.length : 0;
+
+      // (b) Close the PR on GitHub. Idempotent: closeArchivedSpecPr returns ok=true reason='not-open'
+      //     if the PR was already closed/merged, and ok=false (no mutation) on any auth-drift.
+      try {
+        const closed = await closeArchivedSpecPr(p.prNumber, p.branch, p.specSlug);
+        if (closed.ok) prsClosedOk += 1;
+      } catch {
+        /* best-effort — a GH failure doesn't block the next PR or roll back the DB cancels */
+      }
+    }
+  }
+
+  return { cancelled: slugs.length, slugs, prsClosedOk, prResolveCancelled };
+}
+
+/**
+ * pr-resolve-fold-closes-orphan-pr (Phase 2) — PURE decision helper. Given the archived-spec build/spec-test
+ * jobs the caller has already narrowed via [[filterJobsForArchivedSpecs]], return the subset that carry an
+ * OPEN claude/* PR that must be auto-closed. Only `build` kind mints the claude/* PR; `spec-test` never
+ * carries a build PR of its own. Fold-safe: a job with no pr_number, no spec_branch, or a spec_branch that
+ * isn't a `claude/*` build branch is DROPPED (never mutated). Deduped on (workspace_id, pr_number) so a
+ * spec with more than one same-PR build job never triggers two closes.
+ */
+export function collectArchivedSpecOpenPrs<
+  J extends { spec_slug: string; workspace_id: string; kind: string; pr_number: number | null; spec_branch: string | null },
+>(cancellable: J[]): Array<{ workspaceId: string; prNumber: number; branch: string; specSlug: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ workspaceId: string; prNumber: number; branch: string; specSlug: string }> = [];
+  for (const j of cancellable) {
+    if (j.kind !== "build") continue; // spec-test doesn't own the PR
+    if (typeof j.pr_number !== "number") continue;
+    if (typeof j.spec_branch !== "string") continue;
+    if (!j.spec_branch.startsWith("claude/")) continue;
+    const key = `${j.workspace_id}:${j.pr_number}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ workspaceId: j.workspace_id, prNumber: j.pr_number, branch: j.spec_branch, specSlug: j.spec_slug });
+  }
+  return out;
 }
 
 /**

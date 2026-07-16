@@ -31,6 +31,8 @@
     "test:ads-supervisor-lf8-disposition": "tsx --test src/lib/ads-supervisor.lf8-disposition.test.ts",
     "test:cancel-jobs-archived-db-folded": "tsx --test src/lib/agent-jobs.cancel-archived-db-folded.test.ts",
     "test:reap-needs-attention-archived": "tsx --test src/lib/agent-jobs.reap-needs-attention-archived.test.ts",
+    "test:pr-resolve-retry-cap-counts-parked": "tsx --test src/lib/github-pr-resolve.retry-cap-counts-parked.test.ts",
+    "test:fold-closes-orphan-pr": "tsx --test src/lib/agent-jobs.fold-closes-orphan-pr.test.ts",
     "test:stuck-build-terminal-spec": "tsx --test src/lib/agents/platform-director.stuck-build-terminal-spec.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
