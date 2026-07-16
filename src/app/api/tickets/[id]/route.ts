@@ -491,6 +491,14 @@ export async function DELETE(
   await admin.from("returns").update({ ticket_id: null }).eq("ticket_id", ticketId);
   await admin.from("store_credit_log").update({ ticket_id: null }).eq("ticket_id", ticketId);
 
+  // Sol cheap-execution queue keeps a required FK to tickets, so hard-delete
+  // fails for any ticket with action-request history unless we clear it first.
+  const { error: aarErr } = await admin.from("agent_action_requests").delete().eq("ticket_id", ticketId);
+  if (aarErr) {
+    console.error("[delete-ticket] agent_action_requests delete failed:", aarErr.message);
+    return NextResponse.json({ error: `Failed to delete action requests: ${aarErr.message}` }, { status: 500 });
+  }
+
   // Messages cascade on FK so this is belt-and-suspenders, but explicit
   // is fine and surfaces errors if the table ever changes.
   const { error: msgErr } = await admin.from("ticket_messages").delete().eq("ticket_id", ticketId);
