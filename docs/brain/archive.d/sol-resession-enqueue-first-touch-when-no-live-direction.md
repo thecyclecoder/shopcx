@@ -1,0 +1,1 @@
+- **Sol re-session: enqueue a fresh first-touch session when frustration fires but no live Direction exists** · verified 2026-07-16 · → [[../lifecycles/ticket-lifecycle]]
