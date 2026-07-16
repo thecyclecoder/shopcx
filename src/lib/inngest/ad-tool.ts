@@ -42,6 +42,10 @@ import { loadStaticInputs, buildReviewProps, buildOfferProps, buildBenefitAuthor
 import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic, type KillerArchetype } from "@/lib/ad-statics";
 import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createPlacementCreative, createAd, createAdSet } from "@/lib/meta-ads";
 import { resolvePlacementPublish } from "@/lib/ads/placement-publish";
+import { evaluateCreativePackGate, missingCreativePackDiagnosis, MISSING_CREATIVE_PACK_REASON } from "@/lib/ads/creative-pack-gate";
+import type { CreativePackSnapshot } from "@/lib/ads/creative-pack";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
+import { recordDirectorActivity } from "@/lib/director-activity";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
 import {
   MEDIA_BUYER_TEST_ORIGIN,
@@ -838,7 +842,7 @@ export const adToolPublishToMeta = inngest.createFunction(
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
-      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id").eq("id", job.campaign_id).single();
+      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id, angle_id").eq("id", job.campaign_id).single();
       // Gather BOTH ratios for the campaign so we can publish one placement-customized
       // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Also grab the
       // right_column_1x1 sibling so a complete Dahlia pack routes through Bianca's
@@ -849,6 +853,18 @@ export const adToolPublishToMeta = inngest.createFunction(
         .from("ad_videos")
         .select("id, format, media_kind, meta, final_mp4_url, static_jpg_url")
         .eq("campaign_id", job.campaign_id).eq("status", "ready");
+      // For the Phase 3 pack-complete gate: load the FULL row set (regardless of
+      // status) so `isCreativePackComplete` can distinguish `canonical_missing`
+      // (never authored) from `canonical_not_ready` (authored but still rendering
+      // / failed) rather than reading a status-filtered view as "missing".
+      const { data: allVidsForGate } = await admin
+        .from("ad_videos")
+        .select("id, format, media_kind, status, format_variant_of_id")
+        .eq("campaign_id", job.campaign_id);
+      const angleId = (campaign as { angle_id?: string | null } | null)?.angle_id ?? null;
+      const { data: angleRow } = angleId
+        ? await admin.from("product_ad_angles").select("metadata").eq("id", angleId).maybeSingle()
+        : { data: null };
       const all = vids || [];
       const anchor = all.find((v) => v.id === job.video_id) || all[0] || null;
       const mediaKind = (anchor?.media_kind as string) || "video";
@@ -900,10 +916,82 @@ export const adToolPublishToMeta = inngest.createFunction(
         .eq("meta_account_id", job.meta_account_id)
         .maybeSingle();
       const metaAdAccountRowId = (acctRow as { id: string } | null)?.id ?? null;
-      return { job, adName, mediaKind, feedUrl, storyUrl, rightColumnUrl, singleUrl, token, productId, metaAdAccountRowId, placementDecision };
+      // Phase 3 — pack-complete publish gate. `evaluateCreativePackGate` is a pure
+      // predicate over the FULL ad_videos row set + the angle's `metadata.copy_pack`.
+      // A Dahlia-authored static campaign whose pack is incomplete REFUSES rather
+      // than silently degrading to a single-image ad (bianca-publishes-3-placement-
+      // multi-copy-via-placement-customization Phase 3). Video / non-Dahlia campaigns
+      // are `skipped` so the legacy paths keep running.
+      const gateAdVideos = (allVidsForGate || []).map((r) => ({
+        format: String(r.format),
+        media_kind: String(r.media_kind),
+        status: String(r.status),
+        format_variant_of_id: (r.format_variant_of_id as string | null) ?? null,
+      }));
+      const canonicalRow = (allVidsForGate || []).find(
+        (r) => r.format === "feed_4x5" && ((r as { format_variant_of_id?: string | null }).format_variant_of_id ?? null) === null,
+      ) as { id?: string } | undefined;
+      const packSnapshot: CreativePackSnapshot = {
+        adVideos: gateAdVideos,
+        canonicalId: canonicalRow?.id ?? null,
+        angleMetadata: (angleRow?.metadata as { copy_pack?: { headlines?: unknown; primaryTexts?: unknown } | null } | null) ?? null,
+      };
+      const packGate = evaluateCreativePackGate({ mediaKind, snapshot: packSnapshot });
+      return { job, adName, mediaKind, feedUrl, storyUrl, rightColumnUrl, singleUrl, token, productId, metaAdAccountRowId, placementDecision, packGate };
     });
 
     if (!ctx.token) { await setStatus("failed", { error: "meta_not_connected" }); return { ok: false, reason: "meta_not_connected" }; }
+    // Phase 3 refusal — a Dahlia-authored static campaign whose pack is incomplete
+    // MUST NOT ship as a degraded single-image ad. `evaluateCreativePackGate`
+    // returns `allowed:false` only when the campaign is Dahlia-authored (a
+    // `feed_4x5` canonical row exists) AND the pack is incomplete; video / legacy
+    // studio campaigns are `skipped` and fall through to the normal publish paths.
+    // On refusal: status=failed with reason=`missing_creative_pack`, publish_active
+    // cleared so no ad exists, and a deduped CEO escalation + growth-owned
+    // director_activity row records what to fix.
+    const j0 = ctx.job as any;
+    if (!ctx.packGate.allowed) {
+      const diagnosis = missingCreativePackDiagnosis({
+        packReason: ctx.packGate.packReason,
+        detail: ctx.packGate.detail,
+        campaignId: String(j0.campaign_id ?? ""),
+      });
+      await setStatus("failed", {
+        error: `${MISSING_CREATIVE_PACK_REASON}:${ctx.packGate.packReason}`,
+        publish_active: false,
+      });
+      const dedupeKey = `bianca_pack_gate:${workspace_id}:${String(j0.campaign_id ?? "")}:${ctx.packGate.packReason}`;
+      const escalationMetadata = {
+        origin: (j0.origin as string | null) ?? null,
+        reason: MISSING_CREATIVE_PACK_REASON,
+        pack_reason: ctx.packGate.packReason,
+        job_id,
+        campaign_id: (j0.campaign_id as string) ?? null,
+        product_id: ctx.productId ?? null,
+        media_kind: ctx.mediaKind,
+      } as const;
+      const ceo = await escalateDiagnosisToCeo(admin, {
+        workspaceId: workspace_id,
+        specSlug: null,
+        title: `Bianca publish refused: incomplete creative pack (${ctx.packGate.packReason})`,
+        diagnosis,
+        dedupeKey,
+        deepLink: "/dashboard/marketing/ads",
+        escalationKind: "bianca_missing_creative_pack",
+        metadata: escalationMetadata,
+      });
+      if (ceo.emitted) {
+        await recordDirectorActivity(admin, {
+          workspaceId: workspace_id,
+          directorFunction: "growth",
+          actionKind: "bianca_missing_creative_pack",
+          specSlug: null,
+          reason: diagnosis,
+          metadata: { ...escalationMetadata, dedupe_key: dedupeKey, autonomous: true },
+        });
+      }
+      return { ok: false, reason: MISSING_CREATIVE_PACK_REASON, packReason: ctx.packGate.packReason };
+    }
     if (!ctx.singleUrl) { await setStatus("failed", { error: "no_media_url" }); return { ok: false, reason: "no_media_url" }; }
     const j = ctx.job as any;
     const isStatic = ctx.mediaKind === "static";
