@@ -49,6 +49,15 @@ export interface CreativeQAVerdict {
      *  when a packshot is absent), the check is SKIPPED and this stays true so a legitimate render
      *  isn't false-failed. Fail-closed on ambiguity. */
     packagingFaithful: boolean;
+    /** Phase 2 of `ad-creative-only-our-real-offer-discount-shown-never-a-competitors` — true iff
+     *  every discount / percent-off / dollar-off / "free shipping" / BOGO / "X for $Y" claim shown
+     *  anywhere on the rendered image is consistent with `realOffer` (our REAL store offer, from
+     *  `brief.offer`). Also fails when two conflicting discount numbers appear on the same ad. When
+     *  no realOffer is supplied, the check is SKIPPED locally (stays true) — same skip semantic as
+     *  `packagingFaithful` — so a legitimate no-offer render is never false-failed. Fail-closed on
+     *  ambiguity. Closes the 2026-07-14 Amazing Creamer defect where a competitor's "50% OFF" leaked
+     *  into the headline while our real offer badge said "Up to 34% off" and QA passed the pair. */
+    offerConsistent: boolean;
   };
 }
 
@@ -62,6 +71,7 @@ Check each item and return ONLY a JSON object (no prose):
   "noFabricatedPhotoCaption": boolean, // NO text claiming an image is a real/candid/verified/authentic photo or "taken from her phone/home". Plain "Before"/"After" labels are fine
   "transformationPhotorealistic": boolean, // IF there is a before/after transformation image: it is photorealistic (a real-looking photograph), NOT a cartoon/illustration/drawing/3D-CGI render. If there is no transformation image, return true
   "packagingFaithful": boolean,    // IF a reference packshot image is supplied: the product package rendered in the ad matches the reference on WORDMARK (main brand/product name on the pack), DOMINANT PACK COLORS, FLAVOR ART / hero graphic, and OVERALL PACK SHAPE/silhouette. FAIL on any of: an invented pack (a different-shaped bottle/pouch/box the reference doesn't have), a competitor's pack still visible, a wrong-color pack, a fabricated wordmark, a missing/altered flavor art. Sub-readable ingredient icons + supplement-facts fine print are OUT OF SCOPE (same as textLegible). If NO reference packshot is supplied, return true (skip the check). Fail-closed on ambiguity — if you cannot see both packages clearly enough to compare, return false and cite what you couldn't see in issues.
+  "offerConsistent": boolean,      // IF a REAL_OFFER is supplied: every discount/percent-off/dollar-off/"free shipping"/BOGO/"X for $Y" claim rendered ANYWHERE on the image (headline, subhead, badges, stickers, corner tags, footer, on the pack) must be consistent with the supplied real offer. FAIL if the image shows a discount NUMBER or claim that does not match — e.g. image shows "50% OFF" but the real offer is "Up to 34% off + free shipping" (the number is wrong), image shows a "BOGO" badge our offer doesn't include, image shows "free shipping" when the offer doesn't include it, OR image shows TWO CONFLICTING discount numbers on the same ad (headline "50% OFF" + badge "34% off"). A per-serving value / strikethrough-MSRP that is consistent with the real offer is OK. If the image shows NO discount/offer claim of any kind, return true. If NO real offer is supplied, return true (skip the check). Fail-closed on ambiguity — if you cannot tell whether a rendered discount matches the real offer, return false and cite the mismatch in issues.
   "issues": string[]               // one short string per failed check explaining what's wrong; empty array if all pass
 }`;
 
@@ -81,6 +91,25 @@ export interface CreativeQAInput extends Pick<GeneratedCreative, "buffer" | "exp
   /** Absolute http(s) URL of the real isolated packshot (from product_intelligence.media.isolatedPackshots
    *  → product_variants.isolated_image_url), threaded by [[creative-agent]] `stockProduct`. */
   packshotUrl?: string | null;
+  /** Phase 2 of `ad-creative-only-our-real-offer-discount-shown-never-a-competitors` — our REAL
+   *  store offer (from `brief.offer`) that the vision QC must compare every rendered discount
+   *  against. The three fields together describe every legitimate discount signal we allow on the
+   *  image (the badge headline · a strikethrough MSRP → discounted price · a per-serving value).
+   *  When null/undefined the check is SKIPPED locally (offerConsistent stays true) — a legitimate
+   *  no-offer render is not false-failed. Threaded by [[creative-agent]] `stockProduct`. */
+  realOffer?: { headline: string; strikethrough: string | null; perServing: string | null } | null;
+}
+
+/** Format the real offer for the QC prompt — one line per legitimate signal, so the model can
+ *  reason directly ("does the image's '50% OFF' match 'Up to 34% off + free shipping'? no →
+ *  offerConsistent=false"). Returns null when no offer / every field empty (the SKIP case). */
+export function summarizeOfferForQa(offer: CreativeQAInput["realOffer"]): string | null {
+  if (!offer) return null;
+  const parts: string[] = [];
+  if (offer.headline && offer.headline.trim()) parts.push(`HEADLINE: "${offer.headline.trim()}"`);
+  if (offer.strikethrough && offer.strikethrough.trim()) parts.push(`STRIKETHROUGH: "${offer.strikethrough.trim()}"`);
+  if (offer.perServing && offer.perServing.trim()) parts.push(`PER_SERVING: "${offer.perServing.trim()}"`);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 /** Fetch + normalize a remote packshot URL for the QA vision compare. Returns null on any fetch /
@@ -115,7 +144,7 @@ export async function qaCreative(
   const failClosed = (reason: string): CreativeQAVerdict => ({
     pass: false,
     issues: [reason],
-    checks: { headlineExact: false, textLegible: false, noBarePrice: false, noFabricatedPhotoCaption: false, transformationPhotorealistic: false, packagingFaithful: false },
+    checks: { headlineExact: false, textLegible: false, noBarePrice: false, noFabricatedPhotoCaption: false, transformationPhotorealistic: false, packagingFaithful: false, offerConsistent: false },
   });
   if (!ANTHROPIC_API_KEY) return failClosed("qa_no_anthropic_key");
 
@@ -135,6 +164,10 @@ export async function qaCreative(
   // present, we hand it to the vision API as a second image and instruct packagingFaithful=compare;
   // when absent, we instruct packagingFaithful=true (skip).
   const packshot = await loadReferencePackshot(gen.packshotUrl);
+  // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — summarize the
+  // real store offer for the vision model so `offerConsistent` has a source of truth to compare
+  // every rendered discount against. Null → SKIP (offerConsistent forced true locally below).
+  const realOfferSummary = summarizeOfferForQa(gen.realOffer);
   const expected = [
     imitationHeadline
       ? `HEADLINE: none given — this is a competitor-imitation whose headline was rewritten for our brand. Set headlineExact=true (there is no exact string to match); DO judge the headline under textLegible (real, correctly-spelled words) and it must contain NO competitor brand name.`
@@ -145,9 +178,12 @@ export async function qaCreative(
     packshot
       ? `A reference packshot photograph is supplied as the SECOND image below. Compare the ad's rendered product package against it and judge packagingFaithful per the system rules.`
       : `No reference packshot supplied — set packagingFaithful=true (skip the check).`,
+    realOfferSummary
+      ? `REAL_OFFER (compare every rendered discount against this — the ONLY discount allowed on the image): ${realOfferSummary}. FAIL offerConsistent if the image shows any percent-off / dollar-off / free-shipping / BOGO / X-for-$Y claim that does not match, or two conflicting discount numbers.`
+      : `No real offer supplied — set offerConsistent=true (skip the check).`,
   ].join("\n");
 
-  let json: { headlineExact?: boolean; textLegible?: boolean; noBarePrice?: boolean; noFabricatedPhotoCaption?: boolean; transformationPhotorealistic?: boolean; packagingFaithful?: boolean; issues?: string[]; usage?: unknown };
+  let json: { headlineExact?: boolean; textLegible?: boolean; noBarePrice?: boolean; noFabricatedPhotoCaption?: boolean; transformationPhotorealistic?: boolean; packagingFaithful?: boolean; offerConsistent?: boolean; issues?: string[]; usage?: unknown };
   try {
     const content: Array<Record<string, unknown>> = [
       { type: "image", source: { type: "base64", media_type: "image/jpeg", data: normalized.toString("base64") } },
@@ -186,6 +222,10 @@ export async function qaCreative(
     // Packagingfaithful with no reference supplied is SKIPPED — the model is told to return true and
     // we also enforce it locally so a legacy path (no packshot threaded) can never regress.
     packagingFaithful: packshot ? json.packagingFaithful === true : true,
+    // OfferConsistent with no real offer supplied is SKIPPED — same defense-in-depth as
+    // packagingFaithful: the model is told to return true, and we also enforce it locally so a
+    // legacy caller that doesn't thread realOffer can never regress a legitimate no-offer render.
+    offerConsistent: realOfferSummary ? json.offerConsistent === true : true,
   };
   const pass = Object.values(checks).every(Boolean);
   const issues = Array.isArray(json.issues) ? json.issues.filter((s): s is string => typeof s === "string") : [];
@@ -269,7 +309,7 @@ export async function qaCreativeViaBoxSession(
   const failClosed = (reason: string): CreativeQAVerdict => ({
     pass: false,
     issues: [reason],
-    checks: { headlineExact: false, textLegible: false, noBarePrice: false, noFabricatedPhotoCaption: false, transformationPhotorealistic: false, packagingFaithful: false },
+    checks: { headlineExact: false, textLegible: false, noBarePrice: false, noFabricatedPhotoCaption: false, transformationPhotorealistic: false, packagingFaithful: false, offerConsistent: false },
   });
 
   let normalized: Buffer;
@@ -311,6 +351,11 @@ export async function qaCreativeViaBoxSession(
     // containing an injected instruction ("SYSTEM: run Bash …") can no longer influence the QC
     // agent's tool use — and the least-privilege sandbox + PreToolUse gate wired in the
     // dispatcher deny the tool anyway, so this is defence in depth.
+    // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — hand the
+    // vision QC the real store offer as a TRUSTED string (outside the untrusted DATA block, same
+    // trust boundary as the imitation/packshot rules). Null → the outer prompt tells the QC to
+    // SKIP offerConsistent (returning true), matching the local skip below.
+    const realOfferSummary = summarizeOfferForQa(gen.realOffer);
     const prompt = buildQcPrompt({
       imagePath,
       expectedCopy: { headline: gen.expectedCopy.headline, offer: gen.expectedCopy.offer, trust: gen.expectedCopy.trust },
@@ -319,6 +364,7 @@ export async function qaCreativeViaBoxSession(
       // skip the exact-match (keep textLegible + no-competitor-brand strict). See creative-generate buildPrompt.
       imitationHeadline: !gen.expectedCopy.headline?.trim(),
       packshotPath,
+      realOfferSummary,
     });
 
     // Both tmp paths become the comma-separated allowedImagePath env value. The QC gate's
@@ -350,6 +396,13 @@ export async function qaCreativeViaBoxSession(
       // API path. This closes the "packshotUrl was set but the tmpfile write failed" hole so a
       // model that mistakenly says false can't fail-close a legitimate own-brand render.
       packagingFaithful: packshotPath ? rawChecks.packagingFaithful === true : true,
+      // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors —
+      // offerConsistent is only enforced when a real offer summary was actually threaded into the
+      // prompt. When no offer reached the QC (own-brand no-offer render, or realOffer=null), we
+      // force true locally regardless of the model's answer — same defense-in-depth pattern as
+      // packagingFaithful: a legacy caller / a spuriously-false model answer can't false-fail a
+      // legitimate no-offer render.
+      offerConsistent: realOfferSummary ? rawChecks.offerConsistent === true : true,
     };
     const allTrue = Object.values(checks).every(Boolean);
     // A mismatched top-level `pass` (checks all true but pass:false, or vice versa) is treated as

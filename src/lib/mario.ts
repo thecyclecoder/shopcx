@@ -672,6 +672,10 @@ async function readStuckQueuedBuildStalls(
  *  or `failed` state — the retry-cap surface in [[github-pr-resolve]] `surfaceExhaustedPrResolve`
  *  already stamps a single `needs_attention` sentinel per PR, so 3 rows means Mario is looking at a
  *  repeat pattern the deduper alone did not stop. */
+/** Orphaned-PR detector age ceiling: only a build row updated within this window is considered for an
+ *  orphaned open PR. A genuinely orphaned PR is days-old at most; older `completed` rows are settled
+ *  history (pre-`merged`-status convention) and must never be re-litigated (911 2026-07-16). */
+const MARIO_ORPHANED_PR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MARIO_PR_RESOLVE_STORM_MIN_PARKED = 3;
 
 /** Rolling window Mario looks back to count parked pr-resolve rows for one PR. 24 h is wide enough to
@@ -814,6 +818,13 @@ async function readOrphanedFoldedPrs(
   workspace_id: string,
 ): Promise<Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }>> {
   const now = Date.now();
+  // AGE CEILING (911 fix `mario-orphaned-pr-age-ceiling` 2026-07-16): only consider RECENT build rows.
+  // The detector's real job is catching a just-folded spec whose PR is still open (e.g. #1893 at 7h) —
+  // NOT months-old settled PRs. Ancient `completed` build rows (pre-`merged`-status convention, e.g.
+  // June PRs #1216/#1218) have no `merged` sibling for the #1914 dedupe to catch, so they re-surfaced as
+  // false orphans and mass-enqueued ~99 no-op mario jobs every cron tick. A genuinely orphaned PR is
+  // days-old at most; cap at MARIO_ORPHANED_PR_MAX_AGE_MS so settled history is never re-litigated.
+  const orphanCutoff = new Date(now - MARIO_ORPHANED_PR_MAX_AGE_MS).toISOString();
   const { data: builds, error } = await admin
     .from("agent_jobs")
     .select("spec_slug, pr_number, spec_branch, status, updated_at")
@@ -821,6 +832,7 @@ async function readOrphanedFoldedPrs(
     .eq("kind", "build")
     .not("pr_number", "is", null)
     .neq("status", "merged")
+    .gte("updated_at", orphanCutoff)
     .limit(1000);
   if (error) throw error;
   const rows = (builds ?? []) as Array<{
@@ -858,8 +870,27 @@ async function readOrphanedFoldedPrs(
     if (s.status === "folded" || s.status === "shipped") terminalSpecs.set(s.slug, s.status);
   }
 
+  // A PR that has ANY build row already `merged` is NOT orphaned — it merged via a DIFFERENT build
+  // row for the same PR. The primary scan above excludes `merged` rows (`.neq('status','merged')`), so
+  // a PR with an earlier `completed`/`needs_attention` build row (same pr_number) survives as a FALSE
+  // orphan and re-enqueues a mario job every cron tick (911 2026-07-16: ~24 long-merged PRs like #868 —
+  // a `merged` build row AND a `completed` build row both carry pr_number=868 — mass-enqueued mario jobs
+  // that just no-op on the already-closed PR). Fetch the merged pr_numbers among our candidates and drop them.
+  const candidatePrs = [...new Set([...bySlug.values()].map((b) => b.pr_number))];
+  const { data: mergedRows } = candidatePrs.length
+    ? await admin
+        .from("agent_jobs")
+        .select("pr_number")
+        .eq("workspace_id", workspace_id)
+        .eq("kind", "build")
+        .eq("status", "merged")
+        .in("pr_number", candidatePrs)
+    : { data: [] as Array<{ pr_number: number | null }> };
+  const mergedPrs = new Set(((mergedRows ?? []) as Array<{ pr_number: number | null }>).map((r) => r.pr_number));
+
   const out: Array<{ workspace_id: string; spec_slug: string; pr_number: number; branch: string | null; age_ms: number }> = [];
   for (const [slug, b] of bySlug) {
+    if (mergedPrs.has(b.pr_number)) continue; // PR already merged (a sibling build row is `merged`) — not orphaned
     const specStatus = terminalSpecs.get(slug) ?? null;
     if (
       !shouldSurfaceOrphanedFoldedPr({
@@ -1217,9 +1248,10 @@ export async function evaluateStalledSpecs(
     // merely had a rough build history. A pipeline visibility increase surfaced ~50 such specs and
     // mass-enqueued mario jobs against them. Derive shipped from the phase rollup (every phase shipped)
     // and drop it under the SAME terminal-source relax as folded/deferred.
-    const derivedShipped =
-      specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
-    if (specRow.status === "folded" || specRow.status === "deferred" || derivedShipped) {
+    // (d) terminal spec (folded / deferred / derived-shipped) — dropped UNLESS this from_event is a
+    // terminal-targeted source (orphaned_folded_pr). The enqueue chokepoint (isMarioTerminalSpec guard in
+    // enqueueMarioJob) is the ABSOLUTE backstop that refuses even the relaxed source per the CEO directive.
+    if (isMarioTerminalSpec(specRow)) {
       if (!TERMINAL_OK_FROM_EVENTS.has(c.from_event)) continue;
     }
 
@@ -1283,6 +1315,26 @@ export async function evaluateStalledSpecs(
  * race would insert a second row; M4's own claim step is designed to no-op on
  * that (the FIRST claim wins; the second becomes a no-op mario tick).
  */
+/** PURE predicate — is this spec row TERMINAL for Mario's purposes: archived/folded, explicitly
+ *  `deferred`, or DERIVED-shipped (every phase shipped, which presents with a NULL raw `status`)?
+ *
+ *  The CEO directive (2026-07-16) is ABSOLUTE: Mario must never file a job on an archived/folded spec.
+ *  The `evaluateStalledSpecs` survivor filter's (d) drop already drops these — EXCEPT it relaxes for the
+ *  `orphaned_folded_pr` ninth source (folded spec + open PR), which the moment the box regained pipeline
+ *  visibility mass-enqueued 65 Max-session jobs against just-folded pipeline specs (goal-serializer,
+ *  parallel-build-*, mario-detects-*, pr-resolve-retry-cap-*). This predicate powers a HARD guard at the
+ *  `enqueueMarioJob` chokepoint below that overrides that relax for EVERY candidate source (current or
+ *  future) — so no folded-spec flood can recur regardless of which source produced the candidate.
+ *  Orphaned-PR cleanup on a folded spec is a deterministic fold-time concern
+ *  ([[pr-resolve-retry-cap-and-fold-closes-orphan-pr]]), never a per-PR Max session. Kept pure +
+ *  exported so the guard is unit-testable without a Supabase seam (mirrors the survivor-filter (d)
+ *  derivedShipped logic — one definition of "terminal for Mario"). */
+export function isMarioTerminalSpec(specRow: Pick<SpecRow, "status" | "phases">): boolean {
+  const derivedShipped =
+    specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
+  return specRow.status === "folded" || specRow.status === "deferred" || derivedShipped;
+}
+
 export async function enqueueMarioJob(
   admin: Admin,
   candidate: StalledCandidate,
@@ -1301,6 +1353,17 @@ export async function enqueueMarioJob(
     .maybeSingle();
   if (selectErr) throw selectErr;
   if (existing) return { enqueued: false, reason: "active_mario_exists" };
+
+  // TERMINAL-SPEC HARD GUARD (CEO 2026-07-16 — "Mario must not work on archived/folded specs", absolute).
+  // The enqueue chokepoint refuses ANY candidate whose spec is folded / deferred / derived-shipped, even
+  // the orphaned_folded_pr ninth source whose survivor-filter (d) relax would otherwise let it through.
+  // This is the load-bearing invariant: a folded spec never gets a Max-session mario job, period, no matter
+  // the source. Fail-OPEN on a missing row (the phantom / pr-<n> job/PR class carries no specs row and is a
+  // legitimate Mario target — the survivor filter's (d0) already vetted it).
+  const specRow = await getSpecFromDb(candidate.workspace_id, candidate.spec_slug);
+  if (specRow && isMarioTerminalSpec(specRow)) {
+    return { enqueued: false, reason: "terminal_spec" };
+  }
 
   // Re-fire COOLDOWN. The active-mario dedupe above only blocks a CONCURRENT job — the moment a mario job
   // COMPLETES with an escalate (or a fix that didn't clear the stall), the underlying stall persists, so
