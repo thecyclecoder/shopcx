@@ -102,6 +102,8 @@ TRUST BAR (small, along the bottom, render exactly): ${trust}
 
 OFFER (show ONCE — a single badge, never duplicated): ${offerHeadline ? `one pill/badge reading "${offerHeadline}".` : "none."}${priceLine && brief.offer?.perServing ? ` Next to it, the per-serving value "${priceLine}".` : priceLine && brief.offer?.strikethrough ? ` If a price is shown, ONLY as strikethrough MSRP → discounted: "${priceLine}" with the small disclaimer "${brief.offer?.disclaimer}".` : ""}
 
+OFFER FIDELITY (hard rule): the ONLY discount / percent-off / dollar-off / "free shipping" / BOGO / "X for $Y" claim that may appear ANYWHERE in the image is the OFFER above. Do NOT invent, add, echo, or carry over a different discount number from the headline, subhead, badges, or any other element${offerHeadline ? "" : " (no offer is supplied — the ad must show NO discount claim at all)"}. Two conflicting discount numbers on the same ad is a defect.
+
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 
   // expectedCopy.headline drives the QC exact-headline check. For an imitation we deliberately let the model
