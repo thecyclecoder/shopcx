@@ -1,0 +1,1 @@
+- **Ticket deletion clears Sol action request rows before deleting the ticket** · verified 2026-07-16 · → [[../tables/agent_action_requests]]
