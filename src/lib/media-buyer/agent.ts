@@ -1882,6 +1882,44 @@ export function ensureExcludedPurchaserAudience(
   return { ...targeting, excluded_custom_audiences: [...existing, { id: audienceId }] };
 }
 
+/**
+ * PURE — compose EVERY declared exclusion audience id onto `targeting.excluded_custom_audiences`.
+ * Filters out null/undefined ids (a cohort that never stamped one) and dedupes against entries
+ * already present, so a template whose provision-time composition already carries an id is
+ * returned unchanged. The composite is the exact shape the publish-gate demands: an entry per
+ * declared id (pixel WEBSITE audience + hashed CUSTOMER_LIST audience together on every cold-test
+ * ad set). Returns targeting unchanged when no non-null id is passed.
+ *
+ * bianca-full-order-history-customer-list-exclusion-audience Fix 1 — replaces the single-id
+ * `ensureExcludedPurchaserAudience` at replenish time so BOTH ids compose. The single-id helper
+ * is retained for callers still on the sibling spec's shape.
+ */
+export function ensureExcludedAudiences(
+  targeting: Record<string, unknown>,
+  audienceIds: Array<string | null | undefined>,
+): Record<string, unknown> {
+  const ids = audienceIds.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (ids.length === 0) return targeting;
+  const raw = targeting.excluded_custom_audiences;
+  const existing = Array.isArray(raw) ? [...raw] : [];
+  const already = new Set<string>();
+  for (const entry of existing) {
+    if (entry && typeof entry === "object") {
+      const id = (entry as Record<string, unknown>).id;
+      if (typeof id === "string") already.add(id);
+    }
+  }
+  let changed = false;
+  for (const id of ids) {
+    if (already.has(id)) continue;
+    existing.push({ id });
+    already.add(id);
+    changed = true;
+  }
+  if (!changed) return targeting;
+  return { ...targeting, excluded_custom_audiences: existing };
+}
+
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
   const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts } = input;
 
@@ -1900,15 +1938,20 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
         reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
       };
     }
-    // bianca-cold-test-recent-purchaser-exclusion Phase 2 — the freshly-minted per-test ad
-    // set MUST publish with the cohort's declared purchaser-exclusion audience listed under
+    // bianca-cold-test-recent-purchaser-exclusion Phase 2 + bianca-full-order-history-
+    // customer-list-exclusion-audience Fix 1 — the freshly-minted per-test ad set MUST
+    // publish with EVERY exclusion audience the cohort declares listed under
     // `targeting.excluded_custom_audiences` (Meta's `[{ id }, …]` shape). Prefer the
     // template's own targeting (buildAdsetTemplate composes the exclusion at provision time),
     // but if the cohort has stamped an id and the template's targeting doesn't carry it, layer
-    // it on here as a belt-and-suspenders — the publish-gate refuses `missing_purchaser_exclusion`
-    // on any per-test publish whose spec doesn't. A cohort with a null
-    // `excludedPurchaserAudienceId` (legacy pre-Phase-2 row) forwards the template unchanged.
-    const targeting = ensureExcludedPurchaserAudience(tmpl.targeting, cohort.excludedPurchaserAudienceId);
+    // it on here as a belt-and-suspenders — the publish-gate refuses both
+    // `missing_purchaser_exclusion` AND `missing_customer_exclusion` on any per-test publish
+    // whose spec doesn't. A cohort with only one id set (e.g. legacy pre-Fix-1 row) forwards
+    // the template with just that id; a cohort with neither id set forwards the template unchanged.
+    const targeting = ensureExcludedAudiences(tmpl.targeting, [
+      cohort.excludedPurchaserAudienceId,
+      cohort.excludedAllCustomersAudienceId,
+    ]);
     createAdsetSpec = {
       campaign_id: campaignId,
       name: adName,

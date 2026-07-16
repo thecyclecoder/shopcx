@@ -81,6 +81,18 @@ export interface MediaBuyerTestCohort {
    * whose `id === excludedPurchaserAudienceId` (`missing_purchaser_exclusion`).
    */
   excludedPurchaserAudienceId: string | null;
+  /**
+   * [[../../../docs/brain/specs/bianca-full-order-history-customer-list-exclusion-audience]]
+   * Phase 1 — the bare Meta customaudience id (NOT our uuid) of the CUSTOMER_LIST
+   * (upload-based) audience the cohort must exclude on every per-test ad set. Built
+   * from our ENTIRE order history across Shopify + Internal + Amazon — hashed
+   * email+phone, no plaintext PII. NULL = no all-customers exclusion stamped yet
+   * (legacy pre-Fix-1 row). When non-null, the publish-gate REFUSES a per-test
+   * publish whose proposed `targeting.excluded_custom_audiences` does not carry an
+   * entry whose `id === excludedAllCustomersAudienceId` (`missing_customer_exclusion`).
+   * Both ids are composed into the same exclusion list on every cold-test adset.
+   */
+  excludedAllCustomersAudienceId: string | null;
 }
 
 /** The cloned adset spec every per-test ad set inherits (mirrors provision-cohort's `AdsetTemplate`). */
@@ -131,6 +143,7 @@ interface MediaBuyerTestCohortRow {
   per_test_daily_budget_cents?: number | string | null;
   adset_template?: AdsetTemplateShape | null;
   excluded_purchaser_audience_id?: string | null;
+  excluded_all_customers_audience_id?: string | null;
 }
 
 function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
@@ -158,6 +171,7 @@ function toCohort(row: MediaBuyerTestCohortRow): MediaBuyerTestCohort {
         : Number(row.per_test_daily_budget_cents),
     adsetTemplate: (row.adset_template as AdsetTemplateShape | null) ?? null,
     excludedPurchaserAudienceId: row.excluded_purchaser_audience_id ?? null,
+    excludedAllCustomersAudienceId: row.excluded_all_customers_audience_id ?? null,
   };
 }
 
@@ -213,7 +227,8 @@ export type MediaBuyerTestRefusalReason =
   | "over_ceiling" // projected daily spend on the ad set exceeds `daily_test_ceiling_cents`.
   | "over_concurrency" // per-test mode: minting this ad set would push live tests × per-test budget over the ceiling.
   | "cohort_misconfigured" // per-test cohort missing its campaign/template — can't safely mint an ad set.
-  | "missing_purchaser_exclusion"; // per-test mode: cohort carries `excluded_purchaser_audience_id` but the proposed adset targeting does NOT list that id under `excluded_custom_audiences` (bianca-cold-test-recent-purchaser-exclusion Phase 3).
+  | "missing_purchaser_exclusion" // per-test mode: cohort carries `excluded_purchaser_audience_id` but the proposed adset targeting does NOT list that id under `excluded_custom_audiences` (bianca-cold-test-recent-purchaser-exclusion Phase 3).
+  | "missing_customer_exclusion"; // per-test mode: cohort carries `excluded_all_customers_audience_id` but the proposed adset targeting does NOT list that id under `excluded_custom_audiences` (bianca-full-order-history-customer-list-exclusion-audience Fix 1).
 
 export interface MediaBuyerTestGateInput {
   workspaceId: string;
@@ -317,6 +332,15 @@ function refusalDiagnosis(
         `Media Buyer publish REFUSED live: adset request for ${scope} must exclude custom audience ${audienceId} — ` +
         `the last-180d-purchasers audience the cohort declares. Its id was NOT present in the proposed ` +
         `targeting.excluded_custom_audiences. Publishing PAUSED to Meta (adset ${input.metaAdsetId}, projected $${usdProj}/day). ` +
+        `Re-provision the cohort or fix the template so every per-test ad set inherits the exclusion. Your call.`
+      );
+    }
+    case "missing_customer_exclusion": {
+      const audienceId = cohort?.excludedAllCustomersAudienceId ?? "(none)";
+      return (
+        `Media Buyer publish REFUSED live: adset request for ${scope} must exclude custom audience ${audienceId} — ` +
+        `the all-customers (all-order-history, hashed) audience the cohort declares. Its id was NOT present in the ` +
+        `proposed targeting.excluded_custom_audiences. Publishing PAUSED to Meta (adset ${input.metaAdsetId}, projected $${usdProj}/day). ` +
         `Re-provision the cohort or fix the template so every per-test ad set inherits the exclusion. Your call.`
       );
     }
@@ -476,6 +500,24 @@ export async function evaluateMediaBuyerTestPublish(
           projectedDailyCents: input.projectedDailyCents,
           ceilingCents: cohort.dailyTestCeilingCents,
           diagnosis: refusalDiagnosis("missing_purchaser_exclusion", input, cohort),
+        };
+      }
+    }
+    // Customer-list exclusion rail (bianca-full-order-history-customer-list-exclusion-audience Fix 1).
+    // Sibling of the purchaser-exclusion rail — same shape, second audience id. When the cohort
+    // declares a CUSTOMER_LIST all-customers exclusion, the per-test publish MUST list its id
+    // under the proposed adset targeting's `excluded_custom_audiences` alongside the purchaser id.
+    if (cohort.excludedAllCustomersAudienceId) {
+      const proposed =
+        input.createAdsetSpec?.targeting ?? input.targeting ?? null;
+      if (!targetingExcludesAudience(proposed, cohort.excludedAllCustomersAudienceId)) {
+        return {
+          allowed: false,
+          reason: "missing_customer_exclusion",
+          cohort,
+          projectedDailyCents: input.projectedDailyCents,
+          ceilingCents: cohort.dailyTestCeilingCents,
+          diagnosis: refusalDiagnosis("missing_customer_exclusion", input, cohort),
         };
       }
     }
