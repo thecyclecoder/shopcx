@@ -1248,9 +1248,10 @@ export async function evaluateStalledSpecs(
     // merely had a rough build history. A pipeline visibility increase surfaced ~50 such specs and
     // mass-enqueued mario jobs against them. Derive shipped from the phase rollup (every phase shipped)
     // and drop it under the SAME terminal-source relax as folded/deferred.
-    const derivedShipped =
-      specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
-    if (specRow.status === "folded" || specRow.status === "deferred" || derivedShipped) {
+    // (d) terminal spec (folded / deferred / derived-shipped) — dropped UNLESS this from_event is a
+    // terminal-targeted source (orphaned_folded_pr). The enqueue chokepoint (isMarioTerminalSpec guard in
+    // enqueueMarioJob) is the ABSOLUTE backstop that refuses even the relaxed source per the CEO directive.
+    if (isMarioTerminalSpec(specRow)) {
       if (!TERMINAL_OK_FROM_EVENTS.has(c.from_event)) continue;
     }
 
@@ -1314,6 +1315,26 @@ export async function evaluateStalledSpecs(
  * race would insert a second row; M4's own claim step is designed to no-op on
  * that (the FIRST claim wins; the second becomes a no-op mario tick).
  */
+/** PURE predicate — is this spec row TERMINAL for Mario's purposes: archived/folded, explicitly
+ *  `deferred`, or DERIVED-shipped (every phase shipped, which presents with a NULL raw `status`)?
+ *
+ *  The CEO directive (2026-07-16) is ABSOLUTE: Mario must never file a job on an archived/folded spec.
+ *  The `evaluateStalledSpecs` survivor filter's (d) drop already drops these — EXCEPT it relaxes for the
+ *  `orphaned_folded_pr` ninth source (folded spec + open PR), which the moment the box regained pipeline
+ *  visibility mass-enqueued 65 Max-session jobs against just-folded pipeline specs (goal-serializer,
+ *  parallel-build-*, mario-detects-*, pr-resolve-retry-cap-*). This predicate powers a HARD guard at the
+ *  `enqueueMarioJob` chokepoint below that overrides that relax for EVERY candidate source (current or
+ *  future) — so no folded-spec flood can recur regardless of which source produced the candidate.
+ *  Orphaned-PR cleanup on a folded spec is a deterministic fold-time concern
+ *  ([[pr-resolve-retry-cap-and-fold-closes-orphan-pr]]), never a per-PR Max session. Kept pure +
+ *  exported so the guard is unit-testable without a Supabase seam (mirrors the survivor-filter (d)
+ *  derivedShipped logic — one definition of "terminal for Mario"). */
+export function isMarioTerminalSpec(specRow: Pick<SpecRow, "status" | "phases">): boolean {
+  const derivedShipped =
+    specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
+  return specRow.status === "folded" || specRow.status === "deferred" || derivedShipped;
+}
+
 export async function enqueueMarioJob(
   admin: Admin,
   candidate: StalledCandidate,
@@ -1332,6 +1353,17 @@ export async function enqueueMarioJob(
     .maybeSingle();
   if (selectErr) throw selectErr;
   if (existing) return { enqueued: false, reason: "active_mario_exists" };
+
+  // TERMINAL-SPEC HARD GUARD (CEO 2026-07-16 — "Mario must not work on archived/folded specs", absolute).
+  // The enqueue chokepoint refuses ANY candidate whose spec is folded / deferred / derived-shipped, even
+  // the orphaned_folded_pr ninth source whose survivor-filter (d) relax would otherwise let it through.
+  // This is the load-bearing invariant: a folded spec never gets a Max-session mario job, period, no matter
+  // the source. Fail-OPEN on a missing row (the phantom / pr-<n> job/PR class carries no specs row and is a
+  // legitimate Mario target — the survivor filter's (d0) already vetted it).
+  const specRow = await getSpecFromDb(candidate.workspace_id, candidate.spec_slug);
+  if (specRow && isMarioTerminalSpec(specRow)) {
+    return { enqueued: false, reason: "terminal_spec" };
+  }
 
   // Re-fire COOLDOWN. The active-mario dedupe above only blocks a CONCURRENT job — the moment a mario job
   // COMPLETES with an escalate (or a fix that didn't clear the stall), the underlying stall persists, so
