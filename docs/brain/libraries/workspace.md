@@ -46,7 +46,7 @@ async function autoAcceptInvites(userId: string, email: string)
 
 ## Gotchas
 
-_None documented._
+- `getUserWorkspaces` and `getActiveWorkspaceId` are React `cache()`-wrapped (tag `db-load-auth-cache`) — repeated calls within one server render dedup. `setActiveWorkspace` verifies membership via [[auth]] `getWorkspaceMemberships` (also `cache()`-wrapped) instead of a direct `workspace_members` read.
 
 ---
 

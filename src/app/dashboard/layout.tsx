@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/auth"; // db-load-auth-cache
 import { getActiveWorkspaceId, getUserWorkspaces } from "@/lib/workspace";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import { SectionNavProvider } from "@/lib/section-nav-context";
@@ -22,8 +22,7 @@ export default function DashboardLayout({
 }
 
 async function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
 
   if (!user) redirect("/login");
 
@@ -41,7 +40,15 @@ async function DashboardLayoutInner({ children }: { children: React.ReactNode })
       <div className="flex h-screen bg-zinc-50 dark:bg-zinc-950">
         <Sidebar
           workspace={current}
-          user={{ id: user.id, email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
+          user={{
+            id: user.id,
+            email: user.email!,
+            // user_metadata is typed as Record<string, unknown> when the
+            // db-load-getclaims path maps the JWT claim to a user shape.
+            name:
+              (user.user_metadata?.full_name as string | undefined) ||
+              (user.user_metadata?.name as string | undefined),
+          }}
         />
         <main className="min-w-0 flex-1 overflow-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
           <PullToRefresh>
