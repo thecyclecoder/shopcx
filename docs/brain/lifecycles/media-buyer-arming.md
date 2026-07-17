@@ -60,9 +60,25 @@ The route above is the **owner-driven** transition. The **autonomous** side of t
 
 **Open work:** per-campaign `iteration_policies.mode` overrides (v1 is workspace-wide, `campaign_id IS NULL`); extending the cohort set beyond the two launch products.
 
+### Follow-on goal — `bianca-temperature-aware-campaign-structure` (folded complete 2026-07-17)
+
+Where the supervision goal above made the **test cohort** live, supervised, and self-correcting, this goal gave Bianca the thin **temperature-aware account STRUCTURE** the loop was missing — three surfaces routed by Dahlia's `audience_temperature` tag, plus a SECOND arming gate for the highest-risk surface. Owned by [[../functions/growth]]; the CEO north star it serves — *a scaler Max can't grade is the one thing this must not create* — is encoded as a campaign-level CAC:LTV sensor + a per-surface arming gate, never raw autonomous spend. The research verdict that shaped it: Meta pools + self-sorts cold traffic by the ad's own creative signal ("creative IS the targeting"), so heavy audience segmentation is dropped — the three surviving obligations Meta will NOT do are temperature routing (our construct), new-vs-existing-buyer separation, and signal hygiene.
+
+**The three surfaces (the durable architecture):**
+- **Surface 1 — TEST** (the existing lab, hardened): per-product ABO, 4×$150 single-creative adsets judged on cost-per-ATC, perpetual feeder. M1 aligned the default targeting to the proven **US women 50-65** converter (was US 18-65, no gender — which confounded the per-creative CPA read the crown/kill call depends on) and honored the [[../tables/iteration_policies]] scale-edit rails (`per_object_cooldown_hours` + `per_account_daily_budget_delta_ceiling_cents`) the executor had been ignoring. M2 added a **recent-purchaser exclusion** on every cold-test adset (backed by a full-order-history hashed customer-list exclusion audience, refreshed) after a one-shot measurement confirmed the existing-buyer overlap cleared the ~15% ship threshold. Corrected harm model: contamination → **false crowns** (weak creative promoted to concentrated budget), not false kills — so the exclusion + the scaler are coupled.
+- **Surface 2 — COLD-SCALE** (the real gap, M4): ONE consolidated Advantage+/CBO with native "Acquire New Customers Only", optimizing for purchase VALUE, where crowned winners graduate off the $600 lab ceiling. Ships **bounded + supervised** with three of its own rails: a cohort + daily ceiling ([[../tables/media_buyer_cold_scaler_cohorts]] via [[../libraries/cold-scaler-cohort]]), a **shadow→armed weekly arming gate** ([[../libraries/media-buyer__cold-scaler-arming-gate]] → [[../tables/media_buyer_cold_scaler_arming_authorization]] — distinct from the test-cohort gate on this page), and a campaign-level **CAC:LTV sensor** ([[../libraries/media-buyer__cold-scaler-cac-ltv-sensor]] → [[../tables/media_buyer_cold_scaler_cac_ltv_snapshots]]) that keeps the scaler gradable by Max where per-creative ROAS can't reach.
+- **Surface 3 — HOT-RETARGET**: DEFERRED out of this goal — one account-level DPA/offer lane, only after Dahlia's Hot lane exists AND an incrementality measurement vs Advantage+'s built-in retargeting. Skipped entirely: lookalikes, interest tiers, warm/cold adset matrices, hashed-list exclusion chains.
+
+**Temperature routing (M3):** Bianca's ready-creative picker is TEMPERATURE-scoped to `'cold'` ([[../libraries/media-buyer-agent]]) so a Warm/Hot creative Dahlia tagged (via the Dahlia copy-engine goal's `audience_temperature` column) can't leak into the cold rail's deficit fill; Hot/Warm creatives are parked until Surface 3 exists.
+
+**Sequencing:** M1 + M2 were Bianca-side and independent of Dahlia (paid off during the creative freeze); M3 gated on Dahlia's temperature column; M4 gated on Dahlia supplying a steady crowned-winner stream (can't seed a scaler with a paused creative engine). All four milestones landed.
+
+**Open work:** Surface 3 (hot-retarget) remains deferred; the cold scaler ships shadow-first and arms only under its weekly gate.
+
 ## Related
 
 - [[../specs/media-buyer-armed-flip-surface]] (this spec) · [[../specs/media-buyer-arming-gate]] · [[../specs/media-buyer-shadow-mode]]
 - [[../tables/iteration_policies]] · [[../tables/media_buyer_arming_authorization]] · [[../tables/media_buyer_action_grades]] · [[../tables/director_activity]]
+- Cold scaler (follow-on goal): [[../tables/media_buyer_cold_scaler_cohorts]] · [[../tables/media_buyer_cold_scaler_arming_authorization]] · [[../tables/media_buyer_cold_scaler_cac_ltv_snapshots]] · [[../libraries/cold-scaler-cohort]] · [[../libraries/media-buyer__cold-scaler-arming-gate]] · [[../libraries/media-buyer__cold-scaler-cac-ltv-sensor]]
 - [[../libraries/approval-router]] · [[../libraries/director-activity]] · [[../libraries/media-buyer-arming-gate]] · [[../libraries/media-buyer-agent]] · [[../libraries/media-buyer-self-correcting]] · [[../libraries/media-buyer__mode-flip]]
 - [[../functions/growth]] (owning function) · [[../inngest/media-buyer-cadence]] · [[../inngest/media-buyer-grade]] · [[../inngest/media-buyer-self-correcting]]

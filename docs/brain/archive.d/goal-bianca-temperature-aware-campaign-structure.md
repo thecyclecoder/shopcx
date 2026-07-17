@@ -1,0 +1,1 @@
+- **Bianca Temperature-Aware Campaign Structure** · folded 2026-07-17 · → [[lifecycles/media-buyer-arming]]
