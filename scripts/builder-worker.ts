@@ -57,7 +57,8 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
-import { runBoxTurnWithFreshFallback, pickNextSession } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2)
+import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2); isMissingSessionError powers the copy-author self-heal resume failsafe
+import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -20810,30 +20811,60 @@ async function runAdCreativeJob(job: Job) {
   // deterministic buildMetaCopyPack path runs byte-identical to today.
   const copyAuthorMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
   let copyAuthorCounter = 0;
-  const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+  // copy-author-self-heal (2026-07-17) — the dispatcher now honours a `resume` pin so the self-heal
+  // loop can RESUME Dahlia's SAME box session (cache-warm) instead of paying the full context again on
+  // every revise. It reports the run's `sessionId` + `sessionConfigDir` so the loop can pin the next
+  // resume to the SAME account, and `missingSession` so the loop's FAILSAFE re-dispatches FRESH (full
+  // prompt) when the box lost the session between turns. It never retries internally — the loop owns
+  // the fresh re-dispatch because the fresh turn needs the FULL prompt, not the short revise one.
+  const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyAuthorCounter++;
-    const authorTag = `${tag}[copy-author#${copyAuthorCounter}]`;
+    const authorTag = `${tag}[copy-author#${copyAuthorCounter}]${resume ? "[resume]" : ""}`;
     try {
-      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-        configDir: cfg,
-        kind: "ad-creative-copy-author",
-        // Least-privilege — same profile as `sandbox: "qc"`; the author child only needs to Read
-        // ONE tmp jpeg + emit ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/META_/
-        // ANTHROPIC_/OPENAI_ credential like the QC lane does.
-        sandbox: "qc",
-        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
-        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
-        // Same env-var name keeps the gate script single-source-of-truth.
-        permissionGate: { hookCommand: qcPermissionHookCommand },
-        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-      }));
+      const run = await runBoxLane(
+        (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-author",
+          // Least-privilege — same profile as `sandbox: "qc"`; the author child only needs to Read
+          // ONE tmp jpeg + emit ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/META_/
+          // ANTHROPIC_/OPENAI_ credential like the QC lane does. (A RESUME reuses the same qc sandbox
+          // + the same single-image allowlist — the security boundary is per-image and unchanged.)
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+          // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+          // Same env-var name keeps the gate script single-source-of-truth.
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }),
+        // Resume pin — when set, runBoxLane pins to the session's owning account and passes the
+        // sessionId into runBoxSession (`claude --resume`). Omitted on the first turn (fresh session,
+        // self-selected healthy account).
+        resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+      );
+      // FAILSAFE 1 — a RESUME whose session the box no longer has (restart / rotation / expiry). Do NOT
+      // retry here; signal the loop to re-dispatch FRESH with the FULL prompt (the short revise prompt
+      // has nothing to resume onto). Founder-sanctioned edge case.
+      if (resume && isMissingSessionError(run.raw || "")) {
+        console.warn(`${authorTag} resume session ${resume.sessionId} missing on box — signaling fresh re-dispatch`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
+      // FAILSAFE 2 — a RESUME whose pinned account was capped mid-loop: runBoxLane hops to a healthy
+      // account and re-runs the SHORT revise prompt on a FRESH session there — which has NO cached
+      // image/brief context, so its output is unusable. Detect the hop (configDir changed) and signal
+      // the loop to re-dispatch FRESH with the FULL prompt on the now-healthy account next turn. (Not a
+      // correctness risk even if undetected — a context-less short prompt can't produce a grounded,
+      // parseable verdict — but this avoids burning self-heal attempts on a guaranteed miss.)
+      if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+        console.warn(`${authorTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling fresh re-dispatch`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
       if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
-      return { resultText: run.resultText || "", isError: run.isError };
+      return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
     } catch (err) {
       console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
-      return { resultText: "", isError: true };
+      return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
     }
   };
   console.log(`${tag} DAHLIA_COPY_MODE=${copyAuthorMode}${copyAuthorMode === "author" ? " — per-creative dahlia-copy-author box session engaged" : " — deterministic buildMetaCopyPack (default)"}`);
@@ -20924,24 +20955,38 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
         return { resultText: "", isError: true };
       }
     };
-    const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+    // copy-author-self-heal (2026-07-17) — same resume-aware dispatcher as the production lane
+    // (runAdCreativeJob): honours the loop's `resume` pin, reports sessionId/configDir/missingSession
+    // so the loop can resume Dahlia's session cache-warm + failsafe-fresh on a lost session.
+    const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       counter++;
-      const authorTag = `${tag}[copy-author#${counter}]`;
+      const authorTag = `${tag}[copy-author#${counter}]${resume ? "[resume]" : ""}`;
       try {
-        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-          configDir: cfg,
-          kind: "ad-creative-copy-author",
-          sandbox: "qc",
-          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-          permissionGate: { hookCommand: qcPermissionHookCommand },
-          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-        }));
+        const run = await runBoxLane(
+          (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+            configDir: cfg,
+            kind: "ad-creative-copy-author",
+            sandbox: "qc",
+            timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+            idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+            permissionGate: { hookCommand: qcPermissionHookCommand },
+            extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+          }),
+          resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+        );
+        if (resume && isMissingSessionError(run.raw || "")) {
+          console.warn(`${authorTag} resume session ${resume.sessionId} missing on box — signaling fresh re-dispatch`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
+        if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+          console.warn(`${authorTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling fresh re-dispatch`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
         if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
-        return { resultText: run.resultText || "", isError: run.isError };
+        return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
       } catch (err) {
         console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
-        return { resultText: "", isError: true };
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
       }
     };
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");

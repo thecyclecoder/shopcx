@@ -34,6 +34,21 @@ import {
   type AuthorModeCopy,
 } from "./creative-agent";
 import type { ScoredAngle } from "./creative-brief";
+import type { ClaimMiss } from "./never-fabricate";
+
+// copy-author-self-heal (2026-07-17) — a scripted firewall closure: returns `ok:false` for the first
+// `failCount` verdicts (citing a fabricated number), then `ok:true`. Models the in-loop never-fabricate
+// firewall so the self-heal (resume → re-author → re-check) is deterministically testable.
+function scriptedFirewall(failCount: number): CopyAuthorSessionInputs["verifyClaimTrace"] {
+  let seen = 0;
+  const miss: ClaimMiss = { claim: "500 million cups sold", source: "leadProof", source_ref: "leadProof", reason: "fabricated_number" };
+  return async () => {
+    seen++;
+    return seen <= failCount
+      ? { ok: false, reason: `firewall_claim_miss: ${miss.source}:${miss.reason}`, misses: [miss] }
+      : { ok: true };
+  };
+}
 
 // ── Fixtures ────────────────────────────────────────────────────────────────────────────────────
 
@@ -87,18 +102,33 @@ function envelope(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify(body);
 }
 
-function scriptedDispatcher(replies: Array<{ resultText: string; isError?: boolean } | Error>): {
+function scriptedDispatcher(
+  replies: Array<
+    | { resultText: string; isError?: boolean; sessionId?: string | null; sessionConfigDir?: string | null; missingSession?: boolean }
+    | Error
+  >,
+): {
   dispatch: CopyAuthorSessionDispatcher;
-  calls: Array<{ prompt: string; imagePath: string }>;
+  calls: Array<{ prompt: string; imagePath: string; resume?: { sessionId: string; sessionConfigDir: string | null } }>;
 } {
-  const calls: Array<{ prompt: string; imagePath: string }> = [];
+  const calls: Array<{ prompt: string; imagePath: string; resume?: { sessionId: string; sessionConfigDir: string | null } }> = [];
   let i = 0;
-  const dispatch: CopyAuthorSessionDispatcher = async (prompt, imagePath) => {
-    calls.push({ prompt, imagePath });
+  const dispatch: CopyAuthorSessionDispatcher = async (prompt, imagePath, resume) => {
+    calls.push({ prompt, imagePath, resume });
     const reply = replies[i++];
     if (!reply) throw new Error(`no scripted reply for dispatch call #${calls.length}`);
     if (reply instanceof Error) throw reply;
-    return { resultText: reply.resultText, isError: reply.isError === true };
+    return {
+      resultText: reply.resultText,
+      isError: reply.isError === true,
+      // copy-author-self-heal (2026-07-17) — a real box run always surfaces a session id + the account
+      // it ran on. Default them (sess-N on a fixed account) so the loop exercises the RESUME path — the
+      // realistic case. Override per-reply to model a lost session (missingSession:true) or a fresh
+      // session (sessionId:null → the loop won't resume onto it).
+      sessionId: reply.sessionId === undefined ? `sess-${calls.length}` : reply.sessionId,
+      sessionConfigDir: reply.sessionConfigDir === undefined ? "/cfg/acct-a" : reply.sessionConfigDir,
+      missingSession: reply.missingSession === true,
+    };
   };
   return { dispatch, calls };
 }
@@ -295,21 +325,29 @@ test("runCopyAuthorSession (c): self-score below floor → ONE revise, then ok o
   if (outcome.kind === "ok") {
     assert.equal(outcome.attempts, 2);
     assert.equal(calls.length, 2);
-    // The revise prompt MUST cite the self-score reason (so Dahlia knows what to fix).
+    // copy-author-self-heal — the retry RESUMES the SAME session (cache-warm) with the SHORT revise
+    // prompt, pinned to the account that created it.
+    assert.deepEqual(calls[1].resume, { sessionId: "sess-1", sessionConfigDir: "/cfg/acct-a" });
+    assert.match(calls[1].prompt, /REVISE — reuse the SAME image/);
+    // The revise prompt MUST still cite the self-score reason (so Dahlia knows what to fix).
     assert.match(calls[1].prompt, /self_score_below_floor/);
-    assert.match(calls[1].prompt, /REVISE — this is the ONE external revise/);
   }
 });
 
 test("runCopyAuthorSession (d): still-bad after the revise cap → exhausted with the last reason", async () => {
   const bad = envelope({ self_score: { lf8: 0, schwartz: 0, cialdini: 0, hopkins: 0, sugarman: 0, total: 0, evidence: [] } });
-  const { dispatch, calls } = scriptedDispatcher([{ resultText: bad }, { resultText: bad }]);
+  // The loop makes 1 first pass + MAX_COPY_AUTHOR_REVISE_ATTEMPTS revises before giving up.
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: bad }));
+  const { dispatch, calls } = scriptedDispatcher(replies);
   const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
   assert.equal(outcome.kind, "exhausted");
   if (outcome.kind === "exhausted") {
     assert.equal(outcome.attempts, 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS);
     assert.equal(calls.length, 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS);
     assert.match(outcome.reason, /self_score_below_floor/);
+    // A self-score exhaustion is NOT a firewall exhaustion — firewallMisses stays undefined so
+    // stockProduct emits `dahlia_copy_author_exhausted`, not the firewall variant.
+    assert.equal(outcome.firewallMisses, undefined);
   }
 });
 
@@ -363,6 +401,69 @@ test("runCopyAuthorSession (f): cold audience emit that leaks offer language →
     assert.equal(outcome.verdict.headline, "Energy without the 3pm slump");
     assert.match(calls[1].prompt, /cold_offer_leak/);
   }
+});
+
+// ── copy-author-self-heal (2026-07-17): firewall INSIDE the loop + cache-warm resume + failsafe ──
+
+test("self-heal: firewall miss on attempt 1 → RESUME same session + re-author → ok on attempt 2", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyClaimTrace: scriptedFirewall(1) }), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.equal(calls.length, 2);
+    // The first pass paid the full context; the retry RESUMED that same session (cache-warm) with the
+    // SHORT revise prompt, pinned to the account that created it, citing the firewall reason.
+    assert.equal(calls[0].resume, undefined);
+    assert.match(calls[0].prompt, /Use the dahlia-copy-author skill/); // full prompt on the first pass
+    assert.deepEqual(calls[1].resume, { sessionId: "sess-1", sessionConfigDir: "/cfg/acct-a" });
+    assert.match(calls[1].prompt, /REVISE — reuse the SAME image/);
+    assert.match(calls[1].prompt, /firewall_claim_miss/);
+  }
+});
+
+test("self-heal: firewall never grounds → exhausted carrying firewallMisses (distinct escalation)", async () => {
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: envelope() }));
+  const { dispatch, calls } = scriptedDispatcher(replies);
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyClaimTrace: scriptedFirewall(99) }), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.equal(calls.length, 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS);
+    assert.match(outcome.reason, /firewall_claim_miss/);
+    // firewallMisses is set ⇒ stockProduct emits `dahlia_copy_firewall_exhausted`, not the author variant.
+    assert.ok(outcome.firewallMisses, "firewallMisses must be populated on a firewall exhaustion");
+    assert.equal(outcome.firewallMisses!.length, 1);
+    assert.equal(outcome.firewallMisses![0].reason, "fabricated_number");
+    assert.equal(outcome.validatorMisses, undefined);
+  }
+});
+
+test("self-heal FAILSAFE: a RESUME hits a lost session → re-dispatch FRESH (full prompt) → ok", async () => {
+  const { dispatch, calls } = scriptedDispatcher([
+    { resultText: envelope() },                                  // attempt 0: firewall miss, session sess-1
+    { resultText: "", isError: true, missingSession: true },     // attempt 1: resume → box lost the session
+    { resultText: envelope() },                                  // attempt 2: FRESH full prompt → firewall ok
+  ]);
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyClaimTrace: scriptedFirewall(1) }), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(calls.length, 3);
+    // attempt 1 TRIED to resume sess-1…
+    assert.deepEqual(calls[1].resume, { sessionId: "sess-1", sessionConfigDir: "/cfg/acct-a" });
+    // …the box had lost it (missingSession), so the loop did NOT count it as a content failure and
+    // re-dispatched FRESH: no resume pin, the FULL prompt, still carrying the same firewall reason.
+    assert.equal(calls[2].resume, undefined);
+    assert.match(calls[2].prompt, /Use the dahlia-copy-author skill/);
+    assert.match(calls[2].prompt, /firewall_claim_miss/);
+  }
+});
+
+test("self-heal: no verifyClaimTrace injected → the firewall gate is simply skipped (bench/deterministic callers)", async () => {
+  // A caller that runs its own post-session firewall passes no closure; the loop must accept a
+  // validator-clean verdict without a firewall gate.
+  const { dispatch } = scriptedDispatcher([{ resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
 });
 
 test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, TARGET_SCHWARTZ_LEVEL, MARKET_SOPHISTICATION_EVIDENCE, and the DATA block", async () => {
@@ -574,7 +675,8 @@ test("runCopyAuthorSession: validator failure that keeps repeating → exhausted
     audience_temperature: "warm",
     self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
   });
-  const { dispatch } = scriptedDispatcher([{ resultText: leaky }, { resultText: leaky }]);
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: leaky }));
+  const { dispatch } = scriptedDispatcher(replies);
   const outcome = await runCopyAuthorSession(
     sessionInputs({
       competitorDna: {

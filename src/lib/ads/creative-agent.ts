@@ -69,12 +69,18 @@ const MAX_QA_ATTEMPTS = 3;
 export const AUTHOR_SELF_SCORE_FLOOR = 6;
 
 /** External revise cap the worker enforces AROUND Dahlia's own in-session revise. Total dispatches
- *  per creative = 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS. Set to 1: on the first bad verdict / parse
- *  failure / self-score below floor / cold-offer-leak trip, invoke ONCE more with the revise
- *  prompt; on exhaustion, escalate via `director_activity` action_kind='dahlia_copy_author_exhausted'
- *  and DO NOT insert the campaign. Never fall back to `buildMetaCopyPack` — a silent fallback would
- *  erase the audit trail the goal's success metric depends on. */
-export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 1;
+ *  per creative = 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS. copy-author-self-heal (2026-07-17) raised this
+ *  from 1 → 4 because the never-fabricate FIREWALL now runs INSIDE this loop (was a post-session hold
+ *  that wasted the whole box session on a single ungrounded number). Each retry RESUMES Dahlia's SAME
+ *  box session with a short revise turn (the image+brief+rubric context is already cached within the
+ *  1h prompt-cache TTL), so a retry costs a few hundred tokens, not a fresh context load — cheap enough
+ *  to let her self-heal a fabricated/ungrounded claim in-session across a handful of tries. On the first
+ *  bad verdict / parse failure / self-score below floor / cold-offer-leak / validator / FIREWALL trip,
+ *  she revises; on exhaustion, escalate via `director_activity` (action_kind='dahlia_copy_author_exhausted',
+ *  or 'dahlia_copy_firewall_exhausted' when the last failure was a firewall miss) and DO NOT insert the
+ *  campaign. Never fall back to `buildMetaCopyPack` — a silent fallback would erase the audit trail the
+ *  goal's success metric depends on. */
+export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
 
 // ── dahlia-copy-author-box-session Phase 3 — author-mode types (Phase 2 was folded in) ──────────
 
@@ -229,7 +235,23 @@ export function pickCanonicalVariant(
 export type CopyAuthorSessionDispatcher = (
   prompt: string,
   allowedImagePath: string,
-) => Promise<{ resultText: string; isError: boolean }>;
+  /** copy-author-self-heal (2026-07-17): when set, RESUME this box session instead of spawning fresh —
+   *  the prompt is a SHORT revise turn and the full image+brief+rubric context is already cached on the
+   *  session (within the 1h prompt-cache TTL), so a retry pays only for the tiny turn, not the context
+   *  again. The dispatcher pins the resume to `sessionConfigDir` (the account that created it). */
+  resume?: { sessionId: string; sessionConfigDir: string | null },
+) => Promise<{
+  resultText: string;
+  isError: boolean;
+  /** The session id to resume next turn (null if the run couldn't establish one). */
+  sessionId: string | null;
+  /** The account (CLAUDE_CONFIG_DIR) that ran it — a resume MUST pin to the same account. */
+  sessionConfigDir: string | null;
+  /** True iff a RESUME failed because the session no longer exists (the box restarted between turns) —
+   *  the loop's failsafe re-dispatches FRESH with the full prompt (rebuilding context is fine for this
+   *  rare edge case). */
+  missingSession: boolean;
+}>;
 
 /** Everything runCopyAuthorSession needs to author one creative's caption. The image has already
  *  been generated + QC-passed by the caller; the tmp jpeg path is what the child Reads. */
@@ -287,6 +309,20 @@ export interface CopyAuthorSessionInputs {
    *  validator sees an empty ourBrand string (fine — currently reserved for future
    *  disambiguation on the validator side). */
   ourBrand?: string;
+  /** copy-author-self-heal (2026-07-17) — the never-fabricate firewall, injected so it runs INSIDE
+   *  the revise loop instead of after the session returns. When present, each parsed+validated
+   *  verdict is fact-checked against our real corpus (see [[./never-fabricate]] `verifyClaimTrace`);
+   *  a miss becomes a revise reason and the SAME session is resumed (cache-warm) for another try —
+   *  no wasted box session, no post-hoc hold. The caller (stockProduct) builds this closure once per
+   *  run from the resolved brief + product + reviews, so the loop needs no firewall wiring of its own.
+   *  Optional so pre-existing callers (bench/deterministic) keep compiling; when omitted the loop
+   *  skips the firewall gate (the caller runs it after, as before). */
+  verifyClaimTrace?: (
+    verdict: AuthorModeCopy,
+  ) => Promise<
+    | { ok: true }
+    | { ok: false; reason: string; misses: import("./never-fabricate").ClaimMiss[] }
+  >;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -304,6 +340,12 @@ export type CopyAuthorSessionOutcome =
        *  metadata as `validator_misses` so operators can slice validator failures apart from
        *  self-score / parse / cold-offer failures. Undefined on non-validator exhaustion. */
       validatorMisses?: ValidatorCheck[];
+      /** copy-author-self-heal (2026-07-17) — populated ONLY when the LAST failed attempt tripped
+       *  the never-fabricate FIREWALL (now run inside the loop via `inputs.verifyClaimTrace`). Its
+       *  presence tells stockProduct to emit the DISTINCT `dahlia_copy_firewall_exhausted` escalation
+       *  (preserving the pre-move operator distinction between fabrication holds and self-score/
+       *  validator holds) and to stamp the concrete miss list. Undefined on non-firewall exhaustion. */
+      firewallMisses?: import("./never-fabricate").ClaimMiss[];
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -616,6 +658,26 @@ export function buildCopyAuthorPrompt(
   ].join("\n");
 }
 
+/** copy-author-self-heal (2026-07-17) — the SHORT revise turn sent when RESUMING an existing session
+ *  (`runBoxSession --resume`). The full image + brief + rubric + DNA are already in the resumed
+ *  session's context (cached within the 1h prompt-cache TTL), so this turn re-sends NONE of it — only
+ *  the worker's rejection reason + the standing envelope contract. That's the whole point of resume:
+ *  a retry pays for a few hundred tokens, not the whole context again. `reviseReason` is run through
+ *  `sanitizeReviseReason` at the choke-point (same guard as the full prompt) so a firewall/validator
+ *  reason string can't smuggle instructions into the turn.
+ *
+ *  NOTE: this is used ONLY on a genuine session resume. If the session was lost (box restarted →
+ *  `missingSession`), the loop falls back to `buildCopyAuthorPrompt` (the full context) on a fresh
+ *  session, because a fresh session has no cached context to lean on. */
+export function buildCopyAuthorRevisePrompt(reviseReason: string): string {
+  const sanitized = sanitizeReviseReason(reviseReason) ?? "your previous emit did not pass the worker's checks";
+  return [
+    `REVISE — reuse the SAME image and brief already in this session (do not ask for a new image, do not re-read anything you don't need). Your previous AuthorModeCopy emit did not land; the reason from the worker is: ${sanitized}. Address that reason head-on and emit ONE fresh AuthorModeCopy envelope. Rails 1-5 and the never-fabricate firewall still apply — if the reason names a fabricated or ungrounded claim, drop or re-ground it against real brief evidence rather than restating it. Do not hedge with a needs_attention / needs_input status — the verdict is a JSON envelope, always.`,
+    "",
+    "Return ONLY the AuthorModeCopy JSON (same shape as before: headline, primaryText, description, audience_temperature, concept_tag, self_score{…}, claim_trace[…]). No prose, no code fences, no wrapper.",
+  ].join("\n");
+}
+
 /** Extract the last JSON object from a model response — mirror of the QC path's extractor so the
  *  fenced / trailing-JSON variants that Claude Code sometimes emits are handled. Returns null when
  *  no valid object is present. */
@@ -746,16 +808,29 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
 }
 
 /**
- * runCopyAuthorSession — the per-creative Max copy-author revise loop the worker owns AROUND
- * Dahlia's in-session revise. Attempt 0 is the first pass; if the verdict trips ANY revise trigger
- * (parse fail / session error / self-score below floor / cold-offer-leak on a cold-audience emit),
- * the worker re-invokes ONCE with a `revise the copy; address {reason}` prompt (image reused —
- * the goal's cost rail). On exhaustion, returns `{ kind:'exhausted', reason }` so the caller can
- * emit the `director_activity` `action_kind='dahlia_copy_author_exhausted'` escalation and hold
- * the campaign OUT of the bin — never fall back to `buildMetaCopyPack` (a silent fallback would
- * erase the audit trail the M1 keystone needs).
+ * runCopyAuthorSession — the per-creative Max copy-author self-heal loop the worker owns AROUND
+ * Dahlia's in-session revise. Attempt 0 is the first pass (full prompt, fresh session); if the verdict
+ * trips ANY gate (parse fail / session error / self-score below floor / cold-offer-leak / shared
+ * validator / never-fabricate FIREWALL), the worker re-invokes with a revise turn addressing the
+ * named reason.
  *
- * Pure w.r.t. Supabase — takes a dispatcher callable and cold-offer-gate predicate; the caller
+ * copy-author-self-heal (2026-07-17): retries RESUME Dahlia's SAME box session with a SHORT revise
+ * turn (`buildCopyAuthorRevisePrompt`) — the image + brief + rubric context is already cached on the
+ * session within the 1h prompt-cache TTL, so a retry costs a few hundred tokens, not a fresh context
+ * load. Two things moved into this loop as a result: (1) the never-fabricate firewall is now the LAST
+ * gate here (via `inputs.verifyClaimTrace`) instead of a post-session hold in stockProduct that burned
+ * the whole session on one ungrounded number; (2) the cap rose to 4 so a fabricated/ungrounded claim
+ * can be self-healed in-session across a handful of cheap resume turns. FAILSAFE: if a resume finds the
+ * session gone (`missingSession` — the box restarted between turns), the loop re-dispatches FRESH with
+ * the full prompt on the next turn (rebuilding context is fine for that rare edge case).
+ *
+ * On exhaustion, returns `{ kind:'exhausted', reason, validatorMisses?, firewallMisses? }` so the
+ * caller emits the `director_activity` escalation (`dahlia_copy_author_exhausted`, or
+ * `dahlia_copy_firewall_exhausted` when `firewallMisses` is set) and holds the campaign OUT of the bin
+ * — never fall back to `buildMetaCopyPack` (a silent fallback would erase the audit trail the M1
+ * keystone needs).
+ *
+ * Pure w.r.t. Supabase — takes a dispatcher callable + the injected firewall closure; the caller
  * (stockProduct) is responsible for writing the tmp jpeg + calling insertReadyCreative on ok.
  */
 export async function runCopyAuthorSession(
@@ -764,32 +839,70 @@ export async function runCopyAuthorSession(
 ): Promise<CopyAuthorSessionOutcome> {
   let lastReason = "";
   let lastValidatorMisses: ValidatorCheck[] | undefined = undefined;
+  let lastFirewallMisses: import("./never-fabricate").ClaimMiss[] | undefined = undefined;
+  // copy-author-self-heal (2026-07-17) — the box session to RESUME on the next revise turn. Set from
+  // each healthy dispatch's returned sessionId/configDir; cleared to null whenever we must go fresh (a
+  // lost session, a dispatch that threw, or one that never established a session). null ⇒ the next turn
+  // sends the FULL prompt on a fresh session; non-null ⇒ the next turn RESUMES with the short revise
+  // prompt (cache-warm), pinned to the SAME account (sessionConfigDir) that created it.
+  let resumeSessionId: string | null = null;
+  let resumeConfigDir: string | null = null;
   const cap = MAX_COPY_AUTHOR_REVISE_ATTEMPTS;
   for (let attempt = 0; attempt <= cap; attempt++) {
-    const prompt = buildCopyAuthorPrompt(inputs, attempt === 0 ? null : lastReason);
-    let dispatchResult: { resultText: string; isError: boolean };
+    // Resume the SAME session with a short revise turn when we hold a live session id; otherwise send
+    // the full context (attempt 0, or a fresh session after the lost-session failsafe fired).
+    const resumePin = resumeSessionId
+      ? { sessionId: resumeSessionId, sessionConfigDir: resumeConfigDir }
+      : undefined;
+    const prompt = resumePin
+      ? buildCopyAuthorRevisePrompt(lastReason)
+      : buildCopyAuthorPrompt(inputs, attempt === 0 ? null : lastReason);
+    let dispatchResult: Awaited<ReturnType<CopyAuthorSessionDispatcher>>;
     try {
-      dispatchResult = await dispatch(prompt, inputs.imagePath);
+      dispatchResult = await dispatch(prompt, inputs.imagePath, resumePin);
     } catch (err) {
       lastReason = `dispatch_threw: ${err instanceof Error ? err.message : String(err)}`;
       lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
+      resumeSessionId = null; // unknown state after a throw — rebuild fresh next turn
+      resumeConfigDir = null;
       continue;
+    }
+    // FAILSAFE — a RESUME hit a box that no longer has this session id (the box restarted between
+    // turns and lost it). Drop the resume and re-dispatch FRESH (full context) next turn, still
+    // addressing the SAME lastReason — do NOT consume the reason or count it as a content failure.
+    // Founder-sanctioned edge case: "in case there is a 'can't resume session id XXX' it will just
+    // launch a fresh one, and in that edge case it's ok."
+    if (dispatchResult.missingSession) {
+      resumeSessionId = null;
+      resumeConfigDir = null;
+      if (!lastReason) lastReason = "session_lost_before_first_verdict"; // defensive — attempt 0 never resumes
+      continue;
+    }
+    // Capture the session for a potential resume next turn (present on a healthy pass — this is what
+    // keeps the context cache warm across a revise).
+    if (dispatchResult.sessionId) {
+      resumeSessionId = dispatchResult.sessionId;
+      resumeConfigDir = dispatchResult.sessionConfigDir;
     }
     if (dispatchResult.isError) {
       lastReason = "session_error";
       lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
       continue;
     }
     const parsed = parseAuthorVerdict(dispatchResult.resultText);
     if (parsed.kind === "invalid") {
       lastReason = `parse_failed: ${parsed.reason}`;
       lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
       continue;
     }
     const verdict = parsed.verdict;
     if (verdict.selfScore.total < AUTHOR_SELF_SCORE_FLOOR) {
       lastReason = `self_score_below_floor (total=${verdict.selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR})`;
       lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
       continue;
     }
     if (
@@ -802,6 +915,7 @@ export async function runCopyAuthorSession(
     ) {
       lastReason = "cold_offer_leak";
       lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
       continue;
     }
     // dahlia-shared-deterministic-copy-validator Phase 2 — SSOT self-check. Runs AFTER the
@@ -829,7 +943,24 @@ export async function runCopyAuthorSession(
       const failing = validator.checks.filter((c) => !c.pass);
       lastReason = `validator_failed: ${failing.map((c) => c.rail).join(", ")}`;
       lastValidatorMisses = failing;
+      lastFirewallMisses = undefined;
       continue;
+    }
+    // copy-author-self-heal (2026-07-17) — the never-fabricate FIREWALL, now the LAST gate INSIDE the
+    // loop (was a post-session hold in stockProduct that burned the whole box session on a single
+    // ungrounded number). A miss becomes the revise reason + drives another RESUME turn so Dahlia can
+    // re-ground the claim against real brief evidence or drop it — in-session, cache-warm, no wasted
+    // dispatch. `firewallMisses` bubbles up on exhaustion so stockProduct emits the DISTINCT
+    // `dahlia_copy_firewall_exhausted` escalation. Skipped when the caller injected no closure (the
+    // bench / deterministic callers run their own post-session check, unchanged).
+    if (inputs.verifyClaimTrace) {
+      const firewall = await inputs.verifyClaimTrace(verdict);
+      if (!firewall.ok) {
+        lastReason = firewall.reason;
+        lastValidatorMisses = undefined;
+        lastFirewallMisses = firewall.misses;
+        continue;
+      }
     }
     return { kind: "ok", verdict, attempts: attempt + 1 };
   }
@@ -838,6 +969,7 @@ export async function runCopyAuthorSession(
     reason: lastReason || "exhausted",
     attempts: cap + 1,
     ...(lastValidatorMisses ? { validatorMisses: lastValidatorMisses } : {}),
+    ...(lastFirewallMisses ? { firewallMisses: lastFirewallMisses } : {}),
   };
 }
 
@@ -862,6 +994,10 @@ async function runCopyAuthorSessionForImage(
      *  once per stockProduct run; threaded through so the shared validator's competitor-leak
      *  scan sees the workspace's own brand and never treats it as a leak. */
     ourBrand?: string;
+    /** copy-author-self-heal (2026-07-17) — the never-fabricate firewall closure, injected so it runs
+     *  INSIDE the revise loop (a miss → resume + re-author, not a wasted session). Passed straight
+     *  through to `runCopyAuthorSession`. Optional so pre-existing callers keep compiling. */
+    verifyClaimTrace?: CopyAuthorSessionInputs["verifyClaimTrace"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -896,6 +1032,7 @@ async function runCopyAuthorSessionForImage(
         targetSchwartzLevel: input.targetSchwartzLevel,
         marketSophisticationEvidence: input.marketSophisticationEvidence,
         ourBrand: input.ourBrand,
+        verifyClaimTrace: input.verifyClaimTrace,
       },
       dispatch,
     );
@@ -1538,20 +1675,45 @@ async function stockProduct(
                   competitorAdvertiser: brief.competitorDna.competitorAdvertiser,
                 }
               : null;
+          // copy-author-self-heal (2026-07-17) — the never-fabricate firewall closure, injected so it
+          // runs INSIDE the revise loop: a fabricated/ungrounded claim becomes a revise reason and
+          // Dahlia's SAME session is RESUMED (cache-warm) to re-ground or drop it, instead of the old
+          // post-session hold that burned the whole box session on one bad number. `reviews.byClaim`
+          // is a lazy async closure, so each verdict resolves its unique source_refs once before the
+          // pure verifier runs. Built fresh per attempt over the current `brief` + stockProduct `pi`.
+          const verifyClaimTraceForVerdict: CopyAuthorSessionInputs["verifyClaimTrace"] = async (verdict) => {
+            const reviewsResolved = await resolveReviewsForClaimTrace(verdict.claim_trace, pi.reviews.byClaim);
+            const fw = verifyClaimTrace(verdict.claim_trace, brief, pi, reviewsResolved);
+            if (fw.ok) return { ok: true };
+            return {
+              ok: false,
+              reason: `firewall_claim_miss: ${fw.misses.map((m) => `${m.source}:${m.reason}`).join(", ")}`,
+              misses: fw.misses,
+            };
+          };
           const outcome = await runCopyAuthorSessionForImage(
-            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence, ourBrand },
+            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence, ourBrand, verifyClaimTrace: verifyClaimTraceForVerdict },
             copyAuthorDispatcher,
           );
           if (outcome.kind === "exhausted") {
             // director_activity ledger + StockedCreative failure row — NO insertReadyCreative call,
             // so no product_ad_angles / ad_campaigns / ad_videos rows are ever written. Best-effort
             // per director-activity; a write miss must NOT crash the batch.
+            //
+            // copy-author-self-heal (2026-07-17) — the firewall now exhausts INSIDE the loop, so its
+            // DISTINCT escalation is keyed off `outcome.firewallMisses` (set when the LAST failed
+            // attempt was a firewall miss). This preserves the pre-move operator distinction:
+            // `dahlia_copy_firewall_exhausted` (fabrication) vs `dahlia_copy_author_exhausted`
+            // (self-score / parse / cold-offer / validator).
+            const isFirewallExhaustion = !!outcome.firewallMisses;
             await recordDirectorActivity(admin, {
               workspaceId,
               directorFunction: "growth",
-              actionKind: "dahlia_copy_author_exhausted",
-              specSlug: "dahlia-copy-author-box-session",
-              reason: `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`,
+              actionKind: isFirewallExhaustion ? "dahlia_copy_firewall_exhausted" : "dahlia_copy_author_exhausted",
+              specSlug: isFirewallExhaustion ? "dahlia-never-fabricate-copy-firewall" : "dahlia-copy-author-box-session",
+              reason: isFirewallExhaustion
+                ? `dahlia never-fabricate firewall exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — ${outcome.firewallMisses!.length} untraceable claim(s); last reason: ${outcome.reason}`
+                : `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`,
               metadata: {
                 product_id: productId,
                 product_title: productTitle,
@@ -1565,60 +1727,31 @@ async function stockProduct(
                 // validator-driven exhaustions apart from self-score / parse / cold-offer ones
                 // by whether this array is present + non-empty.
                 ...(outcome.validatorMisses ? { validator_misses: outcome.validatorMisses } : {}),
+                // copy-author-self-heal — the concrete firewall miss list when the last attempt was
+                // a fabrication miss (mirrors the pre-move `misses` metadata on the firewall row).
+                ...(outcome.firewallMisses ? { misses: outcome.firewallMisses } : {}),
                 autonomous: true,
               },
             }).catch((e) => {
-              console.warn("dahlia_copy_author_exhausted_activity_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+              console.warn(
+                isFirewallExhaustion ? "dahlia_copy_firewall_exhausted_activity_failed" : "dahlia_copy_author_exhausted_activity_failed",
+                { workspaceId, productId, err: e instanceof Error ? e.message : String(e) },
+              );
             });
             out.push({
               productId,
               angleHook: angle.hook,
               campaignId: null,
               ok: false,
-              reason: `dahlia_copy_author_exhausted: ${outcome.reason}`,
+              // Firewall exhaustion's `outcome.reason` already carries the `firewall_claim_miss: …`
+              // prefix (set by the injected closure), so surface it verbatim; author exhaustion keeps
+              // its own prefix.
+              reason: isFirewallExhaustion ? outcome.reason : `dahlia_copy_author_exhausted: ${outcome.reason}`,
             });
             skipped = true;
             break;
           }
           authorVerdict = outcome.verdict;
-          // dahlia-never-fabricate-copy-firewall Phase 3 (layer 3) — deterministic verifier runs
-          // on the parsed author verdict's claim_trace against the fully-backed brief +
-          // ProductIntelligence surface (ingredients / ingredientResearch / reviews.byClaim). A
-          // miss HOLDS the campaign out of the bin with a DISTINCT `dahlia_copy_firewall_exhausted`
-          // escalation so operators can slice fabrication failures separately from self-score
-          // failures. `reviews.byClaim` is a lazy async closure — resolve every unique source_ref
-          // once, then run the pure verifier against the resolved map.
-          const reviewsResolved = await resolveReviewsForClaimTrace(outcome.verdict.claim_trace, pi.reviews.byClaim);
-          const firewallResult = verifyClaimTrace(outcome.verdict.claim_trace, brief, pi, reviewsResolved);
-          if (!firewallResult.ok) {
-            await recordDirectorActivity(admin, {
-              workspaceId,
-              directorFunction: "growth",
-              actionKind: "dahlia_copy_firewall_exhausted",
-              specSlug: "dahlia-never-fabricate-copy-firewall",
-              reason: `dahlia never-fabricate firewall miss for ${productTitle} (${angle.source} angle) — ${firewallResult.misses.length} untraceable claim(s)`,
-              metadata: {
-                product_id: productId,
-                product_title: productTitle,
-                angle_source: angle.source,
-                angle_hook: angle.hook,
-                audience_temperature: audienceTemperature,
-                misses: firewallResult.misses,
-                autonomous: true,
-              },
-            }).catch((e) => {
-              console.warn("dahlia_copy_firewall_exhausted_activity_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
-            });
-            out.push({
-              productId,
-              angleHook: angle.hook,
-              campaignId: null,
-              ok: false,
-              reason: `firewall_claim_miss: ${firewallResult.misses.map((m) => `${m.source}:${m.reason}`).join(", ")}`,
-            });
-            skipped = true;
-            break;
-          }
           copyPack = authorCopyPack(outcome.verdict);
           insertOpts = {
             audienceTemperature: outcome.verdict.audience_temperature,

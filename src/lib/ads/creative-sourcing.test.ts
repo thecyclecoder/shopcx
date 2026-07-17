@@ -40,6 +40,9 @@ interface SkeletonRow {
   destination_domain: string | null;
   image_url: string | null;
   resume_advertising: boolean | null;
+  // Dahlia imitates STATIC competitor ads only (#2020) — getProvenCompetitorAngles filters
+  // `.eq("media_type","static")`, so the fixtures must carry it or every row is (correctly) dropped.
+  media_type: string | null;
 }
 
 interface ActivityRow {
@@ -71,6 +74,7 @@ function skel(over: Partial<SkeletonRow>): SkeletonRow {
     destination_domain: "rivalco.com",
     image_url: "https://cdn.example/x.jpg",
     resume_advertising: true,
+    media_type: "static",
     ...over,
   };
 }
@@ -166,6 +170,9 @@ test("getProvenCompetitorAngles: preferDeeplyProven raises the floor to 60d AND 
       skel({ hook: "30d still running", days_running: 33, resume_advertising: true }),
       // 60d+ but PAUSED — excluded by the resume_advertising filter
       skel({ hook: "60d paused", days_running: 80, resume_advertising: false }),
+      // 90d+ still-running but a VIDEO — excluded by the static-only filter (#2020). Dahlia only
+      // imitates static image ads right now; a processed video shelf row must never be an imitate base.
+      skel({ hook: "90d video", days_running: 95, resume_advertising: true, media_type: "video" }),
     ],
   });
   const { angles, usedFallback } = await getProvenCompetitorAngles(admin, WS, {
@@ -179,6 +186,7 @@ test("getProvenCompetitorAngles: preferDeeplyProven raises the floor to 60d AND 
   assert.ok(hooks.includes("90d deep"), "90d+ still-running row was kept");
   assert.ok(!hooks.includes("30d still running"), "shallow 30d row is excluded by the deep floor");
   assert.ok(!hooks.includes("60d paused"), "60d+ but paused row is excluded by resume_advertising filter");
+  assert.ok(!hooks.includes("90d video"), "video row is excluded by the static-only filter (#2020)");
   assert.equal(activity.length, 0, "no fallback → NO director_activity row emitted");
 });
 
