@@ -1,0 +1,1 @@
+- **Build lane self-verifies the spec's checks against its own worktree before commit** · verified 2026-07-17 · → [[../libraries/builder-worker]] § Pre-commit self-verify gate · [[../libraries/spec-check-runner]] § Pre-commit self-verify (build lane)
