@@ -47,10 +47,12 @@ CEO (fail-safe root — approvals fall through here when no live+autonomous dire
 │       └── ai:fraud-detector (inline)
 ├── dept:growth          Max — paid acquisition, landing-page CRO
 │   └── director:growth
-│       ├── agent:storefront-optimizer (Cleo), agent:dr-content (Carrie)
-│       ├── agent-kind:media-buyer (Bianca), ad-creative (Dahlia), media-buyer-grade,
-│       │   research (Rhea), campaign-grade, gap-grade, growth-director,
-│       │   sensor-trust-probe, calibrate-media-buyer-policy
+│       ├── agent:storefront-optimizer (Cleo), agent:dr-content (Carrie),
+│       │   agent:media-buyer (Bianca), agent:ad-creative (Dahlia)   ← MONITORED_LOOPS agent-kind rows
+│       │      (org-chart-roster-dahlia-bianca-under-max: Bianca + Dahlia gained agent-kind rows so
+│       │       buildRoster source 1 renders them as worker cards under Max, like Cleo/Carrie)
+│       ├── agent-kind:media-buyer-grade, research (Rhea), campaign-grade, gap-grade,
+│       │   growth-director, sensor-trust-probe, calibrate-media-buyer-policy
 │       └── Growth-owned crons (today-sync, meta-*, creative-finder-daily-cron,
 │           landing-page-scout-daily-cron, storefront-*, growth-ad-spend-governor-cron, …)
 ├── dept:retention       Theo — subscriptions, dunning, cancel-flow, journeys
