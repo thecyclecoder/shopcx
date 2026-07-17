@@ -260,6 +260,87 @@ test("computeMediaBuyerPlan — winner below scale_up_roas_trigger is NOT promot
   assert.equal(plan.promote.length, 0);
 });
 
+// ── bianca-scale-edit-rails-cooldown-and-account-delta-ceiling Phase 1 ──
+//
+// The two scale-edit rails the storefront decision engine already enforces on scale
+// actions (`per_object_cooldown_hours` + `per_account_daily_budget_delta_ceiling_cents`
+// in src/lib/meta/decision-engine.ts:340-410) — Bianca's promote path now honors both.
+// Cooldown-in-window promotes are dropped with rail='per_object_cooldown'; promotes
+// whose absolute budget delta would breach the account's daily ceiling are dropped
+// with rail='per_account_daily_budget_delta_ceiling'. Each dropped promote lands on
+// plan.deferred so the runner (Phase 2) can write one media_buyer_scale_rail_deferred
+// director_activity row citing the rail.
+
+test("computeMediaBuyerPlan — Phase 1: winner whose parent adset is INSIDE per_object_cooldown_hours is deferred (rail='per_object_cooldown'), not promoted", () => {
+  const w = winner();
+  const now = new Date("2026-07-15T12:00:00Z").getTime();
+  const twelveHoursAgo = new Date(now - 12 * 3600_000).toISOString();
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      policy: policy({ per_object_cooldown_hours: 24 }),
+      winners: [w],
+      metaAdIdToAdsetId: new Map([[w.metaAdId, "adset-parent-1"]]),
+      budgets: new Map([["adset-parent-1", 20_000]]),
+      recentActions: [
+        {
+          object_id: "adset-parent-1",
+          action_type: "scale_up",
+          created_at: twelveHoursAgo, // 12h < 24h cooldown → in-window
+          before_budget_cents: 15_000,
+          after_budget_cents: 20_000,
+        },
+      ],
+      nowMs: now,
+    }),
+  );
+  assert.equal(plan.promote.length, 0, "in-window cooldown must drop the promote");
+  assert.equal(plan.deferred.length, 1);
+  const d = plan.deferred[0];
+  assert.equal(d.rail, "per_object_cooldown");
+  assert.equal(d.targetObjectId, "adset-parent-1");
+  assert.equal(d.sourceMetaAdId, w.metaAdId);
+  assert.equal(d.cooldownMs, 24 * 3600_000);
+  assert.ok(d.sinceLastActionMs != null && d.sinceLastActionMs < 24 * 3600_000, "sinceLastActionMs must reflect the 12h gap");
+  assert.ok(d.rationale.includes("per_object_cooldown_hours"));
+});
+
+test("computeMediaBuyerPlan — Phase 1: two winners whose combined budget delta breaches per_account_daily_budget_delta_ceiling_cents — first emitted, second deferred (rail='per_account_daily_budget_delta_ceiling')", () => {
+  // Each winner's parent adset sits at $20/day; scale_up_step_pct=0.15 gives after=$23 → |delta|=$3.
+  // With ceiling $5 (500 cents), the first promote fits (3 ≤ 5), the second would push cumulative
+  // to 6 > 5 → deferred.
+  const w1 = winner({ metaAdId: "meta_ad_winner_A" });
+  const w2 = winner({ metaAdId: "meta_ad_winner_B" });
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      policy: policy({
+        per_account_daily_budget_delta_ceiling_cents: 500, // $5 — tiny so the second breaches
+        per_object_cooldown_hours: 0, // disable cooldown so it never gates this test
+      }),
+      winners: [w1, w2],
+      metaAdIdToAdsetId: new Map([
+        [w1.metaAdId, "adset-A"],
+        [w2.metaAdId, "adset-B"],
+      ]),
+      budgets: new Map([
+        ["adset-A", 2_000], // $20 → $23 → delta 300 cents ($3)
+        ["adset-B", 2_000], // $20 → $23 → delta 300 cents ($3)
+      ]),
+      // no recentActions → cooldown gate cannot fire regardless of nowMs
+    }),
+  );
+  assert.equal(plan.promote.length, 1, "first promote fits the ceiling and is emitted");
+  assert.equal(plan.promote[0].sourceMetaAdId, w1.metaAdId);
+  assert.equal(plan.deferred.length, 1);
+  const d = plan.deferred[0];
+  assert.equal(d.rail, "per_account_daily_budget_delta_ceiling");
+  assert.equal(d.sourceMetaAdId, w2.metaAdId);
+  assert.equal(d.targetObjectId, "adset-B");
+  assert.equal(d.ceiling, 500);
+  assert.equal(d.wouldBeDelta, 300);
+  assert.equal(d.cumulativeSoFar, 300, "the accumulator reflects the first (emitted) promote's delta");
+  assert.ok(d.rationale.includes("per_account_daily_budget_delta_ceiling_cents"));
+});
+
 // media-buyer-kill-on-decision-tree-retire-roas-floor Phase 1 — the pure function no
 // longer re-gates on roas_floor or pause_min_spend_cents. `input.losers` is already a
 // decision-tree-vetted list (detectMetaCpaLosers), and every non-never-paused loser
