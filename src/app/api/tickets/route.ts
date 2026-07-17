@@ -168,15 +168,31 @@ export async function POST(request: Request) {
     if (existing) {
       resolvedCustomerId = existing.id;
     } else {
+      // Get-or-create is non-atomic (check-then-insert): two concurrent requests
+      // for the same new email both miss the select above and both try to
+      // insert, and the loser hits the UNIQUE(workspace_id, email) constraint
+      // (Postgres 23505). Upsert with ignoreDuplicates so the loser inserts
+      // nothing (returns no row); then re-read the winner's row by (ws, email).
+      const normalizedEmail = customer_email.toLowerCase();
       const { data: created } = await admin
         .from("customers")
-        .insert({
+        .upsert({
           workspace_id: workspaceId,
-          email: customer_email.toLowerCase(),
-        })
+          email: normalizedEmail,
+        }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
         .select("id")
-        .single();
-      resolvedCustomerId = created?.id;
+        .maybeSingle();
+      if (created) {
+        resolvedCustomerId = created.id;
+      } else {
+        const { data: raced } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("email", normalizedEmail)
+          .maybeSingle();
+        resolvedCustomerId = raced?.id;
+      }
     }
   }
 
