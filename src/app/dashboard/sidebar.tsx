@@ -194,6 +194,9 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       // HTML board on the Showcase (/showcase/tools/teardowns/examples/[id]). Supersedes the
       // legacy lander_snapshots teardowns surface.
       { href: "/dashboard/research/teardowns", label: "Teardowns", icon: "M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" },
+      // Research › Ads — competitor ads found in the ad library for our seeded competitors, split by
+      // static vs video and filterable by hero product. See src/app/dashboard/research/ads/page.tsx.
+      { href: "/dashboard/research/ads", label: "Ads", icon: "M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" },
     ],
   },
   // Developer is a PORTAL, not a collapsible section — clicking it lands on the Overview and the
