@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 
 import {
   classifyMigrationSql,
+  cascadeAddedToExistingTable,
   computeBlastRadius,
   splitSqlStatements,
   isRenameAndExpire,
@@ -65,6 +66,45 @@ test("classifyMigrationSql returns additive for ALTER TABLE ... ADD COLUMN", () 
   const r = classifyMigrationSql("ALTER TABLE x ADD COLUMN y int;");
   assert.equal(r.severity, "additive");
   assert.deepEqual(r.matches, []);
+});
+
+// ── ON DELETE CASCADE inside CREATE TABLE is ADDITIVE (2026-07-17 drift-bug regression) ──────────
+// A new table's FK with `on delete cascade` has NO existing rows to cascade-delete — additive. The
+// bug classified it destructive → the reconciler gated `ad_creative_copy_qc_verdicts` +
+// `ad_creative_copy_variants` for an approval that never came, so they were never auto-applied and
+// the whole Dahlia copy-pack/QC pipeline silently no-op'd.
+test("classifyMigrationSql: CREATE TABLE with an ON DELETE CASCADE foreign key is ADDITIVE", () => {
+  const r = classifyMigrationSql(
+    `create table if not exists public.ad_creative_copy_qc_verdicts (
+       id uuid primary key default gen_random_uuid(),
+       workspace_id uuid not null references public.workspaces(id) on delete cascade,
+       ad_campaign_id uuid not null references public.ad_campaigns(id) on delete cascade,
+       hard_gate_pass boolean not null
+     );`,
+  );
+  assert.equal(r.severity, "additive");
+  assert.deepEqual(r.matches, []);
+});
+
+test("classifyMigrationSql: a CREATE TABLE cascade + a SEPARATE ALTER cascade in one file still flags (the alter is real)", () => {
+  const r = classifyMigrationSql(
+    `create table t (id uuid, ws uuid references w(id) on delete cascade);
+     alter table existing add constraint fk foreign key (x) references p(id) on delete cascade;`,
+  );
+  assert.notEqual(r.severity, "additive");
+  assert.ok(r.matches.includes("ON DELETE CASCADE"));
+});
+
+test("cascadeAddedToExistingTable: true only for an ALTER cascade, false for a CREATE TABLE cascade", () => {
+  assert.equal(
+    cascadeAddedToExistingTable("create table t (a uuid references p(id) on delete cascade);"),
+    false,
+  );
+  assert.equal(
+    cascadeAddedToExistingTable("alter table t add constraint fk foreign key (a) references p(id) on delete cascade;"),
+    true,
+  );
+  assert.equal(cascadeAddedToExistingTable("create index i on t (a);"), false);
 });
 
 test("classifyMigrationSql returns additive for CREATE TABLE", () => {
