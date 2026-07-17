@@ -36,6 +36,11 @@ import {
   playbookSupersedeReasonPhrase,
   CS_DIRECTOR_VERDICT_NOTE_PREFIX,
 } from "@/lib/playbook-supersede-guard";
+import {
+  detectSilentTurn,
+  SILENT_TURN_HOLDING_MESSAGE,
+  type SilentTurnReason,
+} from "@/lib/silent-turn-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -1556,44 +1561,68 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
 
         if (pbResult.action === "cancelled") return { status: "cancelled" };
 
+        // Silent-turn tracking (docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md
+        // § Phase 2). Track whether any customer-facing external reply was sent AND whether the
+        // escalate_api_failure rail already fired its own holding-message + Slack path, so the
+        // post-auto-advance guard can escalate with a holding message when the exec concluded
+        // silent (Melissa/eca3f43b: dead playbook resume + failed cancel + zero customer text).
+        let responseSent = false;
+        let escalationRaised = false;
+
         // Log system note
         if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
 
         // Send response if one was generated
         if (pbResult.response) {
           await step.run("pb-send", () => sendWithDelay(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
+          responseSent = true;
         }
+
+        // Escalate + holding message + Slack — the SAME rail two callsites depend on:
+        //   • pbResult.action === "escalate_api_failure" (executor asked for it, pre-existing)
+        //   • the silent-turn guard below (post-auto-advance, Phase 2)
+        // Kept inline as a local closure so both callsites send the byte-identical
+        // SILENT_TURN_HOLDING_MESSAGE + share the Slack-notify shape. `reason` is a short
+        // human string that renders on the sysNote, escalation_reason, and Slack payload.
+        const raiseHoldingMessageEscalation = async (
+          reason: string,
+          sysNotePrefix: string,
+          slackHeader: string,
+        ) => {
+          await sysNote(admin, tid, `[System] ${sysNotePrefix}: ${reason}. Escalating to the To-Do routine.`);
+          // Agent To-Do system: route to the routine, not a human. escalated_to
+          // stays null until a human rejects a todo. docs/brain/specs/agent-todo-system.md.
+          await admin.from("tickets").update({
+            status: "open",
+            assigned_to: null, escalated_to: null,
+            escalated_at: new Date().toISOString(),
+            escalation_reason: reason,
+          }).eq("id", tid);
+          // Send the customer the standard holding message so they don't sit in silence
+          await sendWithDelay(admin, wsId, tid, st.ch, SILENT_TURN_HOLDING_MESSAGE, cfg.sandbox);
+          // Slack notification
+          try {
+            const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
+            if (ws?.slack_webhook_url) {
+              const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
+              const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
+              await fetch(ws.slack_webhook_url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: `${slackHeader}\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${reason}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
+              });
+            }
+          } catch {}
+        };
 
         // Handle API failure escalation
         if (pbResult.action === "escalate_api_failure") {
           await step.run("pb-api-fail", async () => {
             const reason = pbResult.error || pbResult.systemNote || "playbook step could not progress";
-            await sysNote(admin, tid, `[System] Playbook API failure: ${reason}. Escalating to the To-Do routine.`);
-            // Agent To-Do system: route to the routine, not a human. escalated_to
-            // stays null until a human rejects a todo. docs/brain/specs/agent-todo-system.md.
-            await admin.from("tickets").update({
-              status: "open",
-              assigned_to: null, escalated_to: null,
-              escalated_at: new Date().toISOString(),
-              escalation_reason: reason,
-            }).eq("id", tid);
-            // Send the customer a holding message so they don't sit in silence
-            await sendWithDelay(admin, wsId, tid, st.ch,
-              "I need a little time to work on this and I'll get back to you.", cfg.sandbox);
-            // Slack notification
-            try {
-              const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
-              if (ws?.slack_webhook_url) {
-                const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
-                const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
-                await fetch(ws.slack_webhook_url, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ text: `🚨 *Playbook Action Failed*\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${reason}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
-                });
-              }
-            } catch {}
+            await raiseHoldingMessageEscalation(reason, "Playbook API failure", "🚨 *Playbook Action Failed*");
           });
+          escalationRaised = true;
+          responseSent = true; // the holding message is a customer-facing reply
           return { status: "playbook_api_failure", error: pbResult.error };
         }
 
@@ -1641,7 +1670,10 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           if (r.action === "cancelled") break;
           const pr = r as PlaybookExecResult;
           if (pr.systemNote) await step.run(`pb-adv-note-${advCount}`, () => sysNote(admin, tid, pr.systemNote!));
-          if (pr.response) await step.run(`pb-adv-send-${advCount}`, () => sendWithDelay(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+          if (pr.response) {
+            await step.run(`pb-adv-send-${advCount}`, () => sendWithDelay(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+            responseSent = true;
+          }
         }
 
         // Handle the final result after auto-advancing
@@ -1655,6 +1687,35 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           } else if (finalR.action === "respond" || finalR.response) {
             await step.run("pb-adv-status", () => setStatus(admin, tid, cfg.auto_resolve));
           }
+        }
+
+        // Silent-turn escape hatch (docs/brain/specs/post-resolution-inbound-reroute-and-
+        // silent-turn-guard.md § Phase 2). A handled non-new inbound must NEVER end without a
+        // customer-facing reply OR an explicit escalation — Melissa/eca3f43b measured 5 of 13
+        // backstopped tickets ended silent. The pure `detectSilentTurn` predicate ([[silent-
+        // turn-guard]]) mirrors [[tickets-read]] `buildTurnTimeline`'s read-side silentTurn
+        // detection; here it runs at RUNTIME so we escalate BEFORE the customer waits.
+        const finalActionForGuard =
+          advResult.action === "cancelled" ? null : (advResult as PlaybookExecResult).action;
+        const finalErrorForGuard =
+          advResult.action === "cancelled" ? null : ((advResult as PlaybookExecResult).error ?? null);
+        const silentTurnVerdict = detectSilentTurn({
+          responseSent,
+          escalationRaised,
+          cancelled: advResult.action === "cancelled",
+          finalAction: finalActionForGuard,
+          finalError: finalErrorForGuard,
+        });
+        if (silentTurnVerdict.silent) {
+          const guardReason: SilentTurnReason = silentTurnVerdict.reason;
+          await step.run("pb-silent-turn-escape", async () => {
+            await raiseHoldingMessageEscalation(
+              silentTurnVerdict.note,
+              "Silent-turn guard tripped",
+              `🚨 *Playbook Silent Turn (${guardReason})*`,
+            );
+          });
+          return { status: "playbook_silent_turn", reason: guardReason };
         }
 
         return { status: "playbook_step", action: pbResult.action };
