@@ -119,6 +119,8 @@ Validation: `safeJSONParse()` parses + schema-checks. Bad JSON → fall back to 
 
 Above the confidence gate sits the CS Director hard-call lane ([[../libraries/cs-director]] § Phase-2 executor). An escalated ticket reaches June via the `cs-director-call` box lane; her verdict flows through `applyBoxCsDirectorCall` (in `src/lib/cs-director.ts`) — `approve_remedy` fires the real commerce action via `executeSonnetDecision` and only THEN delivers the customer message via `deliverTicketMessage` (execute-then-message rule from the derived-from ticket `115350d5`), `author_spec` writes through the specs SDK chokepoint, and `escalate_founder` returns the linkage-back payload for the runner-minted CEO card (single-writer principle).
 
+A June resolution ALSO supersedes the ticket's active playbook: [[../libraries/cs-director-ticket-transition]] `close_and_deescalate` / `deescalate_only` patches null `active_playbook_id / playbook_step / playbook_exceptions_used`, and the [[../inngest/unified-ticket-handler]] check-playbook step's [[../libraries/playbook-supersede-guard]] belt-and-suspenders route detects a `[CS Director review]` internal note as the same signal — a later customer follow-up on a June-resolved ticket routes to Sol/Sonnet fresh (remedy-aware), never resumes the stale pre-escalation playbook ([[../specs/post-resolution-inbound-reroute-and-silent-turn-guard]] § Phase 1, Melissa/eca3f43b).
+
 ## Phase 5 — execute
 
 `src/lib/action-executor.ts` dispatches on `action_type`:

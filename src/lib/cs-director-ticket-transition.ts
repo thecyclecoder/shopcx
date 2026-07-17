@@ -20,6 +20,14 @@
  *                       `escalated_to` so the ticket is OWNED by the founder rather than
  *                       stranded on the routine's default lane.
  *
+ * Both resolution-side patches (`close_and_deescalate` + `deescalate_only`) additionally clear
+ * `active_playbook_id` + `playbook_step` + `playbook_exceptions_used` so a June-resolved ticket
+ * cannot resume a stale pre-escalation playbook on a later customer follow-up
+ * (docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md § Phase 1 —
+ * Melissa/eca3f43b: the stale refund playbook re-ran after June closed with an in-flight return,
+ * tried a silent cancel, and sent the customer nothing). `escalate_founder` deliberately leaves
+ * the playbook alone — the founder ruling may still fold back into the pre-escalation lane.
+ *
  * Kept pure (no DB, no imports from the runtime worker) so `runCsDirectorCallJob` can call it +
  * pass the patch to a straight `tickets.update` with a compare-and-set guard, and so a unit
  * test can exercise every verdict shape (see cs-director-ticket-transition.test.ts).
@@ -79,6 +87,22 @@ function remedyClosesTicket(remedy: Record<string, unknown> | null | undefined):
   return false;
 }
 
+/**
+ * A CS-director resolution — an `approve_remedy` June actually executed OR a `close_no_action`
+ * OR an `author_spec` — supersedes the ticket's active playbook the same way an external human-
+ * agent reply does: the playbook was the pre-escalation lane, June's resolution is the current
+ * lane, and a later customer follow-up must NOT resume the stale pre-escalation playbook.
+ * See docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md § Phase 1
+ * (derived-from Melissa/eca3f43b) + [[../inngest/unified-ticket-handler]] check-playbook guard.
+ * Both resolution-side patches (`close_and_deescalate` + `deescalate_only`) include these
+ * clearers idempotently — safe on a ticket that never carried a playbook.
+ */
+const PLAYBOOK_CLEAR_FIELDS = {
+  active_playbook_id: null,
+  playbook_step: 0,
+  playbook_exceptions_used: 0,
+} as const;
+
 function closeAndDeescalatePatch(now: string): Record<string, unknown> {
   return {
     status: "closed",
@@ -88,6 +112,7 @@ function closeAndDeescalatePatch(now: string): Record<string, unknown> {
     escalated_to: null,
     escalation_reason: null,
     assigned_to: null,
+    ...PLAYBOOK_CLEAR_FIELDS,
     updated_at: now,
   };
 }
@@ -97,6 +122,7 @@ function deescalateOnlyPatch(now: string): Record<string, unknown> {
     escalated_at: null,
     escalated_to: null,
     escalation_reason: null,
+    ...PLAYBOOK_CLEAR_FIELDS,
     updated_at: now,
   };
 }
