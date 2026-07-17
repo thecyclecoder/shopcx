@@ -65,6 +65,43 @@ export interface RealizedAttribution {
   windowEnd: string;
 }
 
+/**
+ * Dahlia copy mode a graded creative was authored in — the M3 measurement-lane split.
+ * `author` when [[../../tables/ad_campaigns]] `author_self_score` is present at grade time
+ * (Dahlia authored the copy in an author-mode box session); `deterministic` when NULL
+ * (`buildMetaCopyPack` slot-fill). NULL as a grade-row value is the pre-migration state
+ * (backfilled by scripts/_backfill-media-buyer-grades-dahlia-copy-mode.ts). Per-mode readers
+ * EXCLUDE NULL grades from their bucket averages so the pre-migration gap doesn't skew.
+ */
+export type DahliaCopyMode = "author" | "deterministic";
+
+/**
+ * Resolve the copy mode for a graded creative by joining the source Meta ad id back to
+ * `ad_publish_jobs.meta_ad_id → ad_publish_jobs.campaign_id → ad_campaigns.author_self_score`.
+ * Returns `null` when the Meta ad has no ad_publish_jobs row (a legacy/off-platform ad — the
+ * grader leaves the grade row's mode NULL and per-mode readers exclude it).
+ */
+export async function resolveDahliaCopyMode(
+  admin: Admin,
+  args: { workspaceId: string; metaAdId: string },
+): Promise<DahliaCopyMode | null> {
+  const { data, error } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id, ad_campaigns(author_self_score)")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_id", args.metaAdId)
+    .limit(1);
+  if (error) return null;
+  const row = ((data || [])[0] || null) as
+    | { campaign_id: string | null; ad_campaigns: { author_self_score: unknown } | Array<{ author_self_score: unknown }> | null }
+    | null;
+  if (!row) return null;
+  const rel = row.ad_campaigns;
+  const campaign = Array.isArray(rel) ? rel[0] ?? null : rel ?? null;
+  if (!campaign) return null;
+  return campaign.author_self_score == null ? "deterministic" : "author";
+}
+
 /** The typed grade the pure scorer emits — the row shape written to `media_buyer_action_grades`. */
 export interface MediaBuyerGrade {
   actionKind: GradeableActionKind;
@@ -332,11 +369,20 @@ export async function gradeMediaBuyerActions(
     }
     const sourceMetaAdId = sourceMetaAdIdOf(action);
     let realized: RealizedAttribution | null = null;
+    let dahliaCopyMode: DahliaCopyMode | null = null;
     if (sourceMetaAdId) {
       realized = await loadRealizedAttribution(admin, {
         workspaceId: opts.workspaceId,
         metaAdId: sourceMetaAdId,
         actionCreatedAt: action.created_at,
+      });
+      // Stamp the Dahlia copy-mode split at grade time (M3 measurement lane). Joined via
+      // ad_publish_jobs.meta_ad_id → ad_publish_jobs.campaign_id → ad_campaigns.author_self_score.
+      // NULL result = ad has no publish-job row (legacy/off-platform); the grade row's mode stays
+      // NULL and per-mode readers exclude it.
+      dahliaCopyMode = await resolveDahliaCopyMode(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdId: sourceMetaAdId,
       });
     }
     const grade = scoreMediaBuyerAction(action, policy, realized);
@@ -356,6 +402,7 @@ export async function gradeMediaBuyerActions(
       outcome_quality: grade.outcomeQuality,
       overall_grade: grade.overallGrade,
       reasoning: grade.reasoning,
+      dahlia_copy_mode: dahliaCopyMode,
       graded_by: "agent" as const,
       graded_at: new Date(nowMs).toISOString(),
     };

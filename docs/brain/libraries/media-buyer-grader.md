@@ -50,9 +50,17 @@ Pure. Given the decision-time action row + the active policy + realized attribut
 
 Reads [[../tables/meta_attribution_daily]] for one source `meta_ad_id` over `[action + minDays, action + maxDays]` (UTC days). Returns `null` on error, `{spendCents:0, revenueCents:0, roas:null}` when the window is empty (that IS the correct signal for a paused loser).
 
+### `DahliaCopyMode` — type
+
+`'author' | 'deterministic'`. The M3 measurement-lane split on [[../tables/media_buyer_action_grades]] (`dahlia_copy_mode`), stamped at grade time. NULL as a grade-row value is the pre-migration state (backfilled by `scripts/_backfill-media-buyer-grades-dahlia-copy-mode.ts`) or an unresolvable off-platform ad — per-mode readers ([[media-buyer-insights]] `getPerCopyModeCtrCac`) EXCLUDE NULLs.
+
+### `resolveDahliaCopyMode(admin, {workspaceId, metaAdId})` — function
+
+Joins the source Meta ad id back to `ad_publish_jobs.meta_ad_id → ad_publish_jobs.campaign_id → ad_campaigns.author_self_score`. Returns `'author'` when `author_self_score` is non-null, `'deterministic'` when null, and `null` when the Meta ad has no [[../tables/ad_publish_jobs]] row (legacy/off-platform — the grade row's mode stays NULL).
+
 ### `gradeMediaBuyerActions(admin, opts)` — function
 
-The runner's chokepoint. Reads every UNGRADED media-buyer [[../tables/director_activity]] row older than `REALIZED_WINDOW_MIN_DAYS`, resolves realized attribution per row, scores, and UPSERTS one grade row per action_id keyed on `director_activity_id`.
+The runner's chokepoint. Reads every UNGRADED media-buyer [[../tables/director_activity]] row older than `REALIZED_WINDOW_MIN_DAYS`, resolves realized attribution per row, stamps the [[../tables/media_buyer_action_grades]] `dahlia_copy_mode` split via `resolveDahliaCopyMode`, scores, and UPSERTS one grade row per action_id keyed on `director_activity_id`.
 
 **Guards** (per the coaching + spec discipline):
 - Idempotent — the UNIQUE index on `(director_activity_id)` collapses re-runs.
