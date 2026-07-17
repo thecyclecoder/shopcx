@@ -1,0 +1,1 @@
+- **Suppress box job cron freshness alerts while the box worker is down** · verified 2026-07-17 · → [[lifecycles/control-tower]]
