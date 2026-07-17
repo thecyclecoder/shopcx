@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { META_CTA_TYPES } from "@/lib/ad-meta-copy";
@@ -13,8 +13,7 @@ import {
 import { getMetaUserToken, updateObjectBudget } from "@/lib/meta-ads";
 
 async function authorize(workspaceId: string | null) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!workspaceId) return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };
   const admin = createAdminClient();

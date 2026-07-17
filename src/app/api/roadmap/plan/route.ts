@@ -10,14 +10,13 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ACTIVE_STATUSES, getLatestPlanJob, type AgentJob } from "@/lib/agent-jobs";
 import { getGoal } from "@/lib/brain-roadmap";
 
 async function ctx() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   const cookieStore = await cookies();
   const workspaceId = cookieStore.get("workspace_id")?.value;

@@ -24,7 +24,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { rollupFleetCost } from "@/lib/fleet-cost";
 import { listFleetBudgets } from "@/lib/fleet-spend-governor";
@@ -120,10 +120,7 @@ async function buildApiPanel(admin: ReturnType<typeof createAdminClient>, worksp
 }
 
 export async function GET(request: Request) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

@@ -12,15 +12,14 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { mergeClaudePr } from "@/lib/roadmap-actions";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ number: string }> }) {
   const { number } = await params;
   const prNumber = Number(number);
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

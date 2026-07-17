@@ -24,7 +24,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 // Page past PostgREST's 1000-row cap. makeQuery must return a fresh builder
@@ -81,8 +81,7 @@ export async function GET(
   const url = new URL(request.url);
   const minSessions = Math.max(1, Number(url.searchParams.get("min") || "1") || 1);
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
