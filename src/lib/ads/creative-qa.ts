@@ -516,6 +516,16 @@ export interface QaCreativeCopyBoxSessionInput extends CopyQcPreCheckInput {
   /** Trusted extra prompt body — the dispatcher inlines it AFTER the validator TRUSTED CONTEXT
    *  block and BEFORE any untrusted DATA fence. Optional; the pre-check itself does not need it. */
   trustedPromptPreamble?: string;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 2 — the declared research intent
+   *  Max is graded AGAINST (Dahlia declares FIRST — Phase 1's `resolveResearchIntent`). When
+   *  provided the dispatcher inlines the `renderMaxDahliaRubricTrustedContext` block above
+   *  the validator TRUSTED CONTEXT (same fence-based frame). Null / undefined → today's
+   *  byte-identical prompt with no rubric block. */
+  declaredIntent?: CopyQaDeclaredIntent | null;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 2 — the winner-library benchmark
+   *  the trusted-context block cites (the underlying competitor concept_tags when Dahlia's
+   *  driving angle was a competitor imitation). Own-brand angles pass null / undefined. */
+  dahliaRubricBenchmark?: DahliaRubricBenchmark | null;
 }
 
 /**
@@ -540,8 +550,16 @@ export async function runQaCreativeCopyViaBoxSession(
   dispatch: CopyQcSessionDispatcher,
 ): Promise<CopyQcSessionOutcome> {
   const preCheck = computeCopyQcPreCheck({ copy: input.copy, brief: input.brief, context: input.context });
+  // dahlia-researches-from-winners-flow-ad-library Phase 2 — render the intent+benchmark
+  // TRUSTED CONTEXT block when the caller threaded a declared intent. Empty string preserves
+  // today's byte-identical prompt.
+  const intentBlock = renderMaxDahliaRubricTrustedContext({
+    declaredIntent: input.declaredIntent ?? null,
+    benchmark: input.dahliaRubricBenchmark ?? null,
+  });
   const prompt = [
     preCheck.trustedContextBlock,
+    intentBlock,
     input.trustedPromptPreamble ?? "",
     // Room for the M1 keystone dispatcher to inline the untrusted DATA fence below.
   ]
@@ -607,6 +625,79 @@ export interface CopyQaPersuasionRubric {
   evidence: string[];
 }
 
+// ── dahlia-researches-from-winners-flow-ad-library Phase 2 — Max's 5-axis rubric ────────────
+//
+// The 5 axes Max grades EVERY Dahlia creative on (intent-aware), each 1..10 + a short reason
+// naming what he saw. Persisted on `ad_creative_copy_qc_verdicts.dahlia_rubric` alongside the
+// existing hard-gates / persuasion / scroll-stop columns, plus the `declared_intent` envelope
+// so a downstream reader can pin what temperature/purpose was declared BEFORE this creative
+// was authored — the invariant Phase 1 of this spec ships (Dahlia declares FIRST; Max grades
+// AGAINST the declared intent, not blind).
+//
+// NOT a hard-gate driver — the north-star supervisable-autonomy pattern says Dahlia
+// optimizes a proxy (bin depth), Max owns the OBJECTIVE (winning creative) and grades her on
+// the dimensions that actually make a static win. Phase 3 (a later session) wires the
+// threshold-gated ready-to-bin rail; Phase 2 only ADDS the scored rubric so the ledger has
+// the signal.
+
+/** One axis of Max's 5-axis rubric: an integer 1..10 + a short reason line. Score is a
+ *  full-precision integer (no half-points) so grading noise is bounded and the grade ledger
+ *  can be aggregated cleanly by `AVG(score)`. Reason is human-readable one line naming what
+ *  Max saw — the same "cite what you saw" convention as `persuasion_rubric.evidence[]`. */
+export interface DahliaRubricAxisScore {
+  score: number;
+  reason: string;
+}
+
+/** Max's 5-axis rubric on a Dahlia creative. Each axis is graded intent-aware — Max is
+ *  handed the declared `audience_temperature` + `purpose` (via TRUSTED CONTEXT in the QC
+ *  prompt) so a cold ad is judged as a cold ad, not blind. Present on every verdict Max
+ *  scores; MAY be null on a hard-gate fail (the bounce is the signal — the rubric wasn't
+ *  scored, same as `persuasion_rubric`).
+ *
+ *  The 5 axes are the ones the spec pins as "the dimensions that actually make a static
+ *  win":
+ *    • competitor_selection — did Dahlia pick a good competitor WINNER for THIS declared
+ *      temperature? (a cold-audience task's winner-concept awareness_stage should be
+ *      unaware / problem_aware — a mismatch scores lower on this axis).
+ *    • temperature_selection — does the creative actually FIT the declared temperature?
+ *      (a cold ad that leads with a hot offer/urgency is off-temperature — scores lower).
+ *    • creative_quality — the render + copy craftsmanship (headline, hierarchy, offer clarity).
+ *    • scroll_stopping — does the first 3 frames' headline earn the second line? (this
+ *      overlaps the existing `scroll_stop` sub-scores; the 1-10 axis is the rolled-up read).
+ *    • dr_consumer_psychology — DR fundamentals (LF8, Cialdini, Schwartz stage-fit) rolled
+ *      up. Overlaps `persuasion_rubric`; the 1-10 axis is Max's whole-ad synthesis.
+ */
+export interface DahliaCreativeRubric {
+  competitor_selection: DahliaRubricAxisScore;
+  temperature_selection: DahliaRubricAxisScore;
+  creative_quality: DahliaRubricAxisScore;
+  scroll_stopping: DahliaRubricAxisScore;
+  dr_consumer_psychology: DahliaRubricAxisScore;
+}
+
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — the declared-intent envelope
+ *  Dahlia announces FIRST (see Phase 1 `CreativeIntent`) and Max sees at grade time. Mirrors
+ *  the Phase 1 type verbatim; kept independently importable here so `creative-qa.ts` doesn't
+ *  reach into `creative-sourcing.ts` for a small type. */
+export interface CopyQaDeclaredIntent {
+  audience_temperature: "cold" | "warm" | "hot";
+  purpose: "test-to-find-winner";
+}
+
+/** The 5 axis keys — used by the parser + the SDK writer. Kept as a `const readonly` so the
+ *  order + spelling live in ONE place; a divergence between the type + this list is a build
+ *  bug. */
+export const DAHLIA_RUBRIC_AXES = [
+  "competitor_selection",
+  "temperature_selection",
+  "creative_quality",
+  "scroll_stopping",
+  "dr_consumer_psychology",
+] as const;
+
+export type DahliaRubricAxis = (typeof DAHLIA_RUBRIC_AXES)[number];
+
 /** The strict-JSON verdict `.claude/skills/max-copy-qc/SKILL.md` documents. Shape pinned by
  *  `parseCopyQaVerdict` — a divergence between the skill and the parser is a build-time bug. */
 export interface CopyQaVerdict {
@@ -626,6 +717,20 @@ export interface CopyQaVerdict {
    *  disk records what the copy WAS like even when the safety rails failed. Never null, never
    *  omitted — parseCopyQaVerdict refuses fail-closed on missing / null. */
   scroll_stop: CopyQaScrollStop;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 2 — the declared-intent envelope Max
+   *  was graded against for THIS creative. When the caller threaded a declared intent into the
+   *  QC session (Dahlia's Phase 1 default) the Node lane echoes it back on the verdict so a
+   *  reader can pin what temperature/purpose was in-scope BEFORE this creative was authored.
+   *  MAY be null for legacy callers that never declared one — the parser is tolerant of
+   *  absence so the M1 keystone continues to work byte-identical to today. */
+  declared_intent: CopyQaDeclaredIntent | null;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 2 — Max's 5-axis rubric scored
+   *  intent-aware. Present on every verdict Max scores; MAY be null on a hard-gate fail (the
+   *  bounce is the signal, same as `persuasion_rubric`) OR on a legacy verdict that never
+   *  emitted the field. The parser fail-closes on a MALFORMED (present but wrong shape)
+   *  rubric — absence is tolerated for backcompat, but a partial or out-of-range payload is a
+   *  defect. */
+  dahlia_rubric: DahliaCreativeRubric | null;
   verdict_reason: string;
 }
 
@@ -649,8 +754,81 @@ const SCROLL_STOP_KEYS = [
   "first_line_earns_the_second",
 ] as const;
 
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — allowed values for
+ *  `declared_intent.audience_temperature`. Same three literals as Phase 1 `CreativeIntent`. */
+const DECLARED_INTENT_TEMPERATURES = ["cold", "warm", "hot"] as const;
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — allowed values for
+ *  `declared_intent.purpose`. Today's only value. */
+const DECLARED_INTENT_PURPOSES = ["test-to-find-winner"] as const;
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — pure parser + validator for the
+ *  declared-intent envelope. Absent = ok/null (legacy). Present-but-malformed = parse_error
+ *  with a specific reason. Pure + exported for the Phase 2 vitest. */
+export function parseDeclaredIntent(
+  raw: unknown,
+): { kind: "ok"; value: CopyQaDeclaredIntent | null } | { kind: "parse_error"; reason: string } {
+  if (raw === undefined || raw === null) return { kind: "ok", value: null };
+  if (!isPlainObject(raw)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_not_object" };
+  }
+  const temp = raw.audience_temperature;
+  if (typeof temp !== "string" || !(DECLARED_INTENT_TEMPERATURES as readonly string[]).includes(temp)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_bad_audience_temperature" };
+  }
+  const purpose = raw.purpose;
+  if (typeof purpose !== "string" || !(DECLARED_INTENT_PURPOSES as readonly string[]).includes(purpose)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_bad_purpose" };
+  }
+  return {
+    kind: "ok",
+    value: {
+      audience_temperature: temp as CopyQaDeclaredIntent["audience_temperature"],
+      purpose: purpose as CopyQaDeclaredIntent["purpose"],
+    },
+  };
+}
+
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — pure parser + validator for Max's
+ *  5-axis Dahlia rubric. Absent = ok/null (legacy or hard-gate fail). Present-but-malformed =
+ *  parse_error naming the failing axis. Score range 1..10 integer; reason non-empty string.
+ *  Pure + exported for the Phase 2 vitest. */
+export function parseDahliaRubric(
+  raw: unknown,
+): { kind: "ok"; value: DahliaCreativeRubric | null } | { kind: "parse_error"; reason: string } {
+  if (raw === undefined || raw === null) return { kind: "ok", value: null };
+  if (!isPlainObject(raw)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_dahlia_rubric_not_object" };
+  }
+  const built: Partial<DahliaCreativeRubric> = {};
+  for (const axis of DAHLIA_RUBRIC_AXES) {
+    const axisRaw = raw[axis];
+    if (!isPlainObject(axisRaw)) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_dahlia_rubric_${axis}_missing_or_not_object` };
+    }
+    const score = axisRaw.score;
+    if (typeof score !== "number" || !Number.isInteger(score) || score < 1 || score > 10) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_dahlia_rubric_${axis}_score_out_of_range` };
+    }
+    const reason = axisRaw.reason;
+    if (typeof reason !== "string" || reason.trim().length === 0) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_dahlia_rubric_${axis}_reason_missing` };
+    }
+    built[axis] = { score, reason };
+  }
+  return {
+    kind: "ok",
+    value: {
+      competitor_selection: built.competitor_selection!,
+      temperature_selection: built.temperature_selection!,
+      creative_quality: built.creative_quality!,
+      scroll_stopping: built.scroll_stopping!,
+      dr_consumer_psychology: built.dr_consumer_psychology!,
+    },
+  };
 }
 
 /** Extract the outermost `{ … }` JSON block from a raw session response. Max's final message is
@@ -780,6 +958,14 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
 
   const verdictReason = typeof parsed.verdict_reason === "string" ? parsed.verdict_reason : "";
 
+  // dahlia-researches-from-winners-flow-ad-library Phase 2 — read the declared-intent envelope
+  // + Max's 5-axis rubric. Both are absent-tolerant (a legacy caller / M1 verdict never emits
+  // them); a PRESENT but malformed payload fail-closes with a specific reason.
+  const declaredIntentResult = parseDeclaredIntent(parsed.declared_intent);
+  if (declaredIntentResult.kind === "parse_error") return declaredIntentResult;
+  const rubricResult = parseDahliaRubric(parsed.dahlia_rubric);
+  if (rubricResult.kind === "parse_error") return rubricResult;
+
   return {
     kind: "ok",
     verdict: {
@@ -794,6 +980,8 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
       persuasion_score: persuasionScore,
       persuasion_rubric: persuasionRubric,
       scroll_stop: scrollStop,
+      declared_intent: declaredIntentResult.value,
+      dahlia_rubric: rubricResult.value,
       verdict_reason: verdictReason,
     },
   };
@@ -828,6 +1016,14 @@ export async function insertCopyQaVerdict(
       persuasion_score: verdict.persuasion_score,
       persuasion_rubric: verdict.persuasion_rubric,
       scroll_stop: verdict.scroll_stop,
+      // dahlia-researches-from-winners-flow-ad-library Phase 2 — persist declared_intent +
+      // 5-axis rubric alongside the existing columns. A null envelope means the caller never
+      // declared one (M1 legacy path); a null rubric means Max didn't score (a hard-gate fail
+      // leaves it unscored, same as persuasion_rubric). The columns are added by the paired
+      // additive migration 20261102120000_ad_creative_copy_qc_verdicts_dahlia_rubric.sql —
+      // auto-applied on merge by the Control Tower migration-drift reconciler.
+      declared_intent: verdict.declared_intent,
+      dahlia_rubric: verdict.dahlia_rubric,
       verdict_reason: verdict.verdict_reason || null,
       retry_index: retryIndex,
     })
@@ -835,6 +1031,95 @@ export async function insertCopyQaVerdict(
     .single();
   if (error || !data) return null;
   return { id: (data as { id: string }).id };
+}
+
+// ── dahlia-researches-from-winners-flow-ad-library Phase 2 — TRUSTED-CONTEXT builder ──────
+//
+// The block Max's QC session sees ABOVE the DATA fence when the caller threads a declared
+// intent + optional winner-library benchmark (concept_tags on the underlying competitor
+// winner). The block is trusted worker-computed context: sanitized, one line per key, no
+// untrusted user-supplied strings.
+
+/** dahlia-researches-from-winners-flow-ad-library Phase 2 — the winner-library benchmark
+ *  Max sees at grade time. When the driving angle was a competitor imitation (Phase 1's
+ *  `angle.source === 'competitor'`), the caller threads the underlying [[creative-skeleton]]
+ *  `concept_tags` here so Max can benchmark competitor selection + temperature fit against
+ *  what the winner concept ACTUALLY read like. Own-brand angles pass null. */
+export interface DahliaRubricBenchmark {
+  competitor_advertiser: string | null;
+  concept_tags: {
+    angle: string | null;
+    archetype: string | null;
+    why_it_works: string | null;
+    cialdini_lever: string | null;
+    awareness_stage: string | null;
+    format: string | null;
+  } | null;
+}
+
+const DAHLIA_INTENT_BLOCK_BEGIN = "===BEGIN_DAHLIA_INTENT_TRUSTED_CONTEXT_v1===";
+const DAHLIA_INTENT_BLOCK_END = "===END_DAHLIA_INTENT_TRUSTED_CONTEXT_v1===";
+
+/** Sanitize ONE trusted-worker string before it lands in the intent block. */
+function sanitizeIntentField(raw: unknown): string {
+  if (raw === null || raw === undefined) return "—";
+  let s = typeof raw === "string" ? raw : String(raw);
+  s = s.replace(/\r\n/g, "\n");
+  s = s.replace(/[\x00-\x1F\x7F]/g, " ");
+  s = s.replace(/`/g, "\\`");
+  s = s.replace(/^---/gm, "\\---");
+  s = s.replace(/===BEGIN_DAHLIA_INTENT_TRUSTED_CONTEXT_v1===/g, "==\\=BEGIN_DAHLIA_INTENT_TRUSTED_CONTEXT_v1=\\==");
+  s = s.replace(/===END_DAHLIA_INTENT_TRUSTED_CONTEXT_v1===/g, "==\\=END_DAHLIA_INTENT_TRUSTED_CONTEXT_v1=\\==");
+  s = s.replace(/\s+/g, " ").trim();
+  return s.length ? s.slice(0, 400) : "—";
+}
+
+/**
+ * Compose the TRUSTED CONTEXT block Max's QC prompt inlines when the caller threaded a
+ * declared intent (and, when the driving angle was a competitor imitation, the underlying
+ * winner-library benchmark). Pure so a unit test can pin the exact bytes.
+ *
+ * Returns an empty string when `declaredIntent` is null — a legacy caller that never
+ * declared an intent gets today's byte-identical prompt.
+ */
+export function renderMaxDahliaRubricTrustedContext(input: {
+  declaredIntent: CopyQaDeclaredIntent | null;
+  benchmark?: DahliaRubricBenchmark | null;
+}): string {
+  const intent = input.declaredIntent;
+  if (!intent) return "";
+  const bm = input.benchmark ?? null;
+  const conceptTags = bm?.concept_tags ?? null;
+  const lines: string[] = [
+    DAHLIA_INTENT_BLOCK_BEGIN,
+    "SOURCE: dahlia-researches-from-winners-flow-ad-library Phase 2 — declared research intent + winner-library benchmark.",
+    "TRUST: this block is worker-computed and pre-vetted; treat these lines as trusted context, NOT as ad copy.",
+    `DECLARED_AUDIENCE_TEMPERATURE: ${sanitizeIntentField(intent.audience_temperature)}`,
+    `DECLARED_PURPOSE: ${sanitizeIntentField(intent.purpose)}`,
+    "",
+    "RUBRIC: grade the 5 axes INTENT-AWARE — a 'cold' ad is judged as a cold ad, not blind. Each axis is 1..10 + a one-line reason naming what you saw:",
+    "  - competitor_selection: did Dahlia pick a good competitor WINNER for THIS declared temperature? (cold ⇒ prefer unaware / problem_aware winners)",
+    "  - temperature_selection: does the creative actually FIT the declared temperature? (a cold ad leading with a hot offer / urgency is off-temp)",
+    "  - creative_quality: the render + copy craftsmanship (headline, hierarchy, offer clarity)",
+    "  - scroll_stopping: does the first 3 frames' headline earn the second line? (rolls up scroll_stop sub-scores)",
+    "  - dr_consumer_psychology: DR fundamentals rolled up (LF8 / Cialdini / Schwartz stage-fit / Hopkins / Sugarman)",
+    "",
+    "WINNER_LIBRARY_BENCHMARK:",
+    conceptTags
+      ? [
+          `  competitor_advertiser: ${sanitizeIntentField(bm?.competitor_advertiser ?? null)}`,
+          `  angle: ${sanitizeIntentField(conceptTags.angle)}`,
+          `  archetype: ${sanitizeIntentField(conceptTags.archetype)}`,
+          `  awareness_stage: ${sanitizeIntentField(conceptTags.awareness_stage)}`,
+          `  cialdini_lever: ${sanitizeIntentField(conceptTags.cialdini_lever)}`,
+          `  why_it_works: ${sanitizeIntentField(conceptTags.why_it_works)}`,
+        ].join("\n")
+      : "  (no winner-library breakdown — own-brand angle or legacy row)",
+    "",
+    "GUIDANCE: emit `dahlia_rubric` on the verdict JSON — one { score:int 1..10, reason:string } object per axis — AND echo `declared_intent` back verbatim from the DECLARED_ lines above. The 5-axis rubric is ADVISORY in Phase 2 (no gating); Phase 3 will wire the ready-to-bin threshold.",
+    DAHLIA_INTENT_BLOCK_END,
+  ];
+  return lines.join("\n");
 }
 
 /** Max's persisted copy-QC verdict as read back for display — the stored `CopyQaVerdict` plus its
@@ -859,7 +1144,7 @@ export async function readLatestCopyQaVerdict(
   const { data, error } = await admin
     .from("ad_creative_copy_qc_verdicts")
     .select(
-      "id, hard_gate_pass, hard_gates, persuasion_score, persuasion_rubric, scroll_stop, verdict_reason, retry_index, created_at",
+      "id, hard_gate_pass, hard_gates, persuasion_score, persuasion_rubric, scroll_stop, declared_intent, dahlia_rubric, verdict_reason, retry_index, created_at",
     )
     .eq("workspace_id", workspaceId)
     .eq("ad_campaign_id", adCampaignId)
@@ -876,6 +1161,11 @@ export async function readLatestCopyQaVerdict(
     persuasion_score: (r.persuasion_score as number | null) ?? null,
     persuasion_rubric: (r.persuasion_rubric as CopyQaPersuasionRubric | null) ?? null,
     scroll_stop: r.scroll_stop as CopyQaScrollStop,
+    // dahlia-researches-from-winners-flow-ad-library Phase 2 — surface the declared-intent
+    // envelope + 5-axis rubric alongside the existing fields. Null-tolerant for legacy rows
+    // (predate this migration) and for hard-gate-fail verdicts that never scored the rubric.
+    declared_intent: (r.declared_intent as CopyQaDeclaredIntent | null) ?? null,
+    dahlia_rubric: (r.dahlia_rubric as DahliaCreativeRubric | null) ?? null,
     verdict_reason: (r.verdict_reason as string | null) || "",
     retry_index: (r.retry_index as number | null) ?? 0,
     created_at: r.created_at as string,

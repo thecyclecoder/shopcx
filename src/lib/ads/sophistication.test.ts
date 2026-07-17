@@ -27,6 +27,9 @@ function makeAngle(hook: string | null, mechanismClaim: string | null): Competit
     destinationDomain: null,
     imageUrl: null,
     resumeAdvertising: true,
+    winnerTier: null,
+    winnerScore: null,
+    conceptTags: null,
   };
 }
 

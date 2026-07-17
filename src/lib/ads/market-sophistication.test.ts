@@ -38,6 +38,9 @@ function makeAngle(over: Partial<CompetitorAngle> = {}): CompetitorAngle {
     destinationDomain: null,
     imageUrl: null,
     resumeAdvertising: true,
+    winnerTier: null,
+    winnerScore: null,
+    conceptTags: null,
     ...over,
   };
 }

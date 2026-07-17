@@ -54,6 +54,7 @@ global row exists per workspace (partial unique index `iteration_policies_one_ac
 | `superseded_at` | `timestamptz` | ✓ | supersede time |
 | `created_at` | `timestamptz` | — | default `now()` |
 | `updated_at` | `timestamptz` | — | default `now()` |
+| `dahlia_rubric_min_composite` | `int` | — | default `7` — the per-workspace THRESHOLD Max's Phase-2 5-axis [[ad_creative_copy_qc_verdicts]]`.dahlia_rubric` composite (0..10) must clear before a Dahlia creative flips to `ad_campaigns.status='ready'` in Bianca's ready-to-test bin. Read by [[../libraries/dahlia-rubric-gate]] `resolveDahliaRubricMinComposite` — same fail-closed shape as `resolveLf8UnderperformanceThreshold` (a missing/errored row refuses to authorize an auto-bin). Tunable per workspace so the bar ratchets up as Dahlia's baseline improves; the migration seeds every row at `7` (spec's opening bar). [[../specs/dahlia-researches-from-winners-flow-ad-library]] Phase 3. |
 
 ## Indexes
 
