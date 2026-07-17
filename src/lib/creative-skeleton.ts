@@ -44,6 +44,27 @@ export interface CreativeSkeleton {
   mechanism_claim: string | null;
   proof: string | null;
   offer: string | null;
+  /** winners-flow Phase 2c — the strategic concept rubric OUR vision emits so LANE-B (domain-search) ads
+   *  carry the SAME shape as LANE-A's AdLibrary tags. `{ angle, archetype, why_it_works, cialdini_lever,
+   *  awareness_stage }` — the axes Max grades Dahlia on. `format` here mirrors AdLibrary's `static_image`. */
+  concept_tags: ConceptTags | null;
+}
+
+/** The unified strategic breakdown (both lanes). LANE A fills it from AdLibrary; LANE B + backfill from OUR
+ *  vision. Keys mirror `WinnerConcept['tags']` in [[./adlibrary-winners]] so Dahlia + Max read one schema. */
+export interface ConceptTags {
+  /** The core marketing angle (e.g. "clean energy without the crash"). */
+  angle: string | null;
+  /** Creative archetype (e.g. "founder-story", "problem-agitate-solve", "us-vs-them", "transformation"). */
+  archetype: string | null;
+  /** Why it stops the scroll + converts — the psychological read. */
+  why_it_works: string | null;
+  /** Dominant Cialdini lever: reciprocity | commitment | social_proof | authority | liking | scarcity | unity. */
+  cialdini_lever: string | null;
+  /** Schwartz awareness stage the ad targets: unaware | problem_aware | solution_aware | product_aware | most_aware. */
+  awareness_stage: string | null;
+  /** Media format — always "static_image" for our image-only library (mirrors AdLibrary's tag). */
+  format: string | null;
 }
 
 // AdLibrary serves full-res source creatives (routinely 6-22MB) with an unreliable HTTP content-type
@@ -106,9 +127,17 @@ Return ONLY a JSON object, no prose, with these keys:
   "hook": the opening attention grab, verbatim or tightly paraphrased,
   "mechanism_claim": the core benefit/mechanism claim (e.g. "clean energy, no jitters"),
   "proof": the proof element (reviews, badge, before/after, clinical, founder, social count) or null,
-  "offer": the offer/CTA (discount, subscribe & save, free shipping, trial) or null
+  "offer": the offer/CTA (discount, subscribe & save, free shipping, trial) or null,
+  "concept_tags": {
+    "angle": the core marketing angle in a short phrase (e.g. "clean energy, no crash"),
+    "archetype": the creative archetype — one of "founder-story" | "problem-agitate-solve" | "us-vs-them" | "transformation" | "myth-bust" | "social-proof-wall" | "demo-proof" | "listicle" | "testimonial" | a short variant,
+    "why_it_works": one sentence on WHY this stops the scroll and converts (the psychological read),
+    "cialdini_lever": the dominant persuasion lever — one of "reciprocity" | "commitment" | "social_proof" | "authority" | "liking" | "scarcity" | "unity",
+    "awareness_stage": the Schwartz awareness stage this ad targets — one of "unaware" | "problem_aware" | "solution_aware" | "product_aware" | "most_aware"
+  }
 }
-Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.`;
+Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.
+The "concept_tags" object is the STRATEGIC read (angle + psychology); the top-level slots are the STRUCTURAL read. Fill both. Never return null for concept_tags — always infer the closest strategic read.`;
 
 /** Run Claude vision on the creative bytes → the four-slot skeleton.
  *  `contentType` is accepted for signature compatibility but no longer trusted (AdLibrary mislabels
@@ -137,7 +166,7 @@ export async function visionDeconstruct(
     },
     body: JSON.stringify({
       model: OPUS_MODEL,
-      max_tokens: 1024,
+      max_tokens: 1536,
       system: VISION_SYSTEM,
       messages: [
         {
@@ -230,7 +259,7 @@ export async function visionDeconstructFrames(
     },
     body: JSON.stringify({
       model: OPUS_MODEL,
-      max_tokens: 1024,
+      max_tokens: 1536,
       system: VIDEO_VISION_SYSTEM,
       messages: [
         {
@@ -272,6 +301,17 @@ function parseSkeleton(text: string): CreativeSkeleton | null {
       const s = String(v).trim();
       return s && s.toLowerCase() !== "null" ? s : null;
     };
+    const ct = (o.concept_tags && typeof o.concept_tags === "object") ? (o.concept_tags as Record<string, unknown>) : null;
+    const conceptTags: ConceptTags | null = ct
+      ? {
+          angle: str(ct.angle),
+          archetype: str(ct.archetype),
+          why_it_works: str(ct.why_it_works),
+          cialdini_lever: str(ct.cialdini_lever),
+          awareness_stage: str(ct.awareness_stage),
+          format: str(ct.format) ?? "static_image", // image-only library
+        }
+      : null;
     return {
       format: str(o.format),
       framework: str(o.framework),
@@ -279,6 +319,7 @@ function parseSkeleton(text: string): CreativeSkeleton | null {
       mechanism_claim: str(o.mechanism_claim),
       proof: str(o.proof),
       offer: str(o.offer),
+      concept_tags: conceptTags,
     };
   } catch {
     return null;
@@ -580,11 +621,12 @@ export async function ingestAd(
     // competitor + WHICH of our products this ad was pulled for, so imitate reads a product's own shelf.
     competitor_id: seed.competitorId ?? null,
     product_id: seed.productId ?? null,
-    // winners-flow Phase 2b — the unified concept breakdown. LANE A carries AdLibrary's AI scoring;
-    // LANE B / backfill leave these null now and get concept_tags from OUR vision (Phase 2c, same schema).
+    // winners-flow — the unified concept breakdown. LANE A (winner arg) carries AdLibrary's AI scoring +
+    // tags; LANE B / backfill get concept_tags from OUR vision (same schema). winner_tier/score are
+    // AdLibrary-only (null for LANE B — a domain search has no AdLibrary composite).
     winner_tier: winner?.tier ?? null,
     winner_score: winner?.score ?? null,
-    concept_tags: winner?.tags ?? null,
+    concept_tags: winner?.tags ?? skeleton?.concept_tags ?? null,
     status,
     raw: ad.raw,
     visioned_at: visionedAt,
@@ -706,16 +748,14 @@ export async function sweepCompetitorLanes(
   return result;
 }
 
-/** Map a LANE-A `WinnerConcept` → the `WinnerMeta` we stamp onto the skeleton row. */
+/** Map a LANE-A `WinnerConcept` → the `WinnerMeta` we stamp onto the skeleton row. `tags` is null when
+ *  AdLibrary returned no strategic tags for the concept — so `ingestAd` falls back to OUR vision's
+ *  `concept_tags` (same schema) rather than storing a bare `variant_count`. */
 function conceptToWinnerMeta(concept: WinnerConcept): WinnerMeta {
   return {
     tier: concept.tier,
     score: concept.composite,
-    tags: concept.tags
-      ? { ...concept.tags, variant_count: concept.variantCount ?? undefined }
-      : concept.variantCount != null
-        ? { variant_count: concept.variantCount }
-        : null,
+    tags: concept.tags ? { ...concept.tags, variant_count: concept.variantCount ?? undefined } : null,
   };
 }
 
