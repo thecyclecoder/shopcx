@@ -551,6 +551,12 @@ function defaultPersona(slug: string, label?: string): AgentPersona {
 const KIND_PERSONA_ALIAS: Record<string, string> = {
   "deploy-review": "deploy-guardian", // Reva's canary-investigation box session
   "cs-director-call": "cs-director", // June's CS-director review box session
+  // Ad-creative sub-lanes: Dahlia AUTHORS the copy, Max GRADES it. Without these the box card
+  // rendered the raw kind ("Ad Creative Copy Author") with the blank default mascot instead of
+  // Dahlia's face (2026-07-17). The node-registry OWNER of all three is the `growth` function, but
+  // the box card wants the ACTING persona — Dahlia (ad-creative) for authoring, Max (growth) for QC.
+  "ad-creative-copy-author": "ad-creative", // Dahlia's per-creative copy-author box session
+  "ad-creative-copy-qc": "growth", // Max's independent per-creative copy-QC box session
 };
 
 export function getPersona(slug: string, label?: string): AgentPersona {
