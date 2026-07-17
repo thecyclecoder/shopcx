@@ -261,3 +261,87 @@ export async function getSpecBoardContext<S = unknown, P = unknown, C = unknown>
     goalMemberships: row.goal_memberships ?? [],
   };
 }
+
+/**
+ * spec-read-eff-pool — pooled straggler read #1: `list_specs_with_phases(uuid, text)`.
+ *
+ * Phase 2 of [[docs/brain/specs/spec-read-efficiency-for-scaling-fleet]] — every whole-board reader
+ * (board render, roadmap, spec-drift, roadmap-status) calls `list_specs_with_phases` via
+ * PostgREST which still pays the `set_config` preamble + auth churn even though the RPC itself is
+ * a single server-side join. Pooling strips the preamble off every cold read, independent of the
+ * cold-getSpec fan-out collapse in Phase 1.
+ *
+ * Returns:
+ *   - `Array<{ spec, phases }>` on success (empty array = no matching rows in scope)
+ *   - `null` on pool unavailable / query error (caller falls back to the supabase-js RPC path)
+ */
+export async function listSpecsWithPhases<S = unknown, P = unknown>(
+  workspaceId: string,
+  scope: "active" | "archived" | "all",
+): Promise<Array<{ spec: S; phases: P[] }> | null> {
+  const rows = await pgQuery<{ spec: S; phases: P[] | null }>(
+    `SELECT spec, phases FROM public.list_specs_with_phases($1::uuid, $2::text)`,
+    [workspaceId, scope],
+  );
+  if (rows === null) return null;
+  return rows.map((r) => ({ spec: r.spec, phases: (r.phases ?? []) as P[] }));
+}
+
+/**
+ * spec-read-eff-pool — pooled straggler read #2: `spec_card_state` full-workspace scan.
+ *
+ * Phase 2 of [[docs/brain/specs/spec-read-efficiency-for-scaling-fleet]] — the transient board
+ * overlay (short_circuit / merged_pr flags) is read whole-workspace on every board render. Same
+ * shape the PostgREST reader ships, just without the preamble.
+ *
+ * Returns:
+ *   - `Array<row>` on success (empty array when no card_state rows exist for the workspace)
+ *   - `null` on pool unavailable / query error (caller falls back to the supabase-js `.from()` path)
+ */
+export async function listSpecCardStates<C extends QueryResultRow = QueryResultRow>(
+  workspaceId: string,
+): Promise<C[] | null> {
+  const rows = await pgQuery<C>(
+    `SELECT workspace_id, spec_slug, status, phase_states, flags, last_merge_sha, updated_at
+       FROM public.spec_card_state
+       WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  return rows;
+}
+
+/**
+ * spec-read-eff-pool — pooled straggler read #3: goals + goal_milestones in one pooled call.
+ *
+ * Phase 2 of [[docs/brain/specs/spec-read-efficiency-for-scaling-fleet]] — the supabase-js path
+ * pays TWO PostgREST round-trips (`goals` then `goal_milestones IN (goal ids)`) each with its own
+ * `set_config` preamble. This helper collapses them into ONE pooled query via a jsonb aggregation
+ * of each goal's milestones (same shape [[goals-table]] `goalRowFromDb` consumes), so both
+ * preambles disappear AND the id round-trip is retired.
+ *
+ * Every workspace goal is returned; the caller applies `ListGoalsFilter` filters
+ * (status/owner/parent_goal_id) in-memory over the bounded workspace set — no per-filter round
+ * trip. Behavior-preserving: same rows, same filter semantics, same sort order.
+ *
+ * Returns:
+ *   - `Array<{ goal, milestones }>` on success (empty array = no goals in the workspace)
+ *   - `null` on pool unavailable / query error (caller falls back to the supabase-js two-call path)
+ */
+export async function listGoalsWithMilestones<G = unknown, M = unknown>(
+  workspaceId: string,
+): Promise<Array<{ goal: G; milestones: M[] }> | null> {
+  const rows = await pgQuery<{ goal: G; milestones: M[] | null }>(
+    `SELECT
+       to_jsonb(g) AS goal,
+       COALESCE(
+         (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.position)
+            FROM public.goal_milestones m WHERE m.goal_id = g.id),
+         '[]'::jsonb
+       ) AS milestones
+     FROM public.goals g
+     WHERE g.workspace_id = $1`,
+    [workspaceId],
+  );
+  if (rows === null) return null;
+  return rows.map((r) => ({ goal: r.goal, milestones: (r.milestones ?? []) as M[] }));
+}

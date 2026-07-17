@@ -535,13 +535,30 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
-  const admin = createAdminClient();
-  const { data, error } = await admin.rpc("list_specs_with_phases", {
-    p_workspace_id: workspaceId,
-    p_scope: filter.scope ?? "all",
-  });
-  if (error) throw error;
-  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  const scope = filter.scope ?? "all";
+  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Pooled path (box worker + any runtime with pooler creds): one pooled query, no PostgREST
+  // preamble. `null` = pool unavailable / query error → fall through to the supabase-js RPC path
+  // (same fail-open contract as `getSpec` above).
+  let rows: Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }> | null = null;
+  try {
+    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
+    if (pooled !== null) {
+      rows = pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
+    }
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
+  if (rows === null) {
+    const admin = createAdminClient();
+    const { data, error } = await admin.rpc("list_specs_with_phases", {
+      p_workspace_id: workspaceId,
+      p_scope: scope,
+    });
+    if (error) throw error;
+    rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  }
   let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
   if (filter.status) out = out.filter((r) => r.status === filter.status);
   if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
