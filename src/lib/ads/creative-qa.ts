@@ -30,6 +30,9 @@ import type { GeneratedCreative } from "@/lib/ads/creative-generate";
 import { buildQcPrompt } from "@/lib/ads/creative-qc-sandbox";
 import { validateGeneratedCopy, type ValidatorResult, type ValidatorContext } from "@/lib/ads/copy-validator";
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
+import type { createAdminClient } from "@/lib/supabase/admin";
+
+type Admin = ReturnType<typeof createAdminClient>;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -558,4 +561,278 @@ export async function runQaCreativeCopyViaBoxSession(
     return { kind: "dispatch_error", validator: preCheck.validator, reason: "qa_copy_session_error" };
   }
   return { kind: "ok", validator: preCheck.validator, resultText: dispatchResult.resultText };
+}
+
+// ── Max copy-QC verdict — TS type + strict-JSON parser + SDK persistence ───────────────────────
+//
+// dahlia-max-independent-copy-qc-box-session + max-copy-qc-scroll-stop-dims — the verdict Max
+// emits at the end of his per-creative copy-QC box session (`.claude/skills/max-copy-qc/SKILL.md`),
+// the parser the Node lane runs on `resultText`, and the SDK helper that persists the row into
+// `public.ad_creative_copy_qc_verdicts` (the SDK-chokepoint rule from CLAUDE.md's "raw .from()
+// with no SDK → STOP" convention — no raw insert lands anywhere else in the codebase).
+//
+// Fail-closed on parse — an undecodable JSON, a missing hard_gates entry, a mismatched pair
+// (hard_gate_pass=true with a false gate inside), or a missing / null `scroll_stop` all resolve
+// to `{ kind: "parse_error", reason }`. The caller treats a parse_error the same as a hard-gate
+// fail (bounce Dahlia's session; never let unchecked bytes land on the row).
+//
+// `scroll_stop` is the max-copy-qc-scroll-stop-dims Phase 1 extension — three ADVISORY 0-2
+// sub-scores (`headline_readable_in_3_frames` / `visual_hierarchy_supports_headline` /
+// `first_line_earns_the_second`) + an `evidence[]` array, REQUIRED on every verdict so
+// downstream CAC-correlation always has the granular signal. The sub-scores never gate the bin
+// insert (Goodhart guard); a low `first_line_earns_the_second` with every hard gate green still
+// passes.
+
+/** Max's advisory scroll-stop sub-scores. All three dimensions REQUIRED on every verdict —
+ *  parseCopyQaVerdict refuses fail-closed on a missing or null `scroll_stop`. See
+ *  `.claude/skills/max-copy-qc/SKILL.md` § "SCROLL-STOP sub-scores" for the definitions and the
+ *  bold ADVISORY-only rule. Each sub-score is 0 / 1 / 2 (absent / weak / strong). */
+export interface CopyQaScrollStop {
+  headline_readable_in_3_frames: 0 | 1 | 2;
+  visual_hierarchy_supports_headline: 0 | 1 | 2;
+  first_line_earns_the_second: 0 | 1 | 2;
+  /** One short line per non-zero sub-score citing the phrase / defect. MAY be empty on an
+   *  all-zeros verdict; MUST be present as a `[]` — never omitted, never `null`. */
+  evidence: string[];
+}
+
+/** Max's per-lens persuasion sub-scores + evidence. Present on a hard-gate pass; MAY be null on
+ *  a hard-gate fail (the bounce is the signal — the rubric wasn't scored). */
+export interface CopyQaPersuasionRubric {
+  lf8: number;
+  schwartz: number;
+  cialdini: number;
+  hopkins: number;
+  sugarman: number;
+  evidence: string[];
+}
+
+/** The strict-JSON verdict `.claude/skills/max-copy-qc/SKILL.md` documents. Shape pinned by
+ *  `parseCopyQaVerdict` — a divergence between the skill and the parser is a build-time bug. */
+export interface CopyQaVerdict {
+  hard_gate_pass: boolean;
+  hard_gates: {
+    no_fabrication: boolean;
+    no_cold_offer: boolean;
+    no_competitor_leak: boolean;
+    single_promise: boolean;
+    render_ok: boolean;
+  };
+  /** Advisory 0-10; NULL on a hard-gate fail. */
+  persuasion_score: number | null;
+  /** Advisory 5-lens rubric; NULL on a hard-gate fail. */
+  persuasion_rubric: CopyQaPersuasionRubric | null;
+  /** Advisory scroll-stop dimensions — REQUIRED on every verdict (pass AND fail); the row on
+   *  disk records what the copy WAS like even when the safety rails failed. Never null, never
+   *  omitted — parseCopyQaVerdict refuses fail-closed on missing / null. */
+  scroll_stop: CopyQaScrollStop;
+  verdict_reason: string;
+}
+
+/** Discriminated outcome of `parseCopyQaVerdict`. `parse_error` carries a short machine-readable
+ *  reason the caller threads into the fail-closed bounce so operators can grep the log. */
+export type ParseCopyQaVerdictResult =
+  | { kind: "ok"; verdict: CopyQaVerdict }
+  | { kind: "parse_error"; reason: string };
+
+const HARD_GATE_KEYS = [
+  "no_fabrication",
+  "no_cold_offer",
+  "no_competitor_leak",
+  "single_promise",
+  "render_ok",
+] as const;
+
+const SCROLL_STOP_KEYS = [
+  "headline_readable_in_3_frames",
+  "visual_hierarchy_supports_headline",
+  "first_line_earns_the_second",
+] as const;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Extract the outermost `{ … }` JSON block from a raw session response. Max's final message is
+ *  supposed to be bare JSON, but the SKILL.md leaves a small tolerance ("if fenced, the JSON is
+ *  the last thing in the message") — this handles both by scanning for the first `{` and taking
+ *  everything to the last matching `}`. Returns null when no plausible object is found. */
+function extractJsonObject(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  if (first < 0 || last < 0 || last <= first) return null;
+  return trimmed.slice(first, last + 1);
+}
+
+/** Strict-JSON parser for Max's copy-QC verdict. Fail-closed on:
+ *   - undecodable JSON
+ *   - missing / non-object `hard_gates`
+ *   - missing / non-boolean hard-gate key
+ *   - `hard_gate_pass=true` with any per-check `false` (mismatched pair)
+ *   - persuasion_score outside 0..10 on a pass
+ *   - MISSING or NULL `scroll_stop` (max-copy-qc-scroll-stop-dims Phase 1 contract — the sub-
+ *     scores are advisory but the FIELD is required so downstream CAC-correlation always has
+ *     the granular signal)
+ *   - a scroll_stop sub-score outside 0..2 or not an integer
+ *
+ *  The parser NORMALIZES `hard_gate_pass` from `hard_gates` before returning — a top-level
+ *  `true` with a per-check `false` inside is REJECTED (parse_error) rather than silently
+ *  flipped, because a mismatched pair from a real session is likely a Goodhart-adjacent lie
+ *  and the caller should see it as a defect. */
+export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
+  const jsonBlob = extractJsonObject(raw);
+  if (!jsonBlob) return { kind: "parse_error", reason: "copy_qc_verdict_no_json_block" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonBlob);
+  } catch {
+    return { kind: "parse_error", reason: "copy_qc_verdict_json_parse_failed" };
+  }
+  if (!isPlainObject(parsed)) return { kind: "parse_error", reason: "copy_qc_verdict_not_object" };
+
+  const hardGates = parsed.hard_gates;
+  if (!isPlainObject(hardGates)) return { kind: "parse_error", reason: "copy_qc_verdict_missing_hard_gates" };
+  const gateBooleans: Record<string, boolean> = {};
+  for (const key of HARD_GATE_KEYS) {
+    const v = hardGates[key];
+    if (typeof v !== "boolean") return { kind: "parse_error", reason: `copy_qc_verdict_hard_gate_${key}_not_boolean` };
+    gateBooleans[key] = v;
+  }
+  const allGatesTrue = HARD_GATE_KEYS.every((k) => gateBooleans[k]);
+  const claimedPass = parsed.hard_gate_pass;
+  if (typeof claimedPass !== "boolean") return { kind: "parse_error", reason: "copy_qc_verdict_hard_gate_pass_not_boolean" };
+  // Mismatched pair = defect. Fail-closed on the mismatch even when the caller could paper it
+  // over (a top-level `true` with a false inside is likely a rubric-mirror lie — surface it).
+  if (claimedPass !== allGatesTrue) return { kind: "parse_error", reason: "copy_qc_verdict_hard_gate_pass_mismatch" };
+
+  const rawScrollStop = parsed.scroll_stop;
+  if (rawScrollStop === undefined || rawScrollStop === null) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_missing_scroll_stop" };
+  }
+  if (!isPlainObject(rawScrollStop)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_not_object" };
+  }
+  const scrollStopScores: Record<string, 0 | 1 | 2> = {};
+  for (const key of SCROLL_STOP_KEYS) {
+    const v = rawScrollStop[key];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 2) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_scroll_stop_${key}_out_of_range` };
+    }
+    scrollStopScores[key] = v as 0 | 1 | 2;
+  }
+  const rawEvidence = rawScrollStop.evidence;
+  if (!Array.isArray(rawEvidence) || !rawEvidence.every((e) => typeof e === "string")) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_evidence_not_string_array" };
+  }
+  const scrollStop: CopyQaScrollStop = {
+    headline_readable_in_3_frames: scrollStopScores.headline_readable_in_3_frames,
+    visual_hierarchy_supports_headline: scrollStopScores.visual_hierarchy_supports_headline,
+    first_line_earns_the_second: scrollStopScores.first_line_earns_the_second,
+    evidence: rawEvidence.slice(),
+  };
+
+  let persuasionScore: number | null;
+  if (allGatesTrue) {
+    const s = parsed.persuasion_score;
+    if (typeof s !== "number" || !Number.isFinite(s) || s < 0 || s > 10) {
+      return { kind: "parse_error", reason: "copy_qc_verdict_persuasion_score_out_of_range_on_pass" };
+    }
+    persuasionScore = s;
+  } else {
+    persuasionScore = parsed.persuasion_score === null || parsed.persuasion_score === undefined ? null : Number(parsed.persuasion_score);
+    if (persuasionScore !== null && (!Number.isFinite(persuasionScore) || persuasionScore < 0 || persuasionScore > 10)) {
+      return { kind: "parse_error", reason: "copy_qc_verdict_persuasion_score_out_of_range_on_fail" };
+    }
+  }
+
+  let persuasionRubric: CopyQaPersuasionRubric | null = null;
+  const rr = parsed.persuasion_rubric;
+  if (allGatesTrue) {
+    if (!isPlainObject(rr)) return { kind: "parse_error", reason: "copy_qc_verdict_persuasion_rubric_missing_on_pass" };
+    const evidence = rr.evidence;
+    if (!Array.isArray(evidence) || !evidence.every((e) => typeof e === "string")) {
+      return { kind: "parse_error", reason: "copy_qc_verdict_persuasion_rubric_evidence_not_string_array" };
+    }
+    const subs: Record<string, number> = {};
+    for (const lens of ["lf8", "schwartz", "cialdini", "hopkins", "sugarman"] as const) {
+      const sv = rr[lens];
+      if (typeof sv !== "number" || !Number.isFinite(sv)) {
+        return { kind: "parse_error", reason: `copy_qc_verdict_persuasion_rubric_${lens}_not_number` };
+      }
+      subs[lens] = sv;
+    }
+    persuasionRubric = {
+      lf8: subs.lf8,
+      schwartz: subs.schwartz,
+      cialdini: subs.cialdini,
+      hopkins: subs.hopkins,
+      sugarman: subs.sugarman,
+      evidence: evidence.slice(),
+    };
+  } else if (rr !== null && rr !== undefined) {
+    // The skill allows null on a fail; a partial rubric object on a fail is fine to preserve
+    // (it's advisory) but we normalize to null to keep the row shape consistent with the "bounce
+    // is the signal — the rubric wasn't scored" contract in the brain page.
+    persuasionRubric = null;
+  }
+
+  const verdictReason = typeof parsed.verdict_reason === "string" ? parsed.verdict_reason : "";
+
+  return {
+    kind: "ok",
+    verdict: {
+      hard_gate_pass: allGatesTrue,
+      hard_gates: {
+        no_fabrication: gateBooleans.no_fabrication,
+        no_cold_offer: gateBooleans.no_cold_offer,
+        no_competitor_leak: gateBooleans.no_competitor_leak,
+        single_promise: gateBooleans.single_promise,
+        render_ok: gateBooleans.render_ok,
+      },
+      persuasion_score: persuasionScore,
+      persuasion_rubric: persuasionRubric,
+      scroll_stop: scrollStop,
+      verdict_reason: verdictReason,
+    },
+  };
+}
+
+/** SDK helper — persists Max's parsed verdict into `public.ad_creative_copy_qc_verdicts`. THE
+ *  only writer for the table (CLAUDE.md's SDK-chokepoint rule: raw `.from("ad_creative_copy_qc_verdicts").insert(...)`
+ *  in a route or worker is a lint-fail). Always writes `scroll_stop` — the max-copy-qc-scroll-stop-dims
+ *  Phase 1 contract makes the field required on every verdict, and parseCopyQaVerdict has
+ *  already fail-closed on missing / null / out-of-range values by the time we get here.
+ *
+ *  Returns `{ id }` on the successful insert; returns `null` when the insert errors so the caller
+ *  can escalate rather than crash (the row is durable audit — the pipeline continues).
+ */
+export async function insertCopyQaVerdict(
+  admin: Admin,
+  opts: {
+    workspaceId: string;
+    adCampaignId: string;
+    verdict: CopyQaVerdict;
+    retryIndex: number;
+  },
+): Promise<{ id: string } | null> {
+  const { workspaceId, adCampaignId, verdict, retryIndex } = opts;
+  const { data, error } = await admin
+    .from("ad_creative_copy_qc_verdicts")
+    .insert({
+      workspace_id: workspaceId,
+      ad_campaign_id: adCampaignId,
+      hard_gate_pass: verdict.hard_gate_pass,
+      hard_gates: verdict.hard_gates,
+      persuasion_score: verdict.persuasion_score,
+      persuasion_rubric: verdict.persuasion_rubric,
+      scroll_stop: verdict.scroll_stop,
+      verdict_reason: verdict.verdict_reason || null,
+      retry_index: retryIndex,
+    })
+    .select("id")
+    .single();
+  if (error || !data) return null;
+  return { id: (data as { id: string }).id };
 }

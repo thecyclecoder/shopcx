@@ -80,5 +80,27 @@ Max still forms his own persuasion judgment against the 5-lens rubric ([[../../.
 
 The same [[copy-validator]] `validateGeneratedCopy` is the SSOT [[creative-agent]] `runCopyAuthorSession`'s post-author self-check reads — kept in ONE place so the author's self-check and Max's pre-check cannot drift.
 
+## Max verdict — type + parser + SDK persistence (max-copy-qc-scroll-stop-dims Phase 1)
+
+Three co-located pieces materialize Max's per-session verdict onto [[../tables/ad_creative_copy_qc_verdicts]]:
+
+- **`CopyQaVerdict`** — the strict-JSON verdict shape Max's [[../../../.claude/skills/max-copy-qc/SKILL]] documents. Carries `hard_gate_pass`, the five `hard_gates` booleans, `persuasion_score` + `persuasion_rubric` (nullable on a fail), a REQUIRED `scroll_stop`, and `verdict_reason`.
+- **`parseCopyQaVerdict(raw)`** — strict-JSON parser that fail-closes on: undecodable JSON, missing / non-object `hard_gates`, non-boolean per-check, a mismatched pair (`hard_gate_pass=true` with a per-check `false`), `persuasion_score` outside `0..10` on a pass, and — new in max-copy-qc-scroll-stop-dims — a MISSING or NULL `scroll_stop`, a non-integer sub-score, or a sub-score outside `0..2`. Returns `{ kind: "ok", verdict }` or `{ kind: "parse_error", reason }`; the caller treats a parse_error the same as a hard-gate fail (bounce Dahlia's session; never let unchecked bytes land on the row).
+- **`insertCopyQaVerdict(admin, opts)`** — the SDK-chokepoint helper for [[../tables/ad_creative_copy_qc_verdicts]]. Always writes `scroll_stop` on the row (the parser has already validated it); the Node lane never reaches raw `admin.from("ad_creative_copy_qc_verdicts").insert(...)`. Returns `{ id }` on success and `null` on an insert error — a durable-audit row is important but the pipeline continues on write failure.
+
+### Three scroll-stop dimensions ([[../specs/max-copy-qc-scroll-stop-dims]] Phase 1)
+
+The M1 keystone's rolled-up `persuasion_score` (0-10) rolls FIVE lenses into one number — great for a rolled-up read, useless for correlating a specific scroll-stop failure mode against realized CAC. `scroll_stop` names three ADVISORY dimensions, each 0 / 1 / 2, so future CAC-correlation work has a granular signal:
+
+| dimension | what it measures |
+|---|---|
+| `headline_readable_in_3_frames` | the top-line copy is legible within ≤3 feed-scroll frames of Meta thumb-cadence viewing (a real buyer flicks Reels/Feed at ~1 second per card) |
+| `visual_hierarchy_supports_headline` | there is a single dominant visual anchor that doesn't fight the headline for attention (one hero object, one focal face, one focal transformation) |
+| `first_line_earns_the_second` | the primary-text opener creates enough curiosity / stakes / specificity to keep the reader past the `…See more` fold (≈125 chars in Meta feed) |
+
+**No-Goodhart contract.** The sub-scores NEVER block `hard_gate_pass` — a caption can score 0/0/0 on scroll_stop and still land in Bianca's bin if every hard gate is green. The moment a low sub-score gates the pipeline, it stops being an honest signal and becomes something to game — the M1 keystone's line-27 "advisory director" clause explicitly bans this. If a low `first_line_earns_the_second` starts predicting high CAC, the fix is a Dahlia author-mode revise directive; not a new hard gate reading off this column.
+
+Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] tests `(e)` / `(f)` — verdict WITH scroll_stop → row body carries the field; verdict missing / null / out-of-range → `parse_error` fail-closed.
+
 ## Related
 [[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[copy-validator]] (SSOT safety rails).
