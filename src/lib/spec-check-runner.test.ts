@@ -265,6 +265,34 @@ test("classifyDeterministicRun — any fail → verdict=issues (fold gate must N
   assert.equal(cls.summary.auto_fail, 1);
 });
 
+// ── no-machine-checks-auto-pass (CEO 2026-07-17) ─────────────────────────────────────────────────
+// A spec with NO machine/auto checks has nothing for the deterministic runner to gate on → it must
+// AUTO-PASS ('approved'), not 'needs_human'. Returning needs_human left such a spec permanently
+// un-green (the auto-merge requires a green spec-test), so it could never self-merge — the 2026-07-17
+// winners-flow stall (0 machine checks → needs_human → manual merge required).
+test("classifyDeterministicRun — ZERO checks → approved (no machine tests to run, nothing to gate)", () => {
+  const cls = classifyDeterministicRun([]);
+  assert.equal(cls.agentVerdict, "approved", "an empty check set must auto-pass, not strand the spec on needs_human");
+  assert.equal(cls.summary.auto_pass, 0);
+  assert.equal(cls.summary.auto_fail, 0);
+  assert.equal(cls.residualCount, 0);
+});
+
+test("classifyDeterministicRun — only needs_human checks + NO auto checks → approved (no machine tests)", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "needs_human"), makeResult("b", "needs_human")]);
+  assert.equal(cls.agentVerdict, "approved", "no machine tests at all ⇒ auto-pass; human sign-off is the separate human-test column");
+});
+
+test("classifyDeterministicRun — a fail STILL wins even with no passing checks", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "fail")]);
+  assert.equal(cls.agentVerdict, "issues", "a real machine failure must never be auto-passed");
+});
+
+test("classifyDeterministicRun — auto checks present + a residual → still needs_human (unchanged for real machine specs)", () => {
+  const cls = classifyDeterministicRun([makeResult("a", "pass"), makeResult("b", "needs_human")]);
+  assert.equal(cls.agentVerdict, "needs_human", "a spec that DOES run machine checks still surfaces an unresolved residual");
+});
+
 test("mergeDeterministicWithLlmChecks — runner pass wins over an LLM needs_human on the same bullet", () => {
   const runner: import("./spec-test-runs").SpecTestCheck[] = [
     { text: "the runner passed this", verdict: "pass", evidence: "runner ok" },
