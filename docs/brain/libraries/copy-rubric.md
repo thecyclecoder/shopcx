@@ -30,6 +30,19 @@ The scorer is **pure** and **deterministic** — same inputs, same bytes out. Th
 
 Every sub-score contributes **≥1 evidence line** to `score.evidence[]`, so the caller can render "why we scored 7" for the human reviewer.
 
+### M2 layer — deep DR vocabulary in the sub-descriptors
+
+The five sub-descriptor consts (`LF8_SUBSCORE_RUBRIC`, `SCHWARTZ_LEVELS_1_TO_5`, `CIALDINI_PRINCIPLES`, `HOPKINS_SPECIFICITY_RULES`, `SUGARMAN_SLIPPERY_SLIDE`) are the M2 **Five Frameworks in-context copy skill** layer over the M1 scorer SSOT (spec: [[../specs/dahlia-five-frameworks-copy-skill]]). Each descriptor carries the actual DR playbook prose Dahlia's author box session writes against — **not** just framework names. `renderRubricForPrompt()` embeds the descriptors verbatim, so a single edit here mutates both the Dahlia author-mode prompt AND the Max QC prompt in one commit.
+
+The deep vocabulary the descriptors carry:
+
+- **Schwartz** — the five awareness levels (`L1` UNAWARE → `L5` MOST-AWARE) with **two concrete example lines per level** (e.g. L4 product-aware: *"adaptogens + L-theanine, no crash"*; L5 most-aware: *"vs coffee alone: 47 fewer crash calories, +2h focus"*), so Dahlia writes AT the market's sophistication level rather than a level below.
+- **Cialdini** — all seven principles (RECIPROCITY, COMMITMENT, SOCIAL PROOF, AUTHORITY, LIKING, SCARCITY, UNITY) with a **one-line worked example per principle** whose shape Dahlia can steal.
+- **Hopkins** — three concrete-numbers-over-generalities authoring rules: (1) replace *"many"* with an exact count; (2) replace *"quickly"* with a real timeframe in days or minutes; (3) replace *"people"* with a real named reviewer.
+- **Sugarman** — four line-earns-the-next micro-rules: (1) first sentence ≤ 1-second reading time; (2) each line ends on a **curiosity gap**, not a period the reader can rest on; (3) no benefit line follows another benefit line — alternate benefit / proof / benefit / proof; (4) the last line invites the click, does not summarize.
+
+The unit tests pin the presence of `L1..L5`, the seven Cialdini names, the three Hopkins rules, and the four Sugarman micro-rules in `renderRubricForPrompt()`'s output while still enforcing byte-stability across repeated calls — the SSOT invariant [[../specs/dahlia-conversion-psychology-rubric-module]] shipped.
+
 ## API
 
 ```ts

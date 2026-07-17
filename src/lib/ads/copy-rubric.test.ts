@@ -162,6 +162,67 @@ test("renderRubricForPrompt: embeds every sub-rubric descriptor verbatim", () =>
   assert.ok(rendered.includes(SUGARMAN_SLIPPERY_SLIDE), "expected SUGARMAN_SLIPPERY_SLIDE in rendered output");
 });
 
+// ─── Phase 1: deep DR vocabulary landed in the sub-descriptors ────────────────────
+// The SSOT invariant is that renderRubricForPrompt() is byte-stable AND embeds the deep
+// Schwartz / Cialdini / Hopkins / Sugarman vocabulary Dahlia's author session needs to write
+// against — not just framework names. Pin the presence of concrete tokens so a future
+// refactor that thins the descriptors back to one-liners fails loudly.
+
+test("renderRubricForPrompt: embeds Schwartz L1..L5 vocabulary tokens", () => {
+  const rendered = renderRubricForPrompt();
+  for (const token of ["L1", "L2", "L3", "L4", "L5"]) {
+    assert.ok(rendered.includes(token), `expected Schwartz level token "${token}" in rendered rubric`);
+  }
+  for (const stage of ["UNAWARE", "PROBLEM-AWARE", "SOLUTION-AWARE", "PRODUCT-AWARE", "MOST-AWARE"]) {
+    assert.ok(rendered.includes(stage), `expected Schwartz stage "${stage}" in rendered rubric`);
+  }
+  // L5 concrete example — the highest-sophistication vocabulary the spec pins.
+  assert.ok(
+    /vs coffee alone/i.test(rendered),
+    "expected Schwartz L5 example ('vs coffee alone: …') in rendered rubric",
+  );
+});
+
+test("renderRubricForPrompt: names all seven Cialdini principles", () => {
+  const rendered = renderRubricForPrompt();
+  for (const name of ["RECIPROCITY", "COMMITMENT", "SOCIAL PROOF", "AUTHORITY", "LIKING", "SCARCITY", "UNITY"]) {
+    assert.ok(rendered.includes(name), `expected Cialdini principle "${name}" in rendered rubric`);
+  }
+});
+
+test("renderRubricForPrompt: pins three Hopkins concrete-numbers-over-generalities rules", () => {
+  const rendered = renderRubricForPrompt();
+  // The spec's three canonical rules: "many" → exact count · "quickly" → real timeframe ·
+  // "people" → real named reviewer.
+  assert.ok(/replace "many"/i.test(rendered), 'expected Hopkins Rule 1 ("replace \\"many\\" with an exact count") in rendered rubric');
+  assert.ok(/replace "quickly"/i.test(rendered), 'expected Hopkins Rule 2 ("replace \\"quickly\\" with a real timeframe") in rendered rubric');
+  assert.ok(/replace "people"/i.test(rendered), 'expected Hopkins Rule 3 ("replace \\"people\\" with a real named reviewer") in rendered rubric');
+});
+
+test("renderRubricForPrompt: pins four Sugarman line-earns-the-next micro-rules", () => {
+  const rendered = renderRubricForPrompt();
+  // Presence of four numbered micro-rule markers.
+  for (const marker of ["Micro-rule 1", "Micro-rule 2", "Micro-rule 3", "Micro-rule 4"]) {
+    assert.ok(rendered.includes(marker), `expected Sugarman "${marker}" in rendered rubric`);
+  }
+  // The curiosity-gap micro-rule the spec's verification block names explicitly.
+  assert.ok(
+    /curiosity gap/i.test(rendered),
+    "expected Sugarman curiosity-gap micro-rule (line ends on a curiosity gap) in rendered rubric",
+  );
+});
+
+test("renderRubricForPrompt: byte-length is large enough to carry the deep DR vocabulary", () => {
+  // Belt-and-suspenders — the M1 rubric shipped at ~2 KB; the Phase-1 deep vocabulary at
+  // least doubles that. A regression that collapses the rubric back to one-liners drops
+  // the length under this floor and fails here loudly.
+  const rendered = renderRubricForPrompt();
+  assert.ok(
+    rendered.length >= 3000,
+    `expected renderRubricForPrompt() to carry deep DR vocabulary (≥3000 bytes), got ${rendered.length}`,
+  );
+});
+
 test("copy-rubric.ts imports LF8_KEYWORDS from lf8.ts (no duplicate keyword list)", async () => {
   // If the module were to shadow LF8_KEYWORDS with its own list, this import would be dead
   // weight and the SSOT invariant would break. Read the source and pin the import line.
