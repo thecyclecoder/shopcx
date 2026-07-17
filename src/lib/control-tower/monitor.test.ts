@@ -21,6 +21,7 @@ import {
   extractSolFirstTouchDispatchTicketIds,
   firstScheduledFiringMs,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
+  isBoxEmittedCronLoop,
   isOrderAwaitingFraudScreen,
   isWorkerUnavailable,
   jobStuckSince,
@@ -985,4 +986,127 @@ test("countRenewalIntegrityOverdueSubs: cancelled/inactive subs and non-internal
   });
   const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
   assert.equal(n, 0);
+});
+
+// ─── Box-emitted cron freshness suppression during worker outage
+// (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1) ───
+
+const dbHealthSlowQueryLoop: MonitoredLoop = {
+  id: "db-health-slow-query",
+  kind: "cron",
+  owner: "platform",
+  label: "DB Health — slow-query root-cause",
+  description: "Box job: top pg_stat_statements offenders → EXPLAIN → classify cause → propose the matching fix.",
+  expectedCadence: "every ~hour (box job)",
+  livenessWindowMs: 2 * 60 * 60_000,
+  registeredAt: "2026-06-23T00:00:00Z",
+  runsOnBox: true,
+};
+
+const inngestOnlyCronLoop: MonitoredLoop = {
+  id: "renewal-integrity-cron",
+  kind: "cron",
+  owner: "platform",
+  label: "Renewal integrity",
+  description: "Inngest cron dispatched by the deployed runtime — not a box-hosted job.",
+  expectedCadence: "every ~15 min (*/15 * * * *)",
+  livenessWindowMs: 45 * 60_000,
+};
+
+test("isBoxEmittedCronLoop is true only for cron loops flagged runsOnBox", () => {
+  assert.equal(isBoxEmittedCronLoop(dbHealthSlowQueryLoop), true);
+  assert.equal(isBoxEmittedCronLoop(inngestOnlyCronLoop), false);
+  // A non-cron kind can never be "box-emitted cron" even with runsOnBox set (defensive).
+  const notACron: MonitoredLoop = { ...dbHealthSlowQueryLoop, kind: "worker" };
+  assert.equal(isBoxEmittedCronLoop(notACron), false);
+});
+
+test("evalCron SUPPRESSES cron_freshness on db-health-slow-query when the box worker is unavailable", () => {
+  // The originating incident: DB Health slow-query tile went red during a box worker outage even
+  // though loop:box already carried the parent failure. Beat is 6h old (past the 2h window) but
+  // workerUnavailable=true → the box `liveness` red is the useful page. The tile stays amber and
+  // never opens a cron_freshness alert.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T06:00:00Z",
+      ok: true,
+      duration_ms: 800,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(dbHealthSlowQueryLoop, latest, null, 5, false, null, null, true);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on box worker outage/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron STILL flips cron_freshness on db-health-slow-query when the box worker is healthy (control case)", () => {
+  // Same stale beat, but workerUnavailable=false — the beat is genuinely late while the worker is
+  // up, so it's a real DB Health lane failure and must still page. This is the healthy-worker
+  // control case the spec's verification calls for; the guard only fires during a worker outage.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T06:00:00Z",
+      ok: true,
+      duration_ms: 800,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(dbHealthSlowQueryLoop, latest, null, 5, false, null, null, false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron does NOT suppress cron_freshness on a non-box cron even during a worker outage", () => {
+  // A pure Inngest-dispatched cron (runsOnBox not set) doesn't depend on the box worker — a stale
+  // beat there is still a real freshness failure regardless of worker status. Guarantees the guard
+  // stays scoped to box-emitted loops and doesn't muzzle unrelated tiles.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T09:00:00Z", // 3h stale, window is 45m
+      ok: true,
+      duration_ms: 800,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(inngestOnlyCronLoop, latest, null, 5, false, null, null, true);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron keeps a FRESH box-emitted beat green even while the worker is unavailable", () => {
+  // The suppression path only fires when the underlying result would be red. A fresh beat is still
+  // green — the guard mustn't paint healthy tiles amber just because the worker went down between
+  // the last beat and the current tick.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:45:00Z", // 15 min ago, well inside the 2h window
+      ok: true,
+      duration_ms: 800,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(dbHealthSlowQueryLoop, latest, null, 5, false, null, null, true);
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+  } finally {
+    Date.now = realNow;
+  }
 });

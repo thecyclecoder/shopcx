@@ -279,6 +279,16 @@ export interface MonitoredLoop {
   /** agent-kind only: the agent_jobs.kind this loop maps to. */
   agentKind?: string;
   /**
+   * cron only: this cron runs INSIDE the box build worker process (a BOX-EMITTED cron —
+   * migration-drift-check, the db-health passes), not as an Inngest schedule the deployed
+   * runtime dispatches. Its beats can only land while the worker is up. When the worker is
+   * unavailable (per `isWorkerUnavailable`), `evalCron` attributes cron_freshness / never_fired /
+   * registered_not_firing on this loop to the parent worker outage (amber, no violation) instead
+   * of opening a duplicate child red — the box `liveness` tile is the useful page.
+   * (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1)
+   */
+  runsOnBox?: boolean;
+  /**
    * Roster-linkage (agent-roster-sync spec, Phase 1): the [[../libraries/agent-personas]] persona
    * key (personas.ts) a NON-`agent-kind` loop maps to a worker on the org view — so a personified
    * platform cron declares its persona EXPLICITLY rather than by guesswork. `control-tower-monitor`
@@ -523,6 +533,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every ~30 min (box job)",
     livenessWindowMs: 90 * MIN,
     outputAssertion: "migration-drift",
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's frequent slow-query root-cause pass (db-health-agent P1).
@@ -538,6 +549,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 2 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's instance-saturation pass (db-health-instance-saturation-detector P1).
@@ -556,6 +568,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 45 * MIN,
     registeredAt: "2026-07-02T00:00:00Z",
     personaKind: "db_health", // Devi — all db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
@@ -570,6 +583,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──
