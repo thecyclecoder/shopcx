@@ -1,0 +1,1 @@
+- **Never resume a stale playbook after a director resolution; never end a turn silent** · verified 2026-07-17 · → [[../inngest/unified-ticket-handler]]
