@@ -141,6 +141,39 @@ export async function getMediaBuyerColdScalerCohortById(
  *
  * `metaAdAccountId=null` restricts to the workspace-wide (null-account) rows.
  */
+/**
+ * Compare-and-set writer for `scaler_meta_campaign_id` — Bianca M4 payoff spec
+ * ([[../../../docs/brain/specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1).
+ *
+ * Called by `executeGraduateActionAgainstMeta` (Phase 3) after
+ * `getOrCreateColdScalerCampaign` mints (or finds) the cohort's cold-scaler
+ * Meta campaign. The `.eq("scaler_meta_campaign_id", null)` guard makes the
+ * write a COMPARE-AND-SET so two concurrent graduate executors cannot
+ * double-stamp — the second one no-ops (no rows updated) and the caller
+ * simply re-reads via `getEffectiveMediaBuyerColdScalerCohort` /
+ * `getMediaBuyerColdScalerCohortById` to see the id the first executor
+ * persisted.
+ *
+ * Returns the number of rows updated (0 = someone else already stamped,
+ * 1 = we stamped). Throws on any Supabase error.
+ */
+export async function setColdScalerCampaignId(
+  admin: Admin,
+  args: { cohortId: string; scalerMetaCampaignId: string },
+): Promise<{ stamped: number }> {
+  const { data, error } = await admin
+    .from("media_buyer_cold_scaler_cohorts")
+    .update({
+      scaler_meta_campaign_id: args.scalerMetaCampaignId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", args.cohortId)
+    .is("scaler_meta_campaign_id", null)
+    .select("id");
+  if (error) throw error;
+  return { stamped: (data || []).length };
+}
+
 export async function listActiveColdScalerCohorts(
   admin: Admin,
   args: { workspaceId: string; metaAdAccountId: string | null },
