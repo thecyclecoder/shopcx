@@ -2941,6 +2941,36 @@ function removeWorktreeDir(path: string) {
   if (existsSync(path)) sh("rm", ["-rf", path]);
 }
 
+// base-poison-verify-main-alone — is origin/main ITSELF tsc-clean right now? The reconcile tsc-gate runs
+// on the RECONCILED tree (branch + main); a failure there does NOT prove main is broken — a stale branch
+// (built before a breaking main change, e.g. a goal promotion that added a required field) fails to compile
+// with the new main even though main alone is fine. So before we call a reconcile-tsc failure "base_poison"
+// (a MAIN hotfix problem), we tsc origin/main ALONE in a throwaway detached worktree. Returns true = main
+// clean (⇒ the failure is the BRANCH's own, NOT base_poison); false = main genuinely broken (⇒ base_poison).
+// FAIL-OPEN: any harness hiccup (worktree add / tsc spawn failure) returns true — we'd rather let the build
+// session run + fix the branch than falsely halt a healthy pipeline blaming a main that's actually fine.
+async function isOriginMainTscClean(tag: string): Promise<boolean> {
+  const mainWt = resolve(BUILDS_DIR, "basepoison-maincheck");
+  try {
+    removeWorktreeDir(mainWt); // idempotent — clear any stale slot
+    sh("git", ["fetch", "origin", "main"]);
+    const add = sh("git", ["worktree", "add", "--detach", mainWt, "origin/main"]);
+    if (add.code !== 0) {
+      console.warn(`${tag} base-poison main-check: worktree add failed → fail-open (treat main as clean): ${((add.err || add.out) ?? "").slice(-200)}`);
+      return true;
+    }
+    sh("ln", ["-sfn", resolve(REPO_DIR, "node_modules"), resolve(mainWt, "node_modules")]);
+    const r = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: mainWt });
+    console.log(`${tag} base-poison main-check: origin/main tsc ${r.code === 0 ? "CLEAN" : "BROKEN"}`);
+    return r.code === 0;
+  } catch (e) {
+    console.warn(`${tag} base-poison main-check threw → fail-open (treat main as clean): ${e instanceof Error ? e.message : String(e)}`);
+    return true;
+  } finally {
+    removeWorktreeDir(mainWt);
+  }
+}
+
 // Idempotent worktree-add precondition: if ANY worktree already holds <branch> (from a prior run that
 // crashed or paused without tearing down), force-remove it so `git worktree add -B <branch>` can't fail
 // with "already used by worktree at …". Then prune stale admin entries.
@@ -24310,25 +24340,39 @@ async function dispatchJob(job: Job) {
         cwd: wt,
       });
       if (tscGate.code !== 0) {
-        // Base-poison: origin/main itself fails tsc — the fault is main, not the spec. Stamp a
-        // distinct class so operators can triage it separately from a spec-caused reconcile_conflict
-        // (both are POST-self-heal parks that count toward the escort loop-guard, but their remedy
-        // is different: base_poison needs a main hotfix, reconcile_conflict needs a spec-level merge).
-        await update(job.id, {
-          status: "needs_attention",
-          needs_attention_class: "base_poison",
-          error:
-            "reconciled tree fails tsc — origin/main is broken (base poison). Refusing to run repo-wide checks on a broken base.",
-          log_tail: `reconcile-tsc-gate (post-${usedStrategy}):\n${(tscGate.out + tscGate.err).slice(-1800)}`.slice(-2000),
-        });
-        console.error(
-          `${tag} reconcile tsc-gate FAILED on ${branch} — parked needs_attention (base_poison; main is broken)`,
+        // base-poison-verify-main-alone — the reconciled tree (branch + main) fails tsc. That does NOT prove
+        // main is broken: a STALE branch (built before a breaking main change — e.g. a goal promotion that
+        // added a required field) fails to compile with the new main even though main ALONE is fine. So verify
+        // origin/main ITSELF before blaming it. Only a genuinely-broken main is base_poison (the session can't
+        // fix main → halt). A clean main means the failure is the BRANCH'S OWN — let the build session run and
+        // fix it (it materializes + builds the spec against the reconciled tree; the post-build gate re-checks).
+        const mainClean = await isOriginMainTscClean(tag);
+        if (!mainClean) {
+          // Genuine base_poison — origin/main itself fails tsc. Distinct class (base_poison needs a main
+          // hotfix; reconcile_conflict needs a spec-level merge). Both count toward the escort loop-guard.
+          await update(job.id, {
+            status: "needs_attention",
+            needs_attention_class: "base_poison",
+            error:
+              "reconciled tree fails tsc AND origin/main ALONE fails tsc — origin/main is genuinely broken (base poison). Refusing to run repo-wide checks on a broken base.",
+            log_tail: `reconcile-tsc-gate (post-${usedStrategy}), main-alone also RED:\n${(tscGate.out + tscGate.err).slice(-1800)}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile tsc-gate FAILED + origin/main ALONE also fails tsc → parked needs_attention (base_poison; main genuinely broken)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
+        // Main is clean → the reconciled-tree tsc failure is the BRANCH's own (stale vs a main change, or the
+        // spec's own not-yet-fixed code). NOT base_poison. Proceed to the build session so it can fix it — the
+        // post-build DEPLOY GATE / spec-test re-runs tsc and catches anything the session doesn't resolve.
+        console.warn(
+          `${tag} reconcile tsc-gate FAILED on ${branch} BUT origin/main ALONE is CLEAN → the failure is the branch's own (not base_poison); proceeding to the build session to fix it.`,
         );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+      } else {
+        console.log(`${tag} reconcile tsc-gate CLEAN on ${branch} — proceeding to build`);
       }
-      console.log(`${tag} reconcile tsc-gate CLEAN on ${branch} — proceeding to build`);
     }
   }
   // node_modules is gitignored (absent in a fresh worktree) → symlink the main clone's so tsc/builds work.
