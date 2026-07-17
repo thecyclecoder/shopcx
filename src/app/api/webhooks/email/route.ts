@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getResendClient, sendTicketReply } from "@/lib/email";
-import { stripQuotedReply } from "@/lib/email-utils";
+import { stripQuotedReply, canonicalizeEmail } from "@/lib/email-utils";
 import { cleanEmailBody } from "@/lib/email-cleaner";
 import { decrypt } from "@/lib/crypto";
 import { logCustomerEvent } from "@/lib/customer-events";
@@ -293,6 +293,12 @@ export async function POST(request: Request) {
   } else {
     // New ticket — resolve or create customer
     let customerId: string | null = null;
+    // Set when we attach to an existing customer via a Gmail-canonical match
+    // (dot/plus variant of an existing stored email). Emitted as a `ticket_messages`
+    // system note after the ticket is created so the audit trail explains why the
+    // ticket is on a customer whose stored email doesn't exactly match the From:
+    // header — identity-gmail-canonicalization-and-dot-insensitive-matching Phase 3.
+    let canonicalAttachStoredEmail: string | null = null;
 
     const { data: existing } = await admin
       .from("customers")
@@ -304,6 +310,37 @@ export async function POST(request: Request) {
     if (existing) {
       customerId = existing.id;
     } else {
+      // Phase 3 — Gmail-canonical attach. If the exact-string lookup missed AND
+      // the canonical form differs from the raw From: address, look for an
+      // existing customer whose stored email canonicalizes to the same inbox
+      // (Gmail dot/plus variant, or googlemail.com alias of a gmail.com record).
+      // On a hit we ATTACH to that record instead of inserting a shadow — this
+      // is the fix that would have prevented ticket 54f0f29e (Julie Metz).
+      // Never rewrites the stored email; the exact-match branch above still
+      // owns rows whose stored form equals the From: address verbatim.
+      //
+      // Prefer the sibling with the most order history (real customer beats
+      // an existing empty shadow with 0 orders), tie-breaking by oldest — a
+      // stable, workspace-scoped choice when 400+ historical dup shadows can
+      // put multiple canonically-equal rows in play.
+      const canonical = canonicalizeEmail(normalizedEmail);
+      if (canonical && canonical !== normalizedEmail) {
+        const { data: canonicalSibling } = await admin
+          .from("customers")
+          .select("id, email, total_orders")
+          .eq("workspace_id", workspaceId)
+          .eq("email_canonical", canonical)
+          .order("total_orders", { ascending: false, nullsFirst: false })
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (canonicalSibling) {
+          customerId = canonicalSibling.id;
+          canonicalAttachStoredEmail = canonicalSibling.email ?? null;
+        }
+      }
+    }
+    if (!customerId) {
       // Extract name from email "From" header
       const nameMatch = (typeof fromEmail === "string" ? fromEmail : "").match(/^([^<]+)</);
       const fromName = nameMatch?.[1]?.trim();
@@ -442,6 +479,20 @@ export async function POST(request: Request) {
         body_clean: newBodyClean,
         email_message_id: messageId,
       }).select("id").single();
+
+      // Audit trail — explain why the ticket is on a customer whose stored email
+      // does NOT exactly match the From: header. Only fires when Phase 3 caught
+      // a Gmail dot/plus/googlemail sibling and attached instead of spawning a
+      // shadow (identity-gmail-canonicalization-and-dot-insensitive-matching Phase 3).
+      if (canonicalAttachStoredEmail) {
+        await admin.from("ticket_messages").insert({
+          ticket_id: ticket.id,
+          direction: "outbound",
+          visibility: "internal",
+          author_type: "system",
+          body: `[System] Attached to existing customer by Gmail canonical: inbound "${normalizedEmail}" resolves to the same real inbox as this customer's stored email "${canonicalAttachStoredEmail}". Prevented a shadow customer record.`,
+        });
+      }
 
       await logCustomerEvent({
         workspaceId,
