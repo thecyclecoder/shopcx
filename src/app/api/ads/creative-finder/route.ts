@@ -40,19 +40,27 @@ export async function GET(req: Request) {
 
   const statusFilter = url.searchParams.get("status"); // e.g. analyzed | shortlisted | video_pending
   const kind = url.searchParams.get("kind"); // category | competitor
+  const productId = url.searchParams.get("productId"); // filter to one advertised product's ads
+  const mediaType = url.searchParams.get("mediaType"); // 'static' | 'video' — the Research › Ads toggle
 
   let q = auth.admin
     .from("creative_skeletons")
     .select(
-      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, created_at",
+      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at",
     )
     .eq("workspace_id", workspaceId as string)
     .order("days_running", { ascending: false, nullsFirst: false })
     .limit(500);
 
   if (statusFilter) q = q.eq("status", statusFilter);
+  // A video toggle wants VIDEO ads regardless of their processing stage (video_pending OR later
+  // flipped to analyzed), so when a mediaType is requested we widen the default status set to include
+  // video_pending; otherwise keep the processed-only default (analyzed/shortlisted).
+  else if (mediaType === "video") q = q.in("status", ["analyzed", "shortlisted", "video_pending"]);
   else q = q.in("status", ["analyzed", "shortlisted"]);
   if (kind) q = q.eq("seed_kind", kind);
+  if (productId) q = q.eq("product_id", productId);
+  if (mediaType === "static" || mediaType === "video") q = q.eq("media_type", mediaType);
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

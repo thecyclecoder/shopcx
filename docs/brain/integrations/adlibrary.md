@@ -25,6 +25,8 @@
 - **`body` copy is thin/empty → vision is mandatory.** The real skeleton lives in the creative image, not the text fields.
 - **Static vs video is detectable at pull time → route at ingestion.** `video_duration>0` ⇒ video; corroborated by `ads_type=2` / `resource_urls[].type=2`. Several competitors are video-heavy (Everyday Dose pulls were all 53–115s video) — Phase 6 (video) carries real weight.
 - **Query by `keyword` only.** The /explore UI's `niche`/`brand` filters are NOT in the API. Per-competitor pulls use the brand name AS the keyword.
+- **`adsType` filters image/video/carousel** (`"1"`=image, `"2"`=video, `"3"`=carousel). The scout now passes **`adsType:["1"]` (image-only)** + `daysBack:90` + `pageSize:50` — founder 2026-07-17: "we aren't doing video stuff" (we research static creative). `searchAds` accepts `adsType?: string[]`.
+- **⚠️ `/api/search` returns RECENT ads, NOT long-runners.** Empirically (2026-07-17) `/api/search` for a keyword returns only ads first-seen in the last ~8 days regardless of `daysBack`/`pageSize`, and `sortField` (`like|share|comment|impression|time` — NO days/longevity option) doesn't change which ads come back. So the "0 ads for a real brand" signal was a FALSE bad-seed flag (e.g. "Obvi collagen" returns 38–60 ads live but our DB had 0 — the sweep only saw new ads, which the winner/longevity filter then rejected). The **proven-winner** (long-running) ads live behind the advertiser endpoints: `GET /api/advertisers/search?q={brand}` (free → Meta page id) → `POST /api/winners/advertiser/{pageId}` (10 credits → scans the FULL library, surfaces + scores winning ads). Switching competitor-ad collection to that flow is the real fix for surfacing long-runners (spec-worthy).
 
 ## Rate limits + credits
 
