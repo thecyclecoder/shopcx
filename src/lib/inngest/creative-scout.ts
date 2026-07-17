@@ -73,7 +73,7 @@ async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult>
     if (!r.lane) {
       console.warn(`[creative-scout] BAD SEED "${seed.keyword}" — neither name nor domain resolved to a Meta advertiser`);
     } else {
-      console.log(`[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.inserted} ingested, ${r.skippedExisting} existing`);
+      console.log(`[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.inserted} new, ${r.reobserved} re-observed (persistence++), ${r.retired} retired`);
     }
     return r;
   } catch (err) {

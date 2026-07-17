@@ -22,7 +22,7 @@ A candidate matches ONLY when their normalized forms are EQUAL, OR the candidate
 
 ## `WinnerConcept` shape
 
-`{ ad, tier, composite, variantCount, tags }` where `tags = { angle, format, archetype, why_it_works, cialdini_lever, awareness_stage }`. `sweepCompetitorLanes` maps `tier`/`composite`/`tags` → the row's `winner_tier`/`winner_score`/`concept_tags` ([[../tables/creative_skeletons]]). LANE B's OUR-vision path (Phase 2c) emits the SAME `tags` schema so both lanes are uniform for Dahlia + Max.
+`{ ad, tier, composite, variantCount, tags }`. **Only `ad` + `composite` are used, and `composite` only to ORDER which new ads `sweepCompetitorLanes` visions first.** AdLibrary's `tier`/`composite`/`tags` are otherwise **NOT trusted or stored** — the scan returned `tier="loser"` for every major brand and the composite tracked a mis-parsed recency number, and `tags` were mislabeled (`angle`="solution_aware", `awareness_stage`="warm" = a temperature). The stored `winner_tier`/`winner_score` are OURS (longitudinal persistence — see [[creative-skeleton]] `reobserveAd`/`deriveWinnerTier`); `concept_tags` come from OUR vision. AdLibrary is used purely to FIND the brand's full-library ad set, not to judge it.
 
 ## Gotchas
 
