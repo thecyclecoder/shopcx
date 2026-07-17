@@ -144,6 +144,24 @@ async function gh(
   return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
 }
 
+/**
+ * Resolve the `claude/build-*` branch whose HEAD is `sha` (GitHub `branches-where-head`). Used by the
+ * deployment-ready webhook to map a Vercel preview deploy (which GitHub reports by commit SHA, not branch)
+ * back to its build branch. Returns null when no build branch heads at that commit — a STALE/superseded
+ * deploy (a newer phase already pushed), or the branch already merged/deleted → correctly skipped.
+ */
+export async function resolveBuildBranchForSha(sha: string): Promise<string | null> {
+  if (!sha) return null;
+  try {
+    const r = await gh("GET", `/repos/${GH_REPO}/commits/${encodeURIComponent(sha)}/branches-where-head`);
+    if (!r.ok || !Array.isArray(r.json)) return null;
+    const names = (r.json as Array<{ name?: string }>).map((b) => b?.name).filter((n): n is string => !!n);
+    return names.find((n) => n.startsWith("claude/build-")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**

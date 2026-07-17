@@ -36,7 +36,9 @@ const REPO_ROOT = resolve(__dirname, "..");
 //   • the worker + its agents spawn these via `npx tsx scripts/<x>.ts`:
 //     spec-test-* (browser-check / db-probe / sandbox), improve-box-tools,
 //     seed-product-tools.
-// Adding a new `tsx scripts/<x>.ts` the box runs? Add it here so it's parse-gated.
+// Adding a new `tsx scripts/<x>.ts` the box runs? Add it to BOTH this list AND
+// the `include` array in tsconfig.box.json — `scripts/_check-box-entrypoints-in-sync.ts`
+// (chained into predeploy) asserts the two lists are set-equal, so drift fails CI red.
 const BOX_ENTRYPOINTS = [
   "scripts/builder-worker.ts",
   "scripts/spec-test-browser-check.ts",
@@ -88,8 +90,10 @@ const externalizeUnresolvable = {
       if (hit) return { path: hit };
       // Non-resolvable first-party path (e.g. a `@/...` alias esbuild can't map,
       // or a missing file) → external so the PARSE of everything else proceeds.
-      // We're checking syntax, not module resolution; tsc already covers missing
-      // imports.
+      // We're checking syntax, not module resolution; the sibling `check:box-types`
+      // gate (scripts/_check-box-types.ts + tsconfig.box.json) genuinely typechecks
+      // the same BOX_ENTRYPOINTS list under tsc — that's what covers missing
+      // imports, wrong-arity calls, and wrong-property references.
       return { path: args.path, external: true };
     });
   },

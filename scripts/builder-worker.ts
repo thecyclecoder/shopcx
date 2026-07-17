@@ -57,6 +57,7 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
+import { runBoxTurnWithFreshFallback, pickNextSession } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2)
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -716,6 +717,11 @@ interface Job {
   // post-ship standing lane (which still hits prod). The column-typed field is preferred over
   // parsing `instructions` — Phase 2's runSpecTestJob reads it directly.
   preview_url?: string | null;
+  // agent_jobs columns the claim RPC returns but the executor lanes carry through on a
+  // pause/resume (see the `pr_url: job.pr_url ?? null` carries at needs_input / needs_approval
+  // parks). `error` is BUILD_GATE_FAILED[…] context the same lanes read to route repairs.
+  pr_url?: string | null;
+  error?: string | null;
 }
 
 // worker-self-update-force-on-unknown-queued-kind Phase 1: mirror of the `Job['kind']` union above,
@@ -2407,8 +2413,8 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
     // Attempt 2 (when `repair` is configured AND we have a prior session): use the cheap same-session
     // re-prompt instead of a fresh re-investigation. Attempt 1 + any other path is the fresh `run`.
-    const useRepair = attempt > 1 && opts.repair && last?.session;
-    const r = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
+    const useRepair: boolean = attempt > 1 && !!opts.repair && !!last?.session;
+    const r: T = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
     last = r;
     if (opts.onRun) await opts.onRun(r, attempt);
     parsed = extractJson<Record<string, unknown>>(r.resultText);
@@ -2616,7 +2622,7 @@ async function update(id: string, patch: Record<string, unknown>) {
   // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
   // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
   // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
-  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const finalPatch: Record<string, unknown> = { ...patch, updated_at: new Date().toISOString() };
   const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
   // spec-timecard-chokepoint-instrumentation Phase 4 — wait-span tracking. When this update() is a
   // status transition, read the current status BEFORE the write to detect entry into and exit from
@@ -5125,7 +5131,7 @@ function isMaxOverloaded(text: string): boolean {
 // BEFORE batching), and the sequential apply loop (each verdict → same per-verdict validators + DB writes
 // as before). A candidate absent from the batched array falls back to a synthetic `{}` verdict — the
 // lane's existing "unparseable → escalate" branch handles it exactly like today's parse miss.
-async function runBatchedDirectorSession<TVerdict extends Record<string, unknown>, TCandidate>(
+async function runBatchedDirectorSession<TVerdict extends object, TCandidate>(
   job: Job,
   tag: string,
   lane: string,
@@ -5258,7 +5264,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
 
   // ada-standing-pass-reasoning-gate Phase 3 — pre-filter first, then batch the ambiguous residual into
   // ONE Max session per pass (was: one cold session per ambiguous row, each re-hydrating the brain).
-  type AmbiguousRow = { row: (typeof rows)[number]; prefilter: sd.DriftPreFilterVerdict | null };
+  type AmbiguousRow = { row: (typeof rows)[number]; prefilter: import("../src/lib/spec-drift").DriftPreFilterVerdict | null };
   const ambiguous: AmbiguousRow[] = [];
 
   for (const row of rows) {
@@ -5271,7 +5277,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
     // Deterministic pre-filter (ada-standing-pass-reasoning-gate Phase 1) — resolve most drift rows
     // without spawning a Max session. Only a `ambiguous` verdict (path 404 + no symbols to grep) falls
     // through to the session for the residual reasoning. Never throws.
-    let prefilter: sd.DriftPreFilterVerdict | null = null;
+    let prefilter: import("../src/lib/spec-drift").DriftPreFilterVerdict | null = null;
     try {
       prefilter = await sd.driftPreFilterPhase(job.workspace_id, row.spec_slug, row.phase_index);
     } catch (e) {
@@ -8967,7 +8973,8 @@ async function runPlanJob(job: Job) {
       what?: string;
       milestone?: string;
       blocked_by?: unknown;
-      phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string }>;
+      human_review?: string;
+      phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string; checks?: unknown }>;
     };
     const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
@@ -10419,30 +10426,34 @@ async function runSpecChatJob(job: Job) {
     // (markNewSpecInReview → authorSpecRowFromMarkdown → upsertSpec). NO docs/brain/specs/*.md is committed
     // — specs live in the DB now (spec-pm-markdown-purge / retire-md-reads). turn: the box returns a short
     // conversational reply as JSON. (Mirrors runPlanJob: the box generates, the worker authors to the DB.)
-    let prompt: string;
-    if (mode === "verify") {
-      const slug = params.slug || "";
-      prompt = [
-        `Use the spec-chat skill in VERIFY mode. The spec IS a ROW in public.specs + public.spec_phases — that DB row is the source of truth. The worker materialized its body for you at docs/brain/specs/${slug}.md inside a THROWAWAY worktree as a scratch buffer transport (never a committed file); Read it (and the brain pages it touches) as grounding.`,
-        `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present. Then this call returns and the deterministic worker parses your buffer and RE-AUTHORS the body to public.specs via the author-spec SDK (upsertSpec), then discards the worktree (git worktree remove). The .md you wrote is transport, not an artifact — nothing is committed to main; the DB row is the spec.`,
-        `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
-      ].join("\n");
-    } else if (mode === "finalize") {
-      const finalizeAsk = [
-        `Now FINALIZE in FINALIZE mode. The AUTHORED SPEC is a ROW in public.specs + public.spec_phases — authored by the deterministic worker via the author-spec SDK (upsertSpec) AFTER this call returns. The docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md you are about to WRITE is a THROWAWAY SCRATCH BUFFER inside a fresh worktree — a transport for the spec body chosen to avoid JSON-escaping fragility for large markdown. Once you return, the worker reads that buffer, upserts it to public.specs + public.spec_phases, and DISCARDS the worktree (git worktree remove). It is NEVER committed to main and is NEVER the source of truth; the DB row is. Write the buffer anyway — the worker needs it as its input. Materialize the full spec by WRITING docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing spec unless the conversation said otherwise` : `pick a SHORT kebab-case slug derived FROM THE TITLE — lowercase words joined by hyphens, e.g. "auto-refund-on-stuck-return"; NEVER a UUID or a random id; all new phases start ⏳`}).`,
-        `The buffer MUST have (the author-spec SDK parses these into the DB row + spec_phases): an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (a real owner function slug + a real parent — a spec with no owner/parent is unbuildable); a one-paragraph summary tied to a business outcome; AT LEAST ONE concrete "## Phase N — name" section (NO status markers — per-phase status lives in spec_phases, the markdown is content-only) — each phase becomes a spec_phases row; a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
-        `Write ONLY that one buffer file under docs/brain/specs/; do NOT edit anything else, do NOT run git (the worker discards the worktree — a commit would be lost anyway). Final message = ONLY one JSON object: {"status":"finalized","slug":"<the kebab slug you wrote>"}.`,
-      ].join("\n");
-      prompt = isResume
-        ? finalizeAsk
-        : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, finalizeAsk].join("\n");
-    } else {
-      // turn
-      const latest = [...(chat?.messages ?? [])].reverse().find((m) => m.role === "user")?.content || "";
-      prompt = isResume
+    // The turn+finalize prompts are built INSIDE the failover closure so a fresh restart (sid=null — either
+    // an account-pool cap hop OR the box-chat-resume-falls-back-fresh-on-missing-session Phase-2 retry)
+    // rebuilds full context from the transcript rather than sending a resume-shape prompt to a fresh
+    // session (silent context loss). verify has no chat/session, so its prompt is standalone.
+    const finalizeAsk = mode === "finalize" ? [
+      `Now FINALIZE in FINALIZE mode. The AUTHORED SPEC is a ROW in public.specs + public.spec_phases — authored by the deterministic worker via the author-spec SDK (upsertSpec) AFTER this call returns. The docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md you are about to WRITE is a THROWAWAY SCRATCH BUFFER inside a fresh worktree — a transport for the spec body chosen to avoid JSON-escaping fragility for large markdown. Once you return, the worker reads that buffer, upserts it to public.specs + public.spec_phases, and DISCARDS the worktree (git worktree remove). It is NEVER committed to main and is NEVER the source of truth; the DB row is. Write the buffer anyway — the worker needs it as its input. Materialize the full spec by WRITING docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing spec unless the conversation said otherwise` : `pick a SHORT kebab-case slug derived FROM THE TITLE — lowercase words joined by hyphens, e.g. "auto-refund-on-stuck-return"; NEVER a UUID or a random id; all new phases start ⏳`}).`,
+      `The buffer MUST have (the author-spec SDK parses these into the DB row + spec_phases): an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (a real owner function slug + a real parent — a spec with no owner/parent is unbuildable); a one-paragraph summary tied to a business outcome; AT LEAST ONE concrete "## Phase N — name" section (NO status markers — per-phase status lives in spec_phases, the markdown is content-only) — each phase becomes a spec_phases row; a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
+      `Write ONLY that one buffer file under docs/brain/specs/; do NOT edit anything else, do NOT run git (the worker discards the worktree — a commit would be lost anyway). Final message = ONLY one JSON object: {"status":"finalized","slug":"<the kebab slug you wrote>"}.`,
+    ].join("\n") : "";
+    const latest = mode === "turn" ? ([...(chat?.messages ?? [])].reverse().find((m) => m.role === "user")?.content || "") : "";
+    const buildPrompt = (sid: string | null): string => {
+      if (mode === "verify") {
+        const slug = params.slug || "";
+        return [
+          `Use the spec-chat skill in VERIFY mode. The spec IS a ROW in public.specs + public.spec_phases — that DB row is the source of truth. The worker materialized its body for you at docs/brain/specs/${slug}.md inside a THROWAWAY worktree as a scratch buffer transport (never a committed file); Read it (and the brain pages it touches) as grounding.`,
+          `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present. Then this call returns and the deterministic worker parses your buffer and RE-AUTHORS the body to public.specs via the author-spec SDK (upsertSpec), then discards the worktree (git worktree remove). The .md you wrote is transport, not an artifact — nothing is committed to main; the DB row is the spec.`,
+          `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
+        ].join("\n");
+      }
+      if (mode === "finalize") {
+        return sid
+          ? finalizeAsk
+          : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, finalizeAsk].join("\n");
+      }
+      return sid
         ? `${latest}\n\n${SPEC_CHAT_OUTPUT}`
         : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, `Respond to the latest [Founder] message. ${SPEC_CHAT_OUTPUT}`].join("\n");
-    }
+    };
 
     // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
     // Universal account failover (foreman helper): a usage wall — incl. the 7-day `rejected` cap — hops to
@@ -10450,10 +10461,19 @@ async function runSpecChatJob(job: Job) {
     // (no per-account column), so a resume assumes the default account (RR1) as owner — same convention as
     // dev-ask/coach; if RR1 is capped the helper starts FRESH on a healthy account (the prompt rebuilds the
     // full conversation from the transcript, so nothing is lost). allCapped → park `blocked_on_usage`.
-    const { result: chatRun, configDir: chatDir, allCapped } = await runBoxClaude(
-      { sessionId },
-      (cfg, sid) => runClaude(prompt, sid, wt, cfg, job.id),
-    );
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — route through the shared wrapper so a
+    // resumed session that's gone from its account retries once with sid=null (buildPrompt rebuilds full
+    // context on the fresh branch), never re-wedging on the same dead id.
+    const { result: chatRun, configDir: chatDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: (cfg, sid) => runClaude(buildPrompt(sid), sid, wt, cfg, job.id),
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
+      },
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !chatRun) {
       // Park (not fail) so the turn auto-resumes when an account resets. Surface the wait on the chat thread.
       if (chatId) {
@@ -10466,7 +10486,7 @@ async function runSpecChatJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = chatRun;
     await meterAgentJob(job, chatDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
 
@@ -10788,7 +10808,12 @@ async function runTicketImproveJob(job: Job) {
   console.log(`${tag} ${isResume ? "resuming" : "starting"} session ${sessionId.slice(0, 8)} on ticket ${ticketId.slice(0, 8)}`);
 
   try {
-    const prompt = isResume
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — the prompt is built INSIDE the failover
+    // closure keyed off `sid` (not the pre-call `isResume`) so a fresh restart — whether from an account-pool
+    // wall OR the missing-session retry — rebuilds full ticket context via loadImproveBrief rather than
+    // sending a "continue the conversation" prompt to a fresh session (silent context loss).
+    const improveBrief = await loadImproveBrief(ticketId);
+    const buildImprovePrompt = (sid: string | null): string => sid
       ? [
           `New message from the human on ticket ${ticketId}: "${userMessage}"`,
           `Continue the conversation. Same role, same read-only-investigation rule, same final JSON output protocol ("reply" or "propose") as before.`,
@@ -10801,7 +10826,7 @@ async function runTicketImproveJob(job: Job) {
           `Use the ticket-improve skill (cwd is the repo root). You are the founder's CX co-pilot fixing ONE specific ticket, super-powered on Max.`,
           ``,
           `TICKET id ${ticketId} — full context loaded for you:`,
-          await loadImproveBrief(ticketId),
+          improveBrief,
           ``,
           `The human's message: "${userMessage}"`,
           ``,
@@ -10826,16 +10851,37 @@ async function runTicketImproveJob(job: Job) {
           `Self-check it before you close: if you can't show graders a before/after, a tag/category delta, or a preserved-voice quote, the turn caps at ~6/10 regardless of how correct the underlying work was.`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw, usage, model, configDir: improveDir } = await runBoxLane(
-      (cfg, sid) => runImproveClaude(prompt, sid, REPO_DIR, cfg, job.id),
-      { sessionId: session.box_session_id }, // chat session has no per-account column → owner defaults to RR1 (dev-ask convention)
-    );
+    const failover = await runBoxTurnWithFreshFallback({
+      pin: { sessionId: session.box_session_id }, // chat session has no per-account column → owner defaults to RR1 (dev-ask convention)
+      run: (cfg, sid) => runImproveClaude(buildImprovePrompt(sid), sid, REPO_DIR, cfg, job.id),
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText);
+        // Improve's success shapes: {status:'reply', message} / {status:'propose', message, plan}.
+        return typeof p?.status === "string" && (p.status === "reply" || p.status === "propose");
+      },
+      onFreshFallback: () => console.warn(`${tag} resumed session ${session.box_session_id ? session.box_session_id.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from loadImproveBrief)`),
+    });
+    // Preserve runBoxLane's synthetic-when-all-capped shape so the downstream handler's isError path fires
+    // exactly as before (isUsageCapError(raw) → park blocked_on_usage / re-queue).
+    const laneRun = failover.result ?? {
+      session: session.box_session_id ?? null,
+      resultText: ALL_CAPPED_MARKER,
+      isError: true,
+      raw: ALL_CAPPED_MARKER,
+      usage: null,
+      model: null,
+    };
+    const improveDir = failover.configDir;
+    const { session: boxSession, resultText, isError, raw, usage, model } = laneRun;
     await meterAgentJob(job, improveDir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
-    if (boxSession && boxSession !== session.box_session_id) {
-      await setSession({ box_session_id: boxSession });
+    // Persist via pickNextSession so a dead prior id is never re-saved on the freshly-retried path.
+    const nextSession = pickNextSession({ newSession: boxSession, priorSessionId: session.box_session_id, raw });
+    if (nextSession !== session.box_session_id) {
+      await setSession({ box_session_id: nextSession });
     }
 
     const messages = Array.isArray(session.messages) ? session.messages : [];
@@ -12155,8 +12201,13 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-test", sandbox: "max", timeout: SPEC_TEST_TIMEOUT_MS });
 }
 
-type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string; screenshot?: string };
-type SpecTestSummary = { auto_pass: number; auto_fail: number; needs_human: number; inconclusive: number };
+// Use the shared shapes from src/lib/spec-test-runs.ts so this file's checks
+// interop directly with mergeDeterministicWithLlmChecks (which types its inputs
+// with the same SpecTestCheck / CheckVerdict). A local looser copy caused a
+// signature drift where verdict was `string` here but `CheckVerdict` there.
+type SpecTestCheck = import("../src/lib/spec-test-runs").SpecTestCheck;
+type SpecTestSummary = import("../src/lib/spec-test-runs").SpecTestSummary;
+type CheckVerdict = import("../src/lib/spec-test-runs").CheckVerdict;
 
 // The spec-test skill is contracted to emit ONLY the result JSON as its final message, fenced-or-last.
 // In practice a Max session sometimes wraps it in prose, so we extract defensively: whole-message parse
@@ -12213,11 +12264,13 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
   const parsedChecks: SpecTestCheck[] = rawChecks.map((c) => {
     const o = (c || {}) as Record<string, unknown>;
     const v = String(o.verdict || "inconclusive");
-    const verdict = ["pass", "fail", "needs_human", "inconclusive"].includes(v) ? v : "inconclusive";
+    const verdict: CheckVerdict = v === "pass" || v === "fail" || v === "needs_human" || v === "inconclusive" ? v : "inconclusive";
+    const catRaw = o.category ? String(o.category) : "";
+    const category = catRaw === "auto" || catRaw === "needs_human" || catRaw === "inconclusive" ? catRaw : undefined;
     return {
       text: String(o.text || "(unnamed check)"),
       verdict,
-      category: o.category ? String(o.category) : undefined,
+      category,
       evidence: o.evidence ? String(o.evidence) : undefined,
       // Browser checks (spec-test-deep-verification Phase 1) carry the evidence screenshot's storage path.
       screenshot: o.screenshot ? String(o.screenshot) : undefined,
@@ -12438,7 +12491,9 @@ async function runSpecTestJob(job: Job) {
               await enqueueRegressionJob(db, {
                 workspaceId: job.workspace_id,
                 specSlug: reg.slug,
-                fromSpecTestRunId: null,
+                title: reg.title,
+                failing: reg.failing.map((f) => ({ text: f.text, evidence: f.evidence, check_key: f.check_key })),
+                runAt: reg.run_at,
               });
             }
           } catch (e) {
@@ -15357,16 +15412,26 @@ async function runDeveloperMessageJob(job: Job) {
     // Account-pool failover (#20): pick a healthy Max account, run on it, and on the 5-hour wall hop to a
     // healthy one (or park blocked_on_usage). The prompt is built INSIDE the closure from the sessionId the
     // pool hands back — a failover that starts fresh rebuilds full context from the transcript (no loss).
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — route through the shared wrapper so a
+    // resumed session that's gone from its account retries once with sid=null (renderDevTranscript rebuilds
+    // full context on the fresh branch), never re-wedging on the same dead id.
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
-      { sessionId },
-      async (cfg, sid) => {
-        const turnPrompt = sid
-          ? `${latest}\n\n${DEV_ASK_OUTPUT}`
-          : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
-        return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id);
+    const runDevTurn = async (cfg: string, sid: string | null) => {
+      const turnPrompt = sid
+        ? `${latest}\n\n${DEV_ASK_OUTPUT}`
+        : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+      return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id);
+    };
+    const { result: coachRun, configDir: coachDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: runDevTurn,
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
       },
-    );
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — coach auto-resumes at reset" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
@@ -15375,7 +15440,7 @@ async function runDeveloperMessageJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = coachRun;
     await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
 
@@ -15658,12 +15723,73 @@ async function runGodModeJob(job: Job) {
 // spec X?"). When the CEO coaches her, she proposes a `coaching` card; on approval the worker writes a
 // director_instruction (coachDirector) that's injected into her future decisions — so coaching actually
 // changes what she does next. Mirrors runDeveloperMessageJob; reuses runDevAskClaude (the Max runner).
+// Free-form director-authored card. Fields typed defensively (the DB row is JSONB and
+// each director's prompt template names its own field set — see the DISPATCH_TABLE +
+// per-type template blocks). Typed fields keep the executor loop's `a.result ?? "…"`
+// and `String(a.reasoning ?? …)` inferences on `string` instead of `unknown`; the
+// index signature keeps a director-specific field the executor doesn't know about
+// readable without a cast.
+interface CoachAction {
+  id?: string;
+  type?: string;
+  status?: string;
+  result?: string;
+  summary?: string;
+  reasoning?: string;
+  cmd?: string;
+  preview?: string;
+  reversibility?: string;
+  irreversible?: boolean;
+  founderAsk?: string;
+  actionType?: string;
+  leashRail?: string;
+  errorClass?: string;
+  guidance?: string;
+  triggeringPattern?: string;
+  targetKind?: string;
+  tier?: string | null;
+  rollup?: number;
+  evidence?: string;
+  slug?: string;
+  content?: string;
+  title?: string;
+  category?: string;
+  derived_from_ticket_id?: string;
+  ticket_id?: string;
+  remedy?: unknown;
+  spec_seed?: unknown;
+  ad_account_id?: string;
+  snapshot_date?: string;
+  payload?: unknown;
+  meta_page_id?: string;
+  meta_account_id?: string;
+  meta_adset_id?: string;
+  meta_campaign_id?: string;
+  meta_ad_id?: string;
+  crisis_id?: string;
+  variant_id?: string;
+  available?: boolean | string;
+  jobId?: string;
+  reason?: string;
+  phases?: unknown;
+  critical?: boolean;
+  deferred?: boolean;
+  shortCircuit?: boolean;
+  gateBuildsUntil?: string;
+  criticalSpecs?: string[];
+  holdBuilds?: string[];
+  steps?: string[];
+  slack_ts?: string;
+  slack_channel?: string;
+  [key: string]: unknown;
+}
+
 interface CoachThreadRow {
   id: string;
   director_function: string;
   messages: { role: "user" | "assistant"; content: string }[];
   box_session_id: string | null;
-  pending_actions: Record<string, unknown>[];
+  pending_actions: CoachAction[];
   // ada-slack-chat: a 'slack'-sourced thread posts Ada's reply + cards back to #cto-ada.
   source: string;
   slack_channel_id: string | null;
@@ -15682,7 +15808,7 @@ async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null>
     director_function: (row.director_function as string) ?? "platform",
     messages: Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [],
     box_session_id: (row.box_session_id as string | null) ?? null,
-    pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as Record<string, unknown>[]) : [],
+    pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as CoachAction[]) : [],
     source: (row.source as string) ?? "web",
     slack_channel_id: (row.slack_channel_id as string | null) ?? null,
     slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
@@ -15881,7 +16007,7 @@ async function applySpecStatusActionInline(
   const did: string[] = [];
   try {
     if (phases.length) {
-      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      const priorPhases = (existing?.phase_states ?? []) as import("../src/lib/spec-card-state").SpecCardPhaseState[];
       const byIndex = new Map(priorPhases.map((p) => [p.index, p]));
       for (const p of phases) {
         const prior = byIndex.get(p.index);
@@ -15892,7 +16018,7 @@ async function applySpecStatusActionInline(
       await cs.markSpecCardStatus(workspaceId, slug, rollup, merged, audit);
       did.push(`phases ${phases.map((p) => `#${p.index + 1}=${p.status}`).join(", ")} → ${rollup}`);
     } else if (effectiveStatus) {
-      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      const priorPhases = (existing?.phase_states ?? []) as import("../src/lib/spec-card-state").SpecCardPhaseState[];
       await cs.markSpecCardStatus(workspaceId, slug, effectiveStatus, priorPhases, audit);
       did.push(`status → ${effectiveStatus}`);
     }
@@ -16891,7 +17017,12 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
   if (isDestructiveDecision) {
     try {
-      await writeDestructiveActionDecisionGrade(db, {
+      // Cast: writeDestructiveActionDecisionGrade takes a locally-declared MinimalAdmin
+      // (Promise<...> return on chained builder). The real supabase-js client resolves to
+      // the same shape via PromiseLike + a runtime `.then`, but the structural mismatch
+      // hits a TS "type instantiation too deep" cycle. `never` is a targeted structural
+      // adapter — the SDK is not shipped from this file so widening it here isn't right.
+      await writeDestructiveActionDecisionGrade(db as never, {
         workspaceId: job.workspace_id,
         agentJobId: job.id,
         directorFunction,
@@ -17898,19 +18029,33 @@ async function runDirectorCoachJob(job: Job) {
     // it errored on the capped default account instead of failing over). Prompt built inside the closure
     // from the pool's sessionId; a fresh-start failover rebuilds full context from the transcript.
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
-      { sessionId },
-      (cfg, sid) => {
-        const turnPrompt = sid
-          // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
-          // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
-          // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
-          // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
-          ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
-          : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
-        return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
+    const runTurn = (cfg: string, sid: string | null) => {
+      const turnPrompt = sid
+        // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
+        // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
+        // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
+        // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
+        ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
+        : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
+      return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
+    };
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — every resumable box-chat lane
+    // (director-coach, dev-ask, roadmap-chat, ticket-improve) routes through the ONE shared wrapper
+    // src/lib/box-session-resume.ts::runBoxTurnWithFreshFallback. A resumed run whose session id is
+    // no longer on its owning account ('No conversation found with session ID') retries ONCE with
+    // sessionId=null so the closure rebuilds full context from the transcript (renderCoachTranscript
+    // at :17879 when sid is null). Same account-pool failover on the retry (allCapped still bubbles
+    // → blocked_on_usage). `pickNextSession` below never re-saves the dead id.
+    const { result: coachRun, configDir: coachDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: runTurn,
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
       },
-    );
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — Ask-Ada auto-resumes at reset" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
@@ -17919,7 +18064,7 @@ async function runDirectorCoachJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = coachRun;
     await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
     if (!reply) {
@@ -20452,7 +20597,7 @@ async function runDirectorGradeJob(job: Job) {
           .eq("id", decision.agent_job_id)
           .maybeSingle();
         if (jobRow) {
-          const j = jobRow as {
+          const j = jobRow as unknown as {
             id: string;
             kind: string;
             spec_slug: string | null;
@@ -20513,7 +20658,7 @@ async function runDirectorGradeJob(job: Job) {
           .limit(200);
         // Prefer the latest terminal row per spec_slug.
         const bySlug = new Map<string, { status: string; pr_url: string | null }>();
-        for (const row of ((specJobs as Array<{ spec_slug: string; status: string; pr_url: string | null; created_at: string }>) || [])) {
+        for (const row of ((specJobs as unknown as Array<{ spec_slug: string; status: string; pr_url: string | null; created_at: string }>) || [])) {
           if (!bySlug.has(row.spec_slug)) bySlug.set(row.spec_slug, { status: row.status, pr_url: row.pr_url });
         }
         for (const slug of c.spec_slugs) {
@@ -21915,7 +22060,7 @@ async function runResearchJob(job: Job) {
     captures = await captureBatch(
       rows.map((r) => ({ id: r.id, url: r.url })),
       stamp,
-      (done, total, url) => noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }),
+      (done, total, url) => { void noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }); },
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -24072,6 +24217,91 @@ async function runNextBuildGate(wt: string): Promise<{ pass: boolean; error: str
   return { pass: false, error: m[0].replace(/\s+/g, " ").slice(0, 600), log: out.slice(-4000) };
 }
 
+// ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1).
+// After tsc + table-refs have passed and BEFORE `git commit`, run the spec's own typed checks against
+// the build worktree using the same `runSpecChecks` deterministic runner the post-hoc spec-test lane
+// (Vera) already calls at :12339 — front-running Rex on 'positive absence' misses (a Verification
+// bullet says a file/export/column should exist, but the build never created it). Blocks ONLY on
+// worktree-reflecting check kinds — the ones whose truth is fully answerable from the local files —
+// so we never block on state that legitimately doesn't exist yet pre-commit:
+//   • db_probe_readonly  — hits PROD read-only; a column a not-yet-applied migration will create is
+//                          legitimately absent, would spuriously fail.
+//   • ci_status          — needs an open PR (not open yet at this point in the lane).
+//   • http_get           — needs a preview deploy (not shipped yet).
+// Kept in the worktree-reflecting blocking set:
+//   • grep, tsc, unit_test, build  — every one is answerable from the worktree's own tree.
+// The runner's harness-error downgrade path ([[spec-test-harness-classifier]] `isHarnessCommandFailure`)
+// already turns "command didn't RUN" (ENOENT / missing script / bad flag) into `needs_human` with the
+// evidence preserved — a broken bullet, not a code regression, and it never blocks the commit.
+// On a real block the build lane resumes Bo's just-finished session with the failing checks (see the
+// build lane's SELF_VERIFY_REPAIR_MAX loop below). This helper is the CHECK; the loop is the wiring.
+const SELF_VERIFY_WORKTREE_KINDS: ReadonlySet<string> = new Set(["grep", "tsc", "unit_test", "build"]);
+async function preCommitSelfVerify(input: {
+  workspaceId: string;
+  slug: string;
+  repoRoot: string;
+}): Promise<{
+  blocked: boolean;
+  ran: boolean;
+  failing: Array<{ text: string; exec_kind: string | null; evidence: string }>;
+  summaryLine: string;
+  error?: string;
+}> {
+  try {
+    const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+      "../src/lib/spec-check-runner"
+    );
+    // packageScripts is the validator's belt-and-suspenders — a check declaring `npm run <script>`
+    // whose script does not exist in the WORKTREE's package.json is a broken bullet, not a fail.
+    const pkg = JSON.parse(readFileSync(resolve(input.repoRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+    const runnerOut = await runSpecChecks({
+      workspaceId: input.workspaceId,
+      slug: input.slug,
+      deps: {
+        loadChecks: defaultLoadChecks,
+        executors: defaultExecutors,
+        packageScripts,
+        repoRoot: input.repoRoot,
+      },
+    });
+    // Filter to worktree-reflecting kinds BEFORE classification so the blocking decision cannot be
+    // driven by a prod / remote-state check. Non-worktree kinds still ran (idempotent, read-only) but
+    // are surfaced only informationally — they never contribute to auto_fail.
+    const worktreeReflecting = runnerOut.results.filter(
+      (r) => r.exec_kind !== null && SELF_VERIFY_WORKTREE_KINDS.has(r.exec_kind),
+    );
+    const cls = classifyDeterministicRun(worktreeReflecting);
+    const failing = worktreeReflecting
+      .filter((r) => r.verdict === "fail")
+      .map((r) => ({ text: r.text, exec_kind: r.exec_kind, evidence: r.evidence.slice(0, 1200) }));
+    const summaryLine =
+      `preCommitSelfVerify worktree-reflecting: ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤` +
+      ` (of ${runnerOut.results.length} total; ${runnerOut.results.length - worktreeReflecting.length} non-worktree kinds skipped)`;
+    return { blocked: cls.summary.auto_fail > 0, ran: true, failing, summaryLine };
+  } catch (e) {
+    // No safety regression: a runner blip (import failure, DB load blip, etc.) falls through to
+    // today's behavior — commit proceeds; the existing fix-phase self-heal remains the backstop.
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      blocked: false,
+      ran: false,
+      failing: [],
+      summaryLine: `preCommitSelfVerify skipped (runner error): ${msg.slice(0, 400)}`,
+      error: msg,
+    };
+  }
+}
+
+// Bounded in-session repair cap for preCommitSelfVerify. Mirrors the Fix-1/Fix-2 loop-guard shape:
+// on a real block we resume Bo's just-finished session with the failing checks and re-verify, at
+// most this many times. Exhausting the cap fails the job (mirroring the tsc gate at :25031-25034),
+// so the existing fix-phase path still backstops — no safety regression, just a faster path when
+// the miss is a positive-absence that Bo can fix in-session.
+const SELF_VERIFY_REPAIR_MAX = 2;
+
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -24885,67 +25115,12 @@ async function dispatchJob(job: Job) {
       // (e.g. noop-pipeline-test-4 / #837) sat `in_testing` forever with `spec_test_runs` EMPTY and no
       // branch-mode security review — the auto-merge tests gate could never go green.
       //
-      // So the MOMENT accumulation completes + the real PR is open, capture the branch tip's preview onto THIS
-      // job row and (on READY) enqueue BOTH pre-merge triggers against it. Fire-and-forget (the preview may
-      // still be BUILDING — a worker-lived poll outlives this runJob, matching the push-path poll); the
-      // standing-pass backstop is the safety net if this worker restarts before READY. Idempotent end-to-end:
-      // capturePreviewUrlForJob only advances the row forward, and the enqueue helpers dedupe per
-      // (workspace, slug, branch). Best-effort — a trigger hiccup must never fail an otherwise-good build.
-      if (branch && branch.startsWith("claude/") && opts.headSha) {
-        const finalizeBranch = branch;
-        const finalizeSha = opts.headSha;
-        const finalizePr = pr.number;
-        void (async () => {
-          try {
-            const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-            const capture = await pollCapturePreviewUrl(
-              { jobId: job.id, branch: finalizeBranch, commitSha: finalizeSha },
-              { log: (m) => console.log(`${tag} [finalize] ${m}`) },
-            );
-            if (capture.previewState === "READY" && capture.previewUrl) {
-              const { maybeEnqueuePreMergeSpecTestOnAccumulation, maybeEnqueuePreMergeSecurityOnAccumulation } =
-                await import("../src/lib/agent-jobs");
-              // fixes-as-phases self-heal: if this build completed a `kind='fix'` phase, the prior pre-merge
-              // spec-test ran against the PRE-fix code — a stale `issues` verdict that the normal dedup would
-              // let block the re-test (the fused-premerge-security stall: Fix built, no re-test, PR held). The
-              // preview we captured is the fix commit's deploy (pollCapturePreviewUrl keyed on finalizeSha), so
-              // forcing past the existing-verdict dedup re-tests the CORRECT (fixed) code.
-              let forceForFix = false;
-              try {
-                const { getSpec: getSpecForFix } = await import("../src/lib/specs-table");
-                const specForFix = await getSpecForFix(job.workspace_id, slug);
-                forceForFix = (specForFix?.phases || []).some(
-                  (p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected",
-                );
-              } catch {
-                /* best-effort — a getSpec blip just means no force (the backstop is the safety net) */
-              }
-              const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
-                workspaceId: job.workspace_id,
-                slug,
-                branch: finalizeBranch,
-                previewUrl: capture.previewUrl,
-                force: forceForFix,
-              });
-              console.log(
-                `${tag} [finalize] M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
-              );
-              const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
-                workspaceId: job.workspace_id,
-                slug,
-                branch: finalizeBranch,
-                previewUrl: capture.previewUrl,
-                prNumber: finalizePr,
-              });
-              console.log(
-                `${tag} [finalize] M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
-              );
-            }
-          } catch (e) {
-            console.error(`${tag} [finalize] pre-merge trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-        })();
-      }
+      // The fused Vera/Vault pre-merge session now fires EVENT-DRIVEN (preview-ready-event-trigger): the
+      // GitHub `deployment_status` webhook (api/webhooks/github Gate D → enqueuePreMergeFromDeploymentReady)
+      // maps the preview deploy's commit SHA → this claude/build-* branch and enqueues the moment the
+      // preview goes READY — no in-worker Vercel poll (the old 6-min pollCapturePreviewUrl loop is retired,
+      // founder 2026-07-17). The standing-pass backstop stays as the safety net for a dropped delivery, and
+      // the fix-force is now derived inside maybeEnqueuePreMergeSpecTestOnAccumulation (not threaded here).
     };
 
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
@@ -25266,6 +25441,162 @@ async function dispatchJob(job: Job) {
       return;
     }
 
+    // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1) —
+    // front-run Rex on positive-absence. tsc + table-refs are green; nothing is committed yet; the
+    // worktree is dirty (Bo's edits, if any). Now run the spec's OWN typed checks against this
+    // worktree via the same deterministic runner Vera uses post-hoc, restricted to worktree-
+    // reflecting kinds ({grep,tsc,unit_test,build}) — the only kinds whose truth is fully answerable
+    // from the local tree. On a real block, resume Bo's just-finished session with the failing
+    // checks and re-verify — up to SELF_VERIFY_REPAIR_MAX repair passes; commit only when the
+    // worktree-reflecting checks are clean. On cap exhaustion, mirror the tsc gate at :25031-25034:
+    // fail the job so the existing fix-phase self-heal still backstops (no safety regression). This
+    // runs INSIDE the existing build lane node, so it inherits its owner/kill-switch/heartbeat —
+    // no new node. When the runner itself blips, preCommitSelfVerify returns {ran:false, blocked:false}
+    // and the lane falls through to today's behavior; a genuine block always surfaces.
+    {
+      let selfVerifySession: string | null = session ?? null;
+      // ⭐ build-lane-pre-commit-self-verify Phase 2 — legibility for Ada. Track the FIRST-pass
+      // failing checks + how many repair passes it took + whether repair resolved before commit, so
+      // we can emit ONE `build_self_verify_caught` director_activity row per FIRING (auto_fail>0 on
+      // the first pass) at the moment the loop resolves. Non-firings emit nothing — the row is the
+      // caught signal, not a heartbeat, so the weekly rollup counts only real catches.
+      let initialFailingChecks: Array<{ description: string; exec_kind: string | null; evidence: string }> = [];
+      let gateFired = false;
+      let repairsExecuted = 0;
+      for (let repairPass = 0; repairPass <= SELF_VERIFY_REPAIR_MAX; repairPass++) {
+        const sv = await preCommitSelfVerify({
+          workspaceId: job.workspace_id,
+          slug,
+          repoRoot: wt,
+        });
+        console.log(`${tag} ${sv.summaryLine}${repairPass > 0 ? ` (after repair pass ${repairPass})` : ""}`);
+        if (repairPass === 0 && sv.blocked) {
+          gateFired = true;
+          initialFailingChecks = sv.failing.map((f) => ({
+            description: f.text,
+            exec_kind: f.exec_kind,
+            evidence: f.evidence.slice(0, 800),
+          }));
+        }
+        if (!sv.blocked) {
+          if (gateFired) {
+            // Legible outcome — the gate fired at pass 0 and Bo's in-session repair cleared it before
+            // commit. Emit ONE `build_self_verify_caught` row so Ada's activity feed / EOD recap /
+            // weekly rollup sees the win (a positive-absence miss caught + fixed in-session, no
+            // extra build cycle). Best-effort + never throws (recordDirectorActivity swallows).
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_self_verify_caught",
+                specSlug: slug,
+                reason:
+                  `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                  ` — resolved in-session after ${repairsExecuted} repair pass(es)`,
+                metadata: {
+                  job_id: job.id,
+                  spec_slug: slug,
+                  failing_checks: initialFailingChecks.map((f) => ({
+                    description: f.description,
+                    exec_kind: f.exec_kind,
+                  })),
+                  repair_passes: repairsExecuted,
+                  resolved_in_session: true,
+                  autonomous: true,
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} preCommitSelfVerify director-activity emit (resolved) failed:`, e instanceof Error ? e.message : e);
+            }
+          }
+          break;
+        }
+        if (repairPass === SELF_VERIFY_REPAIR_MAX) {
+          // Cap exhausted — mirror the tsc gate at :25031-25034 (fail-hard so the existing fix-phase
+          // self-heal picks it up; no silent commit of a spec-check-failing worktree).
+          const failingTexts = sv.failing.map((f) => `${f.text} (${f.exec_kind})`).join("; ").slice(0, 800);
+          const evidenceTail = sv.failing
+            .map((f) => `• ${f.text} [${f.exec_kind}] — ${f.evidence}`)
+            .join("\n")
+            .slice(-1600);
+          // Legible outcome — gate fired, in-session repair could NOT clear it, existing fix-phase
+          // self-heal takes over. Still a catch (a build cycle earlier than Rex would have caught
+          // it) so we emit the row; the weekly rollup separates `resolved_in_session=true` (the
+          // win) from `resolved_in_session=false` (escaped to fix-phase) so Ada can supervise both.
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: "platform",
+              actionKind: "build_self_verify_caught",
+              specSlug: slug,
+              reason:
+                `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                ` — repair cap (${SELF_VERIFY_REPAIR_MAX}) exhausted; escaped to fix-phase self-heal`,
+              metadata: {
+                job_id: job.id,
+                spec_slug: slug,
+                failing_checks: initialFailingChecks.map((f) => ({
+                  description: f.description,
+                  exec_kind: f.exec_kind,
+                })),
+                repair_passes: repairsExecuted,
+                resolved_in_session: false,
+                autonomous: true,
+              },
+            });
+          } catch (e) {
+            console.warn(`${tag} preCommitSelfVerify director-activity emit (unresolved) failed:`, e instanceof Error ? e.message : e);
+          }
+          await update(job.id, {
+            status: "failed",
+            error: `pre-commit self-verify unresolved after ${SELF_VERIFY_REPAIR_MAX} repair passes: ${failingTexts}`,
+            log_tail: `${sv.summaryLine}\n\n${evidenceTail}`.slice(-2000),
+          });
+          console.error(`${tag} preCommitSelfVerify FAIL — see log_tail`);
+          return;
+        }
+        // Real block + budget remains → resume Bo's session with the specific failing checks (same
+        // evidence shape Rex reports). The prompt names each failing check + exec_kind + evidence,
+        // and instructs Bo to make the file/export/column exist — or to explicitly justify a
+        // genuinely `needs_human` bullet the runner would drop to. No git action here; the worker
+        // still owns commit/push once the checks come back clean.
+        const failingBlock = sv.failing
+          .map(
+            (f, i) =>
+              `${i + 1}. [${f.exec_kind}] ${f.text}\n     evidence: ${f.evidence.replace(/\n+/g, " ").slice(0, 600)}`,
+          )
+          .join("\n");
+        const repairPrompt = [
+          `⛔ PRE-COMMIT SELF-VERIFY BLOCK (repair pass ${repairPass + 1} of ${SELF_VERIFY_REPAIR_MAX}) — your last change passed tsc + the table-refs rail, but the spec's OWN checks fail against your worktree.`,
+          `These are worktree-reflecting checks (grep / tsc / unit_test / build) — every one is answerable from the local files you just wrote. They front-run the post-hoc spec-test (Rex) so a positive-absence miss (a Verification bullet says a file/export/column should exist, but the build never created it) is caught IN this session, not a build cycle later.`,
+          `Failing checks:`,
+          failingBlock,
+          `Fix these NOW: make the file/export/column exist (or clearly justify a genuinely needs_human bullet — a subjective owner-verified item — and it will drop to needs_human on the next runner pass). Do NOT weaken or delete the spec's Verification bullet to make it pass. Do NOT touch git — the worker still owns commit/push. When you're done, return the same {"status":"completed","summary":"…"} envelope; the worker will re-run the self-verify.`,
+        ].join("\n\n");
+        const repair = await runClaude(repairPrompt, selfVerifySession, wt, configDir, job.id);
+        await meterAgentJob(job, configDir, repair.usage, repair.model);
+        repairsExecuted++;
+        if (repair.session) {
+          selfVerifySession = repair.session;
+          await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
+        }
+        // A repair that broke tsc must not slip through — re-run the tsc gate exactly the same shape
+        // as the top-level gate at :25031-25034 so a regression bounces to `failed` immediately.
+        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        if (tscAfter.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "tsc failed after pre-commit self-verify repair",
+            log_tail: (tscAfter.out + tscAfter.err).slice(-2000),
+          });
+          console.error(`${tag} preCommitSelfVerify repair broke tsc — see log_tail`);
+          return;
+        }
+      }
+    }
+
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
     if (!dirty) {
       // No NEW changes — typically because the build committed everything during a needs_approval/needs_input
@@ -25413,64 +25744,12 @@ async function dispatchJob(job: Job) {
         return;
       }
     }
-    // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
-    // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best
-    // effort + idempotent; failures are swallowed (never fatal to the build). The worker process is
-    // long-lived (job-loop), so the poll outlives this runJob.
+    // The branch's Vercel preview URL + the fused Vera/Vault pre-merge session are now captured/enqueued
+    // EVENT-DRIVEN via the GitHub `deployment_status` webhook (preview-ready-event-trigger,
+    // api/webhooks/github Gate D → enqueuePreMergeFromDeploymentReady) — no in-worker Vercel poll (the old
+    // 6-min pollCapturePreviewUrl loop is retired, founder 2026-07-17). The standing-pass backstop stays as
+    // the safety net for a dropped delivery. `headSha` is still needed by finalizeBuiltPhase below.
     const headSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim() || null;
-    void (async () => {
-      try {
-        const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-        const capture = await pollCapturePreviewUrl(
-          { jobId: job.id, branch: branch!, commitSha: headSha },
-          { log: (m) => console.log(`${tag} ${m}`) },
-        );
-        // spec-goal-branch-pm-flow M3 — once the branch's preview is READY, fire the PRE-MERGE spec-test
-        // IFF the whole spec is now accumulated on the branch (every phase built). When the LAST phase's
-        // preview lands READY, accumulation is complete → enqueue; earlier phases no-op (not yet complete).
-        // Idempotent (dedupes per branch). The spec-test materializes the spec from the DB row (M1/M2
-        // stamped it from this branch's commits) and points its probes at the preview URL — testing the
-        // BUILT spec on its branch preview, not main. Best-effort — never fail the build on a trigger hiccup.
-        if (capture.previewState === "READY" && capture.previewUrl) {
-          try {
-            const { maybeEnqueuePreMergeSpecTestOnAccumulation } = await import("../src/lib/agent-jobs");
-            const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
-              workspaceId: job.workspace_id,
-              slug,
-              branch,
-              previewUrl: capture.previewUrl,
-            });
-            console.log(
-              `${tag} M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
-            );
-          } catch (e) {
-            console.error(`${tag} M3 pre-merge spec-test trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-          // security-test-on-preview-pre-merge Phase 1 (the wiring the spec never landed) — fire the
-          // PRE-MERGE security review on the SAME preview-ready signal. The security signal
-          // (isSecurityGreenForBranch) is the second leg of the M4 tests gate; without this enqueue it was
-          // ALWAYS false and every one-off PR sat in_testing forever (branch-mode reviews = 0 in prod).
-          // Idempotent (one open review per branch). Best-effort — never fail the build on a trigger hiccup.
-          try {
-            const { maybeEnqueuePreMergeSecurityOnAccumulation } = await import("../src/lib/agent-jobs");
-            const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
-              workspaceId: job.workspace_id,
-              slug,
-              branch,
-              previewUrl: capture.previewUrl,
-              prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
-            });
-            console.log(
-              `${tag} M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
-            );
-          } catch (e) {
-            console.error(`${tag} M2 pre-merge security trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-        }
-      } catch (e) {
-        console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
-      }
-    })();
     // ⭐ DEPLOY BUILD GATE: if this build touched code that affects the production build (pages/components/
     // config/middleware), it must survive a real `next build` BEFORE it can complete (→ auto-merge). tsc
     // already passed; this catches the cacheComponents/prerender/segment-config breaks tsc can't see. The

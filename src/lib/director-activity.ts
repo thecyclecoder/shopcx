@@ -249,7 +249,21 @@ export type DirectorActionKind =
   // record ONE row here + skip; the standing pr-resolve flow / a human resolves the overlap. Owned
   // by Platform (director_function='platform'). metadata: { actor:'serialized-rebase-merge-guard',
   // goal_slug, spec_branch, rebased, autonomous:true }.
-  | "goal_branch_merge_escalated";
+  | "goal_branch_merge_escalated"
+  // build-lane-pre-commit-self-verify Phase 2 — the pre-commit self-verify gate ([[builder-worker]]
+  // § Pre-commit self-verify gate) stamps ONE row per firing so Ada can supervise whether the rail
+  // actually drops Bo's first-pass fix-phase rate (the ~18% Ask-Ada number). Emitted from
+  // `scripts/builder-worker.ts` `runBuildJob` inside the pre-commit self-verify block ONLY when the
+  // gate ACTUALLY fires (auto_fail>0 over the worktree-reflecting set {grep,tsc,unit_test,build}).
+  // `resolved_in_session=true` means Bo's bounded in-session repair caught the miss BEFORE commit
+  // (the whole point — no extra build cycle, no Rex round, no Vercel redeploy);
+  // `resolved_in_session=false` means the repair cap exhausted and the existing fix-phase self-heal
+  // took over (still an improvement over pure Rex — the catch is a build cycle earlier). Owned by
+  // Platform (director_function='platform'). metadata: { job_id, spec_slug, failing_checks:[{
+  // description, exec_kind }], repair_passes, resolved_in_session, autonomous:true }. A weekly
+  // rollup (caught / repaired-in-session / escaped-to-fix-phase) reads this kind — see the brain
+  // note next to the Phase-1 build-lane page.
+  | "build_self_verify_caught";
 
 export interface DirectorActivityInput {
   workspaceId: string;

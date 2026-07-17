@@ -1,0 +1,1 @@
+- **Typecheck the box tsx entrypoints in CI (scoped tsconfig) + fix the latent errors** · verified 2026-07-17 · → [[../operational-rules#box-code-parses-under-esbuild-not-just-tsc-predeploy-guard]] · [[../recipes/build-box-setup]]

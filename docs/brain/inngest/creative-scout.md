@@ -39,13 +39,23 @@ The heavier **video drain** stays in [[creative-finder]] (`creativeFinderVideoPr
 2. Freshness gate (unless `force`): `filterSeedsByFreshness` drops brands searched inside `adlibraryFreshnessDays()` (default 7). A fresh/never-searched brand always passes → a newly-approved competitor runs on the very next scout.
 3. Per kept seed: `safeSweep` → `sweepCompetitorLanes` (winners-flow, [[../libraries/creative-skeleton]] + [[../libraries/adlibrary-winners]]) → routes the competitor to a collection LANE (below) → `ingestAd` (statics vision-deconstructed + `status='analyzed'`). 7s `step.sleep` between seeds. A seed that resolves to NEITHER lane is logged as a **bad seed** (its `search_keyword`/`domain` don't map to a Meta advertiser — a reliable fix-me signal).
 
-## Two-lane collection (winners-flow, 2026-07-17)
+## Two-lane collection + longitudinal tracking (winners-flow, 2026-07-17)
 
 The old keyword `searchAds` path (`sweepSeed`) only returned a brand's RECENT ads, never its proven long-runners. `sweepCompetitorLanes` calls `resolveAdvertiser(seed.keyword, { domain: seed.expectedDomain })` and routes:
 
-- **LANE A — `via:'name'` → a Meta `pageId`.** `scanWinners(pageId)` (`POST /api/winners/advertiser/{pageId}`, 10 credits) returns AdLibrary's **AI-scored, concept-tagged winners** (`tier` + `composite` + `tags{angle,archetype,why_it_works,cialdini_lever,awareness_stage}`), image-only. Each concept's ad is normalized → deduped → ranked by composite → `ingestAd(…, winnerMeta)`: OUR four-slot vision (hook/mechanism/proof/offer for Dahlia's imitation) PLUS AdLibrary's `winner_tier`/`winner_score`/`concept_tags`.
-- **LANE B — `via:'domain'`** (advertiser un-resolvable by name — an AdLibrary limitation — but a domain is known, e.g. Beam→shopbeam.com). `searchAds({ domain, adsType:['1'], platform:['facebook','instagram'] })` returns the brand's real ads (domain-search carries no page_id, so no winners scan). OUR vision only; `concept_tags` backfilled by Phase 2c so the library is uniform.
+- **LANE A — `via:'name'` → a Meta `pageId`.** `scanWinners(pageId)` (`POST /api/winners/advertiser/{pageId}`, 10 credits) scans the brand's **FULL library** (not recent-only), image-only.
+- **LANE B — `via:'domain'`** (advertiser un-resolvable by name — an AdLibrary limitation — but a domain is known, e.g. Beam→shopbeam.com). `searchAds({ domain, adsType:['1'], platform:['facebook','instagram'] })` returns the brand's real ads (domain-search carries no page_id, so no winners scan).
 - **`via:null`** — neither name nor domain resolves = a reliable **bad seed** (unlike the old "0 ads" false flag).
+
+### The winner signal is OURS, not AdLibrary's
+
+AdLibrary's `tier`/`composite` are **not trusted** — the winners scan returned `tier="loser"` for *every* major brand (AG1, MUD\WTR, Calm), and the composite just tracked a mis-parsed recency number (day-counts of 1–6, `first_seen` parsing as 1970). Instead the scout tracks **longitudinal persistence** through `collectAndTrack`, per competitor:
+
+- **NEW static** (ad_key we don't have) → `ingestAd`: OUR four-slot vision + `concept_tags` (both lanes, one schema), and the longitudinal clock starts (`our_first_seen=now`, `winner_tier='new'`). Capped by `visionCap` (Opus spend); AdLibrary's composite only ORDERS which new ads to vision first.
+- **ALREADY-SEEN** → `reobserveAd`: cheap bump of `our_last_seen` + `observed_sweeps`, recompute `winner_score` = persistence days + `winner_tier` (`new`<7d, `building`≥7d, `proven`≥21d). **No re-vision.**
+- **VANISHED** (this competitor's active rows not in the sweep) → `markDisappearedAds`: `still_active=false`, `winner_tier='retired'` — the competitor stopped paying to run it.
+
+An ad a competitor keeps running across our weekly sweeps IS a proven winner (they pay because it converts) — the strongest signal, fully ours, no dependence on AdLibrary's opaque score.
 
 Advertiser resolution is STRICT (`nameMatches`: normalized-equal or brand + one corporate suffix) — the loose matcher mis-picked "Bulletproof Automotive"/"Ryze Hendricks"/"…Concrete Beams". Unit-tested in `src/lib/adlibrary-winners.test.ts`. The legacy `adMatchesCompetitor` domain/advertiser relevance filter (`src/lib/adlibrary.test.ts`) still guards the `sweepSeed` fallback path.
 
