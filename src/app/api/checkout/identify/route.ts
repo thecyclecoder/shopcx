@@ -76,9 +76,14 @@ export async function POST(request: Request) {
     .maybeSingle();
   let created = false;
   if (!customer) {
+    // Get-or-create is non-atomic (check-then-insert): two concurrent requests
+    // for the same new email both miss the select above and both try to insert,
+    // and the loser hits the UNIQUE(workspace_id, email) constraint (Postgres
+    // 23505). Upsert with ignoreDuplicates so the loser inserts nothing (returns
+    // no row) instead of throwing; then re-read the winner's row by (ws, email).
     const { data: row, error } = await admin
       .from("customers")
-      .insert({
+      .upsert({
         workspace_id: cart.workspace_id,
         email,
         first_name: body.first_name || null,
@@ -87,12 +92,24 @@ export async function POST(request: Request) {
         subscription_status: "never",
         email_marketing_status: body.email_marketing_consent ? "subscribed" : "not_subscribed",
         sms_marketing_status: body.sms_marketing_consent && body.phone ? "subscribed" : "not_subscribed",
-      })
+      }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
       .select("id")
-      .single();
-    if (error || !row) return NextResponse.json({ error: error?.message || "customer_create_failed" }, { status: 500 });
-    customer = row;
-    created = true;
+      .maybeSingle();
+    if (error) return NextResponse.json({ error: error.message || "customer_create_failed" }, { status: 500 });
+    if (row) {
+      customer = row;
+      created = true;
+    } else {
+      // Lost the insert race — the row already exists, so re-read it.
+      const { data: existing } = await admin
+        .from("customers")
+        .select("id")
+        .eq("workspace_id", cart.workspace_id)
+        .eq("email", email)
+        .maybeSingle();
+      if (!existing) return NextResponse.json({ error: "customer_create_failed" }, { status: 500 });
+      customer = existing;
+    }
   } else {
     // Refresh names + phone + marketing consent on the existing row.
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
