@@ -1,6 +1,6 @@
 # `ad_publish_jobs` — Meta ad publish jobs
 
-One row per "publish this campaign's video to Meta" action: the chosen targets + copy + the resulting Meta ids. Driven by [[../inngest/ad-tool]] `adToolPublishToMeta`. Migrations `20260610140000_ad_publish_jobs.sql` + `20260620180000_ad_publish_jobs_engine_fields.sql` (Iteration Engine 6b: `ad_name` + `recommendation_id`) + `20260707120000_media_buyer_test_cohorts.sql` (Media Buyer Phase 1: `origin`). RLS: workspace-member SELECT, service-role write. See [[../lifecycles/ad-publish]].
+One row per "publish this campaign's video to Meta" action: the chosen targets + copy + the resulting Meta ids. Driven by [[../inngest/ad-tool]] `adToolPublishToMeta`. Migrations `20260610140000_ad_publish_jobs.sql` + `20260620180000_ad_publish_jobs_engine_fields.sql` (Iteration Engine 6b: `ad_name` + `recommendation_id`) + `20260707120000_media_buyer_test_cohorts.sql` (Media Buyer Phase 1: `origin`) + `20261101120000_ad_publish_jobs_descriptions.sql` (dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1: `descriptions`). RLS: workspace-member SELECT, service-role write. See [[../lifecycles/ad-publish]].
 
 ## Columns
 
@@ -15,9 +15,10 @@ One row per "publish this campaign's video to Meta" action: the chosen targets +
 | `create_adset_spec` | jsonb? | **Per-test-adset (CEO 2026-07-12)** — when set, `adToolPublishToMeta` mints a dedicated ~$150/day ad set from this spec (`createAdSet`, in `spec.campaign_id`) BEFORE the ad, with the gated status, then stamps `meta_adset_id`. Null = publish into the row's existing `meta_adset_id` (legacy shared adset). Assembled by [[../libraries/media-buyer-agent]] `enqueueReplenishPublish` from the cohort's `adset_template`. |
 | `meta_page_id` | text | operator-selected FB page for the creative |
 | `meta_instagram_user_id` | text | the page's linked IG account |
-| `headlines` | jsonb | headline + variations |
-| `primary_texts` | jsonb | primary text + variations |
-| `description` | text | optional link description |
+| `headlines` | jsonb | headline + variations — TRUE multi-variant carrier on the M3 path ([[../libraries/media-buyer-agent]] `enqueueReplenishPublish` reads [[ad_creative_copy_variants]] via `readCopyVariants` (SDK chokepoint in `src/lib/ads/ad-copy-variants.ts`) and stamps N entries in warm→cold→hot order); [[../inngest/ad-tool]] `adToolPublishToMeta` splats 1:1 into Meta's `asset_feed_spec.titles[]` |
+| `primary_texts` | jsonb | primary text + variations — 1:1 sibling of `headlines`; splats into `asset_feed_spec.bodies[]` |
+| `descriptions` | jsonb? | **dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1** — N link descriptions from the temperature-banded pack. `null` = legacy studio / deterministic-mode job (publisher falls back to `[description]` single-element so byte-identical to today); non-null = 1:N variants that `adToolPublishToMeta` splats into `asset_feed_spec.descriptions[]` |
+| `description` | text | optional link description — retained for `link_data` image ads (1:1 by Meta's shape) AND as the single-element fallback for `asset_feed_spec.descriptions[]` when `descriptions` is null |
 | `cta_type` | text | Meta CTA enum (default `SHOP_NOW`) |
 | `destination_url` | text | click-through URL |
 | `publish_active` | bool | false → ad created PAUSED |
