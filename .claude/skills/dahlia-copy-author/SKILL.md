@@ -45,17 +45,30 @@ The worker hands you:
     resolved deterministically by the worker (cold when the angle is a competitor imitation OR
     the angle's `acquisitionPower ≥ 8`; warm otherwise). You tag this verbatim back on the
     verdict, and it drives what copy is allowed (see the RAILS below).
-  - `TARGET_SCHWARTZ_LEVEL:` `1` | `2` | `3` | `4` | `5` — the shelf-derived modal Schwartz
-    awareness level the product's competitor shelf is writing at, computed pure by the worker
-    from the M1 author session's already-computed competitor shelf
-    (`computeSophisticationLevel` in [[../../../src/lib/ads/sophistication.ts]]). This is the
-    market's sophistication level — where its proven competitors have moved to.
-    **WRITE AT `target_schwartz_level`; NEVER below `(target_schwartz_level - 1)`.** A level-2
-    problem-aware ad in a level-4 mechanism market reads as a decade behind and never
-    converts; a level-3 solution-category ad in a level-5 versus-comparison market misses the
-    audience the shelf has already educated. Empty-shelf products default to `3`
-    (solution-aware). The value is a session input, not a hard block — the enforcement is
-    that you write at the correct level.
+  - `TARGET_SCHWARTZ_LEVEL:` `1` | `2` | `3` | `4` | `5` — the **ESCALATED** target Schwartz
+    awareness level, computed pure by the worker via
+    [[../../../src/lib/ads/market-sophistication.ts]] `computeMarketSophistication` — the
+    shelf modal (from `computeSophisticationLevel` in
+    [[../../../src/lib/ads/sophistication.ts]]) **plus one, clamped at 5**. This is the level
+    the market has NOT been written at yet — one step ABOVE where the shelf currently sits.
+    **Write at `target_schwartz_level`** — the shelf modal is `target_schwartz_level - 1`;
+    everyone at `target-1` loses because the market already heard it and yawns. Empty-shelf
+    products default to `target=4` (safe mid-market — write one step above assumed L3
+    solution-aware). If you cannot write at `target` without fabricating (per the
+    never-fabricate firewall in [[../../../docs/brain/specs/dahlia-never-fabricate-copy-firewall.md]]),
+    drop to `target-1` and **cite the fallback in your verdict rationale** — a level drop
+    with a stated reason is an honest signal; a silent drop erases the audit trail. The value
+    is a session input, not a hard block — the enforcement is that you write at the correct
+    level, and Max's independent copy QC cross-checks whether you actually did.
+  - `MARKET_SOPHISTICATION_EVIDENCE:` a JSON array of strings — one line per contributing
+    competitor angle in the shape
+    `advertiser=<advertiser> level=L<level> hook=<hook slice(0,80)>`, or the single default
+    marker `no proven competitor shelf — defaulting to mid-market` when the shelf was empty.
+    This is the audit trail behind `TARGET_SCHWARTZ_LEVEL` — you MAY quote it in your
+    `self_score.evidence` to justify why the escalated target reads as the right bar, and
+    you MUST reference it when you drop to `target-1` (name which shelf line justifies the
+    fallback, e.g. `"dropped to L3 — every shelf line was L2 problem-aware; L4 mechanism
+    would fabricate ingredients we don't have"`).
   - `COMPETITOR_DNA:` (present only when the angle is `source='competitor'`) the
     reverse-engineered mechanism + proof + advertiser tokens from the scouted competitor ad,
     **already debranded** by the worker. Use it as inspiration for the underlying angle only —

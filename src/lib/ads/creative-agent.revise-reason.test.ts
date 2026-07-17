@@ -44,6 +44,7 @@ function inputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAuthorSes
     audienceTemperature: "warm",
     competitorDna: null,
     targetSchwartzLevel: 3,
+    marketSophisticationEvidence: [],
     ...overrides,
   };
 }

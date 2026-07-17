@@ -61,6 +61,7 @@ function sessionInputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAu
     audienceTemperature: "warm",
     competitorDna: null,
     targetSchwartzLevel: 3,
+    marketSophisticationEvidence: [],
     ...overrides,
   };
 }
@@ -364,15 +365,35 @@ test("runCopyAuthorSession (f): cold audience emit that leaks offer language →
   }
 });
 
-test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, TARGET_SCHWARTZ_LEVEL, and the DATA block", async () => {
+test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, TARGET_SCHWARTZ_LEVEL, MARKET_SOPHISTICATION_EVIDENCE, and the DATA block", async () => {
   const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
-  await runCopyAuthorSession(sessionInputs({ audienceTemperature: "cold", imagePath: "/tmp/pinned.jpg", targetSchwartzLevel: 4 }), dispatch);
+  await runCopyAuthorSession(
+    sessionInputs({
+      audienceTemperature: "cold",
+      imagePath: "/tmp/pinned.jpg",
+      targetSchwartzLevel: 4,
+      // dahlia-market-sophistication-escalation Phase 1 — the audit trail behind the
+      // escalated TARGET_SCHWARTZ_LEVEL. Threaded verbatim into the prompt so Dahlia can
+      // cite the fallback in her verdict rationale.
+      marketSophisticationEvidence: [
+        "advertiser=Alpha Co level=L3 hook=clean energy for the afternoon",
+        "advertiser=Bravo Co level=L4 hook=real adaptogen stack",
+      ],
+    }),
+    dispatch,
+  );
   const prompt = calls[0].prompt;
   assert.match(prompt, /IMAGE: \/tmp\/pinned\.jpg/);
   assert.match(prompt, /AUDIENCE_TEMPERATURE: cold/);
-  // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the shelf-derived Schwartz level
-  // must appear in the session input so Dahlia writes AT the market's sophistication level.
+  // dahlia-market-sophistication-escalation Phase 1 — the escalated Schwartz level (shelf
+  // modal + 1, clamped) must appear in the session input so Dahlia writes ABOVE the market's
+  // sophistication level, not at it.
   assert.match(prompt, /TARGET_SCHWARTZ_LEVEL: 4/);
+  // The evidence[] audit trail must appear alongside — one line per contributing angle so
+  // Dahlia can cite the shelf's actual advertisers + levels when she narrates her choice.
+  assert.match(prompt, /MARKET_SOPHISTICATION_EVIDENCE:/);
+  assert.match(prompt, /advertiser=Alpha Co/);
+  assert.match(prompt, /level=L4/);
   assert.match(prompt, /===BEGIN_AUTHOR_DATA_v1===/);
   assert.match(prompt, /===END_AUTHOR_DATA_v1===/);
 });

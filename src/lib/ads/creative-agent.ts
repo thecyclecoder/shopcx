@@ -25,7 +25,7 @@ import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
-import { computeSophisticationLevel } from "@/lib/ads/sophistication";
+import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { debrandForOurBrand } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
@@ -202,12 +202,23 @@ export interface CopyAuthorSessionInputs {
     offer: string | null;
     competitorAdvertiser: string | null;
   } | null;
-  /** dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the modal Schwartz awareness level
-   *  the competitor shelf is writing at (1..5). Computed pure from the shelf via
-   *  [[./sophistication]] `computeSophisticationLevel` and threaded into Dahlia's session
-   *  input so she writes AT the market's sophistication level, never below (target-1).
-   *  Empty shelf → 3 (safe solution-aware default; deterministic-mode callers pass 3). */
+  /** dahlia-market-sophistication-escalation Phase 1 — the ESCALATED target level (1..5).
+   *  Computed via [[./market-sophistication]] `computeMarketSophistication` = the shelf modal
+   *  from [[./sophistication]] `computeSophisticationLevel` **plus one, clamped at 5** — the
+   *  Schwartz-level policy Dahlia writes AT. The shelf modal itself is `target-1`, and
+   *  everyone at target-1 loses because the market already heard it and yawns; empty shelf
+   *  → 4 (safe mid-market default; deterministic-mode callers pass 3 → the deterministic
+   *  path never triggered the escalation, so they keep the pre-escalation default). */
   targetSchwartzLevel: 1 | 2 | 3 | 4 | 5;
+  /** dahlia-market-sophistication-escalation Phase 1 — the audit trail behind
+   *  `targetSchwartzLevel`: one string per contributing competitor angle in the shape
+   *  `advertiser=<advertiser> level=L<level> hook=<hook slice(0,80)>`, or the single default
+   *  marker `no proven competitor shelf — defaulting to mid-market` when the shelf was empty.
+   *  Threaded verbatim into Dahlia's session so she can cite the fallback in her verdict
+   *  rationale, and forwarded downstream to Max's copy-QC TRUSTED CONTEXT so his advisory
+   *  persuasion score can flag when Dahlia's actual level (as read from the copy) is below
+   *  target_schwartz_level. Deterministic-mode callers pass an empty array. */
+  marketSophisticationEvidence: string[];
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -469,11 +480,17 @@ export function buildCopyAuthorPrompt(
     "",
     `IMAGE: ${inputs.imagePath}`,
     `AUDIENCE_TEMPERATURE: ${inputs.audienceTemperature}`,
-    // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the shelf-derived modal Schwartz
-    // awareness level. Threaded into the prompt (outside the DATA block, alongside the other
-    // trusted worker-computed session inputs) so Dahlia writes AT the market's sophistication
-    // level, never below (target-1). See [[./sophistication]] `computeSophisticationLevel`.
+    // dahlia-market-sophistication-escalation Phase 1 — the ESCALATED target level
+    // (shelfModal + 1, clamped at 5). Threaded into the prompt (outside the DATA block,
+    // alongside the other trusted worker-computed session inputs) so Dahlia writes AT
+    // target — the shelf modal is target-1; everyone at target-1 loses. See
+    // [[./market-sophistication]] `computeMarketSophistication`.
     `TARGET_SCHWARTZ_LEVEL: ${inputs.targetSchwartzLevel}`,
+    // The audit trail behind TARGET_SCHWARTZ_LEVEL — one line per contributing competitor
+    // angle (`advertiser=… level=L… hook=…`) or the single default marker when the shelf
+    // was empty. Dahlia may cite this in her verdict rationale (and MUST when she drops
+    // to shelfModal per the never-fabricate firewall's target-1-fallback rule).
+    `MARKET_SOPHISTICATION_EVIDENCE: ${sanitizeAuthorField(JSON.stringify(inputs.marketSophisticationEvidence))}`,
     "",
     COPY_AUTHOR_INJECTION_GUARDRAIL,
     "",
@@ -696,6 +713,7 @@ async function runCopyAuthorSessionForImage(
     audienceTemperature: "cold" | "warm" | "hot";
     competitorDna: CopyAuthorSessionInputs["competitorDna"];
     targetSchwartzLevel: CopyAuthorSessionInputs["targetSchwartzLevel"];
+    marketSophisticationEvidence: CopyAuthorSessionInputs["marketSophisticationEvidence"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -728,6 +746,7 @@ async function runCopyAuthorSessionForImage(
         audienceTemperature: input.audienceTemperature,
         competitorDna: input.competitorDna,
         targetSchwartzLevel: input.targetSchwartzLevel,
+        marketSophisticationEvidence: input.marketSophisticationEvidence,
       },
       dispatch,
     );
@@ -1043,12 +1062,17 @@ async function stockProduct(
   if (sourcedUsedFallback) {
     console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
   }
-  // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — shelf-derived Schwartz sophistication
-  // level. Computed ONCE per product (pure, no I/O) from the same `sourced` shelf so a wrong
-  // level can't diverge across creatives. Threaded into Dahlia's per-creative session input as
-  // `target_schwartz_level` so she writes AT the market's sophistication level, never below
-  // (target - 1). Empty shelf → 3 (safe solution-aware default). See [[./sophistication]].
-  const targetSchwartzLevel = computeSophisticationLevel(sourced);
+  // dahlia-market-sophistication-escalation Phase 1 — read the product's own
+  // deliberately-chosen shelf (`creative_skeletons.product_id`) via the shipped SDK, run it
+  // through the M2 shelf-modal detector, then apply the +1 escalation policy (clamped at 5)
+  // so Dahlia writes ABOVE the shelf modal (target - 1 is the failure mode Schwartz explicitly
+  // warned about — everyone at target-1 loses because the market already heard it and yawns).
+  // The evidence[] payload is threaded alongside as an audit trail: one line per contributing
+  // competitor angle (`advertiser=… level=L… hook=…`) so the founder can answer "why L4?"
+  // without a second DB round-trip. Empty shelf → {shelfModal:3, targetLevel:4} default.
+  const marketSoph = await computeMarketSophistication(admin, workspaceId, productId);
+  const targetSchwartzLevel = marketSoph.targetLevel;
+  const marketSophisticationEvidence = marketSoph.evidence;
   // dahlia-deeper-competitor-selection Phase 2 — replace the old hardcoded acquisitionPower=9
   // with a per-angle score derived from the full skeleton signal set (daysRunning × resumeAdvertising
   // + heat tiebreak). A 60d+ still-running + high-heat angle now outranks a 30d dormant one on the
@@ -1264,7 +1288,7 @@ async function stockProduct(
                 }
               : null;
           const outcome = await runCopyAuthorSessionForImage(
-            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel },
+            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence },
             copyAuthorDispatcher,
           );
           if (outcome.kind === "exhausted") {
