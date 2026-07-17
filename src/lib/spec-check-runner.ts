@@ -447,7 +447,8 @@ export interface DeterministicClassification {
   residualTexts: string[];
   /** Summary derived from the runner's per-check verdicts. Matches `normalizeSpecTest`'s shape. */
   summary: SpecTestSummary;
-  /** `approved` iff no fails + ≥1 pass; `issues` iff ≥1 fail; else `needs_human`. */
+  /** `issues` iff ≥1 fail; else `approved` when there are no machine/auto checks at all (nothing to
+   *  gate → auto-pass) OR every auto check passed with no residual; else `needs_human`. */
   agentVerdict: SpecTestAgentVerdict;
   /** The runner's per-check verdicts as `SpecTestCheck[]` — the exact shape `spec_test_runs.checks` carries. */
   checks: SpecTestCheck[];
@@ -475,8 +476,25 @@ export function classifyDeterministicRun(results: CheckResult[]): DeterministicC
     inconclusive: 0,
   };
   const residual = results.filter((r) => r.verdict === "needs_human");
+  // ⭐ no-machine-checks-auto-pass (CEO 2026-07-17): the deterministic spec-test can only GATE on what
+  // it can mechanically run. A spec with NO machine/auto checks (`autoCount === 0`) has nothing for the
+  // runner to verify, so it must AUTO-PASS ('approved') — NOT `needs_human`. Returning `needs_human`
+  // here left such a spec permanently un-green: the auto-merge gate requires a green spec-test, so a
+  // spec with no machine-declared checks could NEVER self-merge (it always needed a manual merge — the
+  // 2026-07-17 winners-flow stall). Human sign-off is the separate optional human-test column, never a
+  // reason for the machine gate to block (operational-rules § no-human-checks-in-verifications). A fail
+  // still wins (`issues`); a genuine residual on a spec that DOES have machine checks still surfaces
+  // (`needs_human`). The `auto_pass > 0` requirement was the over-strict clause — a spec that ran zero
+  // machine checks is "nothing failed", which is a pass, not an unresolved review.
+  const autoCount = summary.auto_pass + summary.auto_fail;
   const agentVerdict: SpecTestAgentVerdict =
-    summary.auto_fail > 0 ? "issues" : summary.needs_human === 0 && summary.auto_pass > 0 ? "approved" : "needs_human";
+    summary.auto_fail > 0
+      ? "issues"
+      : autoCount === 0
+        ? "approved" // no machine tests to run → nothing to gate → auto-pass
+        : summary.needs_human === 0
+          ? "approved"
+          : "needs_human";
   return {
     allResolved: summary.needs_human === 0,
     residualCount: residual.length,
