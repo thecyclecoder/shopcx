@@ -30,6 +30,7 @@ import {
   rankByWinnerSignalAndIntent,
   winnerTierRank,
   awarenessStageMatchesTemperature,
+  competitorTemperatureFit,
   type CompetitorAngle,
 } from "./creative-sourcing";
 import { buildCreativeBrief, type ScoredAngle } from "./creative-brief";
@@ -421,4 +422,49 @@ test("buildCreativeBrief: leaves conceptTags null for an own-brand angle (never 
   } as unknown as ProductIntelligence;
   const brief = await buildCreativeBrief(pi, ownAngle, []);
   assert.equal(brief.conceptTags, null);
+});
+
+// ── competitor temperature FIT — focal-point selection (CEO 2026-07-17) ──────────────────────────
+// Cold = curiosity / problem-solution ads (no offer); warm/hot = offer / mechanism / customer-review
+// ads. An offer is the hard warm/hot tell — a cold audience should never imitate an offer/retargeting
+// ad (closes the cold_offer_leak at its source instead of scrubbing the offer downstream).
+function fitAngle(over: Partial<CompetitorAngle>): CompetitorAngle {
+  return {
+    advertiser: null, hook: null, framework: null, mechanismClaim: null, proof: null,
+    offer: null, daysRunning: 40, heat: null, destinationDomain: null, imageUrl: null,
+    resumeAdvertising: null, winnerTier: "proven", winnerScore: 50, conceptTags: null, ...over,
+  };
+}
+
+test("competitorTemperatureFit: an OFFER ad is a MISMATCH for cold, a MATCH for warm/hot", () => {
+  const offerAd = fitAngle({ offer: "50% OFF today" });
+  assert.equal(competitorTemperatureFit(offerAd, "cold"), "mismatch");
+  assert.equal(competitorTemperatureFit(offerAd, "warm"), "match");
+  assert.equal(competitorTemperatureFit(offerAd, "hot"), "match");
+});
+
+test("competitorTemperatureFit: a curiosity / problem-solution ad (no offer) MATCHES cold", () => {
+  const coldAd = fitAngle({ conceptTags: conceptTags({ awareness_stage: "problem_aware", cialdini_lever: null, archetype: "curiosity-hook" }) });
+  assert.equal(competitorTemperatureFit(coldAd, "cold"), "match");
+});
+
+test("competitorTemperatureFit: a social-proof / review-focal ad (no offer, no cold stage) is a MISMATCH for cold", () => {
+  const reviewAd = fitAngle({ conceptTags: conceptTags({ awareness_stage: "solution_aware", cialdini_lever: "social_proof", archetype: "social-proof-wall" }) });
+  assert.equal(competitorTemperatureFit(reviewAd, "cold"), "mismatch");
+  assert.equal(competitorTemperatureFit(reviewAd, "warm"), "match");
+});
+
+test("competitorTemperatureFit: a cold awareness stage WINS over a social-proof lever (offer is the only hard cold-disqualifier)", () => {
+  const problemAwareWithProof = fitAngle({ conceptTags: conceptTags({ awareness_stage: "unaware", cialdini_lever: "social_proof" }) });
+  assert.equal(competitorTemperatureFit(problemAwareWithProof, "cold"), "match");
+});
+
+test("rankByWinnerSignalAndIntent: for cold, an OFFER-bearing proven winner sinks BELOW an offer-less problem ad", () => {
+  const angles: CompetitorAngle[] = [
+    fitAngle({ hook: "offer winner", offer: "40% off", winnerTier: "proven", winnerScore: 100 }),
+    fitAngle({ hook: "cold problem ad", offer: null, winnerTier: "building", winnerScore: 10, conceptTags: conceptTags({ awareness_stage: "problem_aware", cialdini_lever: null }) }),
+  ];
+  const ranked = rankByWinnerSignalAndIntent(angles, { audience_temperature: "cold", purpose: "test-to-find-winner" });
+  assert.equal(ranked[0].hook, "cold problem ad", "the offer-less cold ad leads even though the offer ad is a higher-tier winner");
+  assert.equal(ranked[1].hook, "offer winner");
 });

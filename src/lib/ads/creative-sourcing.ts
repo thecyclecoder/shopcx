@@ -53,6 +53,66 @@ export function awarenessStageMatchesTemperature(
   return AWARENESS_STAGES_BY_TEMPERATURE[temperature].includes(awarenessStage);
 }
 
+/** True iff a competitor ad's FOCAL POINT reads WARM/HOT (retargeting) rather than cold prospecting
+ *  (CEO 2026-07-17). A cold audience is a scroll-stopping stranger — an ad whose focus is an OFFER,
+ *  a MECHANISM, or a CUSTOMER REVIEW is almost certainly aimed at a warm/hot (already-aware) audience,
+ *  so it's the wrong imitation base for a cold creative. Signals (any → true):
+ *   - an OFFER is present (`angle.offer`) — a discount is the clearest warm/hot tell;
+ *   - the Cialdini lever is `social_proof` (review-focal), `scarcity` (offer/urgency), or `authority`
+ *     (credential/mechanism-focal);
+ *   - the archetype / angle text names an offer / review / mechanism / guarantee / comparison focus. */
+export function competitorFocalIsWarmHot(angle: Pick<CompetitorAngle, "offer" | "conceptTags">): boolean {
+  if (angle.offer && angle.offer.trim().length > 0) return true;
+  const ct = angle.conceptTags ?? null;
+  const lever = (ct?.cialdini_lever ?? "").toLowerCase();
+  if (lever === "social_proof" || lever === "scarcity" || lever === "authority") return true;
+  const text = `${ct?.archetype ?? ""} ${ct?.angle ?? ""}`.toLowerCase();
+  return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|mechanism|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
+}
+
+/** True iff a competitor ad's FOCAL POINT reads COLD/prospecting — curiosity or problem→solution, the
+ *  awareness-opening angles a stranger responds to. Signals (any → true): a cold awareness_stage
+ *  (unaware / problem_aware), or an archetype/angle naming curiosity / a problem-agitate / a story hook. */
+export function competitorFocalIsCold(angle: Pick<CompetitorAngle, "conceptTags">): boolean {
+  const ct = angle.conceptTags ?? null;
+  if (awarenessStageMatchesTemperature(ct?.awareness_stage, "cold")) return true;
+  const text = `${ct?.archetype ?? ""} ${ct?.angle ?? ""}`.toLowerCase();
+  return /curiosity|question|myth|mistake|secret|problem|agitate|struggle|frustrat|founder.?story|story|before.?you|what.?if|did.?you.?know/.test(text);
+}
+
+/** How well a competitor ad fits as an imitation base for a target audience temperature:
+ *   - `match`    — the ad's focal point is RIGHT for this temperature (cold ⇒ curiosity/problem, no
+ *                  offer; warm/hot ⇒ offer/mechanism/review OR a warm/hot awareness stage).
+ *   - `mismatch` — the ad's focal point is WRONG (cold ⇒ an offer/mechanism/review ad; warm/hot ⇒ a
+ *                  pure curiosity/problem ad) — ranked to the TAIL, never used unless nothing better.
+ *   - `neutral`  — no clear focal signal (an untagged skeleton with no offer) — eligible, mid-priority.
+ *  A `mismatch` is a PARTITION not a FILTER (the shelf is never starved), but for cold it is what keeps
+ *  Dahlia from imitating an offer/retargeting ad — closing the 2026-07-17 cold_offer_leak at its source
+ *  (an offer-bearing ad is warm/hot; scrubbing its offer downstream was the band-aid). PURE. */
+export function competitorTemperatureFit(
+  angle: Pick<CompetitorAngle, "offer" | "conceptTags">,
+  temperature: CreativeIntent["audience_temperature"],
+): "match" | "neutral" | "mismatch" {
+  // Precedence: an OFFER is a hard warm/hot tell (a discount ad is retargeting, whatever its stage);
+  // then the AWARENESS STAGE is the direct audience signal (it wins over a softer lever/archetype hint
+  // — a problem_aware ad is cold-appropriate even if it also uses social proof); the focal archetype /
+  // lever is the tiebreak when the stage is untagged.
+  const hasOffer = !!(angle.offer && angle.offer.trim());
+  const stage = angle.conceptTags?.awareness_stage;
+  if (temperature === "cold") {
+    if (hasOffer) return "mismatch"; // an offer ⇒ warm/hot audience, never a cold prospecting base
+    if (awarenessStageMatchesTemperature(stage, "cold")) return "match"; // unaware / problem_aware
+    if (competitorFocalIsWarmHot(angle)) return "mismatch"; // no cold stage + a review/mechanism focal
+    if (competitorFocalIsCold(angle)) return "match"; // curiosity / problem archetype
+    return "neutral"; // untagged, no offer — eligible, mid-priority
+  }
+  // warm / hot
+  if (awarenessStageMatchesTemperature(stage, temperature)) return "match";
+  if (hasOffer || competitorFocalIsWarmHot(angle)) return "match"; // offer / review / mechanism fit warm/hot
+  if (competitorFocalIsCold(angle)) return "mismatch"; // a pure cold curiosity/problem ad is a weak warm/hot base
+  return "neutral";
+}
+
 /** Sort rank for `winner_tier` — the longitudinal signal from `creative_skeletons` (deriveWinnerTier
  *  in [[./creative-skeleton]]). Higher rank = ranked earlier. `proven` (≥21d persistence) leads,
  *  `building` (≥7d) follows, `new` (default, freshly-seen) below, `retired` (still_active=false)
@@ -257,16 +317,19 @@ export function rankByWinnerSignalAndIntent(
     return (b.daysRunning ?? 0) - (a.daysRunning ?? 0);
   });
   if (!intent) return ranked;
-  const onTemp: CompetitorAngle[] = [];
-  const offTemp: CompetitorAngle[] = [];
+  // Partition by temperature FIT (focal point), winner-tier order preserved within each bucket:
+  // match (right focal point) → neutral (no signal) → mismatch (wrong focal point — e.g. an offer ad
+  // for a cold audience) at the tail. This is what steers Dahlia to imitate a curiosity/problem ad
+  // for cold and an offer/mechanism/review ad for warm/hot (CEO 2026-07-17), replacing the
+  // awareness_stage-only partition (which ignored the offer + archetype focal signals).
+  const match: CompetitorAngle[] = [];
+  const neutral: CompetitorAngle[] = [];
+  const mismatch: CompetitorAngle[] = [];
   for (const a of ranked) {
-    if (awarenessStageMatchesTemperature(a.conceptTags?.awareness_stage, intent.audience_temperature)) {
-      onTemp.push(a);
-    } else {
-      offTemp.push(a);
-    }
+    const fit = competitorTemperatureFit(a, intent.audience_temperature);
+    (fit === "match" ? match : fit === "mismatch" ? mismatch : neutral).push(a);
   }
-  return [...onTemp, ...offTemp];
+  return [...match, ...neutral, ...mismatch];
 }
 
 /**
