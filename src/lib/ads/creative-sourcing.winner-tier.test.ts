@@ -60,6 +60,7 @@ interface SkeletonRow {
   resume_advertising: boolean | null;
   winner_tier: string | null;
   winner_score: number | null;
+  media_type: string | null;
   concept_tags: ConceptTags | null;
 }
 
@@ -81,6 +82,7 @@ function skel(over: Partial<SkeletonRow>): SkeletonRow {
     resume_advertising: true,
     winner_tier: "new",
     winner_score: 0,
+    media_type: "static",
     concept_tags: null,
     ...over,
   };
@@ -467,4 +469,13 @@ test("rankByWinnerSignalAndIntent: for cold, an OFFER-bearing proven winner sink
   const ranked = rankByWinnerSignalAndIntent(angles, { audience_temperature: "cold", purpose: "test-to-find-winner" });
   assert.equal(ranked[0].hook, "cold problem ad", "the offer-less cold ad leads even though the offer ad is a higher-tier winner");
   assert.equal(ranked[1].hook, "offer winner");
+});
+
+test("getProvenCompetitorAngles: a VIDEO skeleton is EXCLUDED — Dahlia imitates static ads only", async () => {
+  const { admin } = makeAdmin([
+    skel({ hook: "static winner", media_type: "static", days_running: 50, concept_tags: conceptTags({}) }),
+    skel({ hook: "processed video winner", media_type: "video", days_running: 90, concept_tags: conceptTags({}) }),
+  ]);
+  const { angles } = await getProvenCompetitorAngles(admin, WS, { productId: PRODUCT, limit: 10 });
+  assert.deepEqual(angles.map((a) => a.hook), ["static winner"], "the video ad must not reach the imitation shelf");
 });
