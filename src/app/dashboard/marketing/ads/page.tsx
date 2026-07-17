@@ -43,7 +43,7 @@ export default function AdsLandingPage() {
     <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Ads</h1>
       <p className="mb-8 text-sm text-zinc-500">
-        Generate direct-response paid-social video ads from your product intelligence.
+        Ads are authored autonomously by Dahlia and graded by Max — browse the library below and open any ad for its full preview + lifecycle.
       </p>
 
       <div className="mb-8 grid gap-4 sm:grid-cols-3">
@@ -53,20 +53,6 @@ export default function AdsLandingPage() {
         >
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Avatars</h2>
           <p className="mt-1 text-xs text-zinc-500">Manage the on-camera spokesperson characters.</p>
-        </Link>
-        <Link
-          href="/dashboard/marketing/ads/new"
-          className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
-        >
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">New ad</h2>
-          <p className="mt-1 text-xs text-zinc-500">Build a new ad — avatar, product, angle, script.</p>
-        </Link>
-        <Link
-          href="/dashboard/marketing/ads/upload"
-          className="rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
-        >
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Upload static ad</h2>
-          <p className="mt-1 text-xs text-zinc-500">Skip generation — upload a finished image, get landers + AI copy.</p>
         </Link>
         <Link
           href="/dashboard/marketing/ads/winning"
@@ -96,11 +82,7 @@ export default function AdsLandingPage() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : campaigns.length === 0 ? (
         <p className="text-sm text-zinc-500">
-          No ads yet.{" "}
-          <Link href="/dashboard/marketing/ads/new" className="text-indigo-600 hover:underline">
-            Create your first ad
-          </Link>
-          .
+          No ads yet — Dahlia&apos;s creatives will appear here as they&apos;re authored.
         </p>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
