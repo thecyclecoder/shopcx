@@ -22,6 +22,7 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { findVariant } from "@/lib/product-variants";
 import { CustomizeClient } from "./_components/CustomizeClient";
 import type {
   CartDraft,
@@ -171,17 +172,18 @@ export default async function CustomizePage({ searchParams }: PageProps) {
           let freeGiftPriceCents: number | null = null;
           let freeGiftProductId: string | null = null;
           if (rule.free_gift_variant_id) {
-            const { data: giftVariant } = await admin
-              .from("product_variants")
-              .select("price_cents, compare_at_price_cents, product_id")
-              .eq("id", rule.free_gift_variant_id)
-              .maybeSingle();
+            // free_gift_variant_id is TEXT (UUID or Shopify numeric); findVariant
+            // resolves by shape so a numeric id doesn't 22P02 on product_variants.id.
+            const giftVariant = await findVariant(cart.workspace_id, {
+              id: rule.free_gift_variant_id,
+              shopifyVariantId: rule.free_gift_variant_id,
+            });
             if (giftVariant) {
               freeGiftPriceCents = Math.max(
                 giftVariant.compare_at_price_cents || 0,
                 giftVariant.price_cents || 0,
               );
-              freeGiftProductId = (giftVariant.product_id as string | null) || null;
+              freeGiftProductId = giftVariant.product_id || null;
             }
           }
           pricingRule = {

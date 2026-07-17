@@ -58,17 +58,32 @@ export async function POST(
     .single();
 
   if (!customer) {
+    // Get-or-create is non-atomic (check-then-insert): two concurrent widget
+    // messages for the same new email both miss the select above and both try
+    // to insert, and the loser hits the UNIQUE(workspace_id, email) constraint
+    // (Postgres 23505). Upsert with ignoreDuplicates so the loser inserts
+    // nothing (returns no row); then re-read the winner's row by (ws, email).
     const { data: created } = await admin
       .from("customers")
-      .insert({
+      .upsert({
         workspace_id: workspaceId,
         email: normalizedEmail,
         first_name: first_name || name || null,
         last_name: last_name || null,
-      })
+      }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
       .select("id")
-      .single();
-    customer = created;
+      .maybeSingle();
+    if (created) {
+      customer = created;
+    } else {
+      const { data: raced } = await admin
+        .from("customers")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("email", normalizedEmail)
+        .maybeSingle();
+      customer = raced;
+    }
   } else if (first_name || last_name) {
     // Backfill name on existing customer if missing
     const { data: existing } = await admin.from("customers")

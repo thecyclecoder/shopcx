@@ -14,6 +14,8 @@ interface PostBody {
   channel?: "sms" | "email";
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function maskEmail(email: string): string {
   const [local, domain] = email.split("@");
   if (!domain) return "•••";
@@ -28,6 +30,7 @@ function maskPhone(phone: string): string {
 export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as PostBody;
   if (!body.session_id) return NextResponse.json({ error: "missing_session_id" }, { status: 400 });
+  if (!UUID_RE.test(body.session_id)) return NextResponse.json({ error: "invalid_session" }, { status: 400 });
 
   const admin = createAdminClient();
   const { data: session } = await admin

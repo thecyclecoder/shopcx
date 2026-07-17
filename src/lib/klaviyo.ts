@@ -13,6 +13,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 
 /**
@@ -622,28 +623,14 @@ export async function getReviewsForProducts(
 ): Promise<{ id: string; product_id: string | null; reviewer_name: string; rating: number; title: string; body: string; summary: string; featured: boolean }[]> {
   const admin = createAdminClient();
 
-  // Resolve mixed Shopify/internal IDs to internal product UUIDs.
+  // Resolve mixed Shopify/internal IDs to internal product UUIDs. fix-1-mixed-id-resolver —
+  // Fix 1 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md retires the mixed-ID
+  // `.or()` filter string (security agent flagged as injection · medium in the sibling reviews.ts
+  // callsite) in favor of two parameter-safe `.in()` queries composed inside the shared helper.
   let internalIds: string[] = [];
   if (productIds.length) {
-    // Split by id-shape: a Shopify numeric ID compared against the uuid `id` column throws 22P02
-    // and fails the whole query (no products resolved). Only UUIDs → `id`, only non-UUIDs →
-    // `shopify_product_id` (same split transform-subscription.ts / image-fallback.ts use).
-    const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-    const productUuids = productIds.filter(isUuid);
-    const productShopifyIds = productIds.filter((s) => !isUuid(s));
-    let prodQuery = admin
-      .from("products")
-      .select("id, shopify_product_id")
-      .eq("workspace_id", workspaceId);
-    if (productUuids.length && productShopifyIds.length) {
-      prodQuery = prodQuery.or(`id.in.(${productUuids.join(",")}),shopify_product_id.in.(${productShopifyIds.map(s => `"${s}"`).join(",")})`);
-    } else if (productUuids.length) {
-      prodQuery = prodQuery.in("id", productUuids);
-    } else {
-      prodQuery = prodQuery.in("shopify_product_id", productShopifyIds);
-    }
-    const { data: products } = await prodQuery;
-    internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
+    const products = await resolveProductsByMixedIds(admin, workspaceId, productIds);
+    internalIds = [...new Set(products.map((p) => p.id).filter(Boolean))];
     if (!internalIds.length) return [];
   }
 
