@@ -119,6 +119,7 @@ export const BUILDER_WORKER_KINDS = [
   "ceo-authorized-out-of-leash",
   "media-buyer",
   "ad-creative",
+  "ad-creative-copy-author",
   "media-buyer-grade",
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
@@ -171,6 +172,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "research": "growth", // Rhea's scout box session (crons carry `personaKind:'research'`)
   "media-buyer": "growth", // Bianca — daily creative test cadence under Max
   "ad-creative": "growth", // Dahlia — bin-stocking under Max
+  "ad-creative-copy-author": "growth", // Dahlia — per-creative Max copy-author box session (DAHLIA_COPY_MODE=author gate, dahlia-copy-author-box-session)
   "media-buyer-grade": "growth", // Bianca / Max grading pass
   "ads-supervisor": "growth", // ads-supervisor-3h-agent — 3h supervisory pass over Bianca + Dahlia (owner: Max)
 };

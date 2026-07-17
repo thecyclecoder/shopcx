@@ -1,0 +1,297 @@
+/**
+ * Unit tests for the dahlia-copy-author-box-session Phase 3 wire-in.
+ *
+ * Pins the discriminated outcomes of the pure copy-author revise loop + its parsing / temperature
+ * / pack-broadcast helpers without needing Supabase or a real box session — the caller (stockProduct)
+ * threads a stubbed dispatcher, so the loop's behaviour is deterministically testable:
+ *
+ *   (a) DAHLIA_COPY_MODE unset OR dispatcher absent → resolveAudienceTemperature is never in play
+ *       and stockProduct's `authorModeEngaged` guard collapses to false (asserted by the shape of
+ *       the guard — a compile-time invariant we exercise via the resolveAudienceTemperature +
+ *       parseAuthorVerdict + runCopyAuthorSession seams).
+ *   (b) Dispatcher returns a good verdict → runCopyAuthorSession returns { kind:'ok' } with the
+ *       parsed AuthorModeCopy on the first attempt.
+ *   (c) self_score.total < AUTHOR_SELF_SCORE_FLOOR → the loop dispatches ONE more time (revise),
+ *       and if that second attempt succeeds, returns ok with attempts=2.
+ *   (d) Exhaustion after the revise cap → { kind:'exhausted', reason:'…' }.
+ *   (e) Parse failure → same fail-closed treatment as (c) — trigger a revise; after cap → exhausted.
+ *   (f) Cold-audience emit that trips hasColdOfferLeak → revise trigger.
+ *
+ * Runs via: npx tsx --test src/lib/ads/creative-agent.author.test.ts
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+import type { CopyAuthorSessionDispatcher, CopyAuthorSessionInputs } from "./creative-agent";
+import {
+  AUTHOR_SELF_SCORE_FLOOR,
+  MAX_COPY_AUTHOR_REVISE_ATTEMPTS,
+  authorCopyPack,
+  parseAuthorVerdict,
+  resolveAudienceTemperature,
+  runCopyAuthorSession,
+} from "./creative-agent";
+import type { ScoredAngle } from "./creative-brief";
+
+// ── Fixtures ────────────────────────────────────────────────────────────────────────────────────
+
+function angle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
+  return {
+    hook: "Energy that lasts, without the crash",
+    source: "review_cluster",
+    leadBenefit: "steady 4-hour energy",
+    acquisitionPower: 5,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: {},
+    ...overrides,
+  } as ScoredAngle;
+}
+
+function sessionInputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAuthorSessionInputs {
+  return {
+    brief: { imageRefs: [], productTitle: "Superfood Tabs", supportingBenefits: [], proofStack: [] } as unknown as CopyAuthorSessionInputs["brief"],
+    angle: angle(),
+    imagePath: "/tmp/creative-author-fixture.jpg",
+    rubricText: "# rubric — fixture",
+    audienceTemperature: "warm",
+    competitorDna: null,
+    ...overrides,
+  };
+}
+
+function envelope(overrides: Record<string, unknown> = {}): string {
+  const defaultScore = { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: ["ok"] };
+  const body = {
+    headline: "Clean energy — no crash",
+    primaryText: "Steady 4-hour energy from adaptogens. No jitters, no crash. Shop now 👉",
+    description: "Adaptogens · steady energy",
+    audience_temperature: "warm",
+    self_score: defaultScore,
+    ...overrides,
+  };
+  return JSON.stringify(body);
+}
+
+function scriptedDispatcher(replies: Array<{ resultText: string; isError?: boolean } | Error>): {
+  dispatch: CopyAuthorSessionDispatcher;
+  calls: Array<{ prompt: string; imagePath: string }>;
+} {
+  const calls: Array<{ prompt: string; imagePath: string }> = [];
+  let i = 0;
+  const dispatch: CopyAuthorSessionDispatcher = async (prompt, imagePath) => {
+    calls.push({ prompt, imagePath });
+    const reply = replies[i++];
+    if (!reply) throw new Error(`no scripted reply for dispatch call #${calls.length}`);
+    if (reply instanceof Error) throw reply;
+    return { resultText: reply.resultText, isError: reply.isError === true };
+  };
+  return { dispatch, calls };
+}
+
+// ── resolveAudienceTemperature ───────────────────────────────────────────────────────────────────
+
+test("resolveAudienceTemperature: competitor source → cold", () => {
+  assert.equal(resolveAudienceTemperature({ source: "competitor", acquisitionPower: 1 }), "cold");
+});
+
+test("resolveAudienceTemperature: acquisitionPower ≥ 8 → cold (scroll-stopper)", () => {
+  assert.equal(resolveAudienceTemperature({ source: "review_cluster", acquisitionPower: 8 }), "cold");
+  assert.equal(resolveAudienceTemperature({ source: "review_cluster", acquisitionPower: 10 }), "cold");
+});
+
+test("resolveAudienceTemperature: own-brand mid-acquisition → warm", () => {
+  assert.equal(resolveAudienceTemperature({ source: "review_cluster", acquisitionPower: 7 }), "warm");
+  assert.equal(resolveAudienceTemperature({ source: "benefit", acquisitionPower: 0 }), "warm");
+});
+
+// ── parseAuthorVerdict ──────────────────────────────────────────────────────────────────────────
+
+test("parseAuthorVerdict: happy path → ok with all fields", () => {
+  const result = parseAuthorVerdict(envelope());
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.equal(result.verdict.headline, "Clean energy — no crash");
+    assert.equal(result.verdict.audience_temperature, "warm");
+    assert.equal(result.verdict.selfScore.total, 10);
+    assert.deepEqual(result.verdict.selfScore.evidence, ["ok"]);
+  }
+});
+
+test("parseAuthorVerdict: extracts JSON from a fenced ```json block", () => {
+  const wrapped = `Here is your verdict:\n\n\`\`\`json\n${envelope()}\n\`\`\`\n`;
+  const result = parseAuthorVerdict(wrapped);
+  assert.equal(result.kind, "ok");
+});
+
+test("parseAuthorVerdict: missing headline → invalid", () => {
+  const result = parseAuthorVerdict(envelope({ headline: "" }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "missing_headline");
+});
+
+test("parseAuthorVerdict: bad audience_temperature → invalid", () => {
+  const result = parseAuthorVerdict(envelope({ audience_temperature: "lukewarm" }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_audience_temperature/);
+});
+
+test("parseAuthorVerdict: sub-score out of {0,1,2} → invalid", () => {
+  const bad = envelope({ self_score: { lf8: 3, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 11, evidence: [] } });
+  const result = parseAuthorVerdict(bad);
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "bad_lf8_subscore");
+});
+
+test("parseAuthorVerdict: mismatched total (declared ≠ summed) → invalid", () => {
+  const bad = envelope({ self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 9, evidence: [] } });
+  const result = parseAuthorVerdict(bad);
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /total_mismatch/);
+});
+
+test("parseAuthorVerdict: no JSON at all → invalid", () => {
+  const result = parseAuthorVerdict("The model refused. Try again.");
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "no_json_object_in_reply");
+});
+
+// ── authorCopyPack ──────────────────────────────────────────────────────────────────────────────
+
+test("authorCopyPack: broadcasts Dahlia's single caption across the pack min", () => {
+  const pack = authorCopyPack({ headline: "A", primaryText: "B", description: "C" });
+  assert.equal(pack.headlines.length, 4);
+  assert.equal(pack.primaryTexts.length, 4);
+  assert.ok(pack.headlines.every((h) => h === "A"));
+  assert.ok(pack.primaryTexts.every((p) => p === "B"));
+  assert.equal(pack.description, "C");
+});
+
+test("authorCopyPack: clips strings past META_CAPS (Meta hard limits — headline 40 / primary 600 / description 90)", () => {
+  const long = "x".repeat(2000);
+  const pack = authorCopyPack({ headline: long, primaryText: long, description: long });
+  assert.ok(pack.headlines[0].length <= 40, `headline over cap: ${pack.headlines[0].length}`);
+  assert.ok(pack.primaryTexts[0].length <= 600, `primary over cap: ${pack.primaryTexts[0].length}`);
+  assert.ok(pack.description.length <= 90, `description over cap: ${pack.description.length}`);
+});
+
+// ── runCopyAuthorSession — the revise loop ──────────────────────────────────────────────────────
+
+test("runCopyAuthorSession (b): a good verdict on the first attempt → ok with attempts=1", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 1);
+    assert.equal(calls.length, 1);
+    // The first attempt's prompt must NOT include the revise directive.
+    assert.doesNotMatch(calls[0].prompt, /REVISE — this is the ONE external revise/);
+  }
+});
+
+test("runCopyAuthorSession (c): self-score below floor → ONE revise, then ok on attempt 2", async () => {
+  const belowFloor = 5; // AUTHOR_SELF_SCORE_FLOOR is 6 — 5 = fail
+  const bad = envelope({ self_score: { lf8: 1, schwartz: 1, cialdini: 1, hopkins: 1, sugarman: 1, total: belowFloor, evidence: [] } });
+  assert.ok(belowFloor < AUTHOR_SELF_SCORE_FLOOR); // sanity guard on the test's fixture math
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: bad }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.equal(calls.length, 2);
+    // The revise prompt MUST cite the self-score reason (so Dahlia knows what to fix).
+    assert.match(calls[1].prompt, /self_score_below_floor/);
+    assert.match(calls[1].prompt, /REVISE — this is the ONE external revise/);
+  }
+});
+
+test("runCopyAuthorSession (d): still-bad after the revise cap → exhausted with the last reason", async () => {
+  const bad = envelope({ self_score: { lf8: 0, schwartz: 0, cialdini: 0, hopkins: 0, sugarman: 0, total: 0, evidence: [] } });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: bad }, { resultText: bad }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.equal(outcome.attempts, 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS);
+    assert.equal(calls.length, 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS);
+    assert.match(outcome.reason, /self_score_below_floor/);
+  }
+});
+
+test("runCopyAuthorSession (e): parse failure → treated as a revise trigger; second attempt succeeds → ok", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: "not JSON" }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /parse_failed/);
+  }
+});
+
+test("runCopyAuthorSession (e): dispatcher isError=true → treated as a revise trigger", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: "", isError: true }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.match(calls[1].prompt, /session_error/);
+  }
+});
+
+test("runCopyAuthorSession (e): dispatcher THROWS → treated as a revise trigger (no unhandled rejection)", async () => {
+  const { dispatch, calls } = scriptedDispatcher([new Error("boom"), { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.match(calls[1].prompt, /dispatch_threw/);
+  }
+});
+
+test("runCopyAuthorSession (f): cold audience emit that leaks offer language → revise trigger; second attempt cleans up → ok", async () => {
+  const leaky = envelope({
+    headline: "Save 25% today",
+    primaryText: "Free shipping on cold energy — buy now.",
+    description: "Shop now",
+    audience_temperature: "cold",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+  });
+  const clean = envelope({
+    headline: "Energy without the 3pm slump",
+    primaryText: "Adaptogens that steady your afternoon focus.",
+    description: "Steady focus",
+    audience_temperature: "cold",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+  });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: leaky }, { resultText: clean }]);
+  const outcome = await runCopyAuthorSession(sessionInputs({ audienceTemperature: "cold" }), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.verdict.headline, "Energy without the 3pm slump");
+    assert.match(calls[1].prompt, /cold_offer_leak/);
+  }
+});
+
+test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, and the DATA block", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
+  await runCopyAuthorSession(sessionInputs({ audienceTemperature: "cold", imagePath: "/tmp/pinned.jpg" }), dispatch);
+  const prompt = calls[0].prompt;
+  assert.match(prompt, /IMAGE: \/tmp\/pinned\.jpg/);
+  assert.match(prompt, /AUDIENCE_TEMPERATURE: cold/);
+  assert.match(prompt, /===BEGIN_AUTHOR_DATA_v1===/);
+  assert.match(prompt, /===END_AUTHOR_DATA_v1===/);
+});
+
+test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY when supplied", async () => {
+  const withDna = scriptedDispatcher([{ resultText: envelope() }]);
+  await runCopyAuthorSession(
+    sessionInputs({
+      angle: angle({ source: "competitor" }),
+      competitorDna: { advertiser: "Rival Co", mechanism: "10x collagen bond", proof: null },
+    }),
+    withDna.dispatch,
+  );
+  assert.match(withDna.calls[0].prompt, /COMPETITOR_DNA:/);
+
+  const withoutDna = scriptedDispatcher([{ resultText: envelope() }]);
+  await runCopyAuthorSession(sessionInputs(), withoutDna.dispatch);
+  assert.doesNotMatch(withoutDna.calls[0].prompt, /COMPETITOR_DNA:/);
+});
