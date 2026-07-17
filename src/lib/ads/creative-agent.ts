@@ -1034,7 +1034,22 @@ async function stockProduct(
       commodity: false,
       hasRealPhoto: false,
       reasons: [`proven competitor ad (${c.daysRunning ?? "?"}d running${c.resumeAdvertising === true ? ", still running" : c.resumeAdvertising === false ? ", paused" : ""}${c.advertiser ? `, ${c.advertiser}` : ""}${c.heat != null ? `, heat ${c.heat}` : ""})`],
-      raw: { imageUrl: c.imageUrl, mechanism: c.mechanismClaim, proof: c.proof } as Record<string, unknown>,
+      raw: {
+        imageUrl: c.imageUrl,
+        // `mechanism` retained for existing consumers (planCompositionTransfer + the
+        // stockProduct competitorDna dispatch below); `mechanismClaim` mirrors it under the
+        // canonical name the CompetitorAngle type uses. The other four slots (hook / framework
+        // / proof / offer) + advertiser are threaded so buildCreativeBrief can populate
+        // `brief.competitorDna` without a second DB read (dahlia-preserve-competitor-copy-dna-
+        // debranded Phase 1).
+        mechanism: c.mechanismClaim,
+        mechanismClaim: c.mechanismClaim,
+        proof: c.proof,
+        hook: c.hook,
+        framework: c.framework,
+        offer: c.offer,
+        advertiser: c.advertiser,
+      } as Record<string, unknown>,
     }));
   const ranked = [...competitorAngles, ...ownAngles];
 
