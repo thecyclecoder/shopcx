@@ -1,0 +1,17 @@
+{
+  "//": "Scoped typecheck for the box's tsx entrypoints. The main tsconfig excludes scripts/, so scripts/builder-worker.ts (the systemd entrypoint that runs every autonomous lane) is NEVER typechecked. That gap shipped June's dropped-inputs bug (PR #1971). This config extends the main tsconfig, drops the scripts/ exclusion, and includes exactly the box entrypoints — the same set _check-box-parses.ts parse-gates. Wired into predeploy via `npm run check:box-types`. Keep `include` byte-identical to BOX_ENTRYPOINTS in scripts/_check-box-parses.ts — scripts/_check-box-entrypoints-in-sync.ts (Phase 2) enforces this.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "scripts/builder-worker.ts",
+    "scripts/spec-test-browser-check.ts",
+    "scripts/spec-test-db-probe.ts",
+    "scripts/spec-test-sandbox.ts",
+    "scripts/improve-box-tools.ts",
+    "scripts/seed-product-tools.ts",
+    "scripts/box-watchdog.ts"
+  ],
+  "exclude": ["node_modules", "remotion"]
+}

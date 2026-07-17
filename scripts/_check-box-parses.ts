@@ -88,8 +88,10 @@ const externalizeUnresolvable = {
       if (hit) return { path: hit };
       // Non-resolvable first-party path (e.g. a `@/...` alias esbuild can't map,
       // or a missing file) → external so the PARSE of everything else proceeds.
-      // We're checking syntax, not module resolution; tsc already covers missing
-      // imports.
+      // We're checking syntax, not module resolution; the sibling `check:box-types`
+      // gate (scripts/_check-box-types.ts + tsconfig.box.json) genuinely typechecks
+      // the same BOX_ENTRYPOINTS list under tsc — that's what covers missing
+      // imports, wrong-arity calls, and wrong-property references.
       return { path: args.path, external: true };
     });
   },

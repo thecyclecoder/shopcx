@@ -698,6 +698,11 @@ interface Job {
   // post-ship standing lane (which still hits prod). The column-typed field is preferred over
   // parsing `instructions` — Phase 2's runSpecTestJob reads it directly.
   preview_url?: string | null;
+  // agent_jobs columns the claim RPC returns but the executor lanes carry through on a
+  // pause/resume (see the `pr_url: job.pr_url ?? null` carries at needs_input / needs_approval
+  // parks). `error` is BUILD_GATE_FAILED[…] context the same lanes read to route repairs.
+  pr_url?: string | null;
+  error?: string | null;
 }
 
 // worker-self-update-force-on-unknown-queued-kind Phase 1: mirror of the `Job['kind']` union above,
@@ -2382,8 +2387,8 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
     // Attempt 2 (when `repair` is configured AND we have a prior session): use the cheap same-session
     // re-prompt instead of a fresh re-investigation. Attempt 1 + any other path is the fresh `run`.
-    const useRepair = attempt > 1 && opts.repair && last?.session;
-    const r = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
+    const useRepair: boolean = attempt > 1 && !!opts.repair && !!last?.session;
+    const r: T = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
     last = r;
     if (opts.onRun) await opts.onRun(r, attempt);
     parsed = extractJson<Record<string, unknown>>(r.resultText);
@@ -2591,7 +2596,7 @@ async function update(id: string, patch: Record<string, unknown>) {
   // fetch failed / ECONNRESET) with bounded backoff and THROWS AgentJobsUpdateError on the
   // terminal case so the caller cannot continue as if the write succeeded. A bug-shaped throw
   // (TypeError, PGRST* return) fails fast — retrying a bug just delays the surface.
-  const finalPatch = { ...patch, updated_at: new Date().toISOString() };
+  const finalPatch: Record<string, unknown> = { ...patch, updated_at: new Date().toISOString() };
   const attemptedStatus = typeof finalPatch.status === "string" ? (finalPatch.status as string) : null;
   // spec-timecard-chokepoint-instrumentation Phase 4 — wait-span tracking. When this update() is a
   // status transition, read the current status BEFORE the write to detect entry into and exit from
@@ -5099,7 +5104,7 @@ function isMaxOverloaded(text: string): boolean {
 // BEFORE batching), and the sequential apply loop (each verdict → same per-verdict validators + DB writes
 // as before). A candidate absent from the batched array falls back to a synthetic `{}` verdict — the
 // lane's existing "unparseable → escalate" branch handles it exactly like today's parse miss.
-async function runBatchedDirectorSession<TVerdict extends Record<string, unknown>, TCandidate>(
+async function runBatchedDirectorSession<TVerdict extends object, TCandidate>(
   job: Job,
   tag: string,
   lane: string,
@@ -5232,7 +5237,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
 
   // ada-standing-pass-reasoning-gate Phase 3 — pre-filter first, then batch the ambiguous residual into
   // ONE Max session per pass (was: one cold session per ambiguous row, each re-hydrating the brain).
-  type AmbiguousRow = { row: (typeof rows)[number]; prefilter: sd.DriftPreFilterVerdict | null };
+  type AmbiguousRow = { row: (typeof rows)[number]; prefilter: import("../src/lib/spec-drift").DriftPreFilterVerdict | null };
   const ambiguous: AmbiguousRow[] = [];
 
   for (const row of rows) {
@@ -5245,7 +5250,7 @@ async function runSpecDriftSupervision(job: Job, tag: string): Promise<string> {
     // Deterministic pre-filter (ada-standing-pass-reasoning-gate Phase 1) — resolve most drift rows
     // without spawning a Max session. Only a `ambiguous` verdict (path 404 + no symbols to grep) falls
     // through to the session for the residual reasoning. Never throws.
-    let prefilter: sd.DriftPreFilterVerdict | null = null;
+    let prefilter: import("../src/lib/spec-drift").DriftPreFilterVerdict | null = null;
     try {
       prefilter = await sd.driftPreFilterPhase(job.workspace_id, row.spec_slug, row.phase_index);
     } catch (e) {
@@ -8941,7 +8946,8 @@ async function runPlanJob(job: Job) {
       what?: string;
       milestone?: string;
       blocked_by?: unknown;
-      phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string }>;
+      human_review?: string;
+      phases?: Array<{ title?: string; body?: string; verification?: string; why?: string; what?: string; checks?: unknown }>;
     };
     const { authorSpecRowStructured, MissingVerificationError, EmptyPhaseBodyError, MissingIntentError } = await import("../src/lib/author-spec");
     const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
@@ -12129,8 +12135,13 @@ async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: 
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-test", sandbox: "max", timeout: SPEC_TEST_TIMEOUT_MS });
 }
 
-type SpecTestCheck = { text: string; verdict: string; category?: string; evidence?: string; screenshot?: string };
-type SpecTestSummary = { auto_pass: number; auto_fail: number; needs_human: number; inconclusive: number };
+// Use the shared shapes from src/lib/spec-test-runs.ts so this file's checks
+// interop directly with mergeDeterministicWithLlmChecks (which types its inputs
+// with the same SpecTestCheck / CheckVerdict). A local looser copy caused a
+// signature drift where verdict was `string` here but `CheckVerdict` there.
+type SpecTestCheck = import("../src/lib/spec-test-runs").SpecTestCheck;
+type SpecTestSummary = import("../src/lib/spec-test-runs").SpecTestSummary;
+type CheckVerdict = import("../src/lib/spec-test-runs").CheckVerdict;
 
 // The spec-test skill is contracted to emit ONLY the result JSON as its final message, fenced-or-last.
 // In practice a Max session sometimes wraps it in prose, so we extract defensively: whole-message parse
@@ -12187,11 +12198,13 @@ function normalizeSpecTest(parsed: Record<string, unknown> | null): {
   const parsedChecks: SpecTestCheck[] = rawChecks.map((c) => {
     const o = (c || {}) as Record<string, unknown>;
     const v = String(o.verdict || "inconclusive");
-    const verdict = ["pass", "fail", "needs_human", "inconclusive"].includes(v) ? v : "inconclusive";
+    const verdict: CheckVerdict = v === "pass" || v === "fail" || v === "needs_human" || v === "inconclusive" ? v : "inconclusive";
+    const catRaw = o.category ? String(o.category) : "";
+    const category = catRaw === "auto" || catRaw === "needs_human" || catRaw === "inconclusive" ? catRaw : undefined;
     return {
       text: String(o.text || "(unnamed check)"),
       verdict,
-      category: o.category ? String(o.category) : undefined,
+      category,
       evidence: o.evidence ? String(o.evidence) : undefined,
       // Browser checks (spec-test-deep-verification Phase 1) carry the evidence screenshot's storage path.
       screenshot: o.screenshot ? String(o.screenshot) : undefined,
@@ -12412,7 +12425,9 @@ async function runSpecTestJob(job: Job) {
               await enqueueRegressionJob(db, {
                 workspaceId: job.workspace_id,
                 specSlug: reg.slug,
-                fromSpecTestRunId: null,
+                title: reg.title,
+                failing: reg.failing.map((f) => ({ text: f.text, evidence: f.evidence, check_key: f.check_key })),
+                runAt: reg.run_at,
               });
             }
           } catch (e) {
@@ -15632,12 +15647,73 @@ async function runGodModeJob(job: Job) {
 // spec X?"). When the CEO coaches her, she proposes a `coaching` card; on approval the worker writes a
 // director_instruction (coachDirector) that's injected into her future decisions — so coaching actually
 // changes what she does next. Mirrors runDeveloperMessageJob; reuses runDevAskClaude (the Max runner).
+// Free-form director-authored card. Fields typed defensively (the DB row is JSONB and
+// each director's prompt template names its own field set — see the DISPATCH_TABLE +
+// per-type template blocks). Typed fields keep the executor loop's `a.result ?? "…"`
+// and `String(a.reasoning ?? …)` inferences on `string` instead of `unknown`; the
+// index signature keeps a director-specific field the executor doesn't know about
+// readable without a cast.
+interface CoachAction {
+  id?: string;
+  type?: string;
+  status?: string;
+  result?: string;
+  summary?: string;
+  reasoning?: string;
+  cmd?: string;
+  preview?: string;
+  reversibility?: string;
+  irreversible?: boolean;
+  founderAsk?: string;
+  actionType?: string;
+  leashRail?: string;
+  errorClass?: string;
+  guidance?: string;
+  triggeringPattern?: string;
+  targetKind?: string;
+  tier?: string | null;
+  rollup?: number;
+  evidence?: string;
+  slug?: string;
+  content?: string;
+  title?: string;
+  category?: string;
+  derived_from_ticket_id?: string;
+  ticket_id?: string;
+  remedy?: unknown;
+  spec_seed?: unknown;
+  ad_account_id?: string;
+  snapshot_date?: string;
+  payload?: unknown;
+  meta_page_id?: string;
+  meta_account_id?: string;
+  meta_adset_id?: string;
+  meta_campaign_id?: string;
+  meta_ad_id?: string;
+  crisis_id?: string;
+  variant_id?: string;
+  available?: boolean | string;
+  jobId?: string;
+  reason?: string;
+  phases?: unknown;
+  critical?: boolean;
+  deferred?: boolean;
+  shortCircuit?: boolean;
+  gateBuildsUntil?: string;
+  criticalSpecs?: string[];
+  holdBuilds?: string[];
+  steps?: string[];
+  slack_ts?: string;
+  slack_channel?: string;
+  [key: string]: unknown;
+}
+
 interface CoachThreadRow {
   id: string;
   director_function: string;
   messages: { role: "user" | "assistant"; content: string }[];
   box_session_id: string | null;
-  pending_actions: Record<string, unknown>[];
+  pending_actions: CoachAction[];
   // ada-slack-chat: a 'slack'-sourced thread posts Ada's reply + cards back to #cto-ada.
   source: string;
   slack_channel_id: string | null;
@@ -15656,7 +15732,7 @@ async function loadCoachThread(threadId: string): Promise<CoachThreadRow | null>
     director_function: (row.director_function as string) ?? "platform",
     messages: Array.isArray(row.messages) ? (row.messages as { role: "user" | "assistant"; content: string }[]) : [],
     box_session_id: (row.box_session_id as string | null) ?? null,
-    pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as Record<string, unknown>[]) : [],
+    pending_actions: Array.isArray(row.pending_actions) ? (row.pending_actions as CoachAction[]) : [],
     source: (row.source as string) ?? "web",
     slack_channel_id: (row.slack_channel_id as string | null) ?? null,
     slack_thread_ts: (row.slack_thread_ts as string | null) ?? null,
@@ -15855,7 +15931,7 @@ async function applySpecStatusActionInline(
   const did: string[] = [];
   try {
     if (phases.length) {
-      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      const priorPhases = (existing?.phase_states ?? []) as import("../src/lib/spec-card-state").SpecCardPhaseState[];
       const byIndex = new Map(priorPhases.map((p) => [p.index, p]));
       for (const p of phases) {
         const prior = byIndex.get(p.index);
@@ -15866,7 +15942,7 @@ async function applySpecStatusActionInline(
       await cs.markSpecCardStatus(workspaceId, slug, rollup, merged, audit);
       did.push(`phases ${phases.map((p) => `#${p.index + 1}=${p.status}`).join(", ")} → ${rollup}`);
     } else if (effectiveStatus) {
-      const priorPhases = (existing?.phase_states ?? []) as cs.SpecCardPhaseState[];
+      const priorPhases = (existing?.phase_states ?? []) as import("../src/lib/spec-card-state").SpecCardPhaseState[];
       await cs.markSpecCardStatus(workspaceId, slug, effectiveStatus, priorPhases, audit);
       did.push(`status → ${effectiveStatus}`);
     }
@@ -16865,7 +16941,12 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
   if (isDestructiveDecision) {
     try {
-      await writeDestructiveActionDecisionGrade(db, {
+      // Cast: writeDestructiveActionDecisionGrade takes a locally-declared MinimalAdmin
+      // (Promise<...> return on chained builder). The real supabase-js client resolves to
+      // the same shape via PromiseLike + a runtime `.then`, but the structural mismatch
+      // hits a TS "type instantiation too deep" cycle. `never` is a targeted structural
+      // adapter — the SDK is not shipped from this file so widening it here isn't right.
+      await writeDestructiveActionDecisionGrade(db as never, {
         workspaceId: job.workspace_id,
         agentJobId: job.id,
         directorFunction,
@@ -20426,7 +20507,7 @@ async function runDirectorGradeJob(job: Job) {
           .eq("id", decision.agent_job_id)
           .maybeSingle();
         if (jobRow) {
-          const j = jobRow as {
+          const j = jobRow as unknown as {
             id: string;
             kind: string;
             spec_slug: string | null;
@@ -20487,7 +20568,7 @@ async function runDirectorGradeJob(job: Job) {
           .limit(200);
         // Prefer the latest terminal row per spec_slug.
         const bySlug = new Map<string, { status: string; pr_url: string | null }>();
-        for (const row of ((specJobs as Array<{ spec_slug: string; status: string; pr_url: string | null; created_at: string }>) || [])) {
+        for (const row of ((specJobs as unknown as Array<{ spec_slug: string; status: string; pr_url: string | null; created_at: string }>) || [])) {
           if (!bySlug.has(row.spec_slug)) bySlug.set(row.spec_slug, { status: row.status, pr_url: row.pr_url });
         }
         for (const slug of c.spec_slugs) {
@@ -21710,7 +21791,7 @@ async function runResearchJob(job: Job) {
     captures = await captureBatch(
       rows.map((r) => ({ id: r.id, url: r.url })),
       stamp,
-      (done, total, url) => noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }),
+      (done, total, url) => { void noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }); },
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
