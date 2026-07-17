@@ -141,6 +141,37 @@ On a `hard_gate_pass=false` verdict, you MAY set `persuasion_score` and `persuas
 `null` (the caption is going back for revise; the rubric doesn't matter). On a
 `hard_gate_pass=true` verdict, both MUST be present.
 
+## SCROLL-STOP sub-scores (three named dimensions, 0-2 each, RECORDED, never block)
+
+The 0-10 persuasion score is a single number — great for a rolled-up read, useless for
+correlating a specific scroll-stop failure mode against realized CAC. So you ALSO judge three
+NAMED scroll-stop dimensions, each 0 / 1 / 2, and cite what you saw in a short `evidence` array.
+These are the granular signal future CAC-correlation work reads off `ad_creative_copy_qc_verdicts`
+to answer "did a low `first_line_earns_the_second` predict a high cold-audience CAC?".
+
+**⚠️ These sub-scores are ADVISORY only. Do NOT fail `hard_gate_pass` on a low scroll_stop score
+— those blocks live in `hard_gates`.** A caption can score 0/0/0 on scroll_stop AND still pass
+every hard gate; the bin insert lands and the row records the numbers for later correlation. The
+whole spec exists to prevent scroll-stop from becoming a Goodhart objective — the moment a low
+sub-score blocks the pipeline, it stops being an honest signal and becomes something to game.
+
+| dimension | 0 (absent) | 1 (weak) | 2 (strong) |
+|---|---|---|---|
+| **`headline_readable_in_3_frames`** — the top-line copy is legible within ≤3 feed-scroll frames of Meta thumb-cadence viewing (a real buyer flicks through Reels/Feed at ~1 second per card; text you can't read in that window doesn't earn a scroll-stop) | unreadable at thumb pace (too small, low contrast against the plate, dropped into a crowded band, or the wordmark competes) | legible but requires stopping to parse (unusually long headline, tight leading, a soft contrast that reads only after a second look) | reads in one glance — a scanner in the first frame lands the entire headline without slowing down |
+| **`visual_hierarchy_supports_headline`** — there is a single dominant visual anchor that doesn't fight the headline for attention (one hero object, one focal face, one focal transformation — not three competing anchors that split the buyer's eye) | anchor competes with the headline (a busy pack shot, a competing overlay, a face that looks past rather than at the copy zone, two focal points side-by-side) | anchor coexists with the headline but doesn't lift it (functional composition, no visual pull toward the copy) | anchor supports the headline — a leading line, focal contrast, or gaze direction pulls the eye toward the top-line copy |
+| **`first_line_earns_the_second`** — the primary-text opener creates enough curiosity / stakes / specificity to keep the reader past the '…See more' fold (≈125 chars into `PRIMARY:` in Meta feed rendering); a flat generic opener earns nothing | generic first line ("Discover our best-selling…", "Try our…"); the reader has no reason to expand | a specific claim or one hook lever that could pull ("42 women tried it — here's what happened") but not stacked with a second beat | multiple beats compounding in the first line — a specific number + a curiosity gap + a benefit anchor, so the reader must keep going to resolve the tension |
+
+For each dimension, give it 0 / 1 / 2 based on what you see in the image and read in the copy —
+NOT on what Dahlia claimed in `DAHLIA_SELF_SCORE`. Cite the phrase you're rewarding (or the
+defect you're marking down) in `scroll_stop.evidence` — one short line per non-zero score, so a
+downstream reader can inspect the reasoning. The evidence list is REQUIRED (may be empty on an
+all-zeros verdict, but MUST be present as a `[]`).
+
+`scroll_stop` is REQUIRED on EVERY verdict — pass and fail. A `hard_gate_pass=false` bounce
+still carries the scroll_stop sub-scores (they're advisory, not gate-conditioned) so the row on
+disk records what the copy WAS like even when the safety rails failed. Never omit the field and
+never set it to `null` — the .ts parser refuses fail-closed on a missing or null `scroll_stop`.
+
 ## Output contract — ONLY the CopyQaVerdict JSON
 
 Your final message is ONE JSON object — no prose before, no prose after, no code fences (if
@@ -170,6 +201,16 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
       "hopkins: '3-week pilot with 42 women' — one specific stack"
     ]
   },
+  "scroll_stop": {
+    "headline_readable_in_3_frames": 2,
+    "visual_hierarchy_supports_headline": 1,
+    "first_line_earns_the_second": 1,
+    "evidence": [
+      "headline_readable_in_3_frames: 'Cleaner morning energy' set large, high contrast against a neutral plate",
+      "visual_hierarchy_supports_headline: single hero mug anchors but pack sticker competes for the eye",
+      "first_line_earns_the_second: primary opens 'Drink one cup and get through the afternoon' — a specific promise, not stacked with a second beat"
+    ]
+  },
   "verdict_reason": "clean caption grounded in the brief; one specific proof stack lifts the score above the generic-pitch floor"
 }
 ```
@@ -182,8 +223,12 @@ Rules for the envelope:
   forces `hard_gate_pass:false` (the worker treats a mismatched pair as a defect and fails
   closed).
 - `persuasion_score` / `persuasion_rubric` — required on a pass, MAY be `null` on a fail.
-- `evidence` — a NON-EMPTY string array on a pass (cite the phrases you rewarded); an empty
-  array is fine on a fail.
+- `scroll_stop` — REQUIRED on EVERY verdict (pass AND fail). Never `null`, never omitted; the
+  three named sub-scores are each 0 / 1 / 2 and the `evidence` array MUST be present (may be
+  `[]` if you gave every dimension 0). Advisory only — a low sub-score NEVER blocks
+  `hard_gate_pass`.
+- `evidence` (persuasion_rubric) — a NON-EMPTY string array on a pass (cite the phrases you
+  rewarded); an empty array is fine on a fail.
 - `verdict_reason` — one plain-English line summarizing WHY you passed or failed. On a fail,
   this is the string threaded into Dahlia's revise prompt, so make it specific ("primary text
   invents a '35% of women' stat the brief doesn't ground").

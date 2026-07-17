@@ -32,6 +32,14 @@ const HARNESS_SIGNATURES: readonly RegExp[] = [
   // Common "you asked for a script that doesn't exist" phrasings from other package managers.
   /missing script:/i,
   /unknown command:/i,
+  // A MIS-AUTHORED grep pattern (invalid regex) — ripgrep rejects it before scanning any code, so the
+  // "fail" reflects a broken check bullet, not a code regression. The exact class the deterministic runner
+  // hit on `debrandForOurBrand(` (an unescaped paren → an invalid regex): the code was correct, the check's
+  // pattern was malformed. Route to needs_human so a typo in a check never spawns a Bo fix phase for
+  // already-correct code (a permanent stall — the fix can't satisfy an unsatisfiable pattern).
+  /regex parse error/i,
+  /error parsing (?:regex|pattern)/i,
+  /unclosed (?:group|character class)/i,
 ];
 
 // isHarnessCommandFailure — does this evidence string carry a HARNESS/COMMAND-failure signature?
