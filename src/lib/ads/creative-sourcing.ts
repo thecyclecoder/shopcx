@@ -46,6 +46,11 @@ export interface CompetitorAngle {
   heat: number | null;
   destinationDomain: string | null;
   imageUrl: string | null;
+  /** dahlia-deeper-competitor-selection Phase 2 — the still-running signal
+   *  (`creative_skeletons.resume_advertising`). Used together with `daysRunning` + `heat` to
+   *  derive per-angle acquisitionPower in `scoreCompetitorAcquisitionPower` (kills the old
+   *  hardcoded `acquisitionPower=9`, so Dahlia can tell a deep+hot angle from a shallow one). */
+  resumeAdvertising: boolean | null;
 }
 
 export interface CompetitorAngleOptions {
@@ -111,7 +116,48 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     heat: r.heat == null ? null : Number(r.heat),
     destinationDomain: (r.destination_domain as string | null) ?? null,
     imageUrl: (r.image_url as string | null) ?? null,
+    resumeAdvertising: typeof r.resume_advertising === "boolean" ? (r.resume_advertising as boolean) : null,
   }));
+}
+
+/**
+ * dahlia-deeper-competitor-selection Phase 2 — derive per-angle `acquisitionPower` (0..10)
+ * from the actual creative_skeletons signal set instead of the old hardcoded `acquisitionPower=9`.
+ *
+ * The score is a piecewise base on `daysRunning` × `resumeAdvertising` (the depth-of-proof + is-
+ * still-running signals) with a `heat` tiebreak (how discriminating the skeleton library rated the
+ * ad). This lets Dahlia's `stockProduct` sort competitor imitation bases by DEPTH — a 60d+
+ * still-running high-heat angle outranks a 30d dormant low-heat one — instead of flattening every
+ * competitor angle to a single constant. The tiebreak keeps the metric monotonic: same depth-bucket
+ * → higher heat wins; a dormant/low-heat row costs 1 point (never below 0).
+ *
+ * Contract (pinned by creative-sourcing.acquisition-power.test.ts):
+ *  - 60d+ AND resume=true            → base 9  (deeply-proven + still running)
+ *  - 60d+ but resume≠true            → base 7  (deep but paused — weaker imitation base)
+ *  - 30–59d AND resume=true          → base 7  (shallow but still running)
+ *  - 30–59d and resume≠true          → base 5  (shallow + paused — a 30d ad that may already be dead)
+ *  - <30d or null daysRunning        → base 4  (below the shallow floor)
+ *  Heat tiebreak (skeleton heat/dormancy signal):
+ *   +1 when heat ≥ 4 (capped at 10);  −1 when heat ≤ 1 or heat null (floored at 0).
+ */
+export function scoreCompetitorAcquisitionPower(angle: {
+  daysRunning: number | null;
+  heat: number | null;
+  resumeAdvertising: boolean | null;
+}): number {
+  const days = angle.daysRunning ?? 0;
+  const stillRunning = angle.resumeAdvertising === true;
+  let base: number;
+  if (days >= 60 && stillRunning) base = 9;
+  else if (days >= 60) base = 7;
+  else if (days >= 30 && stillRunning) base = 7;
+  else if (days >= 30) base = 5;
+  else base = 4;
+  const heat = angle.heat;
+  let bonus = 0;
+  if (heat != null && heat >= 4) bonus = 1;
+  else if (heat == null || heat <= 1) bonus = -1;
+  return Math.min(10, Math.max(0, base + bonus));
 }
 
 /** Ranked proven competitor angles from the creative-skeleton library — the strongest idea pool (real
