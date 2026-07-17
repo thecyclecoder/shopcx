@@ -334,6 +334,18 @@ export function derivePhaseStatus(row: {
   return "planned"; // nothing built yet
 }
 
+/**
+ * spec-read-eff-board-context — the pure DB-row → SpecRow mapper the pooled getSpec / listSpecs
+ * paths use to reconstruct a `SpecRow` from raw `to_jsonb(s)` + `to_jsonb(p)` payloads returned by
+ * the server-side RPCs (get_spec_with_phases / list_specs_with_phases / get_spec_board_context).
+ * Exported so the get_spec_board_context caller (brain-roadmap.getSpec) can reuse the SAME mapper
+ * on the RPC's `boardable_specs` array — otherwise a per-column re-map would drift the moment a
+ * new `public.specs` column lands and one caller forgot to update. Pure; no I/O.
+ */
+export function specRowFromDbForPool(db: unknown, phases: unknown[]): SpecRow {
+  return specRowFromDb(db as SpecRowDb, phases as SpecPhaseRow[]);
+}
+
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   // Derive every phase's lifecycle status from provenance at the SDK read boundary, so EVERY consumer of
   // getSpec/listSpecs (board, gates, chained-phase picker) sees the derived status — never the stamped one.
@@ -404,7 +416,29 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
  * and re-fired the RPC every tick. Writers still invalidate proactively via `invalidateSpecCache`,
  * so 15s is only an upper bound on staleness for out-of-module writes (raw SQL / admin scripts).
  */
-const SPEC_CACHE_TTL_MS = 15_000;
+let SPEC_CACHE_TTL_MS = 15_000;
+
+/**
+ * spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ *
+ * The warm long-lived worker (scripts/builder-worker.ts) calls this AFTER
+ * [[pg-pool]] `startSpecChangedListener` reports the LISTEN slot is active — event-driven
+ * eviction lets the worker hold a much longer TTL because every write publishes a pg_notify
+ * the LISTEN drops onto `invalidateSpecCache`, so a stale row can never survive across a write
+ * even inside the raised TTL. Capped at 1 hour so a misconfig can never park an unbounded TTL.
+ * Ephemeral `claude -p` subprocesses do NOT call this (they don't run LISTEN) — they keep the
+ * default 15s TTL which the polled refresh already covers per Phases 1–2.
+ */
+export function setSpecCacheTTLMs(ms: number): void {
+  const CAP_MS = 60 * 60 * 1000; // 1 hour hard cap
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  SPEC_CACHE_TTL_MS = Math.min(ms, CAP_MS);
+}
+
+/** Read the current TTL — used by tests + [[brain-roadmap]] `setWrapperCacheTTLMs` for symmetry. */
+export function getSpecCacheTTLMs(): number {
+  return SPEC_CACHE_TTL_MS;
+}
 
 type SpecCacheEntry = { row: SpecRow | null; expiresAt: number };
 const specCache = new Map<string, SpecCacheEntry>();
@@ -450,6 +484,20 @@ export function invalidateSpecCache(workspaceId: string, slug: string): void {
       // Best-effort — a listener error must never wedge a mutator path.
     }
   }
+  // spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Broadcast the invalidation to every other process running `LISTEN spec_changed` (the warm
+  // long-lived worker + any sibling warm process). Fire-and-forget: pg_notify errors are swallowed
+  // inside notifySpecChanged so a raw INSERT/UPDATE writer can NEVER fail because the notification
+  // rail was unreachable. No-op when the pool is unavailable (dev / edge) — the in-memory eviction
+  // above still fires locally, and the ephemeral subprocess's short-TTL cache is the fallback.
+  void (async () => {
+    try {
+      const { notifySpecChanged } = await import("@/lib/pg-pool");
+      await notifySpecChanged(workspaceId, slug);
+    } catch {
+      /* best-effort */
+    }
+  })();
 }
 
 /** Test-only cache reset. Never called by production code paths. */
@@ -523,13 +571,30 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
-  const admin = createAdminClient();
-  const { data, error } = await admin.rpc("list_specs_with_phases", {
-    p_workspace_id: workspaceId,
-    p_scope: filter.scope ?? "all",
-  });
-  if (error) throw error;
-  const rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  const scope = filter.scope ?? "all";
+  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Pooled path (box worker + any runtime with pooler creds): one pooled query, no PostgREST
+  // preamble. `null` = pool unavailable / query error → fall through to the supabase-js RPC path
+  // (same fail-open contract as `getSpec` above).
+  let rows: Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }> | null = null;
+  try {
+    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
+    if (pooled !== null) {
+      rows = pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
+    }
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
+  if (rows === null) {
+    const admin = createAdminClient();
+    const { data, error } = await admin.rpc("list_specs_with_phases", {
+      p_workspace_id: workspaceId,
+      p_scope: scope,
+    });
+    if (error) throw error;
+    rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
+  }
   let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
   if (filter.status) out = out.filter((r) => r.status === filter.status);
   if (filter.owner) out = out.filter((r) => r.owner === filter.owner);

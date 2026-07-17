@@ -25322,6 +25322,44 @@ async function main() {
     }
   })();
 
+  // spec_changed LISTEN wiring — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  //
+  // The warm long-lived worker holds hot getSpec/getRoadmap wrapper caches whose 15s default TTL
+  // exists only to survive its own 5s poll loop. Phase 4 flips that: open ONE dedicated pooled
+  // LISTEN connection on `spec_changed` (published by [[../src/lib/specs-table]] `invalidateSpecCache`
+  // on every write) and evict the matching (workspace, slug) entry via the SAME chokepoint the
+  // in-process writers already use — so any cross-process write (another warm process, a raw SQL
+  // admin script) drops the cache within a network round-trip. Only when the LISTEN slot is
+  // confirmed active do we raise the wrapper TTL to minutes; a LISTEN failure (no pool creds /
+  // transaction-mode pooler / transient) leaves the pre-Phase-4 15s TTL as the safety-net poll.
+  //
+  // Fire-and-forget, best-effort: any LISTEN error must NEVER block worker startup. The polled
+  // 5s refresh is the durable fallback.
+  void (async () => {
+    try {
+      const { startSpecChangedListener, isSpecChangedListenerActive } = await import("../src/lib/pg-pool");
+      const { invalidateSpecCache, setSpecCacheTTLMs } = await import("../src/lib/specs-table");
+      const { setWrapperCacheTTLMs } = await import("../src/lib/brain-roadmap");
+      const ok = await startSpecChangedListener((workspaceId, slug) => {
+        // The published notification originates from ANOTHER process's invalidateSpecCache (or the
+        // same process re-arriving via the DB — safely idempotent). Call THIS process's
+        // invalidateSpecCache so the specs-table inner cache + every subscribed wrapper (getSpec,
+        // getRoadmap, workspace-maps) evict in lockstep — one code path, one chokepoint.
+        invalidateSpecCache(workspaceId, slug);
+      });
+      if (ok && isSpecChangedListenerActive()) {
+        const WARM_TTL_MS = 5 * 60 * 1000; // 5 minutes — the poll is now the safety-net, not the primary refresh
+        setSpecCacheTTLMs(WARM_TTL_MS);
+        setWrapperCacheTTLMs(WARM_TTL_MS);
+        console.log(`[spec-changed-listener] active — spec caches raised to ${WARM_TTL_MS / 1000}s (poll safety-net stays every ${POLL_MS}ms)`);
+      } else {
+        console.log("[spec-changed-listener] inactive (pool unavailable / LISTEN refused) — 15s TTL + poll fallback stays in effect");
+      }
+    } catch (e) {
+      console.warn("[spec-changed-listener] wiring failed (continuing with poll fallback):", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Deploy-time node_ancestry re-sync (claim-rpc-kill-switch-enforcement Phase 1): the box
   // worker restarts after a self-update, so recomputing the DB mirror of the canonical node
   // registry here keeps public.claim_agent_job's kill-switch cascade in sync with any newly-added
