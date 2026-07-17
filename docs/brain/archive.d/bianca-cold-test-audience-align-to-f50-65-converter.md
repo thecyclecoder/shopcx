@@ -1,0 +1,1 @@
+- **Bianca cold-test audience aligned to the proven F50-65 converter** · verified 2026-07-17 · → [[../lifecycles/bianca-m1-cold-read]]

@@ -1,0 +1,1 @@
+- **Bianca honors iteration_policies scale-edit rails (cooldown + per-account daily-budget-delta ceiling)** · verified 2026-07-17 · → [[../libraries/media-buyer-agent]]

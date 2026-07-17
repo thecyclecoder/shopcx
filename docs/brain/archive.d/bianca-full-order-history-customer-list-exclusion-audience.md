@@ -1,0 +1,1 @@
+- **Full-order-history customer-list exclusion audience (all sources, hashed, refreshed)** · verified 2026-07-17 · → [[../tables/media_buyer_test_cohorts]]
