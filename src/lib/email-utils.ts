@@ -84,3 +84,34 @@ export function cleanEmailForDisplay(html: string): string {
   cleaned = stripEmailSignature(cleaned);
   return cleaned || html; // Fallback to original if stripping removed everything
 }
+
+/**
+ * Canonicalize an email address so two strings that resolve to the same
+ * real inbox compare equal. Pure — no I/O.
+ *
+ * - Always trim + lowercase.
+ * - For gmail.com / googlemail.com ONLY: remove all "." from the local part,
+ *   drop everything from the first "+" in the local part, and normalize the
+ *   domain to gmail.com.
+ * - For every other domain: return the trimmed-lowercased address as-is.
+ *   Providers other than Gmail generally treat dots as significant, so
+ *   stripping them would fuse distinct inboxes.
+ *
+ * Malformed input (no "@", empty local, empty domain) is returned lowercased
+ * + trimmed so the caller can still compare it as a plain string — this
+ * mirrors what an exact-string lookup would see today.
+ */
+export function canonicalizeEmail(email: string): string {
+  const trimmed = (email ?? "").trim().toLowerCase();
+  if (!trimmed) return trimmed;
+  const atIdx = trimmed.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx === trimmed.length - 1) return trimmed;
+  const localRaw = trimmed.slice(0, atIdx);
+  const domain = trimmed.slice(atIdx + 1);
+  const isGmail = domain === "gmail.com" || domain === "googlemail.com";
+  if (!isGmail) return `${localRaw}@${domain}`;
+  const plusIdx = localRaw.indexOf("+");
+  const localNoPlus = plusIdx >= 0 ? localRaw.slice(0, plusIdx) : localRaw;
+  const localNoDots = localNoPlus.replace(/\./g, "");
+  return `${localNoDots}@gmail.com`;
+}

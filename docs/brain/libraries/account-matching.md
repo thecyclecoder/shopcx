@@ -98,10 +98,12 @@ _No internal callers found via static scan._
   branch now rides its own index:
   - name → `idx_customers_name_match (workspace_id, first_name, last_name)`
   - phone → `idx_customers_phone (workspace_id, phone)` partial
-  - email → `idx_customers_email_trgm` gin trgm (added 2026-06-14)
+  - email → `idx_customers_email_canonical (workspace_id, email_canonical)` partial (added `20261104120000`)
   Added in `supabase/migrations/20260706130000_account_matching_indexes.sql`. **If you add a new
   match branch, add a matching index and keep it a separate query** — never fold it back into one
   `.or()`.
+
+- **Email branch matches by `email_canonical`, not exact email-local ilike (identity-gmail-canonicalization Phase 4).** The branch now computes the source customer's canonical via [[email-utils]] `canonicalizeEmail` and runs `.eq('email_canonical', src)` — Gmail dot/plus variants and `googlemail.com` aliases resolve to the same key and surface as email-signal candidates for the pure grader, while non-Gmail providers stay distinct (dots are significant elsewhere). The wedge is ticket **54f0f29e** (Julie Metz): her support email `metz.julie323@gmail.com` and her real record `metzjulie323@gmail.com` were invisible to the exact-local branch, so Sol/June truthfully but wrongly reported "no such account" against her active 33-order sub. The widening also rescues the 404 historical dot-variant shadows already in the DB (Phase 3 prevents NEW shadows). Grader is unchanged — an email-signal-only candidate still grades LOW (no auto-link), so Sol/June still confirm before proposing.
 
 ## Related
 
