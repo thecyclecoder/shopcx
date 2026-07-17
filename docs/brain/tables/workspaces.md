@@ -71,6 +71,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `slack_team_name` | `text` | ✓ |  |
 | `slack_connected_at` | `timestamptz` | ✓ |  |
 | `slack_ada_channel_id` | `text` | ✓ | the `#cto-ada` channel for two-way chat with Ada — set by the `/ada-here` slash command ([[../lifecycles/ada-slack-chat]]) |
+| `media_buyer_digest_enabled` | `bool` | — | default: `true`. When `false`, suppresses the media-buyer (Bianca) Slack digest Max posts to `#director-growth-max` after each media-buyer pass (`deliverMediaBuyerDigest` early-returns) — does NOT affect the media-buyer pass, meta_insights sync, or any other Max post. Set `false` for Superfoods (founder silenced the ~2-hourly digest, mb-digest-workspace-toggle). |
 | `slack_growth_director_channel_id` | `text` | ✓ | the private `#director-growth-max` channel the Growth Director (Max) posts media-buyer shadow digests into ([[../specs/media-buyer-director-slack-digest]]). Mirrors `slack_ada_channel_id`'s posting path — a private channel needs only `chat:write` + bot membership for one-way posts (no fresh scope grant, no reinstall). Seeded to `C0BFW5YUVC1` for Superfoods by the Phase 1 migration; the bot is already a member. Phase 2 delivers the digest; two-way founder chat is deferred (adding `message.groups` later is a lighter lift — `groups:history` is already granted). |
 | `shopify_multipass_secret_encrypted` | `text` | ✓ | AES-256-GCM |
 | `amplifier_api_key_encrypted` | `text` | ✓ | AES-256-GCM |
