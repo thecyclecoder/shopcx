@@ -462,7 +462,7 @@ test("computeMediaBuyerPlan — inactive cohort → no replenish, summary flags 
     baseInputs({
       cohort: cohort({ isActive: false }),
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
       currentTestCohortSize: 0,
     }),
@@ -477,9 +477,9 @@ test("computeMediaBuyerPlan — cohort deficit → replenish up to deficit, capp
       currentTestCohortSize: 1,
       cohortTargetCount: 3, // deficit=2
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -494,11 +494,115 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
     baseInputs({
       currentTestCohortSize: DEFAULT_TEST_COHORT_TARGET,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
   assert.equal(plan.replenish.length, 0);
+});
+
+// ── Phase 2 — Andromeda concept-diversity gate ───────────────────────────────
+
+test("computeMediaBuyerPlan — replenish SKIPS a ready candidate whose concept_tag ∈ liveConceptTags (a)", () => {
+  // live = transformation + curiosity; ready in bin order = [transformation, mechanism, objection]
+  // deficit = 2 → picks mechanism + objection (skips the duplicate transformation).
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation", "curiosity"]),
+      readyToTest: [
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-mechanism", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+        { ad_campaign_id: "cmp-objection", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "objection" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-mechanism");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-objection");
+  assert.equal(plan.replenishDiagnostic, null); // deficit was filled — no diagnostic
+});
+
+test("computeMediaBuyerPlan — every ready candidate is a duplicate → 0 replenish + replenishDiagnostic (b)", () => {
+  // live = [transformation, transformation] (both same tag), ready = [transformation], deficit = 2
+  // → zero picks + diagnostic flags no-diverse-candidate so the runner emits
+  // media_buyer_replenish_no_diverse_candidate.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation"]), // 2 rows same tag → the SET has 1 entry
+      readyToTest: [
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 0);
+  assert.ok(plan.replenishDiagnostic, "diagnostic must fire");
+  assert.equal(plan.replenishDiagnostic!.kind, "no_diverse_candidate");
+  assert.deepEqual(plan.replenishDiagnostic!.liveConceptTags, ["transformation"]);
+  assert.deepEqual(plan.replenishDiagnostic!.readyTagsAvailable, ["transformation"]);
+  assert.ok(plan.summary.includes("no diverse concept candidates"));
+});
+
+test("computeMediaBuyerPlan — NULL concept_tag candidates never conflict with Andromeda tokens (c)", () => {
+  // Deterministic-mode / pre-Phase-1 rows carry concept_tag=null. NULL is its own bucket that
+  // never conflicts with an Andromeda token, so live=[transformation] with ready=[null, null]
+  // both fill the cohort (byte-identical to pre-Phase-2 behavior when everything is NULL).
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation"]),
+      readyToTest: [
+        { ad_campaign_id: "cmp-null-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-null-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-null-1");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-null-2");
+  assert.equal(plan.replenishDiagnostic, null);
+});
+
+test("computeMediaBuyerPlan — empty liveConceptTags + tagged ready bin → picks in bin order (Phase 1 unaffected)", () => {
+  // With no live tags yet (first pass under Phase 2), the gate is a no-op — pick every
+  // ready row in bin order regardless of tag. Guards against a false-positive skip when
+  // liveConceptTags is empty.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2
+      liveConceptTags: new Set(),
+      readyToTest: [
+        { ad_campaign_id: "cmp-t", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-t");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-m");
+  assert.equal(plan.replenishDiagnostic, null);
+});
+
+test("computeMediaBuyerPlan — a same-pass pick reserves its tag against a later duplicate in the SAME bin", () => {
+  // First pass: live is empty, ready in bin order = [transformation, transformation, mechanism].
+  // After the first pick lands transformation, the second transformation is skipped and
+  // mechanism fills the second slot — the same-pass reservation keeps a single-pass cohort
+  // internally diverse.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2
+      liveConceptTags: new Set(),
+      readyToTest: [
+        { ad_campaign_id: "cmp-t1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-t2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-t1");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-m");
 });
 
 // ── Per-test-adset cohort (CEO 2026-07-12) ──────────────────────────────────
@@ -517,10 +621,10 @@ test("computeMediaBuyerPlan — per-test cohort derives target from ceiling÷per
       currentTestCohortSize: 1, // 1 live → deficit 3
       cohortTargetCount: undefined, // per-test ignores the override; derives from budget math
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -746,7 +850,7 @@ test("buildShadowActivityRows — replenish action → media_buyer_replenished_t
       currentTestCohortSize: 1,
       cohortTargetCount: 3,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -799,7 +903,7 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
       currentTestCohortSize: 1,
       cohortTargetCount: 2,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );

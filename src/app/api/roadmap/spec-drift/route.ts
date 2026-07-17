@@ -14,7 +14,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
@@ -34,8 +34,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "bad action" }, { status: 400 });
   }
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

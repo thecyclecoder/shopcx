@@ -12,6 +12,28 @@ SSR Supabase client for server components.
 async function createClient()
 ```
 
+### `getAuthedUser` — function
+
+```ts
+async function getAuthedUser(opts?: { fresh?: boolean }): Promise<{ user: AuthedUser | null }>
+```
+
+Tag: `db-load-route-auth-helper`. Shared auth entrypoint for API-route handlers
+(`src/app/api/**/route.ts`). Wraps `createClient()` + `supabase.auth.getClaims()`
+so the JWT is verified locally against the cached JWKS with zero auth-table
+reads per request (falls back to `getUser()` internally on legacy HS256 keys).
+Returns the same `{ user }` shape routes already read via
+`const { data: { user } } = await supabase.auth.getUser()` — all 528 routes
+are migrated to this helper (see [[../archive.d/db-load-route-auth-getclaims-codemod]])
+via a mechanical `const { user } = await getAuthedUser()` swap. Pass `{ fresh: true }` when the
+route needs a User field not present in the JWT payload (falls back to the
+server-side `getUser()` for that one call site).
+
+Distinct from the same-named `getAuthedUser` in [[auth]] (`src/lib/auth.ts`,
+tag `db-load-auth-cache`) which is a React `cache()`-wrapped `getUser()` gate
+for dashboard SSR + workspace resolution — that helper deliberately stays on
+`getUser()` for authz freshness. This one is the API-route replacement.
+
 ## Callers
 
 - `src/app/api/auth/google-ads/callback/route.ts`

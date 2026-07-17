@@ -10,7 +10,7 @@ The exports live in one module so the pass is unit-testable end-to-end without t
 
 - `runAdsSupervisorPass(admin, workspaceId, nowMs?)` → `AdsSupervisorResult` — the entry point the box lane calls. Read-only against every SDK **except** `authorSpecRowStructured` (the structured spec-authoring chokepoint) and `postAsGrowthDirector` (the founder's Slack digest).
 - `composeAdsSupervisorDigest(result)` — pure composer; exported for unit tests that pin the "no-op suppressed" behaviour.
-- `deliverAdsSupervisorDigest(admin, workspaceId, result)` — wraps `postAsGrowthDirector` + records a `director_activity` audit row.
+- `deliverAdsSupervisorDigest(admin, workspaceId, result)` — wraps `postAsGrowthDirector` + records a `director_activity` audit row. **Skips the post** (no Slack) when `hasContent=false` (no-op suppression), when the workspace has **`ads_supervisor_digest_enabled=false`** (the per-workspace off switch — ads-supervisor-digest-toggle; silenced for Superfoods while Dahlia is held OFF and the thin-bin drift is expected noise — see [[../tables/workspaces]]), or when no channel is configured. The pass / drift detection / fix-spec authoring are unaffected — only the notification is gated.
 - `hasAnyLf8(copyLower)` + `destinationMatchesProduct(destination, productTitle)` — the two pure predicates behind the live-ad QA check (exported so tests pin their exact semantics).
 - `readExecutedIterationActionsForAdsets(admin, workspaceId, adsetIds)` — Bianca-coverage read. Requires `status='executed'` per Phase 2 of [[../specs/media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded]] — a decided-but-unfired action does NOT satisfy coverage. Exported so tests pin the argv-level filter without touching Supabase.
 

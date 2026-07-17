@@ -11,7 +11,7 @@
  */
 import { NextResponse } from "next/server";
 import sharp from "sharp";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fetchCreative } from "@/lib/adlibrary";
 
@@ -28,10 +28,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const workspaceId = url.searchParams.get("workspaceId");
   const u = url.searchParams.get("u");
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!workspaceId || !u)
     return NextResponse.json({ error: "workspaceId and u required" }, { status: 400 });

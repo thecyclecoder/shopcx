@@ -11,15 +11,14 @@
  * in the form data.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { revalidatePath } from "next/cache";
 
 const BUCKET = "product-media";
 
 async function authorize(req: NextRequest, workspaceId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { ok: false as const, status: 401, error: "Unauthorized" };
   const admin = createAdminClient();
   const { data: member } = await admin.from("workspace_members")

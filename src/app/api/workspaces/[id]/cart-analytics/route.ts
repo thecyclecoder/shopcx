@@ -4,7 +4,7 @@
  * GET ?start&end&product&utm_source&referrer&destination
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeCartAnalytics, computePopupFunnel, computeSurveyFunnel, computePackBreakdown } from "@/lib/storefront/funnel-tree";
 
@@ -26,8 +26,7 @@ function centralBoundary(yyyyMmDd: string, endOfDay: boolean): string {
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id: workspaceId } = await params;
   const url = new URL(request.url);
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const admin = createAdminClient();
   const { data: member } = await admin.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", user.id).single();

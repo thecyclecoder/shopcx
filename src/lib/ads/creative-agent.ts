@@ -88,16 +88,39 @@ export interface AuthorSelfScore {
   evidence: string[];
 }
 
+/** Andromeda concept-diversity taxonomy (dahlia-andromeda-concept-diversity-tags Phase 1) — the
+ *  10-token controlled vocabulary Dahlia's author box session tags every ok verdict with, so
+ *  Bianca's replenish path (Phase 2) can enforce test-cohort concept diversity (no more than one
+ *  same-tag creative live per cohort). Kept as a single source of truth here + mirrored verbatim
+ *  in the migration's CHECK constraint + the dahlia-copy-author SKILL.md schema; a divergence
+ *  between the three would let a valid-per-parser tag fail the DB write (or vice-versa). */
+export const ANDROMEDA_CONCEPT_TAGS = [
+  "transformation",
+  "objection",
+  "curiosity",
+  "mechanism",
+  "authority",
+  "social-proof",
+  "scarcity",
+  "negation",
+  "story",
+  "comparison",
+] as const;
+
+export type AndromedaConceptTag = (typeof ANDROMEDA_CONCEPT_TAGS)[number];
+
 /** The verdict envelope Dahlia's per-creative Max box session (kind='ad-creative-copy-author')
  *  emits. Threaded through `insertReadyCreative` to bypass `buildMetaCopyPack` and stamp
- *  `ad_campaigns.audience_temperature` + `ad_campaigns.author_self_score`. Null-means-deterministic:
- *  when this arg is undefined, insertReadyCreative uses the caller-supplied deterministic pack
- *  unchanged (today's byte-for-byte behavior). */
+ *  `ad_campaigns.audience_temperature` + `ad_campaigns.author_self_score` +
+ *  `ad_campaigns.concept_tag`. Null-means-deterministic: when this arg is undefined,
+ *  insertReadyCreative uses the caller-supplied deterministic pack unchanged (today's
+ *  byte-for-byte behavior). */
 export interface AuthorModeCopy {
   headline: string;
   primaryText: string;
   description: string;
   audience_temperature: "cold" | "warm" | "hot";
+  concept_tag: AndromedaConceptTag;
   selfScore: AuthorSelfScore;
 }
 
@@ -351,7 +374,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] } }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] } }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits.",
   ].join("\n");
 }
 
@@ -405,6 +428,17 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
   if (at !== "cold" && at !== "warm" && at !== "hot") {
     return { kind: "invalid", reason: `bad_audience_temperature (${typeof at === "string" ? at : typeof at})` };
   }
+  // Andromeda concept-diversity taxonomy (dahlia-andromeda-concept-diversity-tags Phase 1) —
+  // required, one of the 10 tokens. A missing / bad tag fails the parser (same fail-closed
+  // treatment as a missing sub-score); the worker's revise loop re-invokes Dahlia ONCE with
+  // the concrete reason so she picks a valid token on the retry.
+  const conceptTag = obj.concept_tag;
+  if (typeof conceptTag !== "string") {
+    return { kind: "invalid", reason: "missing_concept_tag" };
+  }
+  if (!(ANDROMEDA_CONCEPT_TAGS as readonly string[]).includes(conceptTag)) {
+    return { kind: "invalid", reason: `bad_concept_tag (${conceptTag})` };
+  }
   const rawScore = obj.self_score && typeof obj.self_score === "object" ? (obj.self_score as Record<string, unknown>) : null;
   if (!rawScore) return { kind: "invalid", reason: "missing_self_score" };
   const readSub = (k: string): number | null => {
@@ -435,6 +469,7 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
       primaryText,
       description,
       audience_temperature: at,
+      concept_tag: conceptTag as AndromedaConceptTag,
       selfScore: {
         lf8,
         schwartz,
@@ -600,6 +635,47 @@ export type InsertReadyCreativeResult =
   | { kind: "skip"; reason: "cold_offer_leak" }
   | { kind: "failed" };
 
+/** The exact row body `insertReadyCreative` writes to `ad_campaigns`. Extracted as a pure helper
+ *  so the row-stamping flow — audience_temperature + author_self_score + Andromeda concept_tag
+ *  — is unit-testable end-to-end (dahlia-andromeda-concept-diversity-tags Phase 1). Author mode:
+ *  every field is CITED from `AuthorModeCopy`. Deterministic mode (opts.authorModeCopy absent):
+ *  author_self_score + concept_tag are both null, byte-identical to today's row shape. */
+export interface AdCampaignInsertBody {
+  workspace_id: string;
+  product_id: string;
+  name: string;
+  angle_id: string | null;
+  status: "ready" | "draft";
+  audience_temperature: "cold" | "warm" | "hot" | null;
+  author_self_score: AuthorSelfScore | null;
+  concept_tag: AndromedaConceptTag | null;
+}
+
+/** Pure — construct the `ad_campaigns` row body `insertReadyCreative` writes for one creative. The
+ *  concept_tag / author_self_score come straight from the AuthorModeCopy verdict when present, both
+ *  NULL otherwise (deterministic-mode path). Keeping this a pure helper lets the author-mode row-
+ *  stamping flow be pinned in unit tests without stubbing the storage / DB chains. */
+export function buildAdCampaignInsertBody(args: {
+  workspaceId: string;
+  productId: string;
+  name: string;
+  angleId: string | null;
+  status: "ready" | "draft";
+  audienceTemperature: "cold" | "warm" | "hot" | null;
+  authorModeCopy?: AuthorModeCopy;
+}): AdCampaignInsertBody {
+  return {
+    workspace_id: args.workspaceId,
+    product_id: args.productId,
+    name: args.name,
+    angle_id: args.angleId,
+    status: args.status,
+    audience_temperature: args.audienceTemperature,
+    author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
+    concept_tag: args.authorModeCopy ? args.authorModeCopy.concept_tag : null,
+  };
+}
+
 /** Insert one finished creative PACK into the ready-to-test bin. A pack = one angle row carrying
  *  the 4-headline + 4-primary-text copy variations (persisted on the angle's scalar columns AND on
  *  its `metadata.copy_pack` JSONB for the sibling publish path to read) + one campaign row + THREE
@@ -682,10 +758,18 @@ async function insertReadyCreative(
   // dahlia-copy-author-box-session Phase 3 — stamp Dahlia's self-score alongside the temperature
   // tag on the SAME row insert (one write, no follow-up update). NULL when opts.authorModeCopy is
   // absent (deterministic buildMetaCopyPack path) so today's row shape is byte-identical.
-  const authorSelfScore = opts?.authorModeCopy ? opts.authorModeCopy.selfScore : null;
+  // dahlia-andromeda-concept-diversity-tags Phase 1 — stamp Dahlia's Andromeda concept_tag on
+  // the SAME insert so Bianca's Phase-2 replenish diversity gate has a first-class read surface.
+  // NULL for deterministic-mode inserts (opts.authorModeCopy absent) — Phase-2 treats NULL as
+  // its own 'untagged' bucket, so deterministic-mode replenish behavior stays byte-identical.
+  const campaignInsertBody = buildAdCampaignInsertBody({
+    workspaceId, productId, name, angleId, status,
+    audienceTemperature,
+    authorModeCopy: opts?.authorModeCopy,
+  });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
-    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleId, status, audience_temperature: audienceTemperature, author_self_score: authorSelfScore })
+    .insert(campaignInsertBody)
     .select("id").single();
   if (cErr || !campaign) return { kind: "failed" };
   const campaignId = (campaign as { id: string }).id;

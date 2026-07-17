@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { generateMetaCopy } from "@/lib/ad-meta-copy";
@@ -24,8 +24,7 @@ const ANGLE_SCAFFOLD: Record<Archetype, { hook_slug: string; lf8_slot: number }>
 const FORMATS = ["feed_4x5", "stories_9x16"] as const;
 
 async function authorize(workspaceId: string | null) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!workspaceId) return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };
   const admin = createAdminClient();

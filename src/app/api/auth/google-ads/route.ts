@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import crypto from "crypto";
 
@@ -10,8 +10,7 @@ const SCOPES = "https://www.googleapis.com/auth/adwords";
  * Called when user clicks "Connect Google Ads" in settings.
  */
 export async function GET(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.redirect(new URL("/login", request.url));
 
   const url = new URL(request.url);

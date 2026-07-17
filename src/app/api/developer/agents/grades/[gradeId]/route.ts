@@ -13,7 +13,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { OVERRIDE_GAP_RULE_THRESHOLD } from "@/lib/agents/director-leash-recommendations";
@@ -21,10 +21,7 @@ import { OVERRIDE_GAP_RULE_THRESHOLD } from "@/lib/agents/director-leash-recomme
 export async function POST(request: Request, { params }: { params: Promise<{ gradeId: string }> }) {
   const { gradeId } = await params;
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

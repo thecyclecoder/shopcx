@@ -64,33 +64,34 @@ function AgentChip({ worker, score }: { worker: WorkerLane; score?: Rollup }) {
     <Link
       href={`/dashboard/agents/${encodeURIComponent(kind)}`}
       title={description}
-      className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/30"
+      className="flex flex-col gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2.5 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/30"
     >
-      <PersonaAvatar persona={persona} size={32} />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
-          <span className="truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</span>
-          <span className="text-[11px] text-zinc-400">{persona.role}</span>
-        </span>
-        <span className="mt-0.5 flex items-center gap-1.5">
-          <span className="truncate font-mono text-[10px] text-zinc-400">{kind}</span>
-          {loopType && (
-            <span title={`Runs as a ${loopKind} loop`} className={`rounded px-1 text-[9px] font-medium ${loopType.cls}`}>
-              {loopType.label}
-            </span>
-          )}
-          {flagged && (
-            <span
-              title="Live lane with no MONITORED_LOOPS row — flagged by the roster drift audit."
-              className="rounded bg-amber-100 px-1 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
-            >
-              unregistered
-            </span>
-          )}
-        </span>
+      {/* agents-workers-card-name-readable: name + grade on the TOP row (name gets the full width so
+          short names like "Cleo"/"Dahlia" never truncate to "C…"/"Da…"), everything else (role, kind,
+          type + status) drops to a wrapping SECOND row. */}
+      <span className="flex items-center gap-2.5">
+        <PersonaAvatar persona={persona} size={32} />
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{persona.name}</span>
+        <ScoreBadge score={score} />
       </span>
-      <WorkerStatusBadge status={status} reason={statusReason} />
-      <ScoreBadge score={score} />
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-[11px] text-zinc-500 dark:text-zinc-400">{persona.role}</span>
+        <span className="font-mono text-[10px] text-zinc-400">{kind}</span>
+        {loopType && (
+          <span title={`Runs as a ${loopKind} loop`} className={`rounded px-1 text-[9px] font-medium ${loopType.cls}`}>
+            {loopType.label}
+          </span>
+        )}
+        {flagged && (
+          <span
+            title="Live lane with no MONITORED_LOOPS row — flagged by the roster drift audit."
+            className="rounded bg-amber-100 px-1 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+          >
+            unregistered
+          </span>
+        )}
+        <WorkerStatusBadge status={status} reason={statusReason} />
+      </span>
     </Link>
   );
 }

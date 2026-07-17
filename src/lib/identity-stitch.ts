@@ -98,20 +98,27 @@ export async function stitchVisitor(opts: {
     if (context.ip_city) updates.ip_city = context.ip_city;
     await admin.from("storefront_sessions").update(updates).eq("id", existing.id);
   } else {
-    await admin.from("storefront_sessions").insert({
-      workspace_id: workspaceId,
-      anonymous_id: anonymousId,
-      customer_id: customerId,
-      first_seen_at: nowIso,
-      last_seen_at: nowIso,
-      user_agent: context.user_agent,
-      device_type: context.device_type,
-      os: context.os,
-      browser: context.browser,
-      ip_country: context.ip_country,
-      ip_region: context.ip_region,
-      ip_city: context.ip_city,
-    });
+    // Atomic get-or-create: this check-then-insert can race the pixel route (or itself) for the same
+    // (workspace_id, anonymous_id) and hit the unique constraint. ON CONFLICT DO NOTHING makes the loser
+    // a silent no-op — no Postgres error logged. Any customer_id stitch a lost race skips is healed by
+    // the set-when-null customer_id path on the next pixel hit + the events backfill below.
+    await admin.from("storefront_sessions").upsert(
+      {
+        workspace_id: workspaceId,
+        anonymous_id: anonymousId,
+        customer_id: customerId,
+        first_seen_at: nowIso,
+        last_seen_at: nowIso,
+        user_agent: context.user_agent,
+        device_type: context.device_type,
+        os: context.os,
+        browser: context.browser,
+        ip_country: context.ip_country,
+        ip_region: context.ip_region,
+        ip_city: context.ip_city,
+      },
+      { onConflict: "workspace_id,anonymous_id", ignoreDuplicates: true },
+    );
   }
 
   // Backfill events for this anonymous_id that don't yet have a

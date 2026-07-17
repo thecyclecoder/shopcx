@@ -15,7 +15,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   isSupabaseLogPollConfigured,
@@ -30,10 +30,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 /** Shared owner gate — returns the admin client on success, or a NextResponse error. */
 async function requireOwner(): Promise<{ admin: Admin } | { error: NextResponse }> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
 
   const cookieStore = await cookies();
