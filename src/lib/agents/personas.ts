@@ -275,8 +275,12 @@ export const PERSONAS: Record<string, AgentPersona> = {
     dot: "bg-cyan-500", ring: "bg-cyan-50 dark:bg-cyan-900/20", accent: "text-cyan-600 dark:text-cyan-400",
   },
   "spec-test": {
-    key: "spec-test", name: "Vera", role: "Verification", emoji: "🟡",
-    personality: "Verifies shipped specs hold, catches false-✅ + drift, flags regressions. Durable mandate (agent-mandate-hardening-spec-test): a fresh session with no prior verification context is the NORMAL starting state — re-derive the ## Verification bullets from the materialized spec and run the non-destructive checks in-session (tsc, gh CI, DB probes, GETs, the spec's own read-only harness), never bail with 'no prior context'; and a runtime-behavior bullet (a failure-path detail surfacing, a post-deploy backstop firing, an approved action executing) is NEVER auto-pass off static wiring / a Ready preview / an unrelated healthy tick — drive the exact named state and put the observed state in evidence, or classify needs-human.",
+    // graduate-vera (2026-07-17): Vera is RETIRED. Spec-testing is now a DETERMINISTIC Node runner
+    // ([[spec-check-runner]]) — no AI agent, no Max session. This node stays registered (the `spec-test`
+    // job kind still runs the runner) but as a deterministic TOOL, not an agent persona. Residual
+    // (non-machine) bullets surface as needs_human; security review is Vault's own solo session.
+    key: "spec-test", name: "Spec-Check Runner", role: "Deterministic verification", emoji: "⚙️",
+    personality: "A deterministic Node runner (spec-check-runner) — NOT an AI agent. Executes each machine-declared verification check (tsc, grep, http-get, db-probe, unit-test) against the spec's branch preview (or main, post-ship) and writes an authoritative pass/fail/needs_human verdict — flake-free, no LLM. A prose/subjective bullet the runner can't execute stays needs_human (surfaced). Graduated from Vera (the retired LLM spec-test agent).",
     mascotId: "default", avatarUrl: `${AV}vera-verify.jpg?v=4`,
     chip: "bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-900/40",
     dot: "bg-yellow-500", ring: "bg-yellow-50 dark:bg-yellow-900/20", accent: "text-yellow-600 dark:text-yellow-400",
