@@ -206,16 +206,29 @@ export function platformDrivesSpec(owner: string | null | undefined, chart: OrgC
 }
 
 /**
- * no-max-on-unreviewed-specs (PRIMARY): true iff a spec has PASSED Vale spec-review and is therefore safe to
- * QUEUE A BUILD for. The same durable signal the claim-time build gate tests (`card.valeReviewPassed`, read
- * off `specs.vale_review_passed_at` — NOT the transient `valePass` Ada's disposition consumes). An already
- * SHIPPED spec is past review by construction. Every Ada build-enqueue lane (the escorts + the init lane) gates
- * on this BEFORE it inserts a `kind:"build"` row — so an `in_review` / never-Vale-passed spec never gets a build
- * job created, and Bo never claims it + burns a Max session on the after-the-fact claim-gate bounce. The
- * claim-time gate stays the backstop; this is the front door that stops the job from ever existing.
+ * Spec-review gate for the build-enqueue lanes (escort / backstop / board-grooming / init / front door).
+ * RETIRED to a constant `true` — see the inline note. Vale's LLM spec-review lane is gone; well-formedness
+ * is enforced deterministically at author time, so a spec that exists as a row has already passed review,
+ * and the `vale_review_passed_at` durable signal this used to read is no longer stamped by anything. Kept
+ * as a named predicate (not inlined) so its ~14 call sites — and the two regression tests — stay a single,
+ * documented chokepoint rather than 14 scattered edits.
  */
-export function specReviewDone(card: Pick<SpecCard, "valeReviewPassed" | "status">): boolean {
-  return card.valeReviewPassed === true || card.status === "shipped";
+export function specReviewDone(_card: Pick<SpecCard, "valeReviewPassed" | "status">): boolean {
+  // escort-retire-vale-eligibility-gate: the Vale LLM spec-review lane is RETIRED
+  // (retire-vale-spec-review-becomes-deterministic-authoring-gate). Well-formedness (phases + per-phase
+  // machine-runnable checks, real Owner/Parent, no dupes/cycles, DB companion) is now enforced
+  // DETERMINISTICALLY at the AUTHORING chokepoint (`assertSpecReviewGate` in author-spec.ts), which THROWS
+  // before the row is ever written — so a spec that EXISTS as a `public.specs` row has ALREADY passed
+  // review. The old `vale_review_passed_at` durable stamp is DEAD: `stampSpecValeReviewPassed` has ZERO
+  // callers repo-wide (nothing sets it), so gating on `valeReviewPassed` silently held EVERY escort /
+  // backstop / board-grooming / init / front-door lane forever — a goal member spec authored under the
+  // deterministic model never received the stamp, so `escortApprovedGoals` + `reconcileReadyGoalMembers`
+  // skipped it every pass (the exact stall on the Dahlia copy-engine goal). retire-vale updated the
+  // claim-time build gate (`evaluateClaimTimeBuildGate`) + `enqueueBuildIfDue` to stop requiring the stamp;
+  // this predicate was the one residue it missed. An existing card is review-done — the remaining
+  // eligibility guards (not-shipped-with-provenance, not-deferred, auto_build, blockers-cleared, in-flight,
+  // loop-guard) still gate the build. `_card` retained for call-site + type compatibility.
+  return true;
 }
 
 /**

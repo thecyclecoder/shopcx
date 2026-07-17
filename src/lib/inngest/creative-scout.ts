@@ -34,7 +34,7 @@ import {
   promoteWhitelistedPages,
 } from "@/lib/competitors";
 import {
-  sweepSeed,
+  sweepCompetitorLanes,
   filterSeedsByFreshness,
   adlibraryFreshnessDays,
   type IngestResult,
@@ -67,7 +67,15 @@ function addTotals(a: IngestResult, b: IngestResult): IngestResult {
 
 async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult> {
   try {
-    return await sweepSeed(workspaceId, seed);
+    // winners-flow (Phase 2b): two-lane collection — LANE A (name→pageId→winners scan) or LANE B
+    // (domain search), routed by resolveAdvertiser. The seed's `expectedDomain` enables LANE B.
+    const r = await sweepCompetitorLanes(workspaceId, seed, { domain: seed.expectedDomain });
+    if (!r.lane) {
+      console.warn(`[creative-scout] BAD SEED "${seed.keyword}" — neither name nor domain resolved to a Meta advertiser`);
+    } else {
+      console.log(`[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.inserted} ingested, ${r.skippedExisting} existing`);
+    }
+    return r;
   } catch (err) {
     console.error(`[creative-scout] sweep failed for ${seed.keyword}:`, err);
     return { ...emptyTotals(), failed: 1 };
