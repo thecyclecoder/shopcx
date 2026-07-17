@@ -329,9 +329,15 @@ export async function POST(request: NextRequest) {
     .maybeSingle();
 
   if (!customer) {
-    const { data: created, error: createErr } = await admin
+    // Get-or-create is non-atomic (check-then-insert): two concurrent checkouts
+    // for the same new email both miss the select above and both try to insert,
+    // and the loser hits the UNIQUE(workspace_id, email) constraint (Postgres
+    // 23505). Previously the loser returned customer_create_failed / 500 = a LOST
+    // ORDER. Upsert with ignoreDuplicates so the loser inserts nothing (returns
+    // no row); then re-read the winner's row by (ws, email) and proceed with it.
+    const { data: createdRow, error: createErr } = await admin
       .from("customers")
-      .insert({
+      .upsert({
         workspace_id: cart.workspace_id,
         email,
         first_name: ship.first_name || null,
@@ -340,13 +346,28 @@ export async function POST(request: NextRequest) {
         subscription_status: subscribing ? "active" : "never",
         email_marketing_status: emailMarketingStatus,
         sms_marketing_status: smsMarketingStatus,
-      })
+      }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
       .select("id, shopify_customer_id, first_name, last_name")
-      .single();
-    if (createErr || !created) {
-      return NextResponse.json({ error: "customer_create_failed", details: createErr?.message }, { status: 500 });
+      .maybeSingle();
+    if (createErr) {
+      return NextResponse.json({ error: "customer_create_failed", details: createErr.message }, { status: 500 });
     }
-    customer = created;
+    if (createdRow) {
+      customer = createdRow;
+    } else {
+      // Lost the insert race — the row already exists, so re-read it (never
+      // surface a 500/lost order on a pure race; the customer row is there).
+      const { data: existing, error: reselectErr } = await admin
+        .from("customers")
+        .select("id, shopify_customer_id, first_name, last_name")
+        .eq("workspace_id", cart.workspace_id)
+        .eq("email", email)
+        .maybeSingle();
+      if (reselectErr || !existing) {
+        return NextResponse.json({ error: "customer_create_failed", details: reselectErr?.message }, { status: 500 });
+      }
+      customer = existing;
+    }
   } else {
     // Existing customer — reaffirm consent from the checkbox. Persist the
     // phone too so a freshly-entered number can receive SMS marketing.

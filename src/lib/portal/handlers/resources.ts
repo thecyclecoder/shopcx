@@ -79,10 +79,21 @@ export const resources: RouteHandler = async ({ auth, route, url }) => {
   const directProductIds = new Set([...variantRefs].filter((r) => r.startsWith("pid:")).map((r) => r.slice(4)));
   const lookupRefs = [...variantRefs].filter((r) => !r.startsWith("pid:"));
   if (lookupRefs.length) {
-    const { data: vrows } = await admin
-      .from("product_variants")
-      .select("product_id")
-      .or(`id.in.(${lookupRefs.map((r) => `"${r}"`).join(",")}),shopify_variant_id.in.(${lookupRefs.map((r) => `"${r}"`).join(",")})`);
+    // items[].variant_id can be a UUID (product_variants.id) or a Shopify
+    // numeric id (shopify_variant_id). Split by shape so a numeric id never
+    // lands on the uuid `id` side (Postgres 22P02 → the whole query fails).
+    const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+    const refUuids = lookupRefs.filter(isUuid);
+    const refShopify = lookupRefs.filter((s) => !isUuid(s));
+    let vq = admin.from("product_variants").select("product_id");
+    if (refUuids.length > 0 && refShopify.length > 0) {
+      vq = vq.or(`id.in.(${refUuids.join(",")}),shopify_variant_id.in.(${refShopify.map((s) => `"${s}"`).join(",")})`);
+    } else if (refUuids.length > 0) {
+      vq = vq.in("id", refUuids);
+    } else {
+      vq = vq.in("shopify_variant_id", refShopify);
+    }
+    const { data: vrows } = await vq;
     for (const v of vrows || []) if (v.product_id) directProductIds.add(String(v.product_id));
   }
   const productIds = [...directProductIds];

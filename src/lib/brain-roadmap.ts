@@ -39,7 +39,7 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
@@ -1153,8 +1153,49 @@ export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
   // No workspace → empty board. We fail loud (empty result, no markdown fallback) so an outage is visible
   // rather than papered over with a stale disk parse. spec-readers-from-db-retire-parser safety rail.
-  const specs = wsId ? await readSpecsFromDb(wsId) : [];
-  return { specs };
+  if (!wsId) return { specs: [] };
+  // spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Wrapper cache HIT skips the ~9-scan whole-board fan-out entirely. Bounded by the same write
+  // invalidation as the getSpec wrapper (onSpecCacheInvalidate above) — a spec write in this workspace
+  // evicts the entry immediately, so the next call sees fresh state even inside the TTL. Amortizes
+  // Mario's stall detector (which resolves blockers for every candidate) + any tick handler that
+  // walks blockers, so a full sweep costs ONE board read, not one per candidate.
+  const cached = getRoadmapWrapperCache.get(wsId);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+  // p_since — Phase 5 change-probe gate. If we have a stale entry with a captured max_updated_at
+  // and the DB's current max_updated_at hasn't advanced past it, NOTHING changed since we cached:
+  // extend the TTL and return the stale value. Probe unavailable (pool blip) falls back to a full
+  // re-fetch — safer to over-fetch than serve genuinely stale data.
+  if (cached && cached.maxUpdatedAt) {
+    try {
+      const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+      const probe = await specsMaxUpdatedAt(wsId);
+      if (probe !== null && probe.getTime() <= cached.maxUpdatedAt.getTime()) {
+        cached.expiresAt = Date.now() + GET_SPEC_WRAPPER_TTL_MS;
+        return cached.value;
+      }
+    } catch {
+      /* fall through to a full re-fetch */
+    }
+  }
+  const specs = await readSpecsFromDb(wsId);
+  // Capture the workspace's max_updated_at ALONGSIDE the fetched snapshot so the next stale-entry
+  // gate has a reliable high-water mark. Probe error → null (no gate on the next miss; that miss
+  // just does a full re-fetch — pre-Phase-5 behavior).
+  let maxUpdatedAt: Date | null = null;
+  try {
+    const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+    maxUpdatedAt = await specsMaxUpdatedAt(wsId);
+  } catch {
+    /* leave null — next stale gate skips the probe path and does a full re-fetch */
+  }
+  const result: RoadmapData = { specs };
+  getRoadmapWrapperCache.set(wsId, {
+    value: result,
+    expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS,
+    maxUpdatedAt,
+  });
+  return result;
 }
 
 /** Slugs of every boardable spec — DB-driven (no fs read). Used to resolve [[wikilinks]] to detail pages. */
@@ -1439,7 +1480,28 @@ export function deriveSpecStatusFromMarkdown(raw: string): SpecStatus {
 // Invalidation: every writer path in `specs-table.ts` calls `invalidateSpecCache(ws, slug)`, which
 // fires the listener below to evict this wrapper's (ws, slug) entry AND the workspace-level maps
 // under (b) — the exact write-set specs-table already invalidates, so no writer path is missed.
-const GET_SPEC_WRAPPER_TTL_MS = 15_000;
+let GET_SPEC_WRAPPER_TTL_MS = 15_000;
+
+/**
+ * spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ *
+ * Raise the getSpec/getRoadmap wrapper TTL — called by the warm long-lived worker AFTER
+ * [[pg-pool]] `startSpecChangedListener` reports the LISTEN slot is active. Event-driven eviction
+ * lets us hold minutes-long TTLs because every write emits `pg_notify('spec_changed', …)` and the
+ * LISTEN drops onto `invalidateSpecCache` → the wrapper caches evict via `onSpecCacheInvalidate`.
+ * Capped at 1 hour so a misconfig cannot park an unbounded TTL. Ephemeral `claude -p` subprocesses
+ * do NOT call this — they keep the default 15s TTL (the polled-refresh safety-net).
+ */
+export function setWrapperCacheTTLMs(ms: number): void {
+  const CAP_MS = 60 * 60 * 1000; // 1 hour hard cap
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  GET_SPEC_WRAPPER_TTL_MS = Math.min(ms, CAP_MS);
+}
+
+/** Read the current TTL — used by tests + call-sites that want to log the effective TTL. */
+export function getWrapperCacheTTLMs(): number {
+  return GET_SPEC_WRAPPER_TTL_MS;
+}
 type GetSpecCached = { raw: string; card: SpecCard } | null;
 type GetSpecCacheEntry = { value: GetSpecCached; expiresAt: number };
 const getSpecWrapperCache = new Map<string, GetSpecCacheEntry>();
@@ -1457,6 +1519,23 @@ type WorkspaceMapsEntry = {
 };
 const workspaceMapsCache = new Map<string, WorkspaceMapsEntry>();
 
+// spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+// Short-TTL wrapper cache around getRoadmap(workspaceId) — mirrors the db-load-getspec-cache pattern
+// (same GET_SPEC_WRAPPER_TTL_MS, same eviction chokepoint via onSpecCacheInvalidate above). Bounded
+// by the same write-invalidation as getSpec, so a spec write is IMMEDIATELY visible on the next call
+// even inside the TTL. Retires the "~9-scan whole-board fan-out with no cache" cost the spec calls
+// out — Mario's stall detector plus any tick handler that resolves blockers through getSpecBlockers
+// now amortize a single board read per workspace within the TTL window.
+//
+// p_since — Phase 5 (docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md Phase 5) extends the
+// entry with a `maxUpdatedAt` high-water mark. On a stale entry, [[pg-pool]] `specsMaxUpdatedAt`
+// probes the workspace's max `specs.updated_at`; when the probe hasn't advanced past `maxUpdatedAt`,
+// NOTHING has changed since we cached — extend the TTL and return the stale value instead of
+// re-firing the whole-board scan. When the probe HAS advanced, do a full re-fetch as before. Probe
+// unavailability (pool blip) falls back to the pre-Phase-5 full re-fetch — no correctness regression.
+type GetRoadmapCacheEntry = { value: RoadmapData; expiresAt: number; maxUpdatedAt: Date | null };
+const getRoadmapWrapperCache = new Map<string, GetRoadmapCacheEntry>();
+
 function getSpecCacheKey(workspaceId: string, slug: string): string {
   return `${workspaceId}::${slug}`;
 }
@@ -1466,6 +1545,10 @@ onSpecCacheInvalidate((workspaceId, slug) => {
   // Any spec write in the workspace may shift the goal-membership index (a milestone reassignment,
   // a status flip, a blocker rewrite), so drop the workspace maps too — the next miss rebuilds.
   workspaceMapsCache.delete(workspaceId);
+  // spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // The whole-board snapshot is a function of every boardable spec in the workspace, so any spec write
+  // invalidates it too. Same eviction chokepoint as the getSpec wrapper — no writer path is missed.
+  getRoadmapWrapperCache.delete(workspaceId);
 });
 
 async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<WorkspaceMapsEntry> {
@@ -1495,6 +1578,8 @@ async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<Workspace
 export function clearGetSpecWrapperCacheForTests(): void {
   getSpecWrapperCache.clear();
   workspaceMapsCache.clear();
+  // spec-read-eff-roadmap-cache — clear the whole-board wrapper too so a test can observe a fresh read.
+  getRoadmapWrapperCache.clear();
 }
 
 export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {
@@ -1505,6 +1590,52 @@ export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw
   const cacheKey = getSpecCacheKey(wsId, slug);
   const cached = getSpecWrapperCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.value;
+  // spec-read-eff-board-context — ONE pooled RPC replaces the 4–6 round-trip fan-out (spec + phases,
+  // full-workspace boardable projection for resolveBlockedBy, this slug's card_state overlay, and
+  // the workspace goal-membership index) on a cold read. Fail-open: pool unavailable / query error
+  // falls through to the pre-Phase-1 four-call path so a pool blip never wedges a cold spec read.
+  try {
+    const { getSpecBoardContext } = await import("@/lib/pg-pool");
+    const ctx = await getSpecBoardContext(wsId, slug);
+    if (ctx === null) {
+      // RPC said no such (boardable) slug — matches the pre-RPC null return.
+      getSpecWrapperCache.set(cacheKey, { value: null, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+      return null;
+    }
+    if (ctx !== undefined) {
+      const row = specRowFromDbForPool(ctx.spec, ctx.phases);
+      if (!isBoardableStatus(row.status)) {
+        getSpecWrapperCache.set(cacheKey, { value: null, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+        return null;
+      }
+      const boardRows = ctx.boardableSpecs.map((r) => specRowFromDbForPool(r.spec, r.phases));
+      const specs = boardRows.map(dbRowToSpecCard);
+      const bySlug = new Map(specs.map((c) => [c.slug, c]));
+      const goalByBlockerSlug = new Map<string, GoalMembership>();
+      for (const gm of ctx.goalMemberships) {
+        goalByBlockerSlug.set(gm.spec_slug, {
+          goalSlug: gm.goal_slug,
+          goalTitle: gm.goal_title,
+          mainMergeSha: gm.main_merge_sha,
+        });
+      }
+      let card = dbRowToSpecCard(row);
+      if (card.blockedBy.length > 0) {
+        card.blockedBy = resolveBlockedBy(card, bySlug, goalByBlockerSlug);
+      }
+      // overlayCardFlags reads only the transient `flags` bag on spec_card_state; the RPC returns
+      // the whole row (or null), so cast through the minimal shape overlayCardFlags accepts.
+      card = overlayCardFlags(
+        card,
+        ctx.cardState as unknown as import("@/lib/spec-card-state").SpecCardState | undefined,
+      );
+      const result: GetSpecCached = { raw: serializeSpecRowToMarkdown(row), card };
+      getSpecWrapperCache.set(cacheKey, { value: result, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+      return result;
+    }
+  } catch {
+    /* fall through to the pre-RPC four-call path */
+  }
   // spec-readers-from-db-retire-parser Phase 1: ONE SQL query for the card + reconstruct raw from the row.
   // No fs read, no parseSpec. Folded specs are archive territory — return null (matches the old
   // "file gone from disk" shape that the fold worker produced).

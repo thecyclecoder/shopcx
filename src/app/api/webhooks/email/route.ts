@@ -308,17 +308,32 @@ export async function POST(request: Request) {
       const nameMatch = (typeof fromEmail === "string" ? fromEmail : "").match(/^([^<]+)</);
       const fromName = nameMatch?.[1]?.trim();
 
+      // Get-or-create is non-atomic (check-then-insert): two concurrent inbound
+      // emails for the same new address both miss the select above and both try
+      // to insert, and the loser hits the UNIQUE(workspace_id, email) constraint
+      // (Postgres 23505). Upsert with ignoreDuplicates so the loser inserts
+      // nothing (returns no row); then re-read the winner's row by (ws, email).
       const { data: created } = await admin
         .from("customers")
-        .insert({
+        .upsert({
           workspace_id: workspaceId,
           email: normalizedEmail,
           first_name: fromName || null,
-        })
+        }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
         .select("id")
-        .single();
+        .maybeSingle();
 
-      customerId = created?.id || null;
+      if (created) {
+        customerId = created.id;
+      } else {
+        const { data: raced } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("email", normalizedEmail)
+          .maybeSingle();
+        customerId = raced?.id || null;
+      }
     }
 
     // Crisis auto-merge: if customer has an active crisis action and subject matches, redirect to crisis ticket

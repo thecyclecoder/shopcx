@@ -8,6 +8,16 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { findVariant } from "@/lib/product-variants";
+
+/**
+ * free_gift_variant_id (and similar admin-writable id columns) are TEXT and
+ * may hold a UUID or a Shopify numeric id. Feeding a numeric into `.eq("id", …)`
+ * / `.in("id", …)` on the uuid product_variants.id column makes Postgres cast
+ * to uuid and throw 22P02. Split by shape before querying.
+ */
+const isUuid = (s: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 
 export interface Product {
   id: string;
@@ -1171,14 +1181,30 @@ async function loadLinkGroup(
       .filter((id): id is string => !!id);
     const giftPriceById = new Map<string, number | null>();
     if (giftVariantIds.length) {
-      const { data: giftVariants } = await admin
+      // Split by id-shape: UUIDs match product_variants.id, everything else is
+      // a Shopify numeric id → match shopify_variant_id. Never feed a numeric
+      // into .in("id", …) (Postgres 22P02 uuid cast). Mirrors transform-subscription.
+      const giftUuids = giftVariantIds.filter(isUuid);
+      const giftShopifyIds = giftVariantIds.filter((s) => !isUuid(s));
+      let gq = admin
         .from("product_variants")
-        .select("id, price_cents, compare_at_price_cents")
-        .in("id", giftVariantIds);
+        .select("id, shopify_variant_id, price_cents, compare_at_price_cents");
+      if (giftUuids.length && giftShopifyIds.length) {
+        gq = gq.or(`id.in.(${giftUuids.join(",")}),shopify_variant_id.in.(${giftShopifyIds.map((s) => `"${s}"`).join(",")})`);
+      } else if (giftUuids.length) {
+        gq = gq.in("id", giftUuids);
+      } else {
+        gq = gq.in("shopify_variant_id", giftShopifyIds);
+      }
+      const { data: giftVariants } = await gq;
       for (const v of giftVariants || []) {
         const p = v.price_cents ?? 0;
         const c = v.compare_at_price_cents ?? 0;
-        giftPriceById.set(v.id, Math.max(p, c) || null);
+        const price = Math.max(p, c) || null;
+        // Key by both ids so the later lookup by free_gift_variant_id resolves
+        // whichever shape the rule stored.
+        if (v.id) giftPriceById.set(v.id as string, price);
+        if (v.shopify_variant_id) giftPriceById.set(v.shopify_variant_id as string, price);
       }
     }
 
@@ -1385,11 +1411,12 @@ async function loadPricingRule(
   // value at the retail figure, not the discounted one.
   let free_gift_price_cents: number | null = null;
   if (rule.free_gift_variant_id) {
-    const { data: giftVariant } = await admin
-      .from("product_variants")
-      .select("price_cents, compare_at_price_cents")
-      .eq("id", rule.free_gift_variant_id)
-      .maybeSingle();
+    // free_gift_variant_id is TEXT (UUID or Shopify numeric); findVariant
+    // resolves by shape so a numeric id doesn't 22P02 on product_variants.id.
+    const giftVariant = await findVariant(workspaceId, {
+      id: rule.free_gift_variant_id,
+      shopifyVariantId: rule.free_gift_variant_id,
+    });
     if (giftVariant) {
       const price = giftVariant.price_cents ?? 0;
       const compare = giftVariant.compare_at_price_cents ?? 0;

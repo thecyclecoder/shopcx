@@ -23,7 +23,7 @@ import { getProductIntelligence, type PIReview } from "@/lib/product-intelligenc
 import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
-import { getProvenCompetitorAngles } from "@/lib/ads/creative-sourcing";
+import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
 import { renderRubricForPrompt } from "@/lib/ads/copy-rubric";
@@ -924,17 +924,34 @@ async function stockProduct(
   // tagged each skeleton with the product its competitor was chosen for, so imitate reads a product's own
   // shelf (not a coffee/weight substring guess). Each carries its image so the generator can do COMPOSITION
   // TRANSFER — reuse the competitor's winning layout, swap in our content.
-  const competitorAngles: ScoredAngle[] = (await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 45, limit: 6 }).catch(() => []))
+  //
+  // dahlia-deeper-competitor-selection Phase 1 — opt into `preferDeeplyProven`: the primary pool becomes
+  // 60d+ AND resume_advertising=true (a still-running, deeply-proven angle is a far stronger imitate base
+  // than a 30d one that may already be dead). Empty deeply-proven pool falls back visibly to the shallow
+  // 30d pool + emits a `dahlia_deeply_proven_fallback` director_activity row.
+  const { angles: sourced, usedFallback: sourcedUsedFallback } = await getProvenCompetitorAngles(
+    admin,
+    workspaceId,
+    { productId, preferDeeplyProven: true, limit: 6 },
+  ).catch(() => ({ angles: [], usedFallback: false }));
+  if (sourcedUsedFallback) {
+    console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
+  }
+  // dahlia-deeper-competitor-selection Phase 2 — replace the old hardcoded acquisitionPower=9
+  // with a per-angle score derived from the full skeleton signal set (daysRunning × resumeAdvertising
+  // + heat tiebreak). A 60d+ still-running + high-heat angle now outranks a 30d dormant one on the
+  // explore-pool sort at line ~966, instead of every competitor angle collapsing to the same 9.
+  const competitorAngles: ScoredAngle[] = sourced
     .filter((c) => c.hook)
     .map((c) => ({
       hook: c.hook as string,
       source: "competitor",
       leadBenefit: c.mechanismClaim ?? "proven competitor angle",
-      acquisitionPower: 9, // proven in market
+      acquisitionPower: scoreCompetitorAcquisitionPower(c),
       retentionTruth: 5,
       commodity: false,
       hasRealPhoto: false,
-      reasons: [`proven competitor ad (${c.daysRunning ?? "?"}d running${c.advertiser ? `, ${c.advertiser}` : ""})`],
+      reasons: [`proven competitor ad (${c.daysRunning ?? "?"}d running${c.resumeAdvertising === true ? ", still running" : c.resumeAdvertising === false ? ", paused" : ""}${c.advertiser ? `, ${c.advertiser}` : ""}${c.heat != null ? `, heat ${c.heat}` : ""})`],
       raw: { imageUrl: c.imageUrl, mechanism: c.mechanismClaim, proof: c.proof } as Record<string, unknown>,
     }));
   const ranked = [...competitorAngles, ...ownAngles];
