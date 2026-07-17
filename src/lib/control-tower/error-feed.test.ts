@@ -18,6 +18,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
+  isTransientAnthropicOverloadError,
   isTransientAppstleFrequencyUpstreamTimeout,
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
@@ -1236,4 +1237,92 @@ test("isTransientSupabaseEdgeHtmlBody returns false on empty / nullish input", (
   assert.equal(isTransientSupabaseEdgeHtmlBody(undefined), false);
   assert.equal(isTransientSupabaseEdgeHtmlBody(""), false);
   assert.equal(isTransientSupabaseEdgeHtmlBody("   "), false);
+});
+
+// ── isTransientAnthropicOverloadError (error-feed-classify-anthropic-overload-5xx-transient) ──
+// Anthropic 529 (Overloaded) and 5xx more broadly are already retryable in `anthropic-retry`
+// (`isRetryableAnthropicStatus`) and factored into the `claude-health` breaker. A best-effort
+// caller like `src/lib/fraud-detector.ts` catches the throw and logs `[fraud] AI screen error:
+// Error: AI API error: 529` — Vercel drains it into the error feed and, without a classifier,
+// mints a fresh OPEN paged incident on a loop that already handled the failure. Classify it
+// transient so a first sighting auto-resolves; a chronic recurrence within the window still
+// escalates. The false positive that opened Control Tower `vercel:ca4ae59dcd07707a`.
+
+test("isTransientAnthropicOverloadError matches the fraud-detector 529 log shape", () => {
+  assert.equal(
+    isTransientAnthropicOverloadError("[fraud] AI screen error: Error: AI API error: 529"),
+    true,
+  );
+});
+
+test("isTransientAnthropicOverloadError matches AI API error across the 5xx band", () => {
+  for (const status of ["500", "502", "503", "504", "520", "529"]) {
+    assert.equal(
+      isTransientAnthropicOverloadError(`[fraud] AI screen error: Error: AI API error: ${status}`),
+      true,
+      `status=${status}`,
+    );
+  }
+});
+
+test("isTransientAnthropicOverloadError matches the throwForAnthropicStatus 'returned 5NN' shape", () => {
+  assert.equal(
+    isTransientAnthropicOverloadError("AnthropicDependencyError: Anthropic messages returned 529"),
+    true,
+  );
+  assert.equal(
+    isTransientAnthropicOverloadError("Error: Anthropic screen returned 503"),
+    true,
+  );
+});
+
+test("isTransientAnthropicOverloadError matches raw api.anthropic.com 5xx / overloaded leaks", () => {
+  assert.equal(
+    isTransientAnthropicOverloadError(
+      "fetch https://api.anthropic.com/v1/messages failed with status 529",
+    ),
+    true,
+  );
+  assert.equal(
+    isTransientAnthropicOverloadError(
+      "api.anthropic.com replied: { type: 'error', error: { type: 'overloaded_error' } }",
+    ),
+    true,
+  );
+});
+
+test("isTransientAnthropicOverloadError KEEPS a 4xx logic bug (still pages)", () => {
+  // A 4xx is a request/auth bug — never succeeds on retry, so it stays captured / paged.
+  assert.equal(
+    isTransientAnthropicOverloadError("[fraud] AI screen error: Error: AI API error: 400"),
+    false,
+  );
+  assert.equal(
+    isTransientAnthropicOverloadError("Error: AI API error: 401"),
+    false,
+  );
+  assert.equal(
+    isTransientAnthropicOverloadError("Anthropic messages returned 404"),
+    false,
+  );
+});
+
+test("isTransientAnthropicOverloadError KEEPS an unrelated 5xx (no Anthropic marker)", () => {
+  // A 5xx from some other upstream is a real classify-and-look failure — no Anthropic marker,
+  // so it stays paged. `api.anthropic.com` is the gate for the raw-upstream path.
+  assert.equal(
+    isTransientAnthropicOverloadError("upstream returned 503 from api.stripe.com"),
+    false,
+  );
+  assert.equal(
+    isTransientAnthropicOverloadError("[some-other] error: 529 from api.example.com"),
+    false,
+  );
+});
+
+test("isTransientAnthropicOverloadError returns false on empty / nullish input", () => {
+  assert.equal(isTransientAnthropicOverloadError(null), false);
+  assert.equal(isTransientAnthropicOverloadError(undefined), false);
+  assert.equal(isTransientAnthropicOverloadError(""), false);
+  assert.equal(isTransientAnthropicOverloadError("   "), false);
 });

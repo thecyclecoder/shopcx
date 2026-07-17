@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getTestingResults, enrichWithMetaCreatives } from "@/lib/ads/testing-results-sdk";
 import { getMetaUserToken } from "@/lib/meta-ads";
@@ -13,8 +13,7 @@ import { metaGraphRequest } from "@/lib/meta/api";
  */
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id: workspaceId } = await params;
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();

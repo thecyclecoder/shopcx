@@ -13,6 +13,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 
 /**
@@ -622,15 +623,14 @@ export async function getReviewsForProducts(
 ): Promise<{ id: string; product_id: string | null; reviewer_name: string; rating: number; title: string; body: string; summary: string; featured: boolean }[]> {
   const admin = createAdminClient();
 
-  // Resolve mixed Shopify/internal IDs to internal product UUIDs.
+  // Resolve mixed Shopify/internal IDs to internal product UUIDs. fix-1-mixed-id-resolver —
+  // Fix 1 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md retires the mixed-ID
+  // `.or()` filter string (security agent flagged as injection · medium in the sibling reviews.ts
+  // callsite) in favor of two parameter-safe `.in()` queries composed inside the shared helper.
   let internalIds: string[] = [];
   if (productIds.length) {
-    const { data: products } = await admin
-      .from("products")
-      .select("id, shopify_product_id")
-      .eq("workspace_id", workspaceId)
-      .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
-    internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
+    const products = await resolveProductsByMixedIds(admin, workspaceId, productIds);
+    internalIds = [...new Set(products.map((p) => p.id).filter(Boolean))];
     if (!internalIds.length) return [];
   }
 

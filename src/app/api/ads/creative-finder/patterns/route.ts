@@ -8,17 +8,14 @@
  * See docs/brain/specs/winning-static-creative-finder.md.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildPatternMatrix } from "@/lib/creative-skeleton";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const workspaceId = url.searchParams.get("workspaceId");
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!workspaceId) return NextResponse.json({ error: "workspaceId required" }, { status: 400 });
 

@@ -37,15 +37,27 @@ The heavier **video drain** stays in [[creative-finder]] (`creativeFinderVideoPr
 
 1. `loadApprovedCompetitorsForProduct(workspaceId, productId)` ([[../libraries/competitors]]) → Seeds carrying `competitorId` + `productId`. `search_keyword` (exact page/brand name the API matches literally) wins over `brand`.
 2. Freshness gate (unless `force`): `filterSeedsByFreshness` drops brands searched inside `adlibraryFreshnessDays()` (default 7). A fresh/never-searched brand always passes → a newly-approved competitor runs on the very next scout.
-3. Per kept seed: `sweepSeed` → `searchAds` → `isWinner` filter (reach/spend OR longevity) → dedup by `ad_key` → rank by `winnerScore` → cap statics (vision cost) + videos → `ingestAd` (statics vision-deconstructed + `status='analyzed'`; videos `status='video_pending'`). 7s `step.sleep` between searches.
+3. Per kept seed: `safeSweep` → `sweepCompetitorLanes` (winners-flow, [[../libraries/creative-skeleton]] + [[../libraries/adlibrary-winners]]) → routes the competitor to a collection LANE (below) → `ingestAd` (statics vision-deconstructed + `status='analyzed'`). 7s `step.sleep` between seeds. A seed that resolves to NEITHER lane is logged as a **bad seed** (its `search_keyword`/`domain` don't map to a Meta advertiser — a reliable fix-me signal).
 
-## Relevance filter — the noisy-search guard
+## Two-lane collection + longitudinal tracking (winners-flow, 2026-07-17)
 
-Brand-keyword search on AdLibrary is NOISY: searching `Bulletproof` returns **Bulletproof Automotive** (carbon-fiber car wheels, 1299d); `Four Sigmatic` returns **Neubrain** (a content-match) + affiliate pages. Un-filtered, Dahlia would imitate car-wheel ads for coffee. So `sweepSeed` relevance-filters winners via [[../libraries/adlibrary]] `adMatchesCompetitor` before ingest, using the competitor's own `domain` + `resolved_advertiser` (threaded onto the Seed by `loadApprovedCompetitorsForProduct`):
-- **Domain match is authoritative** when the ad has a determinable domain (landing-page or a real destination host): keep iff its registrable domain == the competitor's. `bulletproofautomotive.com ≠ bulletproof.com` → rejected even though the name shares a prefix.
-- **Exact advertiser-name match is the fallback** ONLY when the ad has no determinable domain (opaque AdLibrary `ar…` id + null landing) — rescues real ads like "Mud Wtr, Inc" with an opaque destination, without re-admitting a wrong-brand ad (those have real domains, so the primary filter already caught them).
+The old keyword `searchAds` path (`sweepSeed`) only returned a brand's RECENT ads, never its proven long-runners. `sweepCompetitorLanes` calls `resolveAdvertiser(seed.keyword, { domain: seed.expectedDomain })` and routes:
 
-Requires each competitor row to carry a correct `domain` (+ ideally `resolved_advertiser`). A row with neither can't be relevance-checked — its results fall to the advertiser fallback only. Unit-tested in `src/lib/adlibrary.test.ts`.
+- **LANE A — `via:'name'` → a Meta `pageId`.** `scanWinners(pageId)` (`POST /api/winners/advertiser/{pageId}`, 10 credits) scans the brand's **FULL library** (not recent-only), image-only.
+- **LANE B — `via:'domain'`** (advertiser un-resolvable by name — an AdLibrary limitation — but a domain is known, e.g. Beam→shopbeam.com). `searchAds({ domain, adsType:['1'], platform:['facebook','instagram'] })` returns the brand's real ads (domain-search carries no page_id, so no winners scan).
+- **`via:null`** — neither name nor domain resolves = a reliable **bad seed** (unlike the old "0 ads" false flag).
+
+### The winner signal is OURS, not AdLibrary's
+
+AdLibrary's `tier`/`composite` are **not trusted** — the winners scan returned `tier="loser"` for *every* major brand (AG1, MUD\WTR, Calm), and the composite just tracked a mis-parsed recency number (day-counts of 1–6, `first_seen` parsing as 1970). Instead the scout tracks **longitudinal persistence** through `collectAndTrack`, per competitor:
+
+- **NEW static** (ad_key we don't have) → `ingestAd`: OUR four-slot vision + `concept_tags` (both lanes, one schema), and the longitudinal clock starts (`our_first_seen=now`, `winner_tier='new'`). Capped by `visionCap` (Opus spend); AdLibrary's composite only ORDERS which new ads to vision first.
+- **ALREADY-SEEN** → `reobserveAd`: cheap bump of `our_last_seen` + `observed_sweeps`, recompute `winner_score` = persistence days + `winner_tier` (`new`<7d, `building`≥7d, `proven`≥21d). **No re-vision.**
+- **VANISHED** (this competitor's active rows not in the sweep) → `markDisappearedAds`: `still_active=false`, `winner_tier='retired'` — the competitor stopped paying to run it.
+
+An ad a competitor keeps running across our weekly sweeps IS a proven winner (they pay because it converts) — the strongest signal, fully ours, no dependence on AdLibrary's opaque score.
+
+Advertiser resolution is STRICT (`nameMatches`: normalized-equal or brand + one corporate suffix) — the loose matcher mis-picked "Bulletproof Automotive"/"Ryze Hendricks"/"…Concrete Beams". Unit-tested in `src/lib/adlibrary-winners.test.ts`. The legacy `adMatchesCompetitor` domain/advertiser relevance filter (`src/lib/adlibrary.test.ts`) still guards the `sweepSeed` fallback path.
 
 ## Gotchas
 

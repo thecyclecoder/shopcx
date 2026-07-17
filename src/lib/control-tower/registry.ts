@@ -279,6 +279,16 @@ export interface MonitoredLoop {
   /** agent-kind only: the agent_jobs.kind this loop maps to. */
   agentKind?: string;
   /**
+   * cron only: this cron runs INSIDE the box build worker process (a BOX-EMITTED cron —
+   * migration-drift-check, the db-health passes), not as an Inngest schedule the deployed
+   * runtime dispatches. Its beats can only land while the worker is up. When the worker is
+   * unavailable (per `isWorkerUnavailable`), `evalCron` attributes cron_freshness / never_fired /
+   * registered_not_firing on this loop to the parent worker outage (amber, no violation) instead
+   * of opening a duplicate child red — the box `liveness` tile is the useful page.
+   * (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1)
+   */
+  runsOnBox?: boolean;
+  /**
    * Roster-linkage (agent-roster-sync spec, Phase 1): the [[../libraries/agent-personas]] persona
    * key (personas.ts) a NON-`agent-kind` loop maps to a worker on the org view — so a personified
    * platform cron declares its persona EXPLICITLY rather than by guesswork. `control-tower-monitor`
@@ -523,6 +533,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every ~30 min (box job)",
     livenessWindowMs: 90 * MIN,
     outputAssertion: "migration-drift",
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's frequent slow-query root-cause pass (db-health-agent P1).
@@ -538,6 +549,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 2 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's instance-saturation pass (db-health-instance-saturation-detector P1).
@@ -556,6 +568,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 45 * MIN,
     registeredAt: "2026-07-02T00:00:00Z",
     personaKind: "db_health", // Devi — all db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
   {
     // BOX-EMITTED — the DB Health Agent's daily size/growth/index/bloat sweep (db-health-agent P1).
@@ -570,6 +583,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-06-23T00:00:00Z",
     personaKind: "db_health", // Devi — both db-health crons merge into one Devi worker on the org view (agent-roster-sync P1)
+    runsOnBox: true,
   },
 
   // ── Full Inngest cron coverage (control-tower-complete-coverage spec, Phase 1) ──
@@ -1164,6 +1178,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // reactive entry further below (Cole's surface for the retired-Vale supervision invariant).
   { id: "agent:storefront-optimizer", kind: "agent-kind", owner: "growth", agentKind: "storefront-optimizer", label: "Agent — storefront optimizer", description: "Scheduled campaign loop: read funnel + lever map + LTV proxy → propose ONE atomic reversible-lever hypothesis → stand up an M1 experiment vs holdout (auto-run reversible or surface for owner Approve), or author a missing-capability spec + surface for Build. The optimizer is watched too.", expectedCadence: "daily when work exists", stuckThresholdMs: 60 * MIN },
   { id: "agent:dr-content", kind: "agent-kind", owner: "growth", agentKind: "dr-content", label: "Agent — DR content (Carrie)", description: "Direct-response content lane: on a queued lander blueprint, read our product intelligence → write intense/emotional/urgency DR copy for every block, generate the AI-appropriate imagery (Nano Banana Pro), and flag real-asset gaps (before/after, UGC, press logos) to Max → fill the content bucket to 100% before Cleo specs the build.", expectedCadence: "when a lander blueprint is queued", stuckThresholdMs: 60 * MIN },
+  // org-chart-roster-dahlia-bianca-under-max: Dahlia (ad-creative) + Bianca (media-buyer) are real
+  // agent_jobs lanes owned by growth (KIND_OWNER_FALLBACK confirms owner=growth) but had NO agent-kind
+  // MONITORED_LOOPS row, so buildRoster's source 1 never rendered them as worker cards under Max — the
+  // org chart showed Cleo/Carrie/Rhea but dropped Dahlia + Bianca. These rows roster them under Max like
+  // the other two growth agent lanes. Owner is unchanged (still growth); the KIND_OWNER_FALLBACK entries
+  // stay as a consistent backstop (same owner) — exactly like `research`, which is present in both.
+  { id: "agent:ad-creative", kind: "agent-kind", owner: "growth", agentKind: "ad-creative", label: "Agent — ad creative (Dahlia)", description: "Deterministic Node lane: on a queued cadence job for a product whose ready-to-test bin is below floor, read product intelligence → select angles → generate + vision-QA a fresh 3-placement creative pack (feed 4:5 canonical + stories 9:16 + right-column 1:1) with 4-headline/4-primary-text copy → stock Bianca's ready-to-test bin. Held OFF via the ad-creative kill switch during manual E2E.", expectedCadence: "daily when a product's bin is below floor", stuckThresholdMs: 60 * MIN },
+  { id: "agent:media-buyer", kind: "agent-kind", owner: "growth", agentKind: "media-buyer", label: "Agent — media buyer (Bianca)", description: "Test→Measure→Promote→Kill loop over the Meta test campaigns: reads meta_insights_daily (today-inclusive) per test cohort → crowns winners / trims early duds / replenishes the test slate against the active iteration policy, shadow-or-armed under the autonomous-media-buyer-supervision M2 policy (no Meta writes while shadow).", expectedCadence: "daily test cadence", stuckThresholdMs: 60 * MIN },
 
   // ── Inline event-driven AI agents (loop_heartbeats, loop_id = `ai:<agent>`) ──
   // Server-side AI agents that run per-ticket / per-order / per-journey, not on a queue or

@@ -15,6 +15,7 @@
  * stale; the build prints the current number.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { findVariant } from "@/lib/product-variants";
 
 /** The signup coupon stacked on top of qty-break + S&S. */
 export const POPUP_COUPON_PCT = 15;
@@ -98,12 +99,11 @@ export async function computePopupOffer(workspaceId: string, productId: string):
   const giftVariantId = rule?.free_gift_variant_id || null;
   if (giftVariantId) {
     giftTitle = rule?.free_gift_product_title || "Free gift";
-    const { data: gv } = await admin
-      .from("product_variants")
-      .select("price_cents")
-      .or(`id.eq.${giftVariantId},shopify_variant_id.eq.${giftVariantId}`)
-      .maybeSingle();
-    giftValueCents = (gv?.price_cents as number) || 0;
+    // free_gift_variant_id is admin-writable TEXT and may hold a UUID or a
+    // Shopify numeric id. Route through findVariant so a numeric id doesn't
+    // get cast to uuid on product_variants.id (Postgres 22P02 → gift $0).
+    const gv = await findVariant(workspaceId, { id: giftVariantId, shopifyVariantId: giftVariantId });
+    giftValueCents = gv?.price_cents || 0;
   }
 
   // Free shipping is only a stack value when the rule actually grants it.

@@ -211,6 +211,34 @@ export async function getGoal(workspaceId: string, slug: string): Promise<GoalRo
  * by `goal_id`. Sorted client-side by slug for a stable order.
  */
 export async function listGoals(workspaceId: string, filter: ListGoalsFilter = {}): Promise<GoalRow[]> {
+  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Pooled straggler read: ONE pooled query returns every workspace goal + its milestones (jsonb
+  // aggregated), retiring the TWO PostgREST round-trips (goals + goal_milestones IN ids) each with
+  // its own set_config preamble. Filters are applied in-memory over the bounded workspace set —
+  // behavior-preserving vs the DB-level filter (same rows, same sort). `null` = pool unavailable /
+  // query error → fall through to the supabase-js two-call path (same fail-open contract as
+  // [[pg-pool]] `getSpecWithPhases`).
+  try {
+    const { listGoalsWithMilestones } = await import("@/lib/pg-pool");
+    const pooled = await listGoalsWithMilestones<GoalRowDb, GoalMilestoneRow>(workspaceId);
+    if (pooled !== null) {
+      let goalPairs = pooled;
+      if (filter.status) goalPairs = goalPairs.filter((p) => p.goal.status === filter.status);
+      if (filter.owner) goalPairs = goalPairs.filter((p) => p.goal.owner === filter.owner);
+      if (filter.parent_goal_id !== undefined) {
+        const wanted = filter.parent_goal_id;
+        goalPairs =
+          wanted === null
+            ? goalPairs.filter((p) => p.goal.parent_goal_id === null)
+            : goalPairs.filter((p) => p.goal.parent_goal_id === wanted);
+      }
+      return goalPairs
+        .map((p) => goalRowFromDb(p.goal, [...p.milestones].sort((a, b) => a.position - b.position)))
+        .sort((a, b) => a.slug.localeCompare(b.slug));
+    }
+  } catch {
+    /* fall through to the supabase-js two-call path */
+  }
   const admin = createAdminClient();
   let q = admin.from("goals").select(GOAL_COLUMNS).eq("workspace_id", workspaceId);
   if (filter.status) q = q.eq("status", filter.status);

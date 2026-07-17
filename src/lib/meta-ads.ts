@@ -132,10 +132,34 @@ export interface CreativeArgs {
   imageHash?: string | null;
   headlines: string[]; // headline + variations
   primaryTexts: string[]; // primary text + variations
+  /** Single link description — used by link_data image ads (Meta's link_data.description
+   *  is 1:1, not an array). Also the single-element fallback for asset_feed_spec.descriptions[]
+   *  when `descriptions` is unset. */
   description?: string | null;
+  /** dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — multi-variant
+   *  link descriptions. When non-empty, video-ad asset_feed_spec.descriptions[] is built 1:1
+   *  from this array (N entries → N descriptions Meta rotates like titles/bodies); when unset
+   *  or empty, the single-string `description` fallback fires so byte-identical to today. */
+  descriptions?: string[] | null;
   ctaType: string;
   destinationUrl: string;
   urlTags?: string | null; // UTM query string
+}
+
+/** Shared helper — build the `asset_feed_spec.descriptions[]` payload from the N-entry variant array
+ *  (when present) or the legacy single `description` (when the caller only supplies one). Returns an
+ *  empty array when neither source has content, so the caller can decide to omit the key entirely. */
+function buildAssetFeedDescriptions(a: {
+  descriptions?: string[] | null;
+  description?: string | null;
+}): Array<{ text: string }> {
+  const source = a.descriptions && a.descriptions.length
+    ? a.descriptions
+    : (a.description ? [a.description] : []);
+  return source
+    .map((text) => (text ?? "").trim())
+    .filter((t) => t.length > 0)
+    .map((text) => ({ text }));
 }
 
 /** Meta's auto-generated thumbnail URL for a processed video (required by video ads). */
@@ -220,11 +244,15 @@ export async function createAdCreative(token: string, a: CreativeArgs): Promise<
         call_to_action: { type: a.ctaType, value: { link: a.destinationUrl } },
       },
     },
-    asset_feed_spec: {
-      titles: a.headlines.filter(Boolean).map((text) => ({ text })),
-      bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
-      optimization_type: "DEGREES_OF_FREEDOM",
-    },
+    asset_feed_spec: (() => {
+      const descs = buildAssetFeedDescriptions(a);
+      return {
+        titles: a.headlines.filter(Boolean).map((text) => ({ text })),
+        bodies: a.primaryTexts.filter(Boolean).map((text) => ({ text })),
+        ...(descs.length ? { descriptions: descs } : {}),
+        optimization_type: "DEGREES_OF_FREEDOM",
+      };
+    })(),
     degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
     ...(a.urlTags ? { url_tags: a.urlTags } : {}),
   };
@@ -241,6 +269,8 @@ export interface DualAssetCreativeArgs {
   headlines: string[];
   primaryTexts: string[];
   description?: string | null;
+  /** dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — see CreativeArgs. */
+  descriptions?: string[] | null;
   ctaType: string;
   destinationUrl: string;
   urlTags?: string | null;
@@ -269,6 +299,8 @@ export interface PlacementCreativeArgs {
   /** 4 primary texts — each is adlabel'd to every placement so Meta rotates all four per placement. */
   primaryTexts: string[];
   description?: string | null;
+  /** dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — see CreativeArgs. */
+  descriptions?: string[] | null;
   ctaType: string;
   destinationUrl: string;
   displayUrl?: string | null;
@@ -367,7 +399,13 @@ export async function createPlacementCreative(token: string, a: PlacementCreativ
       images,
       bodies: labeledBodies,
       titles: labeledTitles,
-      descriptions: [{ text: (a.description || "").trim() }],
+      // Phase 1 — multi-variant descriptions[] from the temperature-banded pack. Empty string
+      // pack (legacy single-description caller with a blank string) preserved as [{text:""}]
+      // for byte-identical Meta submit, so existing test assertions don't drift.
+      descriptions: (() => {
+        const built = buildAssetFeedDescriptions(a);
+        return built.length ? built : [{ text: "" }];
+      })(),
       call_to_action_types: [a.ctaType],
       link_urls: labeledLinkUrls,
       asset_customization_rules: [
@@ -442,7 +480,13 @@ export async function createDualAssetCreative(token: string, a: DualAssetCreativ
       [assetKey]: assets,
       bodies: labeledBodies,
       titles: labeledTitles,
-      descriptions: [{ text: (a.description || "").trim() }],
+      // Phase 1 — multi-variant descriptions[] from the temperature-banded pack; falls back to
+      // the single-string `description` (or an empty [{text:""}] placeholder) so byte-identical
+      // to today for callers that never opted in to a variant pack.
+      descriptions: (() => {
+        const built = buildAssetFeedDescriptions(a);
+        return built.length ? built : [{ text: "" }];
+      })(),
       call_to_action_types: [a.ctaType],
       link_urls: labeledLinkUrls,
       asset_customization_rules: [

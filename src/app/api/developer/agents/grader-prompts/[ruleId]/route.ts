@@ -8,7 +8,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const STATUSES = ["proposed", "approved", "rejected", "archived"];
@@ -16,10 +16,7 @@ const STATUSES = ["proposed", "approved", "rejected", "archived"];
 export async function PATCH(req: Request, { params }: { params: Promise<{ ruleId: string }> }) {
   const { ruleId } = await params;
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

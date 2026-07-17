@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 // GET — latest analysis for the ticket + cumulative cost
@@ -11,8 +11,7 @@ export async function GET(
   const { id: ticketId } = await params;
   void request;
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

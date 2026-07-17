@@ -3,6 +3,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 
 function safeStr(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -32,12 +33,13 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
 
   const admin = createAdminClient();
 
-  // Resolve every incoming ID (Shopify ID or internal UUID) to the
-  // internal product UUID. Reviews join on `product_id` now.
-  const { data: products } = await admin.from("products")
-    .select("id, shopify_product_id")
-    .eq("workspace_id", auth.workspaceId)
-    .or(productIds.map(id => `shopify_product_id.eq.${id},id.eq.${id}`).join(","));
+  // Resolve every incoming ID (Shopify ID or internal UUID) to the internal product UUID.
+  // Reviews join on `product_id`. fix-1-mixed-id-resolver — Fix 1 of
+  // docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md retires the mixed-ID `.or()` filter
+  // string (security agent flagged as injection · medium here) in favor of two parameter-safe
+  // `.in()` queries composed inside the shared helper — no filter-grammar string ever built from
+  // caller-supplied IDs. Behavior-preserving: same rows returned; only the transport is safer.
+  const products = await resolveProductsByMixedIds(admin, auth.workspaceId, productIds);
 
   const incomingToInternal: Record<string, string> = {};
   for (const p of products || []) {

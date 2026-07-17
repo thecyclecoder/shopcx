@@ -29,6 +29,14 @@ export interface ReadyToTestRow {
   status: "ready_no_active_ad";
   formats: string[];
   created_at: string;
+  /**
+   * `dahlia-andromeda-concept-diversity-tags` Phase 1 — the Andromeda concept token stamped on
+   * the campaign at author-mode ship (one of the 10 tokens; see [[../ads/creative-agent]]
+   * `ANDROMEDA_CONCEPT_TAGS`). NULL for deterministic-mode creatives or pre-Phase-1 rows.
+   * Consumed by Phase 2's [[../media-buyer/agent]] `computeMediaBuyerPlan` replenish diversity
+   * gate — NULL is its own 'untagged' bucket that never conflicts with an Andromeda token.
+   */
+  concept_tag: string | null;
 }
 
 export interface ListReadyToTestResult {
@@ -49,6 +57,7 @@ interface AdCampaignRow {
   landing_url: string | null;
   status: string | null;
   created_at: string;
+  concept_tag: string | null;
 }
 
 interface AdPublishJobRow {
@@ -114,7 +123,7 @@ export async function listReadyToTest(
   // workspace-wide — the null-product default cohort still catches Superfood Tabs today).
   let campaignsQuery = admin
     .from("ad_campaigns")
-    .select("id, landing_url, status, created_at")
+    .select("id, landing_url, status, created_at, concept_tag")
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
     .not("landing_url", "is", null)
@@ -158,6 +167,7 @@ export async function listReadyToTest(
       status: "ready_no_active_ad",
       formats: [...bucket.formats].sort(),
       created_at: c.created_at,
+      concept_tag: c.concept_tag ?? null,
     });
   }
   rows.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));

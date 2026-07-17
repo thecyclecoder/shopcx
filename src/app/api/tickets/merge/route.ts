@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { mergeTickets } from "@/lib/ticket-merge";
 
@@ -8,8 +8,7 @@ import { mergeTickets } from "@/lib/ticket-merge";
  * Moves all messages chronologically, archives old tickets with merged_into reference.
  */
 export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();

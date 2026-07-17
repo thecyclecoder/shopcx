@@ -11,7 +11,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { clearDirective, getActiveDirective } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -20,10 +20,7 @@ import { recordDirectorActivity } from "@/lib/director-activity";
 const DEFAULT_DIRECTOR = "platform";
 
 async function gate(): Promise<{ ok: false; res: NextResponse } | { ok: true; workspaceId: string; userId: string }> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { ok: false, res: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   const cookieStore = await cookies();
   const workspaceId = cookieStore.get("workspace_id")?.value;

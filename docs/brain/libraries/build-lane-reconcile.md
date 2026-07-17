@@ -26,7 +26,7 @@ A `git rebase origin/main` linearly replays the branch's commits and SPURIOUSLY 
 
 - NEVER force-push, NEVER touch main, NEVER drop BUILT commits.
 - ONE reconcile attempt per claim: primary + a single fallback. When BOTH conflict the divergence is genuine and the caller parks `needs_attention`.
-- After a successful reconcile, the caller tsc-gates the reconciled tree BEFORE the claude run — a broken origin/main (base poison) parks with the tsc output so the operator sees the real reason, never spending claude tokens on a broken base.
+- After a successful reconcile, the caller tsc-gates the reconciled tree BEFORE the claude run — a broken origin/main (base poison) parks with the tsc output so the operator sees the real reason, never spending claude tokens on a broken base. **base-poison-verify-main-alone (2026-07-17):** a reconciled-tree tsc failure NO LONGER assumes main is broken — the caller now tsc's `origin/main` ALONE (`isOriginMainTscClean`, a throwaway detached worktree) before blaming it. A STALE branch (built before a breaking main change — e.g. a goal promotion that added a required field) fails to compile with the new main even though main alone is fine; that is the BRANCH's own failure → proceed to the build session to fix it (the post-build deploy gate / spec-test re-checks tsc), NOT `base_poison`. Only a genuinely-broken main-alone parks `base_poison`. Fail-open (a worktree/tsc harness hiccup → treat main as clean + proceed) so a healthy pipeline is never falsely halted. This closed the 2026-07-17 Bianca stall: `bianca-route-ready-creatives`'s branch parked `base_poison` on the Dahlia goal's new required `descriptions` field while main was actually clean.
 
 ## Phase 2 — Name the conflicting files on a real-conflict park
 

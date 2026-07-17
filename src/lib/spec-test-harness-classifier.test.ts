@@ -34,6 +34,15 @@ test("isHarnessCommandFailure recognizes command-not-found / ENOENT / Cannot fin
   assert.equal(isHarnessCommandFailure("/bin/sh: 1: pnpm: not found"), true);
 });
 
+test("isHarnessCommandFailure recognizes a MIS-AUTHORED grep pattern (invalid regex)", () => {
+  // The dahlia-preserve-competitor-copy-dna-debranded stall: P2 grepped for `debrandForOurBrand(` — an
+  // unescaped paren → ripgrep rejects the pattern before scanning. The code was correct; the check was
+  // broken. Must be needs_human, never a `fail` that spawns a Bo fix phase (an unsatisfiable pattern → stall).
+  assert.equal(isHarnessCommandFailure("rg: regex parse error:\n    (?:debrandForOurBrand()\n    ^\nerror: unclosed group"), true);
+  assert.equal(isHarnessCommandFailure("error parsing pattern: unbalanced parenthesis"), true);
+  assert.equal(isHarnessCommandFailure("regex parse error: unclosed character class"), true);
+});
+
 test("isHarnessCommandFailure does NOT match a real assertion failure", () => {
   // Real breakage evidence: the test ran and asserted the wrong value. This is a legitimate `fail`.
   const real = `AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n"active" !== "canceled"\n  at test.ok (src/lib/foo.test.ts:42:3)`;

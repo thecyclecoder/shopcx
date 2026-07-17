@@ -8,6 +8,8 @@ The owner-facing, read-only browse surface for [[../tables/competitors]] — the
 
 **Page title:** Competitors
 
+**Static | Video ad-yield columns (competitor-ad-yield):** each competitor row shows the count of **static** and **video** ads found in the ad library for it (from [[../tables/creative_skeletons]] grouped by `competitor_id` + `media_type`, attached by `GET /api/ads/competitors`). A **0 renders red** — the "bad seed" signal (a wrong/generic `search_keyword`, or the brand isn't running ads — founder acts on it: fix the keyword or replace). CAVEAT: because `/api/search` returns only recent ads (see [[../integrations/adlibrary]] gotcha), a 0 can be a false flag for a real brand until collection moves to the winners endpoint — a live keyword check is the tiebreaker.
+
 **Rendering:** `"use client"` component (client-side state + fetch).
 
 **Layout — grouped by product (Phase 2 of [[../specs/competitor-sdk-chokepoint-and-per-product-cleanup]]):** the page renders one section per product, each with the product title as the group heading + a row count and its own table. Named-product groups sort alphabetically by product title; workspace-scoped rows (null `product_id` — the legacy migrated seeds) render last under a "Workspace-level (unscoped)" heading and disappear once Phase 3 purges them.

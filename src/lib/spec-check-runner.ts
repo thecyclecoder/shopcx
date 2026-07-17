@@ -86,7 +86,7 @@ export interface CheckExecutors {
   tsc: (ctx: { repoRoot: string }) => Promise<ExecutorResult>;
   grep: (ctx: { repoRoot: string; params: GrepCheckParams }) => Promise<ExecutorResult>;
   ci_status: (ctx: { repoRoot: string }) => Promise<ExecutorResult>;
-  http_get: (ctx: { params: HttpGetCheckParams }) => Promise<ExecutorResult>;
+  http_get: (ctx: { params: HttpGetCheckParams; previewOrigin?: string | null }) => Promise<ExecutorResult>;
   db_probe_readonly: (ctx: { params: DbProbeReadonlyCheckParams }) => Promise<ExecutorResult>;
   unit_test: (ctx: { repoRoot: string; params: UnitTestCheckParams }) => Promise<ExecutorResult>;
   build: (ctx: { repoRoot: string }) => Promise<ExecutorResult>;
@@ -97,6 +97,9 @@ export interface RunSpecChecksDeps {
   executors: CheckExecutors;
   packageScripts?: ReadonlySet<string>;
   repoRoot?: string;
+  /** graduate-vera: for a PRE-MERGE run, an `http_get` check that targets shopcx.ai is redirected to this
+   *  per-build preview origin (the Vera session used to do this via its prompt). null/undefined = no redirect. */
+  previewOrigin?: string | null;
 }
 
 export interface RunSpecChecksInput {
@@ -166,7 +169,7 @@ async function runOneCheck(row: LoadedCheck, deps: RunSpecChecksDeps): Promise<C
   const repoRoot = deps.repoRoot ?? process.cwd();
   let executed: ExecutorResult;
   try {
-    executed = await dispatchExecutor(kind, row.params, deps.executors, repoRoot);
+    executed = await dispatchExecutor(kind, row.params, deps.executors, repoRoot, deps.previewOrigin ?? null);
   } catch (e) {
     // A thrown executor is a HARNESS error too (spawn failure, network unreachable, DB blip) — not
     // an assertion `fail`. Preserving the raw message keeps the harness signature matchable.
@@ -194,11 +197,31 @@ async function runOneCheck(row: LoadedCheck, deps: RunSpecChecksDeps): Promise<C
   };
 }
 
+/**
+ * graduate-vera — rewrite a shopcx.ai `http_get` target to the per-build PREVIEW origin for a pre-merge run
+ * (the branch's code isn't on prod yet). Only the ShopCX app host is redirected; an external URL, a relative
+ * URL, or an unparseable one is returned unchanged, as is any URL when `previewOrigin` is null. Pure/exported.
+ */
+export function redirectUrlToPreview(url: string, previewOrigin: string | null): string {
+  if (!previewOrigin) return url;
+  try {
+    const u = new URL(url);
+    if (!/(^|\.)shopcx\.ai$/i.test(u.hostname)) return url;
+    const p = new URL(previewOrigin);
+    u.protocol = p.protocol;
+    u.host = p.host;
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 async function dispatchExecutor(
   kind: SpecPhaseCheckExecKind,
   params: SpecPhaseCheckParams,
   executors: CheckExecutors,
   repoRoot: string,
+  previewOrigin: string | null = null,
 ): Promise<ExecutorResult> {
   switch (kind) {
     case "tsc":
@@ -210,7 +233,7 @@ async function dispatchExecutor(
     case "grep":
       return executors.grep({ repoRoot, params: params as GrepCheckParams });
     case "http_get":
-      return executors.http_get({ params: params as HttpGetCheckParams });
+      return executors.http_get({ params: params as HttpGetCheckParams, previewOrigin });
     case "db_probe_readonly":
       return executors.db_probe_readonly({ params: params as DbProbeReadonlyCheckParams });
     case "unit_test":
@@ -304,12 +327,15 @@ export const defaultExecutors: CheckExecutors = {
       evidence: `gh pr checks — ${r.code === 0 ? "green" : `exit ${r.code}`}\n${(r.stdout || r.stderr).slice(0, 2000)}`,
     };
   },
-  http_get: async ({ params }) => {
+  http_get: async ({ params, previewOrigin }) => {
+    // graduate-vera: on a PRE-MERGE run, redirect a shopcx.ai target to the per-build preview origin (the
+    // branch's code isn't on prod yet). Only the ShopCX app host is rewritten — an external URL is left alone.
+    const url = redirectUrlToPreview(params.url, previewOrigin ?? null);
     try {
-      const res = await fetch(params.url, { redirect: "manual" });
+      const res = await fetch(url, { redirect: "manual" });
       return {
         ok: res.status === params.expect_status,
-        evidence: `GET ${params.url} → ${res.status} (expect ${params.expect_status})`,
+        evidence: `GET ${url} → ${res.status} (expect ${params.expect_status})${url !== params.url ? ` [preview-redirected from ${params.url}]` : ""}`,
       };
     } catch (e) {
       return { ok: false, evidence: `fetch error: ${(e as Error).message}` };

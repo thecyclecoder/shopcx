@@ -18,7 +18,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { WorkspaceRole } from "@/lib/types/workspace";
 import { canApprove, ALL_ACTION_TYPES, type AgentTodoActionType } from "@/lib/agent-todos/constants";
@@ -102,10 +102,7 @@ function deriveImproveState(turnStatus: TurnStatus, messages: unknown): ImproveQ
 }
 
 export async function GET() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

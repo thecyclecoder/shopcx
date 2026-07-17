@@ -16,10 +16,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { ThankYouClient } from "./_components/ThankYouClient";
 import { getStorefrontMetadata } from "../_lib/storefront-metadata";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   await connection();
   const params = await searchParams;
-  if (!params.order) return {};
+  if (!params.order || !UUID_RE.test(params.order)) return {};
   const admin = createAdminClient();
   const { data: order } = await admin
     .from("orders")
@@ -38,7 +40,7 @@ interface PageProps {
 export default async function ThankYouPage({ searchParams }: PageProps) {
   await connection();
   const params = await searchParams;
-  if (!params.order) redirect("/");
+  if (!params.order || !UUID_RE.test(params.order)) redirect("/");
 
   const admin = createAdminClient();
   const { data: order } = await admin

@@ -282,8 +282,8 @@ export async function runAdsSupervisorPass(
       dahliaGaps += 1;
       findings.push(makeDahliaBinFinding(group, depth));
     }
-    const angles = await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 30, limit: 8 })
-      .catch(() => []);
+    const { angles } = await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 30, limit: 8 })
+      .catch(() => ({ angles: [], usedFallback: false }));
     if (angles.length === 0) {
       dahliaGaps += 1;
       findings.push(makeDahliaSeedingFinding(group));
@@ -780,10 +780,18 @@ export async function deliverAdsSupervisorDigest(
 
   const { data: ws } = await admin
     .from("workspaces")
-    .select("slack_growth_director_channel_id")
+    .select("slack_growth_director_channel_id, ads_supervisor_digest_enabled")
     .eq("id", workspaceId)
     .maybeSingle();
-  const channel = (ws as { slack_growth_director_channel_id: string | null } | null)?.slack_growth_director_channel_id;
+  const wsRow = ws as { slack_growth_director_channel_id: string | null; ads_supervisor_digest_enabled: boolean | null } | null;
+  // ads-supervisor-digest-toggle: per-workspace off switch (default true). When explicitly false the
+  // founder has silenced the drift digest for this workspace (e.g. the thin-bin noise while Dahlia is held
+  // OFF for the E2E test) — skip the Slack post. The pass, drift detection, and fix-spec authoring above
+  // already ran and are unaffected; only the notification is suppressed.
+  if (wsRow?.ads_supervisor_digest_enabled === false) {
+    return { posted: false, reason: "ads-supervisor digest disabled for this workspace (ads_supervisor_digest_enabled=false)" };
+  }
+  const channel = wsRow?.slack_growth_director_channel_id;
   if (!channel) return { posted: false, reason: "no slack_growth_director_channel_id configured" };
 
   const token = await getSlackToken(workspaceId);

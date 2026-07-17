@@ -12,7 +12,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeDirectorGradeReport } from "@/lib/agents/director-leash-recommendations";
 import { PLATFORM } from "@/lib/agents/platform-director";
@@ -20,10 +20,7 @@ import { GROWTH } from "@/lib/agents/growth-director";
 
 
 export async function GET() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

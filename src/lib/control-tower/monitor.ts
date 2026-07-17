@@ -510,7 +510,18 @@ function deployRefAgeMs(worker: WorkerRow | null): number | null {
   return ageMs(worker.started_at);
 }
 
-export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+/**
+ * True iff this cron loop runs INSIDE the box build worker process (a BOX-EMITTED cron —
+ * migration-drift-check, the db-health passes). Its beats can only land while the worker is up,
+ * so cron_freshness / never_fired / registered_not_firing on it during a worker outage is a
+ * cascade of the box's own `liveness` red, not an independent lane defect.
+ * (control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1)
+ */
+export function isBoxEmittedCronLoop(loop: MonitoredLoop): boolean {
+  return loop.kind === "cron" && loop.runsOnBox === true;
+}
+
+export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -521,6 +532,20 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
     lastProduced: latest?.produced ?? null,
     detail: latest?.detail ?? null,
   };
+  // control-tower-suppress-box-cron-freshness-during-worker-outage Phase 1 — a BOX-EMITTED cron
+  // (migration-drift-check, db-health-*) only beats while the box worker is up. When the worker
+  // itself is stale/absent/crash-looping, the useful page is loop:box; opening a duplicate red
+  // on each box-hosted child cron (cron_freshness / never_fired / registered_not_firing) just
+  // pins the wrong lane and re-alerts the same parent outage. Suppress the child red → amber
+  // ("waiting on box worker outage"). Once the worker recovers (workerUnavailable=false), the
+  // existing freshness windows still page real stale-loop failures.
+  const suppressForBoxOutage = workerUnavailable && isBoxEmittedCronLoop(loop);
+  const boxOutageAmber = (statusTextForWaiting: string): Omit<LoopStatus, "history" | "openAlert" | "owner"> => ({
+    ...base,
+    color: "amber",
+    statusText: statusTextForWaiting,
+    violation: null,
+  });
   // No beat yet: distinguish NEVER-FIRED-PAST-GRACE (red) from AWAITING-FIRST-TICK (amber).
   // A registered cron whose deploy has been live longer than its cadence+grace (livenessWindowMs)
   // but has 0 heartbeats is NOT awaiting its first tick — Inngest isn't invoking it (the exact
@@ -580,6 +605,9 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
       return { ...base, color: "amber", statusText, violation: null };
     }
     if (everBeatCount === 0 && deployAgeMs != null && deployAgeMs > window) {
+      if (suppressForBoxOutage) {
+        return boxOutageAmber(`waiting on box worker outage — no beat yet (${fmtDur(deployAgeMs)} since box came up on this SHA)`);
+      }
       return {
         ...base,
         color: "red",
@@ -608,6 +636,9 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
     // (monitorUptimeMs is conservative — beat retention can only shorten it, never inflate it — so it
     // never over-fires; null = unknown ⇒ stay amber.)
     if (everBeatCount === 0 && monitorUptimeMs != null && monitorUptimeMs > window) {
+      if (suppressForBoxOutage) {
+        return boxOutageAmber(`waiting on box worker outage — no beat yet (watchdog uptime ${fmtDur(monitorUptimeMs)})`);
+      }
       return {
         ...base,
         color: "red",
@@ -624,6 +655,12 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
   if (stale && !beatsReadFailed) {
     // (Defensive: a failed read returns no latest, so this path won't normally run with
     // beatsReadFailed — but a partial/stale read must not page cron_freshness either.)
+    if (suppressForBoxOutage) {
+      // Originating incident: DB Health slow-query tile went red during a box worker outage while
+      // the box `liveness` tile already identified the parent failure. The DB Health pass recovered
+      // immediately once the worker restarted — a cascade, not a freshness defect.
+      return boxOutageAmber(`waiting on box worker outage — last beat ${elapsed(latest.ran_at)} ago`);
+    }
     return { ...base, color: "red", statusText: `hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence})`, violation: { reason: "cron_freshness", detail: `Cron ${loop.id} hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence}; last beat ${latest.ran_at}).` } };
   }
   if (!latest.ok) {
@@ -1899,7 +1936,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null, workerUnavailable);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null, workerUnavailable);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may

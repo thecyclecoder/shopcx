@@ -17,7 +17,7 @@
  * See docs/brain/specs/box-ticket-improve.md.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import {
@@ -32,8 +32,7 @@ import { executeImprovePlan } from "@/lib/improve-plan-executor";
 const ALLOWED_ROLES = ["owner", "admin", "cs_manager"];
 
 async function authTicket(ticketId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
 
   const cookieStore = await cookies();
