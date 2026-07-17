@@ -81,7 +81,8 @@ function tailToTerminator(text: string, from: number): string {
  *   - `UPDATE x SET …` without `WHERE`   → irreversible_destructive
  *   - `ALTER … DROP CONSTRAINT`          → reversible_destructive
  *   - `ALTER … DROP DEFAULT`             → reversible_destructive
- *   - NEWLY-introduced `ON DELETE CASCADE` → reversible_destructive
+ *   - `ON DELETE CASCADE` ADDED to an EXISTING table (`ALTER TABLE … ON DELETE CASCADE`) → reversible_destructive.
+ *     A cascade INSIDE a `CREATE TABLE` (a new table's FK) is ADDITIVE — see `cascadeAddedToExistingTable`.
  *
  * Also scans INSIDE `DO $$ … $$` blocks and `CREATE OR REPLACE FUNCTION` bodies (the
  * dollar-quoted delimiters are not stripped) — destruction hidden in a function body
@@ -93,6 +94,29 @@ function tailToTerminator(text: string, from: number): string {
  * Empty / non-string / unparseable input → `additive` (defensive: an empty cmd is not
  * destructive; a real destructive migration surfaces its keywords in cmd or preview).
  */
+/**
+ * True iff the SQL adds an `ON DELETE CASCADE` foreign key to an EXISTING table (the only risky
+ * case — it changes delete behavior on rows already in the DB). PURE.
+ *
+ * A cascade INSIDE a `CREATE TABLE` is additive (a new table has no existing rows to cascade-delete),
+ * so it must NOT flag the migration destructive. We classify per statement (split on `;`): a cascade
+ * counts only when its statement is an `ALTER TABLE` and is NOT a `CREATE TABLE`. Statement splitting
+ * is naive (no `;`-in-string handling) but DDL migrations don't embed `;` in string literals, and the
+ * fallback is conservative — an unsplit blob that contains BOTH a create and an alter cascade still
+ * flags via the alter statement. Input is already lower-cased + comment-stripped by the caller.
+ */
+export function cascadeAddedToExistingTable(lowerSql: string): boolean {
+  const CASCADE = /\bon\s+delete\s+cascade\b/;
+  if (!CASCADE.test(lowerSql)) return false;
+  return lowerSql.split(";").some((stmt) => {
+    if (!CASCADE.test(stmt)) return false;
+    const isCreateTable = /\bcreate\s+table\b/.test(stmt);
+    const isAlter = /\balter\s+table\b/.test(stmt);
+    // Risky only when the cascade rides an ALTER of an existing table (not a CREATE TABLE).
+    return isAlter && !isCreateTable;
+  });
+}
+
 export function classifyMigrationSql(sql: string): MigrationClassification {
   if (!sql || typeof sql !== "string") return { severity: "additive", matches: [] };
   const stripped = stripComments(sql);
@@ -112,7 +136,15 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
   if (/\btruncate\b/.test(lower)) push("TRUNCATE", "irrev");
   if (/\bdrop\s+constraint\b/.test(lower)) push("ALTER … DROP CONSTRAINT", "rev");
   if (/\bdrop\s+default\b/.test(lower)) push("ALTER … DROP DEFAULT", "rev");
-  if (/\bon\s+delete\s+cascade\b/.test(lower)) push("ON DELETE CASCADE", "rev");
+  // `ON DELETE CASCADE` is only risky when ADDED to an EXISTING table — an
+  // `ALTER TABLE … ADD … ON DELETE CASCADE` changes delete behavior on rows already in the DB.
+  // Inside a `CREATE TABLE` it's a brand-new table's foreign key: there are no existing rows to
+  // cascade-delete, so it is PURELY ADDITIVE. Classifying a CREATE-TABLE cascade as destructive
+  // is the 2026-07-17 drift bug — it gated `ad_creative_copy_qc_verdicts` + `ad_creative_copy_variants`
+  // (both CREATE TABLE with cascade FKs) for an approval that never came, so the reconciler never
+  // auto-applied them and the whole Dahlia copy-pack/QC pipeline silently no-op'd for weeks. Classify
+  // per-statement: a cascade only counts when its statement is an ALTER (not a CREATE TABLE).
+  if (cascadeAddedToExistingTable(lower)) push("ON DELETE CASCADE", "rev");
 
   for (const m of lower.matchAll(/\bdelete\s+from\s+[^\s;]+/g)) {
     const tail = tailToTerminator(lower, (m.index ?? 0) + m[0].length);
