@@ -12,11 +12,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Resumable box-chat sessions fall back to fresh on missing session** · verified 2026-07-17 · → [[libraries/box-session-resume]]
 - **Typecheck the box tsx entrypoints in CI (scoped tsconfig) + fix the latent errors** · verified 2026-07-17 · → [[../operational-rules#box-code-parses-under-esbuild-not-just-tsc-predeploy-guard]] · [[../recipes/build-box-setup]]
 - **Build lane self-verifies the spec's checks against its own worktree before commit** · verified 2026-07-17 · → [[../libraries/builder-worker]] § Pre-commit self-verify gate · [[../libraries/spec-check-runner]] § Pre-commit self-verify (build lane)
 - **Suppress box job cron freshness alerts while the box worker is down** · verified 2026-07-17 · → [[lifecycles/control-tower]]
 - **DB-load: route all API-route auth through a shared getClaims() helper** · verified 2026-07-17 · → [[../libraries/supabase__server]]
 - **Cut the request-volume / egress firehose on the instance** · verified 2026-07-17 · → [[../libraries/db-health]]
+- **Classify one-off Anthropic overload (529 / 5xx) leaks in the Vercel error feed as transient** · verified 2026-07-17 · → [[../libraries/control-tower]]
 - **Spec/phase read efficiency: make a cold read cheap so it scales with the agent fleet** · verified 2026-07-17 · → [[../libraries/pg-pool]] · [[../libraries/brain-roadmap]]
 - **Ad-creative must show only OUR real offer — strip a competitor's discount from a reused hook, and QA must reject any discount that doesn't match our offer** · verified 2026-07-16 · → [[../libraries/creative-brief]] · [[../libraries/creative-generate]] · [[../libraries/creative-qa]] · [[../lifecycles/ad-creative]]
 - **Ada reacts to routed approvals immediately — approve-fast-or-escalate-fast, never sits** · verified 2026-07-16 · → [[../libraries/platform-director]]
