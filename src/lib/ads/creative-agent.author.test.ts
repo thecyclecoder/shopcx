@@ -514,7 +514,14 @@ test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY wh
   await runCopyAuthorSession(
     sessionInputs({
       angle: angle({ source: "competitor" }),
-      competitorDna: { advertiser: "Rival Co", mechanism: "10x collagen bond", proof: null },
+      competitorDna: {
+        hook: "10x collagen bond in one scoop",
+        framework: "before/after transformation",
+        mechanismClaim: "10x collagen bond",
+        proof: null,
+        offer: null,
+        competitorAdvertiser: "Rival Co",
+      },
     }),
     withDna.dispatch,
   );

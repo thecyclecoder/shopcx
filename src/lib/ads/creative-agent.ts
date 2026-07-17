@@ -26,6 +26,7 @@ import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-f
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
 import { computeSophisticationLevel } from "@/lib/ads/sophistication";
+import { debrandForOurBrand } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
 import { renderRubricForPrompt } from "@/lib/ads/copy-rubric";
@@ -185,12 +186,21 @@ export interface CopyAuthorSessionInputs {
    *  reserved for future retention audiences. */
   audienceTemperature: "cold" | "warm" | "hot";
   /** Present only when `angle.source === 'competitor'` — the debranded competitor DNA
-   *  (advertiser tokens, mechanism, proof) Dahlia may use as INSPIRATION for the underlying
-   *  angle but never echo as brand marks. Null for own-brand angles. */
+   *  (dahlia-preserve-competitor-copy-dna-debranded Phase 2). Each of the four proven slots
+   *  (`hook / framework / mechanismClaim / proof / offer`) is run through
+   *  [[./debrand|debrandForOurBrand]] with the workspace's own brand before it reaches this
+   *  shape, so Dahlia's session sees the winner's proven WORDS with brand marks stripped and
+   *  may use them as authoring material — never echoed back as brand tokens. Null for
+   *  own-brand angles. `competitorAdvertiser` is the raw advertiser name (kept on the payload
+   *  so the skill can quote back which competitor the DNA came from in `claim_trace`
+   *  reasoning). */
   competitorDna: {
-    advertiser: string | null;
-    mechanism: string | null;
-    proof: unknown;
+    hook: string;
+    framework: string | null;
+    mechanismClaim: string | null;
+    proof: string | null;
+    offer: string | null;
+    competitorAdvertiser: string | null;
   } | null;
   /** dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the modal Schwartz awareness level
    *  the competitor shelf is writing at (1..5). Computed pure from the shelf via
@@ -430,12 +440,19 @@ export function buildCopyAuthorPrompt(
 ): string {
   const briefJson = sanitizeAuthorField(JSON.stringify(inputs.brief));
   const rubric = sanitizeAuthorField(inputs.rubricText);
+  // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — emit the six-slot debranded shape
+  // (`hook / framework / mechanism_claim / proof / offer / competitor_advertiser`) the SKILL's
+  // IMITATE-DEBRANDED rule reads. Snake-case keys inside the payload mirror the spec's session
+  // contract even though the TS interface uses camelCase — Dahlia reads the JSON verbatim.
   const dna = inputs.competitorDna
     ? sanitizeAuthorField(
         JSON.stringify({
-          advertiser: inputs.competitorDna.advertiser,
-          mechanism: inputs.competitorDna.mechanism,
+          hook: inputs.competitorDna.hook,
+          framework: inputs.competitorDna.framework,
+          mechanism_claim: inputs.competitorDna.mechanismClaim,
           proof: inputs.competitorDna.proof,
+          offer: inputs.competitorDna.offer,
+          competitor_advertiser: inputs.competitorDna.competitorAdvertiser,
         }),
       )
     : null;
@@ -995,6 +1012,19 @@ async function stockProduct(
   const stories = await loadTransformationStories(admin, workspaceId, productId);
   const ownAngles = selectAngles(pi, stories);
 
+  // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — resolve OUR brand once per
+  // stockProduct call so the author-mode dispatch below can pass it as the `ourBrand` argument
+  // to `debrandForOurBrand` per slot. Falls back to the product title when the workspace name
+  // is missing (never fatal — the debrand helper is null-safe on the competitorAdvertiser side
+  // and the ourBrand argument is currently reserved for future disambiguation).
+  const { data: wsRow } = await admin
+    .from("workspaces")
+    .select("name")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  const ourBrand =
+    (wsRow && typeof (wsRow as { name?: unknown }).name === "string" && (wsRow as { name: string }).name) || productTitle;
+
   // Pool in PROVEN competitor angles from THIS product's deliberately-chosen competitors (CEO 2026-07-12):
   // market-validated hooks + their winning GRAPHIC, ranked by days-running. Read by product_id — the scout
   // tagged each skeleton with the product its competitor was chosen for, so imitate reads a product's own
@@ -1205,13 +1235,34 @@ async function stockProduct(
         let authorVerdict: AuthorModeCopy | null = null;
         if (authorModeEngaged && copyAuthorDispatcher) {
           const audienceTemperature = resolveAudienceTemperature(angle);
-          const competitorDna = angle.source === "competitor"
-            ? {
-                advertiser: typeof angle.raw?.advertiser === "string" ? angle.raw.advertiser : null,
-                mechanism: typeof angle.raw?.mechanism === "string" ? angle.raw.mechanism : null,
-                proof: angle.raw?.proof,
-              }
-            : null;
+          // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — build the six-slot
+          // debranded competitor DNA payload from `brief.competitorDna` (populated in Phase 1
+          // by buildCreativeBrief when angle.source==='competitor'). Every string slot runs
+          // through `debrandForOurBrand(slot, competitorAdvertiser, ourBrand)` so the winner's
+          // proven WORDS reach Dahlia's session with the rival brand tokens stripped — the
+          // whole point of the imitate-then-innovate flow. Null-safe: a competitor angle
+          // whose brief.competitorDna hydration missed still yields the shape (empty slots),
+          // and the SKILL's IMITATE-DEBRANDED rule handles empty gracefully. Own-brand angles
+          // leave competitorDna null.
+          const competitorDna: CopyAuthorSessionInputs["competitorDna"] =
+            angle.source === "competitor" && brief.competitorDna
+              ? {
+                  hook: debrandForOurBrand(brief.competitorDna.hook, brief.competitorDna.competitorAdvertiser, ourBrand),
+                  framework: brief.competitorDna.framework == null
+                    ? null
+                    : debrandForOurBrand(brief.competitorDna.framework, brief.competitorDna.competitorAdvertiser, ourBrand),
+                  mechanismClaim: brief.competitorDna.mechanismClaim == null
+                    ? null
+                    : debrandForOurBrand(brief.competitorDna.mechanismClaim, brief.competitorDna.competitorAdvertiser, ourBrand),
+                  proof: brief.competitorDna.proof == null
+                    ? null
+                    : debrandForOurBrand(brief.competitorDna.proof, brief.competitorDna.competitorAdvertiser, ourBrand),
+                  offer: brief.competitorDna.offer == null
+                    ? null
+                    : debrandForOurBrand(brief.competitorDna.offer, brief.competitorDna.competitorAdvertiser, ourBrand),
+                  competitorAdvertiser: brief.competitorDna.competitorAdvertiser,
+                }
+              : null;
           const outcome = await runCopyAuthorSessionForImage(
             { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel },
             copyAuthorDispatcher,
