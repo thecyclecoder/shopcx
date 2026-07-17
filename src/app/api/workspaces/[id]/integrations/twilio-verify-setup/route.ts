@@ -6,7 +6,7 @@
  * workspaces.twilio_verify_service_sid.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createVerifyService } from "@/lib/twilio-verify";
 
@@ -16,8 +16,7 @@ export async function POST(
 ) {
   void request;
   const { id: workspaceId } = await params;
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();

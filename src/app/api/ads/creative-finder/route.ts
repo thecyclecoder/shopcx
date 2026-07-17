@@ -10,16 +10,13 @@
  * See docs/brain/specs/winning-static-creative-finder.md + creative-finder-video.md.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { signCreativeShot } from "@/lib/creative-skeleton";
 import { inngest } from "@/lib/inngest/client";
 
 async function authorize(workspaceId: string | null) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!workspaceId)
     return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };

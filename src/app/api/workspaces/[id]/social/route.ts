@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { frequencyHint } from "@/lib/social/optimizer";
@@ -16,8 +16,7 @@ const DEFAULT_CONFIG = {
 };
 
 async function auth(workspaceId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   return user ? createAdminClient() : null;
 }
 

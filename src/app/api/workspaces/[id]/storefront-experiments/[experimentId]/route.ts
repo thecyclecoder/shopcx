@@ -13,7 +13,7 @@
  * detail page and the promote/kill decision never disagree. Owner/admin only.
  */
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { computeExperimentFunnel, type VariantRollupRow } from "@/lib/storefront/experiment-funnel";
 import { renderVariantForLanderType, type LanderType } from "@/lib/storefront/experiments";
@@ -25,8 +25,7 @@ export async function GET(
   const { id: workspaceId, experimentId } = await params;
   void request;
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();

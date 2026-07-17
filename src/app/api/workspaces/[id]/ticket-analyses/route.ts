@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { centralDateStr, centralDayWindowUtc, centralTodayStartUtcIso } from "@/lib/central-day";
 
@@ -9,8 +9,7 @@ import { centralDateStr, centralDayWindowUtc, centralTodayStartUtcIso } from "@/
 //   ?view=tickets&date=YYYY-MM-DD — per-ticket list for a given day
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: workspaceId } = await params;
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const view = req.nextUrl.searchParams.get("view") || "daily";

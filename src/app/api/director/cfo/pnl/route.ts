@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 
@@ -10,8 +10,7 @@ import { cookies } from "next/headers";
  * addbacks (adjusted_net_income). See docs/brain/tables/qb_pnl_snapshots.md.
  */
 export async function GET() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

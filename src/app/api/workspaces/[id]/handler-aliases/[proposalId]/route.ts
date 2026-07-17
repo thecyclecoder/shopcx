@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 // PATCH — approve or decline a proposed_action_aliases row.
@@ -18,8 +18,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // check reports back if the compare-and-set found no row.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string; proposalId: string }> }) {
   const { id: workspaceId, proposalId } = await params;
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
