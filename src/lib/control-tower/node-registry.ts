@@ -120,6 +120,7 @@ export const BUILDER_WORKER_KINDS = [
   "media-buyer",
   "ad-creative",
   "ad-creative-copy-author",
+  "ad-creative-copy-qc",
   "media-buyer-grade",
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
@@ -173,6 +174,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "media-buyer": "growth", // Bianca — daily creative test cadence under Max
   "ad-creative": "growth", // Dahlia — bin-stocking under Max
   "ad-creative-copy-author": "growth", // Dahlia — per-creative Max copy-author box session (DAHLIA_COPY_MODE=author gate, dahlia-copy-author-box-session)
+  "ad-creative-copy-qc": "growth", // Max — per-creative INDEPENDENT copy-QC box session (DAHLIA_QC_COPY_MODE=box gate, dahlia-max-independent-copy-qc-box-session)
   "media-buyer-grade": "growth", // Bianca / Max grading pass
   "ads-supervisor": "growth", // ads-supervisor-3h-agent — 3h supervisory pass over Bianca + Dahlia (owner: Max)
 };
