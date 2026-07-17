@@ -205,8 +205,9 @@ async function resolveBuildWorkspaceId(admin: Admin): Promise<string | null> {
   return (ws?.id as string) || null;
 }
 
-/** Stable dedupe key for a PR (one pr-resolve job per PR at a time). */
-function prSpecSlug(prNumber: number): string {
+/** Stable dedupe key for a PR (one pr-resolve job per PR at a time). Exported so the escort sweep can
+ *  find a build-branch's pr-resolve jobs when routing a `reconcile_conflict` park to resolution. */
+export function prSpecSlug(prNumber: number): string {
   return `pr-${prNumber}`;
 }
 

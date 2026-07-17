@@ -195,6 +195,28 @@ export interface CreativeBrief {
   imageRefs: { role: string; url: string }[];
   /** Guardrail attestations — why this brief is safe to auto-publish. */
   guardrails: string[];
+  /**
+   * Preserved competitor copy DNA — the four proven slots the driving competitor's ad has kept
+   * live across 45+ paid days (per creative_skeletons: hook / framework / mechanism_claim /
+   * proof / offer), plus the competitor's advertiser token needed for debranding. Populated ONLY
+   * when the driving `angle.source === 'competitor'`; own-brand angles carry null.
+   *
+   * Consumed by Dahlia's author-mode box session (stockProduct's author-mode branch, wired in
+   * Phase 2) — she debrands each slot via `debrandForOurBrand` and treats the result as
+   * authoring material so the imitate-then-innovate flow reuses the market-tested WORDS the
+   * competitor's picture already proved, with only the brand stripped. Also read by the M2
+   * never-fabricate firewall's `verifyClaimTrace` when a claim cites `source='competitorDna'`
+   * — a slot value here is the required evidence. Deterministic buildMetaCopy is untouched
+   * (the field is opt-in for author-mode consumers only).
+   */
+  competitorDna?: {
+    hook: string;
+    framework: string | null;
+    mechanismClaim: string | null;
+    proof: string | null;
+    offer: string | null;
+    competitorAdvertiser: string | null;
+  };
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -287,7 +309,34 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
     offer ? "price shown only via allowed treatment (no bare MSRP)" : "no price shown",
   ];
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails };
+  // Preserve competitor copy DNA (dahlia-preserve-competitor-copy-dna-debranded Phase 1). The
+  // creative-agent competitor-angle mapper (creative-agent.ts stockProduct) threads the
+  // underlying skeleton's advertiser + hook + framework + mechanism_claim + proof + offer via
+  // `angle.raw` so we can populate the four slots without a second DB read. Own-brand angles
+  // leave the field unset. The RAW hook (pre-sanitizer) is carried so Dahlia's author session
+  // can see the winner's original words before applying `debrandForOurBrand` at author time.
+  let competitorDna: CreativeBrief["competitorDna"];
+  if (angle.source === "competitor") {
+    const raw = angle.raw ?? {};
+    const rawHook = typeof raw.hook === "string" && raw.hook ? raw.hook : angle.hook;
+    const framework = typeof raw.framework === "string" ? raw.framework : null;
+    const mechanismClaim = typeof raw.mechanismClaim === "string"
+      ? raw.mechanismClaim
+      : typeof raw.mechanism === "string" ? raw.mechanism : null;
+    const proof = typeof raw.proof === "string" ? raw.proof : null;
+    const rawOffer = typeof raw.offer === "string" ? raw.offer : null;
+    const competitorAdvertiser = typeof raw.advertiser === "string" ? raw.advertiser : null;
+    competitorDna = {
+      hook: rawHook,
+      framework,
+      mechanismClaim,
+      proof,
+      offer: rawOffer,
+      competitorAdvertiser,
+    };
+  }
+
+  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna };
 }
 
 /**

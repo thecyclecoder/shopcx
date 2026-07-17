@@ -60,7 +60,7 @@ import { setSpecStatus, listSpecs } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
-import { enqueueSpecTestIfDue } from "@/lib/agent-jobs";
+import { enqueueSpecTestIfDue, ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
@@ -1262,6 +1262,7 @@ export const ESCORT_AUTHORED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 export type EscortLane =
   | "queued_build"
   | "failed_retry"
+  | "reconcile_resolve"
   | "failed_repeat"
   | "stalled"
   | "loop_guard";
@@ -1275,6 +1276,7 @@ export interface EscortSweepResult {
   stalled: string[];
   escalated: string[];
   loopGuarded: string[];
+  reconcileResolve: string[]; // builds whose reconcile_conflict park was routed to a pr-resolve this pass
   skipped: number;
 }
 
@@ -1349,19 +1351,24 @@ interface LatestBuild {
   failedCount: number; // failed/needs_attention attempts within the build-state window
   lastError: string | null;
   lastMergeSha: string | null; // from spec_card_state — proxy for "merge landed"
+  needsAttentionClass: string | null; // reconcile_conflict routes to pr-resolve, not a blind rebuild
+  prNumber: number | null; // the branch's open PR (pr-resolve target)
+  specBranch: string | null; // claude/build-{slug} (pr-resolve branch)
 }
 
 async function loadLatestBuildState(admin: Admin, workspaceId: string, slug: string): Promise<{ latest: LatestBuild | null; bs: SpecBuildState }> {
   const bs = await specBuildState(admin, workspaceId, slug);
   const { data: rows } = await admin
     .from("agent_jobs")
-    .select("status, created_at")
+    .select("status, created_at, needs_attention_class, pr_number, spec_branch")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
     .eq("kind", "build")
     .order("created_at", { ascending: false })
     .limit(1);
-  const latestRow = (rows ?? [])[0] as { status?: string; created_at?: string } | undefined;
+  const latestRow = (rows ?? [])[0] as
+    | { status?: string; created_at?: string; needs_attention_class?: string | null; pr_number?: number | null; spec_branch?: string | null }
+    | undefined;
   if (!latestRow) return { latest: null, bs };
   // last_merge_sha lives on spec_card_state — pull it as the "merge landed" proxy.
   const { data: card } = await admin
@@ -1377,9 +1384,58 @@ async function loadLatestBuildState(admin: Admin, workspaceId: string, slug: str
       failedCount: bs.failedCount,
       lastError: bs.lastError,
       lastMergeSha: ((card as { last_merge_sha?: string | null } | null)?.last_merge_sha) ?? null,
+      needsAttentionClass: latestRow.needs_attention_class ?? null,
+      prNumber: typeof latestRow.pr_number === "number" ? latestRow.pr_number : null,
+      specBranch: latestRow.spec_branch ?? null,
     },
     bs,
   };
+}
+
+/**
+ * reconcile-conflict-route-to-pr-resolve — what state is the pr-resolve recovery in for a build parked on
+ * `reconcile_conflict`? pr-resolve jobs are keyed by `pr-{number}` (not the spec slug). Returns:
+ *   • 'inflight'  — a pr-resolve is running → WAIT (don't double-enqueue, don't rebuild).
+ *   • 'resolved'  — a pr-resolve COMPLETED after this build parked → the branch was reconciled → REBUILD.
+ *   • 'none'      — no live/completed-since resolve → ENQUEUE one (a blind rebuild would re-hit the conflict).
+ */
+/**
+ * Pure lane decision for a parked build (reconcile-conflict-route-to-pr-resolve). Given the park's class,
+ * its PR, and the pr-resolve state, decide how the escort handles it:
+ *   • 'reconcile_resolve' — enqueue a pr-resolve (no live/completed resolve yet; a blind rebuild would loop).
+ *   • 'failed_retry'      — a pr-resolve already reconciled the branch → rebuild onto the clean branch.
+ *   • 'skip'              — a pr-resolve is in-flight → wait.
+ *   • null                — NOT a reconcile_conflict-with-PR park → caller uses its normal failedCount lanes.
+ */
+export function routeReconcileConflictPark(
+  needsAttentionClass: string | null,
+  prNumber: number | null,
+  prState: "inflight" | "resolved" | "none",
+): "reconcile_resolve" | "failed_retry" | "skip" | null {
+  if (needsAttentionClass !== "reconcile_conflict" || !prNumber) return null;
+  if (prState === "inflight") return "skip";
+  if (prState === "resolved") return "failed_retry";
+  return "reconcile_resolve";
+}
+
+async function prResolveStateForConflictPark(
+  admin: Admin,
+  workspaceId: string,
+  prNumber: number,
+  parkSinceIso: string,
+): Promise<"inflight" | "resolved" | "none"> {
+  const { prSpecSlug } = await import("@/lib/github-pr-resolve");
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "pr-resolve")
+    .eq("spec_slug", prSpecSlug(prNumber))
+    .order("created_at", { ascending: false });
+  const rows = (data ?? []) as Array<{ status: string; created_at: string }>;
+  if (rows.some((r) => ACTIVE_STATUSES.includes(r.status as (typeof ACTIVE_STATUSES)[number]))) return "inflight";
+  if (rows.some((r) => (r.status === "completed" || r.status === "merged") && r.created_at > parkSinceIso)) return "resolved";
+  return "none";
 }
 
 /** Count of recent `escorted` activity rows for (slug, lane) within the loop-guard window. */
@@ -1420,7 +1476,7 @@ async function recordEscort(admin: Admin, args: { workspaceId: string; slug: str
  * until Platform is live+autonomous; best-effort per spec — one failure never blocks the rest.
  */
 export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
-  const empty: EscortSweepResult = { scanned: 0, queuedBuild: [], failedRetry: [], failedRepeat: [], stalled: [], escalated: [], loopGuarded: [], skipped: 0 };
+  const empty: EscortSweepResult = { scanned: 0, queuedBuild: [], failedRetry: [], failedRepeat: [], stalled: [], escalated: [], loopGuarded: [], reconcileResolve: [], skipped: 0 };
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return empty;
   const workspaceId = await resolveDirectorWorkspace(admin);
@@ -1496,14 +1552,45 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
       result.skipped++;
       continue;
     } else if (FAILED_BUILD_STATUSES.has(latest.status) && !bs.activeBuild) {
-      if (bs.failedCount <= 1) {
+      // reconcile-conflict-route-to-pr-resolve: a build parked on a DETERMINISTIC branch↔main conflict
+      // (needs_attention_class='reconcile_conflict') will re-hit the IDENTICAL conflict on a blind
+      // failed_retry rebuild — looping until the conflict happens to clear on its own (the dahlia-never-
+      // fabricate-copy-firewall stall: three re-attempts, three re-parks). Route it to RESOLUTION instead:
+      // enqueue a pr-resolve (merges main + resolves + pushes the reconciled branch), then re-drive the
+      // build only once the branch is reconciled. Needs the branch's PR (pr-resolve's target); a park with
+      // no PR falls through to the normal rebuild lanes (its first-phase branch is recreated fresh anyway).
+      const reconcileRoute =
+        latest.needsAttentionClass === "reconcile_conflict" && latest.prNumber
+          ? routeReconcileConflictPark(
+              latest.needsAttentionClass,
+              latest.prNumber,
+              await prResolveStateForConflictPark(admin, workspaceId, latest.prNumber, latest.createdAt),
+            )
+          : null;
+      if (reconcileRoute) {
+        extra = { needs_attention_class: latest.needsAttentionClass, pr_number: latest.prNumber, failed_count: bs.failedCount };
+        if (reconcileRoute === "skip") {
+          // A pr-resolve is running — don't double-enqueue and don't rebuild onto an unreconciled branch.
+          result.skipped++;
+          continue;
+        }
+        if (reconcileRoute === "failed_retry") {
+          // pr-resolve reconciled the branch → a rebuild now sees main already merged (reconcile is a no-op).
+          lane = "failed_retry";
+          reason = `${c.slug} reconcile_conflict (PR #${latest.prNumber}) was resolved by pr-resolve — re-driving the build on the reconciled branch.`;
+        } else {
+          lane = "reconcile_resolve";
+          reason = `${c.slug} build parked reconcile_conflict (PR #${latest.prNumber}) — routing to pr-resolve to reconcile the branch (a blind rebuild would re-hit the same conflict).`;
+        }
+      } else if (bs.failedCount <= 1) {
         lane = "failed_retry";
         reason = `Last build of ${c.slug} ${latest.status} (1 failed attempt, no in-flight) — queuing a retry. ${latest.lastError ? `Latest: ${latest.lastError.slice(0, 200)}` : ""}`.trim();
+        extra = { failed_count: bs.failedCount, last_error: latest.lastError ?? undefined };
       } else {
         lane = "failed_repeat";
         reason = `Build of ${c.slug} has failed ${bs.failedCount}× with nothing in-flight — likely a deeper issue, not a flaky retry. Routing to the groom/init lane for re-investigation (fix-spec or dismiss).`;
+        extra = { failed_count: bs.failedCount, last_error: latest.lastError ?? undefined };
       }
-      extra = { failed_count: bs.failedCount, last_error: latest.lastError ?? undefined };
     } else if (ESCORT_ACTIVE_BUILD_STATUSES.has(latest.status)) {
       const ageMs = Date.now() - new Date(latest.createdAt || 0).getTime();
       if (ageMs > ESCORT_STALL_WINDOW_MS && !latest.lastMergeSha) {
@@ -1567,6 +1654,28 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
         if (lane === "queued_build") result.queuedBuild.push(c.slug);
         else result.failedRetry.push(c.slug);
         await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+      } else if (lane === "reconcile_resolve") {
+        // Route the reconcile_conflict park to RESOLUTION: enqueue a pr-resolve on the branch's PR. It merges
+        // origin/main, resolves the conflict, tsc-gates + pushes the reconciled branch — then the NEXT escort
+        // pass sees prResolveState='resolved' and re-drives the build (failed_retry) onto the clean branch.
+        // enqueuePrResolveJob dedupes per PR + is retry-capped; the escort loop-guard bounds this lane too, so
+        // a genuinely unresolvable semantic conflict escalates to the CEO rather than looping.
+        const { enqueuePrResolveJob } = await import("@/lib/github-pr-resolve");
+        const r = await enqueuePrResolveJob(admin, {
+          workspaceId,
+          prNumber: latest!.prNumber!,
+          branch: latest!.specBranch ?? `claude/build-${c.slug}`,
+          reason: `escort: build parked reconcile_conflict — reconcile the branch so the rebuild stops re-hitting the conflict`,
+        });
+        if (r.enqueued) {
+          result.reconcileResolve.push(c.slug);
+          await recordEscort(admin, { workspaceId, slug: c.slug, lane, source: c.source, reason, extra });
+        } else {
+          // Not enqueued (an active pr-resolve already exists, or the retry cap was reached + surfaced). Not a
+          // failure — the in-flight/exhausted resolve owns the branch; skip quietly.
+          console.log(`[platform-director] escortSweep reconcile_resolve for ${c.slug}: pr-resolve not enqueued (${r.reason ?? "?"})`);
+          result.skipped++;
+        }
       } else if (lane === "failed_repeat") {
         const r = await escalateDiagnosisToCeo(admin, {
           workspaceId,

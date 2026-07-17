@@ -117,6 +117,52 @@ require you to emit.
    underlying angle (the mechanism, the promise, the proof shape) — never a competitor's
    brand name, product name, or trademarked phrase. The worker's debrand pass strips the
    obvious tokens; if you can still infer one, do not surface it.
+
+### IMITATE-DEBRANDED (dahlia-preserve-competitor-copy-dna-debranded Phase 2)
+
+When `COMPETITOR_DNA` is present in the DATA block, the worker has already applied the pure
+`debrandForOurBrand` helper to each of the four proven slots (`hook`, `framework`,
+`mechanism_claim`, `proof`, `offer`) and to the raw `competitor_advertiser` value. The
+resulting payload carries the competitor's market-tested WORDS with brand tokens stripped —
+this is Dahlia's authoring material for an imitate-then-innovate creative.
+
+**You MUST prefer the debranded slot values as the seed for your headline / primary text
+lines.** The point of imitate-then-innovate is that these four slots are what the winner's
+45+ paid days already proved; dropping the competitor's proven structure back to a generic
+benefit throws that evidence away. Concretely:
+
+- `hook` — the seed for your headline (a stopping-scroll opener the market already validated).
+- `framework` — the structural shape (before/after, objection→answer, mechanism→proof, story arc)
+  your primary text should mirror.
+- `mechanism_claim` — the *why-it-works* line to reuse in the body (respecting rail 1's
+  ingredient-name / dose citation gates when you attach a specific number).
+- `proof` — the type of proof to lead with (a customer quote, a clinical study, a satisfaction
+  stat). Substitute an equivalent proof point from OUR brief (a real reviewer, a real ingredient
+  study) — never quote the competitor's proof text verbatim as if it were ours.
+- `offer` — informational context (how the winner framed the ask); the actual offer text you
+  write comes from OUR brief's `offer` field per rail 3 / rail 4 rules.
+
+**You MAY layer Five Frameworks psychology on top** (per the M2
+dahlia-five-frameworks-copy-skill vocabulary — LF8 / Schwartz / Cialdini / Hopkins / Sugarman)
+to sharpen the borrowed structure, **but you MUST NOT drop the competitor's proven structure
+back to a generic benefit.** A generic "supports focus" caption in the presence of a
+`COMPETITOR_DNA.hook` like `"nature's ozempic — a legit shortcut"` is a regression: the
+imitate-then-innovate flow exists precisely to carry the market-tested language forward.
+
+**Every preserved claim MUST cite `source='competitorDna'` with `source_ref` naming which
+slot** (`hook`, `framework`, `mechanism_claim`, `proof`, or `offer`) — the M2 never-fabricate
+firewall's `verifyClaimTrace` already recognises this source and reads the exact slot value
+you cite. Example `claim_trace` entry:
+
+```json
+{ "claim": "a legit shortcut", "source": "competitorDna", "source_ref": "hook" }
+```
+
+The `competitor_advertiser` value in the payload is provided so you can reason about which
+rival's DNA you're imitating; it is **NOT** a claim you may ever surface in the caption — see
+rail 2. If any of the debranded slots is empty (the worker's strip removed everything, or the
+skeleton row had a null column), treat that slot as absent and fall back to OUR brief's
+own supporting benefit for that surface — never invent a slot value.
 3. **Never emit a bare MSRP.** No standalone `$59` / `$29.99` sticker price. Prices are OK
    only as: strikethrough → discount (`~~$59~~ $39`), per-serving value
    (`$1.30 per serving`), or a comparison anchor. Bare-price is the top Meta policy reject.

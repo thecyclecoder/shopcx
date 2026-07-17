@@ -5798,10 +5798,11 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const sweep = await lib.escortSweep(db);
     if (sweep.queuedBuild.length) notes.push(`escort-sweep → queued ${sweep.queuedBuild.length} build(s): ${sweep.queuedBuild.join(", ")}`);
     if (sweep.failedRetry.length) notes.push(`escort-sweep → retried ${sweep.failedRetry.length} failed build(s): ${sweep.failedRetry.join(", ")}`);
+    if (sweep.reconcileResolve.length) notes.push(`escort-sweep → routed ${sweep.reconcileResolve.length} reconcile_conflict park(s) to pr-resolve: ${sweep.reconcileResolve.join(", ")}`);
     if (sweep.failedRepeat.length) notes.push(`escort-sweep → escalated ${sweep.failedRepeat.length} repeat-failure(s): ${sweep.failedRepeat.join(", ")}`);
     if (sweep.stalled.length) notes.push(`escort-sweep → flagged ${sweep.stalled.length} stalled build(s): ${sweep.stalled.join(", ")}`);
     if (sweep.loopGuarded.length) notes.push(`escort-sweep loop-guard → escalated ${sweep.loopGuarded.length}: ${sweep.loopGuarded.join(", ")}`);
-    if (sweep.scanned && !sweep.queuedBuild.length && !sweep.failedRetry.length && !sweep.failedRepeat.length && !sweep.stalled.length && !sweep.loopGuarded.length) {
+    if (sweep.scanned && !sweep.queuedBuild.length && !sweep.failedRetry.length && !sweep.reconcileResolve.length && !sweep.failedRepeat.length && !sweep.stalled.length && !sweep.loopGuarded.length) {
       notes.push(`escort-sweep: ${sweep.scanned} scanned, all healthy`);
     }
   } catch (e) {
