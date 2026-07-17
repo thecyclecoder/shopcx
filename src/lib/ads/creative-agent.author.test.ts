@@ -23,6 +23,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { CopyAuthorSessionDispatcher, CopyAuthorSessionInputs } from "./creative-agent";
 import {
+  ANDROMEDA_CONCEPT_TAGS,
   AUTHOR_SELF_SCORE_FLOOR,
   MAX_COPY_AUTHOR_REVISE_ATTEMPTS,
   authorCopyPack,
@@ -68,6 +69,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
     primaryText: "Steady 4-hour energy from adaptogens. No jitters, no crash. Shop now 👉",
     description: "Adaptogens · steady energy",
     audience_temperature: "warm",
+    concept_tag: "mechanism",
     self_score: defaultScore,
     ...overrides,
   };
@@ -114,9 +116,37 @@ test("parseAuthorVerdict: happy path → ok with all fields", () => {
   if (result.kind === "ok") {
     assert.equal(result.verdict.headline, "Clean energy — no crash");
     assert.equal(result.verdict.audience_temperature, "warm");
+    assert.equal(result.verdict.concept_tag, "mechanism");
     assert.equal(result.verdict.selfScore.total, 10);
     assert.deepEqual(result.verdict.selfScore.evidence, ["ok"]);
   }
+});
+
+test("parseAuthorVerdict: every Andromeda concept_tag is accepted", () => {
+  for (const tag of ANDROMEDA_CONCEPT_TAGS) {
+    const result = parseAuthorVerdict(envelope({ concept_tag: tag }));
+    assert.equal(result.kind, "ok", `tag rejected: ${tag}`);
+    if (result.kind === "ok") assert.equal(result.verdict.concept_tag, tag);
+  }
+});
+
+test("parseAuthorVerdict: missing concept_tag → invalid", () => {
+  const body = {
+    headline: "Clean energy — no crash",
+    primaryText: "Steady 4-hour energy.",
+    description: "Adaptogens",
+    audience_temperature: "warm",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+  };
+  const result = parseAuthorVerdict(JSON.stringify(body));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "missing_concept_tag");
+});
+
+test("parseAuthorVerdict: concept_tag not one of the 10 Andromeda tokens → invalid", () => {
+  const result = parseAuthorVerdict(envelope({ concept_tag: "urgency" }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_concept_tag/);
 });
 
 test("parseAuthorVerdict: extracts JSON from a fenced ```json block", () => {

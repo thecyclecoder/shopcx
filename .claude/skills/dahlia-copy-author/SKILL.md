@@ -94,6 +94,7 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
   "primaryText": "…the finished Meta primary text (multi-sentence, slippery-slide, no bare price, no offer language on cold)…",
   "description": "…the finished Meta description (one-sentence reinforcement)…",
   "audience_temperature": "cold",
+  "concept_tag": "transformation",
   "self_score": {
     "lf8": 2,
     "schwartz": 2,
@@ -120,6 +121,16 @@ Rules for the envelope:
 - `audience_temperature` — echo back the exact value the DATA block gave you (`cold` /
   `warm` / `hot`). Do not invent a different value; the deterministic pre-insert gate uses
   YOUR echo to decide whether the cold-offer-gate applies.
+- `concept_tag` — REQUIRED. Exactly one of the 10 **Andromeda concept-diversity tokens**
+  (see the taxonomy below). Deterministic from the writing frame you actually wrote — pick
+  the token that best names the DR pattern the caption you just composed hits, not the
+  brief's raw material. The worker rejects any other value (missing / not one of the 10)
+  and re-invokes you ONCE to pick a valid tag. Downstream, Bianca's media-buyer replenish
+  path reads the tag to enforce test-cohort concept diversity — no more than one same-tag
+  creative live per cohort, so a same-concept win generalizes and a same-concept loss is
+  attributable to concept rather than to execution. Choose honestly; picking the wrong
+  bucket to "avoid a duplicate" defeats the diversity signal and biases the CAC/CTR
+  compare.
 - `self_score.lf8` / `schwartz` / `cialdini` / `hopkins` / `sugarman` — each an integer in
   `{0, 1, 2}` judged against the exact `RUBRIC` text the DATA block gave you.
 - `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`). The worker
@@ -127,6 +138,32 @@ Rules for the envelope:
 - `self_score.evidence` — one short human-readable string per sub-score naming what you saw
   (a keyword you hit, a stage-of-awareness you reached, a specificity marker you counted).
   This is what the M1 Max QC compares against in a later spec.
+
+### Andromeda concept-diversity taxonomy (the 10 valid `concept_tag` values)
+
+Pick the ONE token that best names the DR pattern the caption you actually wrote hits.
+Bianca's replenish path (Phase 2) rejects a candidate whose tag is already live in the
+cohort, so an honest tag is what makes concept diversity work; picking the wrong bucket
+to "avoid a duplicate" degrades measurement — pick the true bucket every time.
+
+- `transformation` — "a customer went from A to B" (before/after, weight loss, energy up,
+  skin cleared).
+- `objection` — "here's why the pushback is wrong" (addresses a stated hesitation:
+  price, doubt, fear-of-failure).
+- `curiosity` — "the ONE thing nobody's telling you about X" (open loop, secret, hidden
+  cause).
+- `mechanism` — "X works because Y" (the pharmacology / biology / chemistry that makes
+  the benefit happen).
+- `authority` — "endorsed by / doctor-formulated / clinically studied" (credentialed
+  source).
+- `social-proof` — "thousands of customers / a community / everyone I know" (volume-of-
+  peer signal).
+- `scarcity` — "limited stock / today only / restock alert" (time or supply pressure).
+- `negation` — "this is NOT another …" (contrast against a category cliché — NOT a fad,
+  NOT a stimulant, NOT a diet).
+- `story` — "let me tell you about the time …" (narrative arc, first-person, scene).
+- `comparison` — "A vs B, and here's why B wins" (side-by-side against a named or generic
+  alternative).
 
 ## In-session revise contract
 
