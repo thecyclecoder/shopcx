@@ -405,6 +405,10 @@ export async function sweepSeed(
     // doing video stuff"). Wider window + full page: daysBack 90 (matches the AdLibrary UI default) and
     // pageSize 50 (the API max) so a competitor's static set isn't truncated to the newest 30.
     adsType: ["1"],
+    // META ONLY — exclude Google/AdMob text ads (founder 2026-07-17: "we don't want google"; those have
+    // no real creative image). The winners flow is Meta-native by construction; this keeps the keyword
+    // stopgap consistent.
+    platform: ["facebook", "instagram"],
     daysBack: opts.daysBack ?? 90,
     pageSize: opts.pageSize ?? 50,
   });

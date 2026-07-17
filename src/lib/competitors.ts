@@ -53,6 +53,13 @@ export interface CompetitorRow {
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
+  /** winners-flow Phase 1 — the resolved Meta advertiser identity (see src/lib/adlibrary-winners.ts).
+   *  `meta_page_id` null = unresolved (bad/ambiguous seed). Populated by the resolve pass. */
+  meta_page_id: string | null;
+  meta_resolved_name: string | null;
+  meta_likes: number | null;
+  meta_resolved_via: string | null; // 'name' | 'domain' | null
+  meta_resolved_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -226,6 +233,31 @@ export async function setCompetitorStatus(
 }
 
 /** Delete one competitor row (workspace-scoped when {@link opts.workspaceId} is provided). */
+/**
+ * winners-flow Phase 1 — persist a competitor's resolved Meta advertiser identity (the output of
+ * `resolveAdvertiser` in src/lib/adlibrary-winners.ts). Always stamps `meta_resolved_at` so a re-resolve
+ * (even one that clears the fields because a brand stopped resolving) is auditable. Workspace-scoped.
+ */
+export async function setCompetitorMetaResolution(
+  id: string,
+  resolution: {
+    meta_page_id: string | null;
+    meta_resolved_name: string | null;
+    meta_likes: number | null;
+    meta_resolved_via: string | null;
+  },
+  opts: { workspaceId?: string } = {},
+): Promise<void> {
+  const admin = createAdminClient();
+  let q = admin
+    .from("competitors")
+    .update({ ...resolution, meta_resolved_at: new Date().toISOString() })
+    .eq("id", id);
+  if (opts.workspaceId) q = q.eq("workspace_id", opts.workspaceId);
+  const { error } = await q;
+  if (error) throw new Error(`setCompetitorMetaResolution: ${error.message}`);
+}
+
 export async function deleteCompetitor(
   id: string,
   opts: { workspaceId?: string } = {},
