@@ -114,7 +114,7 @@ Phase 2 wires **Max's INTENT-AWARE 5-axis rubric** into the same QC session so D
 
 The migration adding the two `jsonb` columns is `supabase/migrations/20261102120000_ad_creative_copy_qc_verdicts_dahlia_rubric.sql` (additive `add column if not exists`, auto-applied by the Control Tower migration-drift reconciler once the PR merges to main — no bespoke pre-merge apply required). Paired apply script `scripts/apply-ad-creative-copy-qc-verdicts-dahlia-rubric-migration.ts` exists so the `tagPendingActionType` classifier can re-tag any manual invocation and self-approve.
 
-**Advisory in Phase 2 — no hard-gate driver.** Phase 3 (a later session) will wire the ready-to-bin threshold that reads this column to enforce a min composite / trigger a revise loop. Any Phase-2 code path reading `dahlia_rubric` MUST NOT gate campaign readiness on it.
+**Advisory in Phase 2 — no hard-gate driver.** Phase 3 wires the ready-to-bin threshold that reads this column to enforce a min composite / trigger a revise loop; the gate ships in a separate module [[dahlia-rubric-gate]] so it's independently testable. Any code path reading `dahlia_rubric` outside `dahlia-rubric-gate` MUST NOT gate campaign readiness on it — the gate is the sanctioned reader.
 
 Pinned by [[../../../src/lib/ads/creative-qa.dahlia-rubric.test.ts]] (12 cases).
 
