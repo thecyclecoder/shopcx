@@ -1,0 +1,1 @@
+- **Resumable box-chat sessions fall back to fresh on missing session** · verified 2026-07-17 · → [[libraries/box-session-resume]]
