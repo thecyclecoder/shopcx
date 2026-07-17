@@ -25158,6 +25158,14 @@ async function dispatchJob(job: Job) {
     // and the lane falls through to today's behavior; a genuine block always surfaces.
     {
       let selfVerifySession: string | null = session ?? null;
+      // ⭐ build-lane-pre-commit-self-verify Phase 2 — legibility for Ada. Track the FIRST-pass
+      // failing checks + how many repair passes it took + whether repair resolved before commit, so
+      // we can emit ONE `build_self_verify_caught` director_activity row per FIRING (auto_fail>0 on
+      // the first pass) at the moment the loop resolves. Non-firings emit nothing — the row is the
+      // caught signal, not a heartbeat, so the weekly rollup counts only real catches.
+      let initialFailingChecks: Array<{ description: string; exec_kind: string | null; evidence: string }> = [];
+      let gateFired = false;
+      let repairsExecuted = 0;
       for (let repairPass = 0; repairPass <= SELF_VERIFY_REPAIR_MAX; repairPass++) {
         const sv = await preCommitSelfVerify({
           workspaceId: job.workspace_id,
@@ -25165,7 +25173,48 @@ async function dispatchJob(job: Job) {
           repoRoot: wt,
         });
         console.log(`${tag} ${sv.summaryLine}${repairPass > 0 ? ` (after repair pass ${repairPass})` : ""}`);
-        if (!sv.blocked) break;
+        if (repairPass === 0 && sv.blocked) {
+          gateFired = true;
+          initialFailingChecks = sv.failing.map((f) => ({
+            description: f.text,
+            exec_kind: f.exec_kind,
+            evidence: f.evidence.slice(0, 800),
+          }));
+        }
+        if (!sv.blocked) {
+          if (gateFired) {
+            // Legible outcome — the gate fired at pass 0 and Bo's in-session repair cleared it before
+            // commit. Emit ONE `build_self_verify_caught` row so Ada's activity feed / EOD recap /
+            // weekly rollup sees the win (a positive-absence miss caught + fixed in-session, no
+            // extra build cycle). Best-effort + never throws (recordDirectorActivity swallows).
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_self_verify_caught",
+                specSlug: slug,
+                reason:
+                  `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                  ` — resolved in-session after ${repairsExecuted} repair pass(es)`,
+                metadata: {
+                  job_id: job.id,
+                  spec_slug: slug,
+                  failing_checks: initialFailingChecks.map((f) => ({
+                    description: f.description,
+                    exec_kind: f.exec_kind,
+                  })),
+                  repair_passes: repairsExecuted,
+                  resolved_in_session: true,
+                  autonomous: true,
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} preCommitSelfVerify director-activity emit (resolved) failed:`, e instanceof Error ? e.message : e);
+            }
+          }
+          break;
+        }
         if (repairPass === SELF_VERIFY_REPAIR_MAX) {
           // Cap exhausted — mirror the tsc gate at :25031-25034 (fail-hard so the existing fix-phase
           // self-heal picks it up; no silent commit of a spec-check-failing worktree).
@@ -25174,6 +25223,35 @@ async function dispatchJob(job: Job) {
             .map((f) => `• ${f.text} [${f.exec_kind}] — ${f.evidence}`)
             .join("\n")
             .slice(-1600);
+          // Legible outcome — gate fired, in-session repair could NOT clear it, existing fix-phase
+          // self-heal takes over. Still a catch (a build cycle earlier than Rex would have caught
+          // it) so we emit the row; the weekly rollup separates `resolved_in_session=true` (the
+          // win) from `resolved_in_session=false` (escaped to fix-phase) so Ada can supervise both.
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: "platform",
+              actionKind: "build_self_verify_caught",
+              specSlug: slug,
+              reason:
+                `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                ` — repair cap (${SELF_VERIFY_REPAIR_MAX}) exhausted; escaped to fix-phase self-heal`,
+              metadata: {
+                job_id: job.id,
+                spec_slug: slug,
+                failing_checks: initialFailingChecks.map((f) => ({
+                  description: f.description,
+                  exec_kind: f.exec_kind,
+                })),
+                repair_passes: repairsExecuted,
+                resolved_in_session: false,
+                autonomous: true,
+              },
+            });
+          } catch (e) {
+            console.warn(`${tag} preCommitSelfVerify director-activity emit (unresolved) failed:`, e instanceof Error ? e.message : e);
+          }
           await update(job.id, {
             status: "failed",
             error: `pre-commit self-verify unresolved after ${SELF_VERIFY_REPAIR_MAX} repair passes: ${failingTexts}`,
@@ -25202,6 +25280,7 @@ async function dispatchJob(job: Job) {
         ].join("\n\n");
         const repair = await runClaude(repairPrompt, selfVerifySession, wt, configDir, job.id);
         await meterAgentJob(job, configDir, repair.usage, repair.model);
+        repairsExecuted++;
         if (repair.session) {
           selfVerifySession = repair.session;
           await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
