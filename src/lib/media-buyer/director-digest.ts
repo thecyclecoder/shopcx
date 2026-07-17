@@ -106,10 +106,17 @@ export async function deliverMediaBuyerDigest(
 ): Promise<DigestResult> {
   const { data: ws } = await admin
     .from("workspaces")
-    .select("slack_growth_director_channel_id")
+    .select("slack_growth_director_channel_id, media_buyer_digest_enabled")
     .eq("id", workspaceId)
     .maybeSingle();
-  const channel = (ws as { slack_growth_director_channel_id: string | null } | null)?.slack_growth_director_channel_id;
+  const wsRow = ws as { slack_growth_director_channel_id: string | null; media_buyer_digest_enabled: boolean | null } | null;
+  // mb-digest-workspace-toggle: a per-workspace off switch (default true). When explicitly false the
+  // founder has silenced the ~2-hourly Bianca digest for this workspace — skip the post entirely (the
+  // media-buyer pass, meta_insights sync, and every other Max Slack post are untouched).
+  if (wsRow?.media_buyer_digest_enabled === false) {
+    return { posted: false, reason: "media-buyer digest disabled for this workspace (media_buyer_digest_enabled=false)" };
+  }
+  const channel = wsRow?.slack_growth_director_channel_id;
   if (!channel) return { posted: false, reason: "no slack_growth_director_channel_id configured" };
 
   // Only report a pass that actually ran a policy — a dormant pass (no active policy / sensor-trust denied)
