@@ -25,6 +25,27 @@ function brief(hook: string): CreativeBrief {
   } as unknown as CreativeBrief;
 }
 
+function briefWithReview(hook: string): CreativeBrief {
+  const b = brief(hook) as unknown as { leadProof: unknown };
+  b.leadProof = { kind: "review", text: "This coffee changed my mornings — so much focus.", attribution: "Jamie R." };
+  return b as unknown as CreativeBrief;
+}
+
+test("buildPrompt: REVIEW FIDELITY forbids the competitor's review and, with OUR review provided, renders only ours (condensing allowed)", () => {
+  const { prompt } = buildPrompt(briefWithReview("New daily superfood coffee."), true, undefined, true);
+  assert.ok(prompt.includes("REVIEW FIDELITY"), "must carry the REVIEW FIDELITY hard rule");
+  assert.ok(/NEVER copy, echo, paraphrase, or render the competitor's review/.test(prompt));
+  assert.ok(/Render ONLY the customer review provided above/.test(prompt), "with our review provided, render only ours");
+  assert.ok(/tighten a long review|faithful condensation/.test(prompt), "summarizing the best parts of a long review is allowed");
+  assert.ok(/keep the reviewer NAME exactly/.test(prompt), "reviewer name stays real");
+});
+
+test("buildPrompt: REVIEW FIDELITY renders NO review when we don't provide one (never invent / carry over the competitor's)", () => {
+  const { prompt } = buildPrompt(brief("New daily superfood coffee."), true, undefined, true);
+  assert.ok(prompt.includes("REVIEW FIDELITY"));
+  assert.ok(/render NO customer review, testimonial, quote, reviewer name, or star-rating/.test(prompt));
+});
+
 test("buildPrompt: an imitation carries a CLAIM FIDELITY rule forbidding false product attributes", () => {
   const { prompt } = buildPrompt(brief("New daily protein coffee."), true, undefined, true);
   assert.ok(prompt.includes("CLAIM FIDELITY"), "imitation prompt must include the CLAIM FIDELITY hard rule");

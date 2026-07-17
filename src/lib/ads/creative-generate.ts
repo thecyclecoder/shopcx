@@ -76,6 +76,12 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
   }
   if (brief.supportingBenefits.length) bodyBits.push(`Small secondary line reinforcing: ${brief.supportingBenefits.slice(0, 2).join(", ")}.`);
 
+  // A competitor design reference frequently contains THEIR customer review / testimonial / star
+  // rating. On a composition transfer the model reuses the layout and copies their review words
+  // verbatim unless told otherwise — a fabricated testimonial (their words, not about our product).
+  // Whether we PROVIDED our own review above decides the rule: swap in ours, or render none.
+  const hasProvidedReview = !!brief.transformation || brief.leadProof?.kind === "review";
+
   // HEADLINE clause — imitation vs own-brand (see isImitation note above).
   const headlineClause = isImitation
     ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Write OUR headline in the SAME structure/energy, but it must name ONLY ${brief.productTitle} and reference ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL: also DROP any product ATTRIBUTE or ingredient descriptor from the competitor's hook that is NOT true of ${brief.productTitle} — e.g. if the competitor angle says "protein coffee" / "keto" / "collagen" and OUR product is not that, do NOT carry the word over; describe our product by its REAL nature shown on the pack (e.g. "superfood coffee"). When the competitor's product noun differs from ours, SWAP IN OURS — never copy their attribute. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
@@ -105,6 +111,8 @@ OFFER (show ONCE — a single badge, never duplicated): ${offerHeadline ? `one p
 OFFER FIDELITY (hard rule): the ONLY discount / percent-off / dollar-off / "free shipping" / BOGO / "X for $Y" claim that may appear ANYWHERE in the image is the OFFER above. Do NOT invent, add, echo, or carry over a different discount number from the headline, subhead, badges, or any other element${offerHeadline ? "" : " (no offer is supplied — the ad must show NO discount claim at all)"}. Two conflicting discount numbers on the same ad is a defect.
 
 CLAIM FIDELITY (hard rule): every product attribute, ingredient, or nutrient descriptor rendered ANYWHERE in the image must be TRUE of ${brief.productTitle} (per the provided packshot + the brief). NEVER describe our product with an attribute it does not have — in particular, do NOT call it a "protein", "keto", "collagen", "pre-workout", or any other nutrient/format claim unless our product actually is that. When echoing a competitor angle, their product's descriptors do NOT transfer — swap in OUR real product nature (shown on the pack). A false attribute claim on our product is a defect.
+
+REVIEW FIDELITY (hard rule): any customer review, testimonial, quote, reviewer name, or star-rating visible in the competitor reference is THEIRS — it is NOT about ${brief.productTitle}. NEVER copy, echo, paraphrase, or render the competitor's review text, reviewer name, or rating. ${hasProvidedReview ? "Render ONLY the customer review provided above — it is a real, featured review of OUR product. You MAY tighten a long review to its strongest, most relevant lines (a faithful condensation is fine), but keep the reviewer NAME exactly as given and never embellish, invent, or add a claim the review does not actually make." : "NO review of our product is provided, so render NO customer review, testimonial, quote, reviewer name, or star-rating anywhere — do NOT invent one and do NOT carry over the competitor's."} Rendering a competitor's (or an invented) review on our ad is a fabricated-testimonial defect.
 
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 
