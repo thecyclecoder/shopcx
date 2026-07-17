@@ -4,25 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
-import { AD_SCENE_STYLES, DEFAULT_SCENE_STYLE, AVATAR_BROLL_ACTIONS } from "@/lib/ad-tool-config";
-import { PublishToMeta } from "./PublishToMeta";
 
-// Static-ad archetypes. The cold-50+ "killer" set is trust-first (both 4:5 + 9:16);
-// the legacy set is kept for back-compat. Mirrors KILLER_ARCHETYPES in ad-statics.ts.
-const KILLER_STATIC_DEFS: Array<{ k: string; label: string }> = [
-  { k: "advertorial", label: "Advertorial" },
-  { k: "testimonial", label: "Testimonial" },
-  { k: "authority", label: "Authority" },
-  { k: "big_claim", label: "Big claim" },
-  { k: "before_after", label: "Before / after" },
-  { k: "ingredient_breakdown", label: "Ingredient breakdown" },
-];
-const LEGACY_STATIC_DEFS: Array<{ k: string; label: string }> = [
-  { k: "review", label: "Review screenshot" },
-  { k: "offer", label: "Offer card" },
-  { k: "benefit_authority", label: "Benefit / authority" },
-];
-const STATIC_DEFS = [...KILLER_STATIC_DEFS, ...LEGACY_STATIC_DEFS];
+// ── Read-only ad lifecycle preview ──────────────────────────────────────────
+// This page is a READ-ONLY preview of a finished ad and its full lifecycle. Ads
+// are authored autonomously by Dahlia (copy + 3 placement statics) and graded by
+// Max — this page does NOT create or edit ads. It shows: the full ad preview
+// (3 placements + headline/primary-text variations + the FB/IG page it posts as),
+// Max's grade + suggestions, and the Meta target it published to
+// (account → campaign → adset → ad). No manual-creation controls by design.
 
 interface Campaign {
   id: string;
@@ -30,51 +19,126 @@ interface Campaign {
   status: string;
   script_text: string | null;
   hero_image_url: string | null;
-  audio_url: string | null;
-  scene_style: string | null;
+  landing_url: string | null;
+  audience_temperature: "cold" | "warm" | "hot" | null;
+  concept_tag: string | null;
+  author_self_score: AuthorSelfScore | null;
   products?: { title: string } | null;
 }
 
-interface Video {
+interface AuthorSelfScore {
+  lf8?: number;
+  schwartz?: number;
+  cialdini?: number;
+  hopkins?: number;
+  sugarman?: number;
+  total?: number;
+  evidence?: string[];
+}
+
+interface AdVideo {
   id: string;
   format: string;
   media_kind: string;
   format_variant_of_id: string | null;
   final_mp4_url: string | null;
   static_jpg_url: string | null;
-  talking_head_url: string | null;
-  duration_sec: number | null;
   status: string;
-  meta?: { archetype?: string; error?: string } | null;
+  meta?: { archetype?: string } | null;
 }
 
-interface Segment {
+interface CopyVariant {
+  audience_temperature: "cold" | "warm" | "hot";
+  headline: string;
+  primary_text: string;
+  description: string;
+}
+
+interface AngleProvenance {
+  mode: "explore" | "exploit";
+  source: string;
+  competitor_advertiser: string | null;
+  competitor_ad_image_url: string | null;
+  competitor_hook: string | null;
+  lead_benefit: string;
+}
+
+interface Angle {
+  meta_headline: string | null;
+  meta_primary_text: string | null;
+  meta_description: string | null;
+  copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string } | null;
+  provenance: AngleProvenance | null;
+}
+
+// Human labels for the own-asset ("exploit") sources.
+const EXPLOIT_SOURCE_LABEL: Record<string, string> = {
+  ad_angle: "an existing ad angle",
+  review_cluster: "a cluster of our reviews",
+  transformation: "a real customer transformation",
+  benefit: "a proven product benefit",
+  ingredient: "an ingredient claim",
+  authority: "an authority / expert proof",
+};
+
+interface QaVerdict {
+  hard_gate_pass: boolean;
+  hard_gates: {
+    no_fabrication: boolean;
+    no_cold_offer: boolean;
+    no_competitor_leak: boolean;
+    single_promise: boolean;
+    render_ok: boolean;
+  };
+  persuasion_score: number | null;
+  persuasion_rubric: { lf8: number; schwartz: number; cialdini: number; hopkins: number; sugarman: number; evidence: string[] } | null;
+  scroll_stop: {
+    headline_readable_in_3_frames: number;
+    visual_hierarchy_supports_headline: number;
+    first_line_earns_the_second: number;
+    evidence: string[];
+  } | null;
+  verdict_reason: string;
+  retry_index: number;
+  created_at: string;
+}
+
+interface PublishJob {
   id: string;
-  kind: "talking_head" | "broll" | "music";
-  seq: number;
-  version: number;
-  script_text: string | null;
-  prompt: string | null;
-  model: string | null;
-  trim_sec: number | null;
-  status: string;
+  publish_status: string;
+  meta_account_id: string | null;
+  meta_campaign_id: string | null;
+  meta_adset_id: string | null;
+  meta_ad_id: string | null;
+  meta_creative_id: string | null;
+  meta_page_id: string | null;
+  meta_instagram_user_id: string | null;
+  cta_type: string | null;
+  destination_url: string | null;
+  publish_active: boolean | null;
   error: string | null;
-  preview_url: string | null;
+  created_at: string;
 }
 
-interface BrollSource {
-  slot: string;
-  alt_text: string | null;
-  url: string;
+interface PageIdentity {
+  page_id: string;
+  page_name: string | null;
+  instagram_id: string | null;
 }
 
-interface LibraryClip {
-  id: string;
-  prompt: string | null;
-  model: string | null;
-  source_url: string | null;
-  preview_url: string | null;
-}
+const TEMP_LABEL: Record<string, string> = { cold: "Cold", warm: "Warm", hot: "Hot" };
+const TEMP_TONE: Record<string, string> = {
+  cold: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
+  warm: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  hot: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
+};
+
+// The three Meta placements a Dahlia pack renders, in display order.
+const PLACEMENTS: Array<{ key: string; label: string; ratio: string; formats: string[] }> = [
+  { key: "feed", label: "Feed", ratio: "4:5", formats: ["feed_4x5"] },
+  { key: "stories", label: "Stories / Reels", ratio: "9:16", formats: ["stories_9x16", "reels_9x16"] },
+  { key: "right_column", label: "Right column", ratio: "1:1", formats: ["right_column_1x1"] },
+];
 
 export default function AdDetailPage() {
   const workspace = useWorkspace();
@@ -82,14 +146,13 @@ export default function AdDetailPage() {
   const id = params.id;
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
-  const [videos, setVideos] = useState<Video[]>([]);
-  const [segments, setSegments] = useState<Segment[]>([]);
-  const [brollSources, setBrollSources] = useState<BrollSource[]>([]);
-  const [publishJobs, setPublishJobs] = useState<any[]>([]);
+  const [videos, setVideos] = useState<AdVideo[]>([]);
+  const [copyVariants, setCopyVariants] = useState<CopyVariant[]>([]);
+  const [angle, setAngle] = useState<Angle | null>(null);
+  const [qa, setQa] = useState<QaVerdict | null>(null);
+  const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
+  const [pageIdentity, setPageIdentity] = useState<PageIdentity | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyStage, setBusyStage] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [heroFeedback, setHeroFeedback] = useState("");
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/ads/campaigns/${id}?workspaceId=${workspace.id}`);
@@ -97,125 +160,18 @@ export default function AdDetailPage() {
       const d = await res.json();
       setCampaign(d.campaign);
       setVideos(d.videos || []);
-      setSegments(d.segments || []);
-      setBrollSources(d.brollSources || []);
+      setCopyVariants(d.copyVariants || []);
+      setAngle(d.angle || null);
+      setQa(d.copyQaVerdict || null);
       setPublishJobs(d.publishJobs || []);
+      setPageIdentity(d.pageIdentity || null);
     }
     setLoading(false);
   }, [id, workspace.id]);
 
-  // Add ONE b-roll clip: text-to-video, animate a chosen photo, or animate the avatar.
-  async function addBroll(opts: { mode: "text" | "image" | "avatar"; prompt: string; sourceUrl?: string; avatarAction?: string; model: "fast" | "full" }) {
-    setMessage(null);
-    const res = await fetch(`/api/ads/campaigns/${id}/broll`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, mode: opts.mode, prompt: opts.prompt, source_url: opts.sourceUrl, avatar_action: opts.avatarAction, model: opts.model }),
-    });
-    setMessage(res.ok ? "Generating a b-roll clip — it'll appear below when ready." : "Failed to queue b-roll.");
-    if (res.ok) setTimeout(load, 1500);
-  }
-  // Reuse an existing library clip in this ad (no regeneration).
-  async function reuseBroll(segId: string) {
-    const res = await fetch(`/api/ads/campaigns/${id}/broll/reuse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, segId }),
-    });
-    setMessage(res.ok ? "Added from library." : "Failed to add from library.");
-    if (res.ok) load();
-  }
-  // Generate a static ad (separate process) — one archetype, 3 formats.
-  async function generateStatic(archetype: string) {
-    setMessage(null);
-    const res = await fetch(`/api/ads/campaigns/${id}/static`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, archetype }),
-    });
-    setMessage(res.ok ? "Generating static ad — appears below when ready." : "Failed to queue static ad.");
-    if (res.ok) setTimeout(load, 1500);
-  }
-
-  // Discard a clip from this ad's cut (stays in the library).
-  async function discardSegment(segId: string) {
-    const res = await fetch(`/api/ads/campaigns/${id}/segments/delete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, segId }),
-    });
-    if (res.ok) load();
-  }
-
-  // Fire a stage (hero / talking-head / broll / render) and refresh.
-  const runStage = useCallback(async (stage: string, label: string) => {
-    setBusyStage(stage);
-    setMessage(null);
-    const res = await fetch(`/api/ads/campaigns/${id}/${stage}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id }),
-    });
-    setMessage(res.ok ? `${label} queued — this runs in the background.` : `Failed to queue ${label.toLowerCase()}.`);
-    setBusyStage(null);
-    setTimeout(load, 1500);
-  }, [id, workspace.id, load]);
-
-  // Change the scene style. Persists immediately; takes effect when the hero +
-  // talking-head are (re)generated — those read scene_style off the campaign.
-  async function saveSceneStyle(value: string) {
-    setCampaign((c) => (c ? { ...c, scene_style: value } : c));
-    await fetch(`/api/ads/campaigns/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, scene_style: value }),
-    });
-  }
-
-  // Regenerate the hero with an optional free-text correction.
-  async function regenerateHero() {
-    setBusyStage("hero");
-    setMessage(null);
-    const res = await fetch(`/api/ads/campaigns/${id}/hero`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, feedback: heroFeedback.trim() || undefined }),
-    });
-    setMessage(res.ok ? "Regenerating the hero — check back shortly." : "Failed to queue hero.");
-    setBusyStage(null);
-    setHeroFeedback("");
-    setTimeout(load, 1500);
-  }
-
-  async function regenerate(
-    seq: number,
-    opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string },
-  ) {
-    const res = await fetch(`/api/ads/campaigns/${id}/segments/regenerate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: workspace.id, seq, kind: opts.kind, model: opts.model, new_script: opts.newScript, prompt: opts.prompt }),
-    });
-    const hq = opts.model === "full";
-    setMessage(res.ok ? `Regenerating that clip${hq ? " in HQ Veo 3" : ""} and re-stitching. Check back shortly.` : "Failed to queue regenerate.");
-    if (res.ok) setTimeout(load, 1500);
-  }
-
   useEffect(() => {
     load();
   }, [load]);
-
-  // Poll while anything is generating/rendering so the operator watches it finish.
-  const inFlight =
-    (campaign?.status === "rendering") ||
-    segments.some((s) => s.status === "generating") ||
-    videos.some((v) => v.status === "rendering") ||
-    publishJobs.some((j: any) => ["queued", "uploading", "creating"].includes(j.publish_status));
-  useEffect(() => {
-    if (!inFlight) return;
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, [inFlight, load]);
 
   if (loading) {
     return (
@@ -236,594 +192,433 @@ export default function AdDetailPage() {
     );
   }
 
+  // Placement statics — the canonical row per format (format_variant_of_id === null wins; else first).
+  const statics = videos.filter((v) => v.media_kind === "static" && v.status === "ready");
+  const placementImage = (formats: string[]): string | null => {
+    const rows = statics.filter((v) => formats.includes(v.format));
+    if (!rows.length) return null;
+    const canonical = rows.find((v) => v.format_variant_of_id === null) || rows[0];
+    return canonical.static_jpg_url;
+  };
   const videoOutputs = videos.filter((v) => v.media_kind === "video");
-  const staticOutputs = videos.filter((v) => v.media_kind === "static");
 
-  // ── Production stages (staged, sequential, each points to the next) ─────────
-  const talkingReady = segments.filter((s) => s.kind === "talking_head" && s.status === "ready");
-  const talkingGenerating = segments.some((s) => s.kind === "talking_head" && s.status === "generating");
-  const brollSegments = segments.filter((s) => s.kind === "broll");
-  const musicReady = segments.filter((s) => s.kind === "music" && s.status === "ready");
-  const musicGenerating = segments.some((s) => s.kind === "music" && s.status === "generating");
-  const videoReady = videoOutputs.some((v) => v.status === "ready");
-  const staticReady = staticOutputs.some((v) => v.status === "ready");
-  const isRendering = campaign.status === "rendering" || videos.some((v) => v.status === "rendering");
-  // Static-first campaign (e.g. the seeded/uploaded killer statics): has NO video
-  // signals at all. Video signals win — a real video campaign that also happens to
-  // have a static output must still show the video UI (don't gate purely on
-  // staticOutputs, or any video campaign with a static gets its production UI hidden).
-  const hasVideoSignals =
-    !!campaign.script_text || !!campaign.hero_image_url || videoOutputs.length > 0 || segments.length > 0;
-  const isStaticCampaign = !hasVideoSignals;
+  // Canonical caption for the ad mock — warm variant, else angle canonical.
+  const warm = copyVariants.find((v) => v.audience_temperature === "warm");
+  const canonical = warm
+    ? { headline: warm.headline, primary_text: warm.primary_text, description: warm.description }
+    : angle
+      ? { headline: angle.meta_headline || "", primary_text: angle.meta_primary_text || "", description: angle.meta_description || "" }
+      : null;
 
-  type StageState = "done" | "running" | "ready" | "blocked";
-  const heroState: StageState = busyStage === "hero" ? "running" : campaign.hero_image_url ? "done" : "ready";
-  const thState: StageState = busyStage === "talking-head" || talkingGenerating ? "running" : talkingReady.length ? "done" : campaign.hero_image_url ? "ready" : "blocked";
-  const musicState: StageState = busyStage === "music" || musicGenerating ? "running" : musicReady.length ? "done" : "ready";
-  const renderState: StageState = busyStage === "render" || isRendering ? "running" : videoReady ? "done" : talkingReady.length ? "ready" : "blocked";
-
-  // B-roll is its own studio (add one at a time) — not a single staged button.
-  const stages = [
-    { key: "hero", n: 1, title: "Hero shot", detail: "Avatar holding the product (Nano Banana Pro)", state: heroState, action: () => runStage("hero", "Hero"), cta: campaign.hero_image_url ? "Regenerate" : "Generate", blockedNote: "" },
-    { key: "talking-head", n: 2, title: "Talking head", detail: `Veo clips that speak the script (${talkingReady.length || "0"} ready)`, state: thState, action: () => runStage("talking-head", "Talking head"), cta: talkingReady.length ? "Regenerate all" : "Generate", blockedNote: "Generate the hero first" },
-    { key: "music", n: 3, title: "Background music", detail: musicReady.length ? "Lyria music bed ready (preview below)" : "Lyria music bed — optional; auto-added at render if skipped", state: musicState, action: () => runStage("music", "Music"), cta: musicReady.length ? "Regenerate" : "Generate", blockedNote: "" },
-    { key: "render", n: 4, title: "Render", detail: `Stitch talking head + ${brollSegments.filter((b) => b.status === "ready").length} b-roll + music + captions`, state: renderState, action: () => runStage("render", "Render"), cta: videoReady ? "Re-render" : "Render", blockedNote: "Generate the talking head first" },
-  ];
-  const nextStage = stages.find((s) => s.state === "ready")?.key;
+  const cta = publishJobs.find((j) => j.cta_type)?.cta_type || "Shop now";
+  const ctaLabel = cta.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const destUrl = publishJobs.find((j) => j.destination_url)?.destination_url || campaign.landing_url || null;
+  const identityName = pageIdentity?.page_name || "Superfoods Company";
 
   return (
     <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">
-            ← Ads
-          </Link>
-          <h1 className="mt-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">{campaign.name}</h1>
-          <p className="mt-1 flex items-center gap-2 text-sm text-zinc-500">
-            <span>{campaign.products?.title || "—"}</span>
-            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider dark:bg-zinc-800">
-              {campaign.status}
-            </span>
-          </p>
-        </div>
-        {videoReady && (
-          <span className="rounded-md bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-            Ad ready ✓
+      {/* Header */}
+      <div className="mb-6">
+        <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">
+          ← Ads
+        </Link>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{campaign.name}</h1>
+          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            {campaign.status}
           </span>
-        )}
-      </div>
-
-      {message && <p className="mb-4 text-sm text-emerald-600">{message}</p>}
-
-      {isStaticCampaign && (
-        <p className="mb-6 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
-          This is a <strong>static (image) ad</strong> campaign. Generate the designed stills below — each archetype makes both feed (4:5) + stories (9:16) — then publish.
-        </p>
-      )}
-
-      {!isStaticCampaign && (
-      <>
-      {/* Production — staged, in order. Each stage lights up the next. */}
-      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Production</h2>
-        <div className="space-y-2">
-          {stages.map((s) => (
-            <StageRow key={s.key} stage={s} isNext={nextStage === s.key} busy={busyStage !== null} />
-          ))}
+          {campaign.audience_temperature && (
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${TEMP_TONE[campaign.audience_temperature]}`}>
+              {TEMP_LABEL[campaign.audience_temperature]} audience
+            </span>
+          )}
+          {campaign.concept_tag && (
+            <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+              {campaign.concept_tag}
+            </span>
+          )}
         </div>
-        <p className="mt-3 text-xs text-zinc-400">
-          Generate in order: hero → talking head → b-roll (optional) → render. Music is added automatically at render. Each stage runs in the background; this page updates itself.
+        <p className="mt-1 flex items-center gap-2 text-sm text-zinc-500">
+          <span>{campaign.products?.title || "—"}</span>
+          <span className="text-zinc-300 dark:text-zinc-600">·</span>
+          <span className="text-xs text-zinc-400">Read-only preview — authored by Dahlia, graded by Max</span>
         </p>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Hero — the holding-product shot every Veo clip is built from.
-            Add a comment + regenerate to fix anatomy/framing issues. */}
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Hero shot</h2>
-
-          {/* Scene style — the setting/action. Changing it re-shoots when you
-              regenerate the hero + talking head below. */}
-          <div className="mb-3 border-b border-zinc-100 pb-3 dark:border-zinc-800">
-            <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Scene style</label>
-            <select
-              value={campaign.scene_style || DEFAULT_SCENE_STYLE}
-              onChange={(e) => saveSceneStyle(e.target.value)}
-              className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
-            >
-              {AD_SCENE_STYLES.map((s) => (
-                <option key={s.value} value={s.value}>{s.label} — {s.description}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-[11px] text-zinc-400">Regenerate the hero (and then the talking head) to re-shoot in this setting.</p>
-          </div>
-
-          {campaign.hero_image_url ? (
-            <div>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={campaign.hero_image_url}
-                alt="Hero"
-                className="w-full rounded-md border border-zinc-200 dark:border-zinc-800"
-              />
-              <a
-                href={campaign.hero_image_url}
-                download
-                className="mt-2 inline-block text-xs text-indigo-600 hover:underline"
-              >
-                Download hero
-              </a>
-              <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
-                <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Not quite right? Describe the fix and regenerate</label>
-                <textarea
-                  value={heroFeedback}
-                  onChange={(e) => setHeroFeedback(e.target.value)}
-                  rows={2}
-                  placeholder="e.g. the hands look wrong relative to the arms; show both hands gripping the pouch naturally"
-                  className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-                />
-                <button
-                  onClick={regenerateHero}
-                  disabled={busyStage !== null}
-                  className="mt-2 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                >
-                  {busyStage === "hero" ? "Regenerating…" : "Regenerate hero"}
-                </button>
-                <p className="mt-1 text-[11px] text-zinc-400">Regenerating the hero won&apos;t change talking-head clips already made — re-generate those if you want them to use the new hero.</p>
+      {/* ── Source (explore / exploit) ─────────────────────────────────────── */}
+      {angle?.provenance && (
+        <Section title="Source" subtitle="What this ad is built from — a competitor ad it explores, or an own asset it exploits">
+          {angle.provenance.mode === "explore" ? (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="mb-3 flex items-center gap-2">
+                <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                  Explore
+                </span>
+                <span className="text-sm text-zinc-600 dark:text-zinc-300">
+                  Imitating a winning competitor ad{angle.provenance.competitor_advertiser ? ` from ${angle.provenance.competitor_advertiser}` : ""}
+                </span>
               </div>
-            </div>
-          ) : (
-            <p className="text-xs text-zinc-400">No hero image yet — generate it in Production above.</p>
-          )}
-        </div>
-
-        {/* Script */}
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Script</h2>
-          <pre className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
-            {campaign.script_text || "—"}
-          </pre>
-        </div>
-      </div>
-
-      {/* B-roll studio — add clips one at a time (text-to-video, animate a photo,
-          or reuse from the library). Keep or discard. Any number works (incl. 0). */}
-      <BrollStudio
-        workspaceId={workspace.id}
-        campaignId={id}
-        clips={brollSegments}
-        sources={brollSources}
-        onAdd={addBroll}
-        onReuse={reuseBroll}
-        onRegenerate={regenerate}
-        onDiscard={discardSegment}
-      />
-
-      {/* Creative library — the talking + music pieces. Refresh one beat (e.g. a
-          fatigued hook) and re-stitch without rebuilding everything. */}
-      <div className="mt-8 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Talking head & music</h2>
-        <span className="text-xs text-zinc-400">Refresh one beat → re-stitch (reuses every other piece)</span>
-      </div>
-      {segments.filter((s) => s.kind !== "broll").length === 0 ? (
-        <p className="mt-2 text-sm text-zinc-500">No talking-head clips yet. Generate them in Production above.</p>
-      ) : (
-        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {segments.filter((s) => s.kind !== "broll").map((s) => (
-            <SegmentCard key={s.id} s={s} onRegenerate={regenerate} />
-          ))}
-        </div>
-      )}
-
-      {/* Video outputs */}
-      <h2 className="mt-8 mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Video formats</h2>
-      {videoOutputs.length === 0 ? (
-        <p className="text-sm text-zinc-500">No video outputs yet. Render to produce them.</p>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {videoOutputs.map((v) => (
-            <VideoCard key={v.id} v={v} />
-          ))}
-        </div>
-      )}
-      </>
-      )}
-
-      {/* Static ads — designed stills. The primary creative for image campaigns. */}
-      <div className="mt-8 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Static ads</h2>
-        <span className="text-xs text-zinc-400">Designed stills from your product data — trust-first for cold 50+ (4:5 + 9:16)</span>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {KILLER_STATIC_DEFS.map((a) => (
-          <button
-            key={a.k}
-            onClick={() => generateStatic(a.k)}
-            className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-          >
-            + {a.label}
-          </button>
-        ))}
-        <span className="mx-1 self-center text-xs text-zinc-300 dark:text-zinc-600">·</span>
-        {LEGACY_STATIC_DEFS.map((a) => (
-          <button
-            key={a.k}
-            onClick={() => generateStatic(a.k)}
-            className="rounded-md border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-500 dark:hover:bg-zinc-800"
-          >
-            + {a.label}
-          </button>
-        ))}
-      </div>
-      {staticOutputs.length === 0 ? (
-        <p className="mt-3 text-sm text-zinc-500">No static ads yet. Generate one above — each makes both feed (4:5) + stories (9:16).</p>
-      ) : (
-        STATIC_DEFS.map(({ k: arch, label }) => {
-          const rows = staticOutputs.filter((v) => v.meta?.archetype === arch);
-          if (!rows.length) return null;
-          return (
-            <div key={arch} className="mt-4">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {rows.map((v) => (
-                  <StaticCard key={v.id} v={v} />
-                ))}
-              </div>
-            </div>
-          );
-        })
-      )}
-
-      {/* Publish to Meta — works for static (image creative) + video campaigns. */}
-      <div className="mt-8">
-        <PublishToMeta workspaceId={workspace.id} campaignId={id} videoReady={videoReady || staticReady} defaultDestinationUrl={(campaign as any)?.landing_url || undefined} publishJobs={publishJobs} onChange={load} />
-      </div>
-    </div>
-  );
-}
-
-interface Stage {
-  key: string;
-  n: number;
-  title: string;
-  detail: string;
-  state: "done" | "running" | "ready" | "blocked";
-  action: () => void;
-  cta: string;
-  blockedNote: string;
-}
-
-function StageRow({ stage, isNext, busy }: { stage: Stage; isNext: boolean; busy: boolean }) {
-  const dot =
-    stage.state === "done" ? "bg-emerald-500" : stage.state === "running" ? "bg-amber-500 animate-pulse" : stage.state === "ready" ? "bg-indigo-500" : "bg-zinc-300 dark:bg-zinc-700";
-  const disabled = busy || stage.state === "running" || stage.state === "blocked";
-  return (
-    <div className={`flex items-center gap-3 rounded-md border p-3 ${isNext ? "border-indigo-300 bg-indigo-50/50 dark:border-indigo-800 dark:bg-indigo-950/30" : "border-zinc-200 dark:border-zinc-800"}`}>
-      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white ${dot}`}>
-        {stage.state === "done" ? "✓" : stage.n}
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{stage.title}</span>
-          {stage.state === "running" && <span className="text-[10px] uppercase tracking-wider text-amber-600">working…</span>}
-          {isNext && stage.state === "ready" && <span className="text-[10px] uppercase tracking-wider text-indigo-600">next</span>}
-        </div>
-        <p className="truncate text-xs text-zinc-500">{stage.state === "blocked" ? stage.blockedNote : stage.detail}</p>
-      </div>
-      <button
-        onClick={stage.action}
-        disabled={disabled}
-        className={`shrink-0 rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-40 ${
-          isNext ? "bg-indigo-600 text-white hover:bg-indigo-500" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-        }`}
-      >
-        {stage.state === "running" ? "Working…" : stage.cta}
-      </button>
-    </div>
-  );
-}
-
-function SegmentCard({ s, onRegenerate, onDiscard }: { s: Segment; onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) => Promise<void>; onDiscard?: (segId: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(s.script_text || "");
-  const [promptDraft, setPromptDraft] = useState(s.prompt || "");
-  const [editingPrompt, setEditingPrompt] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const kindLabel = s.kind === "talking_head" ? `Hook beat #${s.seq + 1}` : s.kind === "broll" ? `B-roll #${s.seq + 1}` : "Music bed";
-  const isVeo = s.kind === "talking_head" || s.kind === "broll";
-  const fast = (s.model || "").includes("fast");
-  async function run(opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) {
-    setBusy(true);
-    await onRegenerate(s.seq, opts);
-    setBusy(false);
-    setEditing(false);
-    setEditingPrompt(false);
-  }
-  return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{kindLabel}</span>
-        {s.version > 1 && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">v{s.version}</span>}
-        {isVeo && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{fast ? "Veo Fast" : "Veo 3 HQ"}</span>}
-        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{s.status}</span>
-        {s.trim_sec ? <span className="text-[10px] text-zinc-400">{s.trim_sec.toFixed(1)}s</span> : null}
-      </div>
-      {s.preview_url ? (
-        s.kind === "music" ? (
-          <audio controls src={s.preview_url} className="w-full" />
-        ) : (
-          <video controls src={s.preview_url} className="w-full rounded-md" />
-        )
-      ) : (
-        <p className="text-xs text-zinc-400">{s.status === "generating" ? "Generating…" : s.status === "failed" ? `Failed${s.error ? `: ${s.error}` : ""}` : "No preview."}</p>
-      )}
-      {s.kind === "talking_head" && (
-        <div className="mt-2">
-          {s.script_text && <p className="mb-1 text-xs italic text-zinc-500">“{s.script_text}”</p>}
-          {editing ? (
-            <div>
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                rows={3}
-                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-                placeholder="New words for this beat…"
-              />
-              <div className="mt-1 flex gap-2">
-                <button
-                  disabled={busy || !draft.trim()}
-                  onClick={() => run({ kind: "talking_head", model: "fast", newScript: draft.trim() })}
-                  className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                >
-                  {busy ? "Queuing…" : "Regenerate & re-stitch"}
-                </button>
-                <button onClick={() => setEditing(false)} className="text-xs text-zinc-500 hover:underline">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <button onClick={() => setEditing(true)} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Refresh this hook</button>
-              <button onClick={() => run({ kind: "talking_head", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">
-                {busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-      {s.kind === "broll" && (
-        <div className="mt-2">
-          {editingPrompt ? (
-            <div>
-              <textarea
-                value={promptDraft}
-                onChange={(e) => setPromptDraft(e.target.value)}
-                rows={4}
-                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-                placeholder="Describe the shot + motion (e.g. slow push-in on the pouch, warm daylight, no morphing)…"
-              />
-              <div className="mt-1 flex flex-wrap gap-2">
-                <button disabled={busy || !promptDraft.trim()} onClick={() => run({ kind: "broll", model: "fast", prompt: promptDraft.trim() })} className="rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50">{busy ? "Queuing…" : "Regenerate"}</button>
-                <button disabled={busy || !promptDraft.trim()} onClick={() => run({ kind: "broll", model: "full", prompt: promptDraft.trim() })} className="rounded border border-indigo-300 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-800 dark:text-indigo-300">HQ (Veo 3)</button>
-                <button onClick={() => setEditingPrompt(false)} className="text-xs text-zinc-500 hover:underline">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <button onClick={() => run({ kind: "broll", model: "fast" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">Regenerate</button>
-              <button onClick={() => run({ kind: "broll", model: "full" })} disabled={busy} className="text-xs text-indigo-600 hover:underline disabled:opacity-50">{busy ? "Queuing…" : "Regenerate in HQ (Veo 3)"}</button>
-              <button onClick={() => { setPromptDraft(s.prompt || ""); setEditingPrompt(true); }} disabled={busy} className="text-xs text-zinc-500 hover:underline disabled:opacity-50">Edit shot prompt</button>
-              {onDiscard && <button onClick={() => onDiscard(s.id)} disabled={busy} className="text-xs text-red-500 hover:underline disabled:opacity-50">Discard</button>}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function BrollStudio({
-  workspaceId, campaignId, clips, sources, onAdd, onReuse, onRegenerate, onDiscard,
-}: {
-  workspaceId: string;
-  campaignId: string;
-  clips: Segment[];
-  sources: BrollSource[];
-  onAdd: (opts: { mode: "text" | "image" | "avatar"; prompt: string; sourceUrl?: string; avatarAction?: string; model: "fast" | "full" }) => Promise<void>;
-  onReuse: (segId: string) => Promise<void>;
-  onRegenerate: (seq: number, opts: { kind?: "talking_head" | "broll"; model?: "fast" | "full"; newScript?: string; prompt?: string }) => Promise<void>;
-  onDiscard: (segId: string) => void;
-}) {
-  const [mode, setMode] = useState<"text" | "photo" | "avatar" | "library">("avatar");
-  const [prompt, setPrompt] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
-  const [avatarAction, setAvatarAction] = useState<string>(AVATAR_BROLL_ACTIONS[0].value);
-  const [model, setModel] = useState<"fast" | "full">("fast");
-  const [busy, setBusy] = useState(false);
-  const [library, setLibrary] = useState<LibraryClip[] | null>(null);
-
-  async function openLibrary() {
-    setMode("library");
-    if (library === null) {
-      const res = await fetch(`/api/ads/broll-library?workspaceId=${workspaceId}&excludeCampaign=${campaignId}`);
-      setLibrary(res.ok ? (await res.json()).clips || [] : []);
-    }
-  }
-  async function add() {
-    setBusy(true);
-    if (mode === "text") await onAdd({ mode: "text", prompt: prompt.trim(), model });
-    else if (mode === "photo" && picked) await onAdd({ mode: "image", prompt: prompt.trim(), sourceUrl: picked, model });
-    else if (mode === "avatar") await onAdd({ mode: "avatar", prompt: "", avatarAction, model });
-    setBusy(false);
-    setPrompt("");
-    setPicked(null);
-  }
-  const tab = (k: "text" | "photo" | "avatar" | "library", label: string) => (
-    <button
-      onClick={() => (k === "library" ? openLibrary() : setMode(k))}
-      className={`rounded-md px-3 py-1.5 text-xs font-medium ${mode === k ? "bg-indigo-600 text-white" : "border border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"}`}
-    >
-      {label}
-    </button>
-  );
-
-  return (
-    <div className="mt-8">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">B-roll</h2>
-        <span className="text-xs text-zinc-400">Add clips one at a time — any number works (or none)</span>
-      </div>
-
-      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-        <div className="mb-3 flex flex-wrap gap-2">
-          {tab("avatar", "Animate the avatar")}
-          {tab("text", "Describe (text → video)")}
-          {tab("photo", "Animate a photo")}
-          {tab("library", "From library")}
-        </div>
-
-        {mode === "library" ? (
-          library === null ? (
-            <p className="text-xs text-zinc-400">Loading library…</p>
-          ) : library.length === 0 ? (
-            <p className="text-xs text-zinc-400">No reusable b-roll yet. Make some with Describe or Animate a photo.</p>
-          ) : (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {library.map((c) => (
-                <div key={c.id} className="rounded-md border border-zinc-200 p-2 dark:border-zinc-800">
-                  {c.preview_url ? <video src={c.preview_url} className="w-full rounded" muted loop onMouseOver={(e) => e.currentTarget.play()} onMouseOut={(e) => e.currentTarget.pause()} /> : <div className="h-24 rounded bg-zinc-100 dark:bg-zinc-800" />}
-                  <button onClick={() => onReuse(c.id)} className="mt-1 w-full rounded bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-500">Add to this ad</button>
-                </div>
-              ))}
-            </div>
-          )
-        ) : (
-          <div>
-            {mode === "avatar" && (
-              <div className="mb-3">
-                <p className="mb-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">What should she do?</p>
-                <select
-                  value={avatarAction}
-                  onChange={(e) => setAvatarAction(e.target.value)}
-                  className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
-                >
-                  {AVATAR_BROLL_ACTIONS.map((a) => (
-                    <option key={a.value} value={a.value}>{a.label}{a.usesProduct ? " (with the product)" : ""}</option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-zinc-400">Builds a fresh frame of this ad&apos;s avatar doing the action (identity-locked to her face), then animates it — no stock b-roll.</p>
-              </div>
-            )}
-            {mode === "photo" && (
-              <div className="mb-3">
-                <p className="mb-1 text-xs font-medium text-zinc-600 dark:text-zinc-400">Pick a photo to animate</p>
-                {sources.length === 0 ? (
-                  <p className="text-xs text-zinc-400">No product photos available.</p>
+              <div className="flex flex-col gap-4 sm:flex-row">
+                {angle.provenance.competitor_ad_image_url ? (
+                  <a href={angle.provenance.competitor_ad_image_url} target="_blank" rel="noreferrer" className="shrink-0">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={angle.provenance.competitor_ad_image_url}
+                      alt="Competitor ad"
+                      className="h-40 w-40 rounded-md border border-zinc-200 object-cover dark:border-zinc-800"
+                    />
+                  </a>
                 ) : (
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {sources.map((src) => (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        key={src.url}
-                        src={src.url}
-                        alt={src.alt_text || src.slot}
-                        onClick={() => setPicked(src.url)}
-                        className={`h-20 w-20 shrink-0 cursor-pointer rounded-md object-cover ${picked === src.url ? "ring-2 ring-indigo-500" : "border border-zinc-200 dark:border-zinc-800"}`}
-                      />
-                    ))}
+                  <div className="flex h-40 w-40 shrink-0 items-center justify-center rounded-md border border-dashed border-zinc-200 text-[11px] text-zinc-400 dark:border-zinc-700">
+                    No competitor image
+                  </div>
+                )}
+                <div className="min-w-0">
+                  {angle.provenance.competitor_hook && (
+                    <>
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Their hook (pre-debrand)</p>
+                      <p className="mt-0.5 text-sm italic text-zinc-700 dark:text-zinc-300">“{angle.provenance.competitor_hook}”</p>
+                    </>
+                  )}
+                  <p className="mt-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Our angle</p>
+                  <p className="mt-0.5 text-sm text-zinc-700 dark:text-zinc-300">{angle.provenance.lead_benefit}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="mb-2 flex items-center gap-2">
+                <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  Exploit
+                </span>
+                <span className="text-sm text-zinc-600 dark:text-zinc-300">
+                  Built from {EXPLOIT_SOURCE_LABEL[angle.provenance.source] || "our own product intelligence"}
+                </span>
+              </div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">The angle</p>
+              <p className="mt-0.5 text-sm text-zinc-700 dark:text-zinc-300">{angle.provenance.lead_benefit}</p>
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/* ── The ad ─────────────────────────────────────────────────────────── */}
+      <Section title="The ad" subtitle="3 placements · the copy variations it rotates · the identity it posts as">
+        {/* Placements */}
+        <div className="grid gap-4 sm:grid-cols-3">
+          {PLACEMENTS.map((p) => {
+            const src = placementImage(p.formats);
+            return (
+              <div key={p.key} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{p.label}</span>
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{p.ratio}</span>
+                </div>
+                {src ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={src} alt={`${p.label} placement`} className="w-full rounded-md border border-zinc-100 dark:border-zinc-800" />
+                ) : (
+                  <div className="flex aspect-[4/5] items-center justify-center rounded-md border border-dashed border-zinc-200 text-[11px] text-zinc-400 dark:border-zinc-700">
+                    Not rendered
                   </div>
                 )}
               </div>
-            )}
-            {mode !== "avatar" && (
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                rows={3}
-                placeholder={mode === "text" ? "Describe the b-roll scene (e.g. close-up of coffee being poured into a mug, steam rising, warm morning light)…" : "Optional: guide the motion (e.g. slow push-in, gentle drift, no morphing)…"}
-                className="w-full rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-              />
-            )}
-            <div className="mt-2 flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
-                <input type="radio" checked={model === "fast"} onChange={() => setModel("fast")} /> Veo Fast
-              </label>
-              <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
-                <input type="radio" checked={model === "full"} onChange={() => setModel("full")} /> Veo 3 HQ
-              </label>
-              <button
-                onClick={add}
-                disabled={busy || (mode === "text" && !prompt.trim()) || (mode === "photo" && !picked)}
-                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {busy ? "Queuing…" : "Add b-roll clip"}
-              </button>
+            );
+          })}
+        </div>
+
+        {/* Ad mock (feed layout) using the canonical copy + the page identity */}
+        {canonical && (canonical.headline || canonical.primary_text) && (
+          <div className="mt-5">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Preview</p>
+            <div className="mx-auto max-w-md overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex items-center gap-2 p-3">
+                <div className="h-8 w-8 shrink-0 rounded-full bg-gradient-to-br from-indigo-400 to-emerald-400" />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{identityName}</p>
+                  <p className="text-[11px] text-zinc-400">Sponsored</p>
+                </div>
+              </div>
+              {canonical.primary_text && (
+                <p className="whitespace-pre-wrap px-3 pb-2 text-sm text-zinc-800 dark:text-zinc-200">{canonical.primary_text}</p>
+              )}
+              {placementImage(["feed_4x5"]) ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={placementImage(["feed_4x5"]) as string} alt="Feed creative" className="w-full" />
+              ) : (
+                <div className="flex aspect-[4/5] items-center justify-center bg-zinc-50 text-xs text-zinc-400 dark:bg-zinc-950">No feed image</div>
+              )}
+              <div className="flex items-center justify-between gap-3 bg-zinc-50 p-3 dark:bg-zinc-950">
+                <div className="min-w-0">
+                  {destUrl && <p className="truncate text-[10px] uppercase tracking-wider text-zinc-400">{hostOf(destUrl)}</p>}
+                  {canonical.headline && <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{canonical.headline}</p>}
+                  {canonical.description && <p className="truncate text-xs text-zinc-500">{canonical.description}</p>}
+                </div>
+                <span className="shrink-0 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{ctaLabel}</span>
+              </div>
             </div>
           </div>
         )}
-      </div>
 
-      {clips.length > 0 && (
-        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {clips.map((s) => (
-            <SegmentCard key={s.id} s={s} onRegenerate={onRegenerate} onDiscard={onDiscard} />
-          ))}
+        {/* Copy variations */}
+        <div className="mt-5">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Copy variations{copyVariants.length ? " · temperature-banded" : ""}
+          </p>
+          {copyVariants.length > 0 ? (
+            <div className="grid gap-3 md:grid-cols-3">
+              {copyVariants.map((v) => (
+                <div key={v.audience_temperature} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                  <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${TEMP_TONE[v.audience_temperature]}`}>
+                    {TEMP_LABEL[v.audience_temperature]}
+                  </span>
+                  <p className="mt-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">{v.headline}</p>
+                  <p className="mt-1 whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-300">{v.primary_text}</p>
+                  {v.description && <p className="mt-1 text-[11px] italic text-zinc-400">{v.description}</p>}
+                </div>
+              ))}
+            </div>
+          ) : angle && (angle.copy_pack?.headlines?.length || angle.meta_headline) ? (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+              <VariationList label="Headlines" items={angle.copy_pack?.headlines?.length ? angle.copy_pack.headlines : [angle.meta_headline || ""]} />
+              <VariationList label="Primary texts" items={angle.copy_pack?.primaryTexts?.length ? angle.copy_pack.primaryTexts : [angle.meta_primary_text || ""]} />
+              {(angle.copy_pack?.description || angle.meta_description) && (
+                <VariationList label="Description" items={[angle.copy_pack?.description || angle.meta_description || ""]} />
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-500">No copy authored yet.</p>
+          )}
         </div>
+
+        {/* Identity */}
+        <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+          <span className="font-medium text-zinc-600 dark:text-zinc-400">Posts as:</span>
+          {pageIdentity ? (
+            <>
+              <span className="rounded bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">📘 {pageIdentity.page_name || pageIdentity.page_id}</span>
+              {pageIdentity.instagram_id && <span className="rounded bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">📷 IG linked</span>}
+            </>
+          ) : (
+            <span className="text-zinc-400">Not yet published — the FB/IG page is assigned at publish time.</span>
+          )}
+        </div>
+      </Section>
+
+      {/* ── Max's grade ────────────────────────────────────────────────────── */}
+      <Section title="Max's grade" subtitle="Dahlia's self-score, then Max's independent copy-QC — hard gates + persuasion + suggestions">
+        <div className="grid gap-4 lg:grid-cols-2">
+          {/* Dahlia self-score */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Dahlia · self-score</h3>
+              {campaign.author_self_score?.total != null && (
+                <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-semibold text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
+                  {campaign.author_self_score.total}/10
+                </span>
+              )}
+            </div>
+            {campaign.author_self_score ? (
+              <>
+                <RubricBars score={campaign.author_self_score} />
+                {campaign.author_self_score.evidence?.length ? (
+                  <ul className="mt-3 space-y-1">
+                    {campaign.author_self_score.evidence.map((e, i) => (
+                      <li key={i} className="text-[11px] text-zinc-500">• {e}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : (
+              <p className="text-sm text-zinc-500">Deterministic caption — no author self-score (Dahlia ran in deterministic mode).</p>
+            )}
+          </div>
+
+          {/* Max QC verdict */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Max · copy-QC</h3>
+              {qa && (
+                <span className={`rounded-md px-2 py-1 text-xs font-semibold ${qa.hard_gate_pass ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"}`}>
+                  {qa.hard_gate_pass ? "Passed ✓" : "Held ✕"}
+                </span>
+              )}
+            </div>
+            {qa ? (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(qa.hard_gates).map(([k, v]) => (
+                    <span key={k} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${v ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"}`}>
+                      {v ? "✓" : "✕"} {k.replace(/_/g, " ")}
+                    </span>
+                  ))}
+                </div>
+                {qa.persuasion_score != null && (
+                  <p className="mt-3 text-xs text-zinc-500">
+                    Persuasion <span className="font-semibold text-zinc-700 dark:text-zinc-200">{qa.persuasion_score}/10</span>
+                    {qa.persuasion_rubric && (
+                      <span className="ml-1 text-zinc-400">
+                        (LF8 {qa.persuasion_rubric.lf8} · Schwartz {qa.persuasion_rubric.schwartz} · Cialdini {qa.persuasion_rubric.cialdini} · Hopkins {qa.persuasion_rubric.hopkins} · Sugarman {qa.persuasion_rubric.sugarman})
+                      </span>
+                    )}
+                  </p>
+                )}
+                {qa.scroll_stop && (
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Scroll-stop: readable {qa.scroll_stop.headline_readable_in_3_frames}/2 · hierarchy {qa.scroll_stop.visual_hierarchy_supports_headline}/2 · first-line {qa.scroll_stop.first_line_earns_the_second}/2
+                  </p>
+                )}
+                {qa.verdict_reason && (
+                  <div className="mt-3 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Suggestion</p>
+                    <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-300">{qa.verdict_reason}</p>
+                  </div>
+                )}
+                <p className="mt-2 text-[10px] text-zinc-400">Attempt {qa.retry_index + 1} · {new Date(qa.created_at).toLocaleString()}</p>
+              </>
+            ) : (
+              <p className="text-sm text-zinc-500">Awaiting Max&apos;s copy-QC.</p>
+            )}
+          </div>
+        </div>
+      </Section>
+
+      {/* ── Meta lifecycle ─────────────────────────────────────────────────── */}
+      <Section title="Meta lifecycle" subtitle="Where this creative published — account → campaign → adset → ad">
+        {publishJobs.length === 0 ? (
+          <p className="text-sm text-zinc-500">Not yet published to Meta. When Bianca ships this into a test, its account, campaign, adset and ad appear here.</p>
+        ) : (
+          <div className="space-y-3">
+            {publishJobs.map((j) => (
+              <div key={j.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${publishTone(j.publish_status)}`}>
+                    {j.publish_status}
+                  </span>
+                  {j.publish_active === false && <span className="text-[10px] text-zinc-400">paused</span>}
+                  <span className="text-[10px] text-zinc-400">{new Date(j.created_at).toLocaleDateString()}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                  <TargetNode label="Account" value={j.meta_account_id ? `act_${j.meta_account_id}` : null} />
+                  <span className="text-zinc-300 dark:text-zinc-600">→</span>
+                  <TargetNode label="Campaign" value={j.meta_campaign_id} />
+                  <span className="text-zinc-300 dark:text-zinc-600">→</span>
+                  <TargetNode label="Adset" value={j.meta_adset_id} />
+                  <span className="text-zinc-300 dark:text-zinc-600">→</span>
+                  <TargetNode label="Ad" value={j.meta_ad_id} />
+                </div>
+                {j.meta_ad_id && j.meta_account_id && (
+                  <a
+                    href={`https://business.facebook.com/adsmanager/manage/ads?act=${j.meta_account_id}&selected_ad_ids=${j.meta_ad_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-block text-xs text-indigo-600 hover:underline"
+                  >
+                    Open in Ads Manager ↗
+                  </a>
+                )}
+                {j.error && <p className="mt-2 text-xs text-rose-600">{j.error}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      {/* Legacy video outputs — read-only, only when this campaign has them. */}
+      {videoOutputs.length > 0 && (
+        <Section title="Video outputs" subtitle="Rendered video formats (read-only)">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {videoOutputs.map((v) => (
+              <div key={v.id} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-2 flex items-center gap-2">
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{v.format}</span>
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">{v.status}</span>
+                </div>
+                {v.final_mp4_url ? (
+                  <video controls src={v.final_mp4_url} className="w-full rounded-md" />
+                ) : (
+                  <p className="text-xs text-zinc-400">Not rendered.</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </Section>
       )}
     </div>
   );
 }
 
-function FormatHeader({ v }: { v: Video }) {
+function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-2">
-      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-        {v.format}
-      </span>
-      {v.format_variant_of_id && (
-        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-          variant
-        </span>
-      )}
-      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800">
-        {v.status}
-      </span>
+    <section className="mb-8">
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{title}</h2>
+        {subtitle && <p className="text-xs text-zinc-400">{subtitle}</p>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function VariationList({ label, items }: { label: string; items: string[] }) {
+  const clean = items.filter(Boolean);
+  if (!clean.length) return null;
+  return (
+    <div className="mb-3 last:mb-0">
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">{label}</p>
+      <ul className="space-y-1">
+        {clean.map((t, i) => (
+          <li key={i} className="text-xs text-zinc-700 dark:text-zinc-300">• {t}</li>
+        ))}
+      </ul>
     </div>
   );
 }
 
-function VideoCard({ v }: { v: Video }) {
+function RubricBars({ score }: { score: AuthorSelfScore }) {
+  const lenses: Array<[string, number | undefined]> = [
+    ["LF8", score.lf8],
+    ["Schwartz", score.schwartz],
+    ["Cialdini", score.cialdini],
+    ["Hopkins", score.hopkins],
+    ["Sugarman", score.sugarman],
+  ];
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <FormatHeader v={v} />
-      {v.final_mp4_url ? (
-        <>
-          <video controls src={v.final_mp4_url} className="w-full rounded-md" />
-          <a href={v.final_mp4_url} download className="mt-2 inline-block text-xs text-indigo-600 hover:underline">
-            Download MP4
-          </a>
-        </>
-      ) : (
-        <p className="text-xs text-zinc-400">Not rendered yet.</p>
-      )}
+    <div className="space-y-1.5">
+      {lenses.map(([name, v]) => (
+        <div key={name} className="flex items-center gap-2">
+          <span className="w-16 shrink-0 text-[11px] text-zinc-500">{name}</span>
+          <div className="flex gap-0.5">
+            {[0, 1].map((i) => (
+              <span key={i} className={`h-2 w-6 rounded-sm ${(v ?? 0) > i ? "bg-indigo-500" : "bg-zinc-200 dark:bg-zinc-700"}`} />
+            ))}
+          </div>
+          <span className="text-[11px] text-zinc-400">{v ?? 0}/2</span>
+        </div>
+      ))}
     </div>
   );
 }
 
-function StaticCard({ v }: { v: Video }) {
+function TargetNode({ label, value }: { label: string; value: string | null | undefined }) {
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-      <FormatHeader v={v} />
-      {v.static_jpg_url ? (
-        <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={v.static_jpg_url} alt={v.format} className="w-full rounded-md" />
-          <a href={v.static_jpg_url} download className="mt-2 inline-block text-xs text-indigo-600 hover:underline">
-            Download JPG
-          </a>
-        </>
-      ) : (
-        <p className="text-xs text-zinc-400">Not produced yet.</p>
-      )}
-    </div>
+    <span className={`rounded px-1.5 py-0.5 ${value ? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200" : "border border-dashed border-zinc-200 text-zinc-300 dark:border-zinc-700 dark:text-zinc-600"}`}>
+      <span className="text-[9px] uppercase tracking-wider text-zinc-400">{label} </span>
+      {value ? <span className="font-mono">{value}</span> : "—"}
+    </span>
   );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, "").toUpperCase();
+  } catch {
+    return "";
+  }
+}
+
+function publishTone(status: string): string {
+  if (status === "published") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
+  if (status === "failed") return "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300";
+  return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
 }

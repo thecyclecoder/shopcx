@@ -973,6 +973,41 @@ export function buildAdCampaignInsertBody(args: {
   };
 }
 
+/** Provenance of a creative — WHERE its angle came from, persisted on the angle so the read-only
+ *  ad detail page can show "the competitor ad this explores" vs "the own asset this exploits".
+ *  `mode` is the coarse explore/exploit split: a `source:'competitor'` angle is EXPLORING a rival's
+ *  winning ad (carries the advertiser + the competitor ad image + the raw hook the debrander rewrote);
+ *  every other source is EXPLOITING one of our own proven assets (a review cluster, a transformation,
+ *  an existing ad angle, an ingredient/benefit/authority claim). */
+export interface AngleProvenance {
+  mode: "explore" | "exploit";
+  source: ScoredAngle["source"];
+  /** competitor advertiser name — only on an explore (competitor) angle. */
+  competitor_advertiser: string | null;
+  /** the competitor ad's image (the design reference Dahlia transfers the layout from). */
+  competitor_ad_image_url: string | null;
+  /** the competitor's RAW hook (pre-debrand) — what the winning ad actually said. */
+  competitor_hook: string | null;
+  /** the hook/lead-benefit this creative was built on (both explore + exploit). */
+  lead_benefit: string;
+}
+
+/** Pure — derive the persisted provenance from a scored angle. Kept pure + exported so the
+ *  explore/exploit split (and the competitor-only field gating) is unit-testable without a DB. */
+export function buildAngleProvenance(angle: ScoredAngle): AngleProvenance {
+  const isCompetitor = angle.source === "competitor";
+  const raw = (angle.raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  return {
+    mode: isCompetitor ? "explore" : "exploit",
+    source: angle.source,
+    competitor_advertiser: isCompetitor ? str(raw.advertiser) : null,
+    competitor_ad_image_url: isCompetitor ? str(raw.imageUrl) : null,
+    competitor_hook: isCompetitor ? str(raw.hook) ?? angle.hook : null,
+    lead_benefit: angle.leadBenefit,
+  };
+}
+
 /** Insert one finished creative PACK into the ready-to-test bin. A pack = one angle row carrying
  *  the 4-headline + 4-primary-text copy variations (persisted on the angle's scalar columns AND on
  *  its `metadata.copy_pack` JSONB for the sibling publish path to read) + one campaign row + THREE
@@ -1039,7 +1074,7 @@ async function insertReadyCreative(
       meta_headline: copyPack.headlines[0].slice(0, META_CAPS.headline),
       meta_primary_text: copyPack.primaryTexts[0].slice(0, META_CAPS.primary_text),
       meta_description: copyPack.description.slice(0, META_CAPS.description),
-      metadata: { copy_pack: copyPack },
+      metadata: { copy_pack: copyPack, provenance: buildAngleProvenance(angle) },
     })
     .select("id").single();
 
