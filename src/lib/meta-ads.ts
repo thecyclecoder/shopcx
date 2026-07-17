@@ -592,6 +592,21 @@ export interface CreateCampaignArgs {
   dailyBudgetCents?: number | null;
   /** CBO only — campaign-level lifetime budget in minor units. Ignored when `abo=true`. */
   lifetimeBudgetCents?: number | null;
+  /**
+   * Advantage+ Sales — percentage of campaign spend allocated to EXISTING customers.
+   * `0` = new-customer-only (the Bianca cold-scaler shape); `null` = leave the knob
+   * off the POST body entirely (existing test-campaign creation stays unchanged).
+   * Forwards to Meta's `existing_customer_budget_percentage` field on
+   * `/act_{id}/campaigns` (documented in [[integrations/meta-marketing]] §
+   * Campaign + ad-set creation).
+   */
+  newCustomerBudgetPercentage?: number | null;
+  /**
+   * Advantage+ Sales campaign type — maps to Meta's `smart_promotion_type` field.
+   * `"AUTOMATED_SHOPPING_ADS"` mints an Advantage+ Sales campaign; `null` = leave
+   * the knob off entirely so the existing ABO test-campaign flow is untouched.
+   */
+  smartPromotionType?: string | null;
 }
 
 /**
@@ -620,6 +635,12 @@ export async function createCampaign(
     if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
     if (args.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(args.lifetimeBudgetCents);
   }
+  if (args.newCustomerBudgetPercentage != null) {
+    body.existing_customer_budget_percentage = args.newCustomerBudgetPercentage;
+  }
+  if (args.smartPromotionType != null) {
+    body.smart_promotion_type = args.smartPromotionType;
+  }
   const j = await metaPost(`${actId(accountId)}/campaigns`, body, token);
   if (!j.id) throw new Error("meta_campaign_no_id");
   return j.id as string;
@@ -635,6 +656,54 @@ export async function getOrCreateTestingCampaign(token: string, accountId: strin
   const hit = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
   if (hit) return hit.id;
   return createCampaign(token, accountId, { name: MB_TESTING_CAMPAIGN_NAME, abo: true, status: "PAUSED" });
+}
+
+/**
+ * Build the stable name for a cohort's cold-scaler campaign. Uses the first 8
+ * chars of the cohort UUID so the name is human-legible + short enough to fit
+ * Meta's 400-char campaign name limit even alongside future suffixes.
+ */
+export function coldScalerCampaignName(cohortId: string): string {
+  return `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
+}
+
+/**
+ * Find-or-create the ONE consolidated cold-scaler campaign for a
+ * `media_buyer_cold_scaler_cohorts` row — Bianca M4 payoff spec
+ * ([[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1).
+ *
+ * Shape (per docs/brain/reference/meta-scaling-methodology.md § Account structure
+ * "SCALING campaign (CBO / Advantage+ Sales) ~85% of budget"):
+ *  - `OUTCOME_SALES` objective
+ *  - CBO (`abo=false`) — campaign-level `daily_budget` is the cohort's ceiling
+ *  - Advantage+ Sales (`smart_promotion_type='AUTOMATED_SHOPPING_ADS'`)
+ *  - New-customer-only from the very first mint (`existing_customer_budget_percentage=0`)
+ *  - PAUSED at mint — an unmonitored campaign never goes live on its own
+ *
+ * Idempotent by exact name match on `coldScalerCampaignName(cohortId)` via
+ * `listCampaigns`. Returns the bare Meta campaign id; the caller
+ * (`executeGraduateActionAgainstMeta` in Phase 3) then compare-and-set-stamps
+ * it onto `media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id` via
+ * `setColdScalerCampaignId` so a race can't double-mint.
+ */
+export async function getOrCreateColdScalerCampaign(
+  token: string,
+  accountId: string,
+  opts: { cohortId: string; dailyCeilingCents: number; name?: string },
+): Promise<string> {
+  const name = opts.name || coldScalerCampaignName(opts.cohortId);
+  const existing = await listCampaigns(token, accountId);
+  const hit = existing.find((c) => c.name === name);
+  if (hit) return hit.id;
+  return createCampaign(token, accountId, {
+    name,
+    objective: "OUTCOME_SALES",
+    abo: false,
+    dailyBudgetCents: opts.dailyCeilingCents,
+    status: "PAUSED",
+    newCustomerBudgetPercentage: 0,
+    smartPromotionType: "AUTOMATED_SHOPPING_ADS",
+  });
 }
 
 export interface CreateAdSetArgs {

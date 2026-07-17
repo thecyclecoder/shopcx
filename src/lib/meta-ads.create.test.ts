@@ -18,8 +18,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   MB_TESTING_CAMPAIGN_NAME,
+  coldScalerCampaignName,
   createAdSet,
   createCampaign,
+  getOrCreateColdScalerCampaign,
   getOrCreateTestingCampaign,
 } from "./meta-ads";
 
@@ -119,6 +121,82 @@ test("createAdSet — PAUSED purchase-optimized defaults + Advantage+ placements
     assert.equal(targeting.facebook_positions, undefined);
     assert.equal(targeting.instagram_positions, undefined);
     assert.deepEqual(targeting.geo_locations, { countries: ["US"] });
+  } finally {
+    stub.restore();
+  }
+});
+
+test("createCampaign — new-customer-only forwards existing_customer_budget_percentage + smart_promotion_type", async () => {
+  const stub = stubFetch(() => ({ json: { id: "adv-1" } }));
+  try {
+    await createCampaign("token", "act_9999", {
+      name: "MB — Cold Scaler (aaaaaaaa)",
+      abo: false,
+      dailyBudgetCents: 20000,
+      newCustomerBudgetPercentage: 0,
+      smartPromotionType: "AUTOMATED_SHOPPING_ADS",
+    });
+    const [call] = stub.calls;
+    assert.equal(call.body.get("existing_customer_budget_percentage"), "0");
+    assert.equal(call.body.get("smart_promotion_type"), "AUTOMATED_SHOPPING_ADS");
+    assert.equal(call.body.get("daily_budget"), "20000");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("createCampaign — baseline test-campaign call omits new-customer knobs entirely", async () => {
+  const stub = stubFetch(() => ({ json: { id: "test-1" } }));
+  try {
+    await createCampaign("token", "act_9999", { name: "MB — Testing (ABO)" });
+    const [call] = stub.calls;
+    // Absent → the Advantage+ Sales knobs must not appear on the wire.
+    assert.equal(call.body.get("existing_customer_budget_percentage"), null);
+    assert.equal(call.body.get("smart_promotion_type"), null);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES Advantage+ with new-customer-only on first call, idempotent on second", async () => {
+  const cohortId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const expectedName = coldScalerCampaignName(cohortId);
+  assert.equal(expectedName, "MB — Cold Scaler (aaaaaaaa)");
+  let campaignRows: Array<{ id: string; name: string; status: string }> = [];
+  const stub = stubFetch((call) => {
+    if (call.method === "GET" && call.url.includes("/act_9999/campaigns")) {
+      return { json: { data: campaignRows } };
+    }
+    if (call.method === "POST" && call.url.includes("/act_9999/campaigns")) {
+      const created = { id: "cold-scaler-1", name: expectedName, status: "PAUSED" };
+      campaignRows = [...campaignRows, created];
+      return { json: { id: created.id } };
+    }
+    throw new Error(`unexpected call: ${call.method} ${call.url}`);
+  });
+  try {
+    const first = await getOrCreateColdScalerCampaign("token", "act_9999", {
+      cohortId,
+      dailyCeilingCents: 20000,
+    });
+    const second = await getOrCreateColdScalerCampaign("token", "act_9999", {
+      cohortId,
+      dailyCeilingCents: 20000,
+    });
+    assert.equal(first, "cold-scaler-1");
+    assert.equal(second, first, "second call must return the same campaign id");
+    const posts = stub.calls.filter((c) => c.method === "POST");
+    assert.equal(posts.length, 1, "second call must NOT POST a new campaign");
+    const [post] = posts;
+    assert.equal(post.body.get("name"), expectedName);
+    assert.equal(post.body.get("objective"), "OUTCOME_SALES");
+    assert.equal(post.body.get("status"), "PAUSED");
+    assert.equal(post.body.get("daily_budget"), "20000");
+    // ABO flag MUST NOT be set (CBO campaign).
+    assert.equal(post.body.get("is_adset_budget_sharing_enabled"), null);
+    // Advantage+ Sales + new-customer-only surfaces.
+    assert.equal(post.body.get("existing_customer_budget_percentage"), "0");
+    assert.equal(post.body.get("smart_promotion_type"), "AUTOMATED_SHOPPING_ADS");
   } finally {
     stub.restore();
   }

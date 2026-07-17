@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import {
   getEffectiveMediaBuyerColdScalerCohort,
   listActiveColdScalerCohorts,
+  setColdScalerCampaignId,
 } from "./cold-scaler-cohort";
 
 type Row = Record<string, unknown>;
@@ -177,6 +178,53 @@ test("getEffectiveMediaBuyerColdScalerCohort — normalizes bigint dailyScalerCe
 });
 
 // ── listActiveColdScalerCohorts — enumeration + sort order (nulls last) ──────
+
+// ── setColdScalerCampaignId — compare-and-set on currently-null column ───────
+
+function makeSetterAdmin(row: Row) {
+  return {
+    from(_table: string) {
+      const filters: Filter[] = [];
+      let isNullCol: string | null = null;
+      let patch: Row | null = null;
+      const chain = {
+        update: (values: Row) => { patch = values; return chain; },
+        eq: (col: string, val: unknown) => { filters.push({ kind: "eq", col, val }); return chain; },
+        is: (col: string, val: unknown) => {
+          if (val !== null) throw new Error("only .is(col, null) is stubbed");
+          isNullCol = col;
+          return chain;
+        },
+        select: async (_: string) => {
+          const matched = matches(row, filters) && (isNullCol == null || row[isNullCol] === null);
+          if (matched && patch) {
+            for (const k of Object.keys(patch)) row[k] = patch[k];
+            return { data: [{ id: row.id }], error: null };
+          }
+          return { data: [], error: null };
+        },
+      };
+      return chain;
+    },
+  } as unknown as Parameters<typeof setColdScalerCampaignId>[0];
+}
+
+test("setColdScalerCampaignId — stamps when column is null, no-ops when someone else stamped first", async () => {
+  const row = cohortRow({ id: "cohort-x", meta_ad_account_id: ACCT, product_id: null });
+  const admin = makeSetterAdmin(row);
+  const first = await setColdScalerCampaignId(admin, {
+    cohortId: "cohort-x",
+    scalerMetaCampaignId: "meta-camp-1",
+  });
+  assert.equal(first.stamped, 1);
+  assert.equal(row.scaler_meta_campaign_id, "meta-camp-1");
+  const second = await setColdScalerCampaignId(admin, {
+    cohortId: "cohort-x",
+    scalerMetaCampaignId: "meta-camp-2",
+  });
+  assert.equal(second.stamped, 0, "second call must no-op because column is no longer null");
+  assert.equal(row.scaler_meta_campaign_id, "meta-camp-1", "must not overwrite the first stamp");
+});
 
 test("listActiveColdScalerCohorts — returns active rows for the account, product_id ASC, nulls last", async () => {
   const admin = makeAdmin({

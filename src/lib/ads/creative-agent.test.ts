@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief, ScoredAngle } from "@/lib/ads/creative-brief";
-import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer } from "./creative-agent";
+import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance } from "./creative-agent";
 
 test("readyStatusForAngle holds a null angle out of 'ready'", () => {
   assert.equal(readyStatusForAngle(null), "draft");
@@ -100,4 +100,52 @@ test("planCompositionTransfer: NEVER silently falls through to competitor-only w
     const plan = planCompositionTransfer(competitorAngle(graphic), packshotless);
     assert.equal(plan.kind, "skip");
   }
+});
+
+// ── buildAngleProvenance — explore/exploit source reference on the read-only detail page ─────────
+
+function scoredAngle(over: Partial<ScoredAngle>): ScoredAngle {
+  return {
+    hook: "results-first hook",
+    source: "review_cluster",
+    leadBenefit: "clearer focus by week two",
+    acquisitionPower: 6,
+    retentionTruth: 7,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: undefined,
+    ...over,
+  };
+}
+
+test("buildAngleProvenance: a competitor angle is EXPLORE — carries the advertiser + ad image + raw hook", () => {
+  const p = buildAngleProvenance(
+    scoredAngle({
+      source: "competitor",
+      hook: "our debranded benefit",
+      raw: { advertiser: "MUD\\WTR", imageUrl: "https://competitor.example/winning.jpg", hook: "Ditch coffee for good" },
+    }),
+  );
+  assert.equal(p.mode, "explore");
+  assert.equal(p.source, "competitor");
+  assert.equal(p.competitor_advertiser, "MUD\\WTR");
+  assert.equal(p.competitor_ad_image_url, "https://competitor.example/winning.jpg");
+  assert.equal(p.competitor_hook, "Ditch coffee for good");
+});
+
+test("buildAngleProvenance: a competitor angle with no raw hook falls back to the angle's own hook", () => {
+  const p = buildAngleProvenance(scoredAngle({ source: "competitor", hook: "fallback hook", raw: { advertiser: "Ryze" } }));
+  assert.equal(p.competitor_hook, "fallback hook");
+  assert.equal(p.competitor_ad_image_url, null);
+});
+
+test("buildAngleProvenance: an own-brand angle is EXPLOIT — no competitor fields leak", () => {
+  const p = buildAngleProvenance(scoredAngle({ source: "transformation", raw: { advertiser: "should-be-ignored", imageUrl: "x" } }));
+  assert.equal(p.mode, "exploit");
+  assert.equal(p.source, "transformation");
+  assert.equal(p.competitor_advertiser, null);
+  assert.equal(p.competitor_ad_image_url, null);
+  assert.equal(p.competitor_hook, null);
+  assert.equal(p.lead_benefit, "clearer focus by week two");
 });

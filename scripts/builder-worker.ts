@@ -20856,6 +20856,33 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     // Reuse the QC gate script — same predicate: allow Read on the exact tmp jpeg, deny else.
     const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
     let counter = 0;
+    // Image-QC dispatcher — MUST be injected too. Without it, stockProduct's per-creative QC pass
+    // falls back to the legacy `qaCreative` Opus-vision path (needs ANTHROPIC_API_KEY), which the
+    // box's least-privilege env does NOT have → every attempt fails closed with `qa_no_anthropic_key`
+    // and the run produces nothing. This mirrors runAdCreativeJob's production `qcDispatcher` exactly
+    // (kind='ad-creative-qc', sandbox='qc' so no ANTHROPIC_API_KEY needed). Forced on for this manual
+    // bench lane — the caller enqueued this kind deliberately to exercise the real box QC path.
+    let qcCounter = 0;
+    const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+      qcCounter++;
+      const qcTag = `${tag}[qc#${qcCounter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-qc",
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }));
+        if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
     const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
       counter++;
       const authorTag = `${tag}[copy-author#${counter}]`;
@@ -20881,8 +20908,11 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
       workspaceId: job.workspace_id,
       productId: instr.product_id,
       count: instr.count,
-      // Force the copy-author path for THIS manual run — the caller enqueued this kind
-      // deliberately so we always inject the dispatcher regardless of the workspace-level flag.
+      // Force BOTH the box image-QC path and the copy-author path for THIS manual run — the caller
+      // enqueued this kind deliberately, so we always inject both dispatchers regardless of the
+      // workspace-level flags. (qcDispatcher must be present or image-QC falls back to the Opus-key
+      // path the box can't run — see the qa_no_anthropic_key note above.)
+      qcDispatcher,
       copyAuthorDispatcher,
     });
     detail = `produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`;
