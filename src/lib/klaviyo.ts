@@ -625,11 +625,24 @@ export async function getReviewsForProducts(
   // Resolve mixed Shopify/internal IDs to internal product UUIDs.
   let internalIds: string[] = [];
   if (productIds.length) {
-    const { data: products } = await admin
+    // Split by id-shape: a Shopify numeric ID compared against the uuid `id` column throws 22P02
+    // and fails the whole query (no products resolved). Only UUIDs → `id`, only non-UUIDs →
+    // `shopify_product_id` (same split transform-subscription.ts / image-fallback.ts use).
+    const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+    const productUuids = productIds.filter(isUuid);
+    const productShopifyIds = productIds.filter((s) => !isUuid(s));
+    let prodQuery = admin
       .from("products")
       .select("id, shopify_product_id")
-      .eq("workspace_id", workspaceId)
-      .or(productIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
+      .eq("workspace_id", workspaceId);
+    if (productUuids.length && productShopifyIds.length) {
+      prodQuery = prodQuery.or(`id.in.(${productUuids.join(",")}),shopify_product_id.in.(${productShopifyIds.map(s => `"${s}"`).join(",")})`);
+    } else if (productUuids.length) {
+      prodQuery = prodQuery.in("id", productUuids);
+    } else {
+      prodQuery = prodQuery.in("shopify_product_id", productShopifyIds);
+    }
+    const { data: products } = await prodQuery;
     internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
     if (!internalIds.length) return [];
   }
