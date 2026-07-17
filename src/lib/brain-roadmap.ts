@@ -1153,8 +1153,19 @@ export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   const wsId = workspaceId ?? (await resolveDefaultWorkspaceId());
   // No workspace → empty board. We fail loud (empty result, no markdown fallback) so an outage is visible
   // rather than papered over with a stale disk parse. spec-readers-from-db-retire-parser safety rail.
-  const specs = wsId ? await readSpecsFromDb(wsId) : [];
-  return { specs };
+  if (!wsId) return { specs: [] };
+  // spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Wrapper cache HIT skips the ~9-scan whole-board fan-out entirely. Bounded by the same write
+  // invalidation as the getSpec wrapper (onSpecCacheInvalidate above) — a spec write in this workspace
+  // evicts the entry immediately, so the next call sees fresh state even inside the TTL. Amortizes
+  // Mario's stall detector (which resolves blockers for every candidate) + any tick handler that
+  // walks blockers, so a full sweep costs ONE board read, not one per candidate.
+  const cached = getRoadmapWrapperCache.get(wsId);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+  const specs = await readSpecsFromDb(wsId);
+  const result: RoadmapData = { specs };
+  getRoadmapWrapperCache.set(wsId, { value: result, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+  return result;
 }
 
 /** Slugs of every boardable spec — DB-driven (no fs read). Used to resolve [[wikilinks]] to detail pages. */
@@ -1457,6 +1468,16 @@ type WorkspaceMapsEntry = {
 };
 const workspaceMapsCache = new Map<string, WorkspaceMapsEntry>();
 
+// spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+// Short-TTL wrapper cache around getRoadmap(workspaceId) — mirrors the db-load-getspec-cache pattern
+// (same GET_SPEC_WRAPPER_TTL_MS, same eviction chokepoint via onSpecCacheInvalidate above). Bounded
+// by the same write-invalidation as getSpec, so a spec write is IMMEDIATELY visible on the next call
+// even inside the TTL. Retires the "~9-scan whole-board fan-out with no cache" cost the spec calls
+// out — Mario's stall detector plus any tick handler that resolves blockers through getSpecBlockers
+// now amortize a single board read per workspace within the TTL window.
+type GetRoadmapCacheEntry = { value: RoadmapData; expiresAt: number };
+const getRoadmapWrapperCache = new Map<string, GetRoadmapCacheEntry>();
+
 function getSpecCacheKey(workspaceId: string, slug: string): string {
   return `${workspaceId}::${slug}`;
 }
@@ -1466,6 +1487,10 @@ onSpecCacheInvalidate((workspaceId, slug) => {
   // Any spec write in the workspace may shift the goal-membership index (a milestone reassignment,
   // a status flip, a blocker rewrite), so drop the workspace maps too — the next miss rebuilds.
   workspaceMapsCache.delete(workspaceId);
+  // spec-read-eff-roadmap-cache — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // The whole-board snapshot is a function of every boardable spec in the workspace, so any spec write
+  // invalidates it too. Same eviction chokepoint as the getSpec wrapper — no writer path is missed.
+  getRoadmapWrapperCache.delete(workspaceId);
 });
 
 async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<WorkspaceMapsEntry> {
@@ -1495,6 +1520,8 @@ async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<Workspace
 export function clearGetSpecWrapperCacheForTests(): void {
   getSpecWrapperCache.clear();
   workspaceMapsCache.clear();
+  // spec-read-eff-roadmap-cache — clear the whole-board wrapper too so a test can observe a fresh read.
+  getRoadmapWrapperCache.clear();
 }
 
 export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw: string; card: SpecCard } | null> {

@@ -30,7 +30,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
-import { getSpec, getSpecBlockers } from "@/lib/brain-roadmap";
+import { getSpec, getSpecBlockers, getRoadmap, type SpecCard } from "@/lib/brain-roadmap";
 import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
 import {
   ACTIVE_STATUSES,
@@ -1203,10 +1203,39 @@ export async function evaluateStalledSpecs(
     }
   }
 
+  // spec-read-eff-mario — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // The N+1 fix: the pre-Phase-3 loop called getSpecBlockers(slug) per candidate, and each call fires
+  // a full getRoadmap() (~9 whole-board scans). One tick with M candidates and N workspaces used to
+  // pay M × 9 board scans. Now: ONE getRoadmap(workspace) per unique workspace_id → build a
+  // slug→blockedBy lookup, and the loop reads from that snapshot. Falls back to getSpecBlockers on a
+  // per-candidate cache miss (unknown workspace / getRoadmap error) so a snapshot error can never
+  // silently degrade the (b) uncleared-blocker filter — behavior-preserving.
+  const boardBySlug = new Map<string, Map<string, SpecCard["blockedBy"]>>();
+  const uniqueWorkspaceIds = Array.from(new Set(initial.map((c) => c.workspace_id)));
+  await Promise.all(
+    uniqueWorkspaceIds.map(async (wsId) => {
+      try {
+        const { specs } = await getRoadmap(wsId);
+        const bySlug = new Map<string, SpecCard["blockedBy"]>();
+        for (const s of specs) bySlug.set(s.slug, s.blockedBy);
+        boardBySlug.set(wsId, bySlug);
+      } catch {
+        // Fail-open: leave the workspace un-snapshotted; the loop falls back to getSpecBlockers.
+      }
+    }),
+  );
+
   const survivors: StalledCandidate[] = [];
   for (const c of initial) {
     // (b) uncleared blockedBy → legit wait, drop.
-    const blockers = await getSpecBlockers(c.spec_slug);
+    // spec-read-eff-mario — read from the per-tick board snapshot when present; a workspace whose
+    // snapshot failed (or a candidate whose slug isn't on the boardable set — e.g. a pr-<n> pseudo
+    // slug) falls back to the per-candidate getSpecBlockers path so no candidate is ever silently
+    // treated as unblocked because its slug is absent from the snapshot.
+    const snapshot = boardBySlug.get(c.workspace_id);
+    const blockers = snapshot?.has(c.spec_slug)
+      ? snapshot.get(c.spec_slug)!
+      : await getSpecBlockers(c.spec_slug);
     if (blockers.some((b) => !b.cleared)) continue;
 
     // (c) active job in a wait status → legit wait, drop.
