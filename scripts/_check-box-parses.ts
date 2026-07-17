@@ -36,7 +36,9 @@ const REPO_ROOT = resolve(__dirname, "..");
 //   • the worker + its agents spawn these via `npx tsx scripts/<x>.ts`:
 //     spec-test-* (browser-check / db-probe / sandbox), improve-box-tools,
 //     seed-product-tools.
-// Adding a new `tsx scripts/<x>.ts` the box runs? Add it here so it's parse-gated.
+// Adding a new `tsx scripts/<x>.ts` the box runs? Add it to BOTH this list AND
+// the `include` array in tsconfig.box.json — `scripts/_check-box-entrypoints-in-sync.ts`
+// (chained into predeploy) asserts the two lists are set-equal, so drift fails CI red.
 const BOX_ENTRYPOINTS = [
   "scripts/builder-worker.ts",
   "scripts/spec-test-browser-check.ts",
