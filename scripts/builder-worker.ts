@@ -23948,6 +23948,91 @@ async function runNextBuildGate(wt: string): Promise<{ pass: boolean; error: str
   return { pass: false, error: m[0].replace(/\s+/g, " ").slice(0, 600), log: out.slice(-4000) };
 }
 
+// ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1).
+// After tsc + table-refs have passed and BEFORE `git commit`, run the spec's own typed checks against
+// the build worktree using the same `runSpecChecks` deterministic runner the post-hoc spec-test lane
+// (Vera) already calls at :12339 — front-running Rex on 'positive absence' misses (a Verification
+// bullet says a file/export/column should exist, but the build never created it). Blocks ONLY on
+// worktree-reflecting check kinds — the ones whose truth is fully answerable from the local files —
+// so we never block on state that legitimately doesn't exist yet pre-commit:
+//   • db_probe_readonly  — hits PROD read-only; a column a not-yet-applied migration will create is
+//                          legitimately absent, would spuriously fail.
+//   • ci_status          — needs an open PR (not open yet at this point in the lane).
+//   • http_get           — needs a preview deploy (not shipped yet).
+// Kept in the worktree-reflecting blocking set:
+//   • grep, tsc, unit_test, build  — every one is answerable from the worktree's own tree.
+// The runner's harness-error downgrade path ([[spec-test-harness-classifier]] `isHarnessCommandFailure`)
+// already turns "command didn't RUN" (ENOENT / missing script / bad flag) into `needs_human` with the
+// evidence preserved — a broken bullet, not a code regression, and it never blocks the commit.
+// On a real block the build lane resumes Bo's just-finished session with the failing checks (see the
+// build lane's SELF_VERIFY_REPAIR_MAX loop below). This helper is the CHECK; the loop is the wiring.
+const SELF_VERIFY_WORKTREE_KINDS: ReadonlySet<string> = new Set(["grep", "tsc", "unit_test", "build"]);
+async function preCommitSelfVerify(input: {
+  workspaceId: string;
+  slug: string;
+  repoRoot: string;
+}): Promise<{
+  blocked: boolean;
+  ran: boolean;
+  failing: Array<{ text: string; exec_kind: string | null; evidence: string }>;
+  summaryLine: string;
+  error?: string;
+}> {
+  try {
+    const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+      "../src/lib/spec-check-runner"
+    );
+    // packageScripts is the validator's belt-and-suspenders — a check declaring `npm run <script>`
+    // whose script does not exist in the WORKTREE's package.json is a broken bullet, not a fail.
+    const pkg = JSON.parse(readFileSync(resolve(input.repoRoot, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
+    const runnerOut = await runSpecChecks({
+      workspaceId: input.workspaceId,
+      slug: input.slug,
+      deps: {
+        loadChecks: defaultLoadChecks,
+        executors: defaultExecutors,
+        packageScripts,
+        repoRoot: input.repoRoot,
+      },
+    });
+    // Filter to worktree-reflecting kinds BEFORE classification so the blocking decision cannot be
+    // driven by a prod / remote-state check. Non-worktree kinds still ran (idempotent, read-only) but
+    // are surfaced only informationally — they never contribute to auto_fail.
+    const worktreeReflecting = runnerOut.results.filter(
+      (r) => r.exec_kind !== null && SELF_VERIFY_WORKTREE_KINDS.has(r.exec_kind),
+    );
+    const cls = classifyDeterministicRun(worktreeReflecting);
+    const failing = worktreeReflecting
+      .filter((r) => r.verdict === "fail")
+      .map((r) => ({ text: r.text, exec_kind: r.exec_kind, evidence: r.evidence.slice(0, 1200) }));
+    const summaryLine =
+      `preCommitSelfVerify worktree-reflecting: ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤` +
+      ` (of ${runnerOut.results.length} total; ${runnerOut.results.length - worktreeReflecting.length} non-worktree kinds skipped)`;
+    return { blocked: cls.summary.auto_fail > 0, ran: true, failing, summaryLine };
+  } catch (e) {
+    // No safety regression: a runner blip (import failure, DB load blip, etc.) falls through to
+    // today's behavior — commit proceeds; the existing fix-phase self-heal remains the backstop.
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      blocked: false,
+      ran: false,
+      failing: [],
+      summaryLine: `preCommitSelfVerify skipped (runner error): ${msg.slice(0, 400)}`,
+      error: msg,
+    };
+  }
+}
+
+// Bounded in-session repair cap for preCommitSelfVerify. Mirrors the Fix-1/Fix-2 loop-guard shape:
+// on a real block we resume Bo's just-finished session with the failing checks and re-verify, at
+// most this many times. Exhausting the cap fails the job (mirroring the tsc gate at :25031-25034),
+// so the existing fix-phase path still backstops — no safety regression, just a faster path when
+// the miss is a positive-absence that Bo can fix in-session.
+const SELF_VERIFY_REPAIR_MAX = 2;
+
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
   if (job.kind === "fold") return runFoldJob(job);
@@ -25138,6 +25223,162 @@ async function dispatchJob(job: Job) {
       });
       console.error(`${tag} build-lane refs-check FAIL — see log_tail`);
       return;
+    }
+
+    // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1) —
+    // front-run Rex on positive-absence. tsc + table-refs are green; nothing is committed yet; the
+    // worktree is dirty (Bo's edits, if any). Now run the spec's OWN typed checks against this
+    // worktree via the same deterministic runner Vera uses post-hoc, restricted to worktree-
+    // reflecting kinds ({grep,tsc,unit_test,build}) — the only kinds whose truth is fully answerable
+    // from the local tree. On a real block, resume Bo's just-finished session with the failing
+    // checks and re-verify — up to SELF_VERIFY_REPAIR_MAX repair passes; commit only when the
+    // worktree-reflecting checks are clean. On cap exhaustion, mirror the tsc gate at :25031-25034:
+    // fail the job so the existing fix-phase self-heal still backstops (no safety regression). This
+    // runs INSIDE the existing build lane node, so it inherits its owner/kill-switch/heartbeat —
+    // no new node. When the runner itself blips, preCommitSelfVerify returns {ran:false, blocked:false}
+    // and the lane falls through to today's behavior; a genuine block always surfaces.
+    {
+      let selfVerifySession: string | null = session ?? null;
+      // ⭐ build-lane-pre-commit-self-verify Phase 2 — legibility for Ada. Track the FIRST-pass
+      // failing checks + how many repair passes it took + whether repair resolved before commit, so
+      // we can emit ONE `build_self_verify_caught` director_activity row per FIRING (auto_fail>0 on
+      // the first pass) at the moment the loop resolves. Non-firings emit nothing — the row is the
+      // caught signal, not a heartbeat, so the weekly rollup counts only real catches.
+      let initialFailingChecks: Array<{ description: string; exec_kind: string | null; evidence: string }> = [];
+      let gateFired = false;
+      let repairsExecuted = 0;
+      for (let repairPass = 0; repairPass <= SELF_VERIFY_REPAIR_MAX; repairPass++) {
+        const sv = await preCommitSelfVerify({
+          workspaceId: job.workspace_id,
+          slug,
+          repoRoot: wt,
+        });
+        console.log(`${tag} ${sv.summaryLine}${repairPass > 0 ? ` (after repair pass ${repairPass})` : ""}`);
+        if (repairPass === 0 && sv.blocked) {
+          gateFired = true;
+          initialFailingChecks = sv.failing.map((f) => ({
+            description: f.text,
+            exec_kind: f.exec_kind,
+            evidence: f.evidence.slice(0, 800),
+          }));
+        }
+        if (!sv.blocked) {
+          if (gateFired) {
+            // Legible outcome — the gate fired at pass 0 and Bo's in-session repair cleared it before
+            // commit. Emit ONE `build_self_verify_caught` row so Ada's activity feed / EOD recap /
+            // weekly rollup sees the win (a positive-absence miss caught + fixed in-session, no
+            // extra build cycle). Best-effort + never throws (recordDirectorActivity swallows).
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_self_verify_caught",
+                specSlug: slug,
+                reason:
+                  `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                  ` — resolved in-session after ${repairsExecuted} repair pass(es)`,
+                metadata: {
+                  job_id: job.id,
+                  spec_slug: slug,
+                  failing_checks: initialFailingChecks.map((f) => ({
+                    description: f.description,
+                    exec_kind: f.exec_kind,
+                  })),
+                  repair_passes: repairsExecuted,
+                  resolved_in_session: true,
+                  autonomous: true,
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} preCommitSelfVerify director-activity emit (resolved) failed:`, e instanceof Error ? e.message : e);
+            }
+          }
+          break;
+        }
+        if (repairPass === SELF_VERIFY_REPAIR_MAX) {
+          // Cap exhausted — mirror the tsc gate at :25031-25034 (fail-hard so the existing fix-phase
+          // self-heal picks it up; no silent commit of a spec-check-failing worktree).
+          const failingTexts = sv.failing.map((f) => `${f.text} (${f.exec_kind})`).join("; ").slice(0, 800);
+          const evidenceTail = sv.failing
+            .map((f) => `• ${f.text} [${f.exec_kind}] — ${f.evidence}`)
+            .join("\n")
+            .slice(-1600);
+          // Legible outcome — gate fired, in-session repair could NOT clear it, existing fix-phase
+          // self-heal takes over. Still a catch (a build cycle earlier than Rex would have caught
+          // it) so we emit the row; the weekly rollup separates `resolved_in_session=true` (the
+          // win) from `resolved_in_session=false` (escaped to fix-phase) so Ada can supervise both.
+          try {
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            await recordDirectorActivity(db, {
+              workspaceId: job.workspace_id,
+              directorFunction: "platform",
+              actionKind: "build_self_verify_caught",
+              specSlug: slug,
+              reason:
+                `pre-commit self-verify caught ${initialFailingChecks.length} worktree-reflecting fail(s)` +
+                ` — repair cap (${SELF_VERIFY_REPAIR_MAX}) exhausted; escaped to fix-phase self-heal`,
+              metadata: {
+                job_id: job.id,
+                spec_slug: slug,
+                failing_checks: initialFailingChecks.map((f) => ({
+                  description: f.description,
+                  exec_kind: f.exec_kind,
+                })),
+                repair_passes: repairsExecuted,
+                resolved_in_session: false,
+                autonomous: true,
+              },
+            });
+          } catch (e) {
+            console.warn(`${tag} preCommitSelfVerify director-activity emit (unresolved) failed:`, e instanceof Error ? e.message : e);
+          }
+          await update(job.id, {
+            status: "failed",
+            error: `pre-commit self-verify unresolved after ${SELF_VERIFY_REPAIR_MAX} repair passes: ${failingTexts}`,
+            log_tail: `${sv.summaryLine}\n\n${evidenceTail}`.slice(-2000),
+          });
+          console.error(`${tag} preCommitSelfVerify FAIL — see log_tail`);
+          return;
+        }
+        // Real block + budget remains → resume Bo's session with the specific failing checks (same
+        // evidence shape Rex reports). The prompt names each failing check + exec_kind + evidence,
+        // and instructs Bo to make the file/export/column exist — or to explicitly justify a
+        // genuinely `needs_human` bullet the runner would drop to. No git action here; the worker
+        // still owns commit/push once the checks come back clean.
+        const failingBlock = sv.failing
+          .map(
+            (f, i) =>
+              `${i + 1}. [${f.exec_kind}] ${f.text}\n     evidence: ${f.evidence.replace(/\n+/g, " ").slice(0, 600)}`,
+          )
+          .join("\n");
+        const repairPrompt = [
+          `⛔ PRE-COMMIT SELF-VERIFY BLOCK (repair pass ${repairPass + 1} of ${SELF_VERIFY_REPAIR_MAX}) — your last change passed tsc + the table-refs rail, but the spec's OWN checks fail against your worktree.`,
+          `These are worktree-reflecting checks (grep / tsc / unit_test / build) — every one is answerable from the local files you just wrote. They front-run the post-hoc spec-test (Rex) so a positive-absence miss (a Verification bullet says a file/export/column should exist, but the build never created it) is caught IN this session, not a build cycle later.`,
+          `Failing checks:`,
+          failingBlock,
+          `Fix these NOW: make the file/export/column exist (or clearly justify a genuinely needs_human bullet — a subjective owner-verified item — and it will drop to needs_human on the next runner pass). Do NOT weaken or delete the spec's Verification bullet to make it pass. Do NOT touch git — the worker still owns commit/push. When you're done, return the same {"status":"completed","summary":"…"} envelope; the worker will re-run the self-verify.`,
+        ].join("\n\n");
+        const repair = await runClaude(repairPrompt, selfVerifySession, wt, configDir, job.id);
+        await meterAgentJob(job, configDir, repair.usage, repair.model);
+        repairsExecuted++;
+        if (repair.session) {
+          selfVerifySession = repair.session;
+          await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
+        }
+        // A repair that broke tsc must not slip through — re-run the tsc gate exactly the same shape
+        // as the top-level gate at :25031-25034 so a regression bounces to `failed` immediately.
+        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        if (tscAfter.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "tsc failed after pre-commit self-verify repair",
+            log_tail: (tscAfter.out + tscAfter.err).slice(-2000),
+          });
+          console.error(`${tag} preCommitSelfVerify repair broke tsc — see log_tail`);
+          return;
+        }
+      }
     }
 
     const dirty = sh("git", ["status", "--porcelain"], { cwd: wt }).out.trim();
