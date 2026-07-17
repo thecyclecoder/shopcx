@@ -272,6 +272,12 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     )
     .eq("workspace_id", workspaceId)
     .eq("status", "analyzed")
+    // Dahlia makes STATIC ads, so she only imitates STATIC competitor ads — a video ad's composition
+    // (its motion, its keyframe framing) does NOT transfer to a static creative (CEO 2026-07-17). The
+    // status filter alone leaks PROCESSED videos onto the shelf: a video is routed to `video_pending`,
+    // then the video pipeline drains it to `status='analyzed'` with `media_type='video'` — 25 such rows
+    // were on the shelf. Filter to `media_type='static'` so the imitation base is always a static ad.
+    .eq("media_type", "static")
     .not("hook", "is", null)
     .gte("days_running", q.minDaysRunning)
     .order("days_running", { ascending: false, nullsFirst: false })
