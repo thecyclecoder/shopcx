@@ -29,6 +29,15 @@ Wired in `scripts/builder-worker.ts` (all four in [[../specs/box-chat-resume-fal
 - **`runSpecChatJob`** modes: turn (+ finalize when there's a chat/session; verify is standalone and the wrapper's `!priorSessionId` guard skips retry) — writes `roadmap_chats.box_session_id`.
 - **`runTicketImproveJob`** — writes `ticket_improve_chats.box_session_id`; also preserves `runBoxLane`'s synthetic-when-`allCapped` shape so the downstream isError path still parks `blocked_on_usage`.
 
+## The one lane that uses the PRIMITIVE but NOT the wrapper — and why (copy-author self-heal, 2026-07-17)
+
+Dahlia's copy-author self-heal loop ([[creative-agent]] `runCopyAuthorSession`) also resumes a box session across turns, but it deliberately does **not** route through `runBoxTurnWithFreshFallback`. It uses the shared PRIMITIVE `isMissingSessionError(raw)` directly and owns the fresh-fallback in its OWN loop. This is NOT a regression of the class — the wrapper doesn't fit here:
+
+- The four box-CHAT lanes rebuild the **SAME** conversation prompt from a thread transcript on a fresh retry, so `runBoxTurnWithFreshFallback` can just re-run the identical `run` closure with `sessionId=null`.
+- The copy-author loop's fresh turn needs a **DIFFERENT** prompt than its resume turn: a RESUME sends the SHORT `buildCopyAuthorRevisePrompt` (the image+brief+rubric are cached on the session), but a FRESH turn must send the FULL `buildCopyAuthorPrompt` (a fresh session has no cached context). Re-running the same closure would send the short prompt to a context-less session.
+
+So the loop: dispatches (resume or fresh), and its `CopyAuthorSessionDispatcher` reports `{sessionId, sessionConfigDir, missingSession}` where `missingSession = isMissingSessionError(raw)` on a resume (OR an account-cap hop the dispatcher detects via a changed `configDir`). On `missingSession` the loop clears its resume pin and re-dispatches FRESH with the FULL prompt next turn — the same "never wedge on a dead session id" guarantee, reached through the loop instead of the wrapper. When adding another resumable surface whose fresh turn needs a different prompt than its resume turn, mirror THIS pattern (primitive + own-loop fallback), not the wrapper.
+
 ## Two-layer split
 
 Same shape as the deterministic gates ([[spec-review-gate]]):
