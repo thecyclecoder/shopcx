@@ -9,7 +9,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { CEO } from "@/lib/agents/approval-router";
 import { listApprovalDecisions, type DecisionHistoryFilters, type DecisionOutcome } from "@/lib/agents/approval-decisions";
@@ -18,10 +18,7 @@ import { listApprovalDecisions, type DecisionHistoryFilters, type DecisionOutcom
 const DECISIONS: DecisionOutcome[] = ["approved", "declined", "escalated"];
 
 export async function GET(req: Request) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

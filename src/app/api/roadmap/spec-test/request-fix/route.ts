@@ -22,7 +22,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createHash } from "crypto";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getLatestSpecTestRuns, checkKey } from "@/lib/spec-test-runs";
 import { getSpec } from "@/lib/specs-table";
@@ -36,8 +36,7 @@ import { isHarnessCommandFailure } from "@/lib/spec-test-harness-classifier";
 const isSlug = (s: unknown): s is string => typeof s === "string" && /^[a-z0-9-]+$/i.test(s);
 
 async function requireOwner() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   const cookieStore = await cookies();
   const workspaceId = cookieStore.get("workspace_id")?.value;

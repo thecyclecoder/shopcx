@@ -4,7 +4,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 
 export async function GET(
   _request: NextRequest,
@@ -12,8 +12,7 @@ export async function GET(
 ) {
   const { id: workspaceId } = await params;
 
-  const auth = await createClient();
-  const { data: { user } } = await auth.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();

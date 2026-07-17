@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { cookies } from "next/headers";
 import { buildAuthorizeUrl, qboAppCreds } from "@/lib/quickbooks";
 
@@ -9,8 +9,7 @@ import { buildAuthorizeUrl, qboAppCreds } from "@/lib/quickbooks";
  * other app sharing the same Intuit app). See docs/brain/integrations/quickbooks-online.md.
  */
 export async function GET(req: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

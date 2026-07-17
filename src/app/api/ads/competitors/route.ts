@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import {
@@ -17,8 +17,7 @@ import {
 // by scripts/_check-competitors-sdk-compliance.ts. See CLAUDE.md § Local conventions.
 
 async function authorize(workspaceId: string | null) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!workspaceId) return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };
   const admin = createAdminClient();

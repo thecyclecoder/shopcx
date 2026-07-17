@@ -16,7 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { OWNER_FUNCTIONS, type OwnerFunction } from "@/lib/control-tower/registry";
 import { buildInfraTabPayload } from "@/lib/control-tower/infra-tab";
@@ -28,10 +28,7 @@ function isOwnerFunction(v: string | null): v is OwnerFunction {
 }
 
 export async function GET(req: Request) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

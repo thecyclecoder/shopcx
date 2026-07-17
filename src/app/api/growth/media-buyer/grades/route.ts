@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAccountGrades } from "@/lib/media-buyer/grade-rollup";
 
@@ -16,8 +16,7 @@ export async function GET(req: Request) {
   const account = url.searchParams.get("account");
   const limit = Math.min(Number(url.searchParams.get("limit") ?? "50") || 50, 200);
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!workspaceId) return NextResponse.json({ error: "workspaceId required" }, { status: 400 });
   if (!account) return NextResponse.json({ error: "account required" }, { status: 400 });

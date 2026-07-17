@@ -16,7 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { AGENT_INBOX_TYPES, APPROVAL_REQUEST_TYPE, tabForType, type InboxItem, type InboxPayload } from "@/lib/agents/inbox";
 import { loadAutonomyMap, isAutoApprover, CEO } from "@/lib/agents/approval-router";
@@ -25,10 +25,7 @@ import { laneForBounceBack } from "@/lib/agents/director-bounce-back";
 
 
 export async function GET(req: Request) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();

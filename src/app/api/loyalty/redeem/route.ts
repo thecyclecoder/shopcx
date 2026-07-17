@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getLoyaltySettings,
@@ -28,9 +28,7 @@ const DISCOUNT_CREATE_MUTATION = `
 
 export async function POST(request: Request) {
   // Support both authenticated dashboard users and portal requests
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
+  const { user } = await getAuthedUser();
   let body;
   try {
     body = await request.json();

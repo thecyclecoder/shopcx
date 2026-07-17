@@ -17,7 +17,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getOrgChart } from "@/lib/agents/org-chart";
 import { getLeashGuide, getRegisteredDirectorSlugs } from "@/lib/agents/director-leash-guide";
@@ -31,10 +31,7 @@ interface DirectorTab {
 }
 
 async function gate(): Promise<{ ok: false; res: NextResponse } | { ok: true; workspaceId: string; userId: string }> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { ok: false, res: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   const cookieStore = await cookies();
   const workspaceId = cookieStore.get("workspace_id")?.value;
