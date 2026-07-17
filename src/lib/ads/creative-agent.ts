@@ -24,6 +24,7 @@ import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief 
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
+import { computeSophisticationLevel } from "@/lib/ads/sophistication";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { qaCreative, qaCreativeViaBoxSession, type QcSessionDispatcher } from "@/lib/ads/creative-qa";
 import { renderRubricForPrompt } from "@/lib/ads/copy-rubric";
@@ -157,6 +158,12 @@ export interface CopyAuthorSessionInputs {
     mechanism: string | null;
     proof: unknown;
   } | null;
+  /** dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the modal Schwartz awareness level
+   *  the competitor shelf is writing at (1..5). Computed pure from the shelf via
+   *  [[./sophistication]] `computeSophisticationLevel` and threaded into Dahlia's session
+   *  input so she writes AT the market's sophistication level, never below (target-1).
+   *  Empty shelf → 3 (safe solution-aware default; deterministic-mode callers pass 3). */
+  targetSchwartzLevel: 1 | 2 | 3 | 4 | 5;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -411,6 +418,11 @@ export function buildCopyAuthorPrompt(
     "",
     `IMAGE: ${inputs.imagePath}`,
     `AUDIENCE_TEMPERATURE: ${inputs.audienceTemperature}`,
+    // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the shelf-derived modal Schwartz
+    // awareness level. Threaded into the prompt (outside the DATA block, alongside the other
+    // trusted worker-computed session inputs) so Dahlia writes AT the market's sophistication
+    // level, never below (target-1). See [[./sophistication]] `computeSophisticationLevel`.
+    `TARGET_SCHWARTZ_LEVEL: ${inputs.targetSchwartzLevel}`,
     "",
     COPY_AUTHOR_INJECTION_GUARDRAIL,
     "",
@@ -608,6 +620,7 @@ async function runCopyAuthorSessionForImage(
     rubricText: string;
     audienceTemperature: "cold" | "warm" | "hot";
     competitorDna: CopyAuthorSessionInputs["competitorDna"];
+    targetSchwartzLevel: CopyAuthorSessionInputs["targetSchwartzLevel"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -639,6 +652,7 @@ async function runCopyAuthorSessionForImage(
         rubricText: input.rubricText,
         audienceTemperature: input.audienceTemperature,
         competitorDna: input.competitorDna,
+        targetSchwartzLevel: input.targetSchwartzLevel,
       },
       dispatch,
     );
@@ -937,6 +951,12 @@ async function stockProduct(
   if (sourcedUsedFallback) {
     console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
   }
+  // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — shelf-derived Schwartz sophistication
+  // level. Computed ONCE per product (pure, no I/O) from the same `sourced` shelf so a wrong
+  // level can't diverge across creatives. Threaded into Dahlia's per-creative session input as
+  // `target_schwartz_level` so she writes AT the market's sophistication level, never below
+  // (target - 1). Empty shelf → 3 (safe solution-aware default). See [[./sophistication]].
+  const targetSchwartzLevel = computeSophisticationLevel(sourced);
   // dahlia-deeper-competitor-selection Phase 2 — replace the old hardcoded acquisitionPower=9
   // with a per-angle score derived from the full skeleton signal set (daysRunning × resumeAdvertising
   // + heat tiebreak). A 60d+ still-running + high-heat angle now outranks a 30d dormant one on the
@@ -1116,7 +1136,7 @@ async function stockProduct(
               }
             : null;
           const outcome = await runCopyAuthorSessionForImage(
-            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna },
+            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel },
             copyAuthorDispatcher,
           );
           if (outcome.kind === "exhausted") {

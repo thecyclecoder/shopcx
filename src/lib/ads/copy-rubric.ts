@@ -75,15 +75,41 @@ PROBLEM-AWARE — feels the pain, no solution named; (3) SOLUTION-AWARE — know
 of solution exists; (4) PRODUCT-AWARE — knows this specific product; (5) MOST-AWARE — needs
 only price/offer to buy. Meta cold traffic is stage 1-2, warm is 3-4, retargeting is 5. Copy
 must match the audience temperature — a stage-5 offer to a stage-1 viewer wastes the impression.
+Write AT the market's sophistication level; NEVER below level-1. When competitors have all
+moved to L4 mechanism, an L2 problem-aware ad reads as a decade behind and never converts.
+Two examples per level (voice + shape you're writing FOR):
+- L1 UNAWARE — 'most people don't realize how much afternoon crashes cost them' ·
+  'the average worker loses two productive hours a day and never notices where they went'
+- L2 PROBLEM-AWARE — 'tired of the 2pm crash?' ·
+  'still fighting brain fog every afternoon?'
+- L3 SOLUTION-AWARE — 'a cleaner afternoon lift' ·
+  'the plant-based focus drink category is having a moment'
+- L4 PRODUCT-AWARE — 'adaptogens + L-theanine, no crash' ·
+  'the ashwagandha + lion's mane stack that replaces your third cup'
+- L5 MOST-AWARE — 'vs coffee alone: 47 fewer crash calories, +2h focus' ·
+  'today only: 30% off the stack 12,000 members already run'
 - 2: copy reaches stage 4 or 5 (names the product or leads with the offer/CTA)
 - 1: copy is at stage 2 or 3 (names a problem or a category-level solution)
 - 0: copy is at stage 1 (reader can't tell what problem this addresses)`;
 
 export const CIALDINI_PRINCIPLES = `Cialdini (7 principles of influence) — 0-2
-Robert Cialdini's 7 levers: RECIPROCITY (free gift, sample), COMMITMENT (risk-free trial,
-guarantee), SOCIAL PROOF (reviews, customer count, "loved by"), AUTHORITY (doctor, expert,
-clinically studied, certified), LIKING (warm we/us/our, family), SCARCITY (limited, today only,
-last chance), UNITY (join us, together, our community). More levers stacked = higher pull.
+Robert Cialdini's 7 levers. More distinct levers stacked = higher pull. Do NOT stack the same
+lever twice and call it two hits — the rubric counts distinct principle BUCKETS, not repeats.
+One line per principle + a one-line example you can steal the SHAPE of:
+- RECIPROCITY — give first, ask second.
+  example: 'free 7-day starter pack — try before you commit.'
+- COMMITMENT — a small yes now sets up the bigger yes.
+  example: 'risk-free 30-day trial — cancel any time, no questions.'
+- SOCIAL PROOF — people who look like the reader are already in.
+  example: '12,438 customers rated it 4.8/5 — loved by moms, coaches, night-shift nurses.'
+- AUTHORITY — an expert or study says so, on the record.
+  example: 'formulated with a naturopathic doctor · clinically studied ingredients.'
+- LIKING — warm, in-group, first-person voice ("we", "our", "us", "family").
+  example: 'we built this for our own team — now it's yours.'
+- SCARCITY — limited by time or count, and true.
+  example: 'first 500 bags of the fall harvest — restock in January.'
+- UNITY — you and the reader belong to the same tribe.
+  example: 'join the 10,000 members who ditched the third coffee.'
 - 2: three or more distinct principle-buckets have at least one hit
 - 1: one or two principle-buckets have at least one hit
 - 0: no principle-bucket hits — the ad has no persuasion lever wired in`;
@@ -93,15 +119,31 @@ Claude Hopkins (Scientific Advertising): a specific claim outsells a general one
 margin. "43% fewer wrinkles in 14 days" beats "clearer skin." Specificity markers: numbers,
 percentages, dollar amounts, doses (mg/g/oz), timeframes (days, weeks), quantities (servings,
 ingredients).
+Three concrete authoring rules — apply on every line before shipping:
+- Rule 1: replace "many" with an exact count.
+  before: 'many customers noticed the change' · after: '4,182 customers noticed the change'
+- Rule 2: replace "quickly" with a real timeframe in days or minutes.
+  before: 'starts working quickly' · after: 'starts working in 14 days (or 20 minutes for focus)'
+- Rule 3: replace "people" with a real named reviewer.
+  before: 'people say it changed their afternoons' · after: 'Marissa D. (verified) says it changed her afternoons'
 - 2: three or more distinct specificity markers appear in the copy
 - 1: one or two specificity markers appear
 - 0: no specificity markers — every claim is vague ("better," "amazing," "the best")`;
 
 export const SUGARMAN_SLIPPERY_SLIDE = `Sugarman Slippery-Slide — 0-2
 Joe Sugarman's rule: the SOLE purpose of the first sentence is to get you to read the second;
-the second, to get you to read the third. Curiosity hooks ("what if", "why", "how", "the
-truth", "here's", "imagine", or a direct question) plus a multi-sentence body keep the reader
-sliding.
+the second, to get you to read the third. Every line earns the next line, or gets cut.
+Curiosity hooks ("what if", "why", "how", "the truth", "here's", "imagine", or a direct
+question) plus a multi-sentence body keep the reader sliding.
+Four line-earns-the-next micro-rules — apply in order when authoring:
+- Micro-rule 1: first sentence ≤ 1-second reading time. If a scroller can't finish the opener
+  in a beat, they never see the second. Cut adjectives until it fits.
+- Micro-rule 2: each line ends on a curiosity gap, not a period the reader can rest on. A
+  finished thought is a stop signal — leave a question, a promise, or a specific next detail.
+- Micro-rule 3: no benefit line follows another benefit line — alternate benefit / proof /
+  benefit / proof so every claim earns credibility before the next claim asks for attention.
+- Micro-rule 4: the last line invites the click, does not summarize. A summary tells the
+  reader they're done; a soft CTA ("see it before it restocks") slides them to the button.
 - 2: copy has a curiosity hook AND primary text has multiple sentences
 - 1: copy has a curiosity hook OR multi-sentence primary text (not both)
 - 0: neither — the copy is a flat one-line statement with no pull`;

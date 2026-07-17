@@ -33,6 +33,7 @@
     "test:insights-per-copy-mode": "tsx --test src/lib/media-buyer/insights.per-copy-mode.test.ts",
     "test:ads-lf8": "tsx --test src/lib/ads/lf8.test.ts",
     "test:copy-rubric": "tsx --test src/lib/ads/copy-rubric.test.ts",
+    "test:sophistication": "tsx --test src/lib/ads/sophistication.test.ts",
     "test:cold-offer-gate": "tsx --test src/lib/ads/cold-offer-gate.test.ts",
     "test:creative-agent-author": "tsx --test src/lib/ads/creative-agent.author.test.ts",
     "test:creative-agent-revise-reason": "tsx --test src/lib/ads/creative-agent.revise-reason.test.ts",
