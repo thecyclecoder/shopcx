@@ -1075,7 +1075,7 @@ async function insertReadyCreative(
     return { kind: "skip", reason: "cold_offer_leak" };
   }
 
-  const { data: angleRow } = await admin
+  const { data: angleRow, error: angleErr } = await admin
     .from("product_ad_angles")
     .insert({
       workspace_id: workspaceId, product_id: productId,
@@ -1097,7 +1097,13 @@ async function insertReadyCreative(
     // dahlia_creative_missing_angle — the angle-row insert missed (a race, RLS deny, or a schema drift),
     // so the creative can't be replenished (no ad-copy source). Hold the row at 'draft' rather than
     // minting a phantom 'ready' that inflates bin depth. Named for grep + future director_activity roll-up.
-    console.warn("dahlia_creative_missing_angle", { workspaceId, productId, productTitle, hook: angle.hook.slice(0, 80) });
+    // ALWAYS include the driver error — a swallowed error made the 2026-07-17 `product_ad_angles.metadata`
+    // schema-drift invisible: the angle insert failed on the missing column (PGRST204), the creative
+    // landed as a copy-less draft, and there was no signal WHY until the insert was probed by hand.
+    console.warn("dahlia_creative_missing_angle", {
+      workspaceId, productId, productTitle, hook: angle.hook.slice(0, 80),
+      error: angleErr?.message ?? null, code: (angleErr as { code?: string } | null)?.code ?? null,
+    });
   }
   // dahlia-copy-author-box-session Phase 3 — stamp Dahlia's self-score alongside the temperature
   // tag on the SAME row insert (one write, no follow-up update). NULL when opts.authorModeCopy is
@@ -1223,8 +1229,16 @@ async function stockProduct(
   // M1 keystone depends on). When the flag is unset / `deterministic` OR the dispatcher is
   // missing (a test / a manual invocation with no runBoxLane), the deterministic buildMetaCopyPack
   // path runs byte-identical to today.
-  const copyMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
-  const authorModeEngaged = copyMode === "author" && !!copyAuthorDispatcher;
+  // Author mode engages whenever the CALLER injected a dispatcher — the env kill-switch gates at the
+  // caller, NOT here. Production (`runAdCreativeJob`) only injects `copyAuthorDispatcher` when
+  // `DAHLIA_COPY_MODE=author`, so the switch still fully controls production. The bench lane
+  // (`runAdCreativeCopyAuthorJob`) injects it UNCONDITIONALLY to force author mode for a manual test
+  // while the workspace-level flag stays off ("test Dahlia while she's turned off"). The old
+  // `copyMode === "author" && …` clause here defeated that: it re-checked the env, so a bench run with
+  // the flag off silently ran deterministic and produced an image-only creative with no authored copy
+  // (the 2026-07-17 Amazing Coffee test). Gating on the dispatcher alone is what the bench lane's
+  // "force author" contract always intended.
+  const authorModeEngaged = !!copyAuthorDispatcher;
   const rubricText = authorModeEngaged ? renderRubricForPrompt() : "";
   const pi = await getProductIntelligence(admin, workspaceId, productId);
   const product = pi.product as { title?: string; handle?: string } | null;
