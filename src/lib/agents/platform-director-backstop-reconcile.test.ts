@@ -114,9 +114,12 @@ test("guard: a deferred spec (CEO parked it) is NOT queued", () => {
   assert.equal(isReadyForBackstopQueue(card, notInFlight), false);
 });
 
-test("guard: an un-Vale-passed spec (no-max-on-unreviewed-specs) is NOT queued", () => {
+test("retire-vale: an un-Vale-stamped spec IS queued — review is now a deterministic author-time gate", () => {
+  // escort-retire-vale-eligibility-gate: `vale_review_passed_at` is retired and stamped by nothing, so a
+  // ready goal member with no vale stamp must NOT be held (that dead gate is exactly what stalled the
+  // escort + this backstop). A spec that exists as a row already passed the author-time gate → queueable.
   const card = readyMember({ valeReviewPassed: undefined });
-  assert.equal(isReadyForBackstopQueue(card, notInFlight), false);
+  assert.equal(isReadyForBackstopQueue(card, notInFlight), true);
 });
 
 test("guard: an auto-build opted-out spec is NOT queued", () => {

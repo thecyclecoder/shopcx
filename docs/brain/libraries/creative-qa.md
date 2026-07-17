@@ -4,7 +4,18 @@ The **visual gate** Dahlia (the [[creative-agent|Ad Creative Agent]]) runs on ev
 
 Two paths, one verdict shape — the caller ([[creative-agent]] `runAdCreativeLoop`, dispatched by [[builder-worker]] `runAdCreativeJob`) picks the path per the `DAHLIA_QC_MODE` env kill-switch and regenerates on `pass:false` up to `MAX_QA_ATTEMPTS`.
 
-## `DAHLIA_QC_MODE` kill-switch (dahlia-creative-qc-via-box-session Phase 2)
+## Two independent gates
+
+Two orthogonal QC modes now live in this file — one for the RENDER (Dahlia's own visual QC of the image she generated), and one for the CAPTION (Max's INDEPENDENT copy-QC of the text Dahlia wrote). Each has its own env kill-switch and its own agent-kind so the founder can turn either on or off without touching the other.
+
+| what | env | agent-kind | skill | writes | spec |
+|---|---|---|---|---|---|
+| Render QC (visual defects) | `DAHLIA_QC_MODE=box\|direct` (default `box`) | `ad-creative-qc` | [[creative-qc]] | inline verdict; regenerates on fail | [[../specs/dahlia-creative-qc-via-box-session]] |
+| Copy QC (Max independent) | `DAHLIA_QC_COPY_MODE=box\|off` (default `off`) | `ad-creative-copy-qc` | [[../../../.claude/skills/max-copy-qc/SKILL]] | `ad_creative_copy_qc_verdicts` + bounces to a copy-only revise | [[../specs/dahlia-max-independent-copy-qc-box-session]] |
+
+The copy-QC path (Phase 2 wire) reuses the same `sandbox: "qc"` env-stripping contract as the render QC — a grep-able `copy-qc` alias in [[builder-worker]] `runBoxSession` routes to the SAME `buildQcChildEnv` filter, so no second env-filter implementation drifts. The PreToolUse gate ([[ad-creative-qc-permission-gate]]) is reused verbatim.
+
+## `DAHLIA_QC_MODE` kill-switch (dahlia-creative-qc-via-box-session Phase 2) — RENDER QC
 
 | value | path | when to flip |
 |---|---|---|
