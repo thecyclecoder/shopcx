@@ -40,7 +40,7 @@ export interface GeneratedCreative {
   expectedCopy: { headline: string; offer: string | null; trust: string };
 }
 
-function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   // For a COMPOSITION-TRANSFER (competitor imitation), the angle.hook is the COMPETITOR's proven hook —
   // it may carry THEIR brand/product name (e.g. "MUD\WTR Mushroom Tea Blend - Up to 43% Off"). Rendering
   // it verbatim over OUR packshot is a brand mismatch the QC gate correctly rejects (2026-07-13). So for
@@ -78,7 +78,7 @@ function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: Ge
 
   // HEADLINE clause — imitation vs own-brand (see isImitation note above).
   const headlineClause = isImitation
-    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Write OUR headline in the SAME structure/energy, but it must name ONLY ${brief.productTitle} and reference ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
+    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Write OUR headline in the SAME structure/energy, but it must name ONLY ${brief.productTitle} and reference ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL: also DROP any product ATTRIBUTE or ingredient descriptor from the competitor's hook that is NOT true of ${brief.productTitle} — e.g. if the competitor angle says "protein coffee" / "keto" / "collagen" and OUR product is not that, do NOT carry the word over; describe our product by its REAL nature shown on the pack (e.g. "superfood coffee"). When the competitor's product noun differs from ours, SWAP IN OURS — never copy their attribute. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
     : `HEADLINE (render EXACTLY, correct spelling, no dropped/repeated words): "${headline}" — big, bold, with 1–2 key phrases highlighted in a color block.`;
 
   // When the brief has NO transformation, the model must NOT free-associate a weight-loss before/after —
@@ -103,6 +103,8 @@ TRUST BAR (small, along the bottom, render exactly): ${trust}
 OFFER (show ONCE — a single badge, never duplicated): ${offerHeadline ? `one pill/badge reading "${offerHeadline}".` : "none."}${priceLine && brief.offer?.perServing ? ` Next to it, the per-serving value "${priceLine}".` : priceLine && brief.offer?.strikethrough ? ` If a price is shown, ONLY as strikethrough MSRP → discounted: "${priceLine}" with the small disclaimer "${brief.offer?.disclaimer}".` : ""}
 
 OFFER FIDELITY (hard rule): the ONLY discount / percent-off / dollar-off / "free shipping" / BOGO / "X for $Y" claim that may appear ANYWHERE in the image is the OFFER above. Do NOT invent, add, echo, or carry over a different discount number from the headline, subhead, badges, or any other element${offerHeadline ? "" : " (no offer is supplied — the ad must show NO discount claim at all)"}. Two conflicting discount numbers on the same ad is a defect.
+
+CLAIM FIDELITY (hard rule): every product attribute, ingredient, or nutrient descriptor rendered ANYWHERE in the image must be TRUE of ${brief.productTitle} (per the provided packshot + the brief). NEVER describe our product with an attribute it does not have — in particular, do NOT call it a "protein", "keto", "collagen", "pre-workout", or any other nutrient/format claim unless our product actually is that. When echoing a competitor angle, their product's descriptors do NOT transfer — swap in OUR real product nature (shown on the pack). A false attribute claim on our product is a defect.
 
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 
