@@ -1525,7 +1525,14 @@ async function stockProduct(
                   proof: brief.competitorDna.proof == null
                     ? null
                     : debrandForOurBrand(brief.competitorDna.proof, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  offer: brief.competitorDna.offer == null
+                  // Cold-audience creatives lead with the hook, NEVER a discount — so a COLD copy-author
+                  // session must not even SEE the competitor's offer, or Dahlia weaves it in and the
+                  // deterministic cold-offer gate (`hasColdOfferLeak`) bounces the whole pack. This is the
+                  // copy-side twin of the #2010 image fix (`imageOfferForAudience` nulls `brief.offer` for
+                  // cold): before it, a cold competitor angle exhausted 2/2 author attempts on `cold_offer_leak`
+                  // (2026-07-17 Amazing Coffee test) because the competitor's offer rode in via the DNA.
+                  // Warm/hot still receive the debranded competitor offer.
+                  offer: audienceTemperature === "cold" || brief.competitorDna.offer == null
                     ? null
                     : debrandForOurBrand(brief.competitorDna.offer, brief.competitorDna.competitorAdvertiser, ourBrand),
                   competitorAdvertiser: brief.competitorDna.competitorAdvertiser,
