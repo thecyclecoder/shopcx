@@ -23,7 +23,10 @@ Phase 1's answer is a **deterministic, mechanical rail** that runs BEFORE Ada's 
 | `UPDATE x SET …` **without** `WHERE` | `irreversible_destructive` |
 | `ALTER … DROP CONSTRAINT` | `reversible_destructive` |
 | `ALTER … DROP DEFAULT` | `reversible_destructive` |
-| a NEWLY-introduced `ON DELETE CASCADE` | `reversible_destructive` |
+| `ON DELETE CASCADE` **added to an existing table** (`ALTER TABLE … ON DELETE CASCADE`) | `reversible_destructive` |
+| `ON DELETE CASCADE` **inside a `CREATE TABLE`** (a new table's FK) | `additive` |
+
+- **Cascade classification is per-statement** (`cascadeAddedToExistingTable`, exported + pinned). A cascade flags destructive ONLY when its statement is an `ALTER TABLE` (adding cascade to a table that already has rows). Inside a `CREATE TABLE` there are no existing rows to cascade-delete → additive. **2026-07-17 drift-bug fix:** the old rule flagged *any* `on delete cascade`, so `ad_creative_copy_qc_verdicts` + `ad_creative_copy_variants` (both `CREATE TABLE` with cascade FKs) were classified `reversible_destructive` and gated by [[control-tower/migration-drift]] `applyMergedMigrations` for an approval that never came — the reconciler ran every 30 min, kept re-flagging them, and never auto-applied them, so the whole Dahlia copy-pack/QC pipeline silently no-op'd on missing tables for weeks. A CREATE-TABLE cascade now auto-applies like any additive DDL.
 
 - **Comment-stripped, case-insensitive.** Both `-- …` line comments and `/* … */` (nested-safe) block comments are removed before matching, so a keyword hidden behind a comment does not fool the scan and one inside a comment does not false-flag.
 - **Destruction hidden inside `DO $$ … $$` blocks and `CREATE OR REPLACE FUNCTION` bodies is caught.** Dollar-quoted string boundaries are deliberately NOT stripped — a `DROP TABLE` inside a plpgsql body scans identically to a top-level `DROP TABLE`.
