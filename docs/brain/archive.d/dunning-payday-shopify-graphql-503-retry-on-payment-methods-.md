@@ -1,0 +1,1 @@
+- **Retry Shopify GraphQL 5xx/429/network transients in getCustomerPaymentMethods** · verified 2026-07-17 · → [[../lifecycles/dunning]]
