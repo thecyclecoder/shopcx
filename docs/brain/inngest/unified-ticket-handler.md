@@ -104,6 +104,8 @@ Two guards govern them:
 
 Applying a playbook sets `active_playbook_id`, `playbook_step:0`, `status:closed`, inserts the agent-context as an internal message, then fires `playbook-apply`. The playbook then auto-identifies the order/subscription and runs through its steps (e.g. Refund → apply_policy → reply explaining ineligibility).
 
+**Playbook-supersede guard** ([[../libraries/playbook-supersede-guard]]). Before running the "is this message about the playbook or a new topic" classifier, the check-playbook step calls `detectPlaybookSuperseder` on two DB reads: any external `author_type='agent'` reply → `"agent_reply"`, any `[CS Director review]` internal system note → `"director_resolution"`. On a non-null reason the handler clears `active_playbook_id / playbook_step / playbook_exceptions_used`, drops a `[System] Active playbook cleared — <phrase>, so the playbook is no longer authoritative. Routing to Sonnet.` internal note, and returns null so the turn flows to Sol/Sonnet fresh. `agent_intervened` only flips true on `"agent_reply"` — a director-resolution supersede leaves it alone (June is an AI). Widened from agent-reply-only per [[../specs/post-resolution-inbound-reroute-and-silent-turn-guard]] § Phase 1 (Melissa/eca3f43b: the stale pre-escalation refund playbook re-ran after June closed with an in-flight return, silently failed a cancel, and sent the customer nothing). The runner-side [[../libraries/cs-director-ticket-transition]] patch already clears the playbook fields at the write site, so this guard is the belt-and-suspenders safety net for a director-resolution reaching the ticket via a code path that did not clear the playbook.
+
 
 ## Downstream events sent
 

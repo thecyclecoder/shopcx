@@ -31,6 +31,11 @@ import { decideOutreachRoute } from "@/lib/outreach-route";
 import { markFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
+import {
+  detectPlaybookSuperseder,
+  playbookSupersedeReasonPhrase,
+  CS_DIRECTOR_VERDICT_NOTE_PREFIX,
+} from "@/lib/playbook-supersede-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -1435,25 +1440,66 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
         if (!t?.active_playbook_id) return null;
 
-        // Agent intervention supersedes the playbook. Once a human agent
-        // has sent an external (customer-facing) reply, they own the
-        // conversation — the playbook would otherwise re-fire its
-        // clarifying questions on every subsequent customer message
-        // (e.g. a customer thank-you 2 days later re-asks the clarification).
-        // Internal-only agent activity (notes) doesn't count — those are
-        // agent-to-agent comms and shouldn't change the customer flow.
-        const { data: agentMsgs } = await admin.from("ticket_messages")
-          .select("id")
-          .eq("ticket_id", tid)
-          .eq("direction", "outbound")
-          .eq("visibility", "external")
-          .eq("author_type", "agent")
-          .limit(1);
-        if (agentMsgs && agentMsgs.length > 0) {
-          await admin.from("tickets")
-            .update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0, agent_intervened: true })
-            .eq("id", tid);
-          await sysNote(admin, tid, `[System] Active playbook cleared — a human agent has replied externally on this ticket, so the playbook is no longer authoritative. Routing to Sonnet.`);
+        // A resolution supersedes the playbook: the playbook was the pre-escalation
+        // lane, so once the ticket has moved on it must not resume the stale lane on
+        // a later inbound. Two supersede signals:
+        //   agent_reply         — a human agent has sent an EXTERNAL (customer-facing) reply.
+        //                         They own the conversation — the playbook would otherwise
+        //                         re-fire its clarifying questions on every subsequent
+        //                         customer message (a thank-you 2 days later re-asks the
+        //                         clarification). Internal-only agent activity (notes) doesn't
+        //                         count — those are agent-to-agent comms.
+        //   director_resolution — a CS-Director verdict note landed on the ticket. June's
+        //                         approve_remedy / author_spec / close_no_action IS the
+        //                         current lane; a later customer follow-up must route back
+        //                         to Sol/Sonnet fresh, not resume the pre-escalation playbook.
+        //                         (docs/brain/specs/post-resolution-inbound-reroute-and-
+        //                         silent-turn-guard.md § Phase 1 — Melissa/eca3f43b, where the
+        //                         stale refund playbook re-ran after June closed with an in-
+        //                         flight return, silently failed a cancel, and sent the
+        //                         customer nothing.) The runner-side patch on
+        //                         `runCsDirectorCallJob` already clears the playbook fields
+        //                         at the write site — this guard is the belt-and-suspenders
+        //                         safety net if a director resolution reached the ticket via
+        //                         a code path that did not clear the playbook.
+        const [{ data: agentMsgs }, { data: directorNotes }] = await Promise.all([
+          admin.from("ticket_messages")
+            .select("id")
+            .eq("ticket_id", tid)
+            .eq("direction", "outbound")
+            .eq("visibility", "external")
+            .eq("author_type", "agent")
+            .limit(1),
+          admin.from("ticket_messages")
+            .select("id")
+            .eq("ticket_id", tid)
+            .eq("direction", "outbound")
+            .eq("visibility", "internal")
+            .eq("author_type", "system")
+            .ilike("body", `${CS_DIRECTOR_VERDICT_NOTE_PREFIX}%`)
+            .limit(1),
+        ]);
+        const supersedeReason = detectPlaybookSuperseder({
+          hasExternalAgentReply: (agentMsgs?.length ?? 0) > 0,
+          hasCsDirectorResolutionNote: (directorNotes?.length ?? 0) > 0,
+        });
+        if (supersedeReason) {
+          // agent_intervened only flips true on a human-agent supersede (the historical
+          // meaning of the column). A director-resolution supersede does NOT flip it —
+          // June is an AI, so the column reads unchanged and downstream analyzers keep
+          // treating the ticket as AI-handled.
+          const patch: Record<string, unknown> = {
+            active_playbook_id: null,
+            playbook_step: 0,
+            playbook_exceptions_used: 0,
+          };
+          if (supersedeReason === "agent_reply") patch.agent_intervened = true;
+          await admin.from("tickets").update(patch).eq("id", tid);
+          await sysNote(
+            admin,
+            tid,
+            `[System] Active playbook cleared — ${playbookSupersedeReasonPhrase(supersedeReason)}, so the playbook is no longer authoritative. Routing to Sonnet.`,
+          );
           return null;
         }
         return t.active_playbook_id;

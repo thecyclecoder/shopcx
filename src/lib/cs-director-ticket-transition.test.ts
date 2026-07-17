@@ -170,3 +170,54 @@ test("escalate_founder falls back gracefully on an empty reasoning string", () =
   assert.equal(t.action_key, "keep_escalated_ceo_owned");
   assert.match(String(t.patch.escalation_reason), /CEO — awaits founder ruling: see cs-director verdict/);
 });
+
+// docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md § Phase 1
+// (derived-from Melissa/eca3f43b): a June-resolved ticket must not resume a stale pre-
+// escalation playbook on a later customer follow-up. Both resolution-side patches must
+// nullify the three playbook fields idempotently; `escalate_founder` leaves them alone
+// because the founder ruling may still fold back into the pre-escalation lane.
+test("close_and_deescalate patches clear the active playbook (author_spec + close_no_action + resolved-remedy)", () => {
+  for (const decision of ["author_spec", "close_no_action"] as const) {
+    const t = decideCsDirectorTicketTransition({ decision, reasoning: "x", now: NOW });
+    assert.equal(t.action_key, "close_and_deescalate");
+    assert.equal(t.patch.active_playbook_id, null, `${decision} clears active_playbook_id`);
+    assert.equal(t.patch.playbook_step, 0, `${decision} resets playbook_step`);
+    assert.equal(t.patch.playbook_exceptions_used, 0, `${decision} resets playbook_exceptions_used`);
+  }
+  const resolvedRemedy = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "resolved.",
+    remedy: { kind: "refund_return", customer_message: "…" },
+    remedyResolved: true,
+    now: NOW,
+  });
+  assert.equal(resolvedRemedy.action_key, "close_and_deescalate");
+  assert.equal(resolvedRemedy.patch.active_playbook_id, null);
+  assert.equal(resolvedRemedy.patch.playbook_step, 0);
+  assert.equal(resolvedRemedy.patch.playbook_exceptions_used, 0);
+});
+
+test("deescalate_only patches also clear the active playbook (customer-reply-pending remedy)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "refund + reply.",
+    remedy: { kind: "refund_order", customer_reply: "…" },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "deescalate_only");
+  assert.equal(t.patch.active_playbook_id, null);
+  assert.equal(t.patch.playbook_step, 0);
+  assert.equal(t.patch.playbook_exceptions_used, 0);
+});
+
+test("escalate_founder does NOT touch the active playbook (defer, not resolve)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "escalate_founder",
+    reasoning: "Founder call.",
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_ceo_owned");
+  assert.equal(t.patch.active_playbook_id, undefined);
+  assert.equal(t.patch.playbook_step, undefined);
+  assert.equal(t.patch.playbook_exceptions_used, undefined);
+});

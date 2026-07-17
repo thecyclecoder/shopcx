@@ -14025,6 +14025,23 @@ async function runCsDirectorCallJob(job: Job) {
       // approve_remedy de-escalate/close transition — the ticket stays escalated (raiseJuneRemedyApproval
       // already stamped escalated_to=owner) until Dylan approves via SMS and the deferred sweep executes.
       if (transition.action_key !== "noop" && !applyResult?.awaiting_founder_approval) {
+        // Read the ticket's PRE-patch state so we can (1) skip the update when the
+        // patch would be a no-op AND (2) drop an internal sysNote when the patch
+        // actually cleared a previously-active playbook — the audit trail for
+        // docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md
+        // Phase 1 (Melissa/eca3f43b). Best-effort; a read failure never rolls back
+        // the completed job, and the sysNote is skipped in that case.
+        let priorActivePlaybookId: string | null = null;
+        try {
+          const { data: preRow } = await db
+            .from("tickets")
+            .select("active_playbook_id")
+            .eq("id", ticketId)
+            .maybeSingle();
+          priorActivePlaybookId = (preRow?.active_playbook_id as string | null) ?? null;
+        } catch (e) {
+          console.warn(`${tag} pre-patch ticket read failed:`, e instanceof Error ? e.message : e);
+        }
         const { error: patchErr, data: patched } = await db
           .from("tickets")
           .update(transition.patch)
@@ -14037,6 +14054,30 @@ async function runCsDirectorCallJob(job: Job) {
           console.warn(`${tag} ticket state transition matched 0 rows (ticket=${ticketId.slice(0, 8)})`);
         } else {
           console.log(`${tag} ticket → ${transition.action_key}`);
+          // Playbook-supersede audit note: only when the patch actually cleared an
+          // active playbook (the resolution-side transitions clear the three
+          // playbook fields idempotently, but we only announce the clear when it
+          // MEANT something — the ticket carried an active playbook and June
+          // resolved it, so a later customer follow-up would have otherwise
+          // resumed a stale pre-escalation lane).
+          const clearedPlaybook =
+            priorActivePlaybookId !== null &&
+            (transition.action_key === "close_and_deescalate" ||
+              transition.action_key === "deescalate_only");
+          if (clearedPlaybook) {
+            try {
+              const { error: noteErr } = await db.from("ticket_messages").insert({
+                ticket_id: ticketId,
+                direction: "outbound",
+                visibility: "internal",
+                author_type: "system",
+                body: "[System] Active playbook cleared — the CS Director has resolved this ticket, so the playbook is no longer authoritative. Routing to Sol/Sonnet on any further inbound.",
+              });
+              if (noteErr) console.warn(`${tag} playbook-supersede sysNote insert failed: ${noteErr.message}`);
+            } catch (e) {
+              console.warn(`${tag} playbook-supersede sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+          }
         }
       }
     } catch (e) {
