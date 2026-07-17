@@ -1,0 +1,1 @@
+- **Dahlia Imitate-Then-Innovate Copy Engine** · folded 2026-07-17 · → [[lifecycles/ad-creative]]
