@@ -27,6 +27,8 @@ interface CompetitorRow {
   search_keyword: string | null;
   runs_ads_for: string | null;
   runs_ads_for_brand: string | null;
+  static_count: number;
+  video_count: number;
 }
 
 interface ProductRow {
@@ -206,6 +208,8 @@ export default function ResearchCompetitorsPage() {
                   <thead className="bg-zinc-50 text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
                     <tr>
                       <th className="px-4 py-2">Brand</th>
+                      <th className="px-4 py-2 text-right" title="Static ads found in the ad library for this competitor">Static</th>
+                      <th className="px-4 py-2 text-right" title="Video ads found in the ad library for this competitor">Video</th>
                       <th className="px-4 py-2">Domain</th>
                       <th className="px-4 py-2">Category</th>
                       <th className="px-4 py-2">Source</th>
@@ -233,6 +237,30 @@ export default function ResearchCompetitorsPage() {
                                 </span>
                               </div>
                             )}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums">
+                            <span
+                              className={
+                                c.static_count === 0
+                                  ? "font-semibold text-red-600 dark:text-red-400"
+                                  : "text-zinc-700 dark:text-zinc-300"
+                              }
+                              title={c.static_count === 0 ? "No static ads found — likely a bad seed (fix search keyword or replace)" : undefined}
+                            >
+                              {c.static_count}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums">
+                            <span
+                              className={
+                                c.video_count === 0
+                                  ? "font-semibold text-red-600 dark:text-red-400"
+                                  : "text-zinc-700 dark:text-zinc-300"
+                              }
+                              title={c.video_count === 0 ? "No video ads found — likely a bad seed (fix search keyword or replace)" : undefined}
+                            >
+                              {c.video_count}
+                            </span>
                           </td>
                           <td className="px-4 py-2 text-zinc-500">{c.domain || "—"}</td>
                           <td className="px-4 py-2 text-zinc-500">{c.category || "—"}</td>

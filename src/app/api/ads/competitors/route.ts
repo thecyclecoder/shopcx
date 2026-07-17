@@ -68,9 +68,34 @@ export async function GET(req: Request) {
     new Set(rows.map((r) => r.runs_ads_for).filter((v): v is string => !!v)),
   );
   const idToBrand = await getCompetitorBrandsById(workspaceId as string, runsAdsForIds);
+
+  // Per-competitor AD YIELD — Static vs Video counts from creative_skeletons (competitor-ad-yield).
+  // A competitor with 0 in BOTH is the "bad seed" signal (wrong/generic search_keyword, or the brand
+  // simply isn't running ads) — the founder acts on it (fix the keyword or replace). Direct read mirrors
+  // the /api/ads/creative-finder route (creative_skeletons has no SDK chokepoint). media_type is the
+  // clean discriminator: 'static' vs 'video'.
+  const compIds = rows.map((r) => r.id);
+  const counts = new Map<string, { static_count: number; video_count: number }>();
+  if (compIds.length) {
+    const { data: sk } = await auth.admin
+      .from("creative_skeletons")
+      .select("competitor_id, media_type")
+      .eq("workspace_id", workspaceId as string)
+      .in("competitor_id", compIds);
+    for (const s of (sk ?? []) as { competitor_id: string | null; media_type: string | null }[]) {
+      if (!s.competitor_id) continue;
+      const e = counts.get(s.competitor_id) ?? { static_count: 0, video_count: 0 };
+      if (s.media_type === "video") e.video_count += 1;
+      else e.static_count += 1;
+      counts.set(s.competitor_id, e);
+    }
+  }
+
   const withResolved = rows.map((r) => ({
     ...r,
     runs_ads_for_brand: r.runs_ads_for ? idToBrand.get(r.runs_ads_for) || null : null,
+    static_count: counts.get(r.id)?.static_count ?? 0,
+    video_count: counts.get(r.id)?.video_count ?? 0,
   }));
 
   return NextResponse.json({ competitors: withResolved });
