@@ -57,6 +57,7 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
+import { isMissingSessionError as isMissingBoxSession } from "../src/lib/box-session-resume"; // resumable box-chat lanes retry fresh once on a dead session id (Phase 1: director-coach)
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -17872,19 +17873,38 @@ async function runDirectorCoachJob(job: Job) {
     // it errored on the capped default account instead of failing over). Prompt built inside the closure
     // from the pool's sessionId; a fresh-start failover rebuilds full context from the transcript.
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
+    const runTurn = (cfg: string, sid: string | null) => {
+      const turnPrompt = sid
+        // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
+        // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
+        // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
+        // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
+        ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
+        : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
+      return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
+    };
+    let { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
       { sessionId },
-      (cfg, sid) => {
-        const turnPrompt = sid
-          // director-chat-in-leash-execution Phase 2 — a resumed director-coach session must
-          // carry ITS OWN director's cards block (Growth → GROWTH_COACH_OUTPUT, CS → CS_COACH_OUTPUT,
-          // Platform → DIRECTOR_COACH_OUTPUT). Without this, a resumed CS/Growth turn regresses to
-          // Ada's card shapes — the model would emit unknown types the Phase-1 dispatch escalates.
-          ? `${latest}\n\n${intentDirective}\n\n${coachOutputFor(thread.director_function)}`
-          : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
-        return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
-      },
+      runTurn,
     );
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 1 — a resumed run whose session id
+    // is no longer on its owning account ('No conversation found with session ID') retries ONCE with
+    // sessionId=null. The closure at :17879 already rebuilds the FULL transcript prompt when sid is
+    // null (renderCoachTranscript), so a fresh start loses no context. Detected via the pure helper
+    // src/lib/box-session-resume.ts::isMissingSessionError (unit-tested there). Only the coach lane
+    // is guarded in this phase; the sibling resumable lanes (dev-ask, roadmap-chat, ticket-improve)
+    // land in Phase 2 behind a shared wrapper.
+    if (sessionId && coachRun && coachRun.isError && isMissingBoxSession(coachRun.raw)) {
+      const parsedForRetry = parseStatus(coachRun.resultText) as Record<string, unknown> | null;
+      const replyForRetry = typeof parsedForRetry?.reply === "string" ? (parsedForRetry.reply as string) : "";
+      if (!replyForRetry) {
+        console.warn(`${tag} resumed session ${sessionId.slice(0, 8)}… missing on its account — retrying FRESH (context rebuilt from transcript)`);
+        const fresh = await withAccountFailover({ sessionId: null }, runTurn);
+        coachRun = fresh.result;
+        coachDir = fresh.configDir;
+        allCapped = fresh.allCapped;
+      }
+    }
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — Ask-Ada auto-resumes at reset" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
@@ -17893,7 +17913,10 @@ async function runDirectorCoachJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = coachRun;
     await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    // On the fresh-retry path `session` is the new id from the null-resume run and `sessionId` is the
+    // dead one; `session || sessionId` would otherwise fall back to the dead id when the fresh run
+    // returned no new id, so guard the dead-id fallback with a session-still-alive check.
+    const newSession = session || (sessionId && !isMissingBoxSession(raw) ? sessionId : null);
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
     if (!reply) {
