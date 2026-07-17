@@ -21,6 +21,7 @@
 import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-intelligence";
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { hasAnyLf8 } from "@/lib/ads/lf8";
+import type { ConceptTags } from "@/lib/creative-skeleton";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -87,6 +88,13 @@ export interface ScoredAngle {
   reasons: string[];
   /** raw source object for the brief builder to pull proof from */
   raw?: Row;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — the unified breakdown OUR vision
+   *  emits on every winners-flow ingest ([[../creative-skeleton|ConceptTags]]: angle, archetype,
+   *  why_it_works, cialdini_lever, awareness_stage, format). Threaded onto competitor-source
+   *  angles by `stockProduct` so `buildCreativeBrief` can surface it on the brief AND Dahlia's
+   *  research reads the imitation rubric alongside the four proven copy slots. Own-brand angles
+   *  leave this null. */
+  conceptTags?: ConceptTags | null;
 }
 
 function scoreAngle(hook: string, leadBenefit: string, source: ScoredAngle["source"], retentionSignal: number, raw?: Row): ScoredAngle {
@@ -217,6 +225,20 @@ export interface CreativeBrief {
     offer: string | null;
     competitorAdvertiser: string | null;
   };
+  /**
+   * dahlia-researches-from-winners-flow-ad-library Phase 1 — the WINNER-CONCEPT unified
+   * breakdown OUR vision emits for the underlying competitor ad ([[../creative-skeleton|ConceptTags]]:
+   * angle, archetype, why_it_works, cialdini_lever, awareness_stage, format). Populated ONLY
+   * when `angle.source === 'competitor'` AND the ScoredAngle was threaded with the winners-flow
+   * concept tags (`stockProduct` populates it from `getProvenCompetitorAngles`). Own-brand
+   * angles leave this null. Consumed by:
+   *   • Dahlia's copy-author session as the imitation rubric alongside `competitorDna` — she
+   *     writes AGAINST the archetype + why_it_works + cialdini_lever the winner already proved;
+   *   • Max's Phase 2 QA grader as the benchmark for competitor-selection + temperature-fit
+   *     grading (a cold-audience task's winner-concept awareness_stage should be
+   *     unaware/problem_aware — a mismatch scores lower on the competitor-selection axis).
+   */
+  conceptTags?: ConceptTags | null;
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -336,7 +358,25 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
     };
   }
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna };
+  // dahlia-researches-from-winners-flow-ad-library Phase 1 — surface the WINNER-CONCEPT unified
+  // breakdown for competitor imitations. `stockProduct` threads it onto `angle.conceptTags`
+  // (canonical field) AND `angle.raw.conceptTags` (compat with pre-existing raw pass-through),
+  // so we accept either. Own-brand angles leave the field null. Downstream: Dahlia's session
+  // reads it alongside `competitorDna`, and Max's Phase 2 grader benchmarks against it.
+  let conceptTags: CreativeBrief["conceptTags"] = null;
+  if (angle.source === "competitor") {
+    if (angle.conceptTags) {
+      conceptTags = angle.conceptTags;
+    } else if (angle.raw && typeof angle.raw === "object") {
+      const raw = angle.raw as Record<string, unknown>;
+      const rawTags = raw.conceptTags;
+      if (rawTags && typeof rawTags === "object" && !Array.isArray(rawTags)) {
+        conceptTags = rawTags as ConceptTags;
+      }
+    }
+  }
+
+  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags };
 }
 
 /**

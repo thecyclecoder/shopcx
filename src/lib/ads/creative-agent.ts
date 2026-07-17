@@ -25,7 +25,7 @@ import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
-import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
+import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { debrandForOurBrand } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -434,6 +434,26 @@ export function resolveAudienceTemperature(
   angle: Pick<ScoredAngle, "source" | "acquisitionPower">,
 ): "cold" | "warm" {
   return angle.source === "competitor" || (angle.acquisitionPower ?? 0) >= 8 ? "cold" : "warm";
+}
+
+// ── dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent-first envelope ───
+
+/** The intent Dahlia declares FIRST for a creative task so research/angle-selection reads the
+ *  winners-flow library SCOPED to that intent — a cold-audience test prefers cold-appropriate
+ *  winner concepts (concept_tags.awareness_stage in {unaware, problem_aware}). Callers may
+ *  pass an explicit intent to `stockProduct`; when omitted the default resolver below applies:
+ *  cold + test-to-find-winner (the current bin's whole reason to exist per the spec). */
+export const DEFAULT_RESEARCH_INTENT: Readonly<CreativeIntent> = Object.freeze({
+  audience_temperature: "cold",
+  purpose: "test-to-find-winner",
+});
+
+/** Pure — pick an intent for this run. Callers may pass an explicit intent (the future
+ *  retention-audience path would pass `warm`/`hot` + a different purpose); when omitted, the
+ *  bin's default `cold + test-to-find-winner` applies. Exported + unit-testable so a downstream
+ *  change to the default is greppable. */
+export function resolveResearchIntent(explicit?: CreativeIntent): CreativeIntent {
+  return explicit ?? DEFAULT_RESEARCH_INTENT;
 }
 
 /** Grep-target boundary markers for the copy-author DATA block. Long enough that a sanitized brief
@@ -1135,7 +1155,14 @@ async function stockProduct(
   count: number,
   qcDispatcher?: QcSessionDispatcher,
   copyAuthorDispatcher?: CopyAuthorSessionDispatcher,
+  intentOverride?: CreativeIntent,
 ): Promise<StockedCreative[]> {
+  // dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope.
+  // Every downstream research read (getProvenCompetitorAngles) is SCOPED to this intent so a
+  // cold-audience task prefers cold-appropriate winner concepts (concept_tags.awareness_stage
+  // in {unaware, problem_aware}). The default is cold + test-to-find-winner — the bin's whole
+  // reason to exist per the spec.
+  const researchIntent = resolveResearchIntent(intentOverride);
   const out: StockedCreative[] = [];
   // DAHLIA_COPY_MODE kill switch. Phase 1 landed the env-var READ + a default `deterministic`
   // short-circuit; Phase 3 wires the actual branch — when the flag is `author` AND a caller-
@@ -1186,7 +1213,13 @@ async function stockProduct(
   const { angles: sourced, usedFallback: sourcedUsedFallback } = await getProvenCompetitorAngles(
     admin,
     workspaceId,
-    { productId, preferDeeplyProven: true, limit: 6 },
+    // dahlia-researches-from-winners-flow-ad-library Phase 1 — pass the declared intent so
+    // the returned angles rank temperature-appropriate winners first (concept_tags.awareness_stage
+    // matching the intent's audience_temperature). Off-temperature angles still fill the tail —
+    // never starve the batch. `getProvenCompetitorAngles` also now selects `winner_tier`,
+    // `winner_score`, and `concept_tags` and re-orders by winner-tier rank → winner_score →
+    // days_running, so the imitation shelf is ranked by OUR longitudinal winner signal first.
+    { productId, preferDeeplyProven: true, limit: 6, intent: researchIntent },
   ).catch(() => ({ angles: [], usedFallback: false }));
   if (sourcedUsedFallback) {
     console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
@@ -1216,7 +1249,14 @@ async function stockProduct(
       retentionTruth: 5,
       commodity: false,
       hasRealPhoto: false,
-      reasons: [`proven competitor ad (${c.daysRunning ?? "?"}d running${c.resumeAdvertising === true ? ", still running" : c.resumeAdvertising === false ? ", paused" : ""}${c.advertiser ? `, ${c.advertiser}` : ""}${c.heat != null ? `, heat ${c.heat}` : ""})`],
+      reasons: [
+        `proven competitor ad (${c.daysRunning ?? "?"}d running${c.resumeAdvertising === true ? ", still running" : c.resumeAdvertising === false ? ", paused" : ""}${c.advertiser ? `, ${c.advertiser}` : ""}${c.heat != null ? `, heat ${c.heat}` : ""}${c.winnerTier ? `, winner_tier=${c.winnerTier}` : ""}${c.winnerScore != null ? `, winner_score=${c.winnerScore}` : ""})`,
+      ],
+      // dahlia-researches-from-winners-flow-ad-library Phase 1 — surface the unified
+      // breakdown (angle / archetype / why_it_works / cialdini_lever / awareness_stage /
+      // format) so `buildCreativeBrief` can populate `brief.conceptTags` for Dahlia's session
+      // + Max's Phase 2 grader. Own-brand angles leave this null (never a winner-concept read).
+      conceptTags: c.conceptTags,
       raw: {
         imageUrl: c.imageUrl,
         // `mechanism` retained for existing consumers (planCompositionTransfer + the
@@ -1232,6 +1272,12 @@ async function stockProduct(
         framework: c.framework,
         offer: c.offer,
         advertiser: c.advertiser,
+        // dahlia-researches-from-winners-flow-ad-library Phase 1 — mirror the concept tags on
+        // `raw` too so consumers reading via `angle.raw.conceptTags` (the pre-existing
+        // pass-through path in `buildCreativeBrief`) also see the unified breakdown.
+        conceptTags: c.conceptTags,
+        winnerTier: c.winnerTier,
+        winnerScore: c.winnerScore,
       } as Record<string, unknown>,
     }));
   const ranked = [...competitorAngles, ...ownAngles];
@@ -1637,9 +1683,14 @@ export async function runAdCreativeLoop(
     binFloor?: number;
     qcDispatcher?: QcSessionDispatcher;
     copyAuthorDispatcher?: CopyAuthorSessionDispatcher;
+    /** dahlia-researches-from-winners-flow-ad-library Phase 1 — override the declared research
+     *  intent for THIS run. Threaded through to `stockProduct` → `getProvenCompetitorAngles` so
+     *  research is scoped to the intent's temperature. Omit to accept the default
+     *  (`cold + test-to-find-winner`) — today's every-caller behavior. */
+    intent?: CreativeIntent;
   },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId, qcDispatcher, copyAuthorDispatcher } = opts;
+  const { workspaceId, qcDispatcher, copyAuthorDispatcher, intent } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
@@ -1670,7 +1721,7 @@ export async function runAdCreativeLoop(
   }
 
   for (const t of targets) {
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher);
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent);
     stocked.push(...results);
   }
 

@@ -17,6 +17,63 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import type { ConceptTags } from "@/lib/creative-skeleton";
+
+// ── dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope ──────────
+/** The intent Dahlia declares FIRST for every creative task — carried through the whole pipeline
+ *  so research/angle-selection reads the winner library SCOPED to that intent (a cold-audience
+ *  task prefers cold-appropriate winner concepts; a hot-audience task prefers most-aware ones).
+ *  `purpose` names WHY the creative is being built ('test-to-find-winner' is today's only value;
+ *  future retention / re-target purposes will land as new literals). */
+export interface CreativeIntent {
+  audience_temperature: "cold" | "warm" | "hot";
+  purpose: "test-to-find-winner";
+}
+
+/** The Schwartz awareness stages a competitor WINNER concept targets that MATCH a declared
+ *  audience temperature. Used by `getProvenCompetitorAngles` to partition (not filter) the pool
+ *  when `intent` is present — temperature-matching winners rank first, off-temp winners fill the
+ *  remaining slots (never starve the shelf). Cold reads a scroll-stopping stranger — a
+ *  problem/unaware-stage ad; warm has heard of the category / brand; hot is ready-to-buy.  */
+const AWARENESS_STAGES_BY_TEMPERATURE: Readonly<Record<CreativeIntent["audience_temperature"], readonly string[]>> = {
+  cold: ["unaware", "problem_aware"],
+  warm: ["solution_aware", "product_aware"],
+  hot: ["most_aware"],
+};
+
+/** True iff a competitor angle's concept-tags awareness_stage matches the intended temperature. Pure
+ *  + exported for the Phase 1 vitest so the mapping is greppable + pinned. A null awareness_stage
+ *  (rows visioned before the concept_tags rubric shipped) matches nothing — those angles fall to the
+ *  tail of the partition, not the temperature-matched head. */
+export function awarenessStageMatchesTemperature(
+  awarenessStage: string | null | undefined,
+  temperature: CreativeIntent["audience_temperature"],
+): boolean {
+  if (!awarenessStage) return false;
+  return AWARENESS_STAGES_BY_TEMPERATURE[temperature].includes(awarenessStage);
+}
+
+/** Sort rank for `winner_tier` — the longitudinal signal from `creative_skeletons` (deriveWinnerTier
+ *  in [[./creative-skeleton]]). Higher rank = ranked earlier. `proven` (≥21d persistence) leads,
+ *  `building` (≥7d) follows, `new` (default, freshly-seen) below, `retired` (still_active=false)
+ *  last. A null tier is treated like `new` — the ingest path always sets one, but older rows may
+ *  predate it. Pure + exported for the Phase 1 vitest. */
+export function winnerTierRank(tier: string | null | undefined): number {
+  switch (tier) {
+    case "proven":
+      return 3;
+    case "building":
+      return 2;
+    case "retired":
+      return 0;
+    case "new":
+    case null:
+    case undefined:
+      return 1;
+    default:
+      return 1;
+  }
+}
 
 type Admin = ReturnType<typeof createAdminClient>;
 const GRAPH = "https://graph.facebook.com/v21.0";
@@ -51,6 +108,25 @@ export interface CompetitorAngle {
    *  derive per-angle acquisitionPower in `scoreCompetitorAcquisitionPower` (kills the old
    *  hardcoded `acquisitionPower=9`, so Dahlia can tell a deep+hot angle from a shallow one). */
   resumeAdvertising: boolean | null;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — OUR longitudinal winner tier
+   *  ([[./creative-skeleton]] `deriveWinnerTier`): `proven` (≥21d persistence across sweeps),
+   *  `building` (≥7d), `new` (freshly-seen), `retired` (still_active=false). Ranks the winner
+   *  library ahead of `days_running` (a competitor may have run an ad for 40 days once and
+   *  killed it — still_active=false → retired, ranks last even at 40d). */
+  winnerTier: string | null;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — OUR longitudinal winner score
+   *  (persistence days across sweeps). Mirrors the AdLibrary "composite" the spec names but is
+   *  OUR signal (their composite was mis-parsed recency — dropped from the ingest per
+   *  [[./creative-skeleton]] comments). Used as the winner-tier tiebreak inside a rank. */
+  winnerScore: number | null;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — the UNIFIED breakdown Dahlia +
+   *  Max read as the imitation rubric ([[./creative-skeleton]] `ConceptTags`): angle,
+   *  archetype, why_it_works, cialdini_lever, awareness_stage, format. LANE A + LANE B both
+   *  emit this shape from OUR vision so Dahlia's research reads ONE schema regardless of
+   *  origin. Consumed by `buildCreativeBrief` to surface unified-breakdown fields on the
+   *  brief, and by Max (Phase 2) to grade competitor selection + temperature fit against the
+   *  benchmark. */
+  conceptTags: ConceptTags | null;
 }
 
 export interface CompetitorAngleOptions {
@@ -70,6 +146,13 @@ export interface CompetitorAngleOptions {
    *  return `usedFallback:true` + emit a `dahlia_deeply_proven_fallback` `director_activity` row so
    *  the fallback is VISIBLE (never silent). Callers that don't set this get the legacy 30d shape. */
   preferDeeplyProven?: boolean;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — the declared-intent envelope that
+   *  scopes research to temperature-appropriate winners. When set, the returned angles are
+   *  re-ordered so those whose `concept_tags.awareness_stage` matches the temperature
+   *  (cold→unaware/problem_aware · warm→solution_aware/product_aware · hot→most_aware) rank
+   *  first; off-temp angles fill the remaining slots so a thin temperature-matched shelf never
+   *  starves the batch. Callers that don't set intent get the unchanged (tier→score→days) order. */
+  intent?: CreativeIntent;
 }
 
 export interface ProvenAnglesResult {
@@ -86,15 +169,47 @@ interface QueryOptions {
   productId?: string;
   niche?: string;
   limit: number;
+  /** dahlia-researches-from-winners-flow-ad-library Phase 1 — when set, the returned rows are
+   *  re-partitioned so temperature-matching winners rank first (see `intent`). Off-temp rows
+   *  fill the remaining slots — this is a PREFERENCE, never a filter, so a thin
+   *  temperature-matched shelf never starves the batch. */
+  intent?: CreativeIntent;
+}
+
+/** Coerce a jsonb concept_tags row into the shared `ConceptTags` shape, or null when the row
+ *  predates the vision rubric. Pure — every unknown key is dropped, every present key is
+ *  narrowed to string|null so downstream (`buildCreativeBrief`, Max's Phase 2 grader) reads a
+ *  stable shape. */
+function coerceConceptTags(raw: unknown): ConceptTags | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+  return {
+    angle: str(r.angle),
+    archetype: str(r.archetype),
+    why_it_works: str(r.why_it_works),
+    cialdini_lever: str(r.cialdini_lever),
+    awareness_stage: str(r.awareness_stage),
+    format: str(r.format),
+  };
 }
 
 /** Raw query — the shared pool reader used by both the legacy path and the two-tier
  *  deeply-proven path. Returns just the mapped rows; the two-tier logic + visible-fallback
- *  audit belong to `getProvenCompetitorAngles`. */
+ *  audit belong to `getProvenCompetitorAngles`.
+ *
+ *  dahlia-researches-from-winners-flow-ad-library Phase 1 — also selects the winners-flow
+ *  longitudinal signals (`winner_tier`, `winner_score`, `concept_tags`) and re-ranks the
+ *  returned rows: winner-tier rank (proven > building > new > retired) → winner_score →
+ *  days_running. When `q.intent` is set, temperature-matching angles (by
+ *  `concept_tags.awareness_stage`) are moved to the front of each rank bucket without
+ *  dropping off-temp angles — a thin temperature shelf never starves the batch. */
 async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOptions): Promise<CompetitorAngle[]> {
   let query = admin
     .from("creative_skeletons")
-    .select("advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising")
+    .select(
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags",
+    )
     .eq("workspace_id", workspaceId)
     .eq("status", "analyzed")
     .not("hook", "is", null)
@@ -105,7 +220,7 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   if (q.productId) query = query.eq("product_id", q.productId);
   else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
   const { data } = await query;
-  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
     advertiser: (r.advertiser as string | null) ?? null,
     hook: (r.hook as string | null) ?? null,
     framework: (r.framework as string | null) ?? null,
@@ -117,7 +232,41 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     destinationDomain: (r.destination_domain as string | null) ?? null,
     imageUrl: (r.image_url as string | null) ?? null,
     resumeAdvertising: typeof r.resume_advertising === "boolean" ? (r.resume_advertising as boolean) : null,
+    winnerTier: (r.winner_tier as string | null) ?? null,
+    winnerScore: r.winner_score == null ? null : Number(r.winner_score),
+    conceptTags: coerceConceptTags(r.concept_tags),
   }));
+  return rankByWinnerSignalAndIntent(mapped, q.intent);
+}
+
+/** Winner-tier-first ranking + optional intent-scoped partition. Pure so a unit test can pin
+ *  every branch. `retired` sinks last even at high `days_running` — a competitor's killed ad is
+ *  not a research base regardless of how long it ran. Same-rank ties fall to `winner_score`
+ *  desc then `days_running` desc. When `intent.audience_temperature` is set, angles whose
+ *  concept_tags.awareness_stage matches the temperature move to the FRONT while preserving the
+ *  within-group order — off-temperature angles stay reachable at the tail. */
+export function rankByWinnerSignalAndIntent(
+  angles: CompetitorAngle[],
+  intent?: CreativeIntent,
+): CompetitorAngle[] {
+  const ranked = angles.slice().sort((a, b) => {
+    const rankDiff = winnerTierRank(b.winnerTier) - winnerTierRank(a.winnerTier);
+    if (rankDiff !== 0) return rankDiff;
+    const scoreDiff = (b.winnerScore ?? 0) - (a.winnerScore ?? 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    return (b.daysRunning ?? 0) - (a.daysRunning ?? 0);
+  });
+  if (!intent) return ranked;
+  const onTemp: CompetitorAngle[] = [];
+  const offTemp: CompetitorAngle[] = [];
+  for (const a of ranked) {
+    if (awarenessStageMatchesTemperature(a.conceptTags?.awareness_stage, intent.audience_temperature)) {
+      onTemp.push(a);
+    } else {
+      offTemp.push(a);
+    }
+  }
+  return [...onTemp, ...offTemp];
 }
 
 /**
@@ -185,6 +334,7 @@ export async function getProvenCompetitorAngles(
       productId: opts.productId,
       niche: opts.niche,
       limit,
+      intent: opts.intent,
     });
     if (deep.length > 0) return { angles: deep, usedFallback: false };
 
@@ -196,6 +346,7 @@ export async function getProvenCompetitorAngles(
       productId: opts.productId,
       niche: opts.niche,
       limit,
+      intent: opts.intent,
     });
     await recordDirectorActivity(admin, {
       workspaceId,
@@ -229,6 +380,7 @@ export async function getProvenCompetitorAngles(
     productId: opts.productId,
     niche: opts.niche,
     limit,
+    intent: opts.intent,
   });
   return { angles, usedFallback: false };
 }
