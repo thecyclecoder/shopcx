@@ -3840,24 +3840,42 @@ async function dbHealthPgClient(): Promise<import("pg").Client | null> {
 }
 
 // EXPLAIN a safe SELECT and return the plan text, or null if it can't be planned. Plain EXPLAIN does
-// NOT execute the query (no ANALYZE) so it's safe on prod; for a normalized parameterized statement
-// (pg_stat_statements stores `$1` placeholders) plain EXPLAIN errors, so we retry with GENERIC_PLAN
-// (PG16+), which plans a parameterized query with no values. Every attempt is isolated in its own
-// try — a failed EXPLAIN must never abort the pass.
+// NOT execute the query (no ANALYZE) so it's safe on prod.
+//
+// dbhealth-explain-no-log-spam: pg_stat_statements normalizes EVERY statement with `$1` placeholders,
+// so a plain `EXPLAIN (FORMAT TEXT)` on an offender's normalized text ALWAYS fails with 42P02 ("there
+// is no parameter $1"). The old code tried plain first and fell back to GENERIC_PLAN — which recovered
+// the plan, but the failed first attempt was still logged by Postgres as an error on EVERY parameterized
+// offender, EVERY hourly pass (visible, alarming log spam). Two changes remove that:
+//   1. Never attempt a PostgREST RPC-call wrapper. A `.rpc()` call is marked by `pgrst_scalar`/`pgrst_call`
+//      and is a function invocation, not an indexable query — its slowness lives INSIDE the function body,
+//      which an outer EXPLAIN can't see, and its untyped `json_to_record($1)` can't be planned even by
+//      GENERIC_PLAN, so EXPLAIN can only ever error. Skip it; the finding still surfaces it as a
+//      high-time offender with no plan (correct — the fix is inside the function, not an outer index).
+//   2. For any remaining statement carrying `$N` placeholders, go STRAIGHT to GENERIC_PLAN (PG16+, plans
+//      a parameterized query with no bound values) instead of erroring on plain EXPLAIN first.
+// Non-parameterized statements still use plain EXPLAIN. Every attempt is isolated in its own try — a
+// failed EXPLAIN must never abort the pass.
 async function explainQuery(c: import("pg").Client, query: string): Promise<string | null> {
   const render = (rows: Array<Record<string, unknown>>): string =>
     rows.map((r) => String(r["QUERY PLAN"] ?? Object.values(r)[0] ?? "")).join("\n");
+  // (1) PostgREST RPC-call wrapper — not plannable, EXPLAIN can only error. Don't attempt.
+  if (/\bpgrst_scalar\b|\bpgrst_call\b/.test(query)) return null;
+  // (2) Parameterized normalized statement → GENERIC_PLAN directly (plain EXPLAIN would 42P02).
+  if (/\$\d+/.test(query)) {
+    try {
+      const res = await c.query(`EXPLAIN (GENERIC_PLAN, FORMAT TEXT) ${query}`);
+      return render(res.rows as Array<Record<string, unknown>>);
+    } catch {
+      return null; // pre-PG16 or an un-plannable statement — the finding still proposes a rewrite review.
+    }
+  }
+  // (3) No placeholders — a plain EXPLAIN is valid and won't error on missing parameters.
   try {
     const res = await c.query(`EXPLAIN (FORMAT TEXT) ${query}`);
     return render(res.rows as Array<Record<string, unknown>>);
   } catch {
-    /* likely parameter placeholders — retry with a generic plan. */
-  }
-  try {
-    const res = await c.query(`EXPLAIN (GENERIC_PLAN, FORMAT TEXT) ${query}`);
-    return render(res.rows as Array<Record<string, unknown>>);
-  } catch {
-    return null; // pre-PG16 or an un-plannable statement — the finding still proposes a rewrite review.
+    return null;
   }
 }
 
