@@ -14992,6 +14992,7 @@ async function runPromptReviewJob(job: Job) {
       job.workspace_id,
       proposal,
       parsed,
+      inputs,
       {
         model: model || REVIEW_MODEL,
         usage,
@@ -14999,6 +15000,42 @@ async function runPromptReviewJob(job: Job) {
       },
       { dailyCap, alreadyAcceptedToday },
     );
+
+    // A false `applied` is NEVER a normal outcome. A guardrail downgrade (confidence floor,
+    // supersede-not-delete) still WRITES its audit + decision and returns applied:true with
+    // forcedToHumanReview:true. applied:false means the audit insert or the prompt update itself
+    // FAILED (infra error) — the proposal is untouched and stuck at status='proposed'. Treat it as
+    // a rail hit: escalate to June + park the job FAILED. This is the gap that let 127 identical
+    // `audit_insert_failed` errors masquerade as `prompt_review_applied` + `completed` for a week
+    // (the caller couldn't distinguish "applied a decision" from "aborted on an infra error").
+    if (!applied.applied) {
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "cs",
+        actionKind: "prompt_review_escalated",
+        specSlug: proposalId,
+        reason: `prompt-review could not apply its verdict — ${applied.reason ?? "unknown"} — escalated to June; proposal remains 'proposed'`,
+        metadata: {
+          job_id: job.id,
+          proposal_id: proposalId,
+          raw_decision: parsed.decision,
+          final_decision: applied.finalDecision,
+          confidence: parsed.confidence,
+          applied: false,
+          reason_code: "apply_failed",
+          safety_reason_code: applied.reason ?? null,
+          model: model || REVIEW_MODEL,
+          autonomous: false,
+        },
+      });
+      await update(job.id, {
+        status: "failed",
+        error: `prompt-review apply failed: ${applied.reason ?? "unknown"}`,
+        log_tail: (applied.reason ?? "apply failed").slice(-2000),
+      });
+      console.error(`${tag} apply FAILED (${applied.reason}) — escalated to June, job parked failed`);
+      return;
+    }
 
     // Phase 2 — record the verdict + safety outcome to `director_activity` under the CS function.
     // A guardrail hit (`forcedToHumanReview === true`) is a rail-escalation to June (not silent
