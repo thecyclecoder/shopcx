@@ -1,0 +1,1 @@
+- **Resolve subscriptions.id UUIDs to shopify_contract_id inside appstleSubscriptionAction** · verified 2026-07-17 · → [[../libraries/appstle]]
