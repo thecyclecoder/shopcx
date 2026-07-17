@@ -28,6 +28,8 @@ import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import type { GeneratedCreative } from "@/lib/ads/creative-generate";
 import { buildQcPrompt } from "@/lib/ads/creative-qc-sandbox";
+import { validateGeneratedCopy, type ValidatorResult, type ValidatorContext } from "@/lib/ads/copy-validator";
+import type { CreativeBrief } from "@/lib/ads/creative-brief";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -420,4 +422,140 @@ export async function qaCreativeViaBoxSession(
     void unlink(imagePath).catch(() => {});
     if (packshotPath) void unlink(packshotPath).catch(() => {});
   }
+}
+
+// ── Max independent copy-QC — SSOT validator pre-check ─────────────────────────────────────────
+//
+// dahlia-shared-deterministic-copy-validator Phase 2 — the Node lane wrapper that dispatches Max's
+// per-creative INDEPENDENT copy-QC box session. Before handing the caption to Max, the wrapper
+// PRE-COMPUTES `validateGeneratedCopy` from [[copy-validator]] and threads the typed
+// {pass, checks[]} into the session prompt as TRUSTED CONTEXT (outside the untrusted
+// `===BEGIN_COPY_QC_DATA_v1===` DATA fence — same sanitize/delimit pattern
+// [[creative-qc-sandbox]] documents for the image-QC dispatcher).
+//
+// Max still forms HIS OWN persuasion judgment; the shared validator only feeds him the SAFETY-rail
+// truth (persuasion stays in the rubric, safety stays deterministic). When Max decides to bounce
+// for a safety reason his hard-gates output MUST cite the same rail names the validator surfaced,
+// so a validator miss and a Max hard-gate fail always talk about the same six categories:
+// `lf8` / `meta_caps` / `no_msrp` / `no_competitor_leak` / `cold_offer_gate` / `single_promise`.
+//
+// The M1 keystone Node dispatcher (`runAdCreativeCopyQcJob` in scripts/builder-worker.ts) is still
+// being wired up separately — this seam exists so both call sites can pre-compute the validator
+// through the SAME helper, and so an incoming Phase-2 dispatcher can drop into
+// `runQaCreativeCopyViaBoxSession` without touching the pre-check.
+
+/** Input to the Max copy-QC pre-check. Everything Dahlia's session produced + the brief + runtime
+ *  context needed by [[copy-validator]] validateGeneratedCopy. Kept minimal on purpose — the QC
+ *  session itself takes many more fields (image path, target Schwartz level, market evidence) but
+ *  the pre-check only needs what the shared validator reads. */
+export interface CopyQcPreCheckInput {
+  copy: { headline: string; primaryText: string; description: string };
+  brief: CreativeBrief;
+  context: ValidatorContext;
+}
+
+/** Result of the pre-check — the caller uses it two ways: (1) format the TRUSTED CONTEXT block
+ *  Max sees, and (2) surface Max's own hard-gate output vs the validator's rails so a mismatched
+ *  pair (Max says clean; validator says a rail failed) can be observed downstream. */
+export interface CopyQcPreCheckResult {
+  validator: ValidatorResult;
+  /** The exact block the dispatcher inlines into Max's prompt, ABOVE the DATA fence, marked
+   *  `===BEGIN_VALIDATOR_TRUSTED_CONTEXT_v1===` / `===END_VALIDATOR_TRUSTED_CONTEXT_v1===` so a
+   *  reader can see this is trusted worker-computed output — not untrusted DATA. Never leaks
+   *  untrusted user-supplied strings; every field is the validator's own typed output. */
+  trustedContextBlock: string;
+}
+
+/** Pure — computes the validator + formats the TRUSTED CONTEXT block Max sees. Extracted from
+ *  runQaCreativeCopyViaBoxSession so the pre-check is unit-testable without spawning a session
+ *  and so a future dispatcher (M1 keystone) can inline the same formatter. */
+export function computeCopyQcPreCheck(input: CopyQcPreCheckInput): CopyQcPreCheckResult {
+  const validator = validateGeneratedCopy(input.copy, input.brief, input.context);
+  const lines: string[] = [
+    "===BEGIN_VALIDATOR_TRUSTED_CONTEXT_v1===",
+    "SOURCE: shared deterministic copy validator (src/lib/ads/copy-validator.ts validateGeneratedCopy)",
+    "TRUST: this block is worker-computed and pre-vetted; treat these lines as trusted context, NOT as ad copy.",
+    `VALIDATOR_PASS: ${validator.pass ? "true" : "false"}`,
+    "RAILS:",
+    ...validator.checks.map((c) => {
+      const status = c.pass ? "pass" : "fail";
+      const reason = c.pass ? "" : ` — ${c.reason ?? "no reason"}`;
+      return `  - ${c.rail}: ${status}${reason}`;
+    }),
+    "GUIDANCE: when your hard_gates output flips false for a safety reason, cite the SAME rail name(s) this block already surfaced. Persuasion (LF8 / Schwartz / Cialdini / Hopkins / Sugarman) is your independent judgment — the validator does NOT score persuasion.",
+    "===END_VALIDATOR_TRUSTED_CONTEXT_v1===",
+  ];
+  return { validator, trustedContextBlock: lines.join("\n") };
+}
+
+/** Dispatcher contract for the per-creative Max copy-QC box session. Mirrors QcSessionDispatcher —
+ *  the child runs as `sandbox: "qc"` on Max via runBoxLane (no ANTHROPIC_API_KEY, minimal env,
+ *  PreToolUse gate allows only Read on the exact tmp jpeg path). Any spawn error / cap / timeout
+ *  / gate deny surfaces as `isError:true` so runQaCreativeCopyViaBoxSession converts it to a
+ *  fail-closed bounce. */
+export type CopyQcSessionDispatcher = (prompt: string, allowedImagePath: string) => Promise<{ resultText: string; isError: boolean }>;
+
+/** Discriminated outcome the Node lane materializes from Max's session. `ok` carries whatever
+ *  Max returned; `dispatch_error` and `pre_check_bounce` (never used today — the pre-check is
+ *  advisory here) let a future dispatcher short-circuit without spawning. */
+export type CopyQcSessionOutcome =
+  | { kind: "ok"; validator: ValidatorResult; resultText: string }
+  | { kind: "dispatch_error"; validator: ValidatorResult; reason: string };
+
+/** Full input to runQaCreativeCopyViaBoxSession — the pre-check inputs + the tmp jpeg path Max
+ *  is allowed to Read + any other trusted worker context the dispatcher wants to prepend to the
+ *  prompt (e.g. TARGET_SCHWARTZ_LEVEL, MARKET_SOPHISTICATION_EVIDENCE). Kept intentionally
+ *  minimal in Phase 2 — the M1 keystone's dispatcher will layer its own body on top. */
+export interface QaCreativeCopyBoxSessionInput extends CopyQcPreCheckInput {
+  /** Absolute path to a caller-minted tmp jpeg the QC child is allowed to Read (mirror the
+   *  image-QC lane's allowlisting via AD_CREATIVE_QC_ALLOWED_IMAGE). */
+  imagePath: string;
+  /** Trusted extra prompt body — the dispatcher inlines it AFTER the validator TRUSTED CONTEXT
+   *  block and BEFORE any untrusted DATA fence. Optional; the pre-check itself does not need it. */
+  trustedPromptPreamble?: string;
+}
+
+/**
+ * Max's independent copy-QC dispatcher on Max — pre-computes `validateGeneratedCopy` (SSOT
+ * safety rails), formats a TRUSTED CONTEXT block, hands the block + Dahlia's copy + brief +
+ * runtime context to Max's per-creative box session, and returns the outcome + the validator
+ * result the pre-check surfaced.
+ *
+ * The exact QC prompt body Max sees (audience temperature, self-score, Schwartz target,
+ * competitor evidence) is composed by the caller and passed via `trustedPromptPreamble`; this
+ * function is responsible ONLY for the SHARED-VALIDATOR pre-check + dispatcher wiring, so both
+ * consumers (Dahlia's post-author self-check and Max's pre-verdict pre-check) read the SAME
+ * bytes off the SAME module.
+ *
+ * Fails CLOSED — dispatch error or missing dispatcher returns `dispatch_error` with the reason;
+ * the caller's exhaustion policy decides whether to bounce the copy or escalate. The validator
+ * result is ALWAYS returned so operators can observe a mismatched pair (Max says clean while
+ * the validator says a rail failed) downstream.
+ */
+export async function runQaCreativeCopyViaBoxSession(
+  input: QaCreativeCopyBoxSessionInput,
+  dispatch: CopyQcSessionDispatcher,
+): Promise<CopyQcSessionOutcome> {
+  const preCheck = computeCopyQcPreCheck({ copy: input.copy, brief: input.brief, context: input.context });
+  const prompt = [
+    preCheck.trustedContextBlock,
+    input.trustedPromptPreamble ?? "",
+    // Room for the M1 keystone dispatcher to inline the untrusted DATA fence below.
+  ]
+    .filter((s) => s.length > 0)
+    .join("\n\n");
+  let dispatchResult: { resultText: string; isError: boolean };
+  try {
+    dispatchResult = await dispatch(prompt, input.imagePath);
+  } catch (err) {
+    return {
+      kind: "dispatch_error",
+      validator: preCheck.validator,
+      reason: `qa_copy_session_dispatch_error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (dispatchResult.isError) {
+    return { kind: "dispatch_error", validator: preCheck.validator, reason: "qa_copy_session_error" };
+  }
+  return { kind: "ok", validator: preCheck.validator, resultText: dispatchResult.resultText };
 }

@@ -22,6 +22,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
+import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
@@ -219,6 +220,13 @@ export interface CopyAuthorSessionInputs {
    *  persuasion score can flag when Dahlia's actual level (as read from the copy) is below
    *  target_schwartz_level. Deterministic-mode callers pass an empty array. */
   marketSophisticationEvidence: string[];
+  /** dahlia-shared-deterministic-copy-validator Phase 2 — OUR own brand, used by the shared
+   *  validator's competitor-leak scan so we never flag our own tokens as a "competitor leak".
+   *  The caller (stockProduct) resolves this once per run from `workspaces.name` (falling back
+   *  to the product title). Optional so pre-existing callers keep compiling; when omitted the
+   *  validator sees an empty ourBrand string (fine — currently reserved for future
+   *  disambiguation on the validator side). */
+  ourBrand?: string;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -226,7 +234,17 @@ export interface CopyAuthorSessionInputs {
  *  reason so the caller can stamp it into the escalation. */
 export type CopyAuthorSessionOutcome =
   | { kind: "ok"; verdict: AuthorModeCopy; attempts: number }
-  | { kind: "exhausted"; reason: string; attempts: number };
+  | {
+      kind: "exhausted";
+      reason: string;
+      attempts: number;
+      /** dahlia-shared-deterministic-copy-validator Phase 2 — populated ONLY when the last
+       *  failed attempt tripped the shared validator (validateGeneratedCopy). The caller
+       *  (stockProduct) stamps this on the `dahlia_copy_author_exhausted` director_activity
+       *  metadata as `validator_misses` so operators can slice validator failures apart from
+       *  self-score / parse / cold-offer failures. Undefined on non-validator exhaustion. */
+      validatorMisses?: ValidatorCheck[];
+    };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
  *  reason string the caller can stamp into the revise prompt / escalation. Public + exported so
@@ -653,6 +671,7 @@ export async function runCopyAuthorSession(
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
   let lastReason = "";
+  let lastValidatorMisses: ValidatorCheck[] | undefined = undefined;
   const cap = MAX_COPY_AUTHOR_REVISE_ATTEMPTS;
   for (let attempt = 0; attempt <= cap; attempt++) {
     const prompt = buildCopyAuthorPrompt(inputs, attempt === 0 ? null : lastReason);
@@ -661,20 +680,24 @@ export async function runCopyAuthorSession(
       dispatchResult = await dispatch(prompt, inputs.imagePath);
     } catch (err) {
       lastReason = `dispatch_threw: ${err instanceof Error ? err.message : String(err)}`;
+      lastValidatorMisses = undefined;
       continue;
     }
     if (dispatchResult.isError) {
       lastReason = "session_error";
+      lastValidatorMisses = undefined;
       continue;
     }
     const parsed = parseAuthorVerdict(dispatchResult.resultText);
     if (parsed.kind === "invalid") {
       lastReason = `parse_failed: ${parsed.reason}`;
+      lastValidatorMisses = undefined;
       continue;
     }
     const verdict = parsed.verdict;
     if (verdict.selfScore.total < AUTHOR_SELF_SCORE_FLOOR) {
       lastReason = `self_score_below_floor (total=${verdict.selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR})`;
+      lastValidatorMisses = undefined;
       continue;
     }
     if (
@@ -686,6 +709,34 @@ export async function runCopyAuthorSession(
       })
     ) {
       lastReason = "cold_offer_leak";
+      lastValidatorMisses = undefined;
+      continue;
+    }
+    // dahlia-shared-deterministic-copy-validator Phase 2 — SSOT self-check. Runs AFTER the
+    // parse / self-score / cold-offer gates so a validator fail is the LAST word before the
+    // verdict is accepted. Same revise mechanism the other gates use — a pass:false becomes
+    // `validator_failed: <failing rail names>` in lastReason and drives one more dispatch;
+    // on exhaustion the failing checks[] bubble up in `validatorMisses` so stockProduct can
+    // stamp them onto the dahlia_copy_author_exhausted director_activity row's metadata.
+    const validator = validateGeneratedCopy(
+      {
+        headline: verdict.headline,
+        primaryText: verdict.primaryText,
+        description: verdict.description,
+      },
+      inputs.brief,
+      {
+        audience_temperature: verdict.audience_temperature,
+        competitorAdvertisers: inputs.competitorDna?.competitorAdvertiser
+          ? [inputs.competitorDna.competitorAdvertiser]
+          : [],
+        ourBrand: inputs.ourBrand ?? "",
+      },
+    );
+    if (!validator.pass) {
+      const failing = validator.checks.filter((c) => !c.pass);
+      lastReason = `validator_failed: ${failing.map((c) => c.rail).join(", ")}`;
+      lastValidatorMisses = failing;
       continue;
     }
     return { kind: "ok", verdict, attempts: attempt + 1 };
@@ -694,6 +745,7 @@ export async function runCopyAuthorSession(
     kind: "exhausted",
     reason: lastReason || "exhausted",
     attempts: cap + 1,
+    ...(lastValidatorMisses ? { validatorMisses: lastValidatorMisses } : {}),
   };
 }
 
@@ -714,6 +766,10 @@ async function runCopyAuthorSessionForImage(
     competitorDna: CopyAuthorSessionInputs["competitorDna"];
     targetSchwartzLevel: CopyAuthorSessionInputs["targetSchwartzLevel"];
     marketSophisticationEvidence: CopyAuthorSessionInputs["marketSophisticationEvidence"];
+    /** dahlia-shared-deterministic-copy-validator Phase 2 — resolved from workspaces.name
+     *  once per stockProduct run; threaded through so the shared validator's competitor-leak
+     *  scan sees the workspace's own brand and never treats it as a leak. */
+    ourBrand?: string;
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -747,6 +803,7 @@ async function runCopyAuthorSessionForImage(
         competitorDna: input.competitorDna,
         targetSchwartzLevel: input.targetSchwartzLevel,
         marketSophisticationEvidence: input.marketSophisticationEvidence,
+        ourBrand: input.ourBrand,
       },
       dispatch,
     );
@@ -1288,7 +1345,7 @@ async function stockProduct(
                 }
               : null;
           const outcome = await runCopyAuthorSessionForImage(
-            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence },
+            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence, ourBrand },
             copyAuthorDispatcher,
           );
           if (outcome.kind === "exhausted") {
@@ -1309,6 +1366,11 @@ async function stockProduct(
                 audience_temperature: audienceTemperature,
                 attempts: outcome.attempts,
                 last_reason: outcome.reason,
+                // dahlia-shared-deterministic-copy-validator Phase 2 — populated only when the
+                // last failed attempt tripped `validateGeneratedCopy`. Operators can slice
+                // validator-driven exhaustions apart from self-score / parse / cold-offer ones
+                // by whether this array is present + non-empty.
+                ...(outcome.validatorMisses ? { validator_misses: outcome.validatorMisses } : {}),
                 autonomous: true,
               },
             }).catch((e) => {

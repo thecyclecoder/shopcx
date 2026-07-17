@@ -530,6 +530,76 @@ test("insertReadyCreative → ad_campaigns insert: fake admin captures the row b
   assert.ok(rec.author_self_score, "author_self_score must be persisted alongside concept_tag");
 });
 
+// ── dahlia-shared-deterministic-copy-validator Phase 2 — validator wire-in ───────────────────
+
+test("runCopyAuthorSession: verdict that fails the shared validator (no_competitor_leak) → revise trigger; clean second attempt → ok", async () => {
+  // First emit leaks the competitor advertiser token; second emit is clean. The revise prompt
+  // MUST cite `validator_failed` so Dahlia knows which SSOT gate she tripped.
+  const leaky = envelope({
+    headline: "Cleaner than MUD/WTR",
+    primaryText: "Steady 4-hour energy — no crash.",
+    description: "Adaptogens",
+    audience_temperature: "warm",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+  });
+  const clean = envelope();
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: leaky }, { resultText: clean }]);
+  const outcome = await runCopyAuthorSession(
+    sessionInputs({
+      competitorDna: {
+        hook: "cleaner morning cup",
+        framework: null,
+        mechanismClaim: null,
+        proof: null,
+        offer: null,
+        competitorAdvertiser: "MUD/WTR",
+      },
+      ourBrand: "Amazing Coffee",
+    }),
+    dispatch,
+  );
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /validator_failed/);
+    assert.match(calls[1].prompt, /no_competitor_leak/);
+  }
+});
+
+test("runCopyAuthorSession: validator failure that keeps repeating → exhausted with validatorMisses carrying the failing checks", async () => {
+  const leaky = envelope({
+    headline: "Cleaner than MUD/WTR",
+    primaryText: "Steady 4-hour energy — no crash.",
+    description: "Adaptogens",
+    audience_temperature: "warm",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+  });
+  const { dispatch } = scriptedDispatcher([{ resultText: leaky }, { resultText: leaky }]);
+  const outcome = await runCopyAuthorSession(
+    sessionInputs({
+      competitorDna: {
+        hook: "cleaner morning cup",
+        framework: null,
+        mechanismClaim: null,
+        proof: null,
+        offer: null,
+        competitorAdvertiser: "MUD/WTR",
+      },
+      ourBrand: "Amazing Coffee",
+    }),
+    dispatch,
+  );
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.match(outcome.reason, /validator_failed/);
+    assert.ok(outcome.validatorMisses, "validatorMisses must be populated on a validator-driven exhaustion");
+    assert.ok(
+      outcome.validatorMisses!.some((c) => c.rail === "no_competitor_leak" && !c.pass),
+      "no_competitor_leak rail must appear in validatorMisses",
+    );
+  }
+});
+
 test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY when supplied", async () => {
   const withDna = scriptedDispatcher([{ resultText: envelope() }]);
   await runCopyAuthorSession(

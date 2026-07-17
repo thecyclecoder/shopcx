@@ -29,10 +29,10 @@ validateGeneratedCopy(
 
 Rails run in the listed order and every rail always runs — so a fail in rail 1 doesn't short-circuit the rest, and `checks[]` always carries six entries. Consumers can key on `rail` to render a per-rail badge instead of a bare `pass: false`.
 
-## Consumers (wired in Phase 2 — not yet)
+## Consumers (Phase 2 — WIRED)
 
-- [[creative-agent]] `stockProduct` author-mode branch calls `validateGeneratedCopy` after parsing Dahlia's verdict; a `pass: false` result triggers a copy-only revise via the same `MAX_COPY_AUTHOR_REVISE_ATTEMPTS` retry cap the M1 keystone already owns; on exhaustion escalates via the existing `dahlia_copy_author_exhausted` `director_activity` kind with `metadata.validator_misses = failing checks[]`.
-- [[creative-qa]] `runQaCreativeCopyViaBoxSession` pre-computes `validateGeneratedCopy` before dispatching Max, and hands the `{pass, checks[]}` to Max as TRUSTED CONTEXT via a `.claude/skills/max-copy-qc/SKILL.md` prompt block (outside the untrusted DATA fence — same sanitize/delimit pattern [[creative-qc-sandbox]] documents). Max still forms his own persuasion judgment; the shared validator only feeds him the safety-rail truth (persuasion stays in the rubric, safety stays deterministic).
+- [[creative-agent]] `runCopyAuthorSession` invokes `validateGeneratedCopy` as the final gate — after parse / self-score / cold-offer — so a `pass: false` result flows through the SAME `MAX_COPY_AUTHOR_REVISE_ATTEMPTS=1` retry mechanism as the other gates. The failing rail names ride out in `lastReason` as `validator_failed: <rail>, <rail>`; the failing checks ride out on the exhausted outcome's `validatorMisses: ValidatorCheck[]` field so `stockProduct` can stamp them onto the `dahlia_copy_author_exhausted` `director_activity` metadata as `validator_misses`.
+- [[creative-qa]] `runQaCreativeCopyViaBoxSession` pre-computes `validateGeneratedCopy` before dispatching Max and hands the typed `{pass, checks[]}` to Max as a `===BEGIN_VALIDATOR_TRUSTED_CONTEXT_v1===` block (outside the untrusted `===BEGIN_COPY_QC_DATA_v1===` DATA fence — same sanitize/delimit pattern [[creative-qc-sandbox]] documents). The [[../../../.claude/skills/max-copy-qc/SKILL.md|max-copy-qc]] SKILL contract tells Max to cite the SAME rail names in his `hard_gates` output when he bounces for a safety reason, so a validator miss and a Max hard-gate fail always talk about the same six categories. Max still forms his own persuasion judgment; the validator only feeds him the safety-rail truth (persuasion stays in the rubric, safety stays deterministic).
 
 ## Tests
 
