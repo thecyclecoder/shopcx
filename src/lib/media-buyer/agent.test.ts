@@ -464,7 +464,7 @@ test("computeMediaBuyerPlan — inactive cohort → no replenish, summary flags 
     baseInputs({
       cohort: cohort({ isActive: false }),
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
       currentTestCohortSize: 0,
     }),
@@ -479,9 +479,9 @@ test("computeMediaBuyerPlan — cohort deficit → replenish up to deficit, capp
       currentTestCohortSize: 1,
       cohortTargetCount: 3, // deficit=2
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -496,7 +496,7 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
     baseInputs({
       currentTestCohortSize: DEFAULT_TEST_COHORT_TARGET,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -513,9 +513,9 @@ test("computeMediaBuyerPlan — replenish SKIPS a ready candidate whose concept_
       currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
       liveConceptTags: new Set(["transformation", "curiosity"]),
       readyToTest: [
-        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
-        { ad_campaign_id: "cmp-mechanism", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
-        { ad_campaign_id: "cmp-objection", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "objection" },
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation", audience_temperature: null },
+        { ad_campaign_id: "cmp-mechanism", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism", audience_temperature: null },
+        { ad_campaign_id: "cmp-objection", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "objection", audience_temperature: null },
       ],
     }),
   );
@@ -534,7 +534,7 @@ test("computeMediaBuyerPlan — every ready candidate is a duplicate → 0 reple
       currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
       liveConceptTags: new Set(["transformation"]), // 2 rows same tag → the SET has 1 entry
       readyToTest: [
-        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation", audience_temperature: null },
       ],
     }),
   );
@@ -555,8 +555,8 @@ test("computeMediaBuyerPlan — NULL concept_tag candidates never conflict with 
       currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
       liveConceptTags: new Set(["transformation"]),
       readyToTest: [
-        { ad_campaign_id: "cmp-null-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-null-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-null-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-null-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -575,8 +575,8 @@ test("computeMediaBuyerPlan — empty liveConceptTags + tagged ready bin → pic
       currentTestCohortSize: 2, // deficit 2
       liveConceptTags: new Set(),
       readyToTest: [
-        { ad_campaign_id: "cmp-t", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
-        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+        { ad_campaign_id: "cmp-t", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation", audience_temperature: null },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism", audience_temperature: null },
       ],
     }),
   );
@@ -596,9 +596,9 @@ test("computeMediaBuyerPlan — a same-pass pick reserves its tag against a late
       currentTestCohortSize: 2, // deficit 2
       liveConceptTags: new Set(),
       readyToTest: [
-        { ad_campaign_id: "cmp-t1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
-        { ad_campaign_id: "cmp-t2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
-        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+        { ad_campaign_id: "cmp-t1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation", audience_temperature: null },
+        { ad_campaign_id: "cmp-t2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation", audience_temperature: null },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism", audience_temperature: null },
       ],
     }),
   );
@@ -623,10 +623,10 @@ test("computeMediaBuyerPlan — per-test cohort derives target from ceiling÷per
       currentTestCohortSize: 1, // 1 live → deficit 3
       cohortTargetCount: undefined, // per-test ignores the override; derives from budget math
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
-        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -852,7 +852,7 @@ test("buildShadowActivityRows — replenish action → media_buyer_replenished_t
       currentTestCohortSize: 1,
       cohortTargetCount: 3,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -905,7 +905,7 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
       currentTestCohortSize: 1,
       cohortTargetCount: 2,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
       ],
     }),
   );
@@ -1296,10 +1296,14 @@ test("agent.ts — Phase 3 replenish path uses the product-scoped listReadyToTes
   const { readFile } = await import("node:fs/promises");
   const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
 
-  // The product-scoped call is the ONE the runner uses now — it MUST be present.
+  // The product-scoped call is the ONE the runner uses now — it MUST be present. The
+  // bianca-route-ready-creatives-by-dahlia-temperature-tag Phase 1 wire adds a
+  // `temperature: "cold"` property after `productId: cohortProductId,` — the
+  // `[\s\S]*?\}` tail permits that (and any future orthogonal option) without allowing
+  // the workspaceId + productId pair to drift.
   assert.ok(
-    /listReadyToTest\(admin, \{\s*workspaceId: opts\.workspaceId,\s*productId: cohortProductId,?\s*\}\)/.test(src),
-    "runMediaBuyerLoop must call listReadyToTest with { workspaceId, productId: cohortProductId } — that's the product-scoped read",
+    /listReadyToTest\(admin, \{\s*workspaceId: opts\.workspaceId,\s*productId: cohortProductId,[\s\S]*?\}\)/.test(src),
+    "runMediaBuyerLoop must call listReadyToTest with { workspaceId, productId: cohortProductId, ... } — that's the product-scoped read",
   );
 
   // The product-blind Phase-1 shape (`listReadyToTest(admin, { workspaceId })`
@@ -1311,6 +1315,31 @@ test("agent.ts — Phase 3 replenish path uses the product-scoped listReadyToTes
     matches.length,
     0,
     `agent.ts still contains ${matches.length} product-blind listReadyToTest call(s): ${JSON.stringify(matches)} — the Phase 3 spec verification's grep guard forbids this. Add productId to every call.`,
+  );
+});
+
+// ── bianca-route-ready-creatives-by-dahlia-temperature-tag Phase 1 ──
+// Structural pin — the media-buyer replenish path MUST route the ready-to-test bin
+// through the temperature-scoped read so a Warm/Hot creative Dahlia tagged cannot
+// leak into the cold rail's deficit fill. Every media-buyer cohort we ship today is a
+// per-test COLD cohort, so `temperature: "cold"` is the always-on argument on the
+// replenish fetch. A stray edit that drops the arg regresses to the pre-Phase-1
+// temperature-blind read (the exact false-crown surface M3 forbids).
+test("agent.ts — Phase 1 (bianca temperature-tag): replenish fetch calls listReadyToTest with temperature: \"cold\"", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+
+  assert.ok(
+    /listReadyToTest\(admin, \{[\s\S]*?workspaceId: opts\.workspaceId,[\s\S]*?productId: cohortProductId,[\s\S]*?temperature:\s*["']cold["'][\s\S]*?\}\)/.test(src),
+    "runMediaBuyerLoop must call listReadyToTest with { workspaceId, productId: cohortProductId, temperature: \"cold\" } — the always-on cold-only replenish read (bianca-route-ready-creatives-by-dahlia-temperature-tag Phase 1)",
+  );
+
+  // Belt-and-suspenders: the literal `temperature: "cold"` string must appear
+  // near the runMediaBuyerLoop replenish site — a plain-text grep guard so a
+  // multi-line refactor that reshapes the call still trips this pin.
+  assert.ok(
+    src.includes('temperature: "cold"'),
+    "agent.ts must contain the literal `temperature: \"cold\"` on the replenish read — Phase 1 pin",
   );
 });
 

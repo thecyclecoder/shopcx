@@ -128,6 +128,7 @@ test("buildReplenishJobInsert — cohort with BOTH ids emits BOTH in create_adse
     destination: "https://example.com/pdp",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, true);
   if (!built.ok) return;
@@ -152,6 +153,7 @@ test("buildReplenishJobInsert — cohort with ONLY all-customers id emits ONLY t
     destination: "https://example.com/pdp",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, true);
   if (!built.ok) return;
@@ -176,6 +178,7 @@ test("buildReplenishJobInsert — cohort with NEITHER id forwards template uncha
     destination: "https://example.com/pdp",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, true);
   if (!built.ok) return;

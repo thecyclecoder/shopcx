@@ -1337,10 +1337,18 @@ export async function runMediaBuyerLoop(
   //     each product its own live-test-target-of-4 (not one shared count).
   // A null-product default cohort (Superfood Tabs today) omits both filters, so
   // its pre-Phase-2 shape is preserved.
+  //
+  // [[../../../docs/brain/specs/bianca-route-ready-creatives-by-dahlia-temperature-tag]]
+  // Phase 1 — the replenish read is TEMPERATURE-scoped to 'cold'. Every media-buyer
+  // cohort we ship today is a per-test cold cohort (docs/brain/tables/media_buyer_test_cohorts.md),
+  // so an audience_temperature-tagged creative Dahlia stamped as 'warm' or 'hot' MUST NOT reach
+  // the cold rail's deficit fill — the M4 crown signal is only meaningful when the tested set is
+  // temperature-uniform. Phase 3 will surface the parked non-cold creatives via listParkedReadyToTest.
   const cohortProductId = cohort?.productId ?? null;
   const { readyToTest } = await listReadyToTest(admin, {
     workspaceId: opts.workspaceId,
     productId: cohortProductId,
+    temperature: "cold",
   });
   const currentTestCohortSize = await readCurrentTestCohortSize(admin, {
     workspaceId: opts.workspaceId,
