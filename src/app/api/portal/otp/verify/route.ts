@@ -17,10 +17,15 @@ interface PostBody {
   code?: string;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as PostBody;
   if (!body.session_id || !body.code) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  }
+  if (!UUID_RE.test(body.session_id)) {
+    return NextResponse.json({ error: "invalid_session" }, { status: 400 });
   }
   const code = body.code.trim();
   if (!/^\d{4,8}$/.test(code)) {
