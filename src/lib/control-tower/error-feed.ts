@@ -830,6 +830,72 @@ export function isTransientSupabaseEdgeHtmlBody(message: string | null | undefin
   );
 }
 
+/**
+ * Transient Anthropic overload / 5xx leak noise — the vercel-drain sibling to
+ * `isTransientSupabaseEdgeHtmlBody` / `isTransientUndiciHeadersTimeout`, factored here so the
+ * vercel-logs route can reuse it
+ * ([[../specs/error-feed-classify-anthropic-overload-5xx-transient]]).
+ *
+ * Anthropic 529 (Overloaded) — and 5xx more broadly — is a well-known transient upstream
+ * ([[anthropic-retry]] `isRetryableAnthropicStatus`: 408/409/425/429/5xx incl. 529 are
+ * retryable; the customer-facing path already retries under
+ * `AnthropicDependencyError` with `OUTAGE_SPANNING_RETRIES`, and `claude-health` folds it
+ * into the outage-aware breaker). Best-effort callers that catch-and-log the throw (e.g.
+ * `src/lib/fraud-detector.ts` `[fraud] AI screen error:` around the AI screen fetch —
+ * `throw new Error(`AI API error: ${aiRes.status}`)` at `fraud-detector.ts:704`) surface the
+ * caught error to `console.error`, which Vercel drains to `/api/webhooks/vercel-logs`. A
+ * single such 529 leak therefore mints a fresh OPEN paged incident on a loop that already
+ * gracefully handled the failure — the classic monitor-false-positive that the existing
+ * transient-classifier chain was built to catch (Control Tower
+ * `vercel:ca4ae59dcd07707a`).
+ *
+ * `true` when the message carries an unambiguous Anthropic-5xx/overload marker:
+ *   - `AI API error: 5NN` — the fraud-detector's exact throw shape (and any other caller that
+ *      copies the pattern).
+ *   - `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from
+ *     [[anthropic-retry]], including the 529-overloaded case.
+ *   - `AnthropicDependencyError` — the class name Node's `util.inspect` writes for a caught
+ *     dependency-error throw ([[anthropic-retry]] `AnthropicDependencyError`).
+ *   - `api.anthropic.com` alongside any 5xx or overloaded marker — direct raw-fetch 5xx text
+ *     leaked from any caller that reports the upstream URL + status.
+ *
+ * A 4xx logic bug (`AI API error: 400` / `Anthropic ... returned 401`) stays captured / paged
+ * on first sighting — those never succeed on retry, so they are terminal bugs to fix.
+ * Recurrence-gated like its siblings: a chronic Anthropic outage would recur every beat and
+ * still surface, and the outage-aware breaker in `recordError` already handles a flood
+ * downstream of a known outage.
+ *
+ * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
+ * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
+ * and escalates to a real open+page ONLY if the SAME signature recurs within
+ * `TRANSIENT_RECUR_WINDOW_MS`.
+ */
+export function isTransientAnthropicOverloadError(message: string | null | undefined): boolean {
+  const text = (message ?? "").trim();
+  if (!text) return false;
+
+  // `AI API error: 5NN` — the fraud-detector's caught throw shape (and any other caller that
+  // copies the pattern). 529 is the specific overload signal we care about; the full 5xx band
+  // is retryable per `isRetryableAnthropicStatus`.
+  if (/AI API error:\s*5\d{2}\b/.test(text)) return true;
+
+  // `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from anthropic-retry
+  // (e.g. "Anthropic messages returned 529").
+  if (/Anthropic\b[^\n]*\breturned\s+5\d{2}\b/.test(text)) return true;
+
+  // The dependency-error class name leaks via `util.inspect` on a caught throw.
+  if (text.includes("AnthropicDependencyError")) return true;
+
+  // Direct raw-fetch upstream 5xx / overload text — any caller that reports the upstream
+  // URL + status. Guarded by `api.anthropic.com` so an unrelated 5xx isn't swept in.
+  if (text.includes("api.anthropic.com")) {
+    if (/\b5\d{2}\b/.test(text)) return true;
+    if (/overloaded/i.test(text)) return true;
+  }
+
+  return false;
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */
