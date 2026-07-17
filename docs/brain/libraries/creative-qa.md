@@ -102,5 +102,21 @@ The M1 keystone's rolled-up `persuasion_score` (0-10) rolls FIVE lenses into one
 
 Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] tests `(e)` / `(f)` — verdict WITH scroll_stop → row body carries the field; verdict missing / null / out-of-range → `parse_error` fail-closed.
 
+### Intent-aware 5-axis rubric ([[../specs/dahlia-researches-from-winners-flow-ad-library]] Phase 2)
+
+Phase 2 wires **Max's INTENT-AWARE 5-axis rubric** into the same QC session so Dahlia's Phase 1 declared intent (`{audience_temperature, purpose}` from [[creative-sourcing|CreativeIntent]] / `resolveResearchIntent`) drives the grade, not blind vibes.
+
+- **`DahliaCreativeRubric`** — the 5 axes Max scores on every Dahlia creative (1..10 + reason): `competitor_selection · temperature_selection · creative_quality · scroll_stopping · dr_consumer_psychology`. Grounded in the spec's supervisable-autonomy rule: Dahlia optimizes a proxy (bin depth); Max grades her on the dimensions that actually make a static win, and does so INTENT-AWARE.
+- **`parseDahliaRubric(raw)`** + **`parseDeclaredIntent(raw)`** — pure parsers wired into `parseCopyQaVerdict`. Fail-closed on malformed (partial axis / out-of-range score 1..10 / empty reason / bad temperature literal); TOLERANT of absence so a legacy M1 verdict emitted before Phase 2 parses byte-identical to today.
+- **`renderMaxDahliaRubricTrustedContext(input)`** — the pure TRUSTED CONTEXT block `runQaCreativeCopyViaBoxSession` inlines above the DATA fence when the caller threads `declaredIntent`. Sanitized worker-computed context (same fence pattern as `computeCopyQcPreCheck`'s validator block). Names each of the 5 axes, echoes the declared temperature, and — for a competitor imitation — includes the underlying winner's [[creative-skeleton|ConceptTags]] benchmark (`angle · archetype · awareness_stage · cialdini_lever · why_it_works`). When `declaredIntent` is null the function returns `""` so the M1 keystone prompt stays byte-identical.
+- **`insertCopyQaVerdict`** — the SDK helper now also writes `declared_intent` + `dahlia_rubric` on the [[../tables/ad_creative_copy_qc_verdicts]] row alongside `scroll_stop`.
+- **`readLatestCopyQaVerdict`** — the read chokepoint selects the two new columns too, so downstream (ad detail page, future Phase 3 gate) reads one consistent `StoredCopyQaVerdict` shape.
+
+The migration adding the two `jsonb` columns is `supabase/migrations/20261102120000_ad_creative_copy_qc_verdicts_dahlia_rubric.sql` (additive `add column if not exists`, auto-applied by the Control Tower migration-drift reconciler once the PR merges to main — no bespoke pre-merge apply required). Paired apply script `scripts/apply-ad-creative-copy-qc-verdicts-dahlia-rubric-migration.ts` exists so the `tagPendingActionType` classifier can re-tag any manual invocation and self-approve.
+
+**Advisory in Phase 2 — no hard-gate driver.** Phase 3 (a later session) will wire the ready-to-bin threshold that reads this column to enforce a min composite / trigger a revise loop. Any Phase-2 code path reading `dahlia_rubric` MUST NOT gate campaign readiness on it.
+
+Pinned by [[../../../src/lib/ads/creative-qa.dahlia-rubric.test.ts]] (12 cases).
+
 ## Related
 [[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[copy-validator]] (SSOT safety rails).
