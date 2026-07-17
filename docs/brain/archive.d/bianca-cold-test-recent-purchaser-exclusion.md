@@ -1,0 +1,1 @@
+- **Recent-purchaser exclusion on every cold-test adset** · verified 2026-07-17 · → [[lifecycles/ad-publish]]
