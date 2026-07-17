@@ -43,6 +43,7 @@ function inputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAuthorSes
     rubricText: "# rubric — fixture",
     audienceTemperature: "warm",
     competitorDna: null,
+    targetSchwartzLevel: 3,
     ...overrides,
   };
 }

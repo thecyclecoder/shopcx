@@ -45,6 +45,17 @@ The worker hands you:
     resolved deterministically by the worker (cold when the angle is a competitor imitation OR
     the angle's `acquisitionPower ≥ 8`; warm otherwise). You tag this verbatim back on the
     verdict, and it drives what copy is allowed (see the RAILS below).
+  - `TARGET_SCHWARTZ_LEVEL:` `1` | `2` | `3` | `4` | `5` — the shelf-derived modal Schwartz
+    awareness level the product's competitor shelf is writing at, computed pure by the worker
+    from the M1 author session's already-computed competitor shelf
+    (`computeSophisticationLevel` in [[../../../src/lib/ads/sophistication.ts]]). This is the
+    market's sophistication level — where its proven competitors have moved to.
+    **WRITE AT `target_schwartz_level`; NEVER below `(target_schwartz_level - 1)`.** A level-2
+    problem-aware ad in a level-4 mechanism market reads as a decade behind and never
+    converts; a level-3 solution-category ad in a level-5 versus-comparison market misses the
+    audience the shelf has already educated. Empty-shelf products default to `3`
+    (solution-aware). The value is a session input, not a hard block — the enforcement is
+    that you write at the correct level.
   - `COMPETITOR_DNA:` (present only when the angle is `source='competitor'`) the
     reverse-engineered mechanism + proof + advertiser tokens from the scouted competitor ad,
     **already debranded** by the worker. Use it as inspiration for the underlying angle only —

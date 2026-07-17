@@ -60,6 +60,7 @@ function sessionInputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAu
     rubricText: "# rubric — fixture",
     audienceTemperature: "warm",
     competitorDna: null,
+    targetSchwartzLevel: 3,
     ...overrides,
   };
 }
@@ -302,12 +303,15 @@ test("runCopyAuthorSession (f): cold audience emit that leaks offer language →
   }
 });
 
-test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, and the DATA block", async () => {
+test("runCopyAuthorSession: prompt embeds IMAGE, AUDIENCE_TEMPERATURE, TARGET_SCHWARTZ_LEVEL, and the DATA block", async () => {
   const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
-  await runCopyAuthorSession(sessionInputs({ audienceTemperature: "cold", imagePath: "/tmp/pinned.jpg" }), dispatch);
+  await runCopyAuthorSession(sessionInputs({ audienceTemperature: "cold", imagePath: "/tmp/pinned.jpg", targetSchwartzLevel: 4 }), dispatch);
   const prompt = calls[0].prompt;
   assert.match(prompt, /IMAGE: \/tmp\/pinned\.jpg/);
   assert.match(prompt, /AUDIENCE_TEMPERATURE: cold/);
+  // dahlia-five-frameworks-copy-skill Phase 2 / Fix 1 — the shelf-derived Schwartz level
+  // must appear in the session input so Dahlia writes AT the market's sophistication level.
+  assert.match(prompt, /TARGET_SCHWARTZ_LEVEL: 4/);
   assert.match(prompt, /===BEGIN_AUTHOR_DATA_v1===/);
   assert.match(prompt, /===END_AUTHOR_DATA_v1===/);
 });
