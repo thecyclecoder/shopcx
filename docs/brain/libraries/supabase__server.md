@@ -23,9 +23,9 @@ Tag: `db-load-route-auth-helper`. Shared auth entrypoint for API-route handlers
 so the JWT is verified locally against the cached JWKS with zero auth-table
 reads per request (falls back to `getUser()` internally on legacy HS256 keys).
 Returns the same `{ user }` shape routes already read via
-`const { data: { user } } = await supabase.auth.getUser()` — the codemod
-(Phase 2 of [[../specs/db-load-route-auth-getclaims-codemod]]) is a mechanical
-`const { user } = await getAuthedUser()` swap. Pass `{ fresh: true }` when the
+`const { data: { user } } = await supabase.auth.getUser()` — all 528 routes
+are migrated to this helper (see [[../archive.d/db-load-route-auth-getclaims-codemod]])
+via a mechanical `const { user } = await getAuthedUser()` swap. Pass `{ fresh: true }` when the
 route needs a User field not present in the JWT payload (falls back to the
 server-side `getUser()` for that one call site).
 

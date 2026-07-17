@@ -1,0 +1,1 @@
+- **DB-load: route all API-route auth through a shared getClaims() helper** · verified 2026-07-17 · → [[../libraries/supabase__server]]
