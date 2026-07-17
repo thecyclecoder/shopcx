@@ -97,6 +97,7 @@ import {
 } from "@/lib/inngest/customer-demographics";
 import { orderAddressFallback } from "@/lib/inngest/order-address-fallback";
 import { resellerDiscoveryWeeklyCron, resellerDiscoveryManual } from "@/lib/inngest/reseller-discovery";
+import { mediaBuyerAllCustomersRefreshWeeklyCron } from "@/lib/inngest/media-buyer-all-customers-refresh";
 import { textCampaignScheduled, textCampaignSendTick } from "@/lib/inngest/marketing-text";
 import { smsCallbackDrain, smsInboundDrain, receivedSmsRollupCron } from "@/lib/inngest/sms-callback-drain";
 import { refreshCustomerSegmentsCron, refreshWorkspaceSegments } from "@/lib/inngest/refresh-customer-segments";
@@ -267,6 +268,7 @@ export const registeredInngestFunctions = [
   orderAddressFallback,
   resellerDiscoveryWeeklyCron,
   resellerDiscoveryManual,
+  mediaBuyerAllCustomersRefreshWeeklyCron,
   textCampaignScheduled,
   textCampaignSendTick,
   smsCallbackDrain,

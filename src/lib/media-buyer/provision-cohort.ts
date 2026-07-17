@@ -17,11 +17,16 @@ import { getMetaUserToken, getOrCreateTestingCampaign } from "@/lib/meta-ads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** The proven cold-test audience (cloned from Amazing Coffee's live MB test adsets): US 18–65, home+recent,
- *  Advantage+ Audience on. Callers override per product/account as needed. */
+/** The proven cold-test converter cohort (docs/brain/reference/meta-scaling-methodology.md § "Test audience
+ *  held constant = our proven converter (US women 50-65, matches the cold-50+ creative)"): US women 50-65,
+ *  home+recent, Advantage+ Audience on. Aligning the cold-test default to F50-65 makes every per-creative
+ *  CPA read a clean signal against the customer the ad is actually meant to sell — a per-test cohort
+ *  minted against 18-65 confounds the crown/kill call the Media Buyer downstream is trying to make.
+ *  Callers override per product/account as needed. */
 export const DEFAULT_TEST_TARGETING: Record<string, unknown> = {
-  age_min: 18,
+  age_min: 50,
   age_max: 65,
+  genders: [2],
   geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
   targeting_automation: { advantage_audience: 1 },
 };
@@ -41,15 +46,38 @@ export function maxConcurrentTests(cohort: { daily_test_ceiling_cents: number; p
   return Math.max(1, Math.floor(cohort.daily_test_ceiling_cents / per));
 }
 
-/** Build the adset template that every per-test ad set clones (only the CREATIVE varies across a cohort). */
-export function buildAdsetTemplate(opts: { pixelId: string; targeting?: Record<string, unknown> }): AdsetTemplate {
+/**
+ * Build the adset template that every per-test ad set clones (only the CREATIVE varies across a cohort).
+ *
+ * `excludedCustomAudienceIds` ([[../../../docs/brain/specs/bianca-cold-test-recent-purchaser-exclusion]]
+ * Phase 2) merges into the resolved targeting as `excluded_custom_audiences: [{ id }, …]` — Meta's
+ * required shape for a custom-audience exclusion on an ad set. Caller-supplied `targeting` that
+ * ALREADY carries its own `excluded_custom_audiences` key wins (caller intent is respected — e.g.
+ * a founder-crafted template that carries an extra list beyond the audience id). When the caller
+ * passes NO `targeting`, DEFAULT_TEST_TARGETING is the base and the exclusion is layered on.
+ * Omitting `excludedCustomAudienceIds` (or passing `[]`) leaves targeting exactly as the caller
+ * asked (no empty `excluded_custom_audiences` key is added — the shape stays clean).
+ */
+export function buildAdsetTemplate(opts: {
+  pixelId: string;
+  targeting?: Record<string, unknown>;
+  excludedCustomAudienceIds?: string[];
+}): AdsetTemplate {
+  const base = opts.targeting ?? DEFAULT_TEST_TARGETING;
+  const ids = opts.excludedCustomAudienceIds ?? [];
+  const callerAlreadyHasExclusion =
+    Object.prototype.hasOwnProperty.call(base, "excluded_custom_audiences");
+  const targeting: Record<string, unknown> =
+    ids.length === 0 || callerAlreadyHasExclusion
+      ? { ...base }
+      : { ...base, excluded_custom_audiences: ids.map((id) => ({ id })) };
   return {
     optimizationGoal: "OFFSITE_CONVERSIONS",
     billingEvent: "IMPRESSIONS",
     bidStrategy: "LOWEST_COST_WITHOUT_CAP",
     pixelId: opts.pixelId,
     customEventType: "PURCHASE",
-    targeting: opts.targeting ?? DEFAULT_TEST_TARGETING,
+    targeting,
   };
 }
 

@@ -1,0 +1,1 @@
+- **Bianca routes ready creatives by Dahlia's temperature tag (Cold → cold rail, Hot/Warm parked until Surface 3)** · verified 2026-07-17 · → [[../libraries/ready-to-test]]

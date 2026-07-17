@@ -1,0 +1,1 @@
+- **Measure existing-buyer contamination in the cold test adsets (1-hour, one-shot)** · verified 2026-07-17 · → [[../recipes/measure-cold-test-purchaser-overlap]]

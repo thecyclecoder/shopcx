@@ -484,6 +484,7 @@ function buildSensorTrustDormantPlan(
     replenish: [],
     fatigueReplenish: [],
     replenishDiagnostic: null,
+    deferred: [],
     summary: `Dormant: sensor-trust denied — ${denial.reason}`,
   };
 }
@@ -530,6 +531,34 @@ export interface MediaBuyerReplenishAction {
   /** The cohort ceiling we pin the ad set's daily budget to. */
   dailyTestCeilingCents: number;
   rationale: string;
+}
+
+/**
+ * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 —
+ * one entry per promote the pure plan-computer DROPPED because a rail fired.
+ * `rail='per_object_cooldown'` carries `sinceLastActionMs` + `cooldownMs`
+ * (the last iteration_actions age against the policy window); `rail='per_account_daily_budget_delta_ceiling'`
+ * carries `wouldBeDelta` + `cumulativeSoFar` + `ceiling` (the pass's accumulator vs the
+ * per-account daily ceiling). The runner writes ONE `media_buyer_scale_rail_deferred`
+ * `director_activity` row per entry so the promote ledger explains suppression instead
+ * of the pass looking silently empty.
+ */
+export interface MediaBuyerDeferredAction {
+  rail: "per_object_cooldown" | "per_account_daily_budget_delta_ceiling";
+  targetObjectId: string;
+  sourceMetaAdId: string;
+  policyVersionId: string;
+  rationale: string;
+  /** Populated when rail='per_object_cooldown'. Milliseconds since the last recorded action on this object. */
+  sinceLastActionMs?: number;
+  /** Populated when rail='per_object_cooldown'. The policy's cooldown window in milliseconds. */
+  cooldownMs?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. |after - before| for the dropped promote. */
+  wouldBeDelta?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. Cumulative absolute delta emitted this pass BEFORE this promote. */
+  cumulativeSoFar?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. The policy's per-account daily delta ceiling in cents. */
+  ceiling?: number;
 }
 
 /**
@@ -588,6 +617,14 @@ export interface MediaBuyerPlan {
    * to emit `media_buyer_replenish_no_diverse_candidate`.
    */
   replenishDiagnostic: MediaBuyerReplenishDiagnostic | null;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — promotes the pure
+   * plan dropped because a scale-edit rail fired (per-object cooldown or per-account daily
+   * budget-delta ceiling). The runner iterates and writes ONE `media_buyer_scale_rail_deferred`
+   * `director_activity` row per entry so a "why is this pass short a promote" question has a
+   * cited answer instead of silence.
+   */
+  deferred: MediaBuyerDeferredAction[];
   summary: string;
 }
 
@@ -729,6 +766,29 @@ export interface MediaBuyerPlanInputs {
    * (Superfood Tabs today) OR by any pre-Phase-2 caller (unit tests, legacy fixtures).
    */
   liveConceptTags?: ReadonlySet<string>;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — the last-N (48h)
+   * `iteration_actions` slice for `(workspaceId, metaAdAccountId)`. Shape mirrors the decision
+   * engine's `RecentAction` ({@link ../meta/decision-engine} `loadRecentActions`) plus the
+   * before/after budget columns so the same slice can seed a same-UTC-day historical delta
+   * (a future extension — today the pure function reads only `object_id` + `created_at` for
+   * the `per_object_cooldown_hours` gate). Omit / pass `[]` to disable the cooldown gate
+   * (backwards compatible with every pre-Phase-1 caller / unit test).
+   */
+  recentActions?: Array<{
+    object_id: string;
+    action_type: string;
+    created_at: string;
+    before_budget_cents: number | null;
+    after_budget_cents: number | null;
+  }>;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — the "now" the
+   * cooldown predicate compares last-action ages against. Required for the per-object cooldown
+   * gate to fire; when omitted the gate is inert so pre-Phase-1 callers keep the pre-rail
+   * behavior.
+   */
+  nowMs?: number;
 }
 
 /**
@@ -777,11 +837,42 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       replenish: [],
       fatigueReplenish: [],
       replenishDiagnostic: null,
+      deferred: [],
       summary:
         "Dormant: no active iteration_policies row — Media Buyer never scales/kills without a supervised policy. Author + activate a conservative policy to activate the loop.",
     };
   }
   const policy = input.policy;
+
+  // `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — scale-edit rails.
+  // Two rails the storefront decision engine already enforces on scale actions; Bianca now
+  // honors them on its promote path:
+  //   • per_object_cooldown_hours — don't scale an object we scaled recently. Fed by
+  //     recentActions (iteration_actions slice) → lastActionAt map keyed by object_id.
+  //   • per_account_daily_budget_delta_ceiling_cents — don't exceed the day's total
+  //     absolute budget delta on the account. Accumulated over emitted promotes this pass.
+  // Every dropped promote surfaces on `deferred[]` so the runner can cite the rail; the
+  // pure function stays DB-free (no writes here, ever).
+  const deferred: MediaBuyerDeferredAction[] = [];
+  const recentActions = input.recentActions ?? [];
+  const nowMs = input.nowMs;
+  const lastActionAt = new Map<string, number>();
+  for (const a of recentActions) {
+    const t = new Date(a.created_at).getTime();
+    if (!Number.isFinite(t)) continue;
+    const prev = lastActionAt.get(a.object_id);
+    if (prev == null || t > prev) lastActionAt.set(a.object_id, t);
+  }
+  const cooldownMs = policy.per_object_cooldown_hours * 3600_000;
+  const inCooldown = (objectId: string): { in: boolean; sinceLastActionMs: number | null } => {
+    if (nowMs == null) return { in: false, sinceLastActionMs: null };
+    const last = lastActionAt.get(objectId);
+    if (last == null) return { in: false, sinceLastActionMs: null };
+    const since = nowMs - last;
+    return { in: since < cooldownMs, sinceLastActionMs: since };
+  };
+  let cumulativeDailyDelta = 0;
+  const ceiling = policy.per_account_daily_budget_delta_ceiling_cents;
 
   // ── Promote ────────────────────────────────────────────────────────────────
   const promote: MediaBuyerPromoteAction[] = [];
@@ -791,9 +882,45 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     if (!policy.trust_meta_reported_signal && w.roas < policy.scale_up_roas_trigger) continue;
     const adsetId = input.metaAdIdToAdsetId.get(w.metaAdId);
     if (!adsetId) continue; // no parent adset resolved — can't scale
+    // Rail 1: per_object_cooldown_hours — drop a promote against an object that has moved
+    // inside the cooldown window. Same seam the decision engine uses (mirrored from
+    // computeAutonomousActions in src/lib/meta/decision-engine.ts:340-365).
+    const cool = inCooldown(adsetId);
+    if (cool.in && cool.sinceLastActionMs != null) {
+      const sinceH = (cool.sinceLastActionMs / 3600_000).toFixed(1);
+      deferred.push({
+        rail: "per_object_cooldown",
+        targetObjectId: adsetId,
+        sourceMetaAdId: w.metaAdId,
+        policyVersionId: policy.id,
+        sinceLastActionMs: cool.sinceLastActionMs,
+        cooldownMs,
+        rationale: `Deferred promote: adset ${adsetId} last moved ${sinceH}h ago (< per_object_cooldown_hours ${policy.per_object_cooldown_hours}h); winner ad ${w.metaAdId} ROAS ${w.roas.toFixed(2)}.`,
+      });
+      continue;
+    }
     const before = input.budgets.get(adsetId) ?? null;
     const stepPct = Math.min(policy.scale_up_step_pct, policy.scale_up_cap_pct);
     const after = before != null ? Math.round(before * (1 + stepPct)) : null;
+    // Rail 2: per_account_daily_budget_delta_ceiling_cents — drop a promote whose absolute
+    // budget delta would breach the pass's per-account daily ceiling. Same accumulator
+    // pattern the decision engine's emitBudgetChange uses (mirrored from
+    // src/lib/meta/decision-engine.ts:405-410).
+    const delta = before != null && after != null ? Math.abs(after - before) : 0;
+    if (ceiling > 0 && delta > 0 && cumulativeDailyDelta + delta > ceiling) {
+      deferred.push({
+        rail: "per_account_daily_budget_delta_ceiling",
+        targetObjectId: adsetId,
+        sourceMetaAdId: w.metaAdId,
+        policyVersionId: policy.id,
+        wouldBeDelta: delta,
+        cumulativeSoFar: cumulativeDailyDelta,
+        ceiling,
+        rationale: `Deferred promote: |after-before|=$${(delta / 100).toFixed(2)} on adset ${adsetId} would breach per_account_daily_budget_delta_ceiling_cents $${(ceiling / 100).toFixed(2)} (already ${(cumulativeDailyDelta / 100).toFixed(2)} this pass); winner ad ${w.metaAdId} ROAS ${w.roas.toFixed(2)}.`,
+      });
+      continue;
+    }
+    cumulativeDailyDelta += delta;
     promote.push({
       kind: "promote",
       sourceMetaAdId: w.metaAdId,
@@ -911,6 +1038,14 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     summaryParts.push("cohort dormant — no active media_buyer_test_cohorts row; replenish skipped");
   }
 
+  if (deferred.length > 0) {
+    const cooled = deferred.filter((d) => d.rail === "per_object_cooldown").length;
+    const capped = deferred.filter((d) => d.rail === "per_account_daily_budget_delta_ceiling").length;
+    summaryParts.push(
+      `scale-edit rails deferred=${deferred.length} (cooldown=${cooled}, delta-ceiling=${capped})`,
+    );
+  }
+
   summaryParts.unshift(
     `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} fatigue_replenish=${fatigueReplenish.length} (policy v${policy.version})`,
   );
@@ -926,6 +1061,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     replenish,
     fatigueReplenish,
     replenishDiagnostic,
+    deferred,
     summary: summaryParts.join(" · "),
   };
 }
@@ -1337,10 +1473,18 @@ export async function runMediaBuyerLoop(
   //     each product its own live-test-target-of-4 (not one shared count).
   // A null-product default cohort (Superfood Tabs today) omits both filters, so
   // its pre-Phase-2 shape is preserved.
+  //
+  // [[../../../docs/brain/specs/bianca-route-ready-creatives-by-dahlia-temperature-tag]]
+  // Phase 1 — the replenish read is TEMPERATURE-scoped to 'cold'. Every media-buyer
+  // cohort we ship today is a per-test cold cohort (docs/brain/tables/media_buyer_test_cohorts.md),
+  // so an audience_temperature-tagged creative Dahlia stamped as 'warm' or 'hot' MUST NOT reach
+  // the cold rail's deficit fill — the M4 crown signal is only meaningful when the tested set is
+  // temperature-uniform. Phase 3 will surface the parked non-cold creatives via listParkedReadyToTest.
   const cohortProductId = cohort?.productId ?? null;
   const { readyToTest } = await listReadyToTest(admin, {
     workspaceId: opts.workspaceId,
     productId: cohortProductId,
+    temperature: "cold",
   });
   const currentTestCohortSize = await readCurrentTestCohortSize(admin, {
     workspaceId: opts.workspaceId,
@@ -1912,6 +2056,7 @@ export async function runMediaBuyerLoopForAccount(
             replenish: [],
             fatigueReplenish: [],
             replenishDiagnostic: null,
+            deferred: [],
             summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,
           },
           writes: {
@@ -2048,6 +2193,67 @@ export type BuildReplenishJobInsertResult =
   | { ok: true; insert: ReplenishJobInsertBody; createAdsetSpec: CreateAdsetSpec | null; metaAdsetIdForJob: string | null }
   | { ok: false; reason: string };
 
+/**
+ * PURE — ensure `targeting.excluded_custom_audiences` lists an entry whose `id === audienceId`.
+ * When `audienceId` is null the targeting is returned unchanged (legacy pre-Phase-2 cohort).
+ * When the current targeting already lists an entry with that id (the template composed it at
+ * provision time), the targeting is returned unchanged. Otherwise a fresh copy is returned with
+ * the id APPENDED to any existing exclusion list (Meta accepts multiple entries — the sibling
+ * customer-list audience composes into the same list via bianca-full-order-history-customer-list-exclusion-audience).
+ *
+ * bianca-cold-test-recent-purchaser-exclusion Phase 2.
+ */
+export function ensureExcludedPurchaserAudience(
+  targeting: Record<string, unknown>,
+  audienceId: string | null,
+): Record<string, unknown> {
+  if (!audienceId) return targeting;
+  const raw = targeting.excluded_custom_audiences;
+  const existing = Array.isArray(raw) ? raw : [];
+  for (const entry of existing) {
+    if (entry && typeof entry === "object" && (entry as Record<string, unknown>).id === audienceId) return targeting;
+  }
+  return { ...targeting, excluded_custom_audiences: [...existing, { id: audienceId }] };
+}
+
+/**
+ * PURE — compose EVERY declared exclusion audience id onto `targeting.excluded_custom_audiences`.
+ * Filters out null/undefined ids (a cohort that never stamped one) and dedupes against entries
+ * already present, so a template whose provision-time composition already carries an id is
+ * returned unchanged. The composite is the exact shape the publish-gate demands: an entry per
+ * declared id (pixel WEBSITE audience + hashed CUSTOMER_LIST audience together on every cold-test
+ * ad set). Returns targeting unchanged when no non-null id is passed.
+ *
+ * bianca-full-order-history-customer-list-exclusion-audience Fix 1 — replaces the single-id
+ * `ensureExcludedPurchaserAudience` at replenish time so BOTH ids compose. The single-id helper
+ * is retained for callers still on the sibling spec's shape.
+ */
+export function ensureExcludedAudiences(
+  targeting: Record<string, unknown>,
+  audienceIds: Array<string | null | undefined>,
+): Record<string, unknown> {
+  const ids = audienceIds.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (ids.length === 0) return targeting;
+  const raw = targeting.excluded_custom_audiences;
+  const existing = Array.isArray(raw) ? [...raw] : [];
+  const already = new Set<string>();
+  for (const entry of existing) {
+    if (entry && typeof entry === "object") {
+      const id = (entry as Record<string, unknown>).id;
+      if (typeof id === "string") already.add(id);
+    }
+  }
+  let changed = false;
+  for (const id of ids) {
+    if (already.has(id)) continue;
+    existing.push({ id });
+    already.add(id);
+    changed = true;
+  }
+  if (!changed) return targeting;
+  return { ...targeting, excluded_custom_audiences: existing };
+}
+
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
   const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
 
@@ -2066,6 +2272,20 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
         reason: `per-test cohort missing ${[!campaignId && "test_meta_campaign_id", !tmpl && "adset_template"].filter(Boolean).join(", ")} — skipped to avoid a malformed ad set`,
       };
     }
+    // bianca-cold-test-recent-purchaser-exclusion Phase 2 + bianca-full-order-history-
+    // customer-list-exclusion-audience Fix 1 — the freshly-minted per-test ad set MUST
+    // publish with EVERY exclusion audience the cohort declares listed under
+    // `targeting.excluded_custom_audiences` (Meta's `[{ id }, …]` shape). Prefer the
+    // template's own targeting (buildAdsetTemplate composes the exclusion at provision time),
+    // but if the cohort has stamped an id and the template's targeting doesn't carry it, layer
+    // it on here as a belt-and-suspenders — the publish-gate refuses both
+    // `missing_purchaser_exclusion` AND `missing_customer_exclusion` on any per-test publish
+    // whose spec doesn't. A cohort with only one id set (e.g. legacy pre-Fix-1 row) forwards
+    // the template with just that id; a cohort with neither id set forwards the template unchanged.
+    const targeting = ensureExcludedAudiences(tmpl.targeting, [
+      cohort.excludedPurchaserAudienceId,
+      cohort.excludedAllCustomersAudienceId,
+    ]);
     createAdsetSpec = {
       campaign_id: campaignId,
       name: adName,
@@ -2075,7 +2295,7 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
       optimization_goal: tmpl.optimizationGoal,
       billing_event: tmpl.billingEvent,
       bid_strategy: tmpl.bidStrategy,
-      targeting: tmpl.targeting,
+      targeting,
     };
     metaAdsetIdForJob = null;
   }

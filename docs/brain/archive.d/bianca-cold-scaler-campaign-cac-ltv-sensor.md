@@ -1,0 +1,1 @@
+- **Campaign-level CAC:LTV sensor for the M4 cold-scaler surface** · verified 2026-07-17 · → [[lifecycles/media-buyer-cold-scaler]]

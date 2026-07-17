@@ -456,6 +456,18 @@ export function resolveResearchIntent(explicit?: CreativeIntent): CreativeIntent
   return explicit ?? DEFAULT_RESEARCH_INTENT;
 }
 
+/** The offer to render on a creative's IMAGE, given the driving angle. Cold-audience creatives lead
+ *  with the hook, NEVER a discount (CEO: a cold ad doesn't need to lead with an offer) — so a cold
+ *  angle strips the offer to `null` (no discount / percent-off / badge on the static). Warm/hot pass
+ *  the offer through unchanged. Mirrors the cold-offer COPY gate (`hasColdOfferLeak`) on the image
+ *  side, where it was previously unenforced. PURE — pinned so the suppression can't silently regress. */
+export function imageOfferForAudience(
+  angle: Pick<ScoredAngle, "source" | "acquisitionPower">,
+  offer: CreativeBrief["offer"],
+): CreativeBrief["offer"] {
+  return resolveAudienceTemperature(angle) === "cold" ? null : offer;
+}
+
 /** Grep-target boundary markers for the copy-author DATA block. Long enough that a sanitized brief
  *  string can't forge them (backticks + leading '---' are escaped by sanitizeAuthorField). */
 export const COPY_AUTHOR_DATA_BLOCK_BEGIN = "===BEGIN_AUTHOR_DATA_v1===";
@@ -1383,6 +1395,14 @@ async function stockProduct(
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed && !skipped; attempt++) {
       try {
         const brief = await buildCreativeBrief(pi, angle, stories);
+        // Cold-audience creatives lead with the hook, NEVER a discount (CEO: a cold ad doesn't need to
+        // lead with an offer). The cold-offer gate (`hasColdOfferLeak`) already enforces this on the
+        // COPY, but the IMAGE prompt renders `brief.offer` regardless of temperature — so a cold
+        // creative could still show a discount ON THE STATIC even when the copy is clean (observed on
+        // the 2026-07-17 Amazing Coffee test run). Strip the offer from the brief for a cold angle
+        // BEFORE generation, so every downstream consumer (the image prompt in generateCreative, the
+        // QA offer-compare, and the deterministic/author copy) sees NO offer. Warm/hot are untouched.
+        brief.offer = imageOfferForAudience(angle, brief.offer);
         // Composition-transfer gate (spec ad-creative-requires-real-packshot-never-invent-packaging Phase 1):
         // a competitor angle may ONLY run composition transfer when the brief has a faithful packshot.
         // Without one, the "swap in OUR product" prompt has no real pack to work from and Nano Banana
