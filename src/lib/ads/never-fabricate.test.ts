@@ -87,7 +87,7 @@ test("(a) every claim traces cleanly across all seven sources → ok:true, misse
 // ── (b) reviews.byClaim: a bare number '40 lbs' whose returned reviews DON'T contain '40 lbs'
 //      → ok:false with claim_not_in_source ─────────────────────────────────────────────────────
 
-test("(b) reviews.byClaim '40 lbs' but returned reviews don't contain '40 lbs' → claim_not_in_source", () => {
+test("(b) reviews.byClaim '40 lbs' but returned reviews don't contain the number 40 → fabricated_number", () => {
   const trace: ClaimTraceEntry[] = [
     { claim: "40 lbs", source: "reviews.byClaim", source_ref: "weight loss" },
   ];
@@ -101,9 +101,55 @@ test("(b) reviews.byClaim '40 lbs' but returned reviews don't contain '40 lbs' �
   const result = verifyClaimTrace(trace, brief(), pi(), resolved);
   assert.equal(result.ok, false);
   assert.equal(result.misses.length, 1);
-  assert.equal(result.misses[0].reason, "claim_not_in_source");
+  assert.equal(result.misses[0].reason, "fabricated_number");
   assert.equal(result.misses[0].source, "reviews.byClaim");
   assert.equal(result.misses[0].claim, "40 lbs");
+});
+
+// ── fact-grounded: a faithful PARAPHRASE of our real data passes; a fabricated number / off-topic
+//    claim / competitor stat is blocked (CEO 2026-07-17) ──────────────────────────────────────────
+function factBrief() {
+  return {
+    leadProof: { kind: "review" as const, text: "I lost 40+ pounds!", attribution: "Barbara H." },
+    transformation: null,
+    supportingBenefits: ["steady all-day energy"],
+    proofStack: ["700,000+ customers across the country trust Superfoods Company", "Non-GMO", "3rd Party Tested", "Made In The USA"],
+    competitorDna: { hook: "500+ million cups of coffee sold" },
+  } as unknown as Parameters<typeof verifyClaimTrace>[1];
+}
+const emptyPi = { ingredients: [], ingredientResearch: [] } as unknown as Parameters<typeof verifyClaimTrace>[2];
+
+test("fact-grounded: a faithful review paraphrase passes ('Barbara says she lost 40+ pounds')", () => {
+  const r = verifyClaimTrace([{ claim: "Barbara H. says she lost 40+ pounds", source: "leadProof", source_ref: "Barbara H." }], factBrief(), emptyPi);
+  assert.equal(r.ok, true);
+});
+
+test("fact-grounded: a reworded proof-stat with OUR number passes ('700,000+ who reach for their superfood coffee')", () => {
+  const r = verifyClaimTrace([{ claim: "700,000+ who reach for their superfood coffee", source: "supportingBenefit", source_ref: "700,000+ customers across the country trust Superfoods Company" }], factBrief(), emptyPi);
+  assert.equal(r.ok, true);
+});
+
+test("fact-grounded: a combined proof claim passes ('clean, non-GMO, 3rd party tested, made in USA')", () => {
+  const r = verifyClaimTrace([{ claim: "clean, non-GMO, 3rd party tested, and made in the USA", source: "supportingBenefit", source_ref: "Non-GMO" }], factBrief(), emptyPi);
+  assert.equal(r.ok, true);
+});
+
+test("fact-grounded: a COMPETITOR'S number is fabricated_number ('500 million cups')", () => {
+  const r = verifyClaimTrace([{ claim: "500 million cups keep getting poured", source: "competitorDna", source_ref: "hook" }], factBrief(), emptyPi);
+  assert.equal(r.ok, false);
+  assert.equal(r.misses[0].reason, "fabricated_number");
+});
+
+test("fact-grounded: an off-topic claim on a real number is blocked ('700,000+ cured of cancer')", () => {
+  const r = verifyClaimTrace([{ claim: "700,000+ cured of cancer", source: "supportingBenefit", source_ref: "700,000+ customers across the country trust Superfoods Company" }], factBrief(), emptyPi);
+  assert.equal(r.ok, false);
+  assert.equal(r.misses[0].reason, "claim_not_in_source");
+});
+
+test("fact-grounded: a fabricated stat is blocked ('clinically proven 90% more focus')", () => {
+  const r = verifyClaimTrace([{ claim: "clinically proven 90% more focus", source: "supportingBenefit", source_ref: "steady all-day energy" }], factBrief(), emptyPi);
+  assert.equal(r.ok, false);
+  assert.equal(r.misses[0].reason, "fabricated_number");
 });
 
 // ── (c) ingredients with source_ref='L-theanine' when pi.ingredients carries only ashwagandha
