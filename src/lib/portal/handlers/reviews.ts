@@ -34,10 +34,24 @@ export const featuredReviews: RouteHandler = async ({ auth, route, url }) => {
 
   // Resolve every incoming ID (Shopify ID or internal UUID) to the
   // internal product UUID. Reviews join on `product_id` now.
-  const { data: products } = await admin.from("products")
+  // Split by id-shape before querying: a Shopify numeric ID compared against the uuid `id`
+  // column throws 22P02 ("invalid input syntax for type uuid"), which fails the WHOLE query and
+  // silently returns no products. Only UUIDs go to `id`, only non-UUIDs to `shopify_product_id`
+  // — same split transform-subscription.ts / image-fallback.ts already use.
+  const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+  const productUuids = productIds.filter(isUuid);
+  const productShopifyIds = productIds.filter((s) => !isUuid(s));
+  let prodQuery = admin.from("products")
     .select("id, shopify_product_id")
-    .eq("workspace_id", auth.workspaceId)
-    .or(productIds.map(id => `shopify_product_id.eq.${id},id.eq.${id}`).join(","));
+    .eq("workspace_id", auth.workspaceId);
+  if (productUuids.length && productShopifyIds.length) {
+    prodQuery = prodQuery.or(`id.in.(${productUuids.join(",")}),shopify_product_id.in.(${productShopifyIds.map(s => `"${s}"`).join(",")})`);
+  } else if (productUuids.length) {
+    prodQuery = prodQuery.in("id", productUuids);
+  } else {
+    prodQuery = prodQuery.in("shopify_product_id", productShopifyIds);
+  }
+  const { data: products } = await prodQuery;
 
   const incomingToInternal: Record<string, string> = {};
   for (const p of products || []) {

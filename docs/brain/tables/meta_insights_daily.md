@@ -20,6 +20,7 @@ to score and act. None existed before — only the account rollup [[daily_meta_a
 | `spend_cents` | `int8` | — | default: `0` (Meta spend dollars ×100) |
 | `impressions` | `int8` | — | default: `0` |
 | `clicks` | `int8` | — | default: `0` |
+| `inline_link_clicks` | `int8` | ✓ | **nullable-means-unknown** — pre-migration rows stay NULL; per-mode CTR readers EXCLUDE NULLs (never treat as 0). Meta Graph field `inline_link_clicks` (Ads Manager label "Link Clicks") — a click that reached the ad's landing_url, excluding video-thumb taps, engagement clicks, CTA-only clicks. Consumed by the M3 leading-signal helper `getPerCopyModeCtrCac` ([[../specs/dahlia-cold-graded-inline-link-ctr-leading-signal]]). |
 | `ctr` | `numeric` | — | default: `0` · **percent**, as reported by Meta |
 | `cpc_cents` | `int8` | — | default: `0` |
 | `purchases` | `int4` | — | default: `0` · from `actions[purchase]` |

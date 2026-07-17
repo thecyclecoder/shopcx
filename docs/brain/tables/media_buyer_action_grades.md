@@ -34,6 +34,7 @@ The rubric's discipline (spec's own words): "a sound call that regressed on a la
 | `override_reason` | `text?` | Why the human overrode. |
 | `overridden_at` | `timestamptz?` | |
 | `graded_at` | `timestamptz` | NOT NULL default `now()` · when the grader emitted this row. |
+| `dahlia_copy_mode` | `text?` | **M3 measurement-lane split** — `'author' \| 'deterministic' \| null`. Stamped at grade time by [[../libraries/media-buyer-grader]] `resolveDahliaCopyMode` (source_meta_ad_id → [[ad_publish_jobs]].meta_ad_id → [[ad_publish_jobs]].campaign_id → [[ad_campaigns]].author_self_score; non-null → `'author'`, null → `'deterministic'`). CHECK-constrained. **Pre-migration rows stay NULL** — the ship-time backfill `scripts/_backfill-media-buyer-grades-dahlia-copy-mode.ts` (auto-ledgered by [[../libraries/ship-time-backfill-detector]]) stamps them; per-mode readers ([[../libraries/media-buyer-insights]] `getPerCopyModeCtrCac`) EXCLUDE NULLs so the pre-migration gap doesn't skew the M3 flag-graduation gate for DAHLIA_COPY_MODE ([[../specs/dahlia-cold-graded-inline-link-ctr-leading-signal]]). Migration `20261024140000`. |
 | `created_at` | `timestamptz` | default `now()` |
 | `updated_at` | `timestamptz` | default `now()` · auto-bumped by `media_buyer_action_grades_touch_updated_at` trigger |
 
@@ -41,6 +42,7 @@ The rubric's discipline (spec's own words): "a sound call that regressed on a la
 
 - `media_buyer_action_grades_ws_idx` — `(workspace_id, created_at desc)`. Workspace grade feed.
 - `media_buyer_action_grades_kind_idx` — `(workspace_id, action_kind, graded_at desc)`. Roll-up by verb (average grade for promote vs kill vs replenish).
+- `media_buyer_action_grades_copy_mode_idx` — partial `(workspace_id, dahlia_copy_mode, graded_at desc) where dahlia_copy_mode is not null`. Powers the M3 per-mode CAC + inline-link-CTR helper `getPerCopyModeCtrCac` — NULL rows are excluded from the index and the read alike.
 
 ## Triggers
 
@@ -59,6 +61,7 @@ The rubric's discipline (spec's own words): "a sound call that regressed on a la
 - **No active policy → the grader is a no-op.** The scorer requires the thresholds that produced the decisions to grade them. `gradeMediaBuyerActions` returns `{ graded: 0 }` when `loadActivePolicy` returns null.
 - **A Growth Director override lives on the same row.** Flip `graded_by='human'` + set `overridden_by` + `override_reason` + `overridden_at`. The initial agent scores are preserved (no shadow columns) — a re-run of the grader will NOT clobber a human-overridden row (the write guard on `.select("id")` catches it).
 - **Small at scale.** One row per Media Buyer action; with a weekly cadence + ~10 actions per workspace per pass, growth is bounded. No archival policy needed yet.
+- **`dahlia_copy_mode` NULL is EXCLUDED from every per-mode read (M3 measurement lane).** NULL means either the row predates migration `20261024140000` (pending backfill by `scripts/_backfill-media-buyer-grades-dahlia-copy-mode.ts`) or the graded creative had no [[ad_publish_jobs]] row (legacy/off-platform ad, unresolvable). Per-mode CTR/CAC readers ([[../libraries/media-buyer-insights]] `getPerCopyModeCtrCac`) filter these out on the read so the pre-migration gap can't skew the M3 delta. Treating NULL as either mode would be exactly the false-success the spec calls out.
 
 ## Migration
 

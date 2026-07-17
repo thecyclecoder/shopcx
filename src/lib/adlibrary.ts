@@ -37,6 +37,9 @@ export interface AdLibrarySearchParams {
   geo?: string[];
   daysBack?: number;
   pageSize?: number;
+  /** AdLibrary `adsType` filter: "1"=image, "2"=video, "3"=carousel. Omit for all types. The scout
+   *  passes `["1"]` (image only) — we research STATIC creative, not video (founder 2026-07-17). */
+  adsType?: string[];
 }
 
 /**
@@ -204,13 +207,15 @@ function normalize(row: Record<string, unknown>): NormalizedAd {
  */
 export async function searchAds(params: AdLibrarySearchParams): Promise<NormalizedAd[]> {
   if (!ADLIBRARY_API_KEY) throw new Error("no_adlibrary_key");
-  const body = {
+  const body: Record<string, unknown> = {
     keyword: params.keyword,
     appType: params.appType ?? "3",
     geo: params.geo ?? ["USA"],
     daysBack: params.daysBack ?? 30,
     pageSize: params.pageSize ?? 30,
   };
+  // adsType filter: "1"=image, "2"=video, "3"=carousel (AdLibrary API). Only sent when the caller sets it.
+  if (params.adsType && params.adsType.length) body.adsType = params.adsType;
   const res = await fetch(`${ADLIBRARY_BASE}/api/search`, {
     method: "POST",
     headers: {

@@ -33,3 +33,7 @@ Each surviving line reads `• {ProductTitle} — {summary}` — the founder-leg
 ## One digest per workspace per pass (Phase 2)
 
 The `deliverMediaBuyerDigest` call posts once per media-buyer job. Under media-buyer-digest-consolidate-product-names-suppress-noop **Phase 2**, the [[../inngest/media-buyer-cadence]] dispatcher now enqueues **exactly one workspace-scoped `kind='media-buyer'` `agent_jobs` row per pass** (rather than one row per active cohort), so a single lane run rolls up every account × per-product cohort and posts **one** consolidated digest — no per-cohort duplicates in `#director-growth-max`. The dormant-heartbeat guarantee (an account with no active cohort still runs one pass with `productId=null` so the audit row lands) lives inside the lane's `runMediaBuyerLoopForAccount` fan-out and is unchanged.
+
+## Per-copy-mode leading signal (M3)
+
+The digest also carries the per-mode CAC + inline-link-CTR delta from [[media-buyer-insights]] `getPerCopyModeCtrCac`. On each pass the lane calls `getPerCopyModeCtrCac(admin, workspaceId, {days:14, audienceCohort:'cold'})` and, when `insufficient_data:false`, prints the two buckets + delta so #director-growth-max sees the DAHLIA_COPY_MODE flag-graduation signal alongside the promote/kill grade averages. When `insufficient_data:true` the digest prints a "(insufficient_data — n<20 in a bucket)" note so the Growth Director knows the delta isn't trustworthy yet. See [[../specs/dahlia-cold-graded-inline-link-ctr-leading-signal]] Phase 2.

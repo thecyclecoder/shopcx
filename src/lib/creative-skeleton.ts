@@ -401,8 +401,12 @@ export async function sweepSeed(
 
   const ads = await searchAds({
     keyword: seed.keyword,
-    daysBack: opts.daysBack ?? 30,
-    pageSize: opts.pageSize ?? 30,
+    // IMAGE-ONLY (adsType "1") — we research STATIC creative, not video (founder 2026-07-17: "we aren't
+    // doing video stuff"). Wider window + full page: daysBack 90 (matches the AdLibrary UI default) and
+    // pageSize 50 (the API max) so a competitor's static set isn't truncated to the newest 30.
+    adsType: ["1"],
+    daysBack: opts.daysBack ?? 90,
+    pageSize: opts.pageSize ?? 50,
   });
   result.searched = ads.length;
 

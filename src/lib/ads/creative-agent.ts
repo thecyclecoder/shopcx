@@ -330,12 +330,59 @@ export function sanitizeAuthorField(raw: unknown): string {
   return s;
 }
 
+/** Cap for a sanitized revise reason inside the trusted REVISE instruction line. Reason
+ *  strings are short by construction (`parse_failed: bad_concept_tag (...)`, `self_score_below_floor
+ *  (total=n, floor=m)`, `cold_offer_leak`, `session_error`, `dispatch_threw: <err.message>`) — 240
+ *  chars is more than enough for any real reason and small enough that even a maximally-adversarial
+ *  injection can't crowd out the trusted instruction. */
+export const COPY_AUTHOR_REVISE_REASON_MAX_LEN = 240;
+
+/** Sanitize a retry reason string before it is interpolated into the TRUSTED REVISE instruction
+ *  line of `buildCopyAuthorPrompt` (dahlia-cold-graded-inline-link-ctr-leading-signal Phase 4 /
+ *  security-agent finding sec:injection:src/lib/ads/creative-agent.ts:357). Reason strings can
+ *  carry raw model-supplied values (notably `parseAuthorVerdict` builds `bad_concept_tag (${tag})`
+ *  from the untrusted Sonnet reply); dropping them into a trusted line unsanitized would let a
+ *  malicious concept_tag forge instructions, escape into a data block, or introduce control
+ *  characters that break the prompt frame. The choke-point sanitizer here is the invariant even
+ *  if a future assignment is added to `lastReason` — every path that flows into the interpolation
+ *  passes through this guard, not just the ones the reviewer remembered. Rules:
+ *    • collapse control chars (including newlines/CR/tabs) into visible escape tokens so the
+ *      revise instruction stays on ONE line — a `\n` can't add a fresh imperative;
+ *    • escape backticks, code-fence markers, and stray `---` heading markers so the reason can't
+ *      open a fenced block or a YAML front-matter frame;
+ *    • escape the `===BEGIN_AUTHOR_DATA_v1===` / `===END_AUTHOR_DATA_v1===` boundary markers so
+ *      the reason can't fake a data-block delimiter;
+ *    • cap length at `COPY_AUTHOR_REVISE_REASON_MAX_LEN` chars (any overflow is truncated with a
+ *      visible `…[TRUNCATED n chars]` marker — no silent drop).
+ *  Returns "" for a nullish / non-string input so the caller can compose without a null-guard. */
+export function sanitizeReviseReason(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) return "";
+  let s = raw.replace(/\r\n/g, "\n");
+  s = s.replace(/[\x00-\x1F\x7F]/g, (ch) => {
+    if (ch === "\n") return "\\n";
+    if (ch === "\r") return "\\r";
+    if (ch === "\t") return "\\t";
+    return `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
+  });
+  s = s.replace(/`/g, "\\`");
+  s = s.replace(/---/g, "\\---");
+  s = s.replace(/===BEGIN_AUTHOR_DATA_v1===/g, "==\\=BEGIN_AUTHOR_DATA_v1=\\==");
+  s = s.replace(/===END_AUTHOR_DATA_v1===/g, "==\\=END_AUTHOR_DATA_v1=\\==");
+  if (s.length > COPY_AUTHOR_REVISE_REASON_MAX_LEN) {
+    const kept = s.slice(0, COPY_AUTHOR_REVISE_REASON_MAX_LEN);
+    return `${kept}…[TRUNCATED ${s.length - COPY_AUTHOR_REVISE_REASON_MAX_LEN} chars]`;
+  }
+  return s;
+}
+
 /** Build the prompt for one copy-author dispatch. Deterministic + side-effect-free so the
  *  test can pin the exact wrapping (the TRUSTED outer instruction + the DATA block with the
  *  UNTRUSTED brief / rubric / competitor-DNA). When `reviseReason` is non-null, the outer prompt
  *  tells Dahlia this is the ONE external revise the worker sanctions — reuse the same image, address
  *  the named reason, and emit a fresh envelope. `imagePath` is a caller-minted tmp path, not user
- *  data, so it's safe to embed as-is outside the DATA block. */
+ *  data, so it's safe to embed as-is outside the DATA block. `reviseReason` is passed through
+ *  `sanitizeReviseReason` at the interpolation point — the choke-point guard so a future assignment
+ *  to `lastReason` in the runner can't bypass the sanitizer. */
 export function buildCopyAuthorPrompt(
   inputs: CopyAuthorSessionInputs,
   reviseReason: string | null,
@@ -351,10 +398,11 @@ export function buildCopyAuthorPrompt(
         }),
       )
     : null;
-  const reviseBlock = reviseReason
+  const sanitizedReviseReason = sanitizeReviseReason(reviseReason);
+  const reviseBlock = sanitizedReviseReason
     ? [
         "",
-        `REVISE — this is the ONE external revise the worker sanctions for THIS image. Your previous emit did not land; the reason from the worker is: ${reviseReason}. Reuse the same image (do not ask for a new one), address the reason head-on, and emit ONE fresh AuthorModeCopy envelope. Rails 1-5 still apply. Do not hedge with a needs_attention / needs_input status — the verdict is a JSON envelope, always.`,
+        `REVISE — this is the ONE external revise the worker sanctions for THIS image. Your previous emit did not land; the reason from the worker is: ${sanitizedReviseReason}. Reuse the same image (do not ask for a new one), address the reason head-on, and emit ONE fresh AuthorModeCopy envelope. Rails 1-5 still apply. Do not hedge with a needs_attention / needs_input status — the verdict is a JSON envelope, always.`,
       ]
     : [];
   return [
