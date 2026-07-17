@@ -57,7 +57,7 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // loop each poll pass (throttled with an internal TTL) so a regressed live RPC surfaces as
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
-import { isMissingSessionError as isMissingBoxSession } from "../src/lib/box-session-resume"; // resumable box-chat lanes retry fresh once on a dead session id (Phase 1: director-coach)
+import { runBoxTurnWithFreshFallback, pickNextSession } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2)
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -10394,30 +10394,34 @@ async function runSpecChatJob(job: Job) {
     // (markNewSpecInReview → authorSpecRowFromMarkdown → upsertSpec). NO docs/brain/specs/*.md is committed
     // — specs live in the DB now (spec-pm-markdown-purge / retire-md-reads). turn: the box returns a short
     // conversational reply as JSON. (Mirrors runPlanJob: the box generates, the worker authors to the DB.)
-    let prompt: string;
-    if (mode === "verify") {
-      const slug = params.slug || "";
-      prompt = [
-        `Use the spec-chat skill in VERIFY mode. The spec IS a ROW in public.specs + public.spec_phases — that DB row is the source of truth. The worker materialized its body for you at docs/brain/specs/${slug}.md inside a THROWAWAY worktree as a scratch buffer transport (never a committed file); Read it (and the brain pages it touches) as grounding.`,
-        `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present. Then this call returns and the deterministic worker parses your buffer and RE-AUTHORS the body to public.specs via the author-spec SDK (upsertSpec), then discards the worktree (git worktree remove). The .md you wrote is transport, not an artifact — nothing is committed to main; the DB row is the spec.`,
-        `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
-      ].join("\n");
-    } else if (mode === "finalize") {
-      const finalizeAsk = [
-        `Now FINALIZE in FINALIZE mode. The AUTHORED SPEC is a ROW in public.specs + public.spec_phases — authored by the deterministic worker via the author-spec SDK (upsertSpec) AFTER this call returns. The docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md you are about to WRITE is a THROWAWAY SCRATCH BUFFER inside a fresh worktree — a transport for the spec body chosen to avoid JSON-escaping fragility for large markdown. Once you return, the worker reads that buffer, upserts it to public.specs + public.spec_phases, and DISCARDS the worktree (git worktree remove). It is NEVER committed to main and is NEVER the source of truth; the DB row is. Write the buffer anyway — the worker needs it as its input. Materialize the full spec by WRITING docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing spec unless the conversation said otherwise` : `pick a SHORT kebab-case slug derived FROM THE TITLE — lowercase words joined by hyphens, e.g. "auto-refund-on-stuck-return"; NEVER a UUID or a random id; all new phases start ⏳`}).`,
-        `The buffer MUST have (the author-spec SDK parses these into the DB row + spec_phases): an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (a real owner function slug + a real parent — a spec with no owner/parent is unbuildable); a one-paragraph summary tied to a business outcome; AT LEAST ONE concrete "## Phase N — name" section (NO status markers — per-phase status lives in spec_phases, the markdown is content-only) — each phase becomes a spec_phases row; a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
-        `Write ONLY that one buffer file under docs/brain/specs/; do NOT edit anything else, do NOT run git (the worker discards the worktree — a commit would be lost anyway). Final message = ONLY one JSON object: {"status":"finalized","slug":"<the kebab slug you wrote>"}.`,
-      ].join("\n");
-      prompt = isResume
-        ? finalizeAsk
-        : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, finalizeAsk].join("\n");
-    } else {
-      // turn
-      const latest = [...(chat?.messages ?? [])].reverse().find((m) => m.role === "user")?.content || "";
-      prompt = isResume
+    // The turn+finalize prompts are built INSIDE the failover closure so a fresh restart (sid=null — either
+    // an account-pool cap hop OR the box-chat-resume-falls-back-fresh-on-missing-session Phase-2 retry)
+    // rebuilds full context from the transcript rather than sending a resume-shape prompt to a fresh
+    // session (silent context loss). verify has no chat/session, so its prompt is standalone.
+    const finalizeAsk = mode === "finalize" ? [
+      `Now FINALIZE in FINALIZE mode. The AUTHORED SPEC is a ROW in public.specs + public.spec_phases — authored by the deterministic worker via the author-spec SDK (upsertSpec) AFTER this call returns. The docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md you are about to WRITE is a THROWAWAY SCRATCH BUFFER inside a fresh worktree — a transport for the spec body chosen to avoid JSON-escaping fragility for large markdown. Once you return, the worker reads that buffer, upserts it to public.specs + public.spec_phases, and DISCARDS the worktree (git worktree remove). It is NEVER committed to main and is NEVER the source of truth; the DB row is. Write the buffer anyway — the worker needs it as its input. Materialize the full spec by WRITING docs/brain/specs/${refineSlug ? refineSlug : "{kebab-slug-from-the-title}"}.md into the working tree (create it; ${refineSlug ? `this is a refine — preserve shipped (✅) phases of the existing spec unless the conversation said otherwise` : `pick a SHORT kebab-case slug derived FROM THE TITLE — lowercase words joined by hyphens, e.g. "auto-refund-on-stuck-return"; NEVER a UUID or a random id; all new phases start ⏳`}).`,
+      `The buffer MUST have (the author-spec SDK parses these into the DB row + spec_phases): an H1 "# <Title>" (NO status emoji — status is DB-driven); directly under it the metadata line \`**Owner:** [[../functions/{slug}]] · **Parent:** {a function mandate or a goal milestone}\` (a real owner function slug + a real parent — a spec with no owner/parent is unbuildable); a one-paragraph summary tied to a business outcome; AT LEAST ONE concrete "## Phase N — name" section (NO status markers — per-phase status lives in spec_phases, the markdown is content-only) — each phase becomes a spec_phases row; a "## Safety / invariants" section; a "## Completion criteria" section; and a "## Verification" section (concrete prod-facing checklist).`,
+      `Write ONLY that one buffer file under docs/brain/specs/; do NOT edit anything else, do NOT run git (the worker discards the worktree — a commit would be lost anyway). Final message = ONLY one JSON object: {"status":"finalized","slug":"<the kebab slug you wrote>"}.`,
+    ].join("\n") : "";
+    const latest = mode === "turn" ? ([...(chat?.messages ?? [])].reverse().find((m) => m.role === "user")?.content || "") : "";
+    const buildPrompt = (sid: string | null): string => {
+      if (mode === "verify") {
+        const slug = params.slug || "";
+        return [
+          `Use the spec-chat skill in VERIFY mode. The spec IS a ROW in public.specs + public.spec_phases — that DB row is the source of truth. The worker materialized its body for you at docs/brain/specs/${slug}.md inside a THROWAWAY worktree as a scratch buffer transport (never a committed file); Read it (and the brain pages it touches) as grounding.`,
+          `WRITE an updated docs/brain/specs/${slug}.md that inserts (or refreshes) ONLY a "## Verification" section — a concrete, prod-facing test checklist the OWNER follows to confirm the feature works in production. 3-7 bullets, each "- On {where}, {do what} → expect {observable result}" naming the REAL routes/tables/CLI the spec touched (look them up; never invent). No vague "test it works". Preserve everything else in the file byte-for-byte; put the section before "## Related" if present. Then this call returns and the deterministic worker parses your buffer and RE-AUTHORS the body to public.specs via the author-spec SDK (upsertSpec), then discards the worktree (git worktree remove). The .md you wrote is transport, not an artifact — nothing is committed to main; the DB row is the spec.`,
+          `Do NOT edit any other file, do NOT run git. Final message = ONLY one JSON object: {"status":"verified","slug":"${slug}"}.`,
+        ].join("\n");
+      }
+      if (mode === "finalize") {
+        return sid
+          ? finalizeAsk
+          : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, finalizeAsk].join("\n");
+      }
+      return sid
         ? `${latest}\n\n${SPEC_CHAT_OUTPUT}`
         : [specChatFraming(refineSlug, seedSlug), ``, `Conversation so far:`, renderTranscript(chat!.messages), ``, `Respond to the latest [Founder] message. ${SPEC_CHAT_OUTPUT}`].join("\n");
-    }
+    };
 
     // ── Run the box session (top-level Max claude; secrets stripped; WebSearch allowed) ──
     // Universal account failover (foreman helper): a usage wall — incl. the 7-day `rejected` cap — hops to
@@ -10425,10 +10429,19 @@ async function runSpecChatJob(job: Job) {
     // (no per-account column), so a resume assumes the default account (RR1) as owner — same convention as
     // dev-ask/coach; if RR1 is capped the helper starts FRESH on a healthy account (the prompt rebuilds the
     // full conversation from the transcript, so nothing is lost). allCapped → park `blocked_on_usage`.
-    const { result: chatRun, configDir: chatDir, allCapped } = await runBoxClaude(
-      { sessionId },
-      (cfg, sid) => runClaude(prompt, sid, wt, cfg, job.id),
-    );
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — route through the shared wrapper so a
+    // resumed session that's gone from its account retries once with sid=null (buildPrompt rebuilds full
+    // context on the fresh branch), never re-wedging on the same dead id.
+    const { result: chatRun, configDir: chatDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: (cfg, sid) => runClaude(buildPrompt(sid), sid, wt, cfg, job.id),
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
+      },
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !chatRun) {
       // Park (not fail) so the turn auto-resumes when an account resets. Surface the wait on the chat thread.
       if (chatId) {
@@ -10441,7 +10454,7 @@ async function runSpecChatJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = chatRun;
     await meterAgentJob(job, chatDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
 
@@ -10763,7 +10776,12 @@ async function runTicketImproveJob(job: Job) {
   console.log(`${tag} ${isResume ? "resuming" : "starting"} session ${sessionId.slice(0, 8)} on ticket ${ticketId.slice(0, 8)}`);
 
   try {
-    const prompt = isResume
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — the prompt is built INSIDE the failover
+    // closure keyed off `sid` (not the pre-call `isResume`) so a fresh restart — whether from an account-pool
+    // wall OR the missing-session retry — rebuilds full ticket context via loadImproveBrief rather than
+    // sending a "continue the conversation" prompt to a fresh session (silent context loss).
+    const improveBrief = await loadImproveBrief(ticketId);
+    const buildImprovePrompt = (sid: string | null): string => sid
       ? [
           `New message from the human on ticket ${ticketId}: "${userMessage}"`,
           `Continue the conversation. Same role, same read-only-investigation rule, same final JSON output protocol ("reply" or "propose") as before.`,
@@ -10776,7 +10794,7 @@ async function runTicketImproveJob(job: Job) {
           `Use the ticket-improve skill (cwd is the repo root). You are the founder's CX co-pilot fixing ONE specific ticket, super-powered on Max.`,
           ``,
           `TICKET id ${ticketId} — full context loaded for you:`,
-          await loadImproveBrief(ticketId),
+          improveBrief,
           ``,
           `The human's message: "${userMessage}"`,
           ``,
@@ -10801,16 +10819,37 @@ async function runTicketImproveJob(job: Job) {
           `Self-check it before you close: if you can't show graders a before/after, a tag/category delta, or a preserved-voice quote, the turn caps at ~6/10 regardless of how correct the underlying work was.`,
         ].join("\n");
 
-    const { session: boxSession, resultText, isError, raw, usage, model, configDir: improveDir } = await runBoxLane(
-      (cfg, sid) => runImproveClaude(prompt, sid, REPO_DIR, cfg, job.id),
-      { sessionId: session.box_session_id }, // chat session has no per-account column → owner defaults to RR1 (dev-ask convention)
-    );
+    const failover = await runBoxTurnWithFreshFallback({
+      pin: { sessionId: session.box_session_id }, // chat session has no per-account column → owner defaults to RR1 (dev-ask convention)
+      run: (cfg, sid) => runImproveClaude(buildImprovePrompt(sid), sid, REPO_DIR, cfg, job.id),
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText);
+        // Improve's success shapes: {status:'reply', message} / {status:'propose', message, plan}.
+        return typeof p?.status === "string" && (p.status === "reply" || p.status === "propose");
+      },
+      onFreshFallback: () => console.warn(`${tag} resumed session ${session.box_session_id ? session.box_session_id.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from loadImproveBrief)`),
+    });
+    // Preserve runBoxLane's synthetic-when-all-capped shape so the downstream handler's isError path fires
+    // exactly as before (isUsageCapError(raw) → park blocked_on_usage / re-queue).
+    const laneRun = failover.result ?? {
+      session: session.box_session_id ?? null,
+      resultText: ALL_CAPPED_MARKER,
+      isError: true,
+      raw: ALL_CAPPED_MARKER,
+      usage: null,
+      model: null,
+    };
+    const improveDir = failover.configDir;
+    const { session: boxSession, resultText, isError, raw, usage, model } = laneRun;
     await meterAgentJob(job, improveDir ?? undefined, usage, model);
     const parsed = parseStatus(resultText);
     console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
 
-    if (boxSession && boxSession !== session.box_session_id) {
-      await setSession({ box_session_id: boxSession });
+    // Persist via pickNextSession so a dead prior id is never re-saved on the freshly-retried path.
+    const nextSession = pickNextSession({ newSession: boxSession, priorSessionId: session.box_session_id, raw });
+    if (nextSession !== session.box_session_id) {
+      await setSession({ box_session_id: nextSession });
     }
 
     const messages = Array.isArray(session.messages) ? session.messages : [];
@@ -15332,16 +15371,26 @@ async function runDeveloperMessageJob(job: Job) {
     // Account-pool failover (#20): pick a healthy Max account, run on it, and on the 5-hour wall hop to a
     // healthy one (or park blocked_on_usage). The prompt is built INSIDE the closure from the sessionId the
     // pool hands back — a failover that starts fresh rebuilds full context from the transcript (no loss).
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — route through the shared wrapper so a
+    // resumed session that's gone from its account retries once with sid=null (renderDevTranscript rebuilds
+    // full context on the fresh branch), never re-wedging on the same dead id.
     const latest = [...thread.messages].reverse().find((m) => m.role === "user")?.content || "";
-    const { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
-      { sessionId },
-      async (cfg, sid) => {
-        const turnPrompt = sid
-          ? `${latest}\n\n${DEV_ASK_OUTPUT}`
-          : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
-        return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id);
+    const runDevTurn = async (cfg: string, sid: string | null) => {
+      const turnPrompt = sid
+        ? `${latest}\n\n${DEV_ASK_OUTPUT}`
+        : [devAskFraming(), ``, `Conversation so far:`, renderDevTranscript(thread.messages), ``, `Respond to the latest [Founder] message.`].join("\n");
+      return runDevAskClaude(await withCoaching(job, turnPrompt), sid, wt, cfg, job.id);
+    };
+    const { result: coachRun, configDir: coachDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: runDevTurn,
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
       },
-    );
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — coach auto-resumes at reset" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
@@ -15350,7 +15399,7 @@ async function runDeveloperMessageJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = coachRun;
     await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    const newSession = session || sessionId;
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     console.log(`${tag} claude finished — status: ${(parsed?.status as string) ?? "(none)"} isError=${isError}`);
 
@@ -17883,28 +17932,23 @@ async function runDirectorCoachJob(job: Job) {
         : [directorCoachFraming(thread.director_function), ``, intentDirective, ``, `Conversation so far:`, renderCoachTranscript(thread.messages), ``, `Respond to the latest [CEO] message.`].join("\n");
       return runDevAskClaude(turnPrompt, sid, wt, cfg, job.id);
     };
-    let { result: coachRun, configDir: coachDir, allCapped } = await withAccountFailover(
-      { sessionId },
-      runTurn,
-    );
-    // box-chat-resume-falls-back-fresh-on-missing-session Phase 1 — a resumed run whose session id
-    // is no longer on its owning account ('No conversation found with session ID') retries ONCE with
-    // sessionId=null. The closure at :17879 already rebuilds the FULL transcript prompt when sid is
-    // null (renderCoachTranscript), so a fresh start loses no context. Detected via the pure helper
-    // src/lib/box-session-resume.ts::isMissingSessionError (unit-tested there). Only the coach lane
-    // is guarded in this phase; the sibling resumable lanes (dev-ask, roadmap-chat, ticket-improve)
-    // land in Phase 2 behind a shared wrapper.
-    if (sessionId && coachRun && coachRun.isError && isMissingBoxSession(coachRun.raw)) {
-      const parsedForRetry = parseStatus(coachRun.resultText) as Record<string, unknown> | null;
-      const replyForRetry = typeof parsedForRetry?.reply === "string" ? (parsedForRetry.reply as string) : "";
-      if (!replyForRetry) {
-        console.warn(`${tag} resumed session ${sessionId.slice(0, 8)}… missing on its account — retrying FRESH (context rebuilt from transcript)`);
-        const fresh = await withAccountFailover({ sessionId: null }, runTurn);
-        coachRun = fresh.result;
-        coachDir = fresh.configDir;
-        allCapped = fresh.allCapped;
-      }
-    }
+    // box-chat-resume-falls-back-fresh-on-missing-session Phase 2 — every resumable box-chat lane
+    // (director-coach, dev-ask, roadmap-chat, ticket-improve) routes through the ONE shared wrapper
+    // src/lib/box-session-resume.ts::runBoxTurnWithFreshFallback. A resumed run whose session id is
+    // no longer on its owning account ('No conversation found with session ID') retries ONCE with
+    // sessionId=null so the closure rebuilds full context from the transcript (renderCoachTranscript
+    // at :17879 when sid is null). Same account-pool failover on the retry (allCapped still bubbles
+    // → blocked_on_usage). `pickNextSession` below never re-saves the dead id.
+    const { result: coachRun, configDir: coachDir, allCapped } = await runBoxTurnWithFreshFallback({
+      pin: { sessionId },
+      run: runTurn,
+      failover: withAccountFailover,
+      hasReply: (r) => {
+        const p = parseStatus(r.resultText) as Record<string, unknown> | null;
+        return typeof p?.reply === "string" && (p.reply as string).length > 0;
+      },
+      onFreshFallback: () => console.warn(`${tag} resumed session ${sessionId ? sessionId.slice(0, 8) : "?"}… missing on its account — retrying FRESH (context rebuilt from transcript)`),
+    });
     if (allCapped || !coachRun) {
       await update(job.id, { status: "blocked_on_usage", error: "all Max accounts capped — Ask-Ada auto-resumes at reset" });
       console.warn(`${tag} all Max accounts capped → blocked_on_usage`);
@@ -17913,10 +17957,7 @@ async function runDirectorCoachJob(job: Job) {
     const { session, resultText, isError, raw, usage, model } = coachRun;
     await meterAgentJob(job, coachDir ?? undefined, usage, model);
     const logTail = raw.slice(-2000);
-    // On the fresh-retry path `session` is the new id from the null-resume run and `sessionId` is the
-    // dead one; `session || sessionId` would otherwise fall back to the dead id when the fresh run
-    // returned no new id, so guard the dead-id fallback with a session-still-alive check.
-    const newSession = session || (sessionId && !isMissingBoxSession(raw) ? sessionId : null);
+    const newSession = pickNextSession({ newSession: session, priorSessionId: sessionId, raw });
     const parsed = parseStatus(resultText) as Record<string, unknown> | null;
     const reply = typeof parsed?.reply === "string" ? (parsed.reply as string) : "";
     if (!reply) {
