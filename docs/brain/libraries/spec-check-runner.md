@@ -1,8 +1,12 @@
 # libraries/spec-check-runner
 
-Deterministic Node runner over a spec's [[../tables/spec_phase_checks]] rows ([[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 2). Turns the machine-declared verification subset from prose the LLM must interpret into plain code the box executes — instant, free, flake-free — so Phase 3's Vera lane can reserve a Max session for ONLY the genuinely-human residual (drift · subjective · undeclared prose).
+Deterministic Node runner over a spec's [[../tables/spec_phase_checks]] rows ([[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 2). Turns the machine-declared verification into plain code the box executes — instant, free, flake-free.
 
-**File:** `src/lib/spec-check-runner.ts` — exports `runSpecChecks`, `defaultExecutors`, `defaultLoadChecks`, and the `LoadedCheck` / `CheckResult` / `CheckExecutors` types.
+> **⭐ graduate-vera (2026-07-17): this runner IS the spec-test verdict. Vera is RETIRED.** The spec-test job (`runSpecTestJob` in [[../../../scripts/builder-worker]]) NO LONGER spawns a Vera Max session. It runs `runSpecChecks` and writes the runner's `agentVerdict`/`summary`/`checks` straight to [[../tables/spec_test_runs]] — post-ship AND pre-merge. A residual (non-machine) bullet the runner can't execute stays `needs_human` (surfaced, never AI-judged — the submission/review gates make a prose verification near-impossible, and a mis-authored *pattern* is a broken check caught by [[spec-test-harness-classifier]]). A runner **exception** is a HARNESS error → a re-runnable `error` run, never a false `fail`. **Pre-merge runs against a branch worktree:** the code under test is on the `claude/build-*` branch, not main, so the box checks out `origin/<branch>` into a read-only `git worktree add --detach` (symlinked node_modules) and passes it as `repoRoot` — a grep/tsc against main would under-see branch-only code. **Security is Vault's own solo session** now — `runSpecTestJob` enqueues a standalone branch-mode `security-review` ([[security-agent]] `enqueueSecurityReviewJob`) on completion; the fused spec-test+security session is gone.
+
+**File:** `src/lib/spec-check-runner.ts` — exports `runSpecChecks`, `defaultExecutors`, `defaultLoadChecks`, `redirectUrlToPreview`, and the `LoadedCheck` / `CheckResult` / `CheckExecutors` types.
+
+> **`http_get` preview-redirect (graduate-vera):** `runSpecChecks` accepts `deps.previewOrigin`. When set (a pre-merge run), the `http_get` executor rewrites a `shopcx.ai` target URL to the per-build preview origin via `redirectUrlToPreview` (path + query preserved; external / relative URLs untouched) — so an endpoint check hits THIS branch's preview, not prod (the branch's code isn't on prod yet). Post-ship runs pass `previewOrigin: null` → no redirect. `runSpecTestJob` passes `isPreMerge ? previewOrigin : null`.
 
 ## Contract
 
