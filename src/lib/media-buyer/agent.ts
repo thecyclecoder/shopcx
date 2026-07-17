@@ -484,6 +484,7 @@ function buildSensorTrustDormantPlan(
     replenish: [],
     fatigueReplenish: [],
     replenishDiagnostic: null,
+    deferred: [],
     summary: `Dormant: sensor-trust denied — ${denial.reason}`,
   };
 }
@@ -530,6 +531,34 @@ export interface MediaBuyerReplenishAction {
   /** The cohort ceiling we pin the ad set's daily budget to. */
   dailyTestCeilingCents: number;
   rationale: string;
+}
+
+/**
+ * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 —
+ * one entry per promote the pure plan-computer DROPPED because a rail fired.
+ * `rail='per_object_cooldown'` carries `sinceLastActionMs` + `cooldownMs`
+ * (the last iteration_actions age against the policy window); `rail='per_account_daily_budget_delta_ceiling'`
+ * carries `wouldBeDelta` + `cumulativeSoFar` + `ceiling` (the pass's accumulator vs the
+ * per-account daily ceiling). The runner writes ONE `media_buyer_scale_rail_deferred`
+ * `director_activity` row per entry so the promote ledger explains suppression instead
+ * of the pass looking silently empty.
+ */
+export interface MediaBuyerDeferredAction {
+  rail: "per_object_cooldown" | "per_account_daily_budget_delta_ceiling";
+  targetObjectId: string;
+  sourceMetaAdId: string;
+  policyVersionId: string;
+  rationale: string;
+  /** Populated when rail='per_object_cooldown'. Milliseconds since the last recorded action on this object. */
+  sinceLastActionMs?: number;
+  /** Populated when rail='per_object_cooldown'. The policy's cooldown window in milliseconds. */
+  cooldownMs?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. |after - before| for the dropped promote. */
+  wouldBeDelta?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. Cumulative absolute delta emitted this pass BEFORE this promote. */
+  cumulativeSoFar?: number;
+  /** Populated when rail='per_account_daily_budget_delta_ceiling'. The policy's per-account daily delta ceiling in cents. */
+  ceiling?: number;
 }
 
 /**
@@ -588,6 +617,14 @@ export interface MediaBuyerPlan {
    * to emit `media_buyer_replenish_no_diverse_candidate`.
    */
   replenishDiagnostic: MediaBuyerReplenishDiagnostic | null;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — promotes the pure
+   * plan dropped because a scale-edit rail fired (per-object cooldown or per-account daily
+   * budget-delta ceiling). The runner iterates and writes ONE `media_buyer_scale_rail_deferred`
+   * `director_activity` row per entry so a "why is this pass short a promote" question has a
+   * cited answer instead of silence.
+   */
+  deferred: MediaBuyerDeferredAction[];
   summary: string;
 }
 
@@ -729,6 +766,29 @@ export interface MediaBuyerPlanInputs {
    * (Superfood Tabs today) OR by any pre-Phase-2 caller (unit tests, legacy fixtures).
    */
   liveConceptTags?: ReadonlySet<string>;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — the last-N (48h)
+   * `iteration_actions` slice for `(workspaceId, metaAdAccountId)`. Shape mirrors the decision
+   * engine's `RecentAction` ({@link ../meta/decision-engine} `loadRecentActions`) plus the
+   * before/after budget columns so the same slice can seed a same-UTC-day historical delta
+   * (a future extension — today the pure function reads only `object_id` + `created_at` for
+   * the `per_object_cooldown_hours` gate). Omit / pass `[]` to disable the cooldown gate
+   * (backwards compatible with every pre-Phase-1 caller / unit test).
+   */
+  recentActions?: Array<{
+    object_id: string;
+    action_type: string;
+    created_at: string;
+    before_budget_cents: number | null;
+    after_budget_cents: number | null;
+  }>;
+  /**
+   * `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — the "now" the
+   * cooldown predicate compares last-action ages against. Required for the per-object cooldown
+   * gate to fire; when omitted the gate is inert so pre-Phase-1 callers keep the pre-rail
+   * behavior.
+   */
+  nowMs?: number;
 }
 
 /**
@@ -777,11 +837,42 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       replenish: [],
       fatigueReplenish: [],
       replenishDiagnostic: null,
+      deferred: [],
       summary:
         "Dormant: no active iteration_policies row — Media Buyer never scales/kills without a supervised policy. Author + activate a conservative policy to activate the loop.",
     };
   }
   const policy = input.policy;
+
+  // `bianca-scale-edit-rails-cooldown-and-account-delta-ceiling` Phase 1 — scale-edit rails.
+  // Two rails the storefront decision engine already enforces on scale actions; Bianca now
+  // honors them on its promote path:
+  //   • per_object_cooldown_hours — don't scale an object we scaled recently. Fed by
+  //     recentActions (iteration_actions slice) → lastActionAt map keyed by object_id.
+  //   • per_account_daily_budget_delta_ceiling_cents — don't exceed the day's total
+  //     absolute budget delta on the account. Accumulated over emitted promotes this pass.
+  // Every dropped promote surfaces on `deferred[]` so the runner can cite the rail; the
+  // pure function stays DB-free (no writes here, ever).
+  const deferred: MediaBuyerDeferredAction[] = [];
+  const recentActions = input.recentActions ?? [];
+  const nowMs = input.nowMs;
+  const lastActionAt = new Map<string, number>();
+  for (const a of recentActions) {
+    const t = new Date(a.created_at).getTime();
+    if (!Number.isFinite(t)) continue;
+    const prev = lastActionAt.get(a.object_id);
+    if (prev == null || t > prev) lastActionAt.set(a.object_id, t);
+  }
+  const cooldownMs = policy.per_object_cooldown_hours * 3600_000;
+  const inCooldown = (objectId: string): { in: boolean; sinceLastActionMs: number | null } => {
+    if (nowMs == null) return { in: false, sinceLastActionMs: null };
+    const last = lastActionAt.get(objectId);
+    if (last == null) return { in: false, sinceLastActionMs: null };
+    const since = nowMs - last;
+    return { in: since < cooldownMs, sinceLastActionMs: since };
+  };
+  let cumulativeDailyDelta = 0;
+  const ceiling = policy.per_account_daily_budget_delta_ceiling_cents;
 
   // ── Promote ────────────────────────────────────────────────────────────────
   const promote: MediaBuyerPromoteAction[] = [];
@@ -791,9 +882,45 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     if (!policy.trust_meta_reported_signal && w.roas < policy.scale_up_roas_trigger) continue;
     const adsetId = input.metaAdIdToAdsetId.get(w.metaAdId);
     if (!adsetId) continue; // no parent adset resolved — can't scale
+    // Rail 1: per_object_cooldown_hours — drop a promote against an object that has moved
+    // inside the cooldown window. Same seam the decision engine uses (mirrored from
+    // computeAutonomousActions in src/lib/meta/decision-engine.ts:340-365).
+    const cool = inCooldown(adsetId);
+    if (cool.in && cool.sinceLastActionMs != null) {
+      const sinceH = (cool.sinceLastActionMs / 3600_000).toFixed(1);
+      deferred.push({
+        rail: "per_object_cooldown",
+        targetObjectId: adsetId,
+        sourceMetaAdId: w.metaAdId,
+        policyVersionId: policy.id,
+        sinceLastActionMs: cool.sinceLastActionMs,
+        cooldownMs,
+        rationale: `Deferred promote: adset ${adsetId} last moved ${sinceH}h ago (< per_object_cooldown_hours ${policy.per_object_cooldown_hours}h); winner ad ${w.metaAdId} ROAS ${w.roas.toFixed(2)}.`,
+      });
+      continue;
+    }
     const before = input.budgets.get(adsetId) ?? null;
     const stepPct = Math.min(policy.scale_up_step_pct, policy.scale_up_cap_pct);
     const after = before != null ? Math.round(before * (1 + stepPct)) : null;
+    // Rail 2: per_account_daily_budget_delta_ceiling_cents — drop a promote whose absolute
+    // budget delta would breach the pass's per-account daily ceiling. Same accumulator
+    // pattern the decision engine's emitBudgetChange uses (mirrored from
+    // src/lib/meta/decision-engine.ts:405-410).
+    const delta = before != null && after != null ? Math.abs(after - before) : 0;
+    if (ceiling > 0 && delta > 0 && cumulativeDailyDelta + delta > ceiling) {
+      deferred.push({
+        rail: "per_account_daily_budget_delta_ceiling",
+        targetObjectId: adsetId,
+        sourceMetaAdId: w.metaAdId,
+        policyVersionId: policy.id,
+        wouldBeDelta: delta,
+        cumulativeSoFar: cumulativeDailyDelta,
+        ceiling,
+        rationale: `Deferred promote: |after-before|=$${(delta / 100).toFixed(2)} on adset ${adsetId} would breach per_account_daily_budget_delta_ceiling_cents $${(ceiling / 100).toFixed(2)} (already ${(cumulativeDailyDelta / 100).toFixed(2)} this pass); winner ad ${w.metaAdId} ROAS ${w.roas.toFixed(2)}.`,
+      });
+      continue;
+    }
+    cumulativeDailyDelta += delta;
     promote.push({
       kind: "promote",
       sourceMetaAdId: w.metaAdId,
@@ -911,6 +1038,14 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     summaryParts.push("cohort dormant — no active media_buyer_test_cohorts row; replenish skipped");
   }
 
+  if (deferred.length > 0) {
+    const cooled = deferred.filter((d) => d.rail === "per_object_cooldown").length;
+    const capped = deferred.filter((d) => d.rail === "per_account_daily_budget_delta_ceiling").length;
+    summaryParts.push(
+      `scale-edit rails deferred=${deferred.length} (cooldown=${cooled}, delta-ceiling=${capped})`,
+    );
+  }
+
   summaryParts.unshift(
     `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} fatigue_replenish=${fatigueReplenish.length} (policy v${policy.version})`,
   );
@@ -926,6 +1061,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     replenish,
     fatigueReplenish,
     replenishDiagnostic,
+    deferred,
     summary: summaryParts.join(" · "),
   };
 }
@@ -1920,6 +2056,7 @@ export async function runMediaBuyerLoopForAccount(
             replenish: [],
             fatigueReplenish: [],
             replenishDiagnostic: null,
+            deferred: [],
             summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,
           },
           writes: {
