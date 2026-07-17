@@ -16,6 +16,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { canonicalizeEmail } from "@/lib/email-utils";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -154,8 +155,28 @@ export async function findUnlinkedMatches(
     branches.push({ signal: "name", q: baseFilter().eq("first_name", customer.first_name).eq("last_name", customer.last_name) });
   }
   if (customer.phone) branches.push({ signal: "phone", q: baseFilter().eq("phone", customer.phone) });
-  const emailLocal = customer.email?.split("@")[0];
-  if (emailLocal) branches.push({ signal: "email", q: baseFilter().ilike("email", `${emailLocal}@%`) });
+  // Email branch — match on the shared `email_canonical` key so Gmail dot/plus/googlemail
+  // variants of the same real inbox surface as candidates for grading. Rides the composite
+  // index `idx_customers_email_canonical (workspace_id, email_canonical)` added in migration
+  // 20261104120000 (identity-gmail-canonicalization-and-dot-insensitive-matching Phase 2).
+  // Previously this was an exact `email-local ilike` — which correctly matched
+  // `julie@gmail.com` against `julie@yahoo.com` (same local, wrong provider) BUT missed
+  // `metz.julie323@gmail.com` vs `metzjulie323@gmail.com` (dot-variant of the same inbox,
+  // ticket 54f0f29e). Canonical equality is the identity-correct widening:
+  //   - Gmail dots/+tags collapse    → same canonical → surfaces the twin
+  //   - googlemail.com alias         → same canonical (normalized to gmail.com) → surfaces
+  //   - Non-gmail providers          → email_canonical == trimmed+lowered email, so
+  //                                    `julie@yahoo.com` and `julie@fastmail.com` remain
+  //                                    DISTINCT (dots stay significant outside Gmail).
+  // Grader is unchanged — this only widens the candidate set the pure grader sees; a
+  // name/address/phone corroboration is still required for `high` confidence.
+  const sourceCanonical = canonicalizeEmail(customer.email ?? "");
+  if (sourceCanonical) {
+    branches.push({
+      signal: "email",
+      q: baseFilter().eq("email_canonical", sourceCanonical),
+    });
+  }
 
   if (!branches.length) return [];
 
