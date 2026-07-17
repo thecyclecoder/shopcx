@@ -263,7 +263,7 @@ export async function getSpecBoardContext<S = unknown, P = unknown, C = unknown>
 }
 
 /**
- * spec-read-eff-pool — pooled straggler read #1: `list_specs_with_phases(uuid, text)`.
+ * spec-read-eff-pool — pooled straggler read #1: `list_specs_with_phases(uuid, text, timestamptz)`.
  *
  * Phase 2 of [[docs/brain/specs/spec-read-efficiency-for-scaling-fleet]] — every whole-board reader
  * (board render, roadmap, spec-drift, roadmap-status) calls `list_specs_with_phases` via
@@ -271,20 +271,51 @@ export async function getSpecBoardContext<S = unknown, P = unknown, C = unknown>
  * a single server-side join. Pooling strips the preamble off every cold read, independent of the
  * cold-getSpec fan-out collapse in Phase 1.
  *
+ * Phase 5 (tag `p_since`) — added an optional incremental cursor argument. Non-null → the RPC
+ * filters to specs whose `updated_at > since`, so an incremental poller ships ONLY changed rows.
+ * Pass `null`/omit to preserve the pre-Phase-5 full-board behavior.
+ *
  * Returns:
- *   - `Array<{ spec, phases }>` on success (empty array = no matching rows in scope)
+ *   - `Array<{ spec, phases }>` on success (empty array = no matching rows in scope / no changes)
  *   - `null` on pool unavailable / query error (caller falls back to the supabase-js RPC path)
  */
 export async function listSpecsWithPhases<S = unknown, P = unknown>(
   workspaceId: string,
   scope: "active" | "archived" | "all",
+  since?: string | Date | null,
 ): Promise<Array<{ spec: S; phases: P[] }> | null> {
+  const sinceIso = since instanceof Date ? since.toISOString() : since ?? null;
   const rows = await pgQuery<{ spec: S; phases: P[] | null }>(
-    `SELECT spec, phases FROM public.list_specs_with_phases($1::uuid, $2::text)`,
-    [workspaceId, scope],
+    `SELECT spec, phases FROM public.list_specs_with_phases($1::uuid, $2::text, $3::timestamptz)`,
+    [workspaceId, scope, sinceIso],
   );
   if (rows === null) return null;
   return rows.map((r) => ({ spec: r.spec, phases: (r.phases ?? []) as P[] }));
+}
+
+/**
+ * p_since — Phase 5 change-probe of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ *
+ * Cheap "did anything change?" gate for a full-board poller. Returns the workspace's max
+ * `specs.updated_at`. Callers keep the last observed value as a high-water mark and skip the
+ * whole-board re-pull when the probe returns the same (or older) timestamp — the
+ * `specs_ws_updated_at_idx (workspace_id, updated_at)` index (added by
+ * 20261023130000_list_specs_with_phases_p_since.sql) makes this an index-only scan.
+ *
+ * Returns:
+ *   - `Date` on match (empty workspace ⇒ epoch 0 so a caller's comparison stays monotonic)
+ *   - `null` on pool unavailable / query error (caller falls back to a full-board re-pull)
+ */
+export async function specsMaxUpdatedAt(workspaceId: string): Promise<Date | null> {
+  const rows = await pgQuery<{ max_updated_at: string | null }>(
+    `SELECT max(updated_at) AS max_updated_at FROM public.specs WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  if (rows === null) return null;
+  const iso = rows[0]?.max_updated_at ?? null;
+  // Empty workspace → epoch 0 so a caller's `probe > highWater` comparison keeps returning false
+  // (nothing to fetch) instead of throwing on a null.
+  return iso ? new Date(iso) : new Date(0);
 }
 
 /**

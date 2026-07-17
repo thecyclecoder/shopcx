@@ -1162,9 +1162,39 @@ export async function getRoadmap(workspaceId?: string): Promise<RoadmapData> {
   // walks blockers, so a full sweep costs ONE board read, not one per candidate.
   const cached = getRoadmapWrapperCache.get(wsId);
   if (cached && Date.now() < cached.expiresAt) return cached.value;
+  // p_since — Phase 5 change-probe gate. If we have a stale entry with a captured max_updated_at
+  // and the DB's current max_updated_at hasn't advanced past it, NOTHING changed since we cached:
+  // extend the TTL and return the stale value. Probe unavailable (pool blip) falls back to a full
+  // re-fetch — safer to over-fetch than serve genuinely stale data.
+  if (cached && cached.maxUpdatedAt) {
+    try {
+      const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+      const probe = await specsMaxUpdatedAt(wsId);
+      if (probe !== null && probe.getTime() <= cached.maxUpdatedAt.getTime()) {
+        cached.expiresAt = Date.now() + GET_SPEC_WRAPPER_TTL_MS;
+        return cached.value;
+      }
+    } catch {
+      /* fall through to a full re-fetch */
+    }
+  }
   const specs = await readSpecsFromDb(wsId);
+  // Capture the workspace's max_updated_at ALONGSIDE the fetched snapshot so the next stale-entry
+  // gate has a reliable high-water mark. Probe error → null (no gate on the next miss; that miss
+  // just does a full re-fetch — pre-Phase-5 behavior).
+  let maxUpdatedAt: Date | null = null;
+  try {
+    const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+    maxUpdatedAt = await specsMaxUpdatedAt(wsId);
+  } catch {
+    /* leave null — next stale gate skips the probe path and does a full re-fetch */
+  }
   const result: RoadmapData = { specs };
-  getRoadmapWrapperCache.set(wsId, { value: result, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+  getRoadmapWrapperCache.set(wsId, {
+    value: result,
+    expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS,
+    maxUpdatedAt,
+  });
   return result;
 }
 
@@ -1496,7 +1526,14 @@ const workspaceMapsCache = new Map<string, WorkspaceMapsEntry>();
 // even inside the TTL. Retires the "~9-scan whole-board fan-out with no cache" cost the spec calls
 // out — Mario's stall detector plus any tick handler that resolves blockers through getSpecBlockers
 // now amortize a single board read per workspace within the TTL window.
-type GetRoadmapCacheEntry = { value: RoadmapData; expiresAt: number };
+//
+// p_since — Phase 5 (docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md Phase 5) extends the
+// entry with a `maxUpdatedAt` high-water mark. On a stale entry, [[pg-pool]] `specsMaxUpdatedAt`
+// probes the workspace's max `specs.updated_at`; when the probe hasn't advanced past `maxUpdatedAt`,
+// NOTHING has changed since we cached — extend the TTL and return the stale value instead of
+// re-firing the whole-board scan. When the probe HAS advanced, do a full re-fetch as before. Probe
+// unavailability (pool blip) falls back to the pre-Phase-5 full re-fetch — no correctness regression.
+type GetRoadmapCacheEntry = { value: RoadmapData; expiresAt: number; maxUpdatedAt: Date | null };
 const getRoadmapWrapperCache = new Map<string, GetRoadmapCacheEntry>();
 
 function getSpecCacheKey(workspaceId: string, slug: string): string {
