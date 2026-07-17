@@ -1,0 +1,1 @@
+- **Classify one-off Anthropic overload (529 / 5xx) leaks in the Vercel error feed as transient** · verified 2026-07-17 · → [[../libraries/control-tower]]
