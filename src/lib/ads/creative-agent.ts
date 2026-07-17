@@ -150,7 +150,16 @@ export interface AuthorClaimTraceEntry {
  *
  *  dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — `claim_trace` is REQUIRED (a
  *  missing / empty / mis-shaped `claim_trace` fails `parseAuthorVerdict` with reason
- *  `firewall_missing_claim_trace` and the M1 revise loop consumes it). */
+ *  `firewall_missing_claim_trace` and the M1 revise loop consumes it).
+ *
+ *  dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — the optional `variants` field
+ *  carries the temperature-banded pack (one entry per band: cold · warm · hot) when the M3
+ *  path emits it. When `variants` is present, `insertReadyCreative` (a) picks the CANONICAL
+ *  variant via `pickCanonicalVariant` (warm > cold > hot priority) and stamps its
+ *  headline/primaryText/description/audience_temperature/selfScore on `ad_campaigns` as today
+ *  so single-caption readers do not break, and (b) persists the full pack via
+ *  `writeCopyVariants` to `ad_creative_copy_variants`. When `variants` is absent, the legacy
+ *  M1 single-variant path runs byte-identical. */
 export interface AuthorModeCopy {
   headline: string;
   primaryText: string;
@@ -159,6 +168,57 @@ export interface AuthorModeCopy {
   concept_tag: AndromedaConceptTag;
   selfScore: AuthorSelfScore;
   claim_trace: AuthorClaimTraceEntry[];
+  /** Optional pack — one AuthorModeCopyVariant per requested band. When present, treated as the
+   *  M3 temperature-banded pack (dahlia-temperature-banded-multi-variant-copy-pack Phase 1);
+   *  when absent, the top-level fields ARE the single-variant M1 result. See `AuthorModeCopyVariant`
+   *  + `pickCanonicalVariant`. */
+  variants?: AuthorModeCopyVariant[];
+}
+
+/** dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — one temperature-banded variant in
+ *  a pack. Each variant carries its own headline / primary text / description / self-score /
+ *  claim-trace / concept-tag, plus the M2 shared-validator verdict pre-computed by the Phase 2
+ *  per-variant loop (validator_pass + validator_checks — persisted as-is so a downstream reader
+ *  can see WHICH rail this band tripped without re-running the validator). */
+export interface AuthorModeCopyVariant {
+  audience_temperature: "cold" | "warm" | "hot";
+  headline: string;
+  primaryText: string;
+  description: string;
+  selfScore: AuthorSelfScore;
+  claim_trace: AuthorClaimTraceEntry[];
+  concept_tag: AndromedaConceptTag;
+  /** M2 shared-validator (validateGeneratedCopy) result rolled up: true iff every rail passed
+   *  for THIS variant. Phase 2's per-variant revise loop reads this to decide whether to bounce
+   *  ONLY this band. */
+  validatorPass: boolean;
+  /** M2 shared-validator per-rail payload — `ValidatorCheck[]` from `./copy-validator`. Kept as
+   *  the wire shape (no jsonb round-trip) so the DB row matches the type. Import kept local to
+   *  avoid a top-level circular dep between creative-agent and copy-validator. */
+  validatorChecks: import("./copy-validator").ValidatorCheck[];
+  /** 0 for the first attempt; incremented by the Phase 2 per-variant revise loop up to
+   *  MAX_COPY_AUTHOR_REVISE_ATTEMPTS. Defaults to 0 when absent. */
+  retryIndex?: number;
+}
+
+/** dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — canonical-variant picker for the
+ *  parent `ad_campaigns` row. Priority is warm > cold > hot: warm covers the widest audience
+ *  slice on Advantage+, so it's the safest single-caption fallback when downstream code only
+ *  reads the parent row. Returns `null` on empty input. Pure — a unit test pins every branch.
+ *
+ *  Warm-first is not arbitrary: cold audiences see a curiosity/objection hook that ISN'T a
+ *  claim readers of the parent row can trust for retention / lookalike audiences; hot leads
+ *  with the offer + urgency and would misfire on a cold single-caption fallback. Warm is the
+ *  benefit + soft-proof middle ground, closest to today's single-caption behavior. */
+export function pickCanonicalVariant(
+  variants: readonly AuthorModeCopyVariant[],
+): AuthorModeCopyVariant | null {
+  if (!variants.length) return null;
+  const warm = variants.find((v) => v.audience_temperature === "warm");
+  if (warm) return warm;
+  const cold = variants.find((v) => v.audience_temperature === "cold");
+  if (cold) return cold;
+  return variants.find((v) => v.audience_temperature === "hot") ?? null;
 }
 
 /** Dispatcher contract for the per-creative copy-author box session. Mirrors QcSessionDispatcher:
@@ -1016,6 +1076,18 @@ async function insertReadyCreative(
 
   const landingUrl = await resolveLandingUrl(admin, workspaceId, productHandle);
   if (landingUrl) await admin.from("ad_campaigns").update({ landing_url: landingUrl }).eq("id", campaignId);
+
+  // dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — persist the temperature-banded
+  // pack to the ad_creative_copy_variants sibling table when the M3 caller supplied one. The
+  // canonical variant has already been broadcast to `copyPack` + stamped on the ad_campaigns
+  // row above; this call persists ALL variants (including the canonical) as the durable pack.
+  // Deterministic-mode + M1-single-variant callers pass no `variants`, so the branch skips and
+  // today's byte-for-byte behavior is preserved.
+  const variants = opts?.authorModeCopy?.variants;
+  if (variants && variants.length) {
+    const { writeCopyVariants } = await import("./ad-copy-variants");
+    await writeCopyVariants(admin, { adCampaignId: campaignId, workspaceId, variants });
+  }
 
   return { kind: "ok", campaignId };
 }

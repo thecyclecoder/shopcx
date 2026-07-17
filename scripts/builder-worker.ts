@@ -2554,11 +2554,11 @@ async function emitTimecard(input: {
   }
 }
 
-// spec-timecard-chokepoint-instrumentation Phase 2 (Fix 1) — fused-session-safe emitter. runSpecTestJob
-// on the pre-merge branch is a FUSED session (Vera runs the spec-test AND Vault runs the security
-// review in ONE claude -p pass — see applyFusedSecurityAsBranchVerdict below), so both spec_test_*
-// and security_* pairs get emitted from the same job's lifetime. This helper keys off the SESSION-
-// LOCAL Set the runner owns: the first call for a given event_kind emits + adds the kind; any
+// spec-timecard-chokepoint-instrumentation Phase 2 (Fix 1) — emit-once-per-kind guard. runSpecTestJob
+// records the spec_test_started + spec_test_verdict timecard pair from its lifetime (graduate-vera:
+// it's a deterministic runner now — no fused session; Vault emits its own security_* pair from its
+// solo session). This helper keys off the SESSION-LOCAL Set the runner owns: the first call for a
+// given event_kind emits + adds the kind; any
 // subsequent call for the same kind in the same job silently no-ops. That guarantees the fused
 // session emits "one of each, not two of one" as the spec verification requires.
 async function emitTimecardOnceInSession(
@@ -12193,14 +12193,6 @@ async function runEscalationTriageJob(job: Job) {
   console.log(`${tag} ✓ swept ${sel.selected.length} ticket(s)`);
 }
 
-// A kind='spec-test' job is ONE non-destructive QA pass over a shipped-but-unverified spec's
-// `## Verification` checklist (spec-test-agent). Like ticket-improve/triage it KEEPS the DB/crypto
-// secrets (the agent probes prod read-only via scripts/spec-test-db-probe.ts, gh, vercel, GET hits) and
-// unsets ANTHROPIC_API_KEY (Max, $0 marginal). No worktree / PR — it writes one spec_test_runs row and
-// NEVER mutates prod or flips a spec verified/archived. See docs/brain/specs/spec-test-agent.md.
-async function runSpecTestClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
-  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "spec-test", sandbox: "max", timeout: SPEC_TEST_TIMEOUT_MS });
-}
 
 // Use the shared shapes from src/lib/spec-test-runs.ts so this file's checks
 // interop directly with mergeDeterministicWithLlmChecks (which types its inputs
@@ -12210,103 +12202,21 @@ type SpecTestCheck = import("../src/lib/spec-test-runs").SpecTestCheck;
 type SpecTestSummary = import("../src/lib/spec-test-runs").SpecTestSummary;
 type CheckVerdict = import("../src/lib/spec-test-runs").CheckVerdict;
 
-// The spec-test skill is contracted to emit ONLY the result JSON as its final message, fenced-or-last.
-// In practice a Max session sometimes wraps it in prose, so we extract defensively: whole-message parse
-// first, then the LAST fenced ```json block that parses, then a scan for the LAST balanced {...} that
-// parses (tolerating leading AND trailing prose). Returns null only if nothing parses — the caller then
-// re-prompts once and, failing that, records an honest `error` run (never a silent 0-check approved row).
-function extractSpecTestResult(text: string): Record<string, unknown> | null {
-  const tryParse = (s: string): Record<string, unknown> | null => {
-    try {
-      const o = JSON.parse(s);
-      return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  };
-  const whole = tryParse(text.trim());
-  if (whole) return whole;
-  // Last fenced ```json block that parses (the contract says fenced JSON is the last thing in the message).
-  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
-  for (let i = fences.length - 1; i >= 0; i--) {
-    const o = tryParse(fences[i][1].trim());
-    if (o) return o;
-  }
-  // Scan for the LAST parseable balanced {...}: walk candidate close braces from the end, and for each,
-  // candidate open braces from the start — the first hit is the outermost-latest object (skips prose braces).
-  const opens: number[] = [];
-  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) opens.push(i);
-  const closes: number[] = [];
-  for (let i = text.indexOf("}"); i >= 0; i = text.indexOf("}", i + 1)) closes.push(i);
-  for (let e = closes.length - 1; e >= 0; e--) {
-    const end = closes[e];
-    for (const start of opens) {
-      if (start >= end) break;
-      const o = tryParse(text.slice(start, end + 1));
-      if (o) return o;
-    }
-  }
-  return null;
-}
 
-// Normalize + re-derive the verdict/summary from the agent's checks so the stamp can never lie (e.g. the
-// agent says "approved" but a check failed). The checks array is the ground truth; counts follow it.
-// `issues` is driven ONLY by evidence-backed `fail`s (auto_fail>0) — a `fail` means the agent observed
-// breakage (see the classification rule in the spec-test prompt/skill); `needs_human`/`inconclusive`
-// never flip the verdict to `issues` and never become regressions. The summary guard holds: an
-// empty/uncertain run (no `pass`) lands on `needs_human`, never `approved`.
-function normalizeSpecTest(parsed: Record<string, unknown> | null): {
-  agent_verdict: "approved" | "issues" | "needs_human";
-  summary: SpecTestSummary;
-  checks: SpecTestCheck[];
-  report: string;
-} {
-  const rawChecks = Array.isArray(parsed?.checks) ? (parsed!.checks as unknown[]) : [];
-  const parsedChecks: SpecTestCheck[] = rawChecks.map((c) => {
-    const o = (c || {}) as Record<string, unknown>;
-    const v = String(o.verdict || "inconclusive");
-    const verdict: CheckVerdict = v === "pass" || v === "fail" || v === "needs_human" || v === "inconclusive" ? v : "inconclusive";
-    const catRaw = o.category ? String(o.category) : "";
-    const category = catRaw === "auto" || catRaw === "needs_human" || catRaw === "inconclusive" ? catRaw : undefined;
-    return {
-      text: String(o.text || "(unnamed check)"),
-      verdict,
-      category,
-      evidence: o.evidence ? String(o.evidence) : undefined,
-      // Browser checks (spec-test-deep-verification Phase 1) carry the evidence screenshot's storage path.
-      screenshot: o.screenshot ? String(o.screenshot) : undefined,
-    };
-  });
-  // vera-harness-error-is-not-a-code-regression Phase 1 — a `fail` whose evidence carries a
-  // HARNESS/COMMAND signature (missing npm script, command-not-found, ENOENT, missing binary) never
-  // ran an assertion, so it is NOT a code regression. Downgrade it to `needs_human` before summary /
-  // verdict / fix-phase authoring see it, so a broken verification bullet can never wedge the
-  // pipeline via an unbuildable Bo fix phase (the 2026-07-11 cs-director-leash false-regression).
-  const { checks } = reclassifyHarnessFails(parsedChecks);
-  const summary: SpecTestSummary = {
-    auto_pass: checks.filter((c) => c.verdict === "pass").length,
-    auto_fail: checks.filter((c) => c.verdict === "fail").length,
-    needs_human: checks.filter((c) => c.verdict === "needs_human").length,
-    inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
-  };
-  const agent_verdict: "approved" | "issues" | "needs_human" =
-    summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
-  return { agent_verdict, summary, checks, report: String(parsed?.report || "") };
-}
-
-// runSpecTestJob — the box QA agent for ONE shipped-but-unverified spec (spec-test-agent Phase 1). Runs
-// the spec-test skill on Max in the MAIN checkout (read-only; the shipped spec is on origin/main), then
-// records a spec_test_runs row with the agent_verdict stamp + per-check verdict+evidence. NEVER opens a
-// PR, NEVER mutates prod, NEVER marks the spec verified — the owner's verify gate stays untouched.
+// runSpecTestJob — DETERMINISTIC verification of ONE spec (graduate-vera: Vera the LLM agent is retired).
+// Runs the machine-declared checks via [[spec-check-runner]] — no Max session — against the spec's branch
+// preview (pre-merge, in a read-only branch worktree) or main (post-ship), then records ONE spec_test_runs
+// row with the runner's verdict + per-check evidence. Residuals → needs_human. On a pre-merge run it also
+// enqueues a standalone SOLO Vault security-review. NEVER opens a PR / mutates prod / flips the verify gate.
 async function runSpecTestJob(job: Job) {
   const slug = job.spec_slug;
   const tag = `[spec-test:${slug}]`;
-  console.log(`${tag} testing shipped spec (job ${job.id.slice(0, 8)})`);
-  // spec-timecard-chokepoint-instrumentation Phase 2 — fused-session in-memory guard. The pre-merge
-  // path here also runs the security review inline (applyFusedSecurityAsBranchVerdict); this set is
-  // threaded through so both spec_test_* and security_* pairs emit AT MOST ONCE PER KIND per job.
+  console.log(`${tag} testing spec deterministically (job ${job.id.slice(0, 8)})`);
+  // spec-timecard-chokepoint-instrumentation Phase 2 — emit-once-per-kind guard (graduate-vera: this is a
+  // deterministic runner, not a fused session; security is Vault's own solo session). The set guards the
+  // spec_test_* timecard pair so it emits AT MOST ONCE PER KIND per job (start + verdict, incl. the error path).
   const emittedThisSession = new Set<string>();
-  // Emit spec_test_started at claim (before Vera even opens the session). phase_index=null — spec-test
+  // Emit spec_test_started at claim. phase_index=null — spec-test
   // grades the WHOLE spec, not a specific phase. Best-effort — every emission wraps a failing insert.
   await emitTimecardOnceInSession(emittedThisSession, {
     workspace_id: job.workspace_id,
@@ -12403,329 +12313,99 @@ async function runSpecTestJob(job: Job) {
     }
     const isPreMerge = !!previewOrigin && !!branch;
 
-    // ── machine-declared-verification-and-deterministic-spec-test-runner Phase 3 ─────────────────
-    // Deterministic-first: run the machine-declared checks in-process BEFORE we spawn a Max session.
-    // If every check resolved (no `needs_human` residual) AND this is NOT a fused pre-merge job (the
-    // security envelope stays a Max session by design — Vault is judgment), write the deterministic
-    // verdicts straight to spec_test_runs and run the same post-verdict downstream (timecard +
-    // green-writeback + auto-fold + regression detector) — NO claude session, no Max cost. Best-
-    // effort: any thrown error falls through to the LLM lane below (the runner is additive, never
-    // regressive). The `residual*` values are threaded into the prompt so an unavoidable Max session
-    // can focus its work.
-    let deterministicResiduals: string[] = [];
-    let deterministicChecks: SpecTestCheck[] = [];
-    let deterministicOk = false;
-    try {
-      const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
-        "../src/lib/spec-check-runner"
-      );
-      const pkg = JSON.parse(readFileSync(resolve(REPO_DIR, "package.json"), "utf8")) as {
-        scripts?: Record<string, string>;
-      };
-      const packageScripts = new Set(Object.keys(pkg.scripts ?? {}));
-      const runnerOut = await runSpecChecks({
-        workspaceId: job.workspace_id,
-        slug,
-        deps: {
-          loadChecks: defaultLoadChecks,
-          executors: defaultExecutors,
-          packageScripts,
-          repoRoot: REPO_DIR,
-        },
-      });
-      const cls = classifyDeterministicRun(runnerOut.results);
-      deterministicResiduals = cls.residualTexts;
-      deterministicChecks = cls.checks;
-      deterministicOk = true;
-      console.log(
-        `${tag} deterministic runner — ${cls.summary.auto_pass}✓ ${cls.summary.auto_fail}✗ ${cls.summary.needs_human}👤 (residual=${cls.residualCount}, isPreMerge=${isPreMerge})`,
-      );
-      if (cls.allResolved && !isPreMerge) {
-        // No LLM needed. Insert the deterministic verdicts + run the same downstream Vera runs today.
+    // ── DETERMINISTIC SPEC-TEST (graduate-vera) — the runner IS the verdict; no Vera Max session ──────
+    // Run the machine-declared checks in-process. For a PRE-MERGE run the code under test lives on the
+    // BRANCH, not main → run the checks against a read-only branch worktree (origin/<branch>), NOT REPO_DIR
+    // (a grep/tsc against main would under-see branch-only code). Residual (non-machine) bullets stay
+    // needs_human — surfaced, never AI-judged (the submission/review gates make a prose verification
+    // near-impossible; a mis-authored pattern is a broken check, caught by the harness classifier). A runner
+    // EXCEPTION is a HARNESS error (env/DB/exec), NOT a code regression → a re-runnable `error` run, never a
+    // false `fail`. Vault (security) is a SEPARATE solo session, enqueued after the verdict (see below).
+    let checks: SpecTestCheck[] = [];
+    let summary = { auto_pass: 0, auto_fail: 0, needs_human: 0, inconclusive: 0 };
+    let agent_verdict = "needs_human";
+    let report = "";
+    {
+      let specCheckRepoRoot = REPO_DIR;
+      let branchWt: string | null = null;
+      if (isPreMerge && branch) {
+        try {
+          branchWt = join(BUILDS_DIR, `spectest-${job.id}`);
+          removeWorktreeDir(branchWt); // idempotent — clear a stale slot from a prior reaped run
+          sh("git", ["fetch", "origin", branch]);
+          const add = sh("git", ["worktree", "add", "--detach", branchWt, `origin/${branch}`]);
+          if (add.code !== 0) {
+            console.warn(`${tag} branch worktree add failed → running checks against main (branch-only code may under-verify): ${((add.err || add.out) ?? "").slice(-300)}`);
+            removeWorktreeDir(branchWt);
+            branchWt = null;
+          } else {
+            sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(branchWt, "node_modules")]);
+            specCheckRepoRoot = branchWt;
+          }
+        } catch (e) {
+          console.warn(`${tag} branch worktree setup threw → checks against main: ${e instanceof Error ? e.message : String(e)}`);
+          if (branchWt) removeWorktreeDir(branchWt);
+          branchWt = null;
+        }
+      }
+      try {
+        const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(
+          "../src/lib/spec-check-runner"
+        );
+        const pkg = JSON.parse(readFileSync(resolve(specCheckRepoRoot, "package.json"), "utf8")) as {
+          scripts?: Record<string, string>;
+        };
+        const runnerOut = await runSpecChecks({
+          workspaceId: job.workspace_id,
+          slug,
+          deps: {
+            loadChecks: defaultLoadChecks,
+            executors: defaultExecutors,
+            packageScripts: new Set(Object.keys(pkg.scripts ?? {})),
+            repoRoot: specCheckRepoRoot,
+            // graduate-vera: pre-merge http_get checks that target shopcx.ai hit THIS build's preview,
+            // not prod (the branch's code isn't on prod yet). Post-ship (isPreMerge=false) → no redirect.
+            previewOrigin: isPreMerge ? previewOrigin : null,
+          },
+        });
+        const cls = classifyDeterministicRun(runnerOut.results);
+        checks = cls.checks;
+        summary = cls.summary;
+        agent_verdict = cls.agentVerdict;
+        report = `deterministic spec-test — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}${isPreMerge ? " (pre-merge branch preview)" : ""}`;
+        console.log(`${tag} ${report}`);
+        try {
+          const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+          const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+          await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: true });
+        } catch { /* best-effort */ }
+      } catch (e) {
+        // The runner threw — a HARNESS error (env/DB/exec/parse), NOT a code regression. Record a
+        // re-runnable `error` run (the pre-merge backstop / spec-test cron re-fires, loop-capped) — never a
+        // false `fail` that would spawn an unfixable Bo phase. Free the branch worktree first.
+        if (branchWt) removeWorktreeDir(branchWt);
+        const why = `deterministic spec-check-runner threw: ${e instanceof Error ? e.message : String(e)}`;
+        console.error(`${tag} ${why}`);
+        try {
+          const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+          const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+          await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: false });
+        } catch { /* best-effort */ }
         await db.from("spec_test_runs").insert({
-          workspace_id: job.workspace_id,
-          spec_slug: slug,
-          agent_job_id: job.id,
-          agent_verdict: cls.agentVerdict,
-          summary: cls.summary,
-          checks: cls.checks,
-          transcript: null,
-          error: null,
-          spec_branch: null,
-          preview_url: null,
+          workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+          agent_verdict: "error", summary: {}, checks: [], transcript: why.slice(-8000), error: why,
+          spec_branch: branch, preview_url: previewOrigin,
         });
         await emitTimecardOnceInSession(emittedThisSession, {
-          workspace_id: job.workspace_id,
-          spec_slug: slug,
-          phase_index: null,
-          event_kind: "spec_test_verdict",
-          actor: "vera",
-          metadata: { job_id: job.id, agent_verdict: cls.agentVerdict, summary: cls.summary, deterministic: true },
+          workspace_id: job.workspace_id, spec_slug: slug, phase_index: null,
+          event_kind: "spec_test_verdict", actor: "vera", metadata: { job_id: job.id, agent_verdict: "error", reason: why },
         });
-        try {
-          const { reflectSpecGreenChecks } = await import("../src/lib/spec-green-writeback");
-          const g = await reflectSpecGreenChecks(job.workspace_id, slug);
-          if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
-        } catch (e) {
-          console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-        }
-        // The claude_session_id stays null on this row — the grader's `ungradedConcludedJobs` filter
-        // reads that as "monitored, not graded" and skips it (agent-grader.ts, machine-declared Phase 3).
-        await update(job.id, {
-          status: "completed",
-          log_tail: `${cls.agentVerdict} — ✅${cls.summary.auto_pass} ✗${cls.summary.auto_fail} 👤${cls.summary.needs_human} (deterministic — no Max session)`.slice(-2000),
-        });
-        try {
-          const { autoFoldVerifiedSpecs } = await import("../src/lib/spec-test-runs");
-          const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
-          if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
-        } catch (e) {
-          console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-        }
-        if (cls.agentVerdict === "issues") {
-          try {
-            const { getHumanTestQueue } = await import("../src/lib/spec-test-runs");
-            const { enqueueRegressionJob } = await import("../src/lib/regression-agent");
-            const q = await getHumanTestQueue(job.workspace_id);
-            const reg = q.regressions.find((r) => r.slug === slug);
-            if (reg) {
-              await enqueueRegressionJob(db, {
-                workspaceId: job.workspace_id,
-                specSlug: reg.slug,
-                title: reg.title,
-                failing: reg.failing.map((f) => ({ text: f.text, evidence: f.evidence, check_key: f.check_key })),
-                runAt: reg.run_at,
-              });
-            }
-          } catch (e) {
-            console.error(`${tag} regression enqueue (deterministic path) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
+        await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
         return;
       }
-    } catch (e) {
-      // The runner throwing is NOT a regression — fall back to today's LLM path. The runner's whole
-      // contract is additive: it verifies more cheaply when it can and gets out of the way otherwise.
-      console.warn(`${tag} deterministic runner failed (falling back to Max): ${e instanceof Error ? e.message : String(e)}`);
+      if (branchWt) removeWorktreeDir(branchWt); // done reading the branch — free the worktree
     }
-    // Emit the monitored-loops heartbeat for the deterministic runner (Control Tower registry
-    // entry DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID) — ok:true when the runner returned verdicts,
-    // ok:false when it threw and Vera's LLM lane had to take over. Best-effort; never fails the job.
-    try {
-      const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
-      const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
-      await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: deterministicOk });
-    } catch { /* best-effort */ }
-
-    const prompt = [
-      `Use the spec-test skill (cwd is the repo root). You are the box QA agent for ONE shipped-but-unverified spec, on Max — web search on, no API key.`,
-      `The spec to test is materialized from the DB to .box/spec-${slug}.md (public.specs + spec_phases — the docs/brain/specs/*.md files were DELETED in the DB cutover, do NOT read them). Read .box/spec-${slug}.md + its "## Verification" section, classify each bullet (auto-testable non-destructive | needs-human), and run ONLY the non-destructive checks on the box.`,
-      ...(deterministicResiduals.length
-        ? [
-            // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — deterministic
-            // pre-pass. The box's Node runner already executed the machine-declared checks; its verdicts
-            // are AUTHORITATIVE and will be merged after your session. Focus your effort on the
-            // subjective/drift residual — do NOT re-run the checks the runner already handled.
-            `🤖 DETERMINISTIC PRE-PASS (spec-check-runner) — a Node module already ran the machine-declared \`spec_phase_checks\` (${deterministicChecks.length} check(s)); its pass/fail verdicts are AUTHORITATIVE and will be merged into the final row after your session. SCOPE your effort to the ${deterministicResiduals.length} RESIDUAL bullet(s) below (drift · subjective · un-typed prose). Still emit ONE check per bullet in your JSON so the merge is complete; other bullets can carry a needs_human / inconclusive placeholder with evidence "handled by deterministic runner" — the merge will replace them with the runner's verdict.\nResidual bullets:\n${deterministicResiduals.map((t) => `  - ${t}`).join("\n")}`,
-          ]
-        : []),
-      ...(isPreMerge
-        ? [
-            `🎯 PRE-MERGE TARGET (spec-test-on-preview-pre-merge Phase 2) — this is a PRE-MERGE verification against the PER-BUILD PREVIEW deployment for branch \`${branch}\`. PREVIEW ORIGIN: ${previewOrigin}. Every HTTP probe MUST hit this origin, NOT https://shopcx.ai: any \`curl\` GET / status check, the \`vercel inspect <url>\` + \`vercel logs <url>\` calls (use the preview URL — this branch's per-build preview already exists), and EVERY \`npx tsx scripts/spec-test-browser-check.ts\` invocation (pass \`--base-url ${previewOrigin}\` so the owner-session is minted against the preview host). The repo checkout itself is on \`main\`, but the spec body materialized at .box/spec-${slug}.md is the BRANCH'S spec (from public.spec_phases keyed to this branch). Read-only DB probes still hit the shared prod DB (preview deployments use the same Postgres) — that's correct, no override needed.`,
-            // consolidate-premerge-checks-one-session Phase 1 — after the spec-test verdict, THIS SAME SESSION
-            // also emits a SECURITY REVIEW verdict off the same branch diff it already loaded (fused; halves
-            // pre-merge Codex sessions + skips a full cold re-hydration). The security half is INDEPENDENT —
-            // it re-derives from the diff, doesn't trust spec-test. Emit BOTH envelopes in ONE JSON below.
-            `🔒 FUSED PRE-MERGE SECURITY REVIEW (consolidate-premerge-checks-one-session Phase 1) — AFTER you finish the spec-test above, THIS SAME SESSION also runs a SECURITY REVIEW of the same branch diff you already loaded. Same read-only contract as spec-test: NEVER mutate prod, NEVER edit product code, NEVER open a PR — you REVIEW the diff and either clear it or AUTHOR a fix spec (a doc). Read the branch diff you already have in context (\`git diff origin/main...origin/${branch}\`) — do NOT re-fetch. Runtime probes (if any) MUST target the per-build preview \`${previewOrigin}\`, NEVER prod.`,
-            `Review for (ShopCX-specific, per CLAUDE.md invariants) — these are the FIVE REQUIRED CHECKS. Emit ONE structured entry per check in the security envelope's \`checks\` array below (KEY listed in parens):`,
-            `  • Injection (key \`injection\`) — SQL / command / prompt injection, unsanitized input reaching a query or shell.`,
-            `  • Secret / credential leak (key \`secret_leak\`) — a hardcoded key/token/password, a secret logged or echoed, an \`*_encrypted\` column read/written in plaintext.`,
-            `  • Authz / RLS-policy regressions (key \`authz_rls\`) — a tightened policy loosened, a tenant check dropped, a join on \`shopify_*_id\` instead of a UUID that crosses a tenant boundary.`,
-            `  • Unsafe \`createAdminClient()\` (service-role) exposure (key \`unsafe_admin_client\`) — a service-role client reachable from a client component / unauthenticated route / user-controlled path.`,
-            `  • Crypto / \`_encrypted\` handling (key \`crypto_encrypted\`) — per-workspace credential decryption mishandled, an encryption helper bypassed.`,
-            `SECRET-SAFETY RAIL: reference any secret/credential finding by its LOCATION (file + line) ONLY. NEVER echo a secret value into your review / the spec / any log.`,
-            // fused-premerge-security-authoritative-drop-standalone Phase 1 — the security envelope MUST be
-            // STRUCTURED and EVIDENCE-BACKED. A bare \`status:"clean"\` flag is REJECTED downstream by the
-            // pure validator [[../src/lib/security-envelope.ts]] (classifyFusedSecurityEnvelope) and
-            // DOWNGRADED to \`needs_human\` (advisory — NEVER an auto-clean gate pass), because a rubber-stamp
-            // is exactly what isolate-premerge-security-verdict distrusted. Ship real per-check evidence.
-            `🔬 EVIDENCE-BACKED PER-CHECK CONTRACT (fused-premerge-security-authoritative-drop-standalone Phase 1) — the security envelope MUST carry a \`checks\` array with ONE ENTRY per required check above. Each entry: {"check":"<key>","verdict":"clean|finding|needs_human","evidence":"<what you inspected / the finding narrative / why you cannot classify"}. A \`clean\` verdict MUST cite what you inspected (the changed files/routes/tables, the pattern you grepped for — e.g. "grepped for raw admin-client writes outside createAdminClient across src/app/api/**/route.ts,src/lib/**; only occurrences are inside createAdminClient()"). A \`finding\` MUST also carry "location":"<file>:<line>" and "severity":"low|medium|high|critical" — secrets by location only. A bare \`clean\` with no evidence, or a missing check, will be REJECTED by the fused-envelope validator and held for a human. All 5 required checks (\`injection\`, \`secret_leak\`, \`authz_rls\`, \`unsafe_admin_client\`, \`crypto_encrypted\`) MUST appear.`,
-            `The security verdict is INDEPENDENT of the spec-test verdict — it re-derives from the diff, does NOT trust the spec-test result. Decide ONE overall security verdict (cite each finding's file:line + category) — but the AUTHORITATIVE classification comes from the per-check evidence above, not this status flag:`,
-            `  • "clean" — no real vulnerability the diff introduced AND every required check carries evidence. No spec, no action.`,
-            `  • "false-positive" — what looked risky is a safe/established pattern (or already mitigated). No spec, no action.`,
-            `  • "real-vuln" — the diff introduced ≥1 genuine vulnerability. Author a single-phase, ~30-min-scoped fix spec that closes it (the finding(s), the fix, and verification). Reference secrets by location only.`,
-            `  • "needs-human" — you CANNOT confidently classify (ambiguous, needs context only a human has). No spec, no guess — surface a plain one-line note.`,
-            `For "real-vuln", default owner "[[../functions/platform]]" and parent "[[../functions/platform]] — Infra & DevOps / reliability mandate" (a fix-spec parent is a function MANDATE, NEVER a spec) and set "related_spec":"security-dependency-agent" (the origin link, not the parent). Use a more specific function+mandate only if one clearly owns the affected system. The fix spec MUST be a SINGLE phase scoped to a ~30-min build.`,
-          ]
-        : []),
-      `⭐ DURABLE MANDATE (agent-mandate-hardening-spec-test) — TWO baked-in rules that override any tendency to bail or auto-pass:`,
-      `  (1) A FRESH SESSION IS THE NORMAL STARTING STATE — a spec-test session is ALWAYS stateless, so "no prior verification context / no security review context available in this session" is the EXPECTED entry state, NEVER a reason to bail with an ~60-token prose response and no verdicts. When you see it, re-derive the spec row's ## Verification bullets from the materialized spec file (\`.box/spec-${slug}.md\`) yourself, classify each bullet, and RUN the non-destructive checks in-session — \`npx tsc --noEmit\`, \`gh\` CI status, read-only DB probes (\`npx tsx scripts/spec-test-db-probe.ts\`), GET endpoints, the browser check, the sandbox toolkit, AND the spec's own read-only harness (e.g. \`npx tsx scripts/commerce-diff-sample.ts\` when the spec ships one — the file's own header declares "READ-ONLY BY CONSTRUCTION: every Supabase call is .select()"). Refusing to fabricate a false-✅ is correct; the fix is to actually run the checks and emit the per-check \`agent_verdict\` JSON, NOT to bail. Missing-context bail = a 10 that scored a 6 for no reason.`,
-      `  (2) RUNTIME-BEHAVIOR BULLETS ARE NEVER AUTO-PASS OFF A STATIC / HAPPY / UNRELATED SIGNAL — when a bullet asserts a runtime BEHAVIOR (a failure-path detail surfacing on worker_heartbeats.detail, a post-deploy box backstop actually firing, an approved action executing via the freestyle run_prod_script path, an event branch reaching a specific sink), a ✅ off "the code that would do X exists" (static wiring cite), "a Ready preview is up", or "an unrelated healthy heartbeat / green tick" is a FALSE-✅ and will be caught. Either DRIVE the exact named state — trigger the failure branch (sandbox or forced-fault local harness), run a sandbox behavioral invocation of the executor, defer a live-DB outcome to a post-deploy read-only outcome probe (\`spec-test-db-probe.ts\` against the row real traffic already produced) — and put THAT observed state in the check's \`evidence\` field, OR classify the bullet \`needs_human\` with a note ("code present at file:line; runtime state not observable read-only, needs a forced fault to confirm"). "The code that would do X exists" and "X observably happened" are DIFFERENT verdicts; never conflate them.`,
-      `⭐ MANDATE — IF A MACHINE CAN TEST IT, THE MACHINE DOES IT. Maximize machine coverage; \`needs_human\` is the LAST resort, not the default. You have THREE non-destructive execution modes — reach for them in order before deferring: (1) read-only probes (repo/DB/HTTP/migration-present), (2) OUTCOME PROBE, (3) NON-DESTRUCTIVE LOCAL HARNESS.`,
-      `OUTCOME-NOT-ACTION: a bullet shaped "do X (a mutation) → expect observable Y" — first ask: is Y ALREADY observable read-only? (a prod row already in the expected state from real traffic, a column already populated, a rendered context string on an existing order, a unique-index definition in pg_indexes). If yes → probe Y read-only and pass/fail on that evidence. Do NOT defer just because the ACTION X mutates — you verify the OUTCOME. Only when the observable requires YOU to perform an irreversible prod mutation that real traffic hasn't already produced → needs_human.`,
-      `LOCAL HARNESS: when the logic under test is reachable as a pure function / parser / classifier / validator in src/, author a THROWAWAY local script (scratch, _-prefixed, NEVER committed) that imports it and exercises it locally — INCLUDING FAULT INJECTION (feed malformed payload, force unparseable output) — run it with \`npx tsx _spec-test-harness.ts\`. No prod write, no network side-effect → it's \`auto\`. Record the input you fed + the value/state returned as evidence. This converts the whole fault-injection bucket from needs_human to auto WHENEVER the logic is reachable as a local unit (e.g. "force unparseable output → error state" over a pure extractor: import it, feed garbage, assert the error state).`,
-      `BROWSER CHECK (spec-test-deep-verification Phase 1) — a FOURTH non-destructive mode for RENDERED-UI bullets. A bullet asserting rendered DOM or a non-mutating click-flow ("the card shows the Agent-tested stamp + chip", "VerificationCard renders per-bullet verdicts", "composer textarea ≥5 rows / auto-grows", "a non-owner doesn't see the nav item / gets a 403", "open the tab → see X") is a BROWSER check (\`auto\`, pass/fail with a SCREENSHOT as evidence), NOT needs_human. Run it with \`npx tsx scripts/spec-test-browser-check.ts --path "/dashboard/..." [--role owner|anon] [--expect-status N] [--assert-text "..."]* [--assert-selector "css"]* [--assert-not-text "..."]* [--assert-no-selector "css"]* [--assert-redirect "/login"] [--click "css"]* [--wait-selector "css"] --slug ${slug} --label <short>\`. It mints an OWNER session server-side (service-role admin, NO human creds), loads the page authed, asserts, and uploads a screenshot to the private evidence bucket; its stdout JSON includes \`pass\`, the per-assertion results, and \`screenshot\` (a storage path). PUT that \`screenshot\` value into the check's \`"screenshot"\` field so the Developer page renders it, and the assertion results into \`evidence\`. (Workspace for this run: ${job.workspace_id} — the tool resolves it automatically, but you may pass \`--workspace-id ${job.workspace_id}\`.)`,
-      `🚨 BROWSER GUARDRAIL — the browser session is OWNER-AUTHED but READ-ONLY on prod: navigate + assert + benign clicks (expand a section / open a tab) ONLY. NEVER use it to fill or submit a form that mutates real customer/billing data — a bullet whose verification REQUIRES a real mutation (submit → charges a card / sends a message / writes a real order) stays needs_human (or Phase 2's sandbox). Use \`--role anon\` for "unauthenticated/non-owner is gated → redirect to /login or 401/403".`,
-      `SANDBOX CHECK (spec-test-deep-verification Phase 2) — a FIFTH non-destructive mode for INTERNAL-ONLY BEHAVIORAL bullets. A bullet shaped "fire event / call POST / approve → assert DB rows + customer_events/triage_runs" whose EVERY side effect is internal (a DB write or an Inngest event) is a SANDBOX check (\`auto\`, pass/fail), NOT needs_human — drive it on dedicated \`is_test\` fixtures, assert the rows/events, then clean up. Run it with \`npx tsx scripts/spec-test-sandbox.ts\`: \`info\` (fixtures + the internal-only flow registry + forbidden external APIs), \`isolation\` (non-test-workspace fingerprint), \`fire <flowId>\` (fire an allowlisted internal-only event — e.g. \`comp-renewal-failclosed\` — it proves the precondition, asserts the rows/events, and reports \`isolation.zero_non_test_workspace_writes\`), \`post <flowId> [--body '<json>'|--clear]\` (call an allowlisted internal POST with owner cookies scoped to the is_test workspace — e.g. \`human-queue-resolve\`, \`roadmap-answer\`), \`cleanup\` (idempotent reset). Cite the tool's \`pass\` + per-assertion booleans + \`isolation.zero_non_test_workspace_writes:true\` as evidence; run \`cleanup\` after. Observing the wrong row/event state IS breakage evidence → a sandbox-check \`fail\` is legitimate.`,
-      `🚨 EXTERNAL SIDE-EFFECT FIREWALL (the core Phase-2 safety rule) — drive a flow ONLY if you can PROVE every side effect stays internal. A flow that would call an EXTERNAL API with real effect — Amplifier fulfillment, a Braintree charge/refund, an Appstle mutation, a Resend/Twilio send, a live Meta ad pause — is NOT run; it stays needs_human. Prove it by reading the handler: assert UP TO the external edge and flag the edge itself human (e.g. comp renewal: the fail-closed branch — comp sub + comp_role null → failed type='comp' txn + subscription.comp_renewal_failed event, no order, no advance — is fully internal → SANDBOX; the happy branch's Amplifier handoff is external → that sub-assertion stays needs_human). The toolkit only drives flows in INTERNAL_ONLY_FLOWS and refuses any non-is_test workspace; the is_test tenant also carries NO external credentials. ALWAYS also assert ZERO writes to non-test-workspace rows (the tool's \`isolation.zero_non_test_workspace_writes\`).`,
-      `\`needs_human\` is now EXACTLY TWO cases: (a) VISUAL/AESTHETIC judgment (looks good / renders nicely / big enough — human taste is the only instrument; a RENDERED-FACT assertion like "the stamp/chip is present" is a BROWSER check, not this), and (b) an IRREVERSIBLE PROD SIDE-EFFECT with NO already-observable evidence AND NO local-harness/browser/sandbox equivalent (a real SMS/email/charge actually reaching an external carrier/processor, a UI flow that can only be verified by submitting a real customer/billing mutation, or a behavioral flow that CROSSES THE EXTERNAL FIREWALL — the side effect would hit Amplifier/Braintree/Appstle/Resend/Twilio/Meta with real effect). An internal-only behavioral flow on \`is_test\` fixtures is a SANDBOX check (auto), not this. Everything else attempts a non-destructive verification.`,
-      `🚨 \`fail\` REQUIRES POSITIVE EVIDENCE OF BREAKAGE — you ran a non-destructive check (incl. a local harness) and OBSERVED the feature doing the wrong thing (a column it claims to select isn't there; a route 500s; a role check returns the wrong status; the harness returned the wrong state). "I couldn't verify this read-only" is NOT a fail. A fault-injection bullet is \`auto\` (pass/fail) whenever the logic is reachable as a local unit; only when it is NOT reachable locally (needs forcing a fault in a live prod runtime path, a mutation, or visual/UX judgment) is it \`needs_human\` (a human can verify it), NEVER \`fail\`. Genuinely undeterminable (missing fixture, ambiguous bullet) → \`inconclusive\`. When the code plainly satisfies a bullet but the runtime path needs a forced fault AND the logic isn't reachable locally, prefer \`needs_human\` with a note ("code present at file:line; not reachable as a local unit, needs forced fault to confirm") over \`fail\`. Only evidence-backed \`fail\`s become regressions / flip the verdict to \`issues\`; \`needs_human\`/\`inconclusive\` never do.`,
-      `🚨 HARNESS/COMMAND FAILURE IS NEVER A CODE \`fail\` (vera-harness-error-is-not-a-code-regression Phase 1) — when a verification bullet names a command whose stderr says \`npm error Missing script\`, \`command not found\`, \`No such file or directory\`/\`ENOENT\`, \`Cannot find module\`/\`Cannot find package\`, or the command exit-1s BEFORE any assertion ran, the command NEVER ran an assertion — the bullet is a broken verification, not a code regression. NEVER record \`verdict='fail'\` for such a check (a \`fail\` spawns a Bo fix phase, and Bo cannot build a phase that fixes a nonexistent shell command — the pipeline wedges; that is the exact 2026-07-11 cs-director-leash false-regression this rule exists to stop). FIRST attempt to map the intended command to the repo's REAL runnable script — e.g. \`npm test src/lib/foo.test.ts\` when \`package.json\` has no \`test\` script but has a matching \`npm run test:<name>\` (grep \`package.json\` \`"scripts"\` for a \`test:*\` entry whose value includes the target file / test name) — and re-run it; if the mapped script now RUNS an assertion, \`pass\`/\`fail\` on that (a real assertion FAIL is a real \`fail\`). If no runnable script maps → classify the check \`needs_human\` (a verification-authoring wart) with the harness stderr as evidence — NEVER \`fail\`. Only a command that RAN and had an assertion FAIL is a real code \`fail\`. (The worker's normalizer also re-classifies a slipped harness-\`fail\` to \`needs_human\` as belt-and-suspenders, but earn the correct verdict at emit time.)`,
-      `TIE-BREAKER (replaces "when in doubt → needs_human"): when in doubt, attempt a read-only outcome probe first, then a non-destructive local harness, then (rendered-UI) a browser check, then (internal-only behavioral) a sandbox check; defer to \`needs_human\` ONLY if ALL are impossible OR the flow crosses the external firewall.`,
-      `You have the box's QA toolkit: repo Read/Grep + \`npx tsc --noEmit\`, the \`gh\` CLI for CI/PR status, the \`vercel\` CLI for deploy READY + logs + \`vercel env ls\`, read-only DB probes via \`npx tsx scripts/spec-test-db-probe.ts "<select …>"\`, GET/read-only endpoint hits, a non-destructive local harness (\`_\`-prefixed scratch \`npx tsx\` script importing pure code from src/), the headless-browser check \`npx tsx scripts/spec-test-browser-check.ts\` (owner-authed, READ-ONLY render assertions + screenshot), and the behavioral sandbox \`npx tsx scripts/spec-test-sandbox.ts\` (drives INTERNAL-ONLY flows on is_test fixtures, asserts, proves isolation — bounded by the external firewall). NEVER mutate REAL prod data, NEVER mark the spec verified/archived, NEVER run a check that hits a real customer/dollar/external API (those are needs_human), NEVER submit a mutating form in the browser, NEVER point the sandbox at a non-is_test workspace.`,
-      isPreMerge
-        ? `Final message = ONLY one JSON object combining BOTH verdicts (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>"]}}} — the security.checks array is REQUIRED (ALL 5 required checks) and each \`clean\` entry MUST carry evidence; the "spec" field is REQUIRED for security.status="real-vuln" and OMITTED otherwise. If you cannot proceed at all, return ONLY {"status":"error","error":"<why>"}.`
-        : `Final message = ONLY one JSON object (no prose before/after; if fenced, the JSON is the last thing in the message): {"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"} — or {"status":"error","error":"<why>"} if you cannot proceed.`,
-    ].join("\n");
-
-    // Records the run as a distinct, retryable `error` state (NOT a 0-check approved/empty row): the
-    // Developer page shows "Run errored — retry" with the raw tail, and "Test now" re-runs it.
-    // Pre-merge Phase 2: carry `spec_branch` + `preview_url` even on the error path, so M3's
-    // green-signal helper sees the LATEST row per (slug, branch) regardless of pass/fail/error.
-    const writeErrorRun = async (reason: string, transcript: string, status: string, jobError?: string) => {
-      await db.from("spec_test_runs").insert({
-        workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
-        agent_verdict: "error", summary: {}, checks: [],
-        transcript: transcript.slice(-8000), error: reason,
-        spec_branch: branch, preview_url: previewOrigin,
-      });
-      // spec-timecard-chokepoint-instrumentation Phase 2 — spec_test_verdict at the spec_test_runs
-      // insert (error path). Fused-session-guarded so a fused session emits only one verdict per kind.
-      await emitTimecardOnceInSession(emittedThisSession, {
-        workspace_id: job.workspace_id,
-        spec_slug: slug,
-        phase_index: null,
-        event_kind: "spec_test_verdict",
-        actor: "vera",
-        metadata: { job_id: job.id, agent_verdict: "error", reason },
-      });
-      await update(job.id, { status, error: jobError ?? reason, log_tail: transcript.slice(-2000) });
-    };
-
-    // Universal account failover (foreman helper): the fresh spec-test run hops to a healthy Max account on
-    // the usage wall (incl. the 7-day `rejected` cap). The landed account (specTestDir) pins the parse-repair
-    // re-prompt, which RESUMES the same session (can't cross accounts).
-    let { session, resultText, isError, raw, usage, model, configDir: specTestDir } = await runBoxLane(
-      (cfg, sid) => runSpecTestClaude(prompt, sid, REPO_DIR, cfg, job.id),
-    );
-    await meterAgentJob(job, specTestDir ?? undefined, usage, model);
-    if (session) await update(job.id, { claude_session_id: session });
-    let parsed = extractSpecTestResult(resultText);
-
-    // Parse-repair: the contract is strict JSON, but a Max session occasionally returns prose. Re-prompt
-    // ONCE on the same session for ONLY the JSON before giving up — a cheap self-heal that turns most
-    // would-be "no parseable JSON" runs into real verdicts.
-    if (!parsed) {
-      console.log(`${tag} no parseable JSON on first pass — re-prompting once for strict JSON`);
-      const repair = [
-        `Your previous message could not be parsed as JSON. Return ONLY one valid JSON object matching this schema — no prose, no commentary, no markdown around it, and if fenced it must be the last thing in the message:`,
-        isPreMerge
-          ? `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<inspection cite OR finding OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"...","fix":"...","verification":["..."]}}}`
-          : `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>"}`,
-        isPreMerge
-          ? `Reuse the checks + security findings you already determined; do not re-run anything. The "security" object is REQUIRED (this is a fused pre-merge session — both verdicts must ship together). security.checks MUST be present and cover all 5 required keys with per-check evidence — a bare status flag is REJECTED downstream (Phase 1). The security.spec field is required only when security.status="real-vuln". If you genuinely could not proceed at all, return ONLY {"status":"error","error":"<why>"}.`
-          : `Reuse the checks you already determined; do not re-run anything. If you genuinely could not proceed, return ONLY {"status":"error","error":"<why>"}.`,
-      ].join("\n");
-      const retry = await runSpecTestClaude(repair, session, REPO_DIR, specTestDir ?? pickHealthyConfigDir(), job.id);
-      await meterAgentJob(job, specTestDir ?? undefined, retry.usage, retry.model);
-      if (retry.session) { session = retry.session; await update(job.id, { claude_session_id: session }); }
-      resultText = retry.resultText; isError = retry.isError; raw = retry.raw;
-      parsed = extractSpecTestResult(resultText);
-    }
-
-    // Missing-security-envelope repair: a FUSED pre-merge session sometimes emits parseable JSON that
-    // forgot the required `security` field entirely. Without this repair the run silently falls through
-    // to `applyFusedSecurityAsBranchVerdict` → classifyFusedSecurityEnvelope(undefined) →
-    // "no security envelope on the fused spec-test result" → needs-human → the origin build parks under
-    // class `real_blocker`. Re-prompt ONCE on the same session for JUST the envelope before that fall-through.
-    // Only fires on the pre-merge branch (the fused contract only applies there) and only when the parse
-    // succeeded, the run isn't a self-declared `error`, and `parsed.security` is missing / not-an-object.
-    if (
-      isPreMerge &&
-      parsed &&
-      parsed.status !== "error" &&
-      (!parsed.security || typeof parsed.security !== "object" || Array.isArray(parsed.security))
-    ) {
-      console.log(`${tag} fused JSON missing security envelope — re-prompting once for JUST the envelope`);
-      const envelopeRepair = [
-        `Your previous JSON parsed but did NOT include the required "security" field. This is a FUSED pre-merge session — both the spec-test verdict AND the security envelope MUST ship together, or the pre-merge gate has to hold the branch for a human.`,
-        `Return ONLY one valid JSON object with the SAME schema as before (reuse your prior checks + report verbatim; do not re-run the spec-test) — add the "security" envelope now:`,
-        `{"status":"completed","agent_verdict":"approved|issues|needs_human","summary":{"auto_pass":N,"auto_fail":N,"needs_human":N,"inconclusive":N},"checks":[{"text":"<bullet>","verdict":"pass|fail|needs_human|inconclusive","category":"auto|needs_human|inconclusive","evidence":"<concrete proof>","screenshot":"<storage path from a browser check, or omit>"}],"report":"<2-4 plain-text sentences>","security":{"status":"clean|false-positive|needs-human|real-vuln","review":"<plain text: findings by file:line + category + severity + the fix; secrets by location only>","checks":[{"check":"injection|secret_leak|authz_rls|unsafe_admin_client|crypto_encrypted","verdict":"clean|finding|needs_human","evidence":"<what you inspected OR finding narrative OR why unclassifiable>","location":"<file:line — findings only>","severity":"low|medium|high|critical — findings only"}],"spec":{"slug":"...","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"...","fix":"...","verification":["..."]}}}`,
-        `security.checks MUST cover ALL 5 required keys (injection, secret_leak, authz_rls, unsafe_admin_client, crypto_encrypted) with per-check evidence — a bare status flag is REJECTED by the fused-envelope validator (fused-premerge-security-authoritative-drop-standalone Phase 1). The security.spec field is required only when security.status="real-vuln".`,
-        `Review the branch diff you already have in context (\`git diff origin/main...origin/${branch}\`) — do NOT re-fetch. If you genuinely cannot classify a check, use verdict="needs_human" with an "evidence" note explaining why. If you genuinely could not proceed at all, return ONLY {"status":"error","error":"<why>"}.`,
-      ].join("\n");
-      const envRetry = await runSpecTestClaude(envelopeRepair, session, REPO_DIR, specTestDir ?? pickHealthyConfigDir(), job.id);
-      await meterAgentJob(job, specTestDir ?? undefined, envRetry.usage, envRetry.model);
-      if (envRetry.session) { session = envRetry.session; await update(job.id, { claude_session_id: session }); }
-      resultText = envRetry.resultText; isError = envRetry.isError; raw = envRetry.raw;
-      const reparsed = extractSpecTestResult(resultText);
-      // Only adopt the reparsed object when it actually landed the envelope — otherwise keep the prior
-      // `parsed` so the spec-test verdict + checks the session already produced are preserved (falling
-      // through to the "no security envelope" path is worse than logging the old verdict with no envelope).
-      if (reparsed) {
-        const gotEnvelope =
-          reparsed.security && typeof reparsed.security === "object" && !Array.isArray(reparsed.security);
-        if (gotEnvelope) {
-          parsed = reparsed;
-        } else if (reparsed.status === "error") {
-          parsed = reparsed;
-        }
-      }
-
-      // Fix 1 of confidence-gated-problem-lockin-and-selective-clarify (Phase 3) — when the retry ALSO
-      // failed to land an envelope AND the session did not self-declare error, synthesize a structured
-      // `needs_human` stub envelope so downstream classifyFusedSecurityEnvelope reads STRUCTURED
-      // per-check evidence ("session could not classify a check") instead of the OPAQUE bare-fall-through
-      // reason ("no security envelope on the fused spec-test result") the parked job a869f697 tripped on.
-      // The synthesized envelope NEVER classifies clean — every per-check entry is needs_human — so we
-      // strand the branch for a human exactly as we would have anyway, but with an actionable log_tail.
-      if (
-        parsed &&
-        parsed.status !== "error" &&
-        (!parsed.security || typeof parsed.security !== "object" || Array.isArray(parsed.security))
-      ) {
-        const { synthesizeMissingEnvelopeStub } = await import("../src/lib/security-envelope");
-        parsed = {
-          ...parsed,
-          security: synthesizeMissingEnvelopeStub("fused session did not emit a security envelope after one repair retry"),
-        };
-        console.log(`${tag} fused envelope still missing after retry — synthesized needs_human stub so parked reason is structured, not opaque`);
-      }
-    }
-
-    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
-
-    if (parsed?.status === "error") {
-      await writeErrorRun(String(parsed.error || "agent reported error"), raw, "completed", `spec-test error: ${String(parsed.error || "").slice(0, 300)}`);
-      return;
-    }
-
-    if (!parsed) {
-      // Still unparseable after the one repair pass — honest terminal `error` state, never a clean-pass row.
-      await writeErrorRun("agent produced no parseable JSON (after one repair re-prompt)", raw, isError ? "failed" : "needs_attention", "spec-test produced no parseable JSON");
-      return;
-    }
-
-    const { agent_verdict: llmAgentVerdict, summary: llmSummary, checks: llmChecks, report } = normalizeSpecTest(parsed);
-    // machine-declared-verification-and-deterministic-spec-test-runner Phase 3 — MERGE. When the
-    // deterministic runner produced verdicts for this spec (a mixed run — residuals forced the Max
-    // session but some checks resolved deterministically), the runner's pass/fail is AUTHORITATIVE
-    // and overrides any conflicting Max verdict on the same bullet; the LLM's verdicts only fill in
-    // the runner's needs_human residual. Pure — same helper the unit tests pin.
-    let checks = llmChecks;
-    let summary = llmSummary;
-    let agent_verdict = llmAgentVerdict;
-    if (deterministicChecks.length) {
-      const { mergeDeterministicWithLlmChecks } = await import("../src/lib/spec-check-runner");
-      checks = mergeDeterministicWithLlmChecks(deterministicChecks, llmChecks);
-      summary = {
-        auto_pass: checks.filter((c) => c.verdict === "pass").length,
-        auto_fail: checks.filter((c) => c.verdict === "fail").length,
-        needs_human: checks.filter((c) => c.verdict === "needs_human").length,
-        inconclusive: checks.filter((c) => c.verdict === "inconclusive").length,
-      };
-      agent_verdict = summary.auto_fail > 0 ? "issues" : summary.auto_pass > 0 ? "approved" : "needs_human";
-    }
+    const raw = report; // no Max transcript — the deterministic runner's summary IS the record
     await db.from("spec_test_runs").insert({
       workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
       agent_verdict, summary, checks, transcript: raw.slice(-8000), error: null,
@@ -12755,31 +12435,26 @@ async function runSpecTestJob(job: Job) {
     } catch (e) {
       console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
     }
-    // ⭐ fused-premerge-security-authoritative-drop-standalone Phase 2 — the fused session's SECURITY
-    // envelope is now AUTHORITATIVE for the pre-merge branch path (reverses isolate-premerge-security-verdict
-    // Phase 1). The Phase-1 pure validator (classifyFusedSecurityEnvelope) enforces the structured
-    // per-check evidence contract: a bare/self-declared `clean` DOWNGRADES to needs_human here, so a
-    // rubber-stamp strands the PR for a human, exactly as a missing dedicated review would. Only a
-    // clean-WITH-evidence classification lands a `completed` security-review row for the branch, which is
-    // what `isSecurityGreenForBranch` / `getSecurityStateForBranch` (src/lib/security-agent.ts) reads. The
-    // `completedClean` definition the M4 promote gate + the post-ship fold gate share is satisfied by a
-    // fused clean-with-evidence verdict and ONLY that. Best-effort — never fails the spec-test run.
-    if (isPreMerge && branch && parsed && typeof parsed === "object") {
+    // ── SOLO VAULT SECURITY (graduate-vera) — security is its OWN session, no longer fused into spec-test.
+    // The spec-test is now deterministic (no Max session), so the pre-merge security review runs as a
+    // STANDALONE branch-mode `security-review` job: runSecurityReviewJob runs the solo Vault Max session
+    // (reviewing a diff for vulnerabilities IS legitimately AI judgment) and writes the authoritative branch
+    // verdict that `isSecurityGreenForBranch` / the M4 promote gate read. Deduped per branch + merged-branch-
+    // guarded inside enqueueSecurityReviewJob. The M4 gate holds the PR until BOTH the deterministic spec-test
+    // AND this Vault review are green. Best-effort — never fails the spec-test run.
+    if (isPreMerge && branch) {
       try {
-        await applyFusedSecurityAsBranchVerdict({
-          job,
-          slug,
+        const { enqueueSecurityReviewJob } = await import("../src/lib/security-agent");
+        const r = await enqueueSecurityReviewJob(db, {
           branch,
           previewOrigin: previewOrigin ?? "",
-          parsedFused: parsed as Record<string, unknown>,
-          raw,
-          tag,
-          // spec-timecard-chokepoint-instrumentation Phase 2 — share the fused-session set so
-          // security_started + security_verdict emit AT MOST ONCE for this pre-merge session.
-          emittedThisSession,
+          specSlug: slug,
+          prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
+          workspaceId: job.workspace_id,
         });
+        console.log(`${tag} solo Vault security-review: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`);
       } catch (e) {
-        console.error(`${tag} fused-security apply failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} solo-Vault security enqueue failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     // Mark THIS spec-test job terminal BEFORE the auto-fold gate runs. fold-guard-live-build (Phase 1)
@@ -23183,197 +22858,6 @@ async function applySecurityVerdictToJob(
   await emitVerdict();
 }
 
-/**
- * fused-premerge-security-authoritative-drop-standalone Phase 2 — insert a synthetic branch-mode
- * security-review row for `branch` (pre-claimed so the standalone poll does NOT pick it) and reuse
- * [[applySecurityVerdictToJob]] to apply the fused envelope's verdict. This is what makes the fused
- * envelope AUTHORITATIVE: `isSecurityGreenForBranch` / `getSecurityStateForBranch` read exactly
- * these `agent_jobs` rows scoped by `spec_branch`, so a `completed` row here satisfies the M4
- * promote gate WITHOUT a separate standalone Vault session. The `completedClean` definition is
- * shared with the post-ship fold gate — both are satisfied by a clean-with-evidence fused verdict
- * and only that.
- */
-async function applyFusedSecurityAsBranchVerdict(args: {
-  job: Job;
-  slug: string;
-  branch: string;
-  previewOrigin: string;
-  parsedFused: Record<string, unknown>;
-  raw: string;
-  tag: string;
-  // spec-timecard-chokepoint-instrumentation Phase 2 — the fused-session emit-once set the caller
-  // (runSpecTestJob) owns. Threaded here so security_started + security_verdict AT MOST ONCE per
-  // fused job regardless of how many terminal branches applySecurityVerdictToJob takes.
-  emittedThisSession?: Set<string>;
-}): Promise<void> {
-  const { job, slug, branch, previewOrigin, parsedFused, raw, tag } = args;
-  const emittedThisSession = args.emittedThisSession ?? new Set<string>();
-  const { classifyFusedSecurityEnvelope, mapFusedSecurityToVerdict } = await import("../src/lib/security-envelope");
-  const { recordDirectorActivity } = await import("../src/lib/director-activity");
-  const { SECURITY_DIRECTOR_FUNCTION } = await import("../src/lib/security-agent");
-  // spec-timecard-chokepoint-instrumentation Phase 2 — security_started for the fused pre-merge
-  // session. The security review is running INSIDE the spec-test session, so this fires as the
-  // fused caller pivots into the security-verdict apply. phase_index=null — security_review is
-  // spec-scoped, not phase-scoped.
-  await emitTimecardOnceInSession(emittedThisSession, {
-    workspace_id: job.workspace_id,
-    spec_slug: slug,
-    phase_index: null,
-    event_kind: "security_started",
-    actor: "vault",
-    metadata: { job_id: job.id, fused: true, branch },
-  });
-
-  const fusedSecurity = parsedFused.security;
-  const verdictInfo = classifyFusedSecurityEnvelope(fusedSecurity);
-  const envAsObj: Record<string, unknown> | null =
-    fusedSecurity && typeof fusedSecurity === "object" && !Array.isArray(fusedSecurity)
-      ? (fusedSecurity as Record<string, unknown>)
-      : null;
-  const declaredStatus = String(envAsObj?.status ?? "");
-  const verdict = mapFusedSecurityToVerdict(verdictInfo.classification, declaredStatus);
-  const review = String(envAsObj?.review ?? "") || verdictInfo.reason;
-
-  const instrJson = {
-    mode: "branch" as const,
-    branch,
-    preview_origin: previewOrigin,
-    spec_slug: slug,
-    pr_number: null,
-    // Fused-provenance markers — the row is authored by the spec-test session, not a fresh Vault session.
-    fused_from_job_id: job.id,
-    fused_classification: verdictInfo.classification,
-  };
-
-  // Insert with status='claimed' so the standalone `claim_agent_job` RPC never picks it up (it only
-  // claims 'queued' rows). applySecurityVerdictToJob's `update()` calls flip it to the terminal state.
-  const { data: inserted, error: insErr } = await db
-    .from("agent_jobs")
-    .insert({
-      workspace_id: job.workspace_id,
-      spec_slug: slug,
-      spec_branch: branch,
-      kind: "security-review",
-      status: "claimed",
-      instructions: JSON.stringify(instrJson),
-      log_tail: `fused pre-merge security verdict — classification=${verdictInfo.classification}, applied=${verdict}: ${verdictInfo.reason}`.slice(-2000),
-    })
-    .select("*")
-    .maybeSingle();
-
-  if (insErr || !inserted) {
-    console.warn(`${tag} could not insert fused security-review row for ${branch}: ${insErr?.message ?? "no row returned"}`);
-    return;
-  }
-
-  const syntheticJob = inserted as unknown as Job;
-
-  // ⭐ security-findings-as-fix-phases — a real-vuln on an IN-FLIGHT build branch appends a security Fix
-  // phase to the ORIGIN spec + resumes its build (mirroring the RED spec-test path, src/lib/pre-merge-fix.ts),
-  // instead of authoring a STANDALONE fix spec. Standalone security fix specs on pre-merge branches raced
-  // the origin's own merge and produced superseded duplicate PRs (#1070/#1071, 2026-07-03). Post-merge
-  // (diff-mode) findings are unchanged — they still author a follow-up spec (no live branch build to append
-  // to). spawnPreMergeFix carries the loop-guard + per-check-key dedup (no endless Fix N), and when the fix
-  // phase ships the origin re-tests via the SAME fused (Vera + Vault) pre-merge session that cleared it.
-  if (verdict === "real-vuln") {
-    const specLabel = `unmerged ${slug} (${branch})`;
-    const failing = buildSecurityFailingChecks(envAsObj);
-    let originTitle = slug;
-    try {
-      const { getSpec } = await import("../src/lib/specs-table");
-      const s = await getSpec(job.workspace_id, slug);
-      if (s?.title) originTitle = s.title;
-    } catch {
-      /* best-effort — degrade to slug */
-    }
-    const { spawnPreMergeFix } = await import("../src/lib/pre-merge-fix");
-    const out = await spawnPreMergeFix(db, {
-      workspaceId: job.workspace_id,
-      originSlug: slug,
-      originTitle,
-      branch,
-      failing,
-    });
-    const outcome = out.spawned
-      ? `security Fix phase appended to [[${slug}]] + build resumed (attempt ${out.attempts + 1})`
-      : out.escalated
-        ? `loop-guard escalated (${out.attempts} prior fix phase(s)) — held for the owner`
-        : `no fix phase spawned (${out.reason})`;
-    await recordDirectorActivity(db, {
-      workspaceId: job.workspace_id,
-      directorFunction: SECURITY_DIRECTOR_FUNCTION,
-      actionKind: "authored_fix",
-      specSlug: slug,
-      reason: `Fused pre-merge security review of ${specLabel}: real-vuln → ${outcome} (fixes-as-phases; no standalone fix spec).`.slice(0, 4000),
-      metadata: {
-        branch,
-        preview_origin: previewOrigin,
-        fused_from_job_id: job.id,
-        classification: verdictInfo.classification,
-        per_check: verdictInfo.perCheck,
-        finding_count: verdictInfo.findingCount,
-        routed: "fixes-as-phases",
-        fix_check_keys: failing.map((f) => f.check_key),
-        spawn_escalated: out.escalated ?? false,
-      },
-    });
-    // Terminal but NOT security-green: the verdict stays 'real-vuln' so isSecurityGreenForBranch holds the PR
-    // until the fix phase ships and a FRESH fused (Vera + Vault) re-review of the origin's branch clears it.
-    await update(inserted.id, {
-      status: "completed",
-      error: null,
-      instructions: JSON.stringify({ ...instrJson, verdict, routed: "fixes-as-phases" }),
-      log_tail: `real-vuln → ${outcome}`.slice(-2000),
-    });
-    // spec-timecard-chokepoint-instrumentation Phase 2 — security_verdict for the fused real-vuln
-    // early-return (fixes-as-phases path bypasses applySecurityVerdictToJob).
-    await emitTimecardOnceInSession(emittedThisSession, {
-      workspace_id: job.workspace_id,
-      spec_slug: slug,
-      phase_index: null,
-      event_kind: "security_verdict",
-      actor: "vault",
-      metadata: { job_id: job.id, agent_verdict: "real-vuln", mode: "branch", routed: "fixes-as-phases", fused: true },
-    });
-    console.log(`${tag} fused real-vuln on ${branch} → ${outcome}`);
-    return;
-  }
-
-  const parsedForApplier: Record<string, unknown> = {
-    review,
-    spec: envAsObj?.spec,
-  };
-  const specLabel = `unmerged ${slug} (${branch})`;
-  const activityMetadata: Record<string, unknown> = {
-    branch,
-    preview_origin: previewOrigin,
-    fused_from_job_id: job.id,
-    classification: verdictInfo.classification,
-    per_check: verdictInfo.perCheck,
-    finding_count: verdictInfo.findingCount,
-  };
-  await applySecurityVerdictToJob(syntheticJob, {
-    parsed: parsedForApplier,
-    verdict,
-    raw: raw.slice(-8000),
-    isError: false,
-    fallbackReason: null,
-    source: { kind: "branch", branch, previewOrigin },
-    specLabel,
-    activityReason: (v, r) =>
-      `Fused pre-merge security review of ${specLabel}: ${v} — ${r} (classification=${verdictInfo.classification})`.slice(0, 4000),
-    activityMetadata,
-    parentSlug: slug,
-    instr: instrJson as unknown as Record<string, unknown>,
-    mode: "branch",
-    tag: `[fused-security:${syntheticJob.id.slice(0, 8)}]`,
-    recordDirectorActivity,
-    SECURITY_DIRECTOR_FUNCTION,
-    // spec-timecard-chokepoint-instrumentation Phase 2 — carry the fused-session set into the
-    // shared applier so the security_verdict emit stays single-fire.
-    emittedThisSession,
-  });
-}
 
 async function runSecurityReviewJob(job: Job) {
   const tag = `[security:${job.id.slice(0, 8)}]`;
