@@ -20833,6 +20833,45 @@ async function runAdCreativeJob(job: Job) {
     }
   };
   console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
+  // dahlia-copy-author-box-session Phase 3 — the per-creative copy-author dispatcher factory.
+  // When DAHLIA_COPY_MODE=author, stockProduct hands each QC-passed image to this dispatcher; it
+  // runs Dahlia's `dahlia-copy-author` skill as a top-level `claude -p` on Max via runBoxLane
+  // (mirroring the QC dispatcher above). Same least-privilege sandbox (`sandbox: "qc"`) — the
+  // author child only Reads ONE tmp jpeg + emits ONE JSON envelope, no filesystem/network beyond
+  // that — so we reuse the shared PreToolUse gate + AD_CREATIVE_QC_ALLOWED_IMAGE env pattern.
+  // Fail-closed contract mirrors QC: any spawn error / cap / timeout / gate deny surfaces as
+  // { isError:true } and runCopyAuthorSession converts it to a revise trigger (or exhaustion).
+  // When DAHLIA_COPY_MODE is unset / `deterministic`, the dispatcher is never invoked and the
+  // deterministic buildMetaCopyPack path runs byte-identical to today.
+  const copyAuthorMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
+  let copyAuthorCounter = 0;
+  const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+    copyAuthorCounter++;
+    const authorTag = `${tag}[copy-author#${copyAuthorCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-copy-author",
+        // Least-privilege — same profile as `sandbox: "qc"`; the author child only needs to Read
+        // ONE tmp jpeg + emit ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/META_/
+        // ANTHROPIC_/OPENAI_ credential like the QC lane does.
+        sandbox: "qc",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+        // Same env-var name keeps the gate script single-source-of-truth.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+      }));
+      if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
+  console.log(`${tag} DAHLIA_COPY_MODE=${copyAuthorMode}${copyAuthorMode === "author" ? " — per-creative dahlia-copy-author box session engaged" : " — deterministic buildMetaCopyPack (default)"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
     const result = await runAdCreativeLoop(a, {
@@ -20842,6 +20881,10 @@ async function runAdCreativeJob(job: Job) {
       // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
       // stockProduct falls through to the legacy qaCreative(...) call unchanged.
       qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
+      // dahlia-copy-author-box-session Phase 3 — only inject the copy-author dispatcher when
+      // the workspace-level flag is `author`; unset / `deterministic` leaves it undefined and
+      // stockProduct's `authorModeEngaged` guard collapses to false (deterministic path).
+      copyAuthorDispatcher: copyAuthorMode === "author" ? copyAuthorDispatcher : undefined,
     });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
@@ -20856,32 +20899,73 @@ async function runAdCreativeJob(job: Job) {
 }
 
 /**
- * ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 1) — the per-creative
- * Max box session Dahlia will use to AUTHOR the finished Meta caption (headline / primary
- * text / description) against the shared 0-10 Conversion-Psychology rubric when a workspace
- * runs with DAHLIA_COPY_MODE=author. Phase 1 lands a scaffold: an agent-kind registered in
- * BUILDER_WORKER_KINDS + KIND_OWNER_FALLBACK (growth owner), the `.claude/skills/dahlia-copy-author`
- * skill the future session invokes, and THIS runner — a stub that just emits an
- * `emitAgentHeartbeat('ad-creative-copy-author', ok, latencyMs)` end-of-run row so the audit
- * trail proves each pass ran and the CLAUDE.md north-star node-completeness rule is satisfied
- * (owner + kill-switch + heartbeat all in the PR that adds the kind). Nothing calls this from
- * `stockProduct` yet — that wire-in lands in Phase 3, together with the retry cap constant,
- * the exhaustion escalate path (`director_activity` `action_kind='dahlia_copy_author_exhausted'`),
- * and the unit tests pinning the DAHLIA_COPY_MODE branch. Until Phase 3 lands, a manual /
- * enqueued row of this kind just heartbeats + completes — the deterministic buildMetaCopyPack
- * path stays byte-identical for every real creative.
+ * ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 3). The PRIMARY production
+ * path for Dahlia's per-creative copy-author box session is a CHILD spawn from `runAdCreativeJob`
+ * via the `copyAuthorDispatcher` injected into `runAdCreativeLoop` — every ad-creative pass runs
+ * with DAHLIA_COPY_MODE=author engages Dahlia per creative WITHOUT enqueueing a separate
+ * `ad-creative-copy-author` job. This TOP-LEVEL runner is the manual / replay path: a
+ * `product_id` + `count` instruction JSON triggers ONE forced-author-mode `stockProduct` pass for
+ * that product, which internally dispatches Dahlia through the same code path. Useful for
+ * bench-testing a workspace's rubric alignment before flipping the workspace-level flag, and
+ * for a one-off re-run when a specific creative needs an author-mode retry. Kills-witch: unset /
+ * `deterministic` still short-circuits inside `stockProduct` — this lane deliberately FORCES
+ * `DAHLIA_COPY_MODE=author` for the duration of ITS runAdCreativeLoop call by threading a
+ * dispatcher directly, so the flag's value doesn't matter (the lane is opt-in by enqueue).
+ *
+ * Always emits `emitAgentHeartbeat('ad-creative-copy-author', ok, latencyMs)` in a `finally`
+ * (CLAUDE.md north-star node-completeness rule).
  */
 async function runAdCreativeCopyAuthorJob(job: Job) {
   const tag = `[ad-creative-copy-author:${job.id.slice(0, 8)}]`;
   const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
   const startedAt = Date.now();
   let ok = true;
-  let detail = "stub — dahlia-copy-author-box-session Phase 1 (no wire-in until Phase 3)";
+  let detail = "started";
   try {
+    let instr: { product_id?: string; count?: number } = {};
+    try {
+      instr = job.instructions ? JSON.parse(job.instructions) : {};
+    } catch {
+      /* not JSON — degrade to workspace-wide top-up */
+    }
+    const a = await admin();
+    // Reuse the QC gate script — same predicate: allow Read on the exact tmp jpeg, deny else.
+    const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+    let counter = 0;
+    const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+      counter++;
+      const authorTag = `${tag}[copy-author#${counter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-author",
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }));
+        if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
+    const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
+    const result = await runAdCreativeLoop(a, {
+      workspaceId: job.workspace_id,
+      productId: instr.product_id,
+      count: instr.count,
+      // Force the copy-author path for THIS manual run — the caller enqueued this kind
+      // deliberately so we always inject the dispatcher regardless of the workspace-level flag.
+      copyAuthorDispatcher,
+    });
+    detail = `produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`;
     console.log(`${tag} ${detail}`);
     await update(job.id, {
-      status: "completed",
-      log_tail: detail.slice(-2000),
+      status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
+      log_tail: JSON.stringify(result.stocked).slice(-4000),
     });
   } catch (err) {
     ok = false;
