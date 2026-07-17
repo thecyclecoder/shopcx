@@ -8,11 +8,21 @@ Legacy Appstle Subscriptions API client. Per-workspace API key + shop domain. Ev
 
 ## Exports
 
+### `resolveContractIdForAppstle` — function
+
+```ts
+async function resolveContractIdForAppstle(workspaceId: string, contractId: string): Promise<{ ok: true; contractId: string } | { ok: false; error: string }>
+```
+
+Guard-at-the-chokepoint UUID→shopify_contract_id resolver. If `contractId` is a bare Postgres UUID (i.e. `subscriptions.id`), swaps in the row's `shopify_contract_id` before any Appstle call — otherwise Appstle returns HTTP 400 with a NumberFormatException on `/subscription-contracts/{id}`. Detects UUID shape via `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i`; non-UUID input passes through untouched. This prevents callers (playbook cancel, LLM-authored context, etc.) that pass our internal subscriptions.id UUID from hitting Appstle with invalid input and silently losing the cancel while the customer stays billed.
+
 ### `appstleSubscriptionAction` — function
 
 ```ts
-async function appstleSubscriptionAction(workspaceId: string, contractId: string, action: "pause" | "cancel" | "resume", cancelReason?: string, cancelledBy?: string,) : Promise<
+async function appstleSubscriptionAction(workspaceId: string, contractId: string, action: "pause" | "cancel" | "resume", cancelReason?: string, cancelledBy?: string,) : Promise<{ success: boolean; error?: string }>
 ```
+
+**UUID→shopify_contract_id swap at entry:** Calls `resolveContractIdForAppstle` at the top of the function (after the `isInternalSubscription` guard). If the resolve returns `ok: false`, returns `{ success: false, error: resolved.error }` instead of hitting Appstle with a UUID. This is the canonical chokepoint so all current and future callers benefit from the guard without re-implementing at each call site.
 
 On a non-2xx/204 response it returns the Appstle **response body** in `error` (`text || \`Appstle API error: ${status}\``), not a bare status string — mirroring `appstleSkipUpcomingOrder`. This is what lets [[portal__remediation]]'s `classifyPortalFailure` recognize a transient cancel 400 (e.g. *"billing operation is already in progress"* right after a renewal bills) and auto-retry/self-resolve instead of escalating a stale cancel ticket to a human.
 

@@ -12,6 +12,37 @@ import {
   advanceDate,
 } from "@/lib/internal-subscription";
 
+const APPSTLE_CONTRACT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Guard-at-the-chokepoint UUID→shopify_contract_id resolve. If `contractId`
+// is a bare Postgres UUID (i.e. our internal subscriptions.id), swap in the
+// row's shopify_contract_id before any Appstle call — otherwise Appstle
+// returns HTTP 400 with a NumberFormatException on /subscription-contracts/{id}
+// and the caller (e.g. a playbook cancel) silently fails while the customer
+// stays billed. Non-UUID input passes through untouched.
+async function resolveContractIdForAppstle(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ ok: true; contractId: string } | { ok: false; error: string }> {
+  if (!APPSTLE_CONTRACT_UUID_RE.test(contractId)) {
+    return { ok: true, contractId };
+  }
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("shopify_contract_id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", contractId)
+    .maybeSingle();
+  if (sub?.shopify_contract_id) {
+    return { ok: true, contractId: sub.shopify_contract_id };
+  }
+  return {
+    ok: false,
+    error: "contractId looks like a subscriptions.id UUID but no matching row was found",
+  };
+}
+
 async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
   const { data: workspace } = await admin
@@ -41,6 +72,14 @@ export async function appstleSubscriptionAction(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubscriptionAction(workspaceId, contractId, action);
   }
+
+  // Chokepoint UUID→shopify_contract_id swap so a caller (playbook cancel,
+  // LLM-authored context, etc.) that passes our internal subscriptions.id
+  // UUID never hits Appstle with a UUID (400 NumberFormatException) and
+  // silently loses the cancel.
+  const resolved = await resolveContractIdForAppstle(workspaceId, contractId);
+  if (!resolved.ok) return { success: false, error: resolved.error };
+  contractId = resolved.contractId;
 
   // Heal-on-touch (skip on cancel — no point structuring a sub we're killing).
   if (action !== "cancel") await healOnTouch(workspaceId, contractId);
