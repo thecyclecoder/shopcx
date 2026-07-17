@@ -411,6 +411,12 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
 const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+// dahlia-copy-author-box-session Phase 1: concurrency-1 claim lane for the new
+// `ad-creative-copy-author` agent-kind. Phase 1 lands the scaffold only (the runner is a
+// stub that just heartbeats); Phase 3 wires the real per-creative Max box session from
+// stockProduct via runBoxLane. Keeping the claim lane at 1 mirrors ad-creative — the true
+// concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
+const MAX_AD_CREATIVE_COPY_AUTHOR = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_AUTHOR || 1);
 // dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
 // `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
 // a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
@@ -677,7 +683,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -748,6 +754,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
   "ad-creative",
+  "ad-creative-copy-author",
   "ads-supervisor",
   "ticket-analyze",
   "ticket-handle",
@@ -3346,6 +3353,7 @@ const LANE_GROUPS = {
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
       MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE + MAX_AD_CREATIVE +
+      MAX_AD_CREATIVE_COPY_AUTHOR +
       MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
@@ -3353,7 +3361,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -20848,6 +20856,48 @@ async function runAdCreativeJob(job: Job) {
 }
 
 /**
+ * ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 1) — the per-creative
+ * Max box session Dahlia will use to AUTHOR the finished Meta caption (headline / primary
+ * text / description) against the shared 0-10 Conversion-Psychology rubric when a workspace
+ * runs with DAHLIA_COPY_MODE=author. Phase 1 lands a scaffold: an agent-kind registered in
+ * BUILDER_WORKER_KINDS + KIND_OWNER_FALLBACK (growth owner), the `.claude/skills/dahlia-copy-author`
+ * skill the future session invokes, and THIS runner — a stub that just emits an
+ * `emitAgentHeartbeat('ad-creative-copy-author', ok, latencyMs)` end-of-run row so the audit
+ * trail proves each pass ran and the CLAUDE.md north-star node-completeness rule is satisfied
+ * (owner + kill-switch + heartbeat all in the PR that adds the kind). Nothing calls this from
+ * `stockProduct` yet — that wire-in lands in Phase 3, together with the retry cap constant,
+ * the exhaustion escalate path (`director_activity` `action_kind='dahlia_copy_author_exhausted'`),
+ * and the unit tests pinning the DAHLIA_COPY_MODE branch. Until Phase 3 lands, a manual /
+ * enqueued row of this kind just heartbeats + completes — the deterministic buildMetaCopyPack
+ * path stays byte-identical for every real creative.
+ */
+async function runAdCreativeCopyAuthorJob(job: Job) {
+  const tag = `[ad-creative-copy-author:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "stub — dahlia-copy-author-box-session Phase 1 (no wire-in until Phase 3)";
+  try {
+    console.log(`${tag} ${detail}`);
+    await update(job.id, {
+      status: "completed",
+      log_tail: detail.slice(-2000),
+    });
+  } catch (err) {
+    ok = false;
+    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("ad-creative-copy-author", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
  * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
  * grading pass over concluded Media Buyer director_activity rows. Reads each row's
  * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
@@ -23855,6 +23905,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
   if (job.kind === "media-buyer") return runMediaBuyerJob(job);
   if (job.kind === "ad-creative") return runAdCreativeJob(job);
+  if (job.kind === "ad-creative-copy-author") return runAdCreativeCopyAuthorJob(job);
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
@@ -25283,7 +25334,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -25370,6 +25421,7 @@ async function main() {
   const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
   const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
   const countAdCreative = () => [...active.values()].filter((v) => v.kind === "ad-creative").length;
+  const countAdCreativeCopyAuthor = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-author").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
@@ -25947,6 +25999,18 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ad-creative ${job.id.slice(0, 8)} → ${countAdCreative() + 1}/${MAX_AD_CREATIVE} ad-creative lane`);
+        launch(job);
+      }
+      // Fill the ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 1 — scaffold
+      // only). Phase 1's runner is a stub that just heartbeats — nothing enqueues this kind yet.
+      // Phase 3 wires the real per-creative Max box session from `stockProduct` via `runBoxLane`
+      // (the primary path); a direct `agent_jobs` enqueue path is left available for future
+      // manual / debug invocation, and the lane below is what would drain those.
+      while (laneHasQueued(queuedKinds, ["ad-creative-copy-author"]) && countAdCreativeCopyAuthor() < MAX_AD_CREATIVE_COPY_AUTHOR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-creative-copy-author"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ad-creative-copy-author ${job.id.slice(0, 8)} → ${countAdCreativeCopyAuthor() + 1}/${MAX_AD_CREATIVE_COPY_AUTHOR} ad-creative-copy-author lane`);
         launch(job);
       }
       // Fill the sensor-trust-probe lane (media-buyer-sensor-trust-probe Phase 2):

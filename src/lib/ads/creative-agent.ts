@@ -324,6 +324,19 @@ async function stockProduct(
   qcDispatcher?: QcSessionDispatcher,
 ): Promise<StockedCreative[]> {
   const out: StockedCreative[] = [];
+  // DAHLIA_COPY_MODE kill switch (dahlia-copy-author-box-session Phase 1) — the env-var read is
+  // wired here so a workspace-level flip (`author` / `deterministic`) is a single greppable
+  // surface. Phase 1 lands the READ + a default `deterministic` short-circuit (any unset /
+  // unknown value collapses to `deterministic`, so today's byte-for-byte behavior is preserved).
+  // Phase 3 wires the actual branch: `author` will dispatch the per-creative Max
+  // `ad-creative-copy-author` box session via `runBoxLane` (mirroring `qaCreativeViaBoxSession`),
+  // thread the AuthorModeCopy verdict through `insertReadyCreative`, and re-invoke once on a
+  // cold-offer-gate skip or self-score-below-floor. Until then, `authorModeEngaged` is unused —
+  // the deterministic `buildMetaCopyPack` path below runs unchanged. Never fall back silently in
+  // Phase 3 — a failed author run escalates via `director_activity`, never regresses to slot-fill.
+  const copyMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
+  const authorModeEngaged = copyMode === "author";
+  void authorModeEngaged; // Phase 3 consumer — see note above; kept greppable for the wire-in.
   const pi = await getProductIntelligence(admin, workspaceId, productId);
   const product = pi.product as { title?: string; handle?: string } | null;
   if (!product?.handle) return [{ productId, angleHook: "", campaignId: null, ok: false, reason: "product_missing_handle" }];
