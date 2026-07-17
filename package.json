@@ -39,6 +39,7 @@
     "test:market-sophistication": "tsx --test src/lib/ads/market-sophistication.test.ts",
     "test:cold-offer-gate": "tsx --test src/lib/ads/cold-offer-gate.test.ts",
     "test:copy-validator": "tsx --test src/lib/ads/copy-validator.test.ts",
+    "test:ad-copy-variants": "tsx --test src/lib/ads/ad-copy-variants.test.ts",
     "test:creative-qa-copy-qc": "tsx --test src/lib/ads/creative-qa.copy-qc.test.ts",
     "test:creative-agent-author": "tsx --test src/lib/ads/creative-agent.author.test.ts",
     "test:creative-agent-revise-reason": "tsx --test src/lib/ads/creative-agent.revise-reason.test.ts",
