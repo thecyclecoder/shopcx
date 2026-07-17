@@ -635,6 +635,47 @@ export type InsertReadyCreativeResult =
   | { kind: "skip"; reason: "cold_offer_leak" }
   | { kind: "failed" };
 
+/** The exact row body `insertReadyCreative` writes to `ad_campaigns`. Extracted as a pure helper
+ *  so the row-stamping flow — audience_temperature + author_self_score + Andromeda concept_tag
+ *  — is unit-testable end-to-end (dahlia-andromeda-concept-diversity-tags Phase 1). Author mode:
+ *  every field is CITED from `AuthorModeCopy`. Deterministic mode (opts.authorModeCopy absent):
+ *  author_self_score + concept_tag are both null, byte-identical to today's row shape. */
+export interface AdCampaignInsertBody {
+  workspace_id: string;
+  product_id: string;
+  name: string;
+  angle_id: string | null;
+  status: "ready" | "draft";
+  audience_temperature: "cold" | "warm" | "hot" | null;
+  author_self_score: AuthorSelfScore | null;
+  concept_tag: AndromedaConceptTag | null;
+}
+
+/** Pure — construct the `ad_campaigns` row body `insertReadyCreative` writes for one creative. The
+ *  concept_tag / author_self_score come straight from the AuthorModeCopy verdict when present, both
+ *  NULL otherwise (deterministic-mode path). Keeping this a pure helper lets the author-mode row-
+ *  stamping flow be pinned in unit tests without stubbing the storage / DB chains. */
+export function buildAdCampaignInsertBody(args: {
+  workspaceId: string;
+  productId: string;
+  name: string;
+  angleId: string | null;
+  status: "ready" | "draft";
+  audienceTemperature: "cold" | "warm" | "hot" | null;
+  authorModeCopy?: AuthorModeCopy;
+}): AdCampaignInsertBody {
+  return {
+    workspace_id: args.workspaceId,
+    product_id: args.productId,
+    name: args.name,
+    angle_id: args.angleId,
+    status: args.status,
+    audience_temperature: args.audienceTemperature,
+    author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
+    concept_tag: args.authorModeCopy ? args.authorModeCopy.concept_tag : null,
+  };
+}
+
 /** Insert one finished creative PACK into the ready-to-test bin. A pack = one angle row carrying
  *  the 4-headline + 4-primary-text copy variations (persisted on the angle's scalar columns AND on
  *  its `metadata.copy_pack` JSONB for the sibling publish path to read) + one campaign row + THREE
@@ -721,11 +762,14 @@ async function insertReadyCreative(
   // the SAME insert so Bianca's Phase-2 replenish diversity gate has a first-class read surface.
   // NULL for deterministic-mode inserts (opts.authorModeCopy absent) — Phase-2 treats NULL as
   // its own 'untagged' bucket, so deterministic-mode replenish behavior stays byte-identical.
-  const authorSelfScore = opts?.authorModeCopy ? opts.authorModeCopy.selfScore : null;
-  const conceptTag = opts?.authorModeCopy ? opts.authorModeCopy.concept_tag : null;
+  const campaignInsertBody = buildAdCampaignInsertBody({
+    workspaceId, productId, name, angleId, status,
+    audienceTemperature,
+    authorModeCopy: opts?.authorModeCopy,
+  });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
-    .insert({ workspace_id: workspaceId, product_id: productId, name, angle_id: angleId, status, audience_temperature: audienceTemperature, author_self_score: authorSelfScore, concept_tag: conceptTag })
+    .insert(campaignInsertBody)
     .select("id").single();
   if (cErr || !campaign) return { kind: "failed" };
   const campaignId = (campaign as { id: string }).id;
