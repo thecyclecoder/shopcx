@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isInngestStepWrappedNonErrorLog,
+  isTransientAnthropicOverloadError,
   isTransientAppstleFrequencyUpstreamTimeout,
   isTransientInngestStepRetryThrow,
   isTransientShopifyWebhookHmacFailure,
@@ -200,7 +201,8 @@ export async function POST(request: Request) {
         isTransientAppstleFrequencyUpstreamTimeout(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
         isTransientSupabaseEdgeHtmlBody(g.message) ||
-        isTransientUndiciHeadersTimeout(g.message);
+        isTransientUndiciHeadersTimeout(g.message) ||
+        isTransientAnthropicOverloadError(g.message);
       await recordError({
         source: "vercel",
         // Group on path + status + normalized message (stable bits, not requestId/deploymentId).

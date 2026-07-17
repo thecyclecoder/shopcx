@@ -26,6 +26,12 @@ export interface DunningSettings {
 
 // ── Shopify GraphQL: Customer Payment Methods ──
 
+// Retry-on-5xx/429/network for the Shopify GraphQL fetch below, mirroring
+// fetchWithRetry in shopify-sync.ts. A one-off Shopify upstream 503 was
+// exhausting otherwise-recoverable dunning cycles because the caller's catch
+// treated a transient blip the same as "customer has zero cards".
+const GET_PAYMENT_METHODS_MAX_RETRIES = 3;
+
 export async function getCustomerPaymentMethods(
   workspaceId: string,
   shopifyCustomerId: string,
@@ -60,17 +66,41 @@ export async function getCustomerPaymentMethods(
     }
   }`;
 
-  const res = await fetch(
-    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query }),
+  let res: Response | undefined;
+  for (let attempt = 0; attempt <= GET_PAYMENT_METHODS_MAX_RETRIES; attempt++) {
+    try {
+      res = await fetch(
+        `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "X-Shopify-Access-Token": accessToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ query }),
+        }
+      );
+      if (
+        (res.status === 429 || res.status >= 500) &&
+        attempt < GET_PAYMENT_METHODS_MAX_RETRIES
+      ) {
+        const wait = res.status === 429 ? 2000 : 1000 * (attempt + 1);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      break;
+    } catch (err) {
+      if (attempt < GET_PAYMENT_METHODS_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
     }
-  );
+  }
+
+  if (!res) {
+    throw new Error("Shopify GraphQL: exhausted retries with no response");
+  }
 
   if (!res.ok) {
     const text = await res.text();

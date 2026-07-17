@@ -29,6 +29,23 @@ export interface ReadyToTestRow {
   status: "ready_no_active_ad";
   formats: string[];
   created_at: string;
+  /**
+   * `dahlia-andromeda-concept-diversity-tags` Phase 1 — the Andromeda concept token stamped on
+   * the campaign at author-mode ship (one of the 10 tokens; see [[../ads/creative-agent]]
+   * `ANDROMEDA_CONCEPT_TAGS`). NULL for deterministic-mode creatives or pre-Phase-1 rows.
+   * Consumed by Phase 2's [[../media-buyer/agent]] `computeMediaBuyerPlan` replenish diversity
+   * gate — NULL is its own 'untagged' bucket that never conflicts with an Andromeda token.
+   */
+  concept_tag: string | null;
+  /**
+   * `bianca-route-ready-creatives-by-dahlia-temperature-tag` Phase 1 — the temperature band the
+   * creative was authored for (per Dahlia's audience_temperature stamp on ad_campaigns; see
+   * [[../ads/creative-agent]] `resolveAudienceTemperature`). Values match the DB check constraint:
+   * `'cold' | 'warm' | 'hot' | null`. Bianca's replenish path filters this reader to
+   * `'cold'` for every cold-test cohort pass so a Warm/Hot creative can never leak into the cold
+   * rail; the exposed column also lets the audit trail cite the routed value verbatim.
+   */
+  audience_temperature: "cold" | "warm" | "hot" | null;
 }
 
 export interface ListReadyToTestResult {
@@ -49,6 +66,8 @@ interface AdCampaignRow {
   landing_url: string | null;
   status: string | null;
   created_at: string;
+  concept_tag: string | null;
+  audience_temperature: "cold" | "warm" | "hot" | null;
 }
 
 interface AdPublishJobRow {
@@ -81,12 +100,24 @@ function isReadyCreative(v: AdVideoRow): boolean {
  * feeds product B's ready creative into product A's cohort adset. Omitting the
  * filter (or passing null) preserves the pre-Phase-2 workspace-wide read used
  * by the null-product default cohort.
+ *
+ * [[../../../docs/brain/specs/bianca-route-ready-creatives-by-dahlia-temperature-tag]] Phase 1 —
+ * an optional `temperature` narrows the read to a single `audience_temperature` band
+ * (`ad_campaigns.audience_temperature = temperature`). Bianca's replenish path passes
+ * `'cold'` for every cold-test cohort so a Warm/Hot creative Dahlia tagged cannot leak
+ * into the cold rail's deficit fill. Omitting the filter (or passing null) preserves the
+ * pre-Phase-1 workspace/product read verbatim — nothing regresses when the column is missing
+ * or the caller doesn't care about the band.
  */
 export async function listReadyToTest(
   admin: Admin,
-  opts: { workspaceId: string; productId?: string | null },
+  opts: {
+    workspaceId: string;
+    productId?: string | null;
+    temperature?: "cold" | "warm" | "hot" | null;
+  },
 ): Promise<ListReadyToTestResult> {
-  const { workspaceId, productId = null } = opts;
+  const { workspaceId, productId = null, temperature = null } = opts;
 
   const { data: videoData } = await admin
     .from("ad_videos")
@@ -114,7 +145,7 @@ export async function listReadyToTest(
   // workspace-wide — the null-product default cohort still catches Superfood Tabs today).
   let campaignsQuery = admin
     .from("ad_campaigns")
-    .select("id, landing_url, status, created_at")
+    .select("id, landing_url, status, created_at, concept_tag, audience_temperature")
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
     .not("landing_url", "is", null)
@@ -123,6 +154,10 @@ export async function listReadyToTest(
     // replenish from ever picking a retired creative.
     .neq("status", "archived");
   if (productId) campaignsQuery = campaignsQuery.eq("product_id", productId);
+  // Phase 1 (bianca-route-ready-creatives-by-dahlia-temperature-tag) — when the caller pins a
+  // temperature band, restrict at the DB. The null-default preserves the pre-Phase-1 shape byte-
+  // identically so untagged / unfiltered reads keep working.
+  if (temperature) campaignsQuery = campaignsQuery.eq("audience_temperature", temperature);
   const { data: campaignData } = await campaignsQuery;
   const campaigns = (campaignData || []) as AdCampaignRow[];
   if (campaigns.length === 0) return { readyToTest: [] };
@@ -158,6 +193,8 @@ export async function listReadyToTest(
       status: "ready_no_active_ad",
       formats: [...bucket.formats].sort(),
       created_at: c.created_at,
+      concept_tag: c.concept_tag ?? null,
+      audience_temperature: c.audience_temperature ?? null,
     });
   }
   rows.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));

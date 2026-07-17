@@ -13,7 +13,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { winProbabilityVsControl } from "@/lib/storefront/bandit";
 import { getLeverImportancePanel } from "@/lib/storefront/lever-memory";
@@ -68,8 +68,7 @@ export async function GET(
   // carried, the whole funnel can resolve per product (advertorial-lander A/B).
   const productScope = url.searchParams.get("product_id");
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();

@@ -159,13 +159,28 @@ export function isOverrideStatus(status: string | null | undefined): boolean {
 
 /** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
 export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {
-  const admin = createAdminClient();
-  const { data } = await admin
-    .from("spec_card_state")
-    .select("workspace_id, spec_slug, status, phase_states, flags, last_merge_sha, updated_at")
-    .eq("workspace_id", workspaceId);
+  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Pooled straggler read — one pooled query strips the PostgREST preamble off the full-workspace
+  // scan every board render fires. `null` = pool unavailable / query error → fall through to the
+  // supabase-js `.from()` path (same fail-open contract as [[pg-pool]] `getSpecWithPhases`).
+  let rows: SpecCardState[] | null = null;
+  try {
+    const { listSpecCardStates } = await import("@/lib/pg-pool");
+    const pooled = await listSpecCardStates<SpecCardState>(workspaceId);
+    if (pooled !== null) rows = pooled;
+  } catch {
+    /* fall through to supabase-js .from() */
+  }
+  if (rows === null) {
+    const admin = createAdminClient();
+    const { data } = await admin
+      .from("spec_card_state")
+      .select("workspace_id, spec_slug, status, phase_states, flags, last_merge_sha, updated_at")
+      .eq("workspace_id", workspaceId);
+    rows = (data ?? []) as SpecCardState[];
+  }
   const out: Record<string, SpecCardState> = {};
-  for (const r of (data ?? []) as SpecCardState[]) out[r.spec_slug] = r;
+  for (const r of rows) out[r.spec_slug] = r;
   return out;
 }
 

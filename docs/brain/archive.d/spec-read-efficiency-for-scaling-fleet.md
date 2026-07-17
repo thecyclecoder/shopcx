@@ -1,0 +1,1 @@
+- **Spec/phase read efficiency: make a cold read cheap so it scales with the agent fleet** · verified 2026-07-17 · → [[../libraries/pg-pool]] · [[../libraries/brain-roadmap]]

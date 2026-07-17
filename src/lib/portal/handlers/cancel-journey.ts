@@ -6,6 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
+import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 
 async function createChatTicket(
   admin: ReturnType<typeof createAdminClient>,
@@ -203,11 +204,12 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     let reviews: unknown[] = [];
     if (rawItemIds.length) {
-      const { data: products } = await admin.from("products")
-        .select("id, shopify_product_id")
-        .eq("workspace_id", auth.workspaceId)
-        .or(rawItemIds.map(id => `id.eq.${id},shopify_product_id.eq.${id}`).join(","));
-      const internalIds = [...new Set((products || []).map(p => p.id).filter(Boolean) as string[])];
+      // fix-1-mixed-id-resolver — Fix 1 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md
+      // retires the mixed-ID `.or()` filter string (security agent flagged as injection · medium in
+      // the sibling reviews.ts callsite) in favor of two parameter-safe `.in()` queries composed
+      // inside the shared helper. Behavior-preserving: same rows returned; only transport is safer.
+      const products = await resolveProductsByMixedIds(admin, auth.workspaceId, rawItemIds);
+      const internalIds = [...new Set(products.map((p) => p.id).filter(Boolean))];
 
       if (internalIds.length) {
         const { data: revs } = await admin.from("product_reviews")

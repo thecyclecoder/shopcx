@@ -463,7 +463,14 @@ async function persistEvents({
     const nowIso = new Date().toISOString();
     const { data: inserted, error } = await admin
       .from("storefront_sessions")
-      .insert({
+      // Atomic get-or-create: on the first-touch burst a new visitor's pixel events fire near-
+      // simultaneously, so two requests can both miss the SELECT above and both INSERT — the loser
+      // hit the (workspace_id, anonymous_id) unique constraint and logged a Postgres error (the app
+      // recovered via the re-fetch below, but the constraint violation still spammed the DB log).
+      // `ON CONFLICT DO NOTHING` (ignoreDuplicates) makes the loser a silent no-op — no error raised,
+      // no log noise — and maybeSingle() returns null on conflict so the existing race re-fetch runs.
+      .upsert(
+        {
         workspace_id: workspaceId,
         anonymous_id: anonymousId,
         customer_id: customerId,
@@ -494,9 +501,11 @@ async function persistEvents({
         ttclid: sessionContext.ttclid ?? null,
         fbp: sessionContext.fbp ?? null,
         fbc: sessionContext.fbc ?? null,
-      })
+        },
+        { onConflict: "workspace_id,anonymous_id", ignoreDuplicates: true },
+      )
       .select("id")
-      .single();
+      .maybeSingle();
     if (error || !inserted) {
       // Race: another request inserted between our SELECT and INSERT.
       // Re-fetch and continue.

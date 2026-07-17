@@ -18,6 +18,8 @@ Core dunning logic: card rotation, payment method dedup, payday scheduling
 async function getCustomerPaymentMethods(workspaceId: string, shopifyCustomerId: string,) : Promise<PaymentMethod[]>
 ```
 
+Fetches live payment methods from Shopify GraphQL with automatic retry-on-5xx/429/network transients (3 retries, 1-2s backoff). A one-off Shopify upstream 503 is absorbed at the fetch boundary instead of surfacing as "zero payment methods" → exhausted dunning cycle. Mirrors `fetchWithRetry` from [[shopify-sync]]. Only throws after all retries exhausted.
+
 ### `syncShopifyPaymentMethods` — function
 
 ```ts

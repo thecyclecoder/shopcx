@@ -48,6 +48,13 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `seed_kind` | `text` | ✓ | `category` \| `competitor` (`category` retired 2026-07-12 — new rows are all `competitor`) |
 | `competitor_id` | `uuid` | ✓ | → [[competitors]].id · ON DELETE SET NULL. The approved competitor this ad was scouted for. Stamped by [[../libraries/creative-skeleton]] `ingestAd` from the seed. Migration `20261020120000`. |
 | `product_id` | `uuid` | ✓ | → [[products]].id · ON DELETE SET NULL. **The deliberate imitate link** — WHICH of our products this competitor was chosen for. Dahlia's `getProvenCompetitorAngles(productId)` ([[../libraries/creative-sourcing]]) filters on this so a product imitates only its own shelf. Migration `20261020120000`. |
+| `winner_tier` | `text` | ✓ | **REPURPOSED — OUR persistence tier** (not AdLibrary's, which came back "loser" for every major brand): `new` (<7d observed) \| `building` (7-20d) \| `proven` (≥21d) \| `retired` (`still_active=false`, competitor killed it). Computed by `deriveWinnerTier` on each re-observation. Migrations `20261022160000` (col) + `20261022170000` (repurpose). |
+| `winner_score` | `numeric` | ✓ | **REPURPOSED — OUR observed persistence in DAYS** (`our_last_seen - our_first_seen`), not AdLibrary's opaque composite. The ranking signal for proven winners. Migration `20261022170000`. |
+| `our_first_seen` | `timestamptz` | ✓ | winners-flow longitudinal: when OUR sweep FIRST observed this ad (set once by `ingestAd`; backfilled to `created_at` for pre-existing rows). Persistence = `our_last_seen − our_first_seen`. Migration `20261022170000`. |
+| `our_last_seen` | `timestamptz` | ✓ | Most recent sweep we saw the ad live (bumped by `reobserveAd`). Migration `20261022170000`. |
+| `observed_sweeps` | `integer` | — | default `1` · how many sweeps we've observed the ad in (`reobserveAd` ++). Migration `20261022170000`. |
+| `still_active` | `boolean` | — | default `true` · present in its competitor's latest sweep. `markDisappearedAds` sets it `false` (→ `winner_tier='retired'`) when the ad vanishes. Migration `20261022170000`. |
+| `concept_tags` | `jsonb` | ✓ | **The unified concept breakdown** — `{ angle, archetype, why_it_works, cialdini_lever, awareness_stage, format }`. ALWAYS from OUR vision (both lanes), so Dahlia researches + Max grades one shape. AdLibrary's own tags were dropped — they were mislabeled (`angle`="solution_aware", `awareness_stage`="warm" = a temperature). Migration `20261022160000`. |
 | `status` | `text` | — | default `'analyzed'` · `pending` \| `analyzed` \| `video_pending` \| `shortlisted` \| `archived` \| `failed` |
 | `raw` | `jsonb` | ✓ | full AdLibrary row for replay/audit |
 | `visioned_at` | `timestamptz` | ✓ | when the skeleton was extracted |
@@ -55,7 +62,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `updated_at` | `timestamptz` | — | default `now()` |
 
 **Unique:** `(workspace_id, source, dedup_key)` — the idempotent upsert key.
-**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path), `(product_id)`, `(competitor_id)` (per-product scout read path, migration `20261020120000`).
+**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path), `(product_id)`, `(competitor_id)` (per-product scout read path, migration `20261020120000`), `(workspace_id, winner_tier) WHERE winner_tier IS NOT NULL` (migration `20261022160000`), `(workspace_id, still_active, winner_score desc) WHERE source='adlibrary'` (winners-flow persistence ranking, migration `20261022170000`).
 
 > **Deliberate-scout reset (2026-07-12).** Migration `20261020120000` added `product_id` + `competitor_id` and **hard-cleared all 473 pre-refactor rows** (`delete where product_id is null`) — they predated product tagging and weren't re-derivable. HARD delete (not archive) because the pattern-matrix / promotion scans read `source='adlibrary'` with no status filter. The [[../inngest/creative-scout]] repopulates per-product, tagged. This is the "clean the competitive ad library" step of the base-layer imitate→innovate fix.
 

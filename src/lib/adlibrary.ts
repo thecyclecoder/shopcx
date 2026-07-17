@@ -31,12 +31,23 @@ const ADLIBRARY_API_KEY = process.env.ADLIBRARY_API_KEY?.trim();
 const ADLIBRARY_BASE = "https://adlibrary.com";
 
 export interface AdLibrarySearchParams {
-  keyword: string;
+  /** The brand keyword. Optional ONLY when `domain` is set (a domain-only search — LANE B). */
+  keyword?: string;
+  /** AdLibrary `domain` filter (undocumented but live) — returns a brand's ads by destination domain even
+   *  when its advertiser can't be resolved by name (winners-flow LANE B: Wellah → wellah.com → 20 ads). */
+  domain?: string;
   /** "3" = the all-platforms app type we tested. */
   appType?: string;
   geo?: string[];
   daysBack?: number;
   pageSize?: number;
+  /** AdLibrary `adsType` filter: "1"=image, "2"=video, "3"=carousel. Omit for all types. The scout
+   *  passes `["1"]` (image only) — we research STATIC creative, not video (founder 2026-07-17). */
+  adsType?: string[];
+  /** AdLibrary `platform` filter (facebook | instagram | tiktok | …). The scout passes
+   *  `["facebook","instagram"]` — META ONLY (founder 2026-07-17: "we don't want google results"; the
+   *  Google/AdMob text ads have no real creative image). */
+  platform?: string[];
 }
 
 /**
@@ -149,6 +160,12 @@ export function classifyMedia(ad: AdLibraryAd): MediaType {
   return "static";
 }
 
+/** Normalize a raw AdLibrary ad row → `NormalizedAd`. Exported so the winners-flow ([[./adlibrary-winners]])
+ *  can reuse the SAME normalization on a `/api/winners/advertiser` concept's `ad` payload as `searchAds` uses. */
+export function normalizeAd(row: Record<string, unknown>): NormalizedAd {
+  return normalize(row);
+}
+
 function normalize(row: Record<string, unknown>): NormalizedAd {
   const resourceUrls = Array.isArray(row.resource_urls)
     ? (row.resource_urls as Array<{ type?: number; url?: string; u?: string }>)
@@ -204,13 +221,20 @@ function normalize(row: Record<string, unknown>): NormalizedAd {
  */
 export async function searchAds(params: AdLibrarySearchParams): Promise<NormalizedAd[]> {
   if (!ADLIBRARY_API_KEY) throw new Error("no_adlibrary_key");
-  const body = {
-    keyword: params.keyword,
+  if (!params.keyword && !params.domain) throw new Error("searchAds: keyword or domain required");
+  const body: Record<string, unknown> = {
     appType: params.appType ?? "3",
     geo: params.geo ?? ["USA"],
     daysBack: params.daysBack ?? 30,
     pageSize: params.pageSize ?? 30,
   };
+  if (params.keyword) body.keyword = params.keyword;
+  // domain filter — LANE B (a brand's ads by destination domain when its advertiser won't resolve by name).
+  if (params.domain) body.domain = params.domain;
+  // adsType filter: "1"=image, "2"=video, "3"=carousel (AdLibrary API). Only sent when the caller sets it.
+  if (params.adsType && params.adsType.length) body.adsType = params.adsType;
+  // platform filter (Meta-only for the scout) — only sent when the caller sets it.
+  if (params.platform && params.platform.length) body.platform = params.platform;
   const res = await fetch(`${ADLIBRARY_BASE}/api/search`, {
     method: "POST",
     headers: {

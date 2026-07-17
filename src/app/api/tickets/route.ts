@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 
 // GET: list tickets with filters
 export async function GET(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();
@@ -140,8 +139,7 @@ export async function GET(request: Request) {
 
 // POST: create a new ticket
 export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cookieStore = await cookies();
@@ -170,15 +168,31 @@ export async function POST(request: Request) {
     if (existing) {
       resolvedCustomerId = existing.id;
     } else {
+      // Get-or-create is non-atomic (check-then-insert): two concurrent requests
+      // for the same new email both miss the select above and both try to
+      // insert, and the loser hits the UNIQUE(workspace_id, email) constraint
+      // (Postgres 23505). Upsert with ignoreDuplicates so the loser inserts
+      // nothing (returns no row); then re-read the winner's row by (ws, email).
+      const normalizedEmail = customer_email.toLowerCase();
       const { data: created } = await admin
         .from("customers")
-        .insert({
+        .upsert({
           workspace_id: workspaceId,
-          email: customer_email.toLowerCase(),
-        })
+          email: normalizedEmail,
+        }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
         .select("id")
-        .single();
-      resolvedCustomerId = created?.id;
+        .maybeSingle();
+      if (created) {
+        resolvedCustomerId = created.id;
+      } else {
+        const { data: raced } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("email", normalizedEmail)
+          .maybeSingle();
+        resolvedCustomerId = raced?.id;
+      }
     }
   }
 

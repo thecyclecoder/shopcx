@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import { exchangeCodeForTokens, saveOAuthConnection } from "@/lib/quickbooks";
@@ -37,8 +37,7 @@ export async function GET(req: NextRequest) {
   if (!cookieNonce || cookieNonce !== parsed.nonce) return back(siteUrl, "csrf");
 
   // re-check the user is an owner/admin of the workspace they claim
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user || user.id !== parsed.userId) return back(siteUrl, "unauthorized");
   const admin = createAdminClient();
   const { data: member } = await admin

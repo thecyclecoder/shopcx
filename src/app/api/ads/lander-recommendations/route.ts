@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 // Landing Page Scout recommendations list (docs/brain/specs/landing-page-scout.md, Phase 1).
@@ -7,8 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // Approve/reject one row (which routes it to Build / the optimizer) lives in ./[id]/route.ts. Owner/admin only.
 
 async function authorize(workspaceId: string | null) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user } = await getAuthedUser();
   if (!user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!workspaceId) return { error: NextResponse.json({ error: "workspaceId required" }, { status: 400 }) };
   const admin = createAdminClient();
