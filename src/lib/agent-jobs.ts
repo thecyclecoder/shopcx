@@ -1064,9 +1064,83 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
     // partial spec. Same predicate the auto-merge accumulation gate + isSpecPromoteEligible read.
     const acc = await isSpecAccumulationComplete(workspaceId, slug);
     if (!acc.complete) return { enqueued: false, reason: `not fully accumulated yet (${acc.reason})` };
-    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin, force ? { force: true } : undefined);
+    // fixes-as-phases self-heal: auto-force past the "already tested this preview / existing verdict" dedup
+    // when the spec has an unshipped `kind='fix'` phase — the prior pre-merge run tested the PRE-fix code
+    // (a stale `issues` verdict that the normal dedup would let block the re-test → the fix stalls, PR held
+    // forever). Derived HERE from the spec's phase state (not threaded by the caller) so EVERY trigger — the
+    // deployment-ready webhook AND the standing-pass backstop — re-tests the fixed code. [[pre-merge-fix]].
+    let forceForFix = force ?? false;
+    if (!forceForFix) {
+      try {
+        const specForFix = await getSpecFromDb(workspaceId, slug);
+        forceForFix = (specForFix?.phases || []).some(
+          (p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected",
+        );
+      } catch {
+        /* best-effort — a getSpec blip just means no force (the backstop is the safety net) */
+      }
+    }
+    return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin, forceForFix ? { force: true } : undefined);
   } catch (e) {
     return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * ⚡ EVENT-DRIVEN pre-merge trigger (preview-ready-event-trigger). Maps a Vercel preview deploy that just
+ * reached READY — delivered as a GitHub `deployment_status` webhook, which identifies the deploy by commit
+ * SHA, not branch — back to its `claude/build-*` build job, persists the preview URL, and fires the fused
+ * pre-merge spec-test (Vera) + security (Vault) session IMMEDIATELY. This replaces the fragile in-worker
+ * 6-min poll: the session now starts within seconds of the preview going green instead of waiting for the
+ * box's next standing-pass ([[backstopPreMergeChecks]] stays as the safety net for a missed webhook).
+ *
+ * Best-effort + never throws. Skips (returns a reason) when: the SHA no longer heads a build branch (a
+ * superseded/merged deploy), no build job exists for the branch, or the spec isn't fully accumulated yet
+ * (an earlier phase's preview — `maybeEnqueuePreMergeSpecTestOnAccumulation` no-ops until the last phase).
+ */
+export async function enqueuePreMergeFromDeploymentReady(args: {
+  sha: string | null;
+  previewUrl: string | null;
+  environment?: string | null;
+}): Promise<{ enqueued: boolean; reason?: string; branch?: string; slug?: string }> {
+  const { sha, previewUrl, environment } = args;
+  try {
+    if (environment && !/preview/i.test(environment)) return { enqueued: false, reason: `not a preview env (${environment})` };
+    if (!sha) return { enqueued: false, reason: "no deploy sha" };
+    const origin = (previewUrl || "").replace(/\/$/, "");
+    if (!origin) return { enqueued: false, reason: "no preview URL" };
+
+    const { resolveBuildBranchForSha } = await import("@/lib/github-pr-resolve");
+    const branch = await resolveBuildBranchForSha(sha);
+    if (!branch) return { enqueued: false, reason: "sha heads no claude/build-* branch (superseded/merged deploy)" };
+
+    // Find the latest build job for this branch → workspace + slug. (One repo = one build console.)
+    const admin = createAdminClient();
+    const { data: job } = await admin
+      .from("agent_jobs")
+      .select("id, workspace_id, spec_slug, preview_url, preview_state")
+      .eq("kind", "build")
+      .eq("spec_branch", branch)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!job || !job.spec_slug) return { enqueued: false, reason: `no build job for ${branch}` };
+
+    // Persist the preview URL (authoritative from the webhook) onto the build row — advance-only, so a
+    // late/duplicate delivery never regresses it. The board + backstop read this.
+    if (job.preview_url !== origin || job.preview_state !== "READY") {
+      await admin.from("agent_jobs").update({ preview_url: origin, preview_state: "READY" }).eq("id", job.id);
+    }
+
+    const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
+      workspaceId: job.workspace_id as string,
+      slug: job.spec_slug as string,
+      branch,
+      previewUrl: origin,
+    });
+    return { ...r, branch, slug: job.spec_slug as string };
+  } catch (e) {
+    return { enqueued: false, reason: `deployment-ready trigger errored: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 

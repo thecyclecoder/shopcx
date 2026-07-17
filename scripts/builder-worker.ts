@@ -24908,67 +24908,12 @@ async function dispatchJob(job: Job) {
       // (e.g. noop-pipeline-test-4 / #837) sat `in_testing` forever with `spec_test_runs` EMPTY and no
       // branch-mode security review — the auto-merge tests gate could never go green.
       //
-      // So the MOMENT accumulation completes + the real PR is open, capture the branch tip's preview onto THIS
-      // job row and (on READY) enqueue BOTH pre-merge triggers against it. Fire-and-forget (the preview may
-      // still be BUILDING — a worker-lived poll outlives this runJob, matching the push-path poll); the
-      // standing-pass backstop is the safety net if this worker restarts before READY. Idempotent end-to-end:
-      // capturePreviewUrlForJob only advances the row forward, and the enqueue helpers dedupe per
-      // (workspace, slug, branch). Best-effort — a trigger hiccup must never fail an otherwise-good build.
-      if (branch && branch.startsWith("claude/") && opts.headSha) {
-        const finalizeBranch = branch;
-        const finalizeSha = opts.headSha;
-        const finalizePr = pr.number;
-        void (async () => {
-          try {
-            const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-            const capture = await pollCapturePreviewUrl(
-              { jobId: job.id, branch: finalizeBranch, commitSha: finalizeSha },
-              { log: (m) => console.log(`${tag} [finalize] ${m}`) },
-            );
-            if (capture.previewState === "READY" && capture.previewUrl) {
-              const { maybeEnqueuePreMergeSpecTestOnAccumulation, maybeEnqueuePreMergeSecurityOnAccumulation } =
-                await import("../src/lib/agent-jobs");
-              // fixes-as-phases self-heal: if this build completed a `kind='fix'` phase, the prior pre-merge
-              // spec-test ran against the PRE-fix code — a stale `issues` verdict that the normal dedup would
-              // let block the re-test (the fused-premerge-security stall: Fix built, no re-test, PR held). The
-              // preview we captured is the fix commit's deploy (pollCapturePreviewUrl keyed on finalizeSha), so
-              // forcing past the existing-verdict dedup re-tests the CORRECT (fixed) code.
-              let forceForFix = false;
-              try {
-                const { getSpec: getSpecForFix } = await import("../src/lib/specs-table");
-                const specForFix = await getSpecForFix(job.workspace_id, slug);
-                forceForFix = (specForFix?.phases || []).some(
-                  (p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected",
-                );
-              } catch {
-                /* best-effort — a getSpec blip just means no force (the backstop is the safety net) */
-              }
-              const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
-                workspaceId: job.workspace_id,
-                slug,
-                branch: finalizeBranch,
-                previewUrl: capture.previewUrl,
-                force: forceForFix,
-              });
-              console.log(
-                `${tag} [finalize] M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
-              );
-              const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
-                workspaceId: job.workspace_id,
-                slug,
-                branch: finalizeBranch,
-                previewUrl: capture.previewUrl,
-                prNumber: finalizePr,
-              });
-              console.log(
-                `${tag} [finalize] M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
-              );
-            }
-          } catch (e) {
-            console.error(`${tag} [finalize] pre-merge trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-        })();
-      }
+      // The fused Vera/Vault pre-merge session now fires EVENT-DRIVEN (preview-ready-event-trigger): the
+      // GitHub `deployment_status` webhook (api/webhooks/github Gate D → enqueuePreMergeFromDeploymentReady)
+      // maps the preview deploy's commit SHA → this claude/build-* branch and enqueues the moment the
+      // preview goes READY — no in-worker Vercel poll (the old 6-min pollCapturePreviewUrl loop is retired,
+      // founder 2026-07-17). The standing-pass backstop stays as the safety net for a dropped delivery, and
+      // the fix-force is now derived inside maybeEnqueuePreMergeSpecTestOnAccumulation (not threaded here).
     };
 
     // Approval-resume: run the owner-approved gated actions FIRST (in the worktree), then resume.
@@ -25592,64 +25537,12 @@ async function dispatchJob(job: Job) {
         return;
       }
     }
-    // per-build-vercel-preview-deploys Phase 2 — kick off a fire-and-forget poll that captures the
-    // branch's Vercel preview URL onto the agent_jobs row once the deployment reaches READY. Best
-    // effort + idempotent; failures are swallowed (never fatal to the build). The worker process is
-    // long-lived (job-loop), so the poll outlives this runJob.
+    // The branch's Vercel preview URL + the fused Vera/Vault pre-merge session are now captured/enqueued
+    // EVENT-DRIVEN via the GitHub `deployment_status` webhook (preview-ready-event-trigger,
+    // api/webhooks/github Gate D → enqueuePreMergeFromDeploymentReady) — no in-worker Vercel poll (the old
+    // 6-min pollCapturePreviewUrl loop is retired, founder 2026-07-17). The standing-pass backstop stays as
+    // the safety net for a dropped delivery. `headSha` is still needed by finalizeBuiltPhase below.
     const headSha = sh("git", ["rev-parse", "HEAD"], { cwd: wt }).out.trim() || null;
-    void (async () => {
-      try {
-        const { pollCapturePreviewUrl } = await import("../src/lib/preview-capture");
-        const capture = await pollCapturePreviewUrl(
-          { jobId: job.id, branch: branch!, commitSha: headSha },
-          { log: (m) => console.log(`${tag} ${m}`) },
-        );
-        // spec-goal-branch-pm-flow M3 — once the branch's preview is READY, fire the PRE-MERGE spec-test
-        // IFF the whole spec is now accumulated on the branch (every phase built). When the LAST phase's
-        // preview lands READY, accumulation is complete → enqueue; earlier phases no-op (not yet complete).
-        // Idempotent (dedupes per branch). The spec-test materializes the spec from the DB row (M1/M2
-        // stamped it from this branch's commits) and points its probes at the preview URL — testing the
-        // BUILT spec on its branch preview, not main. Best-effort — never fail the build on a trigger hiccup.
-        if (capture.previewState === "READY" && capture.previewUrl) {
-          try {
-            const { maybeEnqueuePreMergeSpecTestOnAccumulation } = await import("../src/lib/agent-jobs");
-            const r = await maybeEnqueuePreMergeSpecTestOnAccumulation({
-              workspaceId: job.workspace_id,
-              slug,
-              branch,
-              previewUrl: capture.previewUrl,
-            });
-            console.log(
-              `${tag} M3 pre-merge spec-test trigger: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`,
-            );
-          } catch (e) {
-            console.error(`${tag} M3 pre-merge spec-test trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-          // security-test-on-preview-pre-merge Phase 1 (the wiring the spec never landed) — fire the
-          // PRE-MERGE security review on the SAME preview-ready signal. The security signal
-          // (isSecurityGreenForBranch) is the second leg of the M4 tests gate; without this enqueue it was
-          // ALWAYS false and every one-off PR sat in_testing forever (branch-mode reviews = 0 in prod).
-          // Idempotent (one open review per branch). Best-effort — never fail the build on a trigger hiccup.
-          try {
-            const { maybeEnqueuePreMergeSecurityOnAccumulation } = await import("../src/lib/agent-jobs");
-            const sec = await maybeEnqueuePreMergeSecurityOnAccumulation({
-              workspaceId: job.workspace_id,
-              slug,
-              branch,
-              previewUrl: capture.previewUrl,
-              prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
-            });
-            console.log(
-              `${tag} M2 pre-merge security trigger: ${sec.enqueued ? "enqueued" : "skipped"}${sec.reason ? ` (${sec.reason})` : ""}`,
-            );
-          } catch (e) {
-            console.error(`${tag} M2 pre-merge security trigger failed (non-fatal):`, e instanceof Error ? e.message : e);
-          }
-        }
-      } catch (e) {
-        console.error(`${tag} preview-capture poll failed:`, e instanceof Error ? e.message : e);
-      }
-    })();
     // ⭐ DEPLOY BUILD GATE: if this build touched code that affects the production build (pages/components/
     // config/middleware), it must survive a real `next build` BEFORE it can complete (→ auto-merge). tsc
     // already passed; this catches the cacheComponents/prerender/segment-config breaks tsc can't see. The
