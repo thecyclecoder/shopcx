@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief, ScoredAngle } from "@/lib/ads/creative-brief";
-import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance } from "./creative-agent";
+import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature } from "./creative-agent";
 
 test("readyStatusForAngle holds a null angle out of 'ready'", () => {
   assert.equal(readyStatusForAngle(null), "draft");
@@ -148,4 +148,26 @@ test("buildAngleProvenance: an own-brand angle is EXPLOIT — no competitor fiel
   assert.equal(p.competitor_ad_image_url, null);
   assert.equal(p.competitor_hook, null);
   assert.equal(p.lead_benefit, "clearer focus by week two");
+});
+
+// ── imageOfferForAudience — cold creatives render NO offer on the image (2026-07-17) ─────────────
+const SAMPLE_OFFER = { headline: "Save 20%", strikethrough: "$40 → $32", perServing: "$1.07/serving", disclaimer: "while supplies last" };
+
+test("imageOfferForAudience: a COLD angle (competitor) strips the offer to null", () => {
+  assert.equal(imageOfferForAudience({ source: "competitor", acquisitionPower: 5 }, SAMPLE_OFFER), null);
+});
+
+test("imageOfferForAudience: a COLD angle (acquisitionPower >= 8) strips the offer to null", () => {
+  assert.equal(imageOfferForAudience({ source: "review_cluster", acquisitionPower: 9 }, SAMPLE_OFFER), null);
+});
+
+test("imageOfferForAudience: a WARM angle passes the offer through unchanged", () => {
+  const warm = { source: "review_cluster" as const, acquisitionPower: 4 };
+  assert.equal(resolveAudienceTemperature(warm), "warm");
+  assert.deepEqual(imageOfferForAudience(warm, SAMPLE_OFFER), SAMPLE_OFFER);
+});
+
+test("imageOfferForAudience: a null offer stays null regardless of temperature", () => {
+  assert.equal(imageOfferForAudience({ source: "competitor", acquisitionPower: 5 }, null), null);
+  assert.equal(imageOfferForAudience({ source: "review_cluster", acquisitionPower: 3 }, null), null);
 });
