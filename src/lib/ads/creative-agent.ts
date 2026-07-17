@@ -22,6 +22,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
+import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower } from "@/lib/ads/creative-sourcing";
 import { computeSophisticationLevel } from "@/lib/ads/sophistication";
@@ -110,12 +111,44 @@ export const ANDROMEDA_CONCEPT_TAGS = [
 
 export type AndromedaConceptTag = (typeof ANDROMEDA_CONCEPT_TAGS)[number];
 
+/** dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — the SSOT enum of allowed
+ *  `claim_trace.source` values. Mirrors the seven source-field names layer 1 names in the
+ *  CLAIM-ONLY-WHAT'S-IN-THE-BRIEF table of `.claude/skills/dahlia-copy-author/SKILL.md`, and
+ *  layer 3 (`src/lib/ads/never-fabricate.ts` `verifyClaimTrace`) branches on. A divergence would
+ *  let a layer-1-valid citation fail layer-2 parse or vice-versa. */
+export const AUTHOR_CLAIM_TRACE_SOURCES = [
+  "ingredients",
+  "ingredient_research",
+  "reviews.byClaim",
+  "transformationStory",
+  "supportingBenefit",
+  "leadProof",
+  "competitorDna",
+] as const;
+
+export type AuthorClaimTraceSource = (typeof AUTHOR_CLAIM_TRACE_SOURCES)[number];
+
+/** dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — the witnessed-citation entry Dahlia's
+ *  session emits alongside each substantive claim. Each entry names ONE specific claim substring,
+ *  the enumerated source field it comes from, and a `source_ref` (an ingredient name / benefit
+ *  name / reviewer name / benefit token / slot key). Layer 3's `verifyClaimTrace` checks each
+ *  entry against the resolved evidence. */
+export interface AuthorClaimTraceEntry {
+  claim: string;
+  source: AuthorClaimTraceSource;
+  source_ref: string;
+}
+
 /** The verdict envelope Dahlia's per-creative Max box session (kind='ad-creative-copy-author')
  *  emits. Threaded through `insertReadyCreative` to bypass `buildMetaCopyPack` and stamp
  *  `ad_campaigns.audience_temperature` + `ad_campaigns.author_self_score` +
  *  `ad_campaigns.concept_tag`. Null-means-deterministic: when this arg is undefined,
  *  insertReadyCreative uses the caller-supplied deterministic pack unchanged (today's
- *  byte-for-byte behavior). */
+ *  byte-for-byte behavior).
+ *
+ *  dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — `claim_trace` is REQUIRED (a
+ *  missing / empty / mis-shaped `claim_trace` fails `parseAuthorVerdict` with reason
+ *  `firewall_missing_claim_trace` and the M1 revise loop consumes it). */
 export interface AuthorModeCopy {
   headline: string;
   primaryText: string;
@@ -123,6 +156,7 @@ export interface AuthorModeCopy {
   audience_temperature: "cold" | "warm" | "hot";
   concept_tag: AndromedaConceptTag;
   selfScore: AuthorSelfScore;
+  claim_trace: AuthorClaimTraceEntry[];
 }
 
 /** Dispatcher contract for the per-creative copy-author box session. Mirrors QcSessionDispatcher:
@@ -434,7 +468,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] } }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna. A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise.",
   ].join("\n");
 }
 
@@ -522,6 +556,29 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
     return { kind: "invalid", reason: `total_mismatch (declared=${String(declaredTotal)}, summed=${summedTotal})` };
   }
   const rawEvidence = Array.isArray(rawScore.evidence) ? (rawScore.evidence as unknown[]).filter((s): s is string => typeof s === "string") : [];
+  // dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — REQUIRED claim_trace field. A
+  // missing / empty / mis-shaped claim_trace fails the parse with the concrete
+  // `firewall_missing_claim_trace` reason so the M1 revise loop can consume it and re-invoke
+  // Dahlia ONCE with the reason cited. The seven allowed source enum values are the SSOT
+  // vocabulary layer 1 (SKILL.md) names and layer 3 (verifyClaimTrace) branches on.
+  const rawTrace = obj.claim_trace;
+  if (!Array.isArray(rawTrace)) return { kind: "invalid", reason: "firewall_missing_claim_trace (not_array)" };
+  if (rawTrace.length === 0) return { kind: "invalid", reason: "firewall_missing_claim_trace (empty)" };
+  const claim_trace: AuthorClaimTraceEntry[] = [];
+  for (let i = 0; i < rawTrace.length; i++) {
+    const raw = rawTrace[i];
+    if (!raw || typeof raw !== "object") return { kind: "invalid", reason: `firewall_missing_claim_trace (bad_shape_at_${i})` };
+    const r = raw as Record<string, unknown>;
+    const c = typeof r.claim === "string" ? r.claim.trim() : "";
+    const s = r.source;
+    const sr = typeof r.source_ref === "string" ? r.source_ref.trim() : "";
+    if (!c) return { kind: "invalid", reason: `firewall_missing_claim_trace (missing_claim_at_${i})` };
+    if (typeof s !== "string" || !(AUTHOR_CLAIM_TRACE_SOURCES as readonly string[]).includes(s)) {
+      return { kind: "invalid", reason: `firewall_missing_claim_trace (bad_source_at_${i}: ${typeof s === "string" ? s : typeof s})` };
+    }
+    if (!sr) return { kind: "invalid", reason: `firewall_missing_claim_trace (missing_source_ref_at_${i})` };
+    claim_trace.push({ claim: c, source: s as AuthorClaimTraceSource, source_ref: sr });
+  }
   return {
     kind: "ok",
     verdict: {
@@ -539,6 +596,7 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
         total: summedTotal,
         evidence: rawEvidence,
       },
+      claim_trace,
     },
   };
 }
@@ -690,11 +748,15 @@ async function currentBinDepth(admin: Admin, workspaceId: string, productId: str
 }
 
 /** Discriminated result for `insertReadyCreative` — 'ok' carries the new campaign id, 'skip'
- *  names the deterministic cold-offer-gate refusal (author session catches it and revises the copy),
- *  'failed' is the insert-missed case (angle-insert missed / RLS deny / cErr on the campaign insert). */
+ *  names the deterministic cold-offer-gate refusal (author session catches it and revises the copy)
+ *  OR the layer-3 never-fabricate firewall miss (dahlia-never-fabricate-copy-firewall Phase 3 —
+ *  `firewall_claim_miss` carries the concrete miss list so the M1 revise loop can cite it back to
+ *  Dahlia), 'failed' is the insert-missed case (angle-insert missed / RLS deny / cErr on the
+ *  campaign insert). */
 export type InsertReadyCreativeResult =
   | { kind: "ok"; campaignId: string }
   | { kind: "skip"; reason: "cold_offer_leak" }
+  | { kind: "skip"; reason: "firewall_claim_miss"; misses: import("./never-fabricate").ClaimMiss[] }
   | { kind: "failed" };
 
 /** The exact row body `insertReadyCreative` writes to `ad_campaigns`. Extracted as a pure helper
@@ -1173,6 +1235,44 @@ async function stockProduct(
             break;
           }
           authorVerdict = outcome.verdict;
+          // dahlia-never-fabricate-copy-firewall Phase 3 (layer 3) — deterministic verifier runs
+          // on the parsed author verdict's claim_trace against the fully-backed brief +
+          // ProductIntelligence surface (ingredients / ingredientResearch / reviews.byClaim). A
+          // miss HOLDS the campaign out of the bin with a DISTINCT `dahlia_copy_firewall_exhausted`
+          // escalation so operators can slice fabrication failures separately from self-score
+          // failures. `reviews.byClaim` is a lazy async closure — resolve every unique source_ref
+          // once, then run the pure verifier against the resolved map.
+          const reviewsResolved = await resolveReviewsForClaimTrace(outcome.verdict.claim_trace, pi.reviews.byClaim);
+          const firewallResult = verifyClaimTrace(outcome.verdict.claim_trace, brief, pi, reviewsResolved);
+          if (!firewallResult.ok) {
+            await recordDirectorActivity(admin, {
+              workspaceId,
+              directorFunction: "growth",
+              actionKind: "dahlia_copy_firewall_exhausted",
+              specSlug: "dahlia-never-fabricate-copy-firewall",
+              reason: `dahlia never-fabricate firewall miss for ${productTitle} (${angle.source} angle) — ${firewallResult.misses.length} untraceable claim(s)`,
+              metadata: {
+                product_id: productId,
+                product_title: productTitle,
+                angle_source: angle.source,
+                angle_hook: angle.hook,
+                audience_temperature: audienceTemperature,
+                misses: firewallResult.misses,
+                autonomous: true,
+              },
+            }).catch((e) => {
+              console.warn("dahlia_copy_firewall_exhausted_activity_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+            });
+            out.push({
+              productId,
+              angleHook: angle.hook,
+              campaignId: null,
+              ok: false,
+              reason: `firewall_claim_miss: ${firewallResult.misses.map((m) => `${m.source}:${m.reason}`).join(", ")}`,
+            });
+            skipped = true;
+            break;
+          }
           copyPack = authorCopyPack(outcome.verdict);
           insertOpts = {
             audienceTemperature: outcome.verdict.audience_temperature,

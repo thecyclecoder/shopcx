@@ -1,6 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { verifyGithubWebhook, detectAndEnqueueDirtyPrs, autoMergeReadyPrs } from "@/lib/github-pr-resolve";
-import { promoteEligibleSpecsToGoalBranch, promoteCompleteGoalsToMain } from "@/lib/agent-jobs";
+import { promoteEligibleSpecsToGoalBranch, promoteCompleteGoalsToMain, enqueuePreMergeFromDeploymentReady } from "@/lib/agent-jobs";
 
 /**
  * GitHub webhook → Dirty-PR Resolver Agent trigger (docs/brain/specs/dirty-pr-resolver-agent.md).
@@ -73,7 +73,15 @@ export async function POST(request: Request) {
     ((event === "check_suite" || event === "check_run") && action === "completed") ||
     (event === "status" && payload.state === "success");
 
-  if (!dirtyRelevant && !mergeRelevant) return NextResponse.json({ ok: true, skipped: event });
+  // Gate D (preview-ready-event-trigger) relevance: a Vercel PREVIEW deploy just reached READY. GitHub
+  // relays this as `deployment_status` with state='success' — the event-driven signal that a build's
+  // preview is testable, so the fused Vera/Vault pre-merge session can fire NOW (not on the box's next
+  // standing pass). enqueuePreMergeFromDeploymentReady filters to claude/build-* previews.
+  const deployReady =
+    event === "deployment_status" &&
+    (payload.deployment_status as Record<string, unknown> | undefined)?.state === "success";
+
+  if (!dirtyRelevant && !mergeRelevant && !deployReady) return NextResponse.json({ ok: true, skipped: event });
 
   // ACK GitHub immediately; run the four heavy gates inside after() so the response path can't hit the
   // 300s Vercel Lambda cap. Wall-clock deadline (250_000 ms) inside the callback bounds the total
@@ -86,6 +94,29 @@ export async function POST(request: Request) {
     let ranGates = 0;
     const remaining = () => TOTAL_GATES - ranGates;
     const deadlineHit = () => Date.now() - started > 250_000;
+
+    // Gate D — ⚡ event-driven pre-merge trigger (preview-ready-event-trigger). A Vercel PREVIEW deploy
+    // reached READY: map the deploy's commit SHA → its claude/build-* branch → persist the preview URL +
+    // fire the fused Vera/Vault pre-merge session NOW. Independent of the four PR gates below (a
+    // deployment_status event is neither dirty- nor merge-relevant, so those no-op for it). The
+    // standing-pass backstop stays as the safety net for a dropped delivery.
+    if (deployReady) {
+      try {
+        const ds = payload.deployment_status as Record<string, unknown> | undefined;
+        const dep = payload.deployment as Record<string, unknown> | undefined;
+        const r = await enqueuePreMergeFromDeploymentReady({
+          sha: (dep?.sha as string) ?? null,
+          previewUrl: (ds?.environment_url as string) || (ds?.target_url as string) || null,
+          environment: (ds?.environment as string) ?? (dep?.environment as string) ?? null,
+        });
+        console.log(
+          `[github-webhook] deployment_status READY: pre-merge ${r.enqueued ? "ENQUEUED" : "skipped"}${r.slug ? ` [${r.slug}]` : ""}${r.branch ? ` (${r.branch})` : ""}${r.reason ? ` — ${r.reason}` : ""}`,
+        );
+      } catch (err) {
+        console.error("[github-webhook] deployment-ready trigger failed:", err);
+      }
+      return; // deployment_status carries none of the PR-gate signals — nothing else to run.
+    }
 
     // Gate 1 — dirty-PR resolver (CONFLICTING half). dirtyRelevant only.
     if (deadlineHit()) {

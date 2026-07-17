@@ -21,6 +21,8 @@ Returns `{ updated, previewUrl, previewState, reason? }`. Never throws — every
 
 ### `pollCapturePreviewUrl(opts, poll?)` → `PreviewCaptureResult`
 
+> **⚠️ No longer wired (preview-ready-event-trigger, 2026-07-17).** The build worker used to fire-and-forget this 6-min poll after each push to detect READY + enqueue the pre-merge session. That is retired — the fused Vera/Vault session now fires EVENT-DRIVEN off the GitHub `deployment_status` webhook ([[../integrations/github-webhook]] Gate D → [[agent-jobs]] `enqueuePreMergeFromDeploymentReady`), which starts within seconds of READY instead of polling Vercel every 15s. `capturePreviewUrlForJob` (single-shot) is STILL used by `backstopPreMergeChecks` (the safety-net reconcile). This wrapper stays exported but uncalled.
+
 Polling wrapper. Re-calls `capturePreviewUrlForJob` every `intervalMs` (default 15s) until either:
 
 - the deployment reaches `READY` (with a URL) → returns immediately,

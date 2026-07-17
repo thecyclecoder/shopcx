@@ -33,7 +33,7 @@ import {
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
-import { resolveAdvertiser, scanWinners, type WinnerConcept } from "@/lib/adlibrary-winners";
+import { resolveAdvertiser, scanWinners } from "@/lib/adlibrary-winners";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -533,23 +533,28 @@ export async function sweepSeed(
   return result;
 }
 
-/** AdLibrary's winner scoring for a LANE-A concept — stamped onto the row alongside our vision breakdown.
- *  LANE B / backfill leaves this null and populates `concept_tags` from OUR vision (same schema). */
-export interface WinnerMeta {
-  tier: string | null;
-  score: number | null;
-  tags: Record<string, unknown> | null; // { angle, archetype, why_it_works, cialdini_lever, awareness_stage, format }
+/** OUR persistence tier from observed longevity (winners-flow longitudinal). Not AdLibrary's opaque tier —
+ *  the signal is how long WE'VE watched the competitor keep the ad live. `active=false` ⇒ they killed it. */
+export function deriveWinnerTier(persistenceDays: number, active: boolean): string {
+  if (!active) return "retired";
+  if (persistenceDays >= 21) return "proven";
+  if (persistenceDays >= 7) return "building";
+  return "new";
 }
+const daysBetween = (aIso: string, bIso: string): number =>
+  Math.max(0, Math.round((Date.parse(bIso) - Date.parse(aIso)) / 86_400_000));
 
-/** Vision-deconstruct (statics) and persist one ad as a creative_skeletons row. `winner` (LANE A) stamps
- *  AdLibrary's tier/score/concept-tags so Dahlia + Max read one shape across both collection lanes. */
+/** Vision-deconstruct (statics) and persist one FRESH ad as a creative_skeletons row (its FIRST observation).
+ *  Sets the longitudinal clock (our_first_seen = now, observed_sweeps = 1, still_active = true). Re-observations
+ *  of an already-stored ad go through `reobserveAd` (cheap, no re-vision). AdLibrary's tier/score are NOT used —
+ *  our winner signal is persistence across sweeps ([[docs/brain/inngest/creative-scout]]). */
 export async function ingestAd(
   workspaceId: string,
   ad: NormalizedAd,
   seed: Seed,
-  winner?: WinnerMeta,
 ): Promise<void> {
   const admin = createAdminClient();
+  const nowIso = new Date().toISOString();
 
   let skeleton: CreativeSkeleton | null = null;
   let status: string = ad.media_type === "video" ? "video_pending" : "analyzed";
@@ -621,102 +626,222 @@ export async function ingestAd(
     // competitor + WHICH of our products this ad was pulled for, so imitate reads a product's own shelf.
     competitor_id: seed.competitorId ?? null,
     product_id: seed.productId ?? null,
-    // winners-flow — the unified concept breakdown. LANE A (winner arg) carries AdLibrary's AI scoring +
-    // tags; LANE B / backfill get concept_tags from OUR vision (same schema). winner_tier/score are
-    // AdLibrary-only (null for LANE B — a domain search has no AdLibrary composite).
-    winner_tier: winner?.tier ?? null,
-    winner_score: winner?.score ?? null,
-    concept_tags: winner?.tags ?? skeleton?.concept_tags ?? null,
+    // winners-flow — `concept_tags` ALWAYS comes from OUR vision (both lanes) so Dahlia + Max read one
+    // consistent schema. AdLibrary's own LANE-A tags were dropped: mislabeled (angle="solution_aware",
+    // awareness_stage="warm" — a temperature), so mixing them into our keys broke uniformity (founder 2026-07-17).
+    concept_tags: skeleton?.concept_tags ?? null,
+    // LONGITUDINAL winner signal (OURS, not AdLibrary's): this is the ad's FIRST observation, so persistence
+    // is 0 days and the tier is "new". Future sweeps re-observe via reobserveAd and grow winner_score.
+    our_first_seen: nowIso,
+    our_last_seen: nowIso,
+    observed_sweeps: 1,
+    still_active: true,
+    winner_score: 0,
+    winner_tier: "new",
     status,
     raw: ad.raw,
     visioned_at: visionedAt,
-    updated_at: new Date().toISOString(),
+    updated_at: nowIso,
   };
 
-  // Idempotent on (workspace_id, source, dedup_key).
+  // Idempotent on (workspace_id, source, dedup_key). NOTE: an upsert here would RESET the longitudinal
+  // clock (our_first_seen, observed_sweeps) — that's why the sweep only calls ingestAd for genuinely NEW
+  // ads and routes re-observations through reobserveAd. The upsert stays for the rare same-run dup.
   const { error } = await admin
     .from("creative_skeletons")
     .upsert(row, { onConflict: "workspace_id,source,dedup_key" });
   if (error) throw new Error(error.message);
 }
 
-// ── winners-flow Phase 2b — TWO-LANE competitor collection ───────────────────
-// Replaces the keyword `searchAds` stopgap (which only returns RECENT ads, never a brand's proven
-// long-runners). Each competitor routes to a lane via `resolveAdvertiser` ([[./adlibrary-winners]]):
-//   • LANE A (via:'name') — a Meta pageId → `scanWinners` = AdLibrary's AI-scored, concept-tagged
-//     winners. We ALSO run our vision on each (hook/mechanism/proof/offer for Dahlia's imitation),
-//     and stamp AdLibrary's tier/score/tags into winner_* / concept_tags.
-//   • LANE B (via:'domain') — advertiser un-resolvable by name but a domain is known → the brand's
-//     real ads by `searchAds({ domain })`, our vision only (concept_tags backfilled in Phase 2c).
+/** Re-observe an ad we ALREADY have (winners-flow longitudinal): bump `our_last_seen` + `observed_sweeps`,
+ *  recompute the persistence-based `winner_score`/`winner_tier`, re-activate it. NO re-vision (the skeleton +
+ *  concept_tags already stand) — so re-observation is a single cheap UPDATE. Returns the new persistence days. */
+export async function reobserveAd(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  dedupKey: string,
+): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const { data: existing } = await admin
+    .from("creative_skeletons")
+    .select("id, our_first_seen, observed_sweeps")
+    .eq("workspace_id", workspaceId)
+    .eq("source", "adlibrary")
+    .eq("dedup_key", dedupKey)
+    .single();
+  if (!existing) return 0;
+  const firstSeen = (existing.our_first_seen as string) ?? nowIso;
+  const persistence = daysBetween(firstSeen, nowIso);
+  await admin
+    .from("creative_skeletons")
+    .update({
+      our_last_seen: nowIso,
+      observed_sweeps: ((existing.observed_sweeps as number) ?? 1) + 1,
+      still_active: true,
+      winner_score: persistence,
+      winner_tier: deriveWinnerTier(persistence, true),
+      updated_at: nowIso,
+    })
+    .eq("id", existing.id);
+  return persistence;
+}
+
+/** Mark a competitor's ads that DIDN'T appear in this sweep as retired (winners-flow longitudinal): the
+ *  competitor stopped running them → a loser signal we can trust because it's ours. Scoped to ONE competitor
+ *  + lane's currently-active rows; leaves already-retired rows alone. Returns how many were retired. */
+export async function markDisappearedAds(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  competitorId: string,
+  seenKeys: string[],
+): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const { data: active } = await admin
+    .from("creative_skeletons")
+    .select("id, dedup_key")
+    .eq("workspace_id", workspaceId)
+    .eq("source", "adlibrary")
+    .eq("competitor_id", competitorId)
+    .eq("still_active", true);
+  const seen = new Set(seenKeys);
+  const gone = (active || []).filter((r) => !seen.has(r.dedup_key as string)).map((r) => r.id);
+  if (!gone.length) return 0;
+  await admin
+    .from("creative_skeletons")
+    .update({ still_active: false, winner_tier: "retired", updated_at: nowIso })
+    .in("id", gone);
+  return gone.length;
+}
+
+// ── winners-flow — TWO-LANE competitor collection + LONGITUDINAL tracking ────
+// Replaces the keyword `searchAds` stopgap (RECENT ads only, never a brand's proven long-runners). Each
+// competitor routes to a lane via `resolveAdvertiser` ([[./adlibrary-winners]]):
+//   • LANE A (via:'name') — a Meta pageId → `scanWinners` = the brand's FULL library (not recent-only).
+//     We run OUR vision on each new static (hook/mechanism/proof/offer + concept_tags for Dahlia).
+//   • LANE B (via:'domain') — advertiser un-resolvable by name but a domain is known → the brand's real
+//     ads by `searchAds({ domain })`, same vision.
 //   • via:null — a reliable BAD SEED (neither name nor domain resolves).
+// AdLibrary's own tier/score are NOT trusted (they came back "loser" for every major brand; the composite
+// just tracked a mis-parsed recency number). The winner signal is OURS + longitudinal: every sweep, a NEW
+// ad is fully ingested+visioned and an ALREADY-SEEN ad is cheaply re-observed (persistence++), while an ad
+// that VANISHED from the sweep is retired. An ad a competitor keeps running across our sweeps = a proven
+// winner (they keep paying because it converts) — the strongest signal, fully ours.
 
 export interface LaneResult extends IngestResult {
   lane: "winners" | "domain" | null;
   pageId: string | null;
   resolvedName: string | null;
+  /** Longitudinal: existing ads re-observed (persistence bumped, no re-vision) + ads retired (vanished). */
+  reobserved: number;
+  retired: number;
 }
 
-/** Filter freshly-scanned ads down to the ones we don't already have, then cap. Shared by both lanes. */
-async function dedupFresh(
+/** Which of these ad_keys do we already have? Splits a sweep's statics into NEW (ingest+vision) vs EXISTING
+ *  (cheap re-observation). Shared by both lanes. */
+async function splitNewExisting(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   ads: NormalizedAd[],
-): Promise<{ fresh: NormalizedAd[]; skipped: number }> {
+): Promise<{ fresh: NormalizedAd[]; existing: NormalizedAd[] }> {
   const keys = ads.map((a) => a.ad_key).filter(Boolean);
-  if (!keys.length) return { fresh: [], skipped: 0 };
-  const { data: existing } = await admin
-    .from("creative_skeletons")
-    .select("dedup_key")
-    .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
-    .in("dedup_key", keys);
-  const seen = new Set((existing || []).map((r) => r.dedup_key as string));
-  const fresh = ads.filter((a) => a.ad_key && !seen.has(a.ad_key));
-  return { fresh, skipped: ads.length - fresh.length };
+  if (!keys.length) return { fresh: [], existing: [] };
+  const seen = new Set<string>();
+  // Chunk the IN() so a big domain pull doesn't blow the query — 200 keys per round.
+  for (let i = 0; i < keys.length; i += 200) {
+    const { data } = await admin
+      .from("creative_skeletons")
+      .select("dedup_key")
+      .eq("workspace_id", workspaceId)
+      .eq("source", "adlibrary")
+      .in("dedup_key", keys.slice(i, i + 200));
+    for (const r of data || []) seen.add(r.dedup_key as string);
+  }
+  const fresh: NormalizedAd[] = [];
+  const existing: NormalizedAd[] = [];
+  for (const a of ads) (a.ad_key && seen.has(a.ad_key) ? existing : fresh).push(a);
+  return { fresh, existing };
 }
 
-/** Collect one competitor's winning STATIC creatives via the two-lane flow. `domain` (the competitor's
- *  registrable domain) enables LANE B when the name doesn't resolve. `visionCap` bounds Opus spend. */
+/** The shared longitudinal core: ingest NEW statics (vision, capped), re-observe EXISTING statics (cheap),
+ *  then retire this competitor's ads that DIDN'T appear this sweep. Mutates `result` counts. */
+async function collectAndTrack(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  seed: Seed,
+  statics: NormalizedAd[],
+  cap: number,
+  result: LaneResult,
+): Promise<void> {
+  result.searched = statics.length;
+  const { fresh, existing } = await splitNewExisting(admin, workspaceId, statics);
+  result.skippedExisting = existing.length;
+  result.longRunners = fresh.length;
+
+  // NEW ads → full ingest + vision, capped (Opus spend). Highest-signal first (caller pre-ranks).
+  for (const ad of fresh.slice(0, cap)) {
+    try {
+      await ingestAd(workspaceId, ad, seed);
+      result.inserted++;
+    } catch (err) {
+      console.error(`[creative-scout] ingest failed for ${ad.ad_key}:`, err);
+      result.failed++;
+    }
+  }
+  // EXISTING ads → cheap re-observation (persistence++, no re-vision). This is what grows the winner signal.
+  for (const ad of existing) {
+    try {
+      await reobserveAd(admin, workspaceId, ad.ad_key);
+      result.reobserved++;
+    } catch (err) {
+      console.error(`[creative-scout] reobserve failed for ${ad.ad_key}:`, err);
+    }
+  }
+  // VANISHED ads (this competitor's active rows not in this sweep) → retired. Needs the competitor link.
+  if (seed.competitorId) {
+    try {
+      result.retired = await markDisappearedAds(
+        admin,
+        workspaceId,
+        seed.competitorId,
+        statics.map((a) => a.ad_key).filter(Boolean),
+      );
+    } catch (err) {
+      console.error(`[creative-scout] retire-sweep failed for ${seed.keyword}:`, err);
+    }
+  }
+}
+
+/** Collect one competitor's STATIC creatives via the two-lane flow + longitudinal tracking. `domain` (the
+ *  competitor's registrable domain) enables LANE B when the name doesn't resolve. `visionCap` bounds Opus. */
 export async function sweepCompetitorLanes(
   workspaceId: string,
   seed: Seed,
   opts: { domain?: string | null; visionCap?: number } = {},
 ): Promise<LaneResult> {
   const admin = createAdminClient();
-  const result: LaneResult = { ...EMPTY_RESULT(), lane: null, pageId: null, resolvedName: null };
+  const result: LaneResult = { ...EMPTY_RESULT(), lane: null, pageId: null, resolvedName: null, reobserved: 0, retired: 0 };
   const cap = opts.visionCap ?? 12;
 
   const resolution = await resolveAdvertiser(seed.keyword, { domain: opts.domain });
   result.pageId = resolution.pageId;
   result.resolvedName = resolution.name;
 
-  // ── LANE A — winners scan (AdLibrary's AI-scored concepts) ──────────────────
+  // ── LANE A — winners scan (the brand's FULL library, not recent-only) ───────
   if (resolution.via === "name" && resolution.pageId) {
     result.lane = "winners";
     const concepts = await scanWinners(resolution.pageId);
-    result.searched = concepts.length;
-    // Normalize each concept's ad → static, keyed, deduped, ranked by AdLibrary composite (best first).
-    const normalized = concepts
+    // Normalize each concept's ad → static, keyed. AdLibrary's composite is only used to ORDER which NEW ads
+    // we vision first (bounded spend) — it is NOT stored (our winner signal is persistence, tracked below).
+    const statics = concepts
       .map((c) => ({ concept: c, ad: normalizeAd(c.ad) }))
       .filter((n) => n.ad.ad_key && n.ad.media_type === "static" && n.ad.creative_url)
-      .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0));
-    const { fresh, skipped } = await dedupFresh(admin, workspaceId, normalized.map((n) => n.ad));
-    result.skippedExisting = skipped;
-    const freshKeys = new Set(fresh.map((a) => a.ad_key));
-    result.longRunners = fresh.length;
-    for (const { concept, ad } of normalized.filter((n) => freshKeys.has(n.ad.ad_key)).slice(0, cap)) {
-      try {
-        await ingestAd(workspaceId, ad, seed, conceptToWinnerMeta(concept));
-        result.inserted++;
-      } catch (err) {
-        console.error(`[creative-scout] LANE-A ingest failed for ${ad.ad_key}:`, err);
-        result.failed++;
-      }
-    }
+      .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0))
+      .map((n) => n.ad);
+    await collectAndTrack(admin, workspaceId, seed, statics, cap, result);
     return result;
   }
 
-  // ── LANE B — domain search (our vision only; concept_tags backfilled Phase 2c) ──
+  // ── LANE B — domain search (advertiser un-resolvable by name) ───────────────
   if (resolution.via === "domain" && opts.domain) {
     result.lane = "domain";
     const ads = await searchAds({
@@ -725,38 +850,16 @@ export async function sweepCompetitorLanes(
       platform: ["facebook", "instagram"], // Meta-only (no Google)
       pageSize: 50,
     });
-    const statics = ads.filter((a) => a.ad_key && a.media_type === "static" && a.creative_url);
-    result.searched = statics.length;
-    const { fresh, skipped } = await dedupFresh(admin, workspaceId, statics);
-    result.skippedExisting = skipped;
-    result.longRunners = fresh.length;
-    // Rank by our winnerScore proxy (reach/longevity) since domain search carries no AdLibrary score.
-    const ranked = [...fresh].sort((a, b) => winnerScore(b) - winnerScore(a)).slice(0, cap);
-    for (const ad of ranked) {
-      try {
-        await ingestAd(workspaceId, ad, seed);
-        result.inserted++;
-      } catch (err) {
-        console.error(`[creative-scout] LANE-B ingest failed for ${ad.ad_key}:`, err);
-        result.failed++;
-      }
-    }
+    const statics = ads
+      .filter((a) => a.ad_key && a.media_type === "static" && a.creative_url)
+      // Vision the highest-reach/longevity NEW ones first (domain search carries no AdLibrary score).
+      .sort((a, b) => winnerScore(b) - winnerScore(a));
+    await collectAndTrack(admin, workspaceId, seed, statics, cap, result);
     return result;
   }
 
   // via:null — neither lane resolved. A reliable bad seed (caller surfaces it).
   return result;
-}
-
-/** Map a LANE-A `WinnerConcept` → the `WinnerMeta` we stamp onto the skeleton row. `tags` is null when
- *  AdLibrary returned no strategic tags for the concept — so `ingestAd` falls back to OUR vision's
- *  `concept_tags` (same schema) rather than storing a bare `variant_count`. */
-function conceptToWinnerMeta(concept: WinnerConcept): WinnerMeta {
-  return {
-    tier: concept.tier,
-    score: concept.composite,
-    tags: concept.tags ? { ...concept.tags, variant_count: concept.variantCount ?? undefined } : null,
-  };
 }
 
 // ── Phase 4 — the pattern matrix ─────────────────────────────────────────────

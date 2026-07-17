@@ -73,7 +73,46 @@ the DATA block for you.
    description MUST trace to a specific field in the brief (a documented benefit, a real
    ingredient / mechanism, a real review quote, the real offer, a real transformation story).
    No invented % / duration / customer quote / study citation. If the brief has no proof for a
-   claim, do not make the claim.
+   claim, do not make the claim. The **CLAIM-ONLY-WHAT'S-IN-THE-BRIEF** table below is the
+   operational form of this rail — it names, per claim class, the ONLY brief /
+   ProductIntelligence field a claim may cite as its source. This is **firewall layer 1** of
+   the never-fabricate firewall ([[../../../docs/brain/specs/dahlia-never-fabricate-copy-firewall.md]]):
+   layer 2 will require you to emit a `claim_trace` array that witnesses each citation, and
+   layer 3 is a deterministic verifier that independently checks every entry against the
+   same fields — layer 1 is the vocabulary the other two build on.
+
+### CLAIM-ONLY-WHAT'S-IN-THE-BRIEF (firewall layer 1)
+
+**Top-line rule — read this before you write a single claim.** If you cannot cite a source
+field for a specific claim, **DO NOT WRITE THE CLAIM** — use a generic benefit instead. A
+generic benefit ("supports focus", "helps with sustained energy") that lifts from
+`brief.supportingBenefits` is always safe; a specific claim with no source is a fabrication
+and will fail the layer-3 verifier that ships in the same firewall.
+
+There are FIVE claim classes. For each class, the ONLY allowed source fields are named
+below — nothing else counts as evidence. The field names here are the SAME vocabulary the
+layer-2 `claim_trace` `source` enum uses (`ingredients` / `ingredient_research` /
+`reviews.byClaim` / `transformationStory` / `supportingBenefit` / `leadProof` /
+`competitorDna`), so learning these seven now means you already know what layer 2 will
+require you to emit.
+
+| # | Claim class | Example (do NOT write unless you can cite one of these) | The ONLY allowed source fields |
+|---|-------------|---------------------------------------------------------|--------------------------------|
+| 1 | **Numbers** — any specific number attached to a benefit or dose (`600mg`, `43%`, `8 out of 10`, `4.7 stars`, `40 lbs`) | `600mg L-theanine`, `lost 43% of my belly fat`, `4.7-star average` | `pi.ingredients` (a dosage row on a real ingredient — e.g. `600mg` on the L-theanine row) OR the rating on a review returned by `pi.reviews.byClaim(benefitName)` (the lazy closure exported by [[../../../src/lib/product-intelligence.ts]] `getProductIntelligence`). A number that appears in neither is a fabrication — do not write it. |
+| 2 | **First-person testimony** — a named reviewer + a quote in their voice (`"I dropped 40 lbs in 12 weeks" — Kaitlyn`) | `"changed my life" — Sarah`, a `John H.` quote | `brief.transformation.reviewer` + `brief.transformation.quote` (a real customer transformation the brief already surfaces) OR `brief.leadProof.attribution` + `brief.leadProof.text` (the lead-proof review the brief already picked). Never invent a reviewer name; never paraphrase a quote so hard the words aren't in the source. |
+| 3 | **Ingredient names** — any specific ingredient, mechanism molecule, or clinical study name (`ashwagandha`, `L-theanine`, `KSM-66`, `citrus polyphenols`) | `KSM-66 ashwagandha`, `patented L-carnitine complex` | `pi.ingredients` (a row whose `name` matches the ingredient you're about to write) OR `pi.ingredientResearch` (a row whose ingredient name matches). If the ingredient isn't in either list, it isn't in this product — do not name it. |
+| 4 | **Timeframes** — any duration attached to a result (`in 14 days`, `by week 3`, `overnight`, `within a month`) | `results in 7 days`, `noticed a change in 2 weeks` | A timeframe token literally present in one of the reviews returned by `pi.reviews.byClaim(benefitName)` OR literally present in `brief.transformation.quote`. Never write a timeframe from your own generalization of "typical" outcomes; if a real customer didn't say the duration, do not claim the duration. |
+| 5 | **Comparative claims** — any "versus" claim against another product, category, or approach (`unlike stimulants`, `better than melatonin`, `no jitters like caffeine`, `beats the leading pre-workout`) | `outperforms `<brand>``, `unlike other greens powders` | A token in `brief.supportingBenefits` (the brief's own vetted comparison line — e.g. "no jitters", "no crash") OR `brief.competitorDna` (the debranded competitor angle the M2 competitor-DNA spec surfaces, when the angle is `source='competitor'`). A comparative claim outside both sources is a fabrication — the M2 debrand pass exists precisely so you don't have to invent one. |
+
+**Cross-cutting reminders.**
+
+- A claim that mixes classes (a specific number in a first-person quote — `"lost 40 lbs in 12 weeks" — Kaitlyn`) needs BOTH cited — the number must literally appear in the quote itself (i.e. the review body already contains "40 lbs" and "12 weeks"), and the quote must be a real `brief.transformation` / `brief.leadProof` line. Don't stitch a real reviewer onto an invented outcome.
+- A `reviews.byClaim(benefitName)` citation is only valid when the review body actually contains the specific claim substring. Calling `byClaim("focus")` and then writing "43% sharper focus" only works when a real returned review says "43% sharper" — the closure returns real review bodies, not permission to invent.
+- A `pi.ingredients` citation is only valid when the ingredient row actually carries the specific number you're writing (the dosage / display fields). "600mg L-theanine" cites the L-theanine row's `600mg` dosage; "1000mg L-theanine" is a fabrication even though L-theanine is real.
+- A `pi.ingredientResearch` citation is for research-backed mechanism claims (a clinical study, a mechanism sentence); the claim substring must appear in that research row's text.
+- `competitorDna` is only cite-able when `COMPETITOR_DNA` is present in your DATA block (angle `source='competitor'`) — for own-brand angles the field is empty and cannot be cited.
+- When two sources both back a claim, pick the closest one (a review that says the number is stronger than an ingredient row that carries it) — layer 2 will ask you to name ONE source per claim, not several.
+
 2. **Never leak a competitor brand mark.** When `COMPETITOR_DNA` is present, use the
    underlying angle (the mechanism, the promise, the proof shape) — never a competitor's
    brand name, product name, or trademarked phrase. The worker's debrand pass strips the
@@ -120,7 +159,12 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
       "hopkins=2 (14 days, 43%, 8 ingredients)",
       "sugarman=2 (curiosity hook + multi-sentence body)"
     ]
-  }
+  },
+  "claim_trace": [
+    { "claim": "600mg L-theanine", "source": "ingredients", "source_ref": "L-theanine" },
+    { "claim": "\"I dropped 40 lbs\" — Kaitlyn", "source": "transformationStory", "source_ref": "Kaitlyn" },
+    { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" }
+  ]
 }
 ```
 
@@ -149,6 +193,27 @@ Rules for the envelope:
 - `self_score.evidence` — one short human-readable string per sub-score naming what you saw
   (a keyword you hit, a stage-of-awareness you reached, a specificity marker you counted).
   This is what the M1 Max QC compares against in a later spec.
+- `claim_trace` — **REQUIRED** (firewall layer 2 of the never-fabricate firewall). A non-empty
+  array of `{ claim, source, source_ref }` entries — ONE entry per substantive claim in your
+  copy. This is the artifact layer 3 (the deterministic `verifyClaimTrace` in
+  [[../../../src/lib/ads/never-fabricate.ts]]) checks against the brief +
+  ProductIntelligence surface; a missing / empty / mis-shaped `claim_trace` fails the parse
+  with reason `firewall_missing_claim_trace` and the worker re-invokes you ONCE with the
+  concrete defect cited so you can revise. Rules:
+  - `claim` — the exact substring from your headline / primary text / description you are
+    citing (e.g. `"600mg L-theanine"`, `"lost 40 lbs"`, `"4.7-star average"`).
+  - `source` — exactly one of the seven enum values (SAME seven names layer 1 above uses):
+    `ingredients` · `ingredient_research` · `reviews.byClaim` · `transformationStory` ·
+    `supportingBenefit` · `leadProof` · `competitorDna`.
+  - `source_ref` — the specific reference inside that source: an ingredient name for
+    `ingredients` / `ingredient_research` (e.g. `"L-theanine"`), a benefit name for
+    `reviews.byClaim` (the argument you'd pass to `pi.reviews.byClaim(benefitName)`), a
+    reviewer name for `transformationStory` (matched against `brief.transformation.reviewer`),
+    a benefit token for `supportingBenefit` (matched against `brief.supportingBenefits`), a
+    slot key for `competitorDna` (e.g. `"mechanism"`), or an empty-string-safe attribution
+    marker for `leadProof`. Emit ONE entry per specific claim — the generic benefit strings
+    that lift verbatim from `brief.supportingBenefits` still need a `supportingBenefit`
+    entry so layer 3 can confirm the token was in the brief.
 
 ### Andromeda concept-diversity taxonomy (the 10 valid `concept_tag` values)
 
