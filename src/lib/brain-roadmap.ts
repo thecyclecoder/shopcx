@@ -1450,7 +1450,28 @@ export function deriveSpecStatusFromMarkdown(raw: string): SpecStatus {
 // Invalidation: every writer path in `specs-table.ts` calls `invalidateSpecCache(ws, slug)`, which
 // fires the listener below to evict this wrapper's (ws, slug) entry AND the workspace-level maps
 // under (b) — the exact write-set specs-table already invalidates, so no writer path is missed.
-const GET_SPEC_WRAPPER_TTL_MS = 15_000;
+let GET_SPEC_WRAPPER_TTL_MS = 15_000;
+
+/**
+ * spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ *
+ * Raise the getSpec/getRoadmap wrapper TTL — called by the warm long-lived worker AFTER
+ * [[pg-pool]] `startSpecChangedListener` reports the LISTEN slot is active. Event-driven eviction
+ * lets us hold minutes-long TTLs because every write emits `pg_notify('spec_changed', …)` and the
+ * LISTEN drops onto `invalidateSpecCache` → the wrapper caches evict via `onSpecCacheInvalidate`.
+ * Capped at 1 hour so a misconfig cannot park an unbounded TTL. Ephemeral `claude -p` subprocesses
+ * do NOT call this — they keep the default 15s TTL (the polled-refresh safety-net).
+ */
+export function setWrapperCacheTTLMs(ms: number): void {
+  const CAP_MS = 60 * 60 * 1000; // 1 hour hard cap
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  GET_SPEC_WRAPPER_TTL_MS = Math.min(ms, CAP_MS);
+}
+
+/** Read the current TTL — used by tests + call-sites that want to log the effective TTL. */
+export function getWrapperCacheTTLMs(): number {
+  return GET_SPEC_WRAPPER_TTL_MS;
+}
 type GetSpecCached = { raw: string; card: SpecCard } | null;
 type GetSpecCacheEntry = { value: GetSpecCached; expiresAt: number };
 const getSpecWrapperCache = new Map<string, GetSpecCacheEntry>();

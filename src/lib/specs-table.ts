@@ -416,7 +416,29 @@ function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
  * and re-fired the RPC every tick. Writers still invalidate proactively via `invalidateSpecCache`,
  * so 15s is only an upper bound on staleness for out-of-module writes (raw SQL / admin scripts).
  */
-const SPEC_CACHE_TTL_MS = 15_000;
+let SPEC_CACHE_TTL_MS = 15_000;
+
+/**
+ * spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ *
+ * The warm long-lived worker (scripts/builder-worker.ts) calls this AFTER
+ * [[pg-pool]] `startSpecChangedListener` reports the LISTEN slot is active — event-driven
+ * eviction lets the worker hold a much longer TTL because every write publishes a pg_notify
+ * the LISTEN drops onto `invalidateSpecCache`, so a stale row can never survive across a write
+ * even inside the raised TTL. Capped at 1 hour so a misconfig can never park an unbounded TTL.
+ * Ephemeral `claude -p` subprocesses do NOT call this (they don't run LISTEN) — they keep the
+ * default 15s TTL which the polled refresh already covers per Phases 1–2.
+ */
+export function setSpecCacheTTLMs(ms: number): void {
+  const CAP_MS = 60 * 60 * 1000; // 1 hour hard cap
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  SPEC_CACHE_TTL_MS = Math.min(ms, CAP_MS);
+}
+
+/** Read the current TTL — used by tests + [[brain-roadmap]] `setWrapperCacheTTLMs` for symmetry. */
+export function getSpecCacheTTLMs(): number {
+  return SPEC_CACHE_TTL_MS;
+}
 
 type SpecCacheEntry = { row: SpecRow | null; expiresAt: number };
 const specCache = new Map<string, SpecCacheEntry>();
@@ -462,6 +484,20 @@ export function invalidateSpecCache(workspaceId: string, slug: string): void {
       // Best-effort — a listener error must never wedge a mutator path.
     }
   }
+  // spec_changed — Phase 4 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+  // Broadcast the invalidation to every other process running `LISTEN spec_changed` (the warm
+  // long-lived worker + any sibling warm process). Fire-and-forget: pg_notify errors are swallowed
+  // inside notifySpecChanged so a raw INSERT/UPDATE writer can NEVER fail because the notification
+  // rail was unreachable. No-op when the pool is unavailable (dev / edge) — the in-memory eviction
+  // above still fires locally, and the ephemeral subprocess's short-TTL cache is the fallback.
+  void (async () => {
+    try {
+      const { notifySpecChanged } = await import("@/lib/pg-pool");
+      await notifySpecChanged(workspaceId, slug);
+    } catch {
+      /* best-effort */
+    }
+  })();
 }
 
 /** Test-only cache reset. Never called by production code paths. */

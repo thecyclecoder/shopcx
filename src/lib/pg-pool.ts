@@ -20,7 +20,7 @@
  *
  * Brain: docs/brain/libraries/pg-pool.md
  */
-import { Pool, type PoolConfig, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 
 const PROJECT_REF = "urjbhjbygyxffrfkarqn";
 const DEFAULT_HOST = "aws-1-us-east-1.pooler.supabase.com";
@@ -344,4 +344,128 @@ export async function listGoalsWithMilestones<G = unknown, M = unknown>(
   );
   if (rows === null) return null;
   return rows.map((r) => ({ goal: r.goal, milestones: (r.milestones ?? []) as M[] }));
+}
+
+// ── spec_changed pg_notify/LISTEN wiring (Phase 4 tag `spec_changed`) ─────────
+//
+// Phase 4 of [[docs/brain/specs/spec-read-efficiency-for-scaling-fleet]] — turn the warm worker's
+// polled spec-cache TTL into an event-driven eviction. The single write chokepoint
+// [[specs-table]] `invalidateSpecCache` fires `pg_notify('spec_changed', workspace_id::text || '::' ||
+// slug)` through this pool; the warm long-lived worker (scripts/builder-worker.ts) opens ONE
+// dedicated pooled connection that runs `LISTEN spec_changed` and evicts the matching (ws, slug)
+// entry from every downstream cache the moment the notification arrives. This lets the warm worker
+// hold a much longer TTL (raised via [[specs-table]] `setSpecCacheTTLMs` + [[brain-roadmap]]
+// `setWrapperCacheTTLMs`) with the 5s poll demoted to a safety-net.
+//
+// Fail-open by construction: no pool creds / pool errored / underlying connection doesn't support
+// LISTEN (e.g. Supavisor transaction mode) → the listener never starts, the warm worker keeps the
+// pre-Phase-4 15s TTL (the poll-driven refresh) as the sole source of truth. A pg_notify failure
+// on the publish side is swallowed too — a raw INSERT/UPDATE writer must never fail because the
+// listener side was unreachable. This is READ-side coordination; it can only shorten staleness,
+// never break correctness.
+
+/**
+ * spec_changed — publish a `pg_notify('spec_changed', 'workspace_id::slug')` through the pool.
+ * Fire-and-forget: any failure (no pool, transient net, blocked NOTIFY) is swallowed with a warn.
+ * Called from the [[specs-table]] `invalidateSpecCache` chokepoint on every write.
+ */
+export async function notifySpecChanged(workspaceId: string, slug: string): Promise<void> {
+  const p = getPgPool();
+  if (!p) return;
+  try {
+    // Payload is the sole channel content — receiver splits on '::' back to (workspace_id, slug).
+    // Both sides are DB-issued UUIDs / lowercase-kebab slugs (validated by [[specs-table]] writers);
+    // no injection surface. Postgres NOTIFY payload is capped at 8000 bytes — well above the pair's
+    // combined length (uuid + '::' + kebab-slug is < 100 bytes).
+    await p.query("SELECT pg_notify('spec_changed', $1)", [`${workspaceId}::${slug}`]);
+  } catch (e) {
+    console.warn("[pg-pool] notifySpecChanged failed (continuing):", e instanceof Error ? e.message : e);
+  }
+}
+
+let listenClient: PoolClient | null = null;
+let listenStarting = false;
+
+/**
+ * spec_changed — hold ONE pooled connection running `LISTEN spec_changed` and invoke `handler`
+ * for each notification (payload split on '::' → (workspaceId, slug)). Meant for the warm
+ * long-lived worker (scripts/builder-worker.ts) — a single dedicated LISTEN slot is idempotent
+ * (a second call while a listener is already active resolves true without reopening). Idempotent
+ * shutdown via `stopSpecChangedListener` for a graceful process exit.
+ *
+ * Returns `true` when the LISTEN is active (either freshly opened OR already running from a prior
+ * call), `false` when the pool is unavailable OR the underlying connection refused LISTEN (e.g.
+ * a Supavisor transaction-mode pooler) OR any other setup error — the caller MUST treat `false`
+ * as "no event-driven eviction available, keep the polled/short-TTL fallback".
+ */
+export async function startSpecChangedListener(
+  handler: (workspaceId: string, slug: string) => void,
+): Promise<boolean> {
+  if (listenClient) return true;
+  if (listenStarting) return true;
+  const p = getPgPool();
+  if (!p) return false;
+  listenStarting = true;
+  try {
+    const client = await p.connect();
+    // Errors on the LISTEN client MUST NOT crash the worker — drop the listener + let the poll
+    // safety-net take over. A fresh restart / re-init can retry.
+    client.on("error", (err) => {
+      console.warn("[pg-pool] LISTEN spec_changed client error (dropping listener):", err.message);
+      const c = listenClient;
+      listenClient = null;
+      if (c) {
+        try {
+          c.release(true); // destroy — do NOT return a LISTEN-registered connection to the pool
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+    client.on("notification", (msg) => {
+      if (msg.channel !== "spec_changed") return;
+      const payload = msg.payload ?? "";
+      const sep = payload.indexOf("::");
+      if (sep < 0) return;
+      const workspaceId = payload.slice(0, sep);
+      const slug = payload.slice(sep + 2);
+      if (!workspaceId || !slug) return;
+      try {
+        handler(workspaceId, slug);
+      } catch (e) {
+        console.warn("[pg-pool] spec_changed handler threw (continuing):", e instanceof Error ? e.message : e);
+      }
+    });
+    await client.query("LISTEN spec_changed");
+    listenClient = client;
+    return true;
+  } catch (e) {
+    console.warn("[pg-pool] startSpecChangedListener failed (falling back to poll):", e instanceof Error ? e.message : e);
+    return false;
+  } finally {
+    listenStarting = false;
+  }
+}
+
+/** Graceful shutdown: UNLISTEN + destroy the dedicated LISTEN client. Idempotent. */
+export async function stopSpecChangedListener(): Promise<void> {
+  const c = listenClient;
+  listenClient = null;
+  if (!c) return;
+  try {
+    await c.query("UNLISTEN spec_changed");
+  } catch {
+    /* best-effort */
+  }
+  try {
+    c.release(true); // destroy — never return a LISTEN-scoped connection to the pool
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** True when the dedicated LISTEN slot is currently active. Used by the warm worker to gate the
+ *  TTL raise — a raised TTL only fires when event-driven eviction is actually running. */
+export function isSpecChangedListenerActive(): boolean {
+  return listenClient !== null;
 }
