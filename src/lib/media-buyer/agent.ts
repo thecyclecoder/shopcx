@@ -46,6 +46,7 @@ import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/win
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
+import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
@@ -482,6 +483,7 @@ function buildSensorTrustDormantPlan(
     kill: [],
     replenish: [],
     fatigueReplenish: [],
+    replenishDiagnostic: null,
     summary: `Dormant: sensor-trust denied — ${denial.reason}`,
   };
 }
@@ -549,6 +551,23 @@ export interface MediaBuyerFatigueReplenishAction {
   sourceAdCampaignId: string | null;
 }
 
+/**
+ * `dahlia-andromeda-concept-diversity-tags` Phase 2 — populated when the replenish loop
+ * PARTIALS because every remaining ready-to-test candidate's concept_tag was already
+ * represented in the live cohort. The runner reads this to emit a
+ * `media_buyer_replenish_no_diverse_candidate` `director_activity` row so #director-growth-max
+ * surfaces the concept-shortage to Growth (Dahlia diversity nudge). NULL when the pass either
+ * filled the deficit fully OR the ready bin was straight-up empty (that hits the pre-existing
+ * "ready-to-test bin exhausted" summary line + is not a diversity failure).
+ */
+export interface MediaBuyerReplenishDiagnostic {
+  kind: "no_diverse_candidate";
+  /** Distinct non-null concept_tags in the CURRENT live cohort (input.liveConceptTags). */
+  liveConceptTags: string[];
+  /** Distinct non-null concept_tags present in the ready-to-test bin (i.e. the concepts we tried to pick). */
+  readyTagsAvailable: string[];
+}
+
 /** The typed plan the runner emits — one pass, one workspace. */
 export interface MediaBuyerPlan {
   /** True iff an active iteration_policies row was found. */
@@ -563,6 +582,12 @@ export interface MediaBuyerPlan {
   replenish: MediaBuyerReplenishAction[];
   /** Phase 3 — winners flagged as fatiguing that need their angle amplified. */
   fatigueReplenish: MediaBuyerFatigueReplenishAction[];
+  /**
+   * `dahlia-andromeda-concept-diversity-tags` Phase 2 — non-null when replenish partialed
+   * because the diversity gate rejected every remaining candidate. Consumed by the runner
+   * to emit `media_buyer_replenish_no_diverse_candidate`.
+   */
+  replenishDiagnostic: MediaBuyerReplenishDiagnostic | null;
   summary: string;
 }
 
@@ -692,6 +717,18 @@ export interface MediaBuyerPlanInputs {
   /** How many test-cohort live ads currently exist (published via origin='media-buyer-test'). */
   currentTestCohortSize: number;
   cohortTargetCount?: number;
+  /**
+   * `dahlia-andromeda-concept-diversity-tags` Phase 2 — the DISTINCT non-null `ad_campaigns.concept_tag`
+   * values currently LIVE in this cohort (published via origin='media-buyer-test', scoped to this
+   * cohort's productId). The replenish loop rejects a ready-to-test candidate whose concept_tag
+   * ∈ liveConceptTags so a test cohort never fatigues in lockstep on one concept. NULL is its own
+   * 'untagged' bucket that never conflicts with any Andromeda token — deterministic-mode creatives
+   * (all NULL concept_tag) behave byte-identically to the pre-Phase-2 replenish path.
+   *
+   * Omitting / passing an empty set disables the gate — used by the null-product default cohort
+   * (Superfood Tabs today) OR by any pre-Phase-2 caller (unit tests, legacy fixtures).
+   */
+  liveConceptTags?: ReadonlySet<string>;
 }
 
 /**
@@ -739,6 +776,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       kill: [],
       replenish: [],
       fatigueReplenish: [],
+      replenishDiagnostic: null,
       summary:
         "Dormant: no active iteration_policies row — Media Buyer never scales/kills without a supervised policy. Author + activate a conservative policy to activate the loop.",
     };
@@ -820,12 +858,27 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   }
 
   // ── Replenish ──────────────────────────────────────────────────────────────
+  // `dahlia-andromeda-concept-diversity-tags` Phase 2 — iterate ready-to-test in bin order
+  // and REJECT a candidate whose concept_tag is already represented in the live cohort
+  // (or in this pass's own accepted picks). NULL concept_tag is its own 'untagged' bucket
+  // that never conflicts with any Andromeda token so deterministic-mode replenish stays
+  // byte-identical (every candidate NULL, every skip a no-op).
   const replenish: MediaBuyerReplenishAction[] = [];
+  const liveTagsForPass = new Set<string>(input.liveConceptTags ?? []);
+  const readyTagsAvailable = new Set<string>();
+  let diversitySkipped = false;
+  let replenishDiagnostic: MediaBuyerReplenishDiagnostic | null = null;
   if (input.cohort && input.cohort.isActive) {
     const deficit = Math.max(0, cohortTargetCount - input.currentTestCohortSize);
-    const picks = input.readyToTest.slice(0, deficit);
     const perTest = input.cohort.adsetPerTest;
-    for (const p of picks) {
+    for (const p of input.readyToTest) {
+      const tag = p.concept_tag ?? null;
+      if (tag !== null) readyTagsAvailable.add(tag);
+      if (replenish.length >= deficit) continue;
+      if (tag !== null && liveTagsForPass.has(tag)) {
+        diversitySkipped = true;
+        continue;
+      }
       replenish.push({
         kind: "replenish",
         adCampaignId: p.ad_campaign_id,
@@ -836,9 +889,23 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
           ? `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — minting a fresh $${(input.cohort.perTestDailyBudgetCents / 100).toFixed(0)}/day ad set in campaign ${input.cohort.testMetaCampaignId} for ready-to-test campaign ${p.ad_campaign_id} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`
           : `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — publishing ready-to-test campaign ${p.ad_campaign_id} into adset ${input.cohort.testMetaAdsetId} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`,
       });
+      if (tag !== null) liveTagsForPass.add(tag);
     }
     if (deficit > 0 && replenish.length < deficit) {
-      summaryParts.push(`replenish short: ${replenish.length}/${deficit} — ready-to-test bin exhausted`);
+      if (diversitySkipped) {
+        // Distinguish the diversity failure from a straight-up empty bin — the runner reads
+        // `replenishDiagnostic` to emit `media_buyer_replenish_no_diverse_candidate`.
+        summaryParts.push(
+          `replenish short: ${replenish.length}/${deficit} — no diverse concept candidates (live=[${[...new Set(input.liveConceptTags ?? [])].sort().join(",")}])`,
+        );
+        replenishDiagnostic = {
+          kind: "no_diverse_candidate",
+          liveConceptTags: [...new Set(input.liveConceptTags ?? [])].sort(),
+          readyTagsAvailable: [...readyTagsAvailable].sort(),
+        };
+      } else {
+        summaryParts.push(`replenish short: ${replenish.length}/${deficit} — ready-to-test bin exhausted`);
+      }
     }
   } else {
     summaryParts.push("cohort dormant — no active media_buyer_test_cohorts row; replenish skipped");
@@ -858,6 +925,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     kill,
     replenish,
     fatigueReplenish,
+    replenishDiagnostic,
     summary: summaryParts.join(" · "),
   };
 }
@@ -926,6 +994,55 @@ export async function readCurrentTestCohortSize(
     .in("id", campaignIds)
     .eq("product_id", args.productId);
   return (matchingCampaigns ?? []).length;
+}
+
+// ── Live cohort concept-tag reader (Phase 2 diversity gate) ──────────────────
+
+/**
+ * `dahlia-andromeda-concept-diversity-tags` Phase 2 — read the DISTINCT non-null
+ * `ad_campaigns.concept_tag` values currently LIVE in this cohort. Feeds
+ * `computeMediaBuyerPlan`'s replenish diversity gate: a ready-to-test candidate
+ * whose concept_tag ∈ liveConceptTags is skipped so no test cohort ever fatigues
+ * in lockstep on the same concept.
+ *
+ * Same scoping shape as `readCurrentTestCohortSize`'s null-product branch — reads
+ * every ACTIVE `origin='media-buyer-test'` publish job, then joins the campaign_ids
+ * back to `ad_campaigns` narrowed to the cohort's productId (null productId keeps
+ * the pre-Phase-2 workspace-wide shape). Returns an EMPTY set when the workspace
+ * has no live tests, when no live campaign carries a non-null tag (deterministic-
+ * mode cohort — every campaign NULL), or when the product filter matches zero
+ * rows. NULL concept_tag is never added to the set — it's its own 'untagged' bucket
+ * that never conflicts with any Andromeda token.
+ */
+export async function readLiveCohortConceptTags(
+  admin: Admin,
+  args: { workspaceId: string; productId: string | null },
+): Promise<Set<string>> {
+  const { data: liveJobsRaw } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
+    .eq("publish_active", true)
+    .eq("publish_status", "published");
+  const campaignIds = ((liveJobsRaw ?? []) as Array<{ campaign_id: string | null }>)
+    .map((j) => j.campaign_id)
+    .filter((id): id is string => !!id);
+  if (!campaignIds.length) return new Set<string>();
+
+  let q = admin
+    .from("ad_campaigns")
+    .select("concept_tag")
+    .eq("workspace_id", args.workspaceId)
+    .in("id", campaignIds)
+    .not("concept_tag", "is", null);
+  if (args.productId) q = q.eq("product_id", args.productId);
+  const { data } = await q;
+  const tags = new Set<string>();
+  for (const r of (data ?? []) as Array<{ concept_tag: string | null }>) {
+    if (r.concept_tag) tags.add(r.concept_tag);
+  }
+  return tags;
 }
 
 // ── Runner orchestrator ───────────────────────────────────────────────────────
@@ -1231,6 +1348,15 @@ export async function runMediaBuyerLoop(
     testMetaCampaignId: cohort?.testMetaCampaignId ?? null,
   });
 
+  // `dahlia-andromeda-concept-diversity-tags` Phase 2 — distinct non-null concept_tags
+  // currently live in this cohort. Feeds computeMediaBuyerPlan's diversity gate so a
+  // ready candidate whose tag is already represented is skipped in favor of the next
+  // ready row (or the plan partials + emits `media_buyer_replenish_no_diverse_candidate`).
+  const liveConceptTags = await readLiveCohortConceptTags(admin, {
+    workspaceId: opts.workspaceId,
+    productId: cohortProductId,
+  });
+
   // ── Compute the plan ──────────────────────────────────────────────────────
   const plan = computeMediaBuyerPlan({
     policy,
@@ -1243,6 +1369,7 @@ export async function runMediaBuyerLoop(
     readyToTest,
     currentTestCohortSize,
     cohortTargetCount: opts.cohortTargetCount,
+    liveConceptTags,
   });
 
   // ── Shadow branch (media-buyer-shadow-mode Phase 2) ───────────────────────
@@ -1634,6 +1761,34 @@ export async function runMediaBuyerLoop(
     }
   }
 
+  // `dahlia-andromeda-concept-diversity-tags` Phase 2 — when replenish partialed because
+  // every remaining ready-to-test candidate's concept_tag was already represented in the
+  // live cohort, emit a `media_buyer_replenish_no_diverse_candidate` director_activity row
+  // so #director-growth-max surfaces the concept-shortage to Growth (Dahlia diversity nudge).
+  // Only when the cohort is ACTIVE + configured — the diversity failure is a same-shape
+  // signal to the escalateUnderProvisionedCohort escalation (rail-hit → escalate, north star).
+  if (plan.replenishDiagnostic && cohort?.isActive && cohort.id) {
+    const diag = plan.replenishDiagnostic;
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_replenish_no_diverse_candidate",
+      specSlug: null,
+      reason: `Replenish partial (${plan.replenish.length}/${Math.max(0, plan.cohortTargetCount - plan.currentTestCohortSize)}) — no diverse-concept candidate available. live=[${diag.liveConceptTags.join(",")}] ready=[${diag.readyTagsAvailable.join(",")}].`,
+      metadata: {
+        cohort_id: cohort.id,
+        product_id: cohort.productId ?? null,
+        live_concept_tags: diag.liveConceptTags,
+        ready_tags_available: diag.readyTagsAvailable,
+        cohort_target_count: plan.cohortTargetCount,
+        current_test_cohort_size: plan.currentTestCohortSize,
+        replenish_filled: plan.replenish.length,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+  }
+
   // Pass heartbeat — one summary row per cadence pass, always emitted.
   const heartbeat = await recordDirectorActivity(admin, {
     workspaceId: opts.workspaceId,
@@ -1756,6 +1911,7 @@ export async function runMediaBuyerLoopForAccount(
             kill: [],
             replenish: [],
             fatigueReplenish: [],
+            replenishDiagnostic: null,
             summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,
           },
           writes: {
@@ -1786,8 +1942,20 @@ export async function runMediaBuyerLoopForAccount(
  *  campaign has no `angle_id`). */
 export type ReplenishAngleCopy = { meta_headline?: string | null; meta_primary_text?: string | null } | null;
 
+/** A temperature-banded variant row as `resolveReplenishAdCopy` needs it — the shape returned by
+ *  `readCopyVariants` in [[../ads/ad-copy-variants]] (the SDK chokepoint for `ad_creative_copy_variants`).
+ *  The variants are ALREADY warm-then-cold-then-hot sorted by the SDK; the helper below trusts that
+ *  order and splats 1:1 into headlines / primaryTexts / descriptions so Meta's default-serving order
+ *  matches the canonical variant stamped on `ad_campaigns` (warm > cold > hot). */
+export type ReplenishCopyVariant = {
+  audience_temperature: "cold" | "warm" | "hot";
+  headline: string;
+  primary_text: string;
+  description: string;
+};
+
 /**
- * Resolve the ad copy for a replenish publish job from the campaign's angle — PURE (unit-testable).
+ * Resolve the ad copy for a replenish publish job — PURE (unit-testable).
  *
  * FAIL-CLOSED: a replenish `ad_publish_jobs` row must never carry empty `headlines`/`primary_texts`. An empty
  * copy set makes [[../inngest/ad-tool]] `adToolPublishToMeta` build a Meta creative whose `asset_feed_spec`
@@ -1795,16 +1963,32 @@ export type ReplenishAngleCopy = { meta_headline?: string | null; meta_primary_t
  * misleading error for absent ad copy). Before this guard, `enqueueReplenishPublish` hard-coded `headlines:
  * []` / `primary_texts: []`, so EVERY auto-replenish publish failed at Meta. Returns `ok:false` + a reason
  * when the angle yields no usable copy, so the caller skips the job instead of enqueueing an invalid one.
+ *
+ * `variants` is the M3 temperature-banded pack (dahlia-publisher-asset-feed-spec-upgrade-and-competitor-
+ * selection Phase 1). When non-empty, this helper returns 1 entry per variant in the passed order (the
+ * SDK sorts warm → cold → hot so Meta's default-serving matches the canonical stamped on `ad_campaigns`).
+ * When empty / null (deterministic mode, or a legacy campaign whose variant pack was never authored),
+ * the return shape is BYTE-IDENTICAL to the pre-M3 single-angle-caption fallback — headlines /
+ * primaryTexts are 1-element arrays, descriptions is empty (no legacy source populates it). This
+ * fallback path is what preserves determinism for every studio publish that never touches variants.
  */
 export function resolveReplenishAdCopy(
   angle: ReplenishAngleCopy,
-): { ok: boolean; headlines: string[]; primaryTexts: string[]; reason: string | null } {
+  opts?: { variants?: readonly ReplenishCopyVariant[] | null },
+): { ok: boolean; headlines: string[]; primaryTexts: string[]; descriptions: string[]; reason: string | null } {
+  const variants = (opts?.variants ?? []).filter((v) => (v.headline ?? "").trim() && (v.primary_text ?? "").trim());
+  if (variants.length) {
+    const headlines = variants.map((v) => v.headline.trim());
+    const primaryTexts = variants.map((v) => v.primary_text.trim());
+    const descriptions = variants.map((v) => (v.description ?? "").trim()).filter(Boolean);
+    return { ok: true, headlines, primaryTexts, descriptions, reason: null };
+  }
   const headlines = [(angle?.meta_headline || "").trim()].filter(Boolean);
   const primaryTexts = [(angle?.meta_primary_text || "").trim()].filter(Boolean);
   if (!headlines.length || !primaryTexts.length) {
-    return { ok: false, headlines, primaryTexts, reason: "has no meta_headline/meta_primary_text" };
+    return { ok: false, headlines, primaryTexts, descriptions: [], reason: "has no meta_headline/meta_primary_text" };
   }
-  return { ok: true, headlines, primaryTexts, reason: null };
+  return { ok: true, headlines, primaryTexts, descriptions: [], reason: null };
 }
 
 /**
@@ -1834,6 +2018,7 @@ export interface BuildReplenishJobInsertInput {
   destination: string;
   headlines: string[];
   primaryTexts: string[];
+  descriptions: string[];
 }
 
 export interface ReplenishJobInsertBody {
@@ -1847,6 +2032,10 @@ export interface ReplenishJobInsertBody {
   meta_instagram_user_id: string | null;
   headlines: string[];
   primary_texts: string[];
+  /** dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — one entry per
+   *  temperature-banded variant read from `ad_creative_copy_variants`. `null` = legacy studio /
+   *  deterministic-mode job; publisher falls back to `[description]` single-element. */
+  descriptions: string[] | null;
   cta_type: "SHOP_NOW";
   destination_url: string;
   publish_active: true;
@@ -1860,7 +2049,7 @@ export type BuildReplenishJobInsertResult =
   | { ok: false; reason: string };
 
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
-  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts } = input;
+  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
 
   // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
   // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
@@ -1906,6 +2095,7 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
       meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
       headlines,
       primary_texts: primaryTexts,
+      descriptions: descriptions.length ? descriptions : null,
       cta_type: "SHOP_NOW",
       destination_url: destination,
       publish_active: true,
@@ -1963,7 +2153,14 @@ async function enqueueReplenishPublish(
       .maybeSingle();
     angle = data as ReplenishAngleCopy;
   }
-  const copy = resolveReplenishAdCopy(angle);
+  // dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — read the
+  // temperature-banded pack via the SDK chokepoint (warm → cold → hot ordered). When non-empty,
+  // resolveReplenishAdCopy splats it 1:1 into the job's headlines / primary_texts / descriptions
+  // arrays so the publisher can build Meta's asset_feed_spec titles[]/bodies[]/descriptions[]
+  // with N entries. When empty (deterministic mode / legacy campaign that never had a variant
+  // pack authored), the single-angle-caption fallback fires — byte-identical to today.
+  const variants = await readCopyVariants(admin, action.adCampaignId);
+  const copy = resolveReplenishAdCopy(angle, { variants });
   if (!copy.ok) {
     return {
       inserted: false,
@@ -1973,7 +2170,7 @@ async function enqueueReplenishPublish(
         : "campaign has no angle_id — no ad-copy source; skipped to avoid a malformed Meta creative",
     };
   }
-  const { headlines, primaryTexts } = copy;
+  const { headlines, primaryTexts, descriptions } = copy;
 
   const { data: video } = await admin
     .from("ad_videos")
@@ -1998,6 +2195,7 @@ async function enqueueReplenishPublish(
     destination,
     headlines,
     primaryTexts,
+    descriptions,
   });
   if (!built.ok) return { inserted: false, jobId: null, reason: built.reason };
 

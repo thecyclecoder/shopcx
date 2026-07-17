@@ -462,7 +462,7 @@ test("computeMediaBuyerPlan — inactive cohort → no replenish, summary flags 
     baseInputs({
       cohort: cohort({ isActive: false }),
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
       currentTestCohortSize: 0,
     }),
@@ -477,9 +477,9 @@ test("computeMediaBuyerPlan — cohort deficit → replenish up to deficit, capp
       currentTestCohortSize: 1,
       cohortTargetCount: 3, // deficit=2
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -494,11 +494,115 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
     baseInputs({
       currentTestCohortSize: DEFAULT_TEST_COHORT_TARGET,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
   assert.equal(plan.replenish.length, 0);
+});
+
+// ── Phase 2 — Andromeda concept-diversity gate ───────────────────────────────
+
+test("computeMediaBuyerPlan — replenish SKIPS a ready candidate whose concept_tag ∈ liveConceptTags (a)", () => {
+  // live = transformation + curiosity; ready in bin order = [transformation, mechanism, objection]
+  // deficit = 2 → picks mechanism + objection (skips the duplicate transformation).
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation", "curiosity"]),
+      readyToTest: [
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-mechanism", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+        { ad_campaign_id: "cmp-objection", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "objection" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-mechanism");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-objection");
+  assert.equal(plan.replenishDiagnostic, null); // deficit was filled — no diagnostic
+});
+
+test("computeMediaBuyerPlan — every ready candidate is a duplicate → 0 replenish + replenishDiagnostic (b)", () => {
+  // live = [transformation, transformation] (both same tag), ready = [transformation], deficit = 2
+  // → zero picks + diagnostic flags no-diverse-candidate so the runner emits
+  // media_buyer_replenish_no_diverse_candidate.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation"]), // 2 rows same tag → the SET has 1 entry
+      readyToTest: [
+        { ad_campaign_id: "cmp-dup-transformation", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 0);
+  assert.ok(plan.replenishDiagnostic, "diagnostic must fire");
+  assert.equal(plan.replenishDiagnostic!.kind, "no_diverse_candidate");
+  assert.deepEqual(plan.replenishDiagnostic!.liveConceptTags, ["transformation"]);
+  assert.deepEqual(plan.replenishDiagnostic!.readyTagsAvailable, ["transformation"]);
+  assert.ok(plan.summary.includes("no diverse concept candidates"));
+});
+
+test("computeMediaBuyerPlan — NULL concept_tag candidates never conflict with Andromeda tokens (c)", () => {
+  // Deterministic-mode / pre-Phase-1 rows carry concept_tag=null. NULL is its own bucket that
+  // never conflicts with an Andromeda token, so live=[transformation] with ready=[null, null]
+  // both fill the cohort (byte-identical to pre-Phase-2 behavior when everything is NULL).
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2 vs DEFAULT_TEST_COHORT_TARGET=4
+      liveConceptTags: new Set(["transformation"]),
+      readyToTest: [
+        { ad_campaign_id: "cmp-null-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-null-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-null-1");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-null-2");
+  assert.equal(plan.replenishDiagnostic, null);
+});
+
+test("computeMediaBuyerPlan — empty liveConceptTags + tagged ready bin → picks in bin order (Phase 1 unaffected)", () => {
+  // With no live tags yet (first pass under Phase 2), the gate is a no-op — pick every
+  // ready row in bin order regardless of tag. Guards against a false-positive skip when
+  // liveConceptTags is empty.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2
+      liveConceptTags: new Set(),
+      readyToTest: [
+        { ad_campaign_id: "cmp-t", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-t");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-m");
+  assert.equal(plan.replenishDiagnostic, null);
+});
+
+test("computeMediaBuyerPlan — a same-pass pick reserves its tag against a later duplicate in the SAME bin", () => {
+  // First pass: live is empty, ready in bin order = [transformation, transformation, mechanism].
+  // After the first pick lands transformation, the second transformation is skipped and
+  // mechanism fills the second slot — the same-pass reservation keeps a single-pass cohort
+  // internally diverse.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2, // deficit 2
+      liveConceptTags: new Set(),
+      readyToTest: [
+        { ad_campaign_id: "cmp-t1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-t2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "transformation" },
+        { ad_campaign_id: "cmp-m", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: "mechanism" },
+      ],
+    }),
+  );
+  assert.equal(plan.replenish.length, 2);
+  assert.equal(plan.replenish[0].adCampaignId, "cmp-t1");
+  assert.equal(plan.replenish[1].adCampaignId, "cmp-m");
 });
 
 // ── Per-test-adset cohort (CEO 2026-07-12) ──────────────────────────────────
@@ -517,10 +621,10 @@ test("computeMediaBuyerPlan — per-test cohort derives target from ceiling÷per
       currentTestCohortSize: 1, // 1 live → deficit 3
       cohortTargetCount: undefined, // per-test ignores the override; derives from budget math
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "" },
-        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -746,7 +850,7 @@ test("buildShadowActivityRows — replenish action → media_buyer_replenished_t
       currentTestCohortSize: 1,
       cohortTargetCount: 3,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -799,7 +903,7 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
       currentTestCohortSize: 1,
       cohortTargetCount: 2,
       readyToTest: [
-        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "" },
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null },
       ],
     }),
   );
@@ -1264,6 +1368,103 @@ test("resolveReplenishAdCopy: whitespace-only copy is treated as empty → NOT o
   assert.deepEqual(r.headlines, []);
 });
 
+// ── dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 ─────────────
+// The variant-pack read: when readCopyVariants returns 3 rows (warm/cold/hot) the resolver
+// splats them 1:1 into headlines/primaryTexts/descriptions in the SDK's warm→cold→hot order
+// so Meta's asset_feed_spec default-serving matches the canonical stamped on ad_campaigns.
+// The empty-variants path preserves the single-angle-caption fallback byte-identically.
+
+test("resolveReplenishAdCopy: variants=[warm,cold,hot] → 3-entry arrays in warm→cold→hot order (matches asset_feed_spec 1:1)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "canonical", meta_primary_text: "canonical body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "Warm hook", primary_text: "Warm body", description: "Warm desc" },
+        { audience_temperature: "cold", headline: "Cold hook", primary_text: "Cold body", description: "Cold desc" },
+        { audience_temperature: "hot", headline: "Hot hook", primary_text: "Hot body", description: "Hot desc" },
+      ],
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Warm hook", "Cold hook", "Hot hook"]);
+  assert.deepEqual(r.primaryTexts, ["Warm body", "Cold body", "Hot body"]);
+  assert.deepEqual(r.descriptions, ["Warm desc", "Cold desc", "Hot desc"]);
+  assert.equal(r.reason, null);
+});
+
+test("resolveReplenishAdCopy: variants=[warm] → 1-entry arrays; angle-caption fallback does NOT fire (variant wins)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "SHOULD NOT APPEAR", meta_primary_text: "SHOULD NOT APPEAR" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "Only warm", primary_text: "Only warm body", description: "Only warm desc" },
+      ],
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Only warm"]);
+  assert.deepEqual(r.primaryTexts, ["Only warm body"]);
+  assert.deepEqual(r.descriptions, ["Only warm desc"]);
+});
+
+test("resolveReplenishAdCopy: null / empty variants → today's single-angle-caption fallback fires unchanged (deterministic-mode compat)", () => {
+  const withNull = resolveReplenishAdCopy(
+    { meta_headline: "Sleep better tonight", meta_primary_text: "Our gummies help you fall asleep faster." },
+    { variants: null },
+  );
+  assert.equal(withNull.ok, true);
+  assert.deepEqual(withNull.headlines, ["Sleep better tonight"]);
+  assert.deepEqual(withNull.primaryTexts, ["Our gummies help you fall asleep faster."]);
+  assert.deepEqual(withNull.descriptions, [], "legacy angle has no description column — descriptions is empty in fallback");
+  const withEmpty = resolveReplenishAdCopy(
+    { meta_headline: "Sleep better tonight", meta_primary_text: "Our gummies help you fall asleep faster." },
+    { variants: [] },
+  );
+  assert.deepEqual(withEmpty.headlines, ["Sleep better tonight"], "empty variants array is equivalent to null (fallback fires)");
+  assert.deepEqual(withEmpty.primaryTexts, ["Our gummies help you fall asleep faster."]);
+});
+
+test("resolveReplenishAdCopy: variants with blank headline are dropped (fail-closed extends to per-variant hygiene)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "fallback", meta_primary_text: "fallback body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "  ", primary_text: "bad", description: "" },
+      ],
+    },
+  );
+  // All variants dropped → fall back to the angle-caption (single-element arrays).
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["fallback"]);
+});
+
+// Structural test — the publisher's asset_feed_spec construction. A mock createAdCreative-style
+// call with headlines[3] MUST produce titles[3] in the built body; a 1-entry call must still
+// produce titles[1] (byte-identical to today's replenish). This pins the 1:1 array-to-asset
+// invariant Phase 1 promises.
+
+test("Phase 1 — meta-ads asset_feed_spec: headlines[3] → titles[3]; descriptions[3] → descriptions[3]", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../meta-ads.ts", import.meta.url), "utf8");
+  // The video-ad createAdCreative branch builds titles/bodies straight from the headlines/primary
+  // texts arrays via .map((text) => ({ text })). Pin the exact literal so a stray refactor that
+  // hard-codes a single entry can't sneak past.
+  assert.ok(
+    /titles:\s*a\.headlines\.filter\(Boolean\)\.map\(\(text\)\s*=>\s*\(\{\s*text\s*\}\)\)/.test(src),
+    "meta-ads.ts createAdCreative video branch MUST build asset_feed_spec.titles from a.headlines 1:1 (no single-entry cap)",
+  );
+  assert.ok(
+    /bodies:\s*a\.primaryTexts\.filter\(Boolean\)\.map\(\(text\)\s*=>\s*\(\{\s*text\s*\}\)\)/.test(src),
+    "meta-ads.ts createAdCreative video branch MUST build asset_feed_spec.bodies from a.primaryTexts 1:1",
+  );
+  // The video branch must also emit descriptions[] when the caller supplies them (the M3 pack)
+  // via the buildAssetFeedDescriptions helper. Grepping the helper reference is the durable pin.
+  assert.ok(
+    /buildAssetFeedDescriptions\(a\)/.test(src),
+    "meta-ads.ts must build asset_feed_spec.descriptions[] from the descriptions[] pack via buildAssetFeedDescriptions (Phase 1)",
+  );
+});
+
 // ── media-buyer-replenish-per-product-scope Phase 2 — the per-test enqueue artifact ──
 // The pure builder for the `ad_publish_jobs` insert body. This IS the runtime artifact
 // the spec's Phase 2 verification bullet asks for: a per-test replenish must insert a
@@ -1316,6 +1517,7 @@ test("Phase 2 — per-test replenish inserts a job whose create_adset_spec targe
     destination: "https://x/P/r1",
     headlines: ["Sleep better tonight"],
     primaryTexts: ["Real copy from angle."],
+    descriptions: [],
   });
   assert.equal(built.ok, true, "per-test cohort with valid template + campaign must produce an insert body");
   if (!built.ok) return; // narrowing
@@ -1372,6 +1574,7 @@ test("Phase 2 — per-test replenish FAILS CLOSED when cohort.testMetaCampaignId
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, false, "must NOT produce an insert body when testMetaCampaignId is missing");
   if (!built.ok) {
@@ -1399,6 +1602,7 @@ test("Phase 2 — per-test replenish FAILS CLOSED when cohort.adsetTemplate is m
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, false);
   if (!built.ok) {
@@ -1429,6 +1633,7 @@ test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the 
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, true);
   if (!built.ok) return;

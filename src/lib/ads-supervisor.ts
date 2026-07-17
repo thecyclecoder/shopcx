@@ -282,8 +282,8 @@ export async function runAdsSupervisorPass(
       dahliaGaps += 1;
       findings.push(makeDahliaBinFinding(group, depth));
     }
-    const angles = await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 30, limit: 8 })
-      .catch(() => []);
+    const { angles } = await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 30, limit: 8 })
+      .catch(() => ({ angles: [], usedFallback: false }));
     if (angles.length === 0) {
       dahliaGaps += 1;
       findings.push(makeDahliaSeedingFinding(group));

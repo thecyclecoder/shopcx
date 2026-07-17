@@ -224,7 +224,7 @@ const OBJECT_ID_FIELD: Record<Level, string> = { campaign: "campaign_id", adset:
 
 /** Fields requested for an insights pull at `level` (sync GET and async report alike). */
 const insightsFields = (level: Level) =>
-  `${OBJECT_ID_FIELD[level]},spend,impressions,clicks,ctr,cpc,frequency,actions,action_values`;
+  `${OBJECT_ID_FIELD[level]},spend,impressions,clicks,ctr,cpc,frequency,actions,action_values,inline_link_clicks`;
 
 /**
  * Map raw Graph insight rows → `meta_insights_daily` records. Shared by the sync
@@ -232,7 +232,7 @@ const insightsFields = (level: Level) =>
  * ([[syncMetaInsightsForLevelAsync]]) so both land byte-identical rows — the spec's
  * "lands rows across all three levels … idempotency unchanged" invariant.
  */
-function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: string): Record<string, unknown>[] {
+export function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: string): Record<string, unknown>[] {
   const idField = OBJECT_ID_FIELD[level];
   return rows
     .filter((r) => r[idField] && r.date_start)
@@ -249,6 +249,16 @@ function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: strin
         a.action_type === "add_to_cart" || a.action_type === "omni_add_to_cart" || a.action_type === "offsite_conversion.fb_pixel_add_to_cart",
       );
       const addToCart = atcAction ? parseInt(atcAction.value, 10) || 0 : 0;
+      // Meta's `inline_link_clicks` — clicks that reached the ad's landing_url (excludes
+      // video-thumb taps, engagement clicks, CTA-only clicks). NULLABLE-MEANS-UNKNOWN:
+      // when Meta omits the field, leave it null so per-mode CTR readers can EXCLUDE it
+      // rather than treating a missing value as 0 (docs/brain/specs/dahlia-cold-graded-
+      // inline-link-ctr-leading-signal.md Phase 1).
+      const inlineLinkClicksRaw = r.inline_link_clicks;
+      const inlineLinkClicks =
+        inlineLinkClicksRaw == null || inlineLinkClicksRaw === ""
+          ? null
+          : parseInt(String(inlineLinkClicksRaw), 10) || 0;
       return {
         workspace_id: p.workspaceId,
         meta_ad_account_id: p.adAccountId,
@@ -262,6 +272,7 @@ function mapInsightsRecords(p: SyncParams, level: Level, rows: any[], now: strin
         cpc_cents: dollarsToCents(r.cpc),
         purchases,
         add_to_cart: addToCart,
+        inline_link_clicks: inlineLinkClicks,
         revenue_cents: revenueCents,
         roas: spendCents > 0 ? revenueCents / spendCents : 0,
         frequency: num(r.frequency),

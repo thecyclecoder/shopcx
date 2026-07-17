@@ -4,7 +4,18 @@ The **visual gate** Dahlia (the [[creative-agent|Ad Creative Agent]]) runs on ev
 
 Two paths, one verdict shape — the caller ([[creative-agent]] `runAdCreativeLoop`, dispatched by [[builder-worker]] `runAdCreativeJob`) picks the path per the `DAHLIA_QC_MODE` env kill-switch and regenerates on `pass:false` up to `MAX_QA_ATTEMPTS`.
 
-## `DAHLIA_QC_MODE` kill-switch (dahlia-creative-qc-via-box-session Phase 2)
+## Two independent gates
+
+Two orthogonal QC modes now live in this file — one for the RENDER (Dahlia's own visual QC of the image she generated), and one for the CAPTION (Max's INDEPENDENT copy-QC of the text Dahlia wrote). Each has its own env kill-switch and its own agent-kind so the founder can turn either on or off without touching the other.
+
+| what | env | agent-kind | skill | writes | spec |
+|---|---|---|---|---|---|
+| Render QC (visual defects) | `DAHLIA_QC_MODE=box\|direct` (default `box`) | `ad-creative-qc` | [[creative-qc]] | inline verdict; regenerates on fail | [[../specs/dahlia-creative-qc-via-box-session]] |
+| Copy QC (Max independent) | `DAHLIA_QC_COPY_MODE=box\|off` (default `off`) | `ad-creative-copy-qc` | [[../../../.claude/skills/max-copy-qc/SKILL]] | `ad_creative_copy_qc_verdicts` + bounces to a copy-only revise | [[../specs/dahlia-max-independent-copy-qc-box-session]] |
+
+The copy-QC path (Phase 2 wire) reuses the same `sandbox: "qc"` env-stripping contract as the render QC — a grep-able `copy-qc` alias in [[builder-worker]] `runBoxSession` routes to the SAME `buildQcChildEnv` filter, so no second env-filter implementation drifts. The PreToolUse gate ([[ad-creative-qc-permission-gate]]) is reused verbatim.
+
+## `DAHLIA_QC_MODE` kill-switch (dahlia-creative-qc-via-box-session Phase 2) — RENDER QC
 
 | value | path | when to flip |
 |---|---|---|
@@ -61,5 +72,35 @@ Same trust-boundary + skip-semantic wiring as `packagingFaithful`:
 - **Defense-in-depth skip:** both paths force `checks.offerConsistent=true` locally when no real offer reached the model — a spuriously-false CHECK from a stray model answer can't false-fail a legitimate no-offer render.
 - **Skip semantic:** the local override is guarded by the CHECK field, not the top-level `pass` — a well-behaved model in skip mode should still return `pass:true`; the fixture in [[../../../src/lib/ads/creative-qa.test.ts]] "no realOffer supplied → skip forces checks.offerConsistent=true" pins that.
 
+## Shared deterministic copy validator (dahlia-shared-deterministic-copy-validator Phase 2 — WIRED)
+
+`runQaCreativeCopyViaBoxSession` — the Node lane dispatcher for Max's per-creative INDEPENDENT copy-QC box session ([[../specs/dahlia-max-independent-copy-qc-box-session|M1 keystone]]) — **pre-computes** [[copy-validator]] `validateGeneratedCopy` on Dahlia's finished copy BEFORE dispatching Max, and threads the typed `{pass, checks[]}` into the session prompt as a `===BEGIN_VALIDATOR_TRUSTED_CONTEXT_v1===` / `===END_VALIDATOR_TRUSTED_CONTEXT_v1===` **TRUSTED CONTEXT block** — outside the untrusted `===BEGIN_COPY_QC_DATA_v1===` DATA fence, matching the sanitize/delimit trust boundary [[creative-qc-sandbox]] documents for the image-QC dispatcher. Max reads which rails already passed / failed and MUST cite the SAME rail names in his `hard_gates` output when he decides to bounce for a safety reason, so a validator miss and a Max hard-gate fail always talk about the same six categories (`lf8` / `meta_caps` / `no_msrp` / `no_competitor_leak` / `cold_offer_gate` / `single_promise`).
+
+Max still forms his own persuasion judgment against the 5-lens rubric ([[../../../.claude/skills/max-copy-qc/SKILL.md|max-copy-qc]] SKILL) — the shared validator only feeds him the SAFETY-rail truth (persuasion stays in the rubric, safety stays deterministic). The pre-check is factored out as a pure helper `computeCopyQcPreCheck(input) → {validator, trustedContextBlock}` so a future dispatcher can inline the same formatter without spawning a session, and the outcome carries the validator result on BOTH success and dispatch-error paths so operators can observe a mismatched pair (Max says clean while the validator says a rail failed) downstream. Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] (`npx tsx --test src/lib/ads/creative-qa.copy-qc.test.ts`).
+
+The same [[copy-validator]] `validateGeneratedCopy` is the SSOT [[creative-agent]] `runCopyAuthorSession`'s post-author self-check reads — kept in ONE place so the author's self-check and Max's pre-check cannot drift.
+
+## Max verdict — type + parser + SDK persistence (max-copy-qc-scroll-stop-dims Phase 1)
+
+Three co-located pieces materialize Max's per-session verdict onto [[../tables/ad_creative_copy_qc_verdicts]]:
+
+- **`CopyQaVerdict`** — the strict-JSON verdict shape Max's [[../../../.claude/skills/max-copy-qc/SKILL]] documents. Carries `hard_gate_pass`, the five `hard_gates` booleans, `persuasion_score` + `persuasion_rubric` (nullable on a fail), a REQUIRED `scroll_stop`, and `verdict_reason`.
+- **`parseCopyQaVerdict(raw)`** — strict-JSON parser that fail-closes on: undecodable JSON, missing / non-object `hard_gates`, non-boolean per-check, a mismatched pair (`hard_gate_pass=true` with a per-check `false`), `persuasion_score` outside `0..10` on a pass, and — new in max-copy-qc-scroll-stop-dims — a MISSING or NULL `scroll_stop`, a non-integer sub-score, or a sub-score outside `0..2`. Returns `{ kind: "ok", verdict }` or `{ kind: "parse_error", reason }`; the caller treats a parse_error the same as a hard-gate fail (bounce Dahlia's session; never let unchecked bytes land on the row).
+- **`insertCopyQaVerdict(admin, opts)`** — the SDK-chokepoint helper for [[../tables/ad_creative_copy_qc_verdicts]]. Always writes `scroll_stop` on the row (the parser has already validated it); the Node lane never reaches raw `admin.from("ad_creative_copy_qc_verdicts").insert(...)`. Returns `{ id }` on success and `null` on an insert error — a durable-audit row is important but the pipeline continues on write failure.
+
+### Three scroll-stop dimensions ([[../specs/max-copy-qc-scroll-stop-dims]] Phase 1)
+
+The M1 keystone's rolled-up `persuasion_score` (0-10) rolls FIVE lenses into one number — great for a rolled-up read, useless for correlating a specific scroll-stop failure mode against realized CAC. `scroll_stop` names three ADVISORY dimensions, each 0 / 1 / 2, so future CAC-correlation work has a granular signal:
+
+| dimension | what it measures |
+|---|---|
+| `headline_readable_in_3_frames` | the top-line copy is legible within ≤3 feed-scroll frames of Meta thumb-cadence viewing (a real buyer flicks Reels/Feed at ~1 second per card) |
+| `visual_hierarchy_supports_headline` | there is a single dominant visual anchor that doesn't fight the headline for attention (one hero object, one focal face, one focal transformation) |
+| `first_line_earns_the_second` | the primary-text opener creates enough curiosity / stakes / specificity to keep the reader past the `…See more` fold (≈125 chars in Meta feed) |
+
+**No-Goodhart contract.** The sub-scores NEVER block `hard_gate_pass` — a caption can score 0/0/0 on scroll_stop and still land in Bianca's bin if every hard gate is green. The moment a low sub-score gates the pipeline, it stops being an honest signal and becomes something to game — the M1 keystone's line-27 "advisory director" clause explicitly bans this. If a low `first_line_earns_the_second` starts predicting high CAC, the fix is a Dahlia author-mode revise directive; not a new hard gate reading off this column.
+
+Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] tests `(e)` / `(f)` — verdict WITH scroll_stop → row body carries the field; verdict missing / null / out-of-range → `parse_error` fail-closed.
+
 ## Related
-[[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook).
+[[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[copy-validator]] (SSOT safety rails).

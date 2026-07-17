@@ -412,12 +412,30 @@ const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
 // pass per workspace at a time is more than enough for the weekly cadence.
 const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
 const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+// dahlia-copy-author-box-session Phase 1: concurrency-1 claim lane for the new
+// `ad-creative-copy-author` agent-kind. Phase 1 lands the scaffold only (the runner is a
+// stub that just heartbeats); Phase 3 wires the real per-creative Max box session from
+// stockProduct via runBoxLane. Keeping the claim lane at 1 mirrors ad-creative — the true
+// concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
+const MAX_AD_CREATIVE_COPY_AUTHOR = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_AUTHOR || 1);
+// dahlia-max-independent-copy-qc-box-session Phase 1: concurrency-1 claim lane for the new
+// `ad-creative-copy-qc` agent-kind. Phase 1 lands the scaffold only (the runner is a stub that
+// just heartbeats — Phase 2 wires `runQaCreativeCopyViaBoxSession` in `src/lib/ads/creative-qa.ts`);
+// nothing enqueues this kind yet. Concurrency-1 mirrors ad-creative-copy-author — the true
+// concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
+const MAX_AD_CREATIVE_COPY_QC = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_QC || 1);
 // dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
 // `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
 // a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
 // burns an attempt) instead of stalling the ad-creative lane on a stuck QC.
 const AD_CREATIVE_QC_TIMEOUT_MS = 6 * 60 * 1000;   // 6 min hard cap
 const AD_CREATIVE_QC_IDLE_MS = 90 * 1000;          // 90s no-output ⇒ hung ⇒ kill
+// dahlia-max-independent-copy-qc-box-session Phase 1: mirrors the image-QC cap. Max reads one
+// JPEG + the composed copy strings + the brief and emits a JSON verdict; the same 6 min /
+// 90s bounds catch a stuck session and hand back a fail-closed hard_gate_pass=false so the
+// ad-creative caller can revise (Phase 2 wire).
+const AD_CREATIVE_COPY_QC_TIMEOUT_MS = 6 * 60 * 1000;   // 6 min hard cap
+const AD_CREATIVE_COPY_QC_IDLE_MS = 90 * 1000;          // 90s no-output ⇒ hung ⇒ kill
 // media-buyer-test-winner-loop Phase 3: concurrency-1 lane for the Media Buyer
 // grading pass. Deterministic-Node; scores media-buyer director_activity rows
 // against realized ROAS in [[meta_attribution_daily]] settled 3d+ later.
@@ -678,7 +696,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -754,6 +772,8 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
   "ad-creative",
+  "ad-creative-copy-author",
+  "ad-creative-copy-qc",
   "ads-supervisor",
   "ticket-analyze",
   "ticket-handle",
@@ -1996,7 +2016,7 @@ interface RunBoxSessionOpts {
   //   an EXPLICIT INTENT MARKER — grep-able, and Phase-3 review can enforce that ONLY
   //   god-mode routes through it. The trust boundary is NOT the env stripping (there is
   //   none vs max), it's the hard per-tool permission gate below (see `permissionGate`).
-  sandbox?: "build" | "max" | "godmode" | "qc";
+  sandbox?: "build" | "max" | "godmode" | "qc" | "copy-qc";
   timeout: number;
   idleTimeout?: number;
   // God-mode Phase 2: wire a PreToolUse hook via inline --settings JSON and DO NOT pass
@@ -2132,11 +2152,16 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     // docs/brain/lifecycles/god-mode.md § permission gate.
     Object.assign(env, process.env);
     delete env.ANTHROPIC_API_KEY;
-  } else if (sb === "qc") {
+  } else if (sb === "qc" || sb === "copy-qc") {
     // Least-privilege QC sandbox. `buildQcChildEnv` is the sole authority on which env keys
     // reach the QC child (test in scripts/ad-creative-qc-guardrails.test.ts asserts no secrets
     // are copied). Anything the QC actually needs comes from opts.extraEnv layered on below
     // (e.g. AD_CREATIVE_QC_ALLOWED_IMAGE) — the sandbox is fail-safe by omission.
+    //
+    // `copy-qc` (dahlia-max-independent-copy-qc-box-session Phase 1) is a grep-able alias
+    // for the same env-stripping contract — it lets a future audit see that the Max
+    // copy-QC lane went through the least-privilege sandbox WITHOUT introducing a second
+    // env-filter implementation to keep in sync.
     Object.assign(env, buildQcChildEnv(process.env));
   } else {
     Object.assign(env, process.env);
@@ -3352,6 +3377,7 @@ const LANE_GROUPS = {
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
       MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE + MAX_AD_CREATIVE +
+      MAX_AD_CREATIVE_COPY_AUTHOR + MAX_AD_CREATIVE_COPY_QC +
       MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
@@ -3359,7 +3385,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -20701,6 +20727,45 @@ async function runAdCreativeJob(job: Job) {
     }
   };
   console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
+  // dahlia-copy-author-box-session Phase 3 — the per-creative copy-author dispatcher factory.
+  // When DAHLIA_COPY_MODE=author, stockProduct hands each QC-passed image to this dispatcher; it
+  // runs Dahlia's `dahlia-copy-author` skill as a top-level `claude -p` on Max via runBoxLane
+  // (mirroring the QC dispatcher above). Same least-privilege sandbox (`sandbox: "qc"`) — the
+  // author child only Reads ONE tmp jpeg + emits ONE JSON envelope, no filesystem/network beyond
+  // that — so we reuse the shared PreToolUse gate + AD_CREATIVE_QC_ALLOWED_IMAGE env pattern.
+  // Fail-closed contract mirrors QC: any spawn error / cap / timeout / gate deny surfaces as
+  // { isError:true } and runCopyAuthorSession converts it to a revise trigger (or exhaustion).
+  // When DAHLIA_COPY_MODE is unset / `deterministic`, the dispatcher is never invoked and the
+  // deterministic buildMetaCopyPack path runs byte-identical to today.
+  const copyAuthorMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
+  let copyAuthorCounter = 0;
+  const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+    copyAuthorCounter++;
+    const authorTag = `${tag}[copy-author#${copyAuthorCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-copy-author",
+        // Least-privilege — same profile as `sandbox: "qc"`; the author child only needs to Read
+        // ONE tmp jpeg + emit ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/META_/
+        // ANTHROPIC_/OPENAI_ credential like the QC lane does.
+        sandbox: "qc",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+        // Same env-var name keeps the gate script single-source-of-truth.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+      }));
+      if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
+  console.log(`${tag} DAHLIA_COPY_MODE=${copyAuthorMode}${copyAuthorMode === "author" ? " — per-creative dahlia-copy-author box session engaged" : " — deterministic buildMetaCopyPack (default)"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
     const result = await runAdCreativeLoop(a, {
@@ -20710,6 +20775,10 @@ async function runAdCreativeJob(job: Job) {
       // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
       // stockProduct falls through to the legacy qaCreative(...) call unchanged.
       qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
+      // dahlia-copy-author-box-session Phase 3 — only inject the copy-author dispatcher when
+      // the workspace-level flag is `author`; unset / `deterministic` leaves it undefined and
+      // stockProduct's `authorModeEngaged` guard collapses to false (deterministic path).
+      copyAuthorDispatcher: copyAuthorMode === "author" ? copyAuthorDispatcher : undefined,
     });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
@@ -20720,6 +20789,142 @@ async function runAdCreativeJob(job: Job) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`${tag} threw: ${msg}`);
     await update(job.id, { status: "failed", log_tail: msg.slice(-4000) });
+  }
+}
+
+/**
+ * ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 3). The PRIMARY production
+ * path for Dahlia's per-creative copy-author box session is a CHILD spawn from `runAdCreativeJob`
+ * via the `copyAuthorDispatcher` injected into `runAdCreativeLoop` — every ad-creative pass runs
+ * with DAHLIA_COPY_MODE=author engages Dahlia per creative WITHOUT enqueueing a separate
+ * `ad-creative-copy-author` job. This TOP-LEVEL runner is the manual / replay path: a
+ * `product_id` + `count` instruction JSON triggers ONE forced-author-mode `stockProduct` pass for
+ * that product, which internally dispatches Dahlia through the same code path. Useful for
+ * bench-testing a workspace's rubric alignment before flipping the workspace-level flag, and
+ * for a one-off re-run when a specific creative needs an author-mode retry. Kills-witch: unset /
+ * `deterministic` still short-circuits inside `stockProduct` — this lane deliberately FORCES
+ * `DAHLIA_COPY_MODE=author` for the duration of ITS runAdCreativeLoop call by threading a
+ * dispatcher directly, so the flag's value doesn't matter (the lane is opt-in by enqueue).
+ *
+ * Always emits `emitAgentHeartbeat('ad-creative-copy-author', ok, latencyMs)` in a `finally`
+ * (CLAUDE.md north-star node-completeness rule).
+ */
+async function runAdCreativeCopyAuthorJob(job: Job) {
+  const tag = `[ad-creative-copy-author:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "started";
+  try {
+    let instr: { product_id?: string; count?: number } = {};
+    try {
+      instr = job.instructions ? JSON.parse(job.instructions) : {};
+    } catch {
+      /* not JSON — degrade to workspace-wide top-up */
+    }
+    const a = await admin();
+    // Reuse the QC gate script — same predicate: allow Read on the exact tmp jpeg, deny else.
+    const qcPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+    let counter = 0;
+    const copyAuthorDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
+      counter++;
+      const authorTag = `${tag}[copy-author#${counter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-author",
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }));
+        if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
+    const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
+    const result = await runAdCreativeLoop(a, {
+      workspaceId: job.workspace_id,
+      productId: instr.product_id,
+      count: instr.count,
+      // Force the copy-author path for THIS manual run — the caller enqueued this kind
+      // deliberately so we always inject the dispatcher regardless of the workspace-level flag.
+      copyAuthorDispatcher,
+    });
+    detail = `produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`;
+    console.log(`${tag} ${detail}`);
+    await update(job.id, {
+      status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
+      log_tail: JSON.stringify(result.stocked).slice(-4000),
+    });
+  } catch (err) {
+    ok = false;
+    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("ad-creative-copy-author", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
+ * ad-creative-copy-qc lane (dahlia-max-independent-copy-qc-box-session Phase 1). The PRIMARY
+ * production path for Max's INDEPENDENT per-creative copy-QC box session is a CHILD spawn from
+ * `runAdCreativeLoop` via a `copyQcDispatcher` (Phase 2 wire — mirrors the `copyAuthorDispatcher`
+ * pattern above): every ad-creative pass under `DAHLIA_QC_COPY_MODE=box` engages Max per creative
+ * WITHOUT enqueueing a separate `ad-creative-copy-qc` job. This TOP-LEVEL runner is the manual /
+ * replay path: a `product_id` + `count` instruction JSON triggers ONE forced-copy-qc-mode
+ * `stockProduct` pass for that product, which internally dispatches Max through the same code
+ * path.
+ *
+ * Phase 1 lands the scaffold only — Phase 2 implements `runQaCreativeCopyViaBoxSession` in
+ * `src/lib/ads/creative-qa.ts` (peer to `qaCreativeViaBoxSession`) and wires stockProduct to
+ * invoke it. This runner currently just emits a heartbeat so the CLAUDE.md node-completeness
+ * rule (a node without a switch + heartbeat + owner is incomplete) is satisfied in the same PR
+ * as the new agent-kind. The kill-switch (DAHLIA_QC_COPY_MODE=box|off, default off) is read at
+ * the stockProduct call site in Phase 2 — this runner is opt-in by enqueue and always heartbeats
+ * regardless of the switch state.
+ *
+ * Always emits `emitAgentHeartbeat('ad-creative-copy-qc', ok, latencyMs)` in a `finally` (the
+ * CLAUDE.md node-completeness invariant).
+ */
+async function runAdCreativeCopyQcJob(job: Job) {
+  const tag = `[ad-creative-copy-qc:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "started";
+  try {
+    // Phase 1 stub — nothing enqueues this kind yet; Phase 2 wires the real per-creative Max
+    // copy-QC session (runQaCreativeCopyViaBoxSession) from stockProduct via runBoxLane. The
+    // heartbeat + owner + kill-switch trio are the only things required in Phase 1 (spec:
+    // dahlia-max-independent-copy-qc-box-session.md Phase 1). Complete the job as no-op so the
+    // lane drains cleanly if a founder enqueues one manually to bench-test the wiring.
+    detail = `phase-1 stub: DAHLIA_QC_COPY_MODE=${process.env.DAHLIA_QC_COPY_MODE ?? "off"} — no work performed`;
+    console.log(`${tag} ${detail}`);
+    await update(job.id, {
+      status: "completed",
+      log_tail: detail.slice(-2000),
+    });
+  } catch (err) {
+    ok = false;
+    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("ad-creative-copy-qc", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
   }
 }
 
@@ -23625,6 +23830,8 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ceo-authorized-out-of-leash") return runCeoAuthorizedOutOfLeashJob(job);
   if (job.kind === "media-buyer") return runMediaBuyerJob(job);
   if (job.kind === "ad-creative") return runAdCreativeJob(job);
+  if (job.kind === "ad-creative-copy-author") return runAdCreativeCopyAuthorJob(job);
+  if (job.kind === "ad-creative-copy-qc") return runAdCreativeCopyQcJob(job);
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
@@ -25102,7 +25309,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, ad-creative-copy-qc:${MAX_AD_CREATIVE_COPY_QC}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -25227,6 +25434,8 @@ async function main() {
   const countMediaBuyer = () => [...active.values()].filter((v) => v.kind === "media-buyer").length;
   const countMediaBuyerGrade = () => [...active.values()].filter((v) => v.kind === "media-buyer-grade").length;
   const countAdCreative = () => [...active.values()].filter((v) => v.kind === "ad-creative").length;
+  const countAdCreativeCopyAuthor = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-author").length;
+  const countAdCreativeCopyQc = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-qc").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
@@ -25804,6 +26013,31 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ad-creative ${job.id.slice(0, 8)} → ${countAdCreative() + 1}/${MAX_AD_CREATIVE} ad-creative lane`);
+        launch(job);
+      }
+      // Fill the ad-creative-copy-author lane (dahlia-copy-author-box-session Phase 1 — scaffold
+      // only). Phase 1's runner is a stub that just heartbeats — nothing enqueues this kind yet.
+      // Phase 3 wires the real per-creative Max box session from `stockProduct` via `runBoxLane`
+      // (the primary path); a direct `agent_jobs` enqueue path is left available for future
+      // manual / debug invocation, and the lane below is what would drain those.
+      while (laneHasQueued(queuedKinds, ["ad-creative-copy-author"]) && countAdCreativeCopyAuthor() < MAX_AD_CREATIVE_COPY_AUTHOR) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-creative-copy-author"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ad-creative-copy-author ${job.id.slice(0, 8)} → ${countAdCreativeCopyAuthor() + 1}/${MAX_AD_CREATIVE_COPY_AUTHOR} ad-creative-copy-author lane`);
+        launch(job);
+      }
+      // Fill the ad-creative-copy-qc lane (dahlia-max-independent-copy-qc-box-session Phase 1 —
+      // scaffold only). Phase 1's runner is a stub that just heartbeats — nothing enqueues this
+      // kind yet. Phase 2 wires the real per-creative Max INDEPENDENT copy-QC session from
+      // `stockProduct` via `runBoxLane` (the primary path); a direct `agent_jobs` enqueue path
+      // is left available for future manual / debug invocation, and the lane below is what
+      // would drain those.
+      while (laneHasQueued(queuedKinds, ["ad-creative-copy-qc"]) && countAdCreativeCopyQc() < MAX_AD_CREATIVE_COPY_QC) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-creative-copy-qc"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ad-creative-copy-qc ${job.id.slice(0, 8)} → ${countAdCreativeCopyQc() + 1}/${MAX_AD_CREATIVE_COPY_QC} ad-creative-copy-qc lane`);
         launch(job);
       }
       // Fill the sensor-trust-probe lane (media-buyer-sensor-trust-probe Phase 2):
