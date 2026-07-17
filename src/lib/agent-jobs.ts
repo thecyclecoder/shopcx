@@ -1489,13 +1489,35 @@ export interface GoalBranchPromoteResult {
  * specs onto their goal branch and records the marker. Conflicts are surfaced (`conflicts[]`), never silently
  * dropped. Best-effort per spec — one spec's failure never blocks the rest. Never throws.
  */
+/**
+ * spec-goal-branch-pm-flow M4 — the phase positions a successful goal-branch merge should stamp
+ * `build_sha` on INLINE (self-sufficient path; the spec-drift heal is only an edge-case backstop).
+ *
+ * A goal-branch merge means "built on the branch" (`build_sha` via `stampPhaseBuilt`), NOT "shipped to
+ * main" (`merge_sha`/`shipped` via `stampPhaseShipped`) — the goal branch only lands on main atomically
+ * at M5. So the inline stamp mirrors the goal-branch heal's `stampPhaseBuilt` semantics.
+ *
+ * Selection = every phase that is NEITHER terminal (`shipped`/`rejected`) NOR already carrying a
+ * `build_sha` — the SAME not-already-stamped guard `backstopStuckAccumulation` uses. That makes the
+ * inline stamp idempotent: a re-run (or a phase the heal already stamped) is excluded, so we never
+ * double-stamp or over-stamp. Pure — testable without DB or GitHub.
+ */
+export function phasesToStampBuiltOnGoalMerge(
+  phases: { position: number; status: string; build_sha: string | null }[],
+): number[] {
+  return phases
+    .filter((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha)
+    .map((p) => p.position)
+    .sort((a, b) => a - b);
+}
+
 export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Promise<GoalBranchPromoteResult> {
   const result: GoalBranchPromoteResult = { promoted: [], conflicts: [], goalBranchesCreated: [], skipped: [] };
   const admin = adminClient || createAdminClient();
   if (!ghToken()) return result;
   try {
     const { mergeSpecBranchIntoGoalBranch } = await import("@/lib/github-pr-resolve");
-    const { isSpecOnGoalBranch, stampSpecGoalBranchSha } = await import("@/lib/specs-table");
+    const { isSpecOnGoalBranch, stampSpecGoalBranchSha, stampPhaseBuilt } = await import("@/lib/specs-table");
 
     // Candidate set: live build jobs that own a `claude/build-{slug}` branch (the spec-branch flow). One per
     // slug (the latest), so a re-dispatched build doesn't double-list. We then gate each candidate on
@@ -1598,6 +1620,38 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
           continue;
         }
         await stampSpecGoalBranchSha(c.workspaceId, c.slug, merge.mergeSha);
+        // spec-goal-branch-pm-flow M4 — stamp the merged spec's phases' `build_sha` INLINE, right at
+        // merge time, so the NORMAL path is self-sufficient and the spec-drift standing-pass heal never
+        // has to reach in on it (the heal stays only as an edge-case backstop for sibling/manual merges).
+        // A goal-branch merge is "built on the branch" (build_sha via stampPhaseBuilt), NOT "shipped to
+        // main" (merge_sha via stampPhaseShipped) — the goal branch lands on main atomically only at M5.
+        // BEST-EFFORT + FAIL-OPEN: the merge already succeeded, so a stamp error here must NEVER fail the
+        // promote loop — we log and let the heal backstop catch anything missed. Wrapped so it never throws
+        // out of this iteration.
+        try {
+          const spec = await getSpecFromDb(c.workspaceId, c.slug);
+          const positions = spec ? phasesToStampBuiltOnGoalMerge(spec.phases) : [];
+          for (const pos of positions) {
+            try {
+              await stampPhaseBuilt(c.workspaceId, c.slug, pos, { build_sha: merge.mergeSha });
+            } catch (e) {
+              console.warn(
+                `[goal-promote] ${c.slug} P${pos} inline build_sha stamp failed (heal will backstop):`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+          }
+          if (positions.length) {
+            console.log(
+              `[goal-promote] ${c.slug}: inline-stamped build_sha=${merge.mergeSha.slice(0, 8)} on phase(s) P${positions.join(", P")} at M4 merge`,
+            );
+          }
+        } catch (e) {
+          console.warn(
+            `[goal-promote] ${c.slug} inline phase-stamp pass threw (merge already landed; heal will backstop):`,
+            e instanceof Error ? e.message : e,
+          );
+        }
         result.promoted.push(c.slug);
         console.log(
           `[goal-promote] merged ${c.branch} → goal/${c.goalSlug}${merge.created ? " (seeded from main)" : ""}${merge.rebased ? " (rebased first)" : ""}; stamped goal_branch_sha=${merge.mergeSha.slice(0, 8)}`,
