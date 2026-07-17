@@ -1007,6 +1007,15 @@ export const adToolPublishToMeta = inngest.createFunction(
 
     const result = await step.run("publish", async () => {
       try {
+        // dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 —
+        // temperature-banded pack lands here as `j.descriptions` (jsonb string-array); when
+        // present it's the N-entry multi-variant descriptions that Meta's asset_feed_spec
+        // receives 1:1. When null (legacy studio / deterministic-mode job), fall back to
+        // [description] single-element so byte-identical behavior is preserved.
+        const jobDescriptions = (j.descriptions as string[] | null) ?? null;
+        const descriptions = jobDescriptions?.length
+          ? jobDescriptions.filter((d): d is string => typeof d === "string" && d.trim().length > 0)
+          : (typeof j.description === "string" && j.description.trim().length > 0 ? [j.description as string] : []);
         const baseCreative = {
           accountId: j.meta_account_id,
           name: ctx.adName,
@@ -1015,6 +1024,7 @@ export const adToolPublishToMeta = inngest.createFunction(
           headlines: j.headlines || [],
           primaryTexts: j.primary_texts || [],
           description: j.description,
+          descriptions,
           ctaType: j.cta_type,
           destinationUrl: j.destination_url,
           // utm_content={{ad.id}} is Meta's dynamic-URL token — Meta substitutes the

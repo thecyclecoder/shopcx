@@ -1368,6 +1368,103 @@ test("resolveReplenishAdCopy: whitespace-only copy is treated as empty → NOT o
   assert.deepEqual(r.headlines, []);
 });
 
+// ── dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 ─────────────
+// The variant-pack read: when readCopyVariants returns 3 rows (warm/cold/hot) the resolver
+// splats them 1:1 into headlines/primaryTexts/descriptions in the SDK's warm→cold→hot order
+// so Meta's asset_feed_spec default-serving matches the canonical stamped on ad_campaigns.
+// The empty-variants path preserves the single-angle-caption fallback byte-identically.
+
+test("resolveReplenishAdCopy: variants=[warm,cold,hot] → 3-entry arrays in warm→cold→hot order (matches asset_feed_spec 1:1)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "canonical", meta_primary_text: "canonical body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "Warm hook", primary_text: "Warm body", description: "Warm desc" },
+        { audience_temperature: "cold", headline: "Cold hook", primary_text: "Cold body", description: "Cold desc" },
+        { audience_temperature: "hot", headline: "Hot hook", primary_text: "Hot body", description: "Hot desc" },
+      ],
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Warm hook", "Cold hook", "Hot hook"]);
+  assert.deepEqual(r.primaryTexts, ["Warm body", "Cold body", "Hot body"]);
+  assert.deepEqual(r.descriptions, ["Warm desc", "Cold desc", "Hot desc"]);
+  assert.equal(r.reason, null);
+});
+
+test("resolveReplenishAdCopy: variants=[warm] → 1-entry arrays; angle-caption fallback does NOT fire (variant wins)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "SHOULD NOT APPEAR", meta_primary_text: "SHOULD NOT APPEAR" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "Only warm", primary_text: "Only warm body", description: "Only warm desc" },
+      ],
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Only warm"]);
+  assert.deepEqual(r.primaryTexts, ["Only warm body"]);
+  assert.deepEqual(r.descriptions, ["Only warm desc"]);
+});
+
+test("resolveReplenishAdCopy: null / empty variants → today's single-angle-caption fallback fires unchanged (deterministic-mode compat)", () => {
+  const withNull = resolveReplenishAdCopy(
+    { meta_headline: "Sleep better tonight", meta_primary_text: "Our gummies help you fall asleep faster." },
+    { variants: null },
+  );
+  assert.equal(withNull.ok, true);
+  assert.deepEqual(withNull.headlines, ["Sleep better tonight"]);
+  assert.deepEqual(withNull.primaryTexts, ["Our gummies help you fall asleep faster."]);
+  assert.deepEqual(withNull.descriptions, [], "legacy angle has no description column — descriptions is empty in fallback");
+  const withEmpty = resolveReplenishAdCopy(
+    { meta_headline: "Sleep better tonight", meta_primary_text: "Our gummies help you fall asleep faster." },
+    { variants: [] },
+  );
+  assert.deepEqual(withEmpty.headlines, ["Sleep better tonight"], "empty variants array is equivalent to null (fallback fires)");
+  assert.deepEqual(withEmpty.primaryTexts, ["Our gummies help you fall asleep faster."]);
+});
+
+test("resolveReplenishAdCopy: variants with blank headline are dropped (fail-closed extends to per-variant hygiene)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "fallback", meta_primary_text: "fallback body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "  ", primary_text: "bad", description: "" },
+      ],
+    },
+  );
+  // All variants dropped → fall back to the angle-caption (single-element arrays).
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["fallback"]);
+});
+
+// Structural test — the publisher's asset_feed_spec construction. A mock createAdCreative-style
+// call with headlines[3] MUST produce titles[3] in the built body; a 1-entry call must still
+// produce titles[1] (byte-identical to today's replenish). This pins the 1:1 array-to-asset
+// invariant Phase 1 promises.
+
+test("Phase 1 — meta-ads asset_feed_spec: headlines[3] → titles[3]; descriptions[3] → descriptions[3]", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../meta-ads.ts", import.meta.url), "utf8");
+  // The video-ad createAdCreative branch builds titles/bodies straight from the headlines/primary
+  // texts arrays via .map((text) => ({ text })). Pin the exact literal so a stray refactor that
+  // hard-codes a single entry can't sneak past.
+  assert.ok(
+    /titles:\s*a\.headlines\.filter\(Boolean\)\.map\(\(text\)\s*=>\s*\(\{\s*text\s*\}\)\)/.test(src),
+    "meta-ads.ts createAdCreative video branch MUST build asset_feed_spec.titles from a.headlines 1:1 (no single-entry cap)",
+  );
+  assert.ok(
+    /bodies:\s*a\.primaryTexts\.filter\(Boolean\)\.map\(\(text\)\s*=>\s*\(\{\s*text\s*\}\)\)/.test(src),
+    "meta-ads.ts createAdCreative video branch MUST build asset_feed_spec.bodies from a.primaryTexts 1:1",
+  );
+  // The video branch must also emit descriptions[] when the caller supplies them (the M3 pack)
+  // via the buildAssetFeedDescriptions helper. Grepping the helper reference is the durable pin.
+  assert.ok(
+    /buildAssetFeedDescriptions\(a\)/.test(src),
+    "meta-ads.ts must build asset_feed_spec.descriptions[] from the descriptions[] pack via buildAssetFeedDescriptions (Phase 1)",
+  );
+});
+
 // ── media-buyer-replenish-per-product-scope Phase 2 — the per-test enqueue artifact ──
 // The pure builder for the `ad_publish_jobs` insert body. This IS the runtime artifact
 // the spec's Phase 2 verification bullet asks for: a per-test replenish must insert a
@@ -1420,6 +1517,7 @@ test("Phase 2 — per-test replenish inserts a job whose create_adset_spec targe
     destination: "https://x/P/r1",
     headlines: ["Sleep better tonight"],
     primaryTexts: ["Real copy from angle."],
+    descriptions: [],
   });
   assert.equal(built.ok, true, "per-test cohort with valid template + campaign must produce an insert body");
   if (!built.ok) return; // narrowing
@@ -1476,6 +1574,7 @@ test("Phase 2 — per-test replenish FAILS CLOSED when cohort.testMetaCampaignId
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, false, "must NOT produce an insert body when testMetaCampaignId is missing");
   if (!built.ok) {
@@ -1503,6 +1602,7 @@ test("Phase 2 — per-test replenish FAILS CLOSED when cohort.adsetTemplate is m
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, false);
   if (!built.ok) {
@@ -1533,6 +1633,7 @@ test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the 
     destination: "https://x",
     headlines: ["h"],
     primaryTexts: ["p"],
+    descriptions: [],
   });
   assert.equal(built.ok, true);
   if (!built.ok) return;

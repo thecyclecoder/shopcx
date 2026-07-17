@@ -46,6 +46,7 @@ import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/win
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
+import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
@@ -1941,8 +1942,20 @@ export async function runMediaBuyerLoopForAccount(
  *  campaign has no `angle_id`). */
 export type ReplenishAngleCopy = { meta_headline?: string | null; meta_primary_text?: string | null } | null;
 
+/** A temperature-banded variant row as `resolveReplenishAdCopy` needs it — the shape returned by
+ *  `readCopyVariants` in [[../ads/ad-copy-variants]] (the SDK chokepoint for `ad_creative_copy_variants`).
+ *  The variants are ALREADY warm-then-cold-then-hot sorted by the SDK; the helper below trusts that
+ *  order and splats 1:1 into headlines / primaryTexts / descriptions so Meta's default-serving order
+ *  matches the canonical variant stamped on `ad_campaigns` (warm > cold > hot). */
+export type ReplenishCopyVariant = {
+  audience_temperature: "cold" | "warm" | "hot";
+  headline: string;
+  primary_text: string;
+  description: string;
+};
+
 /**
- * Resolve the ad copy for a replenish publish job from the campaign's angle — PURE (unit-testable).
+ * Resolve the ad copy for a replenish publish job — PURE (unit-testable).
  *
  * FAIL-CLOSED: a replenish `ad_publish_jobs` row must never carry empty `headlines`/`primary_texts`. An empty
  * copy set makes [[../inngest/ad-tool]] `adToolPublishToMeta` build a Meta creative whose `asset_feed_spec`
@@ -1950,16 +1963,32 @@ export type ReplenishAngleCopy = { meta_headline?: string | null; meta_primary_t
  * misleading error for absent ad copy). Before this guard, `enqueueReplenishPublish` hard-coded `headlines:
  * []` / `primary_texts: []`, so EVERY auto-replenish publish failed at Meta. Returns `ok:false` + a reason
  * when the angle yields no usable copy, so the caller skips the job instead of enqueueing an invalid one.
+ *
+ * `variants` is the M3 temperature-banded pack (dahlia-publisher-asset-feed-spec-upgrade-and-competitor-
+ * selection Phase 1). When non-empty, this helper returns 1 entry per variant in the passed order (the
+ * SDK sorts warm → cold → hot so Meta's default-serving matches the canonical stamped on `ad_campaigns`).
+ * When empty / null (deterministic mode, or a legacy campaign whose variant pack was never authored),
+ * the return shape is BYTE-IDENTICAL to the pre-M3 single-angle-caption fallback — headlines /
+ * primaryTexts are 1-element arrays, descriptions is empty (no legacy source populates it). This
+ * fallback path is what preserves determinism for every studio publish that never touches variants.
  */
 export function resolveReplenishAdCopy(
   angle: ReplenishAngleCopy,
-): { ok: boolean; headlines: string[]; primaryTexts: string[]; reason: string | null } {
+  opts?: { variants?: readonly ReplenishCopyVariant[] | null },
+): { ok: boolean; headlines: string[]; primaryTexts: string[]; descriptions: string[]; reason: string | null } {
+  const variants = (opts?.variants ?? []).filter((v) => (v.headline ?? "").trim() && (v.primary_text ?? "").trim());
+  if (variants.length) {
+    const headlines = variants.map((v) => v.headline.trim());
+    const primaryTexts = variants.map((v) => v.primary_text.trim());
+    const descriptions = variants.map((v) => (v.description ?? "").trim()).filter(Boolean);
+    return { ok: true, headlines, primaryTexts, descriptions, reason: null };
+  }
   const headlines = [(angle?.meta_headline || "").trim()].filter(Boolean);
   const primaryTexts = [(angle?.meta_primary_text || "").trim()].filter(Boolean);
   if (!headlines.length || !primaryTexts.length) {
-    return { ok: false, headlines, primaryTexts, reason: "has no meta_headline/meta_primary_text" };
+    return { ok: false, headlines, primaryTexts, descriptions: [], reason: "has no meta_headline/meta_primary_text" };
   }
-  return { ok: true, headlines, primaryTexts, reason: null };
+  return { ok: true, headlines, primaryTexts, descriptions: [], reason: null };
 }
 
 /**
@@ -1989,6 +2018,7 @@ export interface BuildReplenishJobInsertInput {
   destination: string;
   headlines: string[];
   primaryTexts: string[];
+  descriptions: string[];
 }
 
 export interface ReplenishJobInsertBody {
@@ -2002,6 +2032,10 @@ export interface ReplenishJobInsertBody {
   meta_instagram_user_id: string | null;
   headlines: string[];
   primary_texts: string[];
+  /** dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — one entry per
+   *  temperature-banded variant read from `ad_creative_copy_variants`. `null` = legacy studio /
+   *  deterministic-mode job; publisher falls back to `[description]` single-element. */
+  descriptions: string[] | null;
   cta_type: "SHOP_NOW";
   destination_url: string;
   publish_active: true;
@@ -2015,7 +2049,7 @@ export type BuildReplenishJobInsertResult =
   | { ok: false; reason: string };
 
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
-  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts } = input;
+  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
 
   // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
   // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
@@ -2061,6 +2095,7 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
       meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
       headlines,
       primary_texts: primaryTexts,
+      descriptions: descriptions.length ? descriptions : null,
       cta_type: "SHOP_NOW",
       destination_url: destination,
       publish_active: true,
@@ -2118,7 +2153,14 @@ async function enqueueReplenishPublish(
       .maybeSingle();
     angle = data as ReplenishAngleCopy;
   }
-  const copy = resolveReplenishAdCopy(angle);
+  // dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — read the
+  // temperature-banded pack via the SDK chokepoint (warm → cold → hot ordered). When non-empty,
+  // resolveReplenishAdCopy splats it 1:1 into the job's headlines / primary_texts / descriptions
+  // arrays so the publisher can build Meta's asset_feed_spec titles[]/bodies[]/descriptions[]
+  // with N entries. When empty (deterministic mode / legacy campaign that never had a variant
+  // pack authored), the single-angle-caption fallback fires — byte-identical to today.
+  const variants = await readCopyVariants(admin, action.adCampaignId);
+  const copy = resolveReplenishAdCopy(angle, { variants });
   if (!copy.ok) {
     return {
       inserted: false,
@@ -2128,7 +2170,7 @@ async function enqueueReplenishPublish(
         : "campaign has no angle_id — no ad-copy source; skipped to avoid a malformed Meta creative",
     };
   }
-  const { headlines, primaryTexts } = copy;
+  const { headlines, primaryTexts, descriptions } = copy;
 
   const { data: video } = await admin
     .from("ad_videos")
@@ -2153,6 +2195,7 @@ async function enqueueReplenishPublish(
     destination,
     headlines,
     primaryTexts,
+    descriptions,
   });
   if (!built.ok) return { inserted: false, jobId: null, reason: built.reason };
 
