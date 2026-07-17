@@ -160,6 +160,12 @@ export function classifyMedia(ad: AdLibraryAd): MediaType {
   return "static";
 }
 
+/** Normalize a raw AdLibrary ad row → `NormalizedAd`. Exported so the winners-flow ([[./adlibrary-winners]])
+ *  can reuse the SAME normalization on a `/api/winners/advertiser` concept's `ad` payload as `searchAds` uses. */
+export function normalizeAd(row: Record<string, unknown>): NormalizedAd {
+  return normalize(row);
+}
+
 function normalize(row: Record<string, unknown>): NormalizedAd {
   const resourceUrls = Array.isArray(row.resource_urls)
     ? (row.resource_urls as Array<{ type?: number; url?: string; u?: string }>)

@@ -29,9 +29,11 @@ import {
   isWinner,
   winnerScore,
   adMatchesCompetitor,
+  normalizeAd,
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
+import { resolveAdvertiser, scanWinners, type WinnerConcept } from "@/lib/adlibrary-winners";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -490,8 +492,22 @@ export async function sweepSeed(
   return result;
 }
 
-/** Vision-deconstruct (statics) and persist one ad as a creative_skeletons row. */
-export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed): Promise<void> {
+/** AdLibrary's winner scoring for a LANE-A concept — stamped onto the row alongside our vision breakdown.
+ *  LANE B / backfill leaves this null and populates `concept_tags` from OUR vision (same schema). */
+export interface WinnerMeta {
+  tier: string | null;
+  score: number | null;
+  tags: Record<string, unknown> | null; // { angle, archetype, why_it_works, cialdini_lever, awareness_stage, format }
+}
+
+/** Vision-deconstruct (statics) and persist one ad as a creative_skeletons row. `winner` (LANE A) stamps
+ *  AdLibrary's tier/score/concept-tags so Dahlia + Max read one shape across both collection lanes. */
+export async function ingestAd(
+  workspaceId: string,
+  ad: NormalizedAd,
+  seed: Seed,
+  winner?: WinnerMeta,
+): Promise<void> {
   const admin = createAdminClient();
 
   let skeleton: CreativeSkeleton | null = null;
@@ -564,6 +580,11 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     // competitor + WHICH of our products this ad was pulled for, so imitate reads a product's own shelf.
     competitor_id: seed.competitorId ?? null,
     product_id: seed.productId ?? null,
+    // winners-flow Phase 2b — the unified concept breakdown. LANE A carries AdLibrary's AI scoring;
+    // LANE B / backfill leave these null now and get concept_tags from OUR vision (Phase 2c, same schema).
+    winner_tier: winner?.tier ?? null,
+    winner_score: winner?.score ?? null,
+    concept_tags: winner?.tags ?? null,
     status,
     raw: ad.raw,
     visioned_at: visionedAt,
@@ -575,6 +596,127 @@ export async function ingestAd(workspaceId: string, ad: NormalizedAd, seed: Seed
     .from("creative_skeletons")
     .upsert(row, { onConflict: "workspace_id,source,dedup_key" });
   if (error) throw new Error(error.message);
+}
+
+// ── winners-flow Phase 2b — TWO-LANE competitor collection ───────────────────
+// Replaces the keyword `searchAds` stopgap (which only returns RECENT ads, never a brand's proven
+// long-runners). Each competitor routes to a lane via `resolveAdvertiser` ([[./adlibrary-winners]]):
+//   • LANE A (via:'name') — a Meta pageId → `scanWinners` = AdLibrary's AI-scored, concept-tagged
+//     winners. We ALSO run our vision on each (hook/mechanism/proof/offer for Dahlia's imitation),
+//     and stamp AdLibrary's tier/score/tags into winner_* / concept_tags.
+//   • LANE B (via:'domain') — advertiser un-resolvable by name but a domain is known → the brand's
+//     real ads by `searchAds({ domain })`, our vision only (concept_tags backfilled in Phase 2c).
+//   • via:null — a reliable BAD SEED (neither name nor domain resolves).
+
+export interface LaneResult extends IngestResult {
+  lane: "winners" | "domain" | null;
+  pageId: string | null;
+  resolvedName: string | null;
+}
+
+/** Filter freshly-scanned ads down to the ones we don't already have, then cap. Shared by both lanes. */
+async function dedupFresh(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  ads: NormalizedAd[],
+): Promise<{ fresh: NormalizedAd[]; skipped: number }> {
+  const keys = ads.map((a) => a.ad_key).filter(Boolean);
+  if (!keys.length) return { fresh: [], skipped: 0 };
+  const { data: existing } = await admin
+    .from("creative_skeletons")
+    .select("dedup_key")
+    .eq("workspace_id", workspaceId)
+    .eq("source", "adlibrary")
+    .in("dedup_key", keys);
+  const seen = new Set((existing || []).map((r) => r.dedup_key as string));
+  const fresh = ads.filter((a) => a.ad_key && !seen.has(a.ad_key));
+  return { fresh, skipped: ads.length - fresh.length };
+}
+
+/** Collect one competitor's winning STATIC creatives via the two-lane flow. `domain` (the competitor's
+ *  registrable domain) enables LANE B when the name doesn't resolve. `visionCap` bounds Opus spend. */
+export async function sweepCompetitorLanes(
+  workspaceId: string,
+  seed: Seed,
+  opts: { domain?: string | null; visionCap?: number } = {},
+): Promise<LaneResult> {
+  const admin = createAdminClient();
+  const result: LaneResult = { ...EMPTY_RESULT(), lane: null, pageId: null, resolvedName: null };
+  const cap = opts.visionCap ?? 12;
+
+  const resolution = await resolveAdvertiser(seed.keyword, { domain: opts.domain });
+  result.pageId = resolution.pageId;
+  result.resolvedName = resolution.name;
+
+  // ── LANE A — winners scan (AdLibrary's AI-scored concepts) ──────────────────
+  if (resolution.via === "name" && resolution.pageId) {
+    result.lane = "winners";
+    const concepts = await scanWinners(resolution.pageId);
+    result.searched = concepts.length;
+    // Normalize each concept's ad → static, keyed, deduped, ranked by AdLibrary composite (best first).
+    const normalized = concepts
+      .map((c) => ({ concept: c, ad: normalizeAd(c.ad) }))
+      .filter((n) => n.ad.ad_key && n.ad.media_type === "static" && n.ad.creative_url)
+      .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0));
+    const { fresh, skipped } = await dedupFresh(admin, workspaceId, normalized.map((n) => n.ad));
+    result.skippedExisting = skipped;
+    const freshKeys = new Set(fresh.map((a) => a.ad_key));
+    result.longRunners = fresh.length;
+    for (const { concept, ad } of normalized.filter((n) => freshKeys.has(n.ad.ad_key)).slice(0, cap)) {
+      try {
+        await ingestAd(workspaceId, ad, seed, conceptToWinnerMeta(concept));
+        result.inserted++;
+      } catch (err) {
+        console.error(`[creative-scout] LANE-A ingest failed for ${ad.ad_key}:`, err);
+        result.failed++;
+      }
+    }
+    return result;
+  }
+
+  // ── LANE B — domain search (our vision only; concept_tags backfilled Phase 2c) ──
+  if (resolution.via === "domain" && opts.domain) {
+    result.lane = "domain";
+    const ads = await searchAds({
+      domain: opts.domain,
+      adsType: ["1"], // image-only
+      platform: ["facebook", "instagram"], // Meta-only (no Google)
+      pageSize: 50,
+    });
+    const statics = ads.filter((a) => a.ad_key && a.media_type === "static" && a.creative_url);
+    result.searched = statics.length;
+    const { fresh, skipped } = await dedupFresh(admin, workspaceId, statics);
+    result.skippedExisting = skipped;
+    result.longRunners = fresh.length;
+    // Rank by our winnerScore proxy (reach/longevity) since domain search carries no AdLibrary score.
+    const ranked = [...fresh].sort((a, b) => winnerScore(b) - winnerScore(a)).slice(0, cap);
+    for (const ad of ranked) {
+      try {
+        await ingestAd(workspaceId, ad, seed);
+        result.inserted++;
+      } catch (err) {
+        console.error(`[creative-scout] LANE-B ingest failed for ${ad.ad_key}:`, err);
+        result.failed++;
+      }
+    }
+    return result;
+  }
+
+  // via:null — neither lane resolved. A reliable bad seed (caller surfaces it).
+  return result;
+}
+
+/** Map a LANE-A `WinnerConcept` → the `WinnerMeta` we stamp onto the skeleton row. */
+function conceptToWinnerMeta(concept: WinnerConcept): WinnerMeta {
+  return {
+    tier: concept.tier,
+    score: concept.composite,
+    tags: concept.tags
+      ? { ...concept.tags, variant_count: concept.variantCount ?? undefined }
+      : concept.variantCount != null
+        ? { variant_count: concept.variantCount }
+        : null,
+  };
 }
 
 // ── Phase 4 — the pattern matrix ─────────────────────────────────────────────
