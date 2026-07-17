@@ -40,6 +40,10 @@ export interface AdLibrarySearchParams {
   /** AdLibrary `adsType` filter: "1"=image, "2"=video, "3"=carousel. Omit for all types. The scout
    *  passes `["1"]` (image only) — we research STATIC creative, not video (founder 2026-07-17). */
   adsType?: string[];
+  /** AdLibrary `platform` filter (facebook | instagram | tiktok | …). The scout passes
+   *  `["facebook","instagram"]` — META ONLY (founder 2026-07-17: "we don't want google results"; the
+   *  Google/AdMob text ads have no real creative image). */
+  platform?: string[];
 }
 
 /**
@@ -216,6 +220,8 @@ export async function searchAds(params: AdLibrarySearchParams): Promise<Normaliz
   };
   // adsType filter: "1"=image, "2"=video, "3"=carousel (AdLibrary API). Only sent when the caller sets it.
   if (params.adsType && params.adsType.length) body.adsType = params.adsType;
+  // platform filter (Meta-only for the scout) — only sent when the caller sets it.
+  if (params.platform && params.platform.length) body.platform = params.platform;
   const res = await fetch(`${ADLIBRARY_BASE}/api/search`, {
     method: "POST",
     headers: {
