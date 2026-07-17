@@ -16,6 +16,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 const GRAPH = "https://graph.facebook.com/v21.0";
@@ -58,24 +59,47 @@ export interface CompetitorAngleOptions {
    *  that predate product tagging; superseded by `productId`. */
   niche?: string;
   limit?: number;
+  /** dahlia-deeper-competitor-selection Phase 1 — raise the imitation bar. When true, the primary
+   *  pool floors `days_running >= 60` AND filters `resume_advertising=true` (still running). If that
+   *  deeply-proven pool is EMPTY for the product, fall back to the shallow 30d/no-resume pool AND
+   *  return `usedFallback:true` + emit a `dahlia_deeply_proven_fallback` `director_activity` row so
+   *  the fallback is VISIBLE (never silent). Callers that don't set this get the legacy 30d shape. */
+  preferDeeplyProven?: boolean;
 }
 
-/** Ranked proven competitor angles from the creative-skeleton library — the strongest idea pool (real
- *  market-validated hooks, ranked by how long the competitor has kept spending on them). Pass `productId`
- *  to read exactly that product's deliberately-chosen competitor shelf (the imitate→innovate path). */
-export async function getProvenCompetitorAngles(admin: Admin, workspaceId: string, opts: CompetitorAngleOptions = {}): Promise<CompetitorAngle[]> {
-  let q = admin
+export interface ProvenAnglesResult {
+  angles: CompetitorAngle[];
+  /** True when `preferDeeplyProven` was requested, the 60d/still-running pool was EMPTY, and the
+   *  returned `angles` came from the shallow 30d/no-resume fallback. Also surfaced in
+   *  `director_activity` (`action_kind='dahlia_deeply_proven_fallback'`) so it's audit-visible. */
+  usedFallback: boolean;
+}
+
+interface QueryOptions {
+  minDaysRunning: number;
+  requireStillRunning: boolean;
+  productId?: string;
+  niche?: string;
+  limit: number;
+}
+
+/** Raw query — the shared pool reader used by both the legacy path and the two-tier
+ *  deeply-proven path. Returns just the mapped rows; the two-tier logic + visible-fallback
+ *  audit belong to `getProvenCompetitorAngles`. */
+async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOptions): Promise<CompetitorAngle[]> {
+  let query = admin
     .from("creative_skeletons")
-    .select("advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url")
+    .select("advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising")
     .eq("workspace_id", workspaceId)
     .eq("status", "analyzed")
     .not("hook", "is", null)
-    .gte("days_running", opts.minDaysRunning ?? 30)
+    .gte("days_running", q.minDaysRunning)
     .order("days_running", { ascending: false, nullsFirst: false })
-    .limit(opts.limit ?? 40);
-  if (opts.productId) q = q.eq("product_id", opts.productId);
-  else if (opts.niche) q = q.or(`advertiser.ilike.%${opts.niche}%,hook.ilike.%${opts.niche}%,mechanism_claim.ilike.%${opts.niche}%`);
-  const { data } = await q;
+    .limit(q.limit);
+  if (q.requireStillRunning) query = query.eq("resume_advertising", true);
+  if (q.productId) query = query.eq("product_id", q.productId);
+  else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
+  const { data } = await query;
   return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
     advertiser: (r.advertiser as string | null) ?? null,
     hook: (r.hook as string | null) ?? null,
@@ -88,6 +112,79 @@ export async function getProvenCompetitorAngles(admin: Admin, workspaceId: strin
     destinationDomain: (r.destination_domain as string | null) ?? null,
     imageUrl: (r.image_url as string | null) ?? null,
   }));
+}
+
+/** Ranked proven competitor angles from the creative-skeleton library — the strongest idea pool (real
+ *  market-validated hooks, ranked by how long the competitor has kept spending on them). Pass `productId`
+ *  to read exactly that product's deliberately-chosen competitor shelf (the imitate→innovate path).
+ *
+ *  Pass `preferDeeplyProven:true` (Dahlia's imitate-then-innovate stockProduct — Phase 1 of
+ *  [[../../../docs/brain/specs/dahlia-deeper-competitor-selection.md]]) to raise the bar: the primary
+ *  pool becomes `days_running >= 60` + `resume_advertising=true`. On an EMPTY deeply-proven pool the
+ *  function falls back to the shallow 30d/no-resume pool, sets `usedFallback:true`, AND emits a
+ *  `dahlia_deeply_proven_fallback` `director_activity` row so a thin-shelf product's fallback is
+ *  audit-visible (never silent). */
+export async function getProvenCompetitorAngles(
+  admin: Admin,
+  workspaceId: string,
+  opts: CompetitorAngleOptions = {},
+): Promise<ProvenAnglesResult> {
+  const shallowMinDays = opts.minDaysRunning ?? 30;
+  const limit = opts.limit ?? 40;
+
+  if (opts.preferDeeplyProven) {
+    const deep = await queryProvenAngles(admin, workspaceId, {
+      minDaysRunning: Math.max(60, shallowMinDays),
+      requireStillRunning: true,
+      productId: opts.productId,
+      niche: opts.niche,
+      limit,
+    });
+    if (deep.length > 0) return { angles: deep, usedFallback: false };
+
+    // Empty deeply-proven pool → fall back visibly. Best-effort audit write; a director_activity
+    // insert crash must NOT starve Dahlia of its shelf (mirrors recordDirectorActivity contract).
+    const fallback = await queryProvenAngles(admin, workspaceId, {
+      minDaysRunning: shallowMinDays,
+      requireStillRunning: false,
+      productId: opts.productId,
+      niche: opts.niche,
+      limit,
+    });
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: "growth",
+      actionKind: "dahlia_deeply_proven_fallback",
+      specSlug: "dahlia-deeper-competitor-selection",
+      reason: `deeply-proven pool empty (${Math.max(60, shallowMinDays)}d + still-running) for ${
+        opts.productId ? `product ${opts.productId}` : opts.niche ? `niche "${opts.niche}"` : "workspace-wide"
+      } — fell back to the ${shallowMinDays}d/no-resume pool (${fallback.length} angle${fallback.length === 1 ? "" : "s"}). A thin competitor shelf, not silence.`,
+      metadata: {
+        product_id: opts.productId ?? null,
+        niche: opts.niche ?? null,
+        deeply_proven_min_days: Math.max(60, shallowMinDays),
+        fallback_min_days: shallowMinDays,
+        fallback_pool_size: fallback.length,
+        autonomous: true,
+      },
+    }).catch((e) => {
+      console.warn("dahlia_deeply_proven_fallback_activity_failed", {
+        workspaceId,
+        productId: opts.productId ?? null,
+        err: e instanceof Error ? e.message : String(e),
+      });
+    });
+    return { angles: fallback, usedFallback: true };
+  }
+
+  const angles = await queryProvenAngles(admin, workspaceId, {
+    minDaysRunning: shallowMinDays,
+    requireStillRunning: false,
+    productId: opts.productId,
+    niche: opts.niche,
+    limit,
+  });
+  return { angles, usedFallback: false };
 }
 
 // ── The performance analyzer (per-ad, Meta ground truth) ─────────────────────

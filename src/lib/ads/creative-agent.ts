@@ -924,7 +924,20 @@ async function stockProduct(
   // tagged each skeleton with the product its competitor was chosen for, so imitate reads a product's own
   // shelf (not a coffee/weight substring guess). Each carries its image so the generator can do COMPOSITION
   // TRANSFER — reuse the competitor's winning layout, swap in our content.
-  const competitorAngles: ScoredAngle[] = (await getProvenCompetitorAngles(admin, workspaceId, { productId, minDaysRunning: 45, limit: 6 }).catch(() => []))
+  //
+  // dahlia-deeper-competitor-selection Phase 1 — opt into `preferDeeplyProven`: the primary pool becomes
+  // 60d+ AND resume_advertising=true (a still-running, deeply-proven angle is a far stronger imitate base
+  // than a 30d one that may already be dead). Empty deeply-proven pool falls back visibly to the shallow
+  // 30d pool + emits a `dahlia_deeply_proven_fallback` director_activity row.
+  const { angles: sourced, usedFallback: sourcedUsedFallback } = await getProvenCompetitorAngles(
+    admin,
+    workspaceId,
+    { productId, preferDeeplyProven: true, limit: 6 },
+  ).catch(() => ({ angles: [], usedFallback: false }));
+  if (sourcedUsedFallback) {
+    console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
+  }
+  const competitorAngles: ScoredAngle[] = sourced
     .filter((c) => c.hook)
     .map((c) => ({
       hook: c.hook as string,
