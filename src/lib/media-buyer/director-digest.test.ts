@@ -33,6 +33,7 @@ function plan(overrides: Partial<MediaBuyerPlan> = {}): MediaBuyerPlan {
     replenish: [],
     fatigueReplenish: [],
     replenishDiagnostic: null,
+    deferred: [],
     summary: "cohort full; no winners; no losers",
     ...overrides,
   };

@@ -929,6 +929,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Weekly crons (window ~8 days) ─
   { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
   { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
+  {
+    id: "media-buyer-all-customers-refresh-weekly",
+    kind: "cron",
+    owner: "growth",
+    label: "Media buyer all-customers exclusion refresh",
+    description:
+      "Weekly incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience — uploads customers with first_order_at ≥ last-run watermark. Hashed email+phone only; no plaintext PII. Keeps the cold-test exclusion current so newly-acquired customers stop seeing cold-prospecting adsets (bianca-full-order-history-customer-list-exclusion-audience Fix 1).",
+    expectedCadence: "weekly Mon (0 12 * * 1)",
+    livenessWindowMs: 9 * DAY,
+    registeredAt: "2026-07-16T12:00:00Z",
+  },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 9 * DAY },
   {
     id: "playbook-compiler",

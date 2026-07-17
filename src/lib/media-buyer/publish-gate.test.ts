@@ -664,3 +664,204 @@ test("evaluateMediaBuyerTestPublish — per-test cohort missing template/campaig
   assert.equal(r.allowed, false);
   if (!r.allowed) assert.equal(r.reason, "cohort_misconfigured");
 });
+
+// ── Purchaser-exclusion rail (bianca-cold-test-recent-purchaser-exclusion Phase 3) ──
+// When the cohort carries `excluded_purchaser_audience_id`, the per-test publish must
+// list that id under the proposed adset targeting's `excluded_custom_audiences`, or
+// the gate refuses `missing_purchaser_exclusion`. A cohort with a null id (legacy
+// pre-Phase-1 row / transition window) SKIPS the check — the existing branches decide.
+
+const AUDIENCE_ID = "23843000000000001";
+
+test("evaluateMediaBuyerTestPublish — per-test cohort with exclusion + spec MISSING id → REFUSE missing_purchaser_exclusion", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      perTestCohortRow({ excluded_purchaser_audience_id: AUDIENCE_ID }),
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending",
+    projectedDailyCents: 15000,
+    createAdsetSpec: {
+      campaign_id: "camp-PT",
+      name: "MB test — missing exclusion",
+      daily_budget_cents: 15000,
+      pixel_id: "px-1",
+      custom_event_type: "PURCHASE",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      billing_event: "IMPRESSIONS",
+      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+      // Deliberately no excluded_custom_audiences at all.
+      targeting: { age_min: 50, age_max: 65, geo_locations: { countries: ["US"] } },
+    },
+  });
+  assert.equal(r.allowed, false);
+  if (!r.allowed) {
+    assert.equal(r.reason, "missing_purchaser_exclusion");
+    assert.equal(r.cohort?.excludedPurchaserAudienceId, AUDIENCE_ID);
+    // Diagnosis surfaces the audience id so the CEO card names the correct row.
+    assert.ok(r.diagnosis.includes(AUDIENCE_ID));
+  }
+});
+
+test("evaluateMediaBuyerTestPublish — per-test cohort with exclusion + spec CONTAINS id → ALLOW", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      perTestCohortRow({ excluded_purchaser_audience_id: AUDIENCE_ID }),
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending",
+    projectedDailyCents: 15000,
+    createAdsetSpec: {
+      campaign_id: "camp-PT",
+      name: "MB test — with exclusion",
+      daily_budget_cents: 15000,
+      pixel_id: "px-1",
+      custom_event_type: "PURCHASE",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      billing_event: "IMPRESSIONS",
+      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+      targeting: {
+        age_min: 50,
+        age_max: 65,
+        geo_locations: { countries: ["US"] },
+        // The exact shape the provision path emits.
+        excluded_custom_audiences: [{ id: AUDIENCE_ID }],
+      },
+    },
+  });
+  assert.equal(r.allowed, true);
+  if (r.allowed) {
+    assert.equal(r.cohort.excludedPurchaserAudienceId, AUDIENCE_ID);
+  }
+});
+
+// ── Customer-list exclusion rail (bianca-full-order-history-customer-list-exclusion-audience Fix 1) ──
+// Sibling of the purchaser-exclusion rail — second audience id, same shape. When the cohort
+// carries `excluded_all_customers_audience_id`, the per-test publish must list THAT id under
+// `excluded_custom_audiences` too, or the gate refuses `missing_customer_exclusion`.
+
+const ALL_CUSTOMERS_AUDIENCE_ID = "23843000000000002";
+
+test("evaluateMediaBuyerTestPublish — per-test cohort with all-customers exclusion + spec MISSING id → REFUSE missing_customer_exclusion", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      perTestCohortRow({
+        excluded_purchaser_audience_id: null,
+        excluded_all_customers_audience_id: ALL_CUSTOMERS_AUDIENCE_ID,
+      }),
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending",
+    projectedDailyCents: 15000,
+    createAdsetSpec: {
+      campaign_id: "camp-PT",
+      name: "MB test — missing all-customers exclusion",
+      daily_budget_cents: 15000,
+      pixel_id: "px-1",
+      custom_event_type: "PURCHASE",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      billing_event: "IMPRESSIONS",
+      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+      targeting: { age_min: 50, age_max: 65, geo_locations: { countries: ["US"] } },
+    },
+  });
+  assert.equal(r.allowed, false);
+  if (!r.allowed) {
+    assert.equal(r.reason, "missing_customer_exclusion");
+    assert.equal(r.cohort?.excludedAllCustomersAudienceId, ALL_CUSTOMERS_AUDIENCE_ID);
+    assert.ok(r.diagnosis.includes(ALL_CUSTOMERS_AUDIENCE_ID));
+  }
+});
+
+test("evaluateMediaBuyerTestPublish — per-test cohort with BOTH ids + spec carries BOTH → ALLOW", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      perTestCohortRow({
+        excluded_purchaser_audience_id: AUDIENCE_ID,
+        excluded_all_customers_audience_id: ALL_CUSTOMERS_AUDIENCE_ID,
+      }),
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending",
+    projectedDailyCents: 15000,
+    createAdsetSpec: {
+      campaign_id: "camp-PT",
+      name: "MB test — with both exclusions",
+      daily_budget_cents: 15000,
+      pixel_id: "px-1",
+      custom_event_type: "PURCHASE",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      billing_event: "IMPRESSIONS",
+      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+      targeting: {
+        age_min: 50,
+        age_max: 65,
+        geo_locations: { countries: ["US"] },
+        excluded_custom_audiences: [
+          { id: AUDIENCE_ID },
+          { id: ALL_CUSTOMERS_AUDIENCE_ID },
+        ],
+      },
+    },
+  });
+  assert.equal(r.allowed, true);
+  if (r.allowed) {
+    assert.equal(r.cohort.excludedPurchaserAudienceId, AUDIENCE_ID);
+    assert.equal(r.cohort.excludedAllCustomersAudienceId, ALL_CUSTOMERS_AUDIENCE_ID);
+  }
+});
+
+test("evaluateMediaBuyerTestPublish — per-test cohort with BOTH ids + spec carries ONLY purchaser id → REFUSE missing_customer_exclusion", async () => {
+  const admin = makeAdmin({
+    media_buyer_test_cohorts: [
+      perTestCohortRow({
+        excluded_purchaser_audience_id: AUDIENCE_ID,
+        excluded_all_customers_audience_id: ALL_CUSTOMERS_AUDIENCE_ID,
+      }),
+    ],
+  });
+  const r = await evaluateMediaBuyerTestPublish(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: "prod-PT",
+    metaAdsetId: "pending",
+    projectedDailyCents: 15000,
+    createAdsetSpec: {
+      campaign_id: "camp-PT",
+      name: "MB test — purchaser only",
+      daily_budget_cents: 15000,
+      pixel_id: "px-1",
+      custom_event_type: "PURCHASE",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      billing_event: "IMPRESSIONS",
+      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+      targeting: {
+        age_min: 50,
+        age_max: 65,
+        geo_locations: { countries: ["US"] },
+        excluded_custom_audiences: [{ id: AUDIENCE_ID }],
+      },
+    },
+  });
+  assert.equal(r.allowed, false);
+  if (!r.allowed) {
+    assert.equal(r.reason, "missing_customer_exclusion");
+    assert.ok(r.diagnosis.includes(ALL_CUSTOMERS_AUDIENCE_ID));
+  }
+});

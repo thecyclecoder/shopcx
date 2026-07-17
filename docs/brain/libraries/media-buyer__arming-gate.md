@@ -8,6 +8,8 @@ Media Buyer **arming gate** — the deterministic authorization that a cohort's 
 
 **Distinct from** [[media-buyer-publish-gate]] — that is an **at-publish** rail on a single ad-set's absolute daily budget (rejects a stray publish). This gate is a **weekly authorization** — rejects the whole cohort's move from shadow to armed. Different altitudes, different tables (`media_buyer_test_cohorts` vs `media_buyer_arming_authorization`), different rails.
 
+**Distinct from** [[media-buyer__cold-scaler-arming-gate]] — that authorizes the COLD SCALER cohort's shadow→armed flip; this one authorizes the TEST cohort's flip. Same three preconditions, same denial-branch shape, disjoint samples (the scaler gate filters shadow reviews to `metadata.surface='cold_scaler'`). Two tables, two independent authorizations — the test rail's arm does NOT imply the scaler's, and vice versa. Introduced by [[../specs/bianca-cold-scaler-arming-gate-shadow-to-armed]] (Bianca M4).
+
 ## Exports
 
 ### `evaluateMediaBuyerArmingPure` — function (pure)

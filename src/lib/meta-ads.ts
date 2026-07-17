@@ -592,6 +592,21 @@ export interface CreateCampaignArgs {
   dailyBudgetCents?: number | null;
   /** CBO only — campaign-level lifetime budget in minor units. Ignored when `abo=true`. */
   lifetimeBudgetCents?: number | null;
+  /**
+   * Advantage+ Sales — percentage of campaign spend allocated to EXISTING customers.
+   * `0` = new-customer-only (the Bianca cold-scaler shape); `null` = leave the knob
+   * off the POST body entirely (existing test-campaign creation stays unchanged).
+   * Forwards to Meta's `existing_customer_budget_percentage` field on
+   * `/act_{id}/campaigns` (documented in [[integrations/meta-marketing]] §
+   * Campaign + ad-set creation).
+   */
+  newCustomerBudgetPercentage?: number | null;
+  /**
+   * Advantage+ Sales campaign type — maps to Meta's `smart_promotion_type` field.
+   * `"AUTOMATED_SHOPPING_ADS"` mints an Advantage+ Sales campaign; `null` = leave
+   * the knob off entirely so the existing ABO test-campaign flow is untouched.
+   */
+  smartPromotionType?: string | null;
 }
 
 /**
@@ -620,6 +635,12 @@ export async function createCampaign(
     if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
     if (args.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(args.lifetimeBudgetCents);
   }
+  if (args.newCustomerBudgetPercentage != null) {
+    body.existing_customer_budget_percentage = args.newCustomerBudgetPercentage;
+  }
+  if (args.smartPromotionType != null) {
+    body.smart_promotion_type = args.smartPromotionType;
+  }
   const j = await metaPost(`${actId(accountId)}/campaigns`, body, token);
   if (!j.id) throw new Error("meta_campaign_no_id");
   return j.id as string;
@@ -635,6 +656,54 @@ export async function getOrCreateTestingCampaign(token: string, accountId: strin
   const hit = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
   if (hit) return hit.id;
   return createCampaign(token, accountId, { name: MB_TESTING_CAMPAIGN_NAME, abo: true, status: "PAUSED" });
+}
+
+/**
+ * Build the stable name for a cohort's cold-scaler campaign. Uses the first 8
+ * chars of the cohort UUID so the name is human-legible + short enough to fit
+ * Meta's 400-char campaign name limit even alongside future suffixes.
+ */
+export function coldScalerCampaignName(cohortId: string): string {
+  return `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
+}
+
+/**
+ * Find-or-create the ONE consolidated cold-scaler campaign for a
+ * `media_buyer_cold_scaler_cohorts` row — Bianca M4 payoff spec
+ * ([[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1).
+ *
+ * Shape (per docs/brain/reference/meta-scaling-methodology.md § Account structure
+ * "SCALING campaign (CBO / Advantage+ Sales) ~85% of budget"):
+ *  - `OUTCOME_SALES` objective
+ *  - CBO (`abo=false`) — campaign-level `daily_budget` is the cohort's ceiling
+ *  - Advantage+ Sales (`smart_promotion_type='AUTOMATED_SHOPPING_ADS'`)
+ *  - New-customer-only from the very first mint (`existing_customer_budget_percentage=0`)
+ *  - PAUSED at mint — an unmonitored campaign never goes live on its own
+ *
+ * Idempotent by exact name match on `coldScalerCampaignName(cohortId)` via
+ * `listCampaigns`. Returns the bare Meta campaign id; the caller
+ * (`executeGraduateActionAgainstMeta` in Phase 3) then compare-and-set-stamps
+ * it onto `media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id` via
+ * `setColdScalerCampaignId` so a race can't double-mint.
+ */
+export async function getOrCreateColdScalerCampaign(
+  token: string,
+  accountId: string,
+  opts: { cohortId: string; dailyCeilingCents: number; name?: string },
+): Promise<string> {
+  const name = opts.name || coldScalerCampaignName(opts.cohortId);
+  const existing = await listCampaigns(token, accountId);
+  const hit = existing.find((c) => c.name === name);
+  if (hit) return hit.id;
+  return createCampaign(token, accountId, {
+    name,
+    objective: "OUTCOME_SALES",
+    abo: false,
+    dailyBudgetCents: opts.dailyCeilingCents,
+    status: "PAUSED",
+    newCustomerBudgetPercentage: 0,
+    smartPromotionType: "AUTOMATED_SHOPPING_ADS",
+  });
 }
 
 export interface CreateAdSetArgs {
@@ -702,4 +771,230 @@ export async function createAdSet(
   const j = await metaPost(`${actId(accountId)}/adsets`, body, token);
   if (!j.id) throw new Error("meta_adset_no_id");
   return j.id as string;
+}
+
+// ── Custom audiences (bianca cold-test recent-purchaser exclusion) ───────────
+// The pixel-side purchaser audience Bianca excludes on every per-test ad set so
+// the cold read is against actual cold traffic (docs/brain/specs/
+// bianca-cold-test-recent-purchaser-exclusion.md Phase 1). One of TWO exclusion
+// audiences composed into targeting.excluded_custom_audiences — the sibling
+// customer-list audience ships as bianca-full-order-history-customer-list-exclusion-audience.
+
+export interface MetaCustomAudience {
+  id: string;
+  name: string;
+  subtype?: string;
+  retention_days?: number;
+}
+
+/**
+ * List custom audiences on a Meta ad account. The find-first idempotency
+ * source behind {@link getOrCreateRecentPurchaserAudience} — a bare
+ * `GET /act_{id}/customaudiences` with the fields the caller needs to match
+ * by name.
+ */
+export async function listCustomAudiences(
+  token: string,
+  accountId: string,
+): Promise<MetaCustomAudience[]> {
+  const j = await metaGet(
+    `${actId(accountId)}/customaudiences?fields=id,name,subtype,retention_days&limit=200`,
+    token,
+  );
+  return (j.data || []) as MetaCustomAudience[];
+}
+
+/**
+ * Find-or-create the pixel-side "recent purchasers" website custom audience
+ * for a given (ad account, pixel). Idempotent by exact name match — the
+ * canonical name is `MB — Purchasers (${retentionDays}d) — pixel ${pixelId}`,
+ * so repeat calls (for the same retention window against the same pixel)
+ * return the existing audience id rather than creating a duplicate. Returns
+ * the BARE Meta customaudience id (not our uuid).
+ *
+ * The rule matches Meta's `Purchase` pixel event across the retention window
+ * (default 180 days — Meta's max, per the founder refinement 2026-07-15). The
+ * bianca cold-test spec composes this id into every per-test ad set's
+ * `targeting.excluded_custom_audiences` so existing buyers cannot see the cold
+ * ad and contaminate the read.
+ */
+export async function getOrCreateRecentPurchaserAudience(
+  token: string,
+  accountId: string,
+  pixelId: string,
+  opts?: { retentionDays?: number; name?: string },
+): Promise<string> {
+  const retentionDays = opts?.retentionDays ?? 180;
+  const name = opts?.name ?? `MB — Purchasers (${retentionDays}d) — pixel ${pixelId}`;
+  const existing = await listCustomAudiences(token, accountId);
+  const hit = existing.find((a) => a.name === name);
+  if (hit) return hit.id;
+  const rule = {
+    inclusions: {
+      operator: "or",
+      rules: [
+        {
+          event_sources: [{ id: pixelId, type: "pixel" }],
+          retention_seconds: retentionDays * 86400,
+          filter: {
+            operator: "and",
+            filters: [{ field: "event", operator: "=", value: "Purchase" }],
+          },
+        },
+      ],
+    },
+  };
+  const j = await metaPost(
+    `${actId(accountId)}/customaudiences`,
+    {
+      name,
+      subtype: "WEBSITE",
+      pixel_id: pixelId,
+      retention_days: retentionDays,
+      rule,
+    },
+    token,
+  );
+  if (!j.id) throw new Error("meta_customaudience_no_id");
+  return j.id as string;
+}
+
+// ── CUSTOMER_LIST audience (bianca full-order-history exclusion) ─────────────
+// The upload-based audience Bianca excludes on every per-test ad set alongside
+// the pixel WEBSITE audience. Uploads SHA256(email) + SHA256(phone) for every
+// customer who has ever ordered (all three sources — Shopify, Internal,
+// Amazon), giving complete existing-customer coverage the 180d pixel audience
+// misses. See docs/brain/specs/bianca-full-order-history-customer-list-exclusion-audience.md
+// Phase 1. Both audience ids compose into targeting.excluded_custom_audiences
+// through the sibling spec's provision/replenish/publish-gate plumbing.
+//
+// Compliance: only SHA256 hex leaves the box; email is lowercase-trimmed and
+// phone is normalized to E.164 before hashing. Plaintext PII is never uploaded
+// and never logged (the uploader logs counts only). Chunks are ≤10k rows per
+// Meta's docs on the customaudience users endpoint.
+
+/**
+ * Find-or-create the CUSTOMER_LIST (upload-based) custom audience the cohort
+ * uses to exclude our ENTIRE existing-customer base (across all three order
+ * sources) from cold-prospecting reach. Idempotent by exact name match — the
+ * canonical name is `MB — All customers (all sources) — hashed`, so repeat
+ * calls return the existing audience id rather than creating a duplicate.
+ * Returns the BARE Meta customaudience id (not our uuid).
+ *
+ * The audience carries no rule — a CUSTOMER_LIST is populated by uploading
+ * hashed users via {@link addUsersToCustomAudience}. `customer_file_source`
+ * is `USER_PROVIDED_ONLY` (we own the data; not partner-supplied).
+ */
+export async function getOrCreateAllCustomersAudience(
+  token: string,
+  accountId: string,
+  opts?: { name?: string; description?: string },
+): Promise<string> {
+  const name = opts?.name ?? "MB — All customers (all sources) — hashed";
+  const description =
+    opts?.description ??
+    "Full-history existing-customer exclusion for cold-prospecting adsets. Hashed email+phone, all three order sources. Refreshed weekly.";
+  const existing = await listCustomAudiences(token, accountId);
+  const hit = existing.find((a) => a.name === name);
+  if (hit) return hit.id;
+  const j = await metaPost(
+    `${actId(accountId)}/customaudiences`,
+    {
+      name,
+      subtype: "CUSTOMER_LIST",
+      customer_file_source: "USER_PROVIDED_ONLY",
+      description,
+    },
+    token,
+  );
+  if (!j.id) throw new Error("meta_customaudience_no_id");
+  return j.id as string;
+}
+
+/**
+ * Normalize a raw email for hashing per Meta's rules: lowercase + trim. Empty
+ * strings and non-strings return null (skip the row's email slot).
+ */
+export function normalizeEmailForHash(email: string | null | undefined): string | null {
+  if (typeof email !== "string") return null;
+  const trimmed = email.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Normalize a phone number to E.164 (digits only, `+` stripped) for hashing.
+ * Meta's docs specify country code + digits, no punctuation. Numbers with 10
+ * digits are assumed US (`1` prefixed); numbers already carrying a country
+ * code pass through digit-only.
+ */
+export function normalizePhoneForHash(phone: string | null | undefined): string | null {
+  if (typeof phone !== "string") return null;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 0) return null;
+  if (digits.length === 10) return `1${digits}`;
+  return digits;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const enc = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  const bytes = new Uint8Array(buf);
+  let hex = "";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
+
+export const META_CUSTOMAUDIENCE_USERS_CHUNK = 10_000;
+
+export interface CustomAudienceUserRow {
+  email?: string | null;
+  phone?: string | null;
+}
+
+/**
+ * Upload hashed users to a CUSTOMER_LIST custom audience. Chunks at
+ * {@link META_CUSTOMAUDIENCE_USERS_CHUNK} rows per POST (Meta's upper bound),
+ * emits SHA256 hex per column with normalized inputs, and skips rows whose
+ * email AND phone both normalize to null. Returns per-chunk POST responses
+ * (the audience_id + num_received) so callers can sum totals for observability.
+ *
+ * Plaintext PII never leaves the box: emails are lowercase-trimmed and phones
+ * digit-normalized in-process before hashing, and only the hex outputs are
+ * placed on the Graph body.
+ */
+export async function addUsersToCustomAudience(
+  token: string,
+  audienceId: string,
+  rows: CustomAudienceUserRow[],
+  opts?: { chunkSize?: number },
+): Promise<Array<{ audience_id: string; num_received: number }>> {
+  const chunkSize = Math.min(
+    Math.max(1, opts?.chunkSize ?? META_CUSTOMAUDIENCE_USERS_CHUNK),
+    META_CUSTOMAUDIENCE_USERS_CHUNK,
+  );
+  const results: Array<{ audience_id: string; num_received: number }> = [];
+  const hashed: Array<[string, string]> = [];
+  for (const row of rows) {
+    const email = normalizeEmailForHash(row.email);
+    const phone = normalizePhoneForHash(row.phone);
+    if (!email && !phone) continue;
+    hashed.push([email ? await sha256Hex(email) : "", phone ? await sha256Hex(phone) : ""]);
+  }
+  for (let i = 0; i < hashed.length; i += chunkSize) {
+    const slice = hashed.slice(i, i + chunkSize);
+    const payload = {
+      schema: ["EMAIL_SHA256", "PHONE_SHA256"],
+      data: slice,
+    };
+    const j = await metaPost(
+      `${audienceId}/users`,
+      { payload },
+      token,
+    );
+    results.push({
+      audience_id: (j.audience_id as string) ?? audienceId,
+      num_received: (j.num_received as number) ?? slice.length,
+    });
+  }
+  return results;
 }
