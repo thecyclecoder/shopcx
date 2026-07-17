@@ -59,29 +59,40 @@ export function hasAnyLf8(copyLower: string): boolean {
  * cold viewer who's never heard of the brand.
  */
 export const COLD_OFFER_TOKENS: readonly string[] = [
-  "save", "off", "free shipping", "deal", "today",
+  "save", "off", "free shipping", "deal", "today", "sale", "discount", "coupon", "promo", "clearance", "bogo",
 ];
 
-/** Bare-percent leak (e.g. "20%", "43%"). Word-boundary + 1-3 digits + '%'. */
-const BARE_PERCENT_RE = /\b\d{1,3}%/;
-/** Bare-currency leak (e.g. "$29", "$5"). '$' followed by any digit. */
+/** Each cold-offer token, WORD-BOUNDARY anchored + case-insensitive. Substring matching was a real
+ *  defect: `"coffee".includes("off")` is TRUE, so EVERY cold coffee creative tripped the gate on the
+ *  word "coffee" — a coffee product literally could not author cold copy (2026-07-17 Amazing Coffee
+ *  test). `\b` fixes it: `\boff\b` matches "50% off" but not the "off" inside "coffee" (nor "deal" in
+ *  "ideal", "save" in "unsaved", "today" in "todays"). */
+const COLD_OFFER_TOKEN_RES: readonly RegExp[] = COLD_OFFER_TOKENS.map(
+  (t) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+);
+/** A DISCOUNT percent — a percentage adjacent to an offer word ("50% off", "save 40%", "20% discount").
+ *  A BARE percentage (`40% more focus`, `95% of drinkers`) is a benefit/social-proof STAT, NOT an
+ *  offer — cold copy may cite it (a cold curiosity/problem ad often leads with a stat). The old bare
+ *  `\b\d{1,3}%` flagged every stat, which — on top of the "coffee" bug — starved cold copy. */
+const DISCOUNT_PERCENT_RE = /(\bsave\b[^.\n]{0,12}\d{1,3}\s*%)|(\d{1,3}\s*%\s*(off|discount|savings?)\b)/i;
+/** Bare-currency leak (e.g. "$29", "$5") — a price shown to a cold stranger is a warm/hot move. */
 const BARE_CURRENCY_RE = /\$\d/;
 
 /**
  * hasColdOfferLeak — DETERMINISTIC gate the persister chokepoint (insertReadyCreative) runs
  * before writing a status='ready' row. Given the three Meta copy fields, return true iff:
- *   (a) any COLD_OFFER_TOKENS substring hits (case-insensitive), OR
- *   (b) a bare-percent pattern hits (BARE_PERCENT_RE), OR
- *   (c) a bare-currency pattern hits (BARE_CURRENCY_RE).
+ *   (a) any COLD_OFFER_TOKENS hits as a WHOLE WORD (case-insensitive), OR
+ *   (b) a DISCOUNT-percent pattern hits (a % adjacent to an offer word — NOT a bare benefit stat), OR
+ *   (c) a bare-currency pattern hits (a price shown to a cold viewer).
  *
  * The temperature check itself lives at the CALLER — this predicate just classifies the copy.
  * The caller fires it only when the row's audience_temperature is 'cold'; warm/hot/null rows
  * pass through untouched. See [[../ads/creative-agent]] insertReadyCreative.
  */
 export function hasColdOfferLeak(copy: { headline: string; primaryText: string; description: string }): boolean {
-  const joined = `${copy.headline} ${copy.primaryText} ${copy.description}`.toLowerCase();
-  for (const t of COLD_OFFER_TOKENS) if (joined.includes(t)) return true;
-  if (BARE_PERCENT_RE.test(joined)) return true;
+  const joined = `${copy.headline} ${copy.primaryText} ${copy.description}`;
+  for (const re of COLD_OFFER_TOKEN_RES) if (re.test(joined)) return true;
+  if (DISCOUNT_PERCENT_RE.test(joined)) return true;
   if (BARE_CURRENCY_RE.test(joined)) return true;
   return false;
 }

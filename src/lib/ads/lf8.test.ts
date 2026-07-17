@@ -8,7 +8,32 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hasAnyLf8, LF8_KEYWORDS } from "./lf8";
+import { hasAnyLf8, LF8_KEYWORDS, hasColdOfferLeak } from "./lf8";
+
+// ── hasColdOfferLeak — word-boundary, not substring (2026-07-17 "coffee" regression) ─────────────
+const c = (headline: string, primaryText = "", description = "") => ({ headline, primaryText, description });
+
+test("hasColdOfferLeak: clean cold COFFEE copy is NOT a leak (the 'off' inside 'coffee' bug)", () => {
+  assert.equal(hasColdOfferLeak(c("Your afternoon crash, solved", "500+ million cups of Amazing Coffee sold.", "Superfood coffee for steady energy.")), false);
+  // other word-boundary false positives the old substring match hit
+  assert.equal(hasColdOfferLeak(c("The ideal morning ritual")), false); // "ideal" contains "deal"
+  assert.equal(hasColdOfferLeak(c("An unsaved draft")), false); // "unsaved" contains "save"
+  assert.equal(hasColdOfferLeak(c("todays focus formula")), false); // "todays" contains "today"
+});
+
+test("hasColdOfferLeak: a benefit / social-proof STAT is allowed (not a discount)", () => {
+  assert.equal(hasColdOfferLeak(c("Feel 40% more focused by week two")), false);
+  assert.equal(hasColdOfferLeak(c("95% of drinkers report steadier energy")), false);
+});
+
+test("hasColdOfferLeak: a real DISCOUNT / offer is caught", () => {
+  assert.equal(hasColdOfferLeak(c("50% off today only")), true); // off + today
+  assert.equal(hasColdOfferLeak(c("Save $10 on your first bag")), true); // save
+  assert.equal(hasColdOfferLeak(c("Get 20% discount")), true); // % discount
+  assert.equal(hasColdOfferLeak(c("Free shipping on all orders")), true);
+  assert.equal(hasColdOfferLeak(c("Just $29 a bag")), true); // bare currency (a price shown to cold)
+  assert.equal(hasColdOfferLeak(c("Grab this deal")), true);
+});
 
 test("hasAnyLf8: previously false-flagged live creatives now register a hit", () => {
   const previouslyFalseFlagged: readonly string[] = [
