@@ -1,0 +1,1 @@
+- **Gmail-canonical identity: stop spawning shadow customer records + match dot/plus variants** · verified 2026-07-17 · → [[lifecycles/customer-link-confirmation]]
