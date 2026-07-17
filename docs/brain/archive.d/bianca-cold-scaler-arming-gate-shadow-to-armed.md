@@ -1,0 +1,1 @@
+- **Bianca cold-scaler arming gate (shadow → armed weekly authorization)** · verified 2026-07-17 · → [[../libraries/media-buyer__cold-scaler-arming-gate]]

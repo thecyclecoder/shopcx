@@ -1,0 +1,1 @@
+- **Bianca cold-scaler cohort table + daily ceiling** · verified 2026-07-17 · → [[../libraries/cold-scaler-cohort]]
