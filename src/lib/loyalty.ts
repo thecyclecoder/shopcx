@@ -199,25 +199,43 @@ export async function getOrCreateMember(
     .eq("shopify_customer_id", shopifyCustomerId)
     .maybeSingle();
 
-  const existing = customer?.id
-    ? await getMemberByCustomerId(workspaceId, customer.id)
-    : await getMember(workspaceId, shopifyCustomerId);
+  const lookupExisting = () =>
+    customer?.id
+      ? getMemberByCustomerId(workspaceId, customer.id)
+      : getMember(workspaceId, shopifyCustomerId);
+
+  const existing = await lookupExisting();
   if (existing) return existing;
 
+  // Upsert (not insert) so two concurrent order-created webhooks — Shopify
+  // retries / double-delivers — that both miss the SELECT above don't crash the
+  // loser with a Postgres 23505 on UNIQUE(workspace_id, shopify_customer_id).
+  // ignoreDuplicates means the winner gets its row back and the loser gets no
+  // row; the loser then re-reads the winner below, so a race resolves to a
+  // successful get-or-create instead of a failed webhook.
   const { data, error } = await admin
     .from("loyalty_members")
-    .insert({
-      workspace_id: workspaceId,
-      customer_id: customer?.id || null,
-      shopify_customer_id: shopifyCustomerId, // retained for back-compat only
-      email,
-      source: "native",
-    })
+    .upsert(
+      {
+        workspace_id: workspaceId,
+        customer_id: customer?.id || null,
+        shopify_customer_id: shopifyCustomerId, // retained for back-compat only
+        email,
+        source: "native",
+      },
+      { onConflict: "workspace_id,shopify_customer_id", ignoreDuplicates: true },
+    )
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) throw new Error(`Failed to create loyalty member: ${error.message}`);
-  return data;
+  if (data) return data;
+
+  // Lost the race (conflict → no row returned by ignoreDuplicates). Re-read the
+  // member the winning insert created and return that.
+  const winner = await lookupExisting();
+  if (winner) return winner;
+  throw new Error("Failed to create loyalty member: no row after upsert conflict");
 }
 
 // ── Redemption tiers ──
