@@ -38,17 +38,27 @@ interface MetaCandidate {
 
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-/** A candidate name MATCHES the brand when one normalized string contains the other, or they share a
- *  significant (>2-char) token. Loose enough for "MUD\WTR" vs "MUD WTR", strict enough that the caller's
- *  likes-ranking then rejects the substring-collision big pages ("trip" ⊂ "Triple H"). */
+/** A candidate name MATCHES the brand only when their NORMALIZED forms are EQUAL, OR the candidate is the
+ *  brand plus a trailing corporate/category suffix (`llc`/`inc`/`co`/`nutrition`/…). STRICT on purpose:
+ *  the loose token/substring matching mis-picked "Bulletproof Automotive" for "Bulletproof", "Ryze
+ *  Hendricks" for "RYZE", "…Concrete Beams" for "Beam Dream", and "Live Update Pvt Ltd" for "Live it Up".
+ *  A brand that doesn't strictly match is routed to the domain lane / left unresolved (correct — better a
+ *  known gap than a confidently-wrong Page ID feeding the winners scan). The operator's curated
+ *  `search_keyword` is expected to be the brand AS IT APPEARS on Meta (e.g. "RYZE Superfoods"). */
+const SUFFIXES = new Set(["llc", "inc", "co", "corp", "ltd", "company"]);
 export function nameMatches(brand: string, candidateName: string): boolean {
   const b = norm(brand);
   const c = norm(candidateName);
   if (!b || !c) return false;
-  if (c.includes(b) || b.includes(c)) return true;
-  const bw = brand.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-  const cw = candidateName.toLowerCase().split(/\s+/);
-  return bw.some((w) => cw.includes(w));
+  if (b === c) return true;
+  // candidate = brand + a single trailing corporate suffix token (word-level), e.g. "Vital Proteins" ~
+  // "Vital Proteins LLC". Word-boundary check so "beam" never matches "…Concrete Beams".
+  const bw = brand.toLowerCase().split(/\s+/).filter(Boolean);
+  const cw = candidateName.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+  if (cw.length === bw.length + 1 && SUFFIXES.has(cw[cw.length - 1])) {
+    return cw.slice(0, bw.length).join(" ") === bw.map((w) => w.replace(/[^a-z0-9]/g, "")).join(" ");
+  }
+  return false;
 }
 
 /** Pure ranker — highest-likes candidate whose name matches the brand (the MUD\WTR fix). Exported for tests. */
@@ -71,37 +81,14 @@ async function resolveByName(brand: string): Promise<AdvertiserResolution | null
   return m ? { pageId: m.id, name: m.name, likes: m.likes ?? null, via: "name" } : null;
 }
 
-async function resolveByDomain(domain: string): Promise<AdvertiserResolution | null> {
-  // /api/search accepts an (undocumented) `domain` filter; the returned ads carry `page_id` — lift the
-  // DOMINANT page_id (most-common) as the advertiser. Verified live: shopbeam.com → 60 Beam ads.
-  const res = await fetch(`${ADLIBRARY_BASE}/api/search`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${ADLIBRARY_API_KEY}` },
-    body: JSON.stringify({ appType: "3", geo: ["USA"], domain, pageSize: 50 }),
-  });
-  if (!res.ok) return null;
-  const json = (await res.json()) as Record<string, unknown>;
-  const rows = ((json.data as Record<string, unknown>[]) || (json.list as Record<string, unknown>[]) || []) as Array<{
-    page_id?: string;
-    page_name?: string;
-    advertiser_name?: string;
-  }>;
-  if (!rows.length) return null;
-  const counts = new Map<string, { count: number; name: string }>();
-  for (const r of rows) {
-    if (!r.page_id) continue;
-    const e = counts.get(r.page_id) ?? { count: 0, name: r.page_name || r.advertiser_name || "" };
-    e.count += 1;
-    counts.set(r.page_id, e);
-  }
-  const top = [...counts.entries()].sort((a, b) => b[1].count - a[1].count)[0];
-  return top ? { pageId: top[0], name: top[1].name || null, likes: null, via: "domain" } : null;
-}
-
 /**
- * Resolve a competitor to a Meta advertiser Page ID: brand-name resolve first (highest-likes name match),
- * then a DOMAIN fallback when a domain is known and the name didn't resolve. Returns `{pageId:null, via:null}`
- * when neither works — the caller treats that as a bad/ambiguous seed. Never throws (a fetch failure → null).
+ * Resolve a competitor to a collection LANE:
+ *   • `via:'name'` + `pageId`  → LANE A: the winners scan (`scanWinners`) — AdLibrary's AI-scored concepts.
+ *   • `via:'domain'` (pageId null, a domain is known) → LANE B: domain search (`collectDomainAds`) — the
+ *     brand's real ads with OUR vision breakdown. AdLibrary genuinely can't map these advertisers, so the
+ *     winners endpoint isn't available; a `domain:` search DOES return their ads (but with no page_id).
+ *   • `via:null` (no name match, no domain) → UNRESOLVED = a reliable bad seed.
+ * Never throws (a fetch failure → unresolved). The strict `nameMatches` prevents a confidently-wrong pageId.
  */
 export async function resolveAdvertiser(
   brand: string,
@@ -112,15 +99,83 @@ export async function resolveAdvertiser(
     const byName = await resolveByName(brand);
     if (byName?.pageId) return byName;
   } catch {
-    /* fall through to domain */
+    /* fall through */
   }
-  if (opts.domain) {
+  // No strict name→pageId. If we know a domain, this competitor is LANE B (domain search + our vision).
+  if (opts.domain) return { pageId: null, name: null, likes: null, via: "domain" };
+  return { pageId: null, name: null, likes: null, via: null };
+}
+
+// ── LANE A: winners scan ─────────────────────────────────────────────────────
+/** One scored winner CONCEPT from `/api/winners/advertiser/{pageId}` — the ad + AdLibrary's AI breakdown. */
+export interface WinnerConcept {
+  ad: Record<string, unknown>;
+  tier: string | null; // high_confidence_winner | winner | middle | loser | emerging
+  composite: number | null;
+  variantCount: number | null;
+  /** AdLibrary's concept tags — the rubric our LANE-B vision must mirror. */
+  tags: {
+    angle?: string;
+    format?: string;
+    archetype?: string;
+    why_it_works?: string;
+    cialdini_lever?: string;
+    awareness_stage?: string;
+  } | null;
+}
+
+/**
+ * Scan a Meta advertiser's FULL library for scored, concept-tagged winners (LANE A). Handles BOTH response
+ * shapes seen live: a cached run returns `{ summary, results:[{ad,score}] }` JSON; a fresh run streams NDJSON
+ * (`{_stage:'score', ad, score}` lines). Filters to `static_image` (we don't do video). 10 credits (cached: 0).
+ */
+export async function scanWinners(
+  pageId: string,
+  opts: { country?: string; topEnrich?: number; maxPages?: number } = {},
+): Promise<WinnerConcept[]> {
+  if (!ADLIBRARY_API_KEY) return [];
+  const res = await fetch(`${ADLIBRARY_BASE}/api/winners/advertiser/${encodeURIComponent(pageId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${ADLIBRARY_API_KEY}` },
+    body: JSON.stringify({
+      country: opts.country ?? "US",
+      ...(opts.topEnrich ? { top_enrich: opts.topEnrich } : {}),
+      ...(opts.maxPages ? { max_pages: opts.maxPages } : {}),
+    }),
+  });
+  if (!res.ok) return [];
+  const text = await res.text();
+  const scored: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> = [];
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") && trimmed.includes('"results"') && !trimmed.includes("\n{")) {
+    // cached JSON shape
     try {
-      const byDomain = await resolveByDomain(opts.domain);
-      if (byDomain?.pageId) return byDomain;
+      const j = JSON.parse(trimmed) as { results?: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> };
+      for (const r of j.results ?? []) if (r?.ad && r?.score) scored.push(r);
     } catch {
-      /* unresolved */
+      /* ignore */
+    }
+  } else {
+    // NDJSON stream
+    for (const line of trimmed.split("\n")) {
+      try {
+        const o = JSON.parse(line) as { _stage?: string; ad?: Record<string, unknown>; score?: Record<string, unknown> };
+        if (o._stage === "score" && o.ad && o.score) scored.push({ ad: o.ad, score: o.score });
+      } catch {
+        /* skip non-JSON line */
+      }
     }
   }
-  return { pageId: null, name: null, likes: null, via: null };
+  return scored
+    .map((r): WinnerConcept => {
+      const s = r.score as { tier?: string; composite?: number; variant_count?: number; tags?: WinnerConcept["tags"] };
+      return {
+        ad: r.ad,
+        tier: s.tier ?? null,
+        composite: typeof s.composite === "number" ? s.composite : null,
+        variantCount: typeof s.variant_count === "number" ? s.variant_count : null,
+        tags: s.tags ?? null,
+      };
+    })
+    .filter((c) => (c.tags?.format ? c.tags.format === "static_image" : true)); // image-only
 }
