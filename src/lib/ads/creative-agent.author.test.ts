@@ -67,6 +67,12 @@ function sessionInputs(overrides: Partial<CopyAuthorSessionInputs> = {}): CopyAu
 
 function envelope(overrides: Record<string, unknown> = {}): string {
   const defaultScore = { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: ["ok"] };
+  // dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — `claim_trace` is REQUIRED. Default
+  // fixture cites a generic supportingBenefit so parseAuthorVerdict accepts the envelope; tests
+  // that need a specific trace pass `claim_trace: [...]` via overrides.
+  const defaultClaimTrace = [
+    { claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" },
+  ];
   const body = {
     headline: "Clean energy — no crash",
     primaryText: "Steady 4-hour energy from adaptogens. No jitters, no crash. Shop now 👉",
@@ -74,6 +80,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
     audience_temperature: "warm",
     concept_tag: "mechanism",
     self_score: defaultScore,
+    claim_trace: defaultClaimTrace,
     ...overrides,
   };
   return JSON.stringify(body);
@@ -188,6 +195,60 @@ test("parseAuthorVerdict: no JSON at all → invalid", () => {
   const result = parseAuthorVerdict("The model refused. Try again.");
   assert.equal(result.kind, "invalid");
   if (result.kind === "invalid") assert.equal(result.reason, "no_json_object_in_reply");
+});
+
+// dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — the REQUIRED claim_trace field. A
+// missing / empty / mis-shaped claim_trace fails the parse with the distinct
+// `firewall_missing_claim_trace` reason so the M1 revise loop can cite it back to Dahlia.
+
+test("parseAuthorVerdict: missing claim_trace → firewall_missing_claim_trace", () => {
+  const body = {
+    headline: "h",
+    primaryText: "p",
+    description: "d",
+    audience_temperature: "warm",
+    concept_tag: "mechanism",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+    // claim_trace omitted
+  };
+  const result = parseAuthorVerdict(JSON.stringify(body));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /firewall_missing_claim_trace/);
+});
+
+test("parseAuthorVerdict: empty claim_trace array → firewall_missing_claim_trace", () => {
+  const result = parseAuthorVerdict(envelope({ claim_trace: [] }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /firewall_missing_claim_trace \(empty\)/);
+});
+
+test("parseAuthorVerdict: claim_trace entry with off-vocabulary source → firewall_missing_claim_trace", () => {
+  const bad = envelope({ claim_trace: [{ claim: "x", source: "made_up_source", source_ref: "y" }] });
+  const result = parseAuthorVerdict(bad);
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /firewall_missing_claim_trace \(bad_source_at_0/);
+});
+
+test("parseAuthorVerdict: claim_trace entry with missing source_ref → firewall_missing_claim_trace", () => {
+  const bad = envelope({ claim_trace: [{ claim: "x", source: "ingredients", source_ref: "" }] });
+  const result = parseAuthorVerdict(bad);
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /firewall_missing_claim_trace \(missing_source_ref_at_0\)/);
+});
+
+test("parseAuthorVerdict: happy path parses claim_trace into the verdict", () => {
+  const trace = [
+    { claim: "600mg L-theanine", source: "ingredients", source_ref: "L-theanine" },
+    { claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" },
+  ];
+  const result = parseAuthorVerdict(envelope({ claim_trace: trace }));
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.equal(result.verdict.claim_trace.length, 2);
+    assert.equal(result.verdict.claim_trace[0].source, "ingredients");
+    assert.equal(result.verdict.claim_trace[0].source_ref, "L-theanine");
+    assert.equal(result.verdict.claim_trace[1].source, "supportingBenefit");
+  }
 });
 
 // ── authorCopyPack ──────────────────────────────────────────────────────────────────────────────
@@ -330,6 +391,8 @@ function authorCopy(overrides: Partial<AuthorModeCopy> = {}): AuthorModeCopy {
     audience_temperature: "warm",
     concept_tag: "transformation",
     selfScore: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: ["ok"] },
+    // dahlia-never-fabricate-copy-firewall Phase 2 — REQUIRED claim_trace field on AuthorModeCopy.
+    claim_trace: [{ claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" }],
     ...overrides,
   };
 }

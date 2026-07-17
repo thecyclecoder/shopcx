@@ -159,7 +159,12 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
       "hopkins=2 (14 days, 43%, 8 ingredients)",
       "sugarman=2 (curiosity hook + multi-sentence body)"
     ]
-  }
+  },
+  "claim_trace": [
+    { "claim": "600mg L-theanine", "source": "ingredients", "source_ref": "L-theanine" },
+    { "claim": "\"I dropped 40 lbs\" — Kaitlyn", "source": "transformationStory", "source_ref": "Kaitlyn" },
+    { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" }
+  ]
 }
 ```
 
@@ -188,6 +193,27 @@ Rules for the envelope:
 - `self_score.evidence` — one short human-readable string per sub-score naming what you saw
   (a keyword you hit, a stage-of-awareness you reached, a specificity marker you counted).
   This is what the M1 Max QC compares against in a later spec.
+- `claim_trace` — **REQUIRED** (firewall layer 2 of the never-fabricate firewall). A non-empty
+  array of `{ claim, source, source_ref }` entries — ONE entry per substantive claim in your
+  copy. This is the artifact layer 3 (the deterministic `verifyClaimTrace` in
+  [[../../../src/lib/ads/never-fabricate.ts]]) checks against the brief +
+  ProductIntelligence surface; a missing / empty / mis-shaped `claim_trace` fails the parse
+  with reason `firewall_missing_claim_trace` and the worker re-invokes you ONCE with the
+  concrete defect cited so you can revise. Rules:
+  - `claim` — the exact substring from your headline / primary text / description you are
+    citing (e.g. `"600mg L-theanine"`, `"lost 40 lbs"`, `"4.7-star average"`).
+  - `source` — exactly one of the seven enum values (SAME seven names layer 1 above uses):
+    `ingredients` · `ingredient_research` · `reviews.byClaim` · `transformationStory` ·
+    `supportingBenefit` · `leadProof` · `competitorDna`.
+  - `source_ref` — the specific reference inside that source: an ingredient name for
+    `ingredients` / `ingredient_research` (e.g. `"L-theanine"`), a benefit name for
+    `reviews.byClaim` (the argument you'd pass to `pi.reviews.byClaim(benefitName)`), a
+    reviewer name for `transformationStory` (matched against `brief.transformation.reviewer`),
+    a benefit token for `supportingBenefit` (matched against `brief.supportingBenefits`), a
+    slot key for `competitorDna` (e.g. `"mechanism"`), or an empty-string-safe attribution
+    marker for `leadProof`. Emit ONE entry per specific claim — the generic benefit strings
+    that lift verbatim from `brief.supportingBenefits` still need a `supportingBenefit`
+    entry so layer 3 can confirm the token was in the brief.
 
 ### Andromeda concept-diversity taxonomy (the 10 valid `concept_tag` values)
 
