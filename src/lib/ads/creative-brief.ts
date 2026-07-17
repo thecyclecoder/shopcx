@@ -262,10 +262,22 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
     ? { ...angle, hook: sanitizeCompetitorHook(angle.hook) }
     : angle;
 
-  // Lead proof: prefer a real review backing this benefit; else an ingredient citation.
+  // Lead proof: prefer a FEATURED review (curated for marketing), favoring one that also backs this
+  // benefit; then any claim-relevant review; else an ingredient citation. Using a featured review is
+  // what lets an imitated competitor testimonial be SWAPPED for one of OUR real featured reviews
+  // (2026-07-17 — a competitor's review was rendering on our ad instead of ours). `byClaim` reviews
+  // carry the `featured` flag, so a claim-relevant featured review wins; `pi.reviews.featured` is the
+  // fallback pool when no claim-relevant featured review exists.
   let leadProof: CreativeBrief["leadProof"] = null;
   const reviewsForClaim = await pi.reviews.byClaim(angle.leadBenefit).catch(() => [] as PIReview[]);
-  const pick = reviewsForClaim.find((r) => r.smart_quote) ?? reviewsForClaim[0];
+  const featuredPool = pi.reviews.featured ?? [];
+  const pick =
+    reviewsForClaim.find((r) => r.featured && r.smart_quote) ?? // featured + claim-relevant + punchy quote
+    reviewsForClaim.find((r) => r.featured) ??                  // featured + claim-relevant
+    featuredPool.find((r) => r.smart_quote) ??                  // any featured with a quote
+    featuredPool[0] ??                                          // any featured
+    reviewsForClaim.find((r) => r.smart_quote) ??              // claim-relevant (non-featured) with a quote
+    reviewsForClaim[0];                                         // any claim-relevant
   if (pick) {
     leadProof = { kind: "review", text: (pick.smart_quote || pick.body || "").slice(0, 160), attribution: pick.reviewer_name ?? "verified customer" };
   } else {
