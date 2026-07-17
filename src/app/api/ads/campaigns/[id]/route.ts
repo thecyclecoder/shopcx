@@ -91,14 +91,90 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     .filter((m) => m.slot !== "hero" && (m.webp_1080_url || m.url))
     .map((m) => ({ slot: m.slot, alt_text: m.alt_text, url: (m.webp_1080_url || m.url) as string }));
 
+  // Widened for the read-only lifecycle preview — the full Meta target chain (account → campaign →
+  // adset → ad) + the operator-selected page identity + the creative id that was uploaded.
   const { data: publishJobs } = await auth.admin
     .from("ad_publish_jobs")
-    .select("id, publish_status, meta_ad_id, meta_account_id, error, created_at")
+    .select(
+      "id, publish_status, meta_account_id, meta_campaign_id, meta_adset_id, meta_ad_id, meta_creative_id, meta_page_id, meta_instagram_user_id, video_id, cta_type, destination_url, publish_active, error, created_at",
+    )
     .eq("campaign_id", id)
     .order("created_at", { ascending: false })
     .limit(10);
 
-  return NextResponse.json({ campaign, videos: videos || [], segments, brollSources, publishJobs: publishJobs || [] });
+  // Temperature-banded copy pack (warm → cold → hot). Empty array when Dahlia authored a single
+  // deterministic caption (pre-author-mode) — the UI falls back to the angle's copy_pack below.
+  const { readCopyVariants } = await import("@/lib/ads/ad-copy-variants");
+  const copyVariants = await readCopyVariants(auth.admin, id).catch(() => []);
+
+  // The angle carries the canonical caption + the deterministic variation set (metadata.copy_pack:
+  // { headlines[], primaryTexts[], description }). Read scoped by the campaign's angle_id (primary
+  // key) — the fallback source of "headline + primary text variations" when copyVariants is empty.
+  let angle:
+    | {
+        meta_headline: string | null;
+        meta_primary_text: string | null;
+        meta_description: string | null;
+        copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string } | null;
+        provenance: import("@/lib/ads/creative-agent").AngleProvenance | null;
+      }
+    | null = null;
+  const angleId = (campaign as any).angle_id as string | null;
+  if (angleId) {
+    const { data: angleRow } = await auth.admin
+      .from("product_ad_angles")
+      .select("meta_headline, meta_primary_text, meta_description, metadata")
+      .eq("id", angleId)
+      .eq("workspace_id", workspaceId as string)
+      .maybeSingle();
+    if (angleRow)
+      angle = {
+        meta_headline: (angleRow.meta_headline as string | null) ?? null,
+        meta_primary_text: (angleRow.meta_primary_text as string | null) ?? null,
+        meta_description: (angleRow.meta_description as string | null) ?? null,
+        copy_pack: ((angleRow.metadata as any)?.copy_pack as any) ?? null,
+        provenance: ((angleRow.metadata as any)?.provenance as any) ?? null,
+      };
+  }
+
+  // Max's latest copy-QC verdict (hard gates + persuasion + scroll-stop + suggestion). Null until
+  // Max has run — the UI shows an "awaiting Max" state.
+  const { readLatestCopyQaVerdict } = await import("@/lib/ads/creative-qa");
+  const copyQaVerdict = await readLatestCopyQaVerdict(auth.admin, {
+    workspaceId: workspaceId as string,
+    adCampaignId: id,
+  }).catch(() => null);
+
+  // "Posted by" identity — the FB page + linked IG handle chosen on the most recent publish job.
+  // Read-only enrichment; null when nothing has been published yet.
+  let pageIdentity: { page_id: string; page_name: string | null; instagram_id: string | null } | null = null;
+  const latestPageId = (publishJobs || []).find((j) => j.meta_page_id)?.meta_page_id;
+  if (latestPageId) {
+    const { data: page } = await auth.admin
+      .from("meta_pages")
+      .select("meta_page_id, meta_page_name, meta_instagram_id")
+      .eq("workspace_id", workspaceId as string)
+      .eq("meta_page_id", latestPageId)
+      .maybeSingle();
+    if (page)
+      pageIdentity = {
+        page_id: page.meta_page_id as string,
+        page_name: (page.meta_page_name as string | null) ?? null,
+        instagram_id: (page.meta_instagram_id as string | null) ?? null,
+      };
+  }
+
+  return NextResponse.json({
+    campaign,
+    videos: videos || [],
+    segments,
+    brollSources,
+    publishJobs: publishJobs || [],
+    copyVariants,
+    angle,
+    copyQaVerdict,
+    pageIdentity,
+  });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {

@@ -836,3 +836,48 @@ export async function insertCopyQaVerdict(
   if (error || !data) return null;
   return { id: (data as { id: string }).id };
 }
+
+/** Max's persisted copy-QC verdict as read back for display — the stored `CopyQaVerdict` plus its
+ *  audit metadata (attempt index + when it was written). */
+export interface StoredCopyQaVerdict extends CopyQaVerdict {
+  id: string;
+  retry_index: number;
+  created_at: string;
+}
+
+/** SDK helper — reads the LATEST copy-QC verdict for a creative (highest `retry_index`, newest
+ *  `created_at` as tiebreak). THE read chokepoint for `public.ad_creative_copy_qc_verdicts`
+ *  (CLAUDE.md SDK-chokepoint rule — a raw `.from("ad_creative_copy_qc_verdicts").select(...)` in a
+ *  route is a lint-fail). Used by the read-only ad detail page to surface Max's grade + suggestions.
+ *  Returns `null` when the creative has no QC verdict yet (Max hasn't run) or on a query error —
+ *  the caller renders an "awaiting Max" empty state either way (read-only, non-blocking). */
+export async function readLatestCopyQaVerdict(
+  admin: Admin,
+  opts: { workspaceId: string; adCampaignId: string },
+): Promise<StoredCopyQaVerdict | null> {
+  const { workspaceId, adCampaignId } = opts;
+  const { data, error } = await admin
+    .from("ad_creative_copy_qc_verdicts")
+    .select(
+      "id, hard_gate_pass, hard_gates, persuasion_score, persuasion_rubric, scroll_stop, verdict_reason, retry_index, created_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("ad_campaign_id", adCampaignId)
+    .order("retry_index", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const r = data as Record<string, unknown>;
+  return {
+    id: r.id as string,
+    hard_gate_pass: !!r.hard_gate_pass,
+    hard_gates: r.hard_gates as CopyQaVerdict["hard_gates"],
+    persuasion_score: (r.persuasion_score as number | null) ?? null,
+    persuasion_rubric: (r.persuasion_rubric as CopyQaPersuasionRubric | null) ?? null,
+    scroll_stop: r.scroll_stop as CopyQaScrollStop,
+    verdict_reason: (r.verdict_reason as string | null) || "",
+    retry_index: (r.retry_index as number | null) ?? 0,
+    created_at: r.created_at as string,
+  };
+}
