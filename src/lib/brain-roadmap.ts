@@ -39,7 +39,7 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
@@ -1505,6 +1505,52 @@ export async function getSpec(slug: string, workspaceId?: string): Promise<{ raw
   const cacheKey = getSpecCacheKey(wsId, slug);
   const cached = getSpecWrapperCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.value;
+  // spec-read-eff-board-context — ONE pooled RPC replaces the 4–6 round-trip fan-out (spec + phases,
+  // full-workspace boardable projection for resolveBlockedBy, this slug's card_state overlay, and
+  // the workspace goal-membership index) on a cold read. Fail-open: pool unavailable / query error
+  // falls through to the pre-Phase-1 four-call path so a pool blip never wedges a cold spec read.
+  try {
+    const { getSpecBoardContext } = await import("@/lib/pg-pool");
+    const ctx = await getSpecBoardContext(wsId, slug);
+    if (ctx === null) {
+      // RPC said no such (boardable) slug — matches the pre-RPC null return.
+      getSpecWrapperCache.set(cacheKey, { value: null, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+      return null;
+    }
+    if (ctx !== undefined) {
+      const row = specRowFromDbForPool(ctx.spec, ctx.phases);
+      if (!isBoardableStatus(row.status)) {
+        getSpecWrapperCache.set(cacheKey, { value: null, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+        return null;
+      }
+      const boardRows = ctx.boardableSpecs.map((r) => specRowFromDbForPool(r.spec, r.phases));
+      const specs = boardRows.map(dbRowToSpecCard);
+      const bySlug = new Map(specs.map((c) => [c.slug, c]));
+      const goalByBlockerSlug = new Map<string, GoalMembership>();
+      for (const gm of ctx.goalMemberships) {
+        goalByBlockerSlug.set(gm.spec_slug, {
+          goalSlug: gm.goal_slug,
+          goalTitle: gm.goal_title,
+          mainMergeSha: gm.main_merge_sha,
+        });
+      }
+      let card = dbRowToSpecCard(row);
+      if (card.blockedBy.length > 0) {
+        card.blockedBy = resolveBlockedBy(card, bySlug, goalByBlockerSlug);
+      }
+      // overlayCardFlags reads only the transient `flags` bag on spec_card_state; the RPC returns
+      // the whole row (or null), so cast through the minimal shape overlayCardFlags accepts.
+      card = overlayCardFlags(
+        card,
+        ctx.cardState as unknown as import("@/lib/spec-card-state").SpecCardState | undefined,
+      );
+      const result: GetSpecCached = { raw: serializeSpecRowToMarkdown(row), card };
+      getSpecWrapperCache.set(cacheKey, { value: result, expiresAt: Date.now() + GET_SPEC_WRAPPER_TTL_MS });
+      return result;
+    }
+  } catch {
+    /* fall through to the pre-RPC four-call path */
+  }
   // spec-readers-from-db-retire-parser Phase 1: ONE SQL query for the card + reconstruct raw from the row.
   // No fs read, no parseSpec. Folded specs are archive territory — return null (matches the old
   // "file gone from disk" shape that the fold worker produced).

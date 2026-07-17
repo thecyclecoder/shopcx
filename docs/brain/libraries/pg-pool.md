@@ -40,11 +40,26 @@ Server-side single-spec + phases join via the `public.get_spec_with_phases(uuid,
 - `null` when the slug does not exist (empty result)
 - `undefined` when the pool is unavailable / the query errored — the [[specs-table]] `getSpec` caller MUST treat this as "fall back to the supabase-js RPC path".
 
+### `getSpecBoardContext<S, P, C>(workspaceId, slug): Promise<SpecBoardContextRow | null | undefined>`
+**Phase 1 addition** ([[../specs/spec-read-efficiency-for-scaling-fleet]] Phase 1, tag `spec-read-eff-board-context`) — server-side collapse of the cold `brain-roadmap.getSpec` fan-out. Calls `public.get_spec_board_context(uuid, text)` (migration `20261023120000_get_spec_board_context_rpc.sql`) which returns EVERYTHING the wrapper needs to build one SpecCard in a single pooled round-trip:
+- `spec` / `phases` — the target `specs` + `spec_phases` join (same shape as `get_spec_with_phases`).
+- `boardableSpecs` — every boardable (`status IS NULL OR status <> 'folded'`) spec in the workspace with its phases, so `resolveBlockedBy` can fill title/status/cleared on each Blocked-by entry without a separate `listSpecs` round-trip.
+- `cardState` — the target slug's `spec_card_state` row (or `null`) for `overlayCardFlags` — the transient `short_circuit` / `merged_pr` flags that aren't on `public.specs` yet.
+- `goalMemberships` — one row per goal-MEMBER spec (slug → `{ goal_slug, goal_title, main_merge_sha }`) so the outside-dependent goal-blocker normalization at [[blocker-goal-normalize]] runs without a separate `listGoals` fan-out (goals + goal_milestones round-trips).
+
+Return contract mirrors `getSpecWithPhases`:
+- `{ spec, phases, boardableSpecs, cardState, goalMemberships }` on match
+- `null` on no-such-slug (RPC always returns exactly one row; `spec IS NULL` is the "not found" signal)
+- `undefined` on pool unavailable / query error — the [[brain-roadmap]] `getSpec` caller MUST treat this as "fall back to the pre-RPC four-call path" so a pool blip never wedges a cold spec read.
+
+Retires the 4–6 network round-trips a cold `brain-roadmap.getSpec` used to pay (get_spec_with_phases + list_specs_with_phases + goals + goal_milestones + spec_card_state scan). The biggest per-subprocess win as the agent/director fleet scales — every fresh `claude -p` re-pays those round-trips cold because the in-memory spec cache is per-process.
+
 ## Consumers
 
 - `scripts/builder-worker.ts` — `hasClaimableJob()` and the self-update queued-kind probe. Both wrap the pool path in a try + fall-through to the pre-existing supabase-js path when `null` is returned. Same fail-open contract as before.
 - [[claim-rpc-verify]] `verifyClaimAgentJobCooldown()` — reads the live `claim_agent_job(text[])` function body via `pg_get_functiondef` to verify the cooldown predicate is present. Called from `ensureClaimAgentJobCooldownVerified` before the build/plan claim block each poll pass (throttled with a 10-minute TTL). Fails open on pool unavailability (returns `ok:true` with a "cannot verify" reason).
 - [[specs-table]] `getSpec` — prefers the pooled `getSpecWithPhases` call, falls through to `admin.rpc('get_spec_with_phases', ...)` on pool unavailability. Same fail-open contract; SpecRow shape byte-identical to the pre-Phase-2 path.
+- [[brain-roadmap]] `getSpec` — prefers the pooled `getSpecBoardContext` call ([[../specs/spec-read-efficiency-for-scaling-fleet]] Phase 1). Fail-open: pool unavailable / query error falls through to the pre-Phase-1 four-call path (`getSpecFromDb` + `loadWorkspaceMapsMemoized`). Consumes the exported `specRowFromDbForPool` mapper from [[specs-table]] so the RPC's `boardable_specs` array reconstructs into the SAME `SpecRow` shape the fallback returns — byte-for-byte behavior-preserving.
 
 ## Verification / measurement
 

@@ -190,3 +190,74 @@ export async function getSpecWithPhases<S = unknown, P = unknown>(
   if (!row || !row.spec) return null;
   return { spec: row.spec, phases: (row.phases ?? []) as P[] };
 }
+
+/**
+ * spec-read-eff-board-context — cold-getSpec collapse in one pooled round-trip.
+ *
+ * Calls `public.get_spec_board_context(uuid, text)` (Phase 1 of
+ * docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md) which returns EVERYTHING
+ * brain-roadmap.getSpec (src/lib/brain-roadmap.ts:1500) needs to build one SpecCard:
+ *   - `spec` / `phases`      — the target `specs` + `spec_phases` join (like get_spec_with_phases)
+ *   - `boardableSpecs`       — every boardable (status IS NULL OR status <> 'folded') spec + its
+ *                              phases in the workspace, so `resolveBlockedBy` can fill title/status/
+ *                              cleared on each entry without a second listSpecs round-trip.
+ *   - `cardState`            — the target slug's `spec_card_state` row (or null) for
+ *                              `overlayCardFlags` — the transient short_circuit / merged_pr flags.
+ *   - `goalMemberships`      — one row per goal-MEMBER spec (slug → owning goal + main_merge_sha)
+ *                              so the outside-dependent goal-blocker normalization runs without a
+ *                              separate `listGoals` fan-out (goals + goal_milestones round-trips).
+ *
+ * Returns:
+ *   - `{ spec, phases, boardableSpecs, cardState, goalMemberships }` on match
+ *   - `null` on no-such-slug (the RPC always returns one row; `spec` is null when the slug is
+ *     absent OR the slug is folded — folded specs are excluded from `boardableSpecs`, matching the
+ *     board's isBoardableStatus filter)
+ *   - `undefined` on pool unavailable / query error (caller falls back to supabase-js)
+ */
+export interface SpecBoardContextRow<S = unknown, P = unknown, C = unknown> {
+  spec: S;
+  phases: P[];
+  boardableSpecs: Array<{ spec: S; phases: P[] }>;
+  cardState: C | null;
+  goalMemberships: Array<{
+    spec_slug: string;
+    goal_slug: string;
+    goal_title: string;
+    main_merge_sha: string | null;
+  }>;
+}
+
+export async function getSpecBoardContext<S = unknown, P = unknown, C = unknown>(
+  workspaceId: string,
+  slug: string,
+): Promise<SpecBoardContextRow<S, P, C> | null | undefined> {
+  const rows = await pgQuery<{
+    spec: S | null;
+    phases: P[] | null;
+    boardable_specs: Array<{ spec: S; phases: P[] | null }> | null;
+    card_state: C | null;
+    goal_memberships: Array<{
+      spec_slug: string;
+      goal_slug: string;
+      goal_title: string;
+      main_merge_sha: string | null;
+    }> | null;
+  }>(
+    `SELECT spec, phases, boardable_specs, card_state, goal_memberships
+       FROM public.get_spec_board_context($1::uuid, $2::text)`,
+    [workspaceId, slug],
+  );
+  if (rows === null) return undefined;
+  const row = rows[0];
+  if (!row || !row.spec) return null;
+  return {
+    spec: row.spec,
+    phases: (row.phases ?? []) as P[],
+    boardableSpecs: (row.boardable_specs ?? []).map((r) => ({
+      spec: r.spec,
+      phases: (r.phases ?? []) as P[],
+    })),
+    cardState: row.card_state,
+    goalMemberships: row.goal_memberships ?? [],
+  };
+}

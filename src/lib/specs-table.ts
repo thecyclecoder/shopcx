@@ -334,6 +334,18 @@ export function derivePhaseStatus(row: {
   return "planned"; // nothing built yet
 }
 
+/**
+ * spec-read-eff-board-context — the pure DB-row → SpecRow mapper the pooled getSpec / listSpecs
+ * paths use to reconstruct a `SpecRow` from raw `to_jsonb(s)` + `to_jsonb(p)` payloads returned by
+ * the server-side RPCs (get_spec_with_phases / list_specs_with_phases / get_spec_board_context).
+ * Exported so the get_spec_board_context caller (brain-roadmap.getSpec) can reuse the SAME mapper
+ * on the RPC's `boardable_specs` array — otherwise a per-column re-map would drift the moment a
+ * new `public.specs` column lands and one caller forgot to update. Pure; no I/O.
+ */
+export function specRowFromDbForPool(db: unknown, phases: unknown[]): SpecRow {
+  return specRowFromDb(db as SpecRowDb, phases as SpecPhaseRow[]);
+}
+
 function specRowFromDb(db: SpecRowDb, phases: SpecPhaseRow[]): SpecRow {
   // Derive every phase's lifecycle status from provenance at the SDK read boundary, so EVERY consumer of
   // getSpec/listSpecs (board, gates, chained-phase picker) sees the derived status — never the stamped one.
