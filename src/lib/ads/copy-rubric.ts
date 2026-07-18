@@ -55,6 +55,14 @@ export type CopyRubricSubs = {
 export type CopyRubricScore = {
   total: number;
   subs: CopyRubricSubs;
+  /** dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 3 (2026-07-18) —
+   *  advisory-soft signal that DEDUCTS 1 point from the total when the brief carries a
+   *  `leadBenefitWeave` (the Phase 2 competitor-riff marker) AND the headline does not
+   *  touch that lead benefit. NEVER a hard gate: a competitor riff whose hook still scores
+   *  well on the other five sub-scores can still clear a floor and ship; the minority
+   *  explore slot's pure-competitor brief has `leadBenefitWeave=null` so the penalty
+   *  cannot fire on it. `0` = no penalty · `-1` = the soft deduction applied. */
+  leadBenefitPenalty: 0 | -1;
   evidence: string[];
 };
 
@@ -129,6 +137,27 @@ Three concrete authoring rules — apply on every line before shipping:
 - 2: three or more distinct specificity markers appear in the copy
 - 1: one or two specificity markers appear
 - 0: no specificity markers — every claim is vague ("better," "amazing," "the best")`;
+
+export const LEAD_BENEFIT_SIGNAL = `Lead-benefit signal (soft) — 0 / −1
+Advisory-soft (never a hard gate). When the brief carries a \`leadBenefitWeave\` — the
+Phase-2 marker that this creative is a competitor RIFF and MUST blend our differentiated
+lead benefit with the competitor's proven framework — the headline is expected to touch
+that lead benefit somewhere in its words. A hook that leads with a purely borrowed
+commodity retention truth ("no jitters" / "no crash" / "tired of the coffee jitters?") while
+the lead benefit is absent LOSES ONE POINT. A hook that BLENDS the lead benefit with the
+competitor angle — soft phrasing OK, verbatim from \`leadBenefitWeave.softPhrasings\` or the
+\`benefitName\` — earns 0 (no penalty). The point-value penalty is intentionally SOFT so a
+deliberately-explore competitor angle can still clear the floor on the other five
+sub-scores; a MINORITY explore slot per batch has \`leadBenefitWeave=null\` and cannot
+receive this penalty at all. North-star example (CEO 2026-07-18): for Amazing Coffee with
+\`leadBenefitWeave.benefitName='Weight loss'\` and softPhrasings \`['feel lighter', 'lost
+weight', ...]\`, a headline of "Tasty coffee, feel lighter, no jitters" earns 0 (the RIFF
+present); "Tired of the coffee jitters?" earns −1 (pure borrow — differentiator absent).
+- 0: brief has no \`leadBenefitWeave\` (own-brand angle OR pure-competitor explore slot) OR
+     the headline contains the benefit name, a soft-phrasing verbatim, or a distinctive
+     word from the benefit name — the RIFF is present
+- −1: brief carries a \`leadBenefitWeave\` AND the headline touches NONE of the above — the
+     ad leads with a borrowed commodity truth and the differentiator is buried`;
 
 export const SUGARMAN_SLIPPERY_SLIDE = `Sugarman Slippery-Slide — 0-2
 Joe Sugarman's rule: the SOLE purpose of the first sentence is to get you to read the second;
@@ -298,9 +327,47 @@ function scoreSugarman(copy: Copy, evidence: string[]): 0 | 1 | 2 {
   return 0;
 }
 
+// Lead-benefit signal — dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 3
+// (2026-07-18). Advisory-soft deduction: fires ONLY when the brief's `leadBenefitWeave` is
+// populated (the Phase-2 competitor-riff marker). A pure-competitor explore slot has
+// `leadBenefitWeave=null` so the penalty cannot fire on it; an own-brand angle likewise leaves
+// the field null and is unaffected. Match is lowercase substring against benefit_name +
+// softPhrasings + individual distinctive words (≥5 chars) from benefit_name.
+function scoreLeadBenefitSignal(copy: Copy, brief: CreativeBrief, evidence: string[]): 0 | -1 {
+  const weave = brief.leadBenefitWeave;
+  if (!weave || !weave.benefitName) {
+    evidence.push(
+      "lead_benefit_penalty=0 (brief carries no leadBenefitWeave — own-brand angle or minority pure-competitor explore slot; the soft rail is silent)",
+    );
+    return 0;
+  }
+  const headline = (copy.headline || "").toLowerCase();
+  const benefitLower = weave.benefitName.toLowerCase().trim();
+  const tokens = new Set<string>();
+  if (benefitLower) tokens.add(benefitLower);
+  for (const p of weave.softPhrasings ?? []) {
+    const pLower = String(p ?? "").toLowerCase().trim();
+    if (pLower) tokens.add(pLower);
+  }
+  for (const word of benefitLower.split(/\s+/)) if (word.length >= 5) tokens.add(word);
+  const hit = [...tokens].find((t) => t.length > 0 && headline.includes(t));
+  if (hit) {
+    evidence.push(
+      `lead_benefit_penalty=0 (RIFF present — headline touches '${hit}' from leadBenefitWeave)`,
+    );
+    return 0;
+  }
+  evidence.push(
+    `lead_benefit_penalty=-1 (soft: brief requires the RIFF but the headline touches no lead-benefit token — benefit_name='${weave.benefitName}', softPhrasings=${JSON.stringify((weave.softPhrasings ?? []).slice(0, 3))})`,
+  );
+  return -1;
+}
+
 /**
  * Pure deterministic scorer. Same inputs → same outputs, byte-for-byte, no I/O.
  * Returns per-sub scores, evidence lines (≥1 per sub-score), and a total clamped to 0..10.
+ * Phase 3 (2026-07-18) — a `leadBenefitPenalty` of −1 (soft) may deduct one point from the
+ * total when the brief carries a `leadBenefitWeave` and the headline ignores it.
  */
 export function scoreConversionPsychology(copy: Copy, brief: CreativeBrief): CopyRubricScore {
   const evidence: string[] = [];
@@ -311,9 +378,10 @@ export function scoreConversionPsychology(copy: Copy, brief: CreativeBrief): Cop
     hopkins: scoreHopkins(copy, evidence),
     sugarman: scoreSugarman(copy, evidence),
   };
-  const rawTotal = subs.lf8 + subs.schwartz + subs.cialdini + subs.hopkins + subs.sugarman;
+  const leadBenefitPenalty = scoreLeadBenefitSignal(copy, brief, evidence);
+  const rawTotal = subs.lf8 + subs.schwartz + subs.cialdini + subs.hopkins + subs.sugarman + leadBenefitPenalty;
   const total = Math.max(0, Math.min(10, rawTotal));
-  return { total, subs, evidence };
+  return { total, subs, leadBenefitPenalty, evidence };
 }
 
 /**
@@ -325,7 +393,9 @@ export function renderRubricForPrompt(): string {
   return [
     "# Conversion-Psychology Rubric (0-10)",
     "",
-    "Score each sub-dimension 0, 1, or 2. Sum the five sub-scores for the total.",
+    "Score each sub-dimension 0, 1, or 2. Sum the five sub-scores for the total, then apply the",
+    "Phase-3 soft LEAD-BENEFIT SIGNAL (0 or −1) as a total-level adjustment. The final total is",
+    "clamped to 0..10.",
     "",
     LF8_SUBSCORE_RUBRIC,
     "",
@@ -336,5 +406,7 @@ export function renderRubricForPrompt(): string {
     HOPKINS_SPECIFICITY_RULES,
     "",
     SUGARMAN_SLIPPERY_SLIDE,
+    "",
+    LEAD_BENEFIT_SIGNAL,
   ].join("\n");
 }

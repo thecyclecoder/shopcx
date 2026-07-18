@@ -176,6 +176,43 @@ rival's DNA you're imitating; it is **NOT** a claim you may ever surface in the 
 rail 2. If any of the debranded slots is empty (the worker's strip removed everything, or the
 skeleton row had a null column), treat that slot as absent and fall back to OUR brief's
 own supporting benefit for that surface — never invent a slot value.
+
+### RIFF — weave in the lead benefit (dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2)
+
+When `COMPETITOR_DNA` is present AND the brief carries a `leadBenefitWeave` field, you MUST
+**RIFF** on the competitor angle — keep their proven framework AND weave in the brief's lead
+benefit (soft phrasing OK) so our differentiator is present in the hook. Never a pure borrow
+with our benefit absent. This is the strong default for every competitor-source creative; a
+minority slot per batch reserves a pure-competitor explore (`leadBenefitWeave: null`) and the
+worker signals that by omitting the field — when the field IS present, the RIFF rule applies.
+
+The lead benefit may be phrased softly (`"feel lighter"` instead of `"lose 40 lbs"`) — that's
+both a stronger conversion frame AND a friendlier Meta weight-loss ad-policy read. Pick a
+phrase from `leadBenefitWeave.softPhrasings` (verbatim customer phrases pulled from the
+`product_benefit_selections` row's `customer_phrases` array — already grounded, no
+fabrication) OR paraphrase the `benefitName` softly. Never invent a new phrasing that isn't
+supported by either the benefit name or the customer phrases list.
+
+**North-star example (CEO 2026-07-18, verbatim):** for Amazing Coffee with competitor DNA hook
+`"Tired of the coffee jitters?"` (MUD/WTR's commodity no-jitters angle) and
+`leadBenefitWeave = { benefitName: "Weight loss", softPhrasings: [...] }`, the RIFF hook is
+**`"Tasty coffee, feel lighter, no jitters"`** — a blend of experience (`"tasty coffee"`) +
+our lead benefit stated softly (`"feel lighter"` = weight loss, ad-compliance-friendly) +
+the competitor's proven no-jitters angle. Pure borrow (`"Tired of the coffee jitters?"`
+with our benefit nowhere) is the FAIL state this rail closes.
+
+Every RIFF claim MUST still cite its source in `claim_trace`:
+
+- The lead-benefit weave (`"feel lighter"`) cites `source='supportingBenefit'` with
+  `source_ref` naming the phrase from `leadBenefitWeave.softPhrasings` OR
+  `source='reviews.byClaim'` with `source_ref` = `leadBenefitWeave.benefitName` (whichever
+  is closest — a soft-phrasing lifted verbatim from `softPhrasings` uses `supportingBenefit`).
+- The competitor-borrowed portion cites `source='competitorDna'` with `source_ref='hook'`
+  (or the framework/mechanism slot you actually kept).
+
+If the brief has no `leadBenefitWeave` (a pure-competitor explore slot OR the product has no
+role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED as-is.
+
 3. **Never emit a bare MSRP.** No standalone `$59` / `$29.99` sticker price. Prices are OK
    only as: strikethrough → discount (`~~$59~~ $39`), per-serving value
    (`$1.30 per serving`), or a comparison anchor. Bare-price is the top Meta policy reject.
@@ -247,11 +284,27 @@ Rules for the envelope:
   compare.
 - `self_score.lf8` / `schwartz` / `cialdini` / `hopkins` / `sugarman` — each an integer in
   `{0, 1, 2}` judged against the exact `RUBRIC` text the DATA block gave you.
-- `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`). The worker
-  double-checks the sum against the parts and rejects a mismatched envelope.
+- `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`), THEN apply the
+  Phase-3 **LEAD-BENEFIT SIGNAL** (soft) as a total-level adjustment (`0` or `−1`) and clamp
+  to `0..10`. When the brief carries a `leadBenefitWeave` (Phase 2 marker — a competitor RIFF
+  is required) AND your headline touches NONE of the lead-benefit tokens (the `benefitName`,
+  a `softPhrasings` entry, or a distinctive word from the benefit name), deduct **one point**
+  from the total and note `lead_benefit_penalty=-1 (reason)` in `evidence`. The rail is
+  advisory-SOFT — never a hard gate — so a deliberately-explore competitor angle scoring well
+  on the other five sub-scores can still clear the floor; the MINORITY pure-competitor slot
+  has `leadBenefitWeave=null` and cannot receive the penalty at all. **North-star example
+  (CEO 2026-07-18):** for Amazing Coffee with `leadBenefitWeave.benefitName='Weight loss'`
+  and softPhrasings `['feel lighter', 'lost weight', 'curbs my appetite']`, a headline of
+  `"Tasty coffee, feel lighter, no jitters"` earns `lead_benefit_penalty=0` (RIFF present);
+  `"Tired of the coffee jitters?"` earns `lead_benefit_penalty=-1` (pure borrow — the
+  differentiator is absent). The worker double-checks the total against `sum(subs) +
+  leadBenefitPenalty` clamped to `0..10` and rejects a mismatched envelope.
 - `self_score.evidence` — one short human-readable string per sub-score naming what you saw
   (a keyword you hit, a stage-of-awareness you reached, a specificity marker you counted).
-  This is what the M1 Max QC compares against in a later spec.
+  This is what the M1 Max QC compares against in a later spec. **Phase 3:** include one
+  additional evidence line `lead_benefit_penalty=<0|-1> (reason)` naming whether the RIFF is
+  present in the headline (or, when the brief has no `leadBenefitWeave`, that the soft rail
+  is silent).
 - `claim_trace` — **REQUIRED** (firewall layer 2 of the never-fabricate firewall). A non-empty
   array of `{ claim, source, source_ref }` entries — ONE entry per substantive claim in your
   copy. This is the artifact layer 3 (the deterministic `verifyClaimTrace` in
