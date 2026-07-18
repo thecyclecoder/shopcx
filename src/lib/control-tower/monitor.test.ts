@@ -10,6 +10,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   classifyShaDirectionLocal,
   countRenewalIntegrityOverdueSubs,
@@ -927,6 +929,102 @@ test("extractSolFirstTouchDispatchTicketIds dedupes when a ticket has multiple f
     { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
   ];
   assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
+});
+
+// ── tickets-awaiting-decision settle-window + outreach bypass ─────────────────
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// a fresh Flippa-style cold-outreach inbound flipped the ai:orchestrator tile red because
+// unified-ticket-handler.ts closes outreach deterministically (§ 1c decideOutreachRoute →
+// `outreach-deterministic-close`, no callSonnetOrchestratorV2 beat), but the monitor's
+// tickets-awaiting-decision probe sampled the inbound BEFORE the classifier stamped
+// `cls:outreach` / `outreach` tags + `status='closed'`, so the message counted as
+// orchestrator work with 0 beats. Spec: control-tower-ticket-decision-workprobe-settle-and-outreach-bypass.
+//
+// Fix has two moving parts, both pinned by source-inspection tests here (the case body itself
+// is inline in the switch statement rather than a pure helper — a source-fingerprint test is
+// the closest thing to a behavioral pin without dragging in a full Supabase-admin mock, and
+// matches the sibling regression test file for `tickets-awaiting-handler-dispatch`):
+//   1) An upper `.lte("created_at", now - TICKET_DECISION_SETTLE_MS)` cutoff on every
+//      count query so a fresh inbound waits through the classifier / deterministic-close race
+//      before entering the count.
+//   2) The `outreach` / `cls:outreach` tags are included alongside `csat:reopened` in the
+//      bypass OR clause so an outreach ticket that HAS aged past the settle window is still
+//      subtracted at the tag layer (defensive — the settle window alone drops the count to
+//      zero when the deterministic-close lands cleanly, and the tag exclusion covers the
+//      edge case where the classifier ran but the close status hasn't propagated yet).
+
+function ticketsAwaitingDecisionCaseBlock(): string {
+  const src = readFileSync(resolve(process.cwd(), "src/lib/control-tower/monitor.ts"), "utf-8");
+  const m = src.match(/case\s+"tickets-awaiting-decision":\s*\{([\s\S]*?)\n\s*\}\s*\n\s*case\s+"/);
+  assert.ok(m, "tickets-awaiting-decision case block not found in monitor.ts — did the switch shape change?");
+  return m[1];
+}
+
+test("Flippa-style outreach close race — tickets-awaiting-decision probe subtracts outreach + cls:outreach tags", () => {
+  // unified-ticket-handler.ts stamps BOTH `cls:outreach` (from `addTicketTag(tid, \`cls:${'${'}msgType${'}'}\`)`
+  // at ~1100) AND the bare `outreach` tag (~1101) whenever the classifier bucket is 'outreach',
+  // AND the automated-sender pre-filter block (~1048) stamps the same pair for the deterministic
+  // pre-classifier outreach lane. Either tag alone is sufficient evidence the deterministic
+  // outreach handler ran — the Sonnet orchestrator never fires. The probe's OR-clause must
+  // include BOTH so a future refactor that removes one of the addTicketTag calls (or a
+  // production race where one lands before the other) still leaves the exclusion intact.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /tags\.cs\.\{outreach\}/,
+    "`tickets-awaiting-decision` case must include `tags.cs.{outreach}` in its exclusion OR clause — unified-ticket-handler.ts stamps this tag on every deterministic outreach close (classifier bucket 'outreach' + automated-sender pre-filter). Without it, a Flippa-style cold outreach pitch counts as orchestrator work with 0 beats and false-fires idle_while_work on the ai:orchestrator tile even after the handler correctly closed it.",
+  );
+  assert.match(
+    block,
+    /tags\.cs\.\{cls:outreach\}/,
+    "`tickets-awaiting-decision` case must include `tags.cs.{cls:outreach}` in its exclusion OR clause — the classifier bucket tag is the FIRST tag written on the outreach lane (before the bare `outreach` tag), so relying on `outreach` alone loses a small race window and re-opens the false-positive the spec is designed to close.",
+  );
+});
+
+test("Flippa-style outreach close race — tickets-awaiting-decision probe applies an upper created_at settle cutoff", () => {
+  // The tag-based exclusion alone doesn't cover the earliest moment of the race: an inbound row
+  // exists BEFORE unified-ticket-handler.ts even begins classifying (dispatchInboundMessage
+  // inserts + fires the event first). Without an upper `.lte("created_at", cutoff)` bound the
+  // probe would still count the fresh inbound as work — hitting a monitor tick in the ~seconds
+  // between the insert and the addTicketTag/setStatus calls flips the tile red on a healthy
+  // system. The `TICKET_DECISION_SETTLE_MS` boundary must be applied at query time via
+  // `Date.now() - TICKET_DECISION_SETTLE_MS` so the window slides with wall-clock, mirroring
+  // the shape HANDLER_DISPATCH_SETTLE_MS uses on the sibling handler-dispatch probe.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /TICKET_DECISION_SETTLE_MS/,
+    "`tickets-awaiting-decision` case must key its settle cutoff on TICKET_DECISION_SETTLE_MS — a bare ms literal in the case body silently drifts and re-opens the race the spec is designed to close.",
+  );
+  assert.match(
+    block,
+    /Date\.now\(\s*\)\s*-\s*TICKET_DECISION_SETTLE_MS/,
+    "`tickets-awaiting-decision` case must derive its cutoff from `Date.now() - TICKET_DECISION_SETTLE_MS` — a static build-time cutoff would let a fresh inbound age past the settle boundary without waiting for the classifier / deterministic-close to run, re-opening the false-positive.",
+  );
+  assert.match(
+    block,
+    /\.lte\(\s*"created_at"\s*,/,
+    "`tickets-awaiting-decision` case must apply `.lte(\"created_at\", cutoff)` to bound the count from above — dropping this filter turns the settle constant into dead code and lets the Flippa-style outreach close race fire the ai:orchestrator tile red again.",
+  );
+});
+
+test("evalInlineAgent still flips RED on a settled real inbound with no ai:orchestrator beat (no false negative)", () => {
+  // No-false-negative guard for the settle-window + outreach exclusion. The probe now waits
+  // through TICKET_DECISION_SETTLE_MS AND subtracts outreach-tagged messages, but a settled
+  // inbound customer message with NO bypass class matching (not closed, not csat:reopened, no
+  // active_playbook_id, not outreach-tagged, no Sol first-touch ack, no first-touch
+  // ticket-handle enqueue) is genuine orchestrator work. That message survives every
+  // exclusion — so if the orchestrator went silent (work=1, 0 successful beats, history not
+  // empty) the tile still flips red and fires idle_while_work on loop:ai:orchestrator. This is
+  // the exact class the monitor exists to alert on; the fix must never mask it.
+  const orchLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.orchestrator);
+  assert.ok(orchLoop, "ai:orchestrator loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(orchLoop!, state);
+  assert.equal(result.color, "red");
+  assert.equal(result.violation?.reason, "idle_while_work");
 });
 
 // ── countRenewalIntegrityOverdueSubs — dunning-aware renewal-integrity helper ──

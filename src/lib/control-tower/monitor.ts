@@ -143,6 +143,21 @@ const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
  * doesn't silently drift. */
 const HANDLER_DISPATCH_SETTLE_MS = 3 * 60_000;
 
+/**
+ * Settle window for the `tickets-awaiting-decision` work probe
+ * (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass). An inbound customer
+ * message becomes eligible to count as ai:orchestrator demand only AFTER this window closes;
+ * anything fresher is still inside the pre-orchestrator handling race — the classifier may still
+ * be running, the outreach deterministic-close may not have stamped `status='closed'` /
+ * `tags cs {outreach, cls:outreach}` yet, and a Sol first-touch `ticket-handle` job may not
+ * have been enqueued. Without this window the monitor can query in the ~seconds between the
+ * inbound insert and the handler's short-circuit and count a legitimately-bypassed inbound
+ * (a cold Flippa-style outreach pitch, an outreach-tagged brand pitch, a Sol first-touch async
+ * email) as orchestrator work with 0 beats — the exact monitor-false-positive that flipped
+ * loop:ai:orchestrator red on healthy traffic. Same boundary shape as HANDLER_DISPATCH_SETTLE_MS
+ * — mirror the deterministic pre-orchestrator gates rather than the raw inbound event. */
+const TICKET_DECISION_SETTLE_MS = 3 * 60_000;
+
 /** Compact elapsed string from an ISO timestamp to now (e.g. "3m", "2h", "1d"). */
 function elapsed(iso: string | null | undefined): string {
   if (!iso) return "never";
@@ -1157,44 +1172,80 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // orchestrator closed has its own ok beat, so dropping it from the work count never
             // manufactures a false negative.
             //
+            // (5) Outreach short-circuit (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass):
+            //     unified-ticket-handler.ts § 1a (`isAutomatedInbound` pre-filter, ~1048) and § 1c
+            //     (`decideOutreachRoute` classifier close, ~1127) both stamp the ticket with the
+            //     `cls:outreach` + `outreach` tags and close it BEFORE ever reaching the Sonnet
+            //     orchestrator — outreach = cold sales pitch / brand collab / UGC / partnership,
+            //     not a customer-service request. Those inbounds are handled by the deterministic
+            //     outreach lane by design, so no ai:orchestrator beat is emitted on them.
+            //     Without this exclusion a single Flippa-style outreach inbound in an otherwise-
+            //     quiet window would read as work=1 with 0 beats and flip the tile red — a
+            //     monitor-false-positive on a healthy system (the correct handler ran, the
+            //     ticket closed, the human never should have paged).
+            //
+            // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass):
+            //     Even with (5) in place, the pre-orchestrator race remains: the classifier bucket
+            //     is stamped over ~seconds AFTER the inbound row is inserted (`step.run(...)`
+            //     boundaries + async Inngest fanout), so a monitor tick sampling in that gap sees
+            //     the raw inbound but not yet its `cls:outreach` tag / closed status / enqueued
+            //     `ticket-handle` job. The upper `created_at` cutoff below (now minus
+            //     TICKET_DECISION_SETTLE_MS) waits through that boundary before counting a fresh
+            //     inbound as orchestrator demand — the same shape as HANDLER_DISPATCH_SETTLE_MS
+            //     mirrors the backstop reconciler's INTENT_SETTLE_MS. A message older than the
+            //     window with none of the bypass classes matching is genuine orchestrator work
+            //     and still counts.
+            //
             // The first three exclusions are expressed as a single positive-match on the
             // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
             // NULL-safe (tickets with NULL/empty tags or NULL active_playbook_id still count)
             // and overlap-free (a csat:reopened ticket that later closes is counted once, not
-            // double-subtracted). The Sol-first-touch class lives on sibling tables
-            // (ticket_resolution_events for the chat ack, agent_jobs for the channel-agnostic
-            // dispatch signal), so it runs as two parallel queries. Overlap between any of
-            // the exclusion sets (e.g. a Sol-first-touch chat ticket that later closes, matching
-            // (2), (4a), and (4b)) can double-subtract, which is safe: it only lowers the work
-            // count further, never inflates it, so the tile still can't false-fire
-            // idle_while_work — and a genuinely orchestrator-owned ticket sits in NONE of the
-            // sets, so no false negatives.
+            // double-subtracted). The outreach class (5) rides along in the same positive-match
+            // via the `tags cs {cls:outreach}` / `tags cs {outreach}` clauses (either tag alone
+            // is sufficient — both are always stamped together on outreach). The Sol-first-touch
+            // class lives on sibling tables (ticket_resolution_events for the chat ack,
+            // agent_jobs for the channel-agnostic dispatch signal), so it runs as two parallel
+            // queries. Overlap between any of the exclusion sets (e.g. a Sol-first-touch chat
+            // ticket that later closes, matching (2), (4a), and (4b)) can double-subtract, which
+            // is safe: it only lowers the work count further, never inflates it, so the tile
+            // still can't false-fire idle_while_work — and a genuinely orchestrator-owned ticket
+            // sits in NONE of the sets, so no false negatives.
+            const decisionSettleCutoffIso = new Date(Date.now() - TICKET_DECISION_SETTLE_MS).toISOString();
             const [allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchJobsRes] = await Promise.all([
               admin
                 .from("ticket_messages")
                 .select("id", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
-                .gte("created_at", sinceIso),
+                .gte("created_at", sinceIso)
+                .lte("created_at", decisionSettleCutoffIso),
               admin
                 .from("ticket_messages")
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
-                .or("status.eq.closed,tags.cs.{csat:reopened},active_playbook_id.not.is.null", { referencedTable: "tickets" }),
+                .lte("created_at", decisionSettleCutoffIso)
+                .or(
+                  "status.eq.closed,tags.cs.{csat:reopened},tags.cs.{outreach},tags.cs.{cls:outreach},active_playbook_id.not.is.null",
+                  { referencedTable: "tickets" },
+                ),
               admin
                 .from("ticket_messages")
                 .select("id, tickets!inner(id, ticket_resolution_events!inner(id))", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
+                .lte("created_at", decisionSettleCutoffIso)
                 .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
               // agent_jobs has no ticket_id column (see enqueueSolFirstTouchForPortalError.ts) —
               // the ticket_id lives in the JSON-encoded `instructions` string. Prefilter on the
               // reason marker with a LIKE (underscore escaped so `first_touch` is literal, not a
               // single-char wildcard) then parse the ticket_ids in Node via the pure
-              // extractSolFirstTouchDispatchTicketIds helper for unit-testability.
+              // extractSolFirstTouchDispatchTicketIds helper for unit-testability. The
+              // decisionSettleCutoffIso window is applied when we subtract by ticket_id below,
+              // NOT here — we want to catch a first-touch job whose enqueue landed inside the
+              // settle boundary for an inbound that will soon leave the settle boundary.
               admin
                 .from("agent_jobs")
                 .select("instructions")
@@ -1213,6 +1264,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
+                .lte("created_at", decisionSettleCutoffIso)
                 .in("ticket_id", dispatchTicketIds);
               solFirstTouchDispatchExcluded = count ?? 0;
             }
