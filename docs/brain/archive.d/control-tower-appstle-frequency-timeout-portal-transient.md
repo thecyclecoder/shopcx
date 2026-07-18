@@ -1,0 +1,1 @@
+- **Treat recovered portal Appstle frequency timeouts as transient** · verified 2026-07-18 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
