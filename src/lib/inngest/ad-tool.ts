@@ -34,7 +34,7 @@ import {
   saveComposition,
   regenerateSegment,
 } from "@/lib/ad-segments";
-import { buildAvatarPortraitPrompt, slugify, resolveAdToolSettings, getSceneStyle, getAvatarBrollAction, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes } from "@/lib/ad-tool-config";
+import { buildAvatarPortraitPrompt, physicalSizeCue, slugify, resolveAdToolSettings, getSceneStyle, getAvatarBrollAction, VIDEO_FORMATS, STATIC_FORMATS, FORMAT_SPECS, type AdFormat, type VibeTag, type AvatarFaceAttributes, type PhysicalDimensionsLite } from "@/lib/ad-tool-config";
 import { loadAngleInputs } from "@/lib/ad-angles";
 import { transcribeWords } from "@/lib/ad-transcribe";
 import { composeCredibility, buildCompositionProps, buildVoCaptions, renderVoSpineVideoTo, renderStaticTo, renderStillCompositionTo } from "@/lib/ad-render";
@@ -165,10 +165,21 @@ export const adToolFaceRequested = inngest.createFunction(
 );
 
 // ── Holding-product prompt (Nano Banana Pro combine: face + product) ─────────
-function buildHoldingProductPrompt(productTitle: string, dims: any, vibeTags: string[], sceneStyle?: string | null): string {
-  const shape = dims?.shape || "package";
+// The size cue (physicalSizeCue) is injected consistently regardless of which
+// output format the hero seeds — the same hero image is reused across the four
+// format renders, so scaling the box against the hand true-to-life once at the
+// combine step keeps the perceived size consistent everywhere. See
+// docs/brain/lifecycles/ad-render.md § Phase 3 — hero for the rationale.
+export function buildHoldingProductPrompt(
+  productTitle: string,
+  dims: PhysicalDimensionsLite | null | undefined,
+  vibeTags: string[],
+  sceneStyle?: string | null,
+): string {
+  const shape = (dims?.shape && dims.shape.trim()) || "package";
   const scene = getSceneStyle(sceneStyle);
-  let prompt = `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${scene.hero}, holding the ${shape} of ${productTitle} from the SECOND image in their hands at chest height, looking toward the camera with a warm authentic smile. Keep their face and identity IDENTICAL to the first image. Reproduce the product packaging artwork and ALL text exactly and sharply from the second image. Realistic hands with exactly five fingers.`;
+  const sizeCue = physicalSizeCue(dims);
+  let prompt = `Create a photorealistic vertical 9:16 UGC selfie-style photo: the person from the FIRST image ${scene.hero}, holding the ${shape} of ${productTitle} from the SECOND image in their hands at chest height, looking toward the camera with a warm authentic smile. Keep their face and identity IDENTICAL to the first image. Reproduce the product packaging artwork and ALL text exactly and sharply from the second image. Realistic hands with exactly five fingers.${sizeCue}`;
   if (vibeTags.includes("ugly")) prompt += " Slightly off-center phone-camera framing, oversaturated color grading.";
   if (vibeTags.includes("clinical")) prompt += " Bright clean clinical lighting, lab-counter setting.";
   return prompt;

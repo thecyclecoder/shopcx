@@ -24,6 +24,7 @@ Ad tool — **single source of truth** for the direct-response frameworks the ge
 | `MAX_SPOKEN_SECONDS` (30), `MAX_AVATARS_PER_WORKSPACE` (10), `DEFAULT_COST_CAP_CENTS` (1000 = $10/ad) | hard caps |
 | `AdToolSettings` + `DEFAULT_AD_TOOL_SETTINGS` + `resolveAdToolSettings(stored)` | per-workspace settings shape (`workspaces.ad_tool_settings`), merged over defaults |
 | `slugify(name)` | name → snake_case slug (used for `ingredient_*` media slots) |
+| `physicalSizeCue(dims)` + `PhysicalDimensionsLite` | derives the real-world size clause injected into `buildHoldingProductPrompt` in [[../inngest/ad-tool]] so the Nano Banana Pro combine renders the product true-to-life against the hand (a 6"×5" box occupies a realistic fraction of the frame, not shrunk to drink-can size). Uses the two largest of `length_in`/`width_in`/`height_in` (visible-face axes) so the cue is stable regardless of which axis was called "height". Returns an empty string when dims are missing/partial (safe fallback — no crash, no broken sentence). Unit-covered in `src/lib/ad-tool-config.physical-size-cue.test.ts`. See [[../lifecycles/ad-render]] Phase 0 + Phase 3 hero. |
 
 ### Avatar face generation (text-to-image)
 

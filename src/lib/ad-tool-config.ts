@@ -431,3 +431,49 @@ export function buildAvatarPortraitPrompt(attrs: AvatarFaceAttributes, context: 
   const ctx = context ? ` ${context}.` : "";
   return `Photorealistic UGC-style portrait photo of a real ${ethClause}${attrs.gender}, apparent age ${apparentAge}, ${health}.${ctx} ${angles[angleVariant % angles.length]}, natural daylight, authentic non-stock expression, shot on a phone. No text, no watermark, no product in frame.`;
 }
+
+// ── Physical size cue (hero holding-product true-to-life scaling) ───────────
+/**
+ * Loose shape matching the `physical_dimensions` jsonb stored on
+ * `products` / `product_variants` (see `docs/brain/lifecycles/ad-render.md`
+ * Phase 0). Everything is optional so a null/partial row degrades safely.
+ */
+export interface PhysicalDimensionsLite {
+  length_in?: number | null;
+  width_in?: number | null;
+  height_in?: number | null;
+  weight_oz?: number | null;
+  shape?: string | null;
+}
+
+/**
+ * Derive an explicit real-world size cue for the hero holding-product
+ * composition. The Nano Banana Pro combine ignores the product's true
+ * dimensions and shrinks a 6"×5" box to a drink-can — so we inject an
+ * unambiguous "render it at N inch by M inch scale in the hand" clause
+ * derived from the two front-facing dimensions.
+ *
+ * The two visible-face dimensions are the LARGEST two of length/width/height
+ * (a box lying flat in the hand shows length × width; a bag or bottle
+ * shows height × width). Picking the two largest keeps the cue stable
+ * regardless of which axis the operator called "height" when entering dims.
+ *
+ * Returns an empty string for any missing / non-positive core dimension so
+ * `buildHoldingProductPrompt` can safely concatenate `${cue}` without a crash
+ * or a broken sentence. The caller — not this helper — decides whether to
+ * surface "product needs dimensions" to the operator.
+ *
+ * Unit-covered in `src/lib/ad-tool-config.physical-size-cue.test.ts`.
+ */
+export function physicalSizeCue(dims: PhysicalDimensionsLite | null | undefined): string {
+  if (!dims) return "";
+  const rawShape = typeof dims.shape === "string" ? dims.shape.trim() : "";
+  const shape = rawShape || "package";
+  const axes = [dims.length_in, dims.width_in, dims.height_in]
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0)
+    .sort((a, b) => b - a);
+  if (axes.length < 2) return "";
+  const [larger, smaller] = axes;
+  const round = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+  return ` The ${shape} is real-world ${round(larger)} inches by ${round(smaller)} inches — render it true-to-life at that physical size against the hand and fingers (do NOT shrink it to a small-package size; a hand span is roughly ${round(larger)} inches, so the ${shape} should fill the hand accordingly).`;
+}

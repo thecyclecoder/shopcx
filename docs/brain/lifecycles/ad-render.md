@@ -75,7 +75,7 @@ Every claim in every ad must trace back to a structured row in the Product Intel
 The hero is only as good as the product reference. Two operator-confirmed inputs, surfaced on `/dashboard/storefront/products/[id]` (see [[../dashboard/products]]):
 
 - **`product_variants.isolated_image_url`** — the variant photographed alone, transparent/white bg, no shadow. Passed as `reference_image_urls[]` to Soul so it renders the actual SKU, not a hallucinated mockup. **Without it, the builder hard-blocks Generate Hero.**
-- **`physical_dimensions` jsonb** on [[../tables/products]] (and optionally per-variant on [[../tables/product_variants]] — variant wins) — `{ length_in, width_in, height_in, weight_oz?, shape }`. Baked into the Soul prompt so the model scales a coffee bag correctly instead of shrinking it to drink-can size.
+- **`physical_dimensions` jsonb** on [[../tables/products]] (and optionally per-variant on [[../tables/product_variants]] — variant wins) — `{ length_in, width_in, height_in, weight_oz?, shape }`. Baked into the hero holding-product prompt via `physicalSizeCue` in [[../libraries/ad-tool-config]] (unit-covered in `src/lib/ad-tool-config.physical-size-cue.test.ts`) so the Nano Banana Pro combine renders the product true-to-life against the hand — a 6"×5" box occupies a realistic fraction of the frame instead of shrinking to drink-can size. The cue is derived once per campaign and reused across the four format renders (they share the same hero image), so the perceived size stays consistent. Missing dimensions degrade to an empty cue (no crash, no broken sentence); the operator is expected to fill them in on `/dashboard/storefront/products/[id]` before the hero looks right.
 
 ### Phase 0.5 — angle generation
 
@@ -96,7 +96,7 @@ Flow: resolve the product's buyer cohort (link-group deduped) → top **5** arch
 ### Phase 3 — script + hero + audio
 
 - **Script** — [[../libraries/ad-script]] `generateScript(args, maxAttempts=3)` calls Opus for a HOOK/BODY/CTA script and runs `validateAdScript` ([[../libraries/ad-validator]]) — retries up to 3× on fatal violations before surfacing them.
-- **Hero** — [[../inngest/ad-tool]] `ad-tool/hero-requested`: Soul with `character_id` + the signed isolated image as reference + `buildSoulPrompt` (dims + vibe tags). Writes `ad_campaigns.hero_image_url`. NSFW jobs surface, don't silently fall through.
+- **Hero** — [[../inngest/ad-tool]] `ad-tool/hero-requested`: Nano Banana Pro combine of `[avatar face, product isolated image]` with `buildHoldingProductPrompt` (scene-style env + shape + **dimension-aware size cue** from `physicalSizeCue` — see Phase 0 above — + vibe tags). Writes `ad_campaigns.hero_image_url`. NSFW jobs surface, don't silently fall through.
 - **Audio** — `ad-tool/audio-requested`: Higgsfield TTS over `script_text`, writes `ad_campaigns.audio_url`.
 
 ### Phase 4 — talking-head + b-roll
