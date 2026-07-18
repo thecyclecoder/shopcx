@@ -125,11 +125,16 @@ interface PreviewBuildOverride {
 }
 
 // build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-lanes-truthful-
-// capacity-not-summed-caps Phase 1 — display order, labels, and the pool-vs-supervisory-bucket
-// distinction now live in the pure derivation helper `deriveLaneGroupSections` (src/lib/
-// box-lane-group-sections.ts). Real concurrent pools (build/plan 10, CS 5, director 2, fold 1)
-// keep their cap; the `other` supervisory bucket carries cap=null so LaneRowGrid renders it as
-// an active-count only — no phantom /35 denominator, no phantom open cells.
+// capacity-not-summed-caps Phase 1 + box-page-split-producer-vs-supervisory-lane-groups Phase 2 —
+// display order, labels, and the pool-vs-active-count distinction live in the pure derivation
+// helper `deriveLaneGroupSections` (src/lib/box-lane-group-sections.ts). Real concurrent pools
+// (build/plan 10, CS 5, director 2, fold 1) keep their cap; the heartbeat's `other` bucket fans
+// into TWO active-count-only sections — `Producer agents` (kinds in PRODUCER_KINDS: ad-creative,
+// ad-creative-copy-author, ad-creative-copy-qc, dr-content, media-buyer, product-seed,
+// storefront-optimizer) and `Supervisory agents` (the default-supervisory fallthrough — spec-test,
+// agent-grade, agent-coach, deploy-review, security-review, migration-fix, director-grade, …). The
+// page renders both by mapping over the returned sections generically below — no hardcoded group
+// keys — so producer + supervisory each show with their own active count, no phantom denominator.
 
 // Route a FAILED job to where you'd look at / rebuild it (a failure isn't an approval — see the paused
 // section below, which routes to the routed inbox). SAFE-BY-DEFAULT (a NEW agent kind can never 404 here):
@@ -480,12 +485,14 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
 }
 
 function LaneRowGrid({ label, total, lanes }: { label: string; total: number | null; lanes: LaneRow[] }) {
-  // build-box-page-other-lanes-truthful-capacity-not-summed-caps Phase 1 — total=null is the
-  // truthful supervisory-bucket display for the 'other' group. Its per-kind caps (spec-test 3 +
-  // agent-grade 1 + … ~ 35) never co-run at the summed ceiling, so a "4/35 in use" render is a
-  // phantom denominator. Render just the ACTIVE count with no open cells; the empty state reads
-  // as "no supervisory agents running" instead of ~30 fake empty slots. Real concurrent pools
-  // (build/plan, CS, director, fold) still render against their cap unchanged.
+  // build-box-page-other-lanes-truthful-capacity-not-summed-caps Phase 1 + box-page-split-producer-
+  // vs-supervisory-lane-groups Phase 2 — total=null is the truthful active-count display for the
+  // two sections fanned out of the heartbeat's `other` bucket (Producer agents + Supervisory
+  // agents). Their per-kind caps never co-run at the summed ceiling, so a "N/35 in use" render is
+  // a phantom denominator. Render just the ACTIVE count with no open cells; the empty state reads
+  // "no <label> running" (interpolated so Producer's empty state doesn't leak the word
+  // "supervisory"). Real concurrent pools (build/plan, CS, director, fold) still render against
+  // their cap unchanged.
   if (total === null) {
     return (
       <div>
@@ -495,7 +502,7 @@ function LaneRowGrid({ label, total, lanes }: { label: string; total: number | n
         </div>
         {lanes.length === 0 ? (
           <div className="rounded-lg border border-dashed border-zinc-200 py-4 text-center text-xs text-zinc-400 dark:border-zinc-800">
-            No supervisory agents running
+            No {label.toLowerCase()} running
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
@@ -708,12 +715,13 @@ export default function BoxPage() {
 
   const stale = worker ? workerStale(worker) : true;
   // build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-lanes-
-  // truthful-capacity-not-summed-caps Phase 1 — the pure derivation in `deriveLaneGroupSections`
-  // filters each lane group's rows by its kind-set AND collapses the 'other' supervisory bucket's
-  // summed-caps to a null cap (LaneRowGrid then renders "N active" — no phantom /35 denominator,
-  // no phantom open cells). Real concurrent pools (build/plan, CS, director, fold) keep their
-  // cap unchanged. When lane_groups is null (a legacy heartbeat row) the helper returns null and
-  // the page falls back to the old single-pool render so nothing regresses on an old box.
+  // truthful-capacity-not-summed-caps Phase 1 + box-page-split-producer-vs-supervisory-lane-groups
+  // Phase 2 — the pure derivation in `deriveLaneGroupSections` filters each lane group's rows by
+  // its kind-set AND fans the heartbeat's single `other` bucket into TWO sections (`producer` +
+  // `supervisory`), both cap:null so LaneRowGrid renders each as "N active" (no phantom /35
+  // denominator, no phantom open cells). Real concurrent pools (build/plan, CS, director, fold)
+  // keep their cap unchanged. When lane_groups is null (a legacy heartbeat row) the helper returns
+  // null and the page falls back to the old single-pool render so nothing regresses on an old box.
   const laneGroupSections = deriveLaneGroupSections<LaneRow>(worker?.lane_groups, worker?.lanes);
   const buildLanes = (worker?.lanes ?? []).filter((l) => l.kind !== "fold");
   const foldLanes = (worker?.lanes ?? []).filter((l) => l.kind === "fold");
@@ -827,9 +835,13 @@ export default function BoxPage() {
             {worker.accounts && <AccountsPanel accounts={worker.accounts} />}
             {laneGroupSections ? (
               // build-box-page-reflects-real-per-lane-group-usage Phase 3 + build-box-page-other-
-              // lanes-truthful-capacity-not-summed-caps Phase 1 — one LaneRowGrid per lane group.
-              // Real pools render against their own cap; the supervisory bucket (cap=null) always
-              // renders (its "N active" tally is meaningful even at zero — an empty-state chip).
+              // lanes-truthful-capacity-not-summed-caps Phase 1 + box-page-split-producer-vs-
+              // supervisory-lane-groups Phase 2 — one LaneRowGrid per derived lane group. Real
+              // pools render against their own cap; the two cap=null sections (`Producer agents`
+              // + `Supervisory agents`, both fanned from the heartbeat's `other` bucket) always
+              // render (their "N active" tally is meaningful even at zero — an empty-state chip).
+              // The render is generic over `laneGroupSections` — a new derived section shows up
+              // on the page automatically without a page-side change.
               laneGroupSections.map((section) =>
                 section.cap === null || section.cap > 0 || section.lanes.length > 0 ? (
                   <LaneRowGrid key={section.key} label={section.label} total={section.cap} lanes={section.lanes} />
