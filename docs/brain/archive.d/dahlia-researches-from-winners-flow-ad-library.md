@@ -1,0 +1,1 @@
+- **Dahlia researches from the winners-flow ad library + Max grades her creative in QA** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
