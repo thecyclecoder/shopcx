@@ -1,0 +1,1 @@
+- **A Max copy-QC miss still bins the ad as HELD (never drops it) — so nothing Dahlia produces vanishes before the CEO can review or override** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
