@@ -93,6 +93,38 @@ A fourth `no_active_cohort` refusal (the workspace hasn't opted in) is treated i
 - **Dedup is per (workspace, adset, reason).** A refusal that swaps between `wrong_adset` and `over_ceiling` re-escalates (different dedupe keys). A repeat of the SAME refusal on the same adset dedupes into the existing open notification.
 - **Belt-and-suspenders is idempotent-safe.** The route's escalation + the publisher's escalation on the same job share the same dedupe key. Only the first one that lands writes a notification; the second short-circuits (still updates the audit ledger only if the notification actually landed).
 
+## Max copy-QC hard rail at Bianca's publish step
+
+[[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] Phase 1 — a **second, INDEPENDENT** fail-closed gate at the actual money step. Before Bianca's replenish path inserts an [[../tables/ad_publish_jobs]] row + dispatches `ad-tool/publish-to-meta`, [[media-buyer-agent]] `enqueueReplenishPublish` calls `evaluateMaxCopyQcAtPublish` on the ad campaign. A missing/NULL [[../tables/ad_creative_copy_qc_verdicts]] row, a `hard_gate_pass=false` verdict, or a hard-gate-pass verdict whose `persuasion_score < MAX_QC_ELIGIBILITY_FLOOR` (7) REFUSES the post — the creative is skipped, an audit row is written (`director_function='growth'`, `action_kind='media_buyer_publish_refused_missing_max_copy_qc'`), and no `ad_publish_jobs` row is ever inserted. This is DEFENCE-IN-DEPTH over the `ad_campaigns` bin eligibility flag — the last gate before ad spend.
+
+### `MaxCopyQcPublishRefusalReason` — type
+
+`"missing_max_copy_qc_verdict" | "hard_gate_fail" | "below_score_floor"` — why the gate refused a Bianca-managed post. Ordering-precedence in `classifyMaxCopyQcAtPublish`: missing verdict → hard-gate fail → below the score floor. Mirrors the ordering of the sibling `isCopyQcEligible` predicate exactly so the two paths can't disagree.
+
+### `classifyMaxCopyQcAtPublish` — function (PURE)
+
+```ts
+function classifyMaxCopyQcAtPublish(
+  verdict: StoredCopyQaVerdict | null,
+  scoreFloor?: number,
+): { ok: true } | { ok: false; reason: MaxCopyQcPublishRefusalReason }
+```
+
+Pure classification of a stored verdict. `scoreFloor` defaults to `MAX_QC_ELIGIBILITY_FLOOR` (7) — kept as a parameter so a unit test can pin the floor explicitly without threading through env config.
+
+### `evaluateMaxCopyQcAtPublish` — function
+
+```ts
+async function evaluateMaxCopyQcAtPublish(
+  admin: Admin,
+  args: { workspaceId, adCampaignId, scoreFloor? },
+): Promise<MaxCopyQcPublishGateResult>
+```
+
+DB-aware wrapper — reads the latest verdict via [[../libraries/creative-qa]] `readLatestCopyQaVerdict` (the SDK chokepoint for [[../tables/ad_creative_copy_qc_verdicts]]) and delegates to `classifyMaxCopyQcAtPublish`. On refusal returns `{ ok: false, reason, verdict, scoreFloor, diagnosis }` — `diagnosis` is human copy the runner surfaces on the `media_buyer_publish_refused_missing_max_copy_qc` `director_activity` row's `reason`. INDEPENDENT of the `ad_campaigns` bin-eligibility flag — a mis-flipped flag routes to refusal here regardless.
+
+**Why a distinct action_kind (`media_buyer_publish_refused_missing_max_copy_qc`) not the generic `media_buyer_replenish_missing_config`:** a Max copy-QC refusal is a creative-quality signal (Bianca's territory — Dahlia's bin), NOT a cohort-config gap. Emitting the config action_kind would misdirect Growth to fix cohort provisioning when the fix is actually to re-run Max copy-QC or drop the sub-7 creative from the bin. The runner also SKIPS the `escalateUnderProvisionedCohort` CEO card on this branch — a sub-7 creative isn't under-provisioning.
+
 ## Related
 
-[[../tables/media_buyer_test_cohorts]] · [[../tables/ad_publish_jobs]] · [[../tables/director_activity]] · [[../tables/dashboard_notifications]] · [[meta-ads]] · [[ad-spend-governor]] · [[platform-director]] · [[../inngest/ad-tool]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[../tables/media_buyer_test_cohorts]] · [[../tables/ad_publish_jobs]] · [[../tables/ad_creative_copy_qc_verdicts]] · [[../tables/director_activity]] · [[../tables/dashboard_notifications]] · [[meta-ads]] · [[ad-spend-governor]] · [[platform-director]] · [[creative-qa]] · [[creative-agent]] (`MAX_QC_ELIGIBILITY_FLOOR`, `isCopyQcEligible`) · [[../inngest/ad-tool]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia]] · [[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)

@@ -22,6 +22,8 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isCopyQcEligible, MAX_QC_ELIGIBILITY_FLOOR } from "@/lib/ads/creative-agent";
+import { readLatestCopyQaVerdict, type StoredCopyQaVerdict } from "@/lib/ads/creative-qa";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -620,4 +622,152 @@ export async function escalateMediaBuyerTestPublishRefusal(
     metadata: { ...metadata, dedupe_key: dedupeKey, autonomous: true },
   });
   return { emitted: true };
+}
+
+// ── Max copy-QC hard gate at Bianca's publish step ──────────────────────────
+// bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
+// defence-in-depth over the ad_campaigns eligibility flag: at the actual money
+// step (the `ad_publish_jobs` insert + Meta post fan-out), independently re-verify
+// the creative carries a valid Max copy-QC verdict with `hard_gate_pass` AND
+// `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A null/missing verdict or a
+// sub-7 score REFUSES the post — the creative is skipped, an audit row is written,
+// and no dollars flow. Mirrors the shape of the media-buyer test-cohort gate: a
+// dispatched fail-closed rail evaluated at the same last-mile chokepoint.
+//
+// Shares the `MAX_QC_ELIGIBILITY_FLOOR` constant + `isCopyQcEligible` predicate
+// with Dahlia's bin gate (max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia
+// Phase 2) so the floor can never diverge between the two rails.
+
+/** Why Bianca's publish path refused to post a creative to Meta. */
+export type MaxCopyQcPublishRefusalReason =
+  | "missing_max_copy_qc_verdict" // no ad_creative_copy_qc_verdicts row (Max never scored the creative).
+  | "hard_gate_fail" // verdict exists but a Max hard gate failed (fabrication, cold-offer, competitor leak, single-promise, render).
+  | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (7).
+
+export interface MaxCopyQcPublishGateAllowResult {
+  ok: true;
+  verdict: StoredCopyQaVerdict;
+  scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
+}
+
+export interface MaxCopyQcPublishGateRefuseResult {
+  ok: false;
+  verdict: StoredCopyQaVerdict | null;
+  reason: MaxCopyQcPublishRefusalReason;
+  scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
+  diagnosis: string;
+}
+
+export type MaxCopyQcPublishGateResult =
+  | MaxCopyQcPublishGateAllowResult
+  | MaxCopyQcPublishGateRefuseResult;
+
+/**
+ * PURE — classify a stored Max copy-QC verdict at publish time. Kept exported +
+ * pure so a fixture verdict provably routes to the right refusal reason
+ * independent of the DB read; the DB-aware `evaluateMaxCopyQcAtPublish` wraps it.
+ *
+ * Refusal precedence: missing verdict → hard-gate fail → below the score floor.
+ * `hard_gate_fail` fires FIRST when `hard_gate_pass === false` regardless of the
+ * (advisory / null-forced) `persuasion_score`; below-floor only fires when hard
+ * gates passed but the score didn't clear the CEO's 7/10 rule. Mirrors
+ * `isCopyQcEligible`'s ordering exactly so the two predicates can never disagree.
+ */
+export function classifyMaxCopyQcAtPublish(
+  verdict: StoredCopyQaVerdict | null,
+  scoreFloor: number = MAX_QC_ELIGIBILITY_FLOOR,
+):
+  | { ok: true }
+  | { ok: false; reason: MaxCopyQcPublishRefusalReason } {
+  if (!verdict) return { ok: false, reason: "missing_max_copy_qc_verdict" };
+  if (!verdict.hard_gate_pass) return { ok: false, reason: "hard_gate_fail" };
+  if ((verdict.persuasion_score ?? 0) < scoreFloor) {
+    return { ok: false, reason: "below_score_floor" };
+  }
+  return { ok: true };
+}
+
+/** Human diagnosis surfaced on the growth audit row's `reason`. */
+function maxCopyQcRefusalDiagnosis(
+  reason: MaxCopyQcPublishRefusalReason,
+  args: { adCampaignId: string; verdict: StoredCopyQaVerdict | null; scoreFloor: number },
+): string {
+  const { adCampaignId, verdict, scoreFloor } = args;
+  switch (reason) {
+    case "missing_max_copy_qc_verdict":
+      return (
+        `Bianca REFUSED to post campaign ${adCampaignId}: no Max copy-QC verdict on record ` +
+        `(ad_creative_copy_qc_verdicts empty). Fail-closed rail — no verdict = no spend. ` +
+        `Re-run Max copy-QC or skip this creative.`
+      );
+    case "hard_gate_fail": {
+      const failed: string[] = [];
+      const g = verdict?.hard_gates;
+      if (g) {
+        if (!g.no_fabrication) failed.push("no_fabrication");
+        if (!g.no_cold_offer) failed.push("no_cold_offer");
+        if (!g.no_competitor_leak) failed.push("no_competitor_leak");
+        if (!g.single_promise) failed.push("single_promise");
+        if (!g.render_ok) failed.push("render_ok");
+      }
+      return (
+        `Bianca REFUSED to post campaign ${adCampaignId}: Max copy-QC hard gate(s) failed ` +
+        `[${failed.length ? failed.join(", ") : "unknown"}]. Fail-closed rail — Bianca never posts a ` +
+        `creative Max hard-rejected, regardless of the bin eligibility flag.`
+      );
+    }
+    case "below_score_floor": {
+      const score = verdict?.persuasion_score ?? null;
+      return (
+        `Bianca REFUSED to post campaign ${adCampaignId}: Max copy-QC persuasion_score ` +
+        `${score === null ? "null" : score} < floor ${scoreFloor}/10. Fail-closed rail — sub-${scoreFloor} ` +
+        `creatives never reach Meta, regardless of the bin eligibility flag.`
+      );
+    }
+  }
+}
+
+/**
+ * DB-aware wrapper — reads the latest Max copy-QC verdict for a creative via the
+ * `readLatestCopyQaVerdict` SDK chokepoint, then delegates to `classifyMaxCopyQcAtPublish`.
+ * Bianca's replenish path calls this BEFORE inserting an `ad_publish_jobs` row so a
+ * sub-7 / ungraded creative is skipped at the money step — never enqueued, never posted.
+ *
+ * INDEPENDENT of the `ad_campaigns` bin-eligibility flag: a mis-flipped flag or a
+ * missing / NULL verdict routes to refusal here too. This is the "second, fail-closed
+ * check at the money step" the spec's north star calls for — defence-in-depth over
+ * the always-bin eligibility state.
+ */
+export async function evaluateMaxCopyQcAtPublish(
+  admin: Admin,
+  args: { workspaceId: string; adCampaignId: string; scoreFloor?: number },
+): Promise<MaxCopyQcPublishGateResult> {
+  const scoreFloor = args.scoreFloor ?? MAX_QC_ELIGIBILITY_FLOOR;
+  const verdict = await readLatestCopyQaVerdict(admin, {
+    workspaceId: args.workspaceId,
+    adCampaignId: args.adCampaignId,
+  });
+  const classified = classifyMaxCopyQcAtPublish(verdict, scoreFloor);
+  if (classified.ok) {
+    // A verdict that classifies OK must also satisfy the shared isCopyQcEligible
+    // predicate — kept as an assertion so a future drift between the two paths
+    // still fails-closed here (defence-in-depth over the bin flag, per the spec).
+    if (!isCopyQcEligible(verdict)) {
+      return {
+        ok: false,
+        verdict,
+        reason: "below_score_floor",
+        scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
+        diagnosis: maxCopyQcRefusalDiagnosis("below_score_floor", { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+      };
+    }
+    return { ok: true, verdict: verdict as StoredCopyQaVerdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR };
+  }
+  return {
+    ok: false,
+    verdict,
+    reason: classified.reason,
+    scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
+    diagnosis: maxCopyQcRefusalDiagnosis(classified.reason, { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+  };
 }
