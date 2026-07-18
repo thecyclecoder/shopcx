@@ -44,6 +44,7 @@ import {
 import type { CopyQaVerdict } from "./creative-qa";
 import type { ScoredAngle } from "./creative-brief";
 import type { ClaimMiss } from "./never-fabricate";
+import { META_CAPS } from "../ad-tool-config";
 
 // copy-author-self-heal (2026-07-17) — a scripted firewall closure: returns `ok:false` for the first
 // `failCount` verdicts (citing a fabricated number), then `ok:true`. Models the in-loop never-fabricate
@@ -499,12 +500,12 @@ test("authorCopyPack: broadcasts Dahlia's single caption across the pack min", (
   assert.equal(pack.description, "C");
 });
 
-test("authorCopyPack: clips strings past META_CAPS (Meta hard limits — headline 40 / primary 600 / description 90)", () => {
-  const long = "x".repeat(2000);
+test("authorCopyPack: clips strings past META_CAPS (Meta hard caps — reads the constants so a widening tracks automatically)", () => {
+  const long = "x".repeat(5000);
   const pack = authorCopyPack({ headline: long, primaryText: long, description: long });
-  assert.ok(pack.headlines[0].length <= 40, `headline over cap: ${pack.headlines[0].length}`);
-  assert.ok(pack.primaryTexts[0].length <= 600, `primary over cap: ${pack.primaryTexts[0].length}`);
-  assert.ok(pack.description.length <= 90, `description over cap: ${pack.description.length}`);
+  assert.ok(pack.headlines[0].length <= META_CAPS.headline, `headline over cap: ${pack.headlines[0].length}`);
+  assert.ok(pack.primaryTexts[0].length <= META_CAPS.primary_text, `primary over cap: ${pack.primaryTexts[0].length}`);
+  assert.ok(pack.description.length <= META_CAPS.description, `description over cap: ${pack.description.length}`);
 });
 
 // dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 2 —
@@ -547,12 +548,12 @@ test("authorCopyPack (Phase 2): variations absent → back-compat broadcast (no 
 });
 
 test("authorCopyPack (Phase 2): variations clipped to META_CAPS per slot", () => {
-  const long = "x".repeat(2000);
+  const long = "x".repeat(5000);
   const variations = AUTHOR_FRAMEWORK_KEYS.map((framework) => ({ framework, headline: long, primaryText: long }));
   const pack = authorCopyPack({ headline: "c", primaryText: "c", description: "c", variations });
   for (let i = 0; i < pack.headlines.length; i++) {
-    assert.ok(pack.headlines[i].length <= 40, `variation ${i} headline over cap: ${pack.headlines[i].length}`);
-    assert.ok(pack.primaryTexts[i].length <= 600, `variation ${i} primary over cap: ${pack.primaryTexts[i].length}`);
+    assert.ok(pack.headlines[i].length <= META_CAPS.headline, `variation ${i} headline over cap: ${pack.headlines[i].length}`);
+    assert.ok(pack.primaryTexts[i].length <= META_CAPS.primary_text, `variation ${i} primary over cap: ${pack.primaryTexts[i].length}`);
   }
 });
 
