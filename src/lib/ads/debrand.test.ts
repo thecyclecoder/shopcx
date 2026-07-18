@@ -5,7 +5,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { debrandForOurBrand } from "./debrand";
+import {
+  chooseGroundedSubstitute,
+  debrandForOurBrand,
+  isCompetitorOffer,
+  stripCompetitorOffer,
+} from "./debrand";
 
 test("(a) 'MUD/WTR vs Ryze' with competitorAdvertiser='MUD/WTR' → 'vs Ryze' (brand slash-name stripped)", () => {
   assert.equal(
@@ -64,5 +69,114 @@ test("(i) tokens shorter than 3 chars in advertiser are ignored (a 2-char 'IO' w
   assert.equal(
     debrandForOurBrand("IO-Zen is a great blend", "IO Zen", "Superfoods Company"),
     "IO- is a great blend",
+  );
+});
+
+// ── Phase 1 — offer swap (swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand) ─
+// A competitor's offer slot is an OFFER we do not run (free tote / free gift / bonus item /
+// discount). Carried through the debrand into Dahlia's imitation rubric it fails every downstream
+// gate. Detect + swap upstream so the winning STRUCTURE survives but the promise becomes grounded.
+
+test("isCompetitorOffer — 'Free tote with every order' matches (freebie phrasing)", () => {
+  assert.equal(isCompetitorOffer("Free tote with every order"), true);
+});
+
+test("isCompetitorOffer — 'Free gift with purchase' matches (freebie phrasing)", () => {
+  assert.equal(isCompetitorOffer("Free gift with purchase"), true);
+});
+
+test("isCompetitorOffer — '50% OFF today' matches (percent-off discount)", () => {
+  assert.equal(isCompetitorOffer("50% OFF today"), true);
+});
+
+test("isCompetitorOffer — 'Free shipping on every order' matches", () => {
+  assert.equal(isCompetitorOffer("Free shipping on every order"), true);
+});
+
+test("isCompetitorOffer — 'BOGO this week' matches", () => {
+  assert.equal(isCompetitorOffer("BOGO this week"), true);
+});
+
+test("isCompetitorOffer — a plain benefit ('Reduce bloating, support metabolism') does NOT match", () => {
+  assert.equal(isCompetitorOffer("Reduce bloating, support metabolism"), false);
+});
+
+test("isCompetitorOffer — a proof point ('700,000+ customers · Non-GMO · 3rd-party tested') does NOT match", () => {
+  assert.equal(isCompetitorOffer("700,000+ customers · Non-GMO · 3rd-party tested"), false);
+});
+
+test("isCompetitorOffer — null / empty / undefined return false (null-safe)", () => {
+  assert.equal(isCompetitorOffer(null), false);
+  assert.equal(isCompetitorOffer(undefined), false);
+  assert.equal(isCompetitorOffer(""), false);
+});
+
+test("stripCompetitorOffer — 'Free tote badge with product held up outdoors' → structural words preserved", () => {
+  // The 'free tote' phrase is scrubbed; the WINNING STRUCTURE ('with product held up outdoors')
+  // survives so a hook a competitor ran for 45+ paid days can still be imitated.
+  const out = stripCompetitorOffer("Free tote badge with product held up outdoors");
+  assert.equal(/tote/i.test(out), false);
+  assert.equal(/free/i.test(out), false);
+  assert.equal(out.includes("with product held up outdoors"), true);
+});
+
+test("stripCompetitorOffer — 'Save 40% today, taste you'll love' → discount stripped, benefit survives", () => {
+  const out = stripCompetitorOffer("Save 40% today, taste you'll love");
+  assert.equal(/40\s*%/i.test(out), false);
+  assert.equal(/save/i.test(out), false);
+  assert.equal(out.includes("taste you'll love"), true);
+});
+
+test("chooseGroundedSubstitute — a Superfood Tabs brief yields a proofStack point (not 'tote')", () => {
+  const brief = {
+    proofStack: ["700,000+ customers", "Non-GMO", "3rd-party tested"],
+    supportingBenefits: ["no crash", "great taste"],
+    leadProof: { text: "reduce bloating, support metabolism, curb cravings" },
+    productFeatures: ["15 superfoods per tab"],
+  };
+  const sub = chooseGroundedSubstitute(brief);
+  assert.equal(sub, "700,000+ customers");
+  assert.equal(/tote/i.test(sub ?? ""), false);
+});
+
+test("chooseGroundedSubstitute — falls back to supportingBenefits when proofStack is empty", () => {
+  const brief = {
+    proofStack: [],
+    supportingBenefits: ["no crash", "great taste"],
+    leadProof: { text: "curb cravings" },
+    productFeatures: ["15 superfoods per tab"],
+  };
+  assert.equal(chooseGroundedSubstitute(brief), "no crash");
+});
+
+test("chooseGroundedSubstitute — falls back to leadProof.text when proofStack + benefits empty", () => {
+  const brief = {
+    proofStack: null,
+    supportingBenefits: null,
+    leadProof: { text: "curb cravings" },
+    productFeatures: ["15 superfoods per tab"],
+  };
+  assert.equal(chooseGroundedSubstitute(brief), "curb cravings");
+});
+
+test("chooseGroundedSubstitute — falls back to productFeatures when everything else missing (derived feature: '15 superfoods per tab')", () => {
+  const brief = {
+    proofStack: null,
+    supportingBenefits: null,
+    leadProof: null,
+    productFeatures: ["15 superfoods per tab", "fizz and drink"],
+  };
+  assert.equal(chooseGroundedSubstitute(brief), "15 superfoods per tab");
+});
+
+test("chooseGroundedSubstitute — returns null when the brief carries no grounded selling point", () => {
+  assert.equal(chooseGroundedSubstitute({}), null);
+  assert.equal(
+    chooseGroundedSubstitute({ proofStack: [], supportingBenefits: [], leadProof: null, productFeatures: [] }),
+    null,
+  );
+  assert.equal(
+    chooseGroundedSubstitute({ proofStack: ["  "], supportingBenefits: [""], leadProof: { text: null } }),
+    null,
   );
 });

@@ -27,7 +27,7 @@ import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-f
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
-import { debrandForOurBrand } from "@/lib/ads/debrand";
+import { chooseGroundedSubstitute, debrandForOurBrand, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import {
   qaCreative,
@@ -2689,32 +2689,64 @@ async function stockProduct(
           // whose brief.competitorDna hydration missed still yields the shape (empty slots),
           // and the SKILL's IMITATE-DEBRANDED rule handles empty gracefully. Own-brand angles
           // leave competitorDna null.
-          const competitorDna: CopyAuthorSessionInputs["competitorDna"] =
-            angle.source === "competitor" && brief.competitorDna
-              ? {
-                  hook: debrandForOurBrand(brief.competitorDna.hook, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  framework: brief.competitorDna.framework == null
-                    ? null
-                    : debrandForOurBrand(brief.competitorDna.framework, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  mechanismClaim: brief.competitorDna.mechanismClaim == null
-                    ? null
-                    : debrandForOurBrand(brief.competitorDna.mechanismClaim, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  proof: brief.competitorDna.proof == null
-                    ? null
-                    : debrandForOurBrand(brief.competitorDna.proof, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  // Cold-audience creatives lead with the hook, NEVER a discount — so a COLD copy-author
-                  // session must not even SEE the competitor's offer, or Dahlia weaves it in and the
-                  // deterministic cold-offer gate (`hasColdOfferLeak`) bounces the whole pack. This is the
-                  // copy-side twin of the #2010 image fix (`imageOfferForAudience` nulls `brief.offer` for
-                  // cold): before it, a cold competitor angle exhausted 2/2 author attempts on `cold_offer_leak`
-                  // (2026-07-17 Amazing Coffee test) because the competitor's offer rode in via the DNA.
-                  // Warm/hot still receive the debranded competitor offer.
-                  offer: audienceTemperature === "cold" || brief.competitorDna.offer == null
-                    ? null
-                    : debrandForOurBrand(brief.competitorDna.offer, brief.competitorDna.competitorAdvertiser, ourBrand),
-                  competitorAdvertiser: brief.competitorDna.competitorAdvertiser,
-                }
-              : null;
+          const competitorDna: CopyAuthorSessionInputs["competitorDna"] = (() => {
+            if (angle.source !== "competitor" || !brief.competitorDna) return null;
+            const dna = brief.competitorDna;
+            const debrandedHook = debrandForOurBrand(dna.hook, dna.competitorAdvertiser, ourBrand);
+            const debrandedOfferRaw = dna.offer == null
+              ? null
+              : debrandForOurBrand(dna.offer, dna.competitorAdvertiser, ourBrand);
+            // swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand
+            // Phase 1 — DEFENSE-IN-DEPTH offer swap at debrand time. The upstream swap in
+            // creative-brief.ts assembles `brief.competitorDna` with the offer already swapped
+            // and the hook already stripped, but this pass re-runs the offer detector on the
+            // debranded strings so an offer that slipped past upstream (e.g. a source row that
+            // put an offer in `framework`, or a debrand that revealed a hidden freebie once the
+            // brand token was stripped) is still caught before Dahlia's session sees it. The
+            // substitute is drawn from the same brief pool (proofStack → supportingBenefits →
+            // leadProof → productFeatures).
+            const substitute = chooseGroundedSubstitute({
+              proofStack: brief.proofStack,
+              supportingBenefits: brief.supportingBenefits,
+              leadProof: brief.leadProof,
+              productFeatures: brief.productFeatures,
+            });
+            const swappedHook = isCompetitorOffer(debrandedHook)
+              ? (() => {
+                  const stripped = stripCompetitorOffer(debrandedHook);
+                  if (!stripped) return debrandedHook;
+                  return substitute ? `${substitute} ${stripped}` : stripped;
+                })()
+              : debrandedHook;
+            // Cold-audience creatives lead with the hook, NEVER a discount — so a COLD copy-author
+            // session must not even SEE the competitor's offer, or Dahlia weaves it in and the
+            // deterministic cold-offer gate (`hasColdOfferLeak`) bounces the whole pack. This is the
+            // copy-side twin of the #2010 image fix (`imageOfferForAudience` nulls `brief.offer` for
+            // cold): before it, a cold competitor angle exhausted 2/2 author attempts on `cold_offer_leak`
+            // (2026-07-17 Amazing Coffee test) because the competitor's offer rode in via the DNA.
+            // Warm/hot still receive the debranded offer, but any surviving competitor OFFER (free
+            // tote / free gift / discount) is swapped for the grounded substitute (or nulled) so an
+            // un-runnable offer never rides in via the DNA.
+            const offerForSession = audienceTemperature === "cold" || debrandedOfferRaw == null
+              ? null
+              : isCompetitorOffer(debrandedOfferRaw)
+                ? substitute
+                : debrandedOfferRaw;
+            return {
+              hook: swappedHook,
+              framework: dna.framework == null
+                ? null
+                : debrandForOurBrand(dna.framework, dna.competitorAdvertiser, ourBrand),
+              mechanismClaim: dna.mechanismClaim == null
+                ? null
+                : debrandForOurBrand(dna.mechanismClaim, dna.competitorAdvertiser, ourBrand),
+              proof: dna.proof == null
+                ? null
+                : debrandForOurBrand(dna.proof, dna.competitorAdvertiser, ourBrand),
+              offer: offerForSession,
+              competitorAdvertiser: dna.competitorAdvertiser,
+            };
+          })();
           // copy-author-self-heal (2026-07-17) — the never-fabricate firewall closure, injected so it
           // runs INSIDE the revise loop: a fabricated/ungrounded claim becomes a revise reason and
           // Dahlia's SAME session is RESUMED (cache-warm) to re-ground or drop it, instead of the old
