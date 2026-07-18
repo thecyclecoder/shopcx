@@ -105,7 +105,21 @@ export interface GenerateCreativeOpts {
    *  reuse its winning COMPOSITION (layout/hierarchy/focal structure) but swap in OUR product + copy +
    *  proof. A static wins on composition, not just its text. */
   compositionTransfer?: boolean;
+  /** ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
+   *  the CEO's per-format revise reason threaded from the ad-review-feedback router. When set,
+   *  `buildPrompt` emits a top-of-prompt `CEO EDIT (apply exactly to this format)` clause so the
+   *  render actually applies the surgical note ("make the product bigger", "change the 'free tote'
+   *  badge to 'Free Shipping with Subscribe and Save'", "change the overlay text to …") instead of
+   *  drifting back to a generic fresh render. Absent (normal fresh-pack path) → no clause emitted,
+   *  the prompt is byte-identical to today. */
+  ceoReviseReason?: string;
 }
+
+/** ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
+ *  header sentinel a unit test can grep for to prove the CEO note landed at the TOP of the composed
+ *  prompt (Nano Banana's instruction-following weighs the earliest lines heaviest). Same-file
+ *  constant so buildPrompt + tests never drift. */
+export const CEO_EDIT_HEADER = "CEO EDIT (apply exactly to this format):";
 
 const TREATMENT_STEER: Record<NonNullable<GenerateCreativeOpts["treatment"]>, string> = {
   before_after: "TREATMENT: before/after transformation-led — the two-photo transformation is the hero.",
@@ -123,7 +137,7 @@ export interface GeneratedCreative {
   expectedCopy: { headline: string; offer: string | null; trust: string };
 }
 
-export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   // For a COMPOSITION-TRANSFER (competitor imitation), the angle.hook is the COMPETITOR's proven hook —
   // it may carry THEIR brand/product name (e.g. "MUD\WTR Mushroom Tea Blend - Up to 43% Off"). Rendering
   // it verbatim over OUR packshot is a brand mismatch the QC gate correctly rejects (2026-07-13). So for
@@ -183,7 +197,17 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? ""
     : ` This ad has NO transformation: do NOT render any before/after, weight-loss, body-comparison, results-timeline, or "BEFORE"/"AFTER" imagery, panel, or caption of ANY kind — no implied physical-result story.`;
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}
+  // ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
+  // when the CEO left a per-format revise reason on the review card, the router hands it to us as
+  // the exact edit to apply. Emit it as the FIRST clause after the ad's setup line (Nano Banana
+  // weighs earliest instructions heaviest) with a sentinel header (`CEO_EDIT_HEADER`) a test can
+  // grep for. Absent (normal fresh-pack path) → empty string, prompt is byte-identical to today.
+  const ceoNote = ceoReviseReason?.trim();
+  const ceoEditClause = ceoNote
+    ? `\n\n${CEO_EDIT_HEADER} the CEO reviewed this exact ad and left a targeted instruction. Apply it EXACTLY — this is a surgical edit to THIS format's existing render, not a redesign. Keep every other element (headline, proof, reviewer, product) unchanged from the composition below unless the note explicitly says otherwise. THE NOTE: "${ceoNote.replace(/"/g, "'")}".`
+    : "";
+
+  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}
 
 ${headlineClause}
 
@@ -218,7 +242,7 @@ HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and 
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
-  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer);
+  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason);
   // Render-side no-competitor-leak deterministic guard (Phase 1) — after the strip
   // helper scrubbed the imitation headline AND the NO COMPETITOR OFFER hard rule was
   // negative-prompted into the composed prompt, a lingering freebie artifact token in
