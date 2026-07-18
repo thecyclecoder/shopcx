@@ -381,14 +381,26 @@ function ghCompareToken(): string | undefined {
 }
 
 /**
+ * The compare result: which side is ahead AND (when the worker is behind) the ISO timestamp of the
+ * FIRST commit that landed on origin/main after the worker's running_sha — i.e. the exact moment
+ * drift began. `firstDivergentAt` lets `evalWorker` anchor its shaGrace elapsed to when drift
+ * actually started rather than to worker uptime, so a fresh commit landing on a long-lived worker
+ * doesn't instantly-red before the worker has had its normal self-update poll window.
+ */
+export type ShaDirectionResult = { direction: ShaDirection; firstDivergentAt: string | null };
+
+/**
  * Ask GitHub which side is ahead — the direction check evalWorker gates its "behind" red on. Fails
  * CLOSED to "unknown" (missing token, unreachable API, unrelated SHAs) so a transient API error can
- * never turn a healthy worker into a red page. Called once per snapshot from buildControlTowerSnapshot.
+ * never turn a healthy worker into a red page. On a confirmed worker-behind, also reads
+ * `body.commits[0].commit.author.date` — the author date of the FIRST commit past running_sha,
+ * which is exactly when the worker fell behind. Called once per snapshot from
+ * buildControlTowerSnapshot.
  */
-export async function fetchShaDirection(deployed: string, running: string): Promise<ShaDirection> {
+export async function fetchShaDirection(deployed: string, running: string): Promise<ShaDirectionResult> {
   const local = classifyShaDirectionLocal(deployed, running);
-  if (local !== "unknown") return local;
-  if (!ghCompareToken() || !deployed || !running) return "unknown";
+  if (local !== "unknown") return { direction: local, firstDivergentAt: null };
+  if (!ghCompareToken() || !deployed || !running) return { direction: "unknown", firstDivergentAt: null };
   try {
     // base = running, head = deployed. GitHub returns `status`: "identical" | "ahead" | "behind" | "diverged".
     // "ahead"  ⇒ head (deployed) is ahead of base (running) ⇒ WORKER-BEHIND.
@@ -402,14 +414,23 @@ export async function fetchShaDirection(deployed: string, running: string): Prom
       },
       cache: "no-store",
     });
-    if (!r.ok) return "unknown";
-    const body = (await r.json()) as { status?: string };
-    if (body.status === "identical") return "same";
-    if (body.status === "ahead") return "worker-behind";
-    if (body.status === "behind") return "worker-ahead";
-    return "unknown"; // "diverged" or an unrecognized status — stay conservative.
+    if (!r.ok) return { direction: "unknown", firstDivergentAt: null };
+    const body = (await r.json()) as {
+      status?: string;
+      commits?: Array<{ commit?: { author?: { date?: string } } }>;
+    };
+    if (body.status === "identical") return { direction: "same", firstDivergentAt: null };
+    if (body.status === "ahead") {
+      // commits[0] is the earliest commit in base..head — the first commit that landed after
+      // running_sha, so its author.date IS the moment the worker fell behind. Missing/malformed
+      // ⇒ null (evalWorker falls back to the worker-uptime anchor).
+      const firstDivergentAt = body.commits?.[0]?.commit?.author?.date ?? null;
+      return { direction: "worker-behind", firstDivergentAt };
+    }
+    if (body.status === "behind") return { direction: "worker-ahead", firstDivergentAt: null };
+    return { direction: "unknown", firstDivergentAt: null }; // "diverged" or an unrecognized status — stay conservative.
   } catch {
-    return "unknown";
+    return { direction: "unknown", firstDivergentAt: null };
   }
 }
 
@@ -419,6 +440,7 @@ export function evalWorker(
   queuedCount = 0,
   manualDrain = false,
   shaDirection: ShaDirection = "unknown",
+  firstDivergentAt: string | null = null,
 ): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
@@ -481,9 +503,19 @@ export function evalWorker(
     return { ...base, color: "green", statusText: `idle — update deferred · ${queuedCount} queued (${running} → ${deployed.slice(0, 7)} on sustained idle)`, detail: row.detail ?? null, violation: null };
   }
   // Red when behind+idle AND past shaGrace AND not queue-deferred (queue empty OR manual drain set).
-  const behindTooLong = idle && !queueDeferred && ageMs(row.started_at) > (loop.shaGraceMs ?? 30 * 60_000);
+  // Anchor elapsed to the smaller of (worker uptime, drift age): a fresh commit landing on a
+  // long-lived worker deserves the full shaGrace poll window before we page — the prior anchor
+  // (worker uptime alone) instant-red every long-lived worker on the next commit, defeating the
+  // grace. `firstDivergentAt` is the author date of the FIRST commit past running_sha (fetched
+  // by fetchShaDirection from GitHub's compare API); when null we fall back to the uptime anchor
+  // so the "unknown" / prefix-equal paths behave exactly as before.
+  const shaGraceMs = loop.shaGraceMs ?? 30 * 60_000;
+  const uptimeElapsedMs = ageMs(row.started_at);
+  const driftElapsedMs = firstDivergentAt ? ageMs(firstDivergentAt) : Number.POSITIVE_INFINITY;
+  const behindTooLong = idle && !queueDeferred && Math.min(uptimeElapsedMs, driftElapsedMs) > shaGraceMs;
   if (behindTooLong) {
-    return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — self-update stuck for ${elapsed(row.started_at)}${manualDrain ? " (manual drain set)" : ""}.` } };
+    const stuckFor = firstDivergentAt ? elapsed(firstDivergentAt) : elapsed(row.started_at);
+    return { ...base, color: "red", statusText: `behind origin/main — running ${running}, deployed ${deployed.slice(0, 7)}`, detail: row.detail ?? null, violation: { reason: "liveness", detail: `Box build worker is running ${running} but origin/main is ${deployed.slice(0, 7)} — behind for ${stuckFor}${manualDrain ? " (manual drain set)" : ""}.` } };
   }
   // Behind but BUSY (active build in flight) ⇒ the worker is intentionally deferring self-update
   // until its lanes clear (sacrosanct — never kill an in-flight build).
@@ -1888,7 +1920,10 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   // deployAgeMs==null posture). Prefix-equal SHAs are resolved locally (no round-trip).
   const deployedShaForDirection = process.env.VERCEL_GIT_COMMIT_SHA || "";
   const runningShaForDirection = (workerRow as WorkerRow | null)?.running_sha ?? "";
-  const shaDirection = await fetchShaDirection(deployedShaForDirection, runningShaForDirection);
+  const { direction: shaDirection, firstDivergentAt } = await fetchShaDirection(
+    deployedShaForDirection,
+    runningShaForDirection,
+  );
 
   // Empirical first-observed-at anchor (control-tower-registered-not-firing-observed-anchor-grace
   // P1). Build the loop_id → first_seen_at(ms) map from the read above, then best-effort upsert a
@@ -1935,7 +1970,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const history = byLoop.get(loop.id) ?? [];
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
-    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection);
+    if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection, firstDivergentAt);
     else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null, workerUnavailable);
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null, workerUnavailable);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
