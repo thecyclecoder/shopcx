@@ -1,0 +1,1 @@
+- **Dahlia names each ad specifically by its static composition — unique per ad, never 'weight loss', never the competitor name** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
