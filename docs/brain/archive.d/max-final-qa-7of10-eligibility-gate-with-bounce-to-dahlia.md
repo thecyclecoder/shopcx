@@ -1,0 +1,1 @@
+- **Wire Max's copy-QC as the mandatory final QA: no bin eligibility below 7/10, bounce back to Dahlia with critiques** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
