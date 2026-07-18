@@ -81,8 +81,9 @@ test("buildMetaCopyPack — yields ≥4 distinct headlines + ≥4 distinct prima
 });
 
 test("buildMetaCopyPack — Meta length caps hold across every headline + primary text", async () => {
-  // Caps track META_CAPS in @/lib/ad-tool-config (headline 40, primary_text 600) — the source of
-  // truth every downstream ad-copy consumer uses.
+  // Caps track META_CAPS in @/lib/ad-tool-config (headline 40, primary_text 1200 after the
+  // 2026-07-18 widening to reconcile with the long-form 3-paragraph rail) — the source of truth
+  // every downstream ad-copy consumer uses.
   const { META_CAPS } = await import("@/lib/ad-tool-config");
   const brief = makeBrief({
     supportingBenefits: [
