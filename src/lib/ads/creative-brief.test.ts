@@ -8,8 +8,37 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMetaCopy, sanitizeCompetitorHook, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import { buildMetaCopy, sanitizeCompetitorHook, selectAngles, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import type { ProductIntelligence, PIReview } from "@/lib/product-intelligence";
 import { hasAnyLf8 } from "./lf8";
+
+function makePi(overrides: Partial<ProductIntelligence> = {}): ProductIntelligence {
+  return {
+    product: null,
+    benefits: [],
+    ingredients: [],
+    ingredientResearch: [],
+    adAngles: [],
+    pageContent: null,
+    reviewAnalysis: null,
+    reviews: {
+      totalCount: 0,
+      fiveStarCount: 0,
+      featured: [],
+      recentFiveStar: [],
+      withPhotos: [],
+      byClaim: async () => [] as PIReview[],
+    },
+    media: { all: [], byCategory: {}, bySlotPrefix: () => [], isolatedPackshots: [] },
+    blogPosts: [],
+    seoKeywords: [],
+    store: { brandProofPoints: [] },
+    offer: null,
+    variants: [],
+    gaps: [],
+    ...overrides,
+  };
+}
 
 function makeAngle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
   return {
@@ -125,4 +154,78 @@ test("buildMetaCopy — own-brand angle keeps its raw hook when the hook itself 
   // Own-brand angle → the hook drives the headline (not benefitHeadline). Verify LF8 is retained.
   assert.match(copy.headline.toLowerCase(), /unlock|energy|morning/);
   assert.ok(hasAnyLf8(copy.headline.toLowerCase()));
+});
+
+// ── selectAngles: curated lead-benefit seed ────────────────────────────────────
+// dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 1 — the curated
+// `product_benefit_selections` role='lead' benefit must be present as a TOP-RANKED
+// acquisition angle so the differentiated hook is on the table before ranking / imitation.
+// Without this seed the Amazing Coffee cold creative led its headline with a purely borrowed
+// commodity hook ("no jitters") — the fix is a root-level seed, not a scoring tweak.
+
+test("selectAngles — seeds a top-priority angle from pi.benefits role='lead'", () => {
+  const pi = makePi({
+    benefits: [
+      {
+        benefit_name: "Weight loss",
+        role: "lead",
+        customer_phrases: ["Lost 15 lbs in three weeks", "curbs my appetite"],
+        science_confirmed: true,
+        customer_confirmed: true,
+        display_order: 0,
+      },
+      {
+        benefit_name: "No jitters",
+        role: "supporting",
+        customer_phrases: ["no crash", "steady energy"],
+        display_order: 1,
+      },
+    ],
+  });
+  const ranked = selectAngles(pi);
+  assert.ok(ranked.length > 0, "expected at least one seeded angle");
+  const seeded = ranked.find((a) => a.source === "benefit" && a.leadBenefit === "Weight loss");
+  assert.ok(seeded, `expected a source='benefit' angle for the lead benefit — got ${JSON.stringify(ranked.map((a) => ({ source: a.source, leadBenefit: a.leadBenefit })))}`);
+  // Ranks at the top of the pool — the strongest differentiated angle before imitation.
+  assert.equal(ranked[0].source, "benefit", `lead-benefit seed should lead the pool; got ${ranked[0].source}`);
+  assert.equal(ranked[0].leadBenefit, "Weight loss");
+  // Top-tier acquisition power + not commodity by construction.
+  assert.equal(seeded.acquisitionPower, 10);
+  assert.equal(seeded.commodity, false);
+  // A punchy customer_phrase becomes the hook so the seeded angle carries real proof-language.
+  assert.equal(seeded.hook, "Lost 15 lbs in three weeks");
+  // The reason string names the source of the curation so downstream logs can trace it.
+  assert.ok(
+    seeded.reasons.some((r) => /curated lead benefit/i.test(r)),
+    `expected a 'curated lead benefit' reason; got ${JSON.stringify(seeded.reasons)}`,
+  );
+});
+
+test("selectAngles — no role='lead' row degrades gracefully to today's behavior (no benefit-source angle)", () => {
+  const pi = makePi({
+    benefits: [
+      { benefit_name: "Great taste", role: "supporting", customer_phrases: ["delicious"], display_order: 0 },
+    ],
+    adAngles: [
+      { hook_one_liner: "The morning routine everyone's copying", lead_benefit_anchor: "focus", is_active: true },
+    ],
+  });
+  const ranked = selectAngles(pi);
+  // No 'benefit'-sourced angle is emitted when nothing carries role='lead' — the seed is opt-in.
+  assert.ok(!ranked.some((a) => a.source === "benefit"), "expected no benefit-source angle without role='lead'");
+  // Other candidate paths still populate the pool.
+  assert.ok(ranked.some((a) => a.source === "ad_angle"), "expected ad_angle-source angles to still populate");
+});
+
+test("selectAngles — a role='lead' row with no customer_phrases falls back to benefit_name as the hook", () => {
+  const pi = makePi({
+    benefits: [
+      { benefit_name: "Weight loss", role: "lead", customer_phrases: null, display_order: 0 },
+    ],
+  });
+  const ranked = selectAngles(pi);
+  const seeded = ranked.find((a) => a.source === "benefit");
+  assert.ok(seeded, "expected a seeded lead-benefit angle even without customer phrases");
+  assert.equal(seeded.hook, "Weight loss");
+  assert.equal(seeded.leadBenefit, "Weight loss");
 });

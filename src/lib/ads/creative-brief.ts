@@ -124,6 +124,39 @@ function scoreAngle(hook: string, leadBenefit: string, source: ScoredAngle["sour
 export function selectAngles(pi: ProductIntelligence, transformationStories: PIReview[] = []): ScoredAngle[] {
   const out: ScoredAngle[] = [];
 
+  // Curated LEAD BENEFIT — the product's differentiated acquisition angle from
+  // `product_benefit_selections` role='lead' (per-product curation). Seeded here as a top-priority
+  // candidate so the strongest differentiated hook is on the table BEFORE ranking / diversification /
+  // imitation — the root fix for dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 1
+  // (2026-07-18). Without this seed, hooks only ever come from generic ingredient headlines, review
+  // clusters, ad_angles rows, and competitor angles — the curated lead benefit (e.g. Amazing Coffee's
+  // WEIGHT LOSS) never even becomes a candidate, so Dahlia's cold creative can lead with a borrowed
+  // commodity hook ("no jitters") with our real differentiator nowhere on the ad. `buildCreativeBrief`
+  // then attaches a real leadProof via `pi.reviews.byClaim(benefit_name)`. Degrades gracefully to
+  // today's behavior when no role='lead' row exists.
+  const leadBenefitRow = (pi.benefits as Row[]).find((b) => str(b.role) === "lead");
+  if (leadBenefitRow) {
+    const name = str(leadBenefitRow.benefit_name).trim();
+    const phrases = Array.isArray(leadBenefitRow.customer_phrases)
+      ? (leadBenefitRow.customer_phrases as unknown[]).map(str).filter(Boolean)
+      : [];
+    const punchyPhrase = phrases.find((p) => p.length > 0 && p.length <= 60) ?? phrases[0] ?? "";
+    const hook = punchyPhrase || name;
+    if (name) {
+      const scored = scoreAngle(hook, name, "benefit", 7, leadBenefitRow);
+      // Curated lead benefit is a DIFFERENTIATED acquisition angle by construction — override
+      // acquisitionPower to top-of-pool and force `commodity=false` so the diversification pass ranks
+      // its source group first and `buildCreativeBrief`'s supporting-benefits filter (commodity ||
+      // retentionTruth>=8) doesn't demote it to body copy.
+      scored.acquisitionPower = 10;
+      scored.commodity = false;
+      scored.reasons.unshift(
+        "curated lead benefit (product_benefit_selections role='lead' — the differentiated acquisition angle)",
+      );
+      out.push(scored);
+    }
+  }
+
   for (const a of pi.adAngles as Row[]) {
     out.push(scoreAngle(str(a.hook_one_liner), str(a.lead_benefit_anchor), "ad_angle", 5, a));
   }
