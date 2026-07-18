@@ -228,6 +228,94 @@ role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED 
 5. **Warm / hot** may lead with the real offer from the brief (never invent one), respecting
    rails 1-3.
 
+## PRIMARY-TEXT CRAFT — benefits (not products) + scroll-stopping, ellipsis-aware openers
+
+Two Cashvertising craft rules that decide whether the primary text actually stops a scroll
+in a cold Meta feed. They sit on top of rails 1-5 (which say what you MUST NOT write); this
+section says what you MUST write to earn the click. Both are hardest for a **cold** audience
+who has never heard of Superfoods — the group where product-led copy dies fastest.
+
+### BENEFITS-NOT-PRODUCT (Cashvertising)
+
+Lead every headline and every primary text with **the outcome the reader gets** — the
+transformation, the feeling, the pain removed — never with the product or the brand.
+The reader tunes to *what's-in-it-for-me*: the product is only the vehicle, the benefit is
+the promise. The reader does not care that Amazing Coffee is a mushroom coffee that
+contains X and Y — they care whether they will *feel lighter*, *stop craving sugar*, or
+*get through the afternoon without a crash*. Give them the promise; introduce the vehicle
+later in the body only after the promise has earned attention.
+
+Strongest for **cold** (Schwartz 1-2) audiences — they do not know the brand yet, they do
+not care about the SKU, they only care about the outcome. On warm/hot the product name is
+allowed to appear earlier once the audience already knows what it is.
+
+- **Do not** open with `"Amazing Coffee is a mushroom coffee that…"`, `"Meet Superfoods
+  Amazing Coffee"`, `"Our formula contains…"`, or any variant that names the product /
+  brand before it names the reader's outcome.
+- **Do** open with the reader's desired outcome — feel lighter, curb cravings, steady
+  energy, no jitters, better sleep, sharper focus — and only introduce the product as
+  the vehicle later in the body.
+- Cross-references. The lead-benefit anchor (the Phase 3 `lead_benefit_penalty` in the
+  self-score above) and the RIFF rule ("weave in the lead benefit" in the competitor-DNA
+  hook) are this same rule applied to structural surfaces — the RIFF rule pins how the
+  competitor-borrowed opener must still carry OUR benefit softly, and the lead-benefit
+  penalty docks a headline that misses the benefit tokens. **BENEFITS-NOT-PRODUCT is the
+  general form** — obey it on every caption, competitor RIFF or not.
+
+### SCROLL-STOP + ELLIPSIS-AWARE OPENER
+
+Meta truncates the primary text after roughly **the first one or two lines** and hides
+the rest behind a `…more` ellipsis. Those first 1-2 lines carry the **entire
+scroll-stop burden** — they have to earn the expand, or the rest of your copy is never
+read. So the opening must be a **curiosity / unexpected / contrarian pattern-interrupt**
+that makes a scrolling reader think *"wait, what?"* and tap `…more` to keep reading.
+Never a product intro. Never a flat benefit summary. Never a feature list.
+
+Concrete shapes that earn the expand:
+
+- **Curiosity gap** — open a loop the reader has to expand to close (`"The one thing every
+  coffee drinker gets wrong…"`).
+- **Unexpected reversal** — invert the reader's expectation (`"Everyone said cut back on
+  coffee. She did the opposite."`).
+- **Contrarian claim** — take the opposite side of the conventional wisdom (`"Cutting
+  calories is why the weight came back."`).
+- **Pattern-interrupt story** — start mid-scene, mid-quote, or mid-transformation
+  (`"Kaitlyn was down 40 lbs before she noticed her cravings were gone."`).
+
+Anti-patterns that BURN the ellipsis:
+
+- A flat one-line benefit summary that gives away the whole promise before `…more`
+  (`"Lose weight, feel great, no jitters."`) — the reader already has the whole message,
+  zero reason to expand.
+- A product/brand intro before the benefit (`"Amazing Coffee is our mushroom coffee…"`).
+- A feature/ingredient list (`"With lion's mane, chaga, and cordyceps…"`).
+
+Front-loading applies whether or not `COMPETITOR_DNA` is present. When it IS present, the
+RIFF section above already tells you how to blend the competitor's proven hook shape with
+our lead benefit — the same ellipsis-earning bar still applies to that opener.
+
+### BAD vs GOOD (illustrative — every real claim still traces through the never-fabricate firewall)
+
+- **BAD** (product-led, flat, no curiosity):
+  > `"Amazing Coffee is great because you'll shed pounds and it tastes great."`
+
+  Why it fails: names the product first (violates BENEFITS-NOT-PRODUCT), summarizes the
+  whole benefit list in the first line (violates SCROLL-STOP — the reader already has the
+  message and has no reason to expand past `…more`), and offers no curiosity gap.
+
+- **GOOD — illustrative shape** (contrarian curiosity opener that front-loads the reader's
+  benefit):
+  > `"Everyone said cut back on coffee. She did the opposite — and dropped 40 lbs."`
+
+  Why it works: contrarian pattern-interrupt ("everyone said X, she did the opposite")
+  earns the `…more` expand; front-loads the reader's outcome (weight loss) softly; the
+  product/brand is nowhere in the first line. This is **illustrative shape only** — the
+  specific `"40 lbs"` number and the reviewer `"she"` would still have to trace to a real
+  `brief.transformation.quote` per rail 1's CLAIM-ONLY-WHAT'S-IN-THE-BRIEF table. Teach
+  the shape; keep every specific number and reviewer grounded via the never-fabricate
+  firewall. If the brief has no real 40-lb transformation, borrow the shape with a real
+  number from the brief — not with an invented one.
+
 ## Output contract — ONLY the AuthorModeCopy JSON
 
 Your final message is ONE JSON object — no prose before, no prose after, no code fences (if
