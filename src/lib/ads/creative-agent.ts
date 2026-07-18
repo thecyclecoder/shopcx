@@ -986,12 +986,16 @@ export function sanitizeAuthorField(raw: unknown): string {
   return s;
 }
 
-/** Cap for a sanitized revise reason inside the trusted REVISE instruction line. Reason
+/** Cap for a sanitized revise reason inside the trusted REVISE instruction line. Most reason
  *  strings are short by construction (`parse_failed: bad_concept_tag (...)`, `self_score_below_floor
- *  (total=n, floor=m)`, `cold_offer_leak`, `session_error`, `dispatch_threw: <err.message>`) — 240
- *  chars is more than enough for any real reason and small enough that even a maximally-adversarial
- *  injection can't crowd out the trusted instruction. */
-export const COPY_AUTHOR_REVISE_REASON_MAX_LEN = 240;
+ *  (total=n, floor=m)`, `cold_offer_leak`, `session_error`, `dispatch_threw: <err.message>`); the
+ *  firewall-miss reason built by `buildFirewallReviseReason` is the fatter one — it enumerates
+ *  each ClaimMiss + surfaces the brief's real grounded benefits + a concrete steer so Dahlia
+ *  can RECOVER instead of exhausting the loop (dahlia-recovers-from-firewall-claim-miss-actionable-
+ *  revise-reason-not-exhaust Phase 1). 500 chars fits that richer payload while staying small
+ *  compared to the trusted prompt frame (thousands of tokens) — a maximally-adversarial reason
+ *  still cannot crowd out the trusted instruction. */
+export const COPY_AUTHOR_REVISE_REASON_MAX_LEN = 500;
 
 /** Sanitize a retry reason string before it is interpolated into the TRUSTED REVISE instruction
  *  line of `buildCopyAuthorPrompt` (dahlia-cold-graded-inline-link-ctr-leading-signal Phase 4 /
@@ -1029,6 +1033,100 @@ export function sanitizeReviseReason(raw: unknown): string {
     return `${kept}…[TRUNCATED ${s.length - COPY_AUTHOR_REVISE_REASON_MAX_LEN} chars]`;
   }
   return s;
+}
+
+/** dahlia-recovers-from-firewall-claim-miss-actionable-revise-reason-not-exhaust Phase 1 (Fix 1
+ *  — trusted-tokens-only, security-review-hardened): build the firewall revise reason so Dahlia
+ *  can RECOVER from a claim miss instead of exhausting the loop. The old shape
+ *  (`firewall_claim_miss: <source>:<reason>, …`) told her a claim was blocked but did NOT
+ *  point at the real grounded benefits sitting right there in the brief; on a competitor angle
+ *  she chased the competitor's ungrounded hook again and burned every attempt (Superfood Tabs
+ *  free-tote COMPETITOR test — `leadProof:claim_not_in_source` three attempts in a row while
+ *  `supportingBenefits` = 'reduce bloating · support metabolism · curb cravings' sat unused).
+ *
+ *  The returned string is interpolated into the TRUSTED REVISE instruction line of
+ *  `buildCopyAuthorPrompt` / `buildCopyAuthorRevisePrompt`. **Security invariant (Fix 1, pre-merge
+ *  spec-test):** the trusted line MUST contain only DETERMINISTIC tokens — enum source names,
+ *  the enum reason names, deterministic field-name references, and literal steer text — NEVER
+ *  raw model-authored claim snippets, brief text, review bodies, or supportingBenefit strings.
+ *  Untrusted content (the actual claim body, the actual benefit text) already sits INSIDE the
+ *  `===BEGIN_AUTHOR_DATA_v1===` fenced block Dahlia sees on the same session (brief JSON with
+ *  `leadProof` / `supportingBenefits` / `proofStack` fields); the trusted reason merely POINTS
+ *  her at those already-fenced fields by name, so `sanitizeReviseReason`'s marker escaping is
+ *  the only content-shaped defense needed and no adversarial claim/benefit can forge instructions
+ *  from inside the trusted line. Shape:
+ *    • per ClaimMiss — `<source>:<reason>` where BOTH are enum tokens (source validated against
+ *      AUTHOR_CLAIM_TRACE_SOURCES; a mis-typed source degrades to the literal `unknown`);
+ *    • field-name reference — `see BRIEF fields: leadProof, supportingBenefits, proofStack`
+ *      enumerating ONLY the deterministic field names the brief actually populated (empty ones
+ *      omitted so the pointer is truthful);
+ *    • concrete STEER — DROP the ungrounded claim and LEAD with one of the listed real
+ *      benefits; on a competitor angle (brief.competitorDna set) the steer keeps the winner's
+ *      structure but grounds the promise in OUR listed benefit, NOT their offer.
+ *  Respects COPY_AUTHOR_REVISE_REASON_MAX_LEN — the whole reason is short by construction now
+ *  (deterministic tokens only), so the cap is only a safety belt. The firewall itself
+ *  (`verifyClaimTrace`) is unchanged; only the feedback loop is made actionable. */
+export function buildFirewallReviseReason(
+  misses: import("./never-fabricate").ClaimMiss[],
+  brief: Pick<CreativeBrief, "leadProof" | "supportingBenefits" | "proofStack" | "competitorDna">,
+): string {
+  const allowedSources = new Set<string>(AUTHOR_CLAIM_TRACE_SOURCES);
+  const allowedReasons = new Set(["source_not_found", "claim_not_in_source", "fabricated_number"]);
+
+  const missTokens =
+    misses.length === 0
+      ? ["unknown"]
+      : misses.map((m) => {
+          const source = allowedSources.has(m.source) ? m.source : "unknown";
+          const reason = allowedReasons.has(m.reason) ? m.reason : "unknown";
+          return `${source}:${reason}`;
+        });
+
+  // Field-name reference points Dahlia back at the ALREADY-FENCED BRIEF fields — the raw text of
+  // those fields already sits inside the untrusted `===BEGIN_AUTHOR_DATA_v1===` block on her
+  // session, so we never re-echo any of it into the trusted line. Only enumerate populated fields
+  // so the pointer stays truthful (empty leadProof / supportingBenefits / proofStack are omitted).
+  const populatedBriefFields: string[] = [];
+  if (brief.leadProof && brief.leadProof.text && brief.leadProof.text.trim()) {
+    populatedBriefFields.push("leadProof");
+  }
+  if ((brief.supportingBenefits ?? []).some((b) => typeof b === "string" && b.trim().length > 0)) {
+    populatedBriefFields.push("supportingBenefits");
+  }
+  if ((brief.proofStack ?? []).some((p) => typeof p === "string" && p.trim().length > 0)) {
+    populatedBriefFields.push("proofStack");
+  }
+
+  const isCompetitorAngle = !!brief.competitorDna;
+  const steer = isCompetitorAngle
+    ? "DROP the ungrounded claim; keep the winner's structure but LEAD with OUR listed benefit, not their offer."
+    : "DROP the ungrounded claim and LEAD with one of these real benefits.";
+
+  const briefRef =
+    populatedBriefFields.length === 0 ? "" : ` | see BRIEF fields: ${populatedBriefFields.join(", ")}`;
+
+  const buildWith = (tokens: string[], includeBriefRef: boolean): string => {
+    const head = `firewall_claim_miss: ${tokens.join("; ")}`;
+    const ref = includeBriefRef ? briefRef : "";
+    return `${head}${ref} | ${steer}`;
+  };
+
+  const full = buildWith(missTokens, true);
+  if (full.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return full;
+
+  // Defensive: with only deterministic tokens the reason is short by construction, but a
+  // pathological miss list can still overflow. Drop the brief-field reference first (steer
+  // stays intact per the spec), then trim excess misses (keep at least one + "+N more"
+  // counter so the count survives). Steer + at least one miss + counter always survive.
+  const noBriefRef = buildWith(missTokens, false);
+  if (noBriefRef.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return noBriefRef;
+
+  for (let n = missTokens.length - 1; n >= 1; n--) {
+    const trimmed = [...missTokens.slice(0, n), `+${missTokens.length - n} more`];
+    const candidate = buildWith(trimmed, false);
+    if (candidate.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return candidate;
+  }
+  return buildWith([missTokens[0], `+${missTokens.length - 1} more`], false);
 }
 
 /** Build the prompt for one copy-author dispatch. Deterministic + side-effect-free so the
@@ -2629,7 +2727,7 @@ async function stockProduct(
             if (fw.ok) return { ok: true };
             return {
               ok: false,
-              reason: `firewall_claim_miss: ${fw.misses.map((m) => `${m.source}:${m.reason}`).join(", ")}`,
+              reason: buildFirewallReviseReason(fw.misses, brief),
               misses: fw.misses,
             };
           };
