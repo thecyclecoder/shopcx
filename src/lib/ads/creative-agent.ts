@@ -53,9 +53,12 @@ import {
   CREATIVE_PACK_MIN,
   placementPackPlan,
   planCreativePackInserts,
+  PLACEMENT_ASPECT,
   type MetaCopyPack,
+  type PlacementFormat,
   type RenderedPlacement,
 } from "@/lib/ads/creative-pack";
+import { COPY_QC_CREATIVE_FORMATS } from "@/lib/ads/creative-qa";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -104,6 +107,37 @@ export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
  *  the money step. Historical spec slugs still say "7of10" because they were named at the
  *  earlier floor; the ACTIVE floor is this constant. */
 export const MAX_QC_ELIGIBILITY_FLOOR = 9;
+
+/** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — total attempts
+ *  through the outer creative-regen loop before the creative is escalated + refused-into-bin.
+ *  Attempt 1 is the FIRST Max verdict that came back from `runCopyAuthorSession` (already produced
+ *  during Dahlia's self-heal loop; no extra cost). Attempts 2..MAX regen ONLY the failed formats
+ *  (via `generateCreative` with the format's aspect ratio) + re-run Max's QC ONCE per attempt.
+ *  Cap kept small (2) because each regen costs one image generation + one Max session per format;
+ *  a truly-degenerate concept exhausts fast and escalates. Named + exported so the pin-tests +
+ *  operators tune it in one place. */
+export const MAX_CREATIVE_QC_ATTEMPTS = 2;
+
+/** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — pure derivation:
+ *  the set of format keys whose per-format entry in Max's `creative[]` block failed at least one
+ *  check. Empty when the verdict cleared the creative gate or when Max didn't grade formats (legacy
+ *  absent). Exported for pin-tests. */
+export function failedFormatsFromCreativeVerdict(verdict: CopyQaVerdict): PlacementFormat[] {
+  if (verdict.creative_gate_pass) return [];
+  if (!verdict.creative) return [];
+  const failed: PlacementFormat[] = [];
+  for (const entry of verdict.creative) {
+    if (
+      !entry.product_scale_ok ||
+      !entry.no_hallucinated_offer_or_badge ||
+      !entry.no_in_pixel_competitor_leak ||
+      !entry.on_image_text_legible
+    ) {
+      failed.push(entry.format as PlacementFormat);
+    }
+  }
+  return failed;
+}
 
 /** Pure predicate for postability on Max's copy-QC verdict. Eligible IFF the verdict exists AND
  *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9 — raised from
@@ -1664,6 +1698,12 @@ export function buildCopyQcPromptPreamble(input: {
   targetSchwartzLevel: 1 | 2 | 3 | 4 | 5;
   marketSophisticationEvidence: string[];
   dahliaSelfScore: AuthorSelfScore;
+  /** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — the per-format
+   *  image paths Max is handed for the per-format creative-QC block. Emitted as a trusted-context
+   *  `FORMATS:` block above the DATA fence (mirrors the SKILL.md schema); Max Reads each path and
+   *  emits one `creative[]` entry per format. When omitted (legacy single-image call), no FORMATS
+   *  block is emitted and Max defaults `creative_gate_pass=true` — byte-identical to Phase 1. */
+  formats?: Array<{ format: PlacementFormat; path: string }>;
 }): string {
   const briefJson = sanitizeAuthorField(JSON.stringify(input.brief));
   const rubric = sanitizeAuthorField(input.rubricText);
@@ -1672,6 +1712,14 @@ export function buildCopyQcPromptPreamble(input: {
   const description = sanitizeAuthorField(input.copy.description);
   const selfScoreJson = sanitizeAuthorField(JSON.stringify(input.dahliaSelfScore));
   const evidenceJson = sanitizeAuthorField(JSON.stringify(input.marketSophisticationEvidence));
+  const formatsBlock =
+    input.formats && input.formats.length > 0
+      ? [
+          "FORMATS (worker-computed, trusted — the per-placement renders you are graded against for the per-format creative-QC block; Read every listed path and emit ONE `creative[]` entry per format naming the format that fails and why):",
+          ...input.formats.map((f) => `  - format: ${f.format}           path: ${f.path}`),
+          "",
+        ]
+      : [];
   return [
     "RUBRIC (worker-computed, trusted — the same shared consumer-psychology rubric Dahlia scored herself against; use it to form your INDEPENDENT persuasion judgment via the 5-lens rubric — LF8 / Schwartz / Cialdini / Hopkins / Sugarman):",
     rubric,
@@ -1680,6 +1728,7 @@ export function buildCopyQcPromptPreamble(input: {
     `TARGET_SCHWARTZ_LEVEL: ${input.targetSchwartzLevel}`,
     `MARKET_SOPHISTICATION_EVIDENCE: ${evidenceJson}`,
     "",
+    ...formatsBlock,
     COPY_QC_INJECTION_GUARDRAIL,
     "",
     COPY_QC_DATA_BLOCK_BEGIN,
@@ -1755,26 +1804,47 @@ async function runCopyQcForCreative(
     competitorAdvertisers: string[];
     declaredIntent: CopyQaDeclaredIntent | null;
     dahliaRubricBenchmark: DahliaRubricBenchmark | null;
+    /** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — the sibling
+     *  renders alongside the canonical, so Max grades ALL formats (feed_4x5 + stories_9x16 +
+     *  right_column_1x1) in ONE session via the SKILL's FORMATS block. When absent (legacy caller),
+     *  only the canonical is handed and the FORMATS block is omitted — byte-identical to Phase 1. */
+    siblingRenders?: RenderedPlacement[];
   },
   dispatch: CopyQcSessionDispatcher,
 ): Promise<{ verdict: CopyQaVerdict } | { verdict: null; reason: string }> {
-  let normalized: Buffer;
+  // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — collect the
+  // canonical + every sibling into one list of RenderedPlacements. Only the formats the SKILL
+  // recognises (COPY_QC_CREATIVE_FORMATS) survive the filter so a stray unknown-format render
+  // can't leak an unhandled path into Max's FORMATS block.
+  const allRenders: RenderedPlacement[] = [
+    { format: "feed_4x5" as PlacementFormat, buffer: input.canonicalBuffer, mimeType: "image/jpeg" },
+    ...(input.siblingRenders ?? []),
+  ].filter((r): r is RenderedPlacement => (COPY_QC_CREATIVE_FORMATS as readonly string[]).includes(r.format));
+  const tmpFiles: Array<{ format: PlacementFormat; path: string }> = [];
+  const runId = randomUUID();
   try {
-    normalized = await sharp(input.canonicalBuffer)
-      .rotate()
-      .resize({ width: 1568, height: 1568, fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 82 })
-      .toBuffer();
-  } catch (err) {
-    return { verdict: null, reason: `image_undecodable: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  const imagePath = join(tmpdir(), `creative-copy-qc-${randomUUID()}.jpg`);
-  try {
-    await writeFile(imagePath, normalized);
-  } catch (err) {
-    return { verdict: null, reason: `tmpfile_write_failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  try {
+    for (const render of allRenders) {
+      let normalized: Buffer;
+      try {
+        normalized = await sharp(render.buffer)
+          .rotate()
+          .resize({ width: 1568, height: 1568, fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 82 })
+          .toBuffer();
+      } catch (err) {
+        return { verdict: null, reason: `image_undecodable_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      const imagePath = join(tmpdir(), `creative-copy-qc-${runId}-${render.format}.jpg`);
+      try {
+        await writeFile(imagePath, normalized);
+      } catch (err) {
+        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      tmpFiles.push({ format: render.format, path: imagePath });
+    }
+    // Only emit a FORMATS block when we handed >1 render — a single-canonical call is treated as
+    // legacy (SKILL then defaults creative_gate_pass=true; per Phase 1 back-compat contract).
+    const shouldEmitFormats = tmpFiles.length > 1;
     const trustedPromptPreamble = buildCopyQcPromptPreamble({
       copy: input.copy,
       brief: input.brief,
@@ -1783,7 +1853,12 @@ async function runCopyQcForCreative(
       targetSchwartzLevel: input.targetSchwartzLevel,
       marketSophisticationEvidence: input.marketSophisticationEvidence,
       dahliaSelfScore: input.dahliaSelfScore,
+      formats: shouldEmitFormats ? tmpFiles : undefined,
     });
+    // The QC gate's PreToolUse hook splits AD_CREATIVE_QC_ALLOWED_IMAGE by comma, so a
+    // comma-joined list of paths lets Max Read every format under one env var. See
+    // scripts/ad-creative-qc-permission-gate.ts.
+    const allowedImagePath = tmpFiles.map((f) => f.path).join(",");
     const outcome = await runQaCreativeCopyViaBoxSession(
       {
         copy: input.copy,
@@ -1793,7 +1868,7 @@ async function runCopyQcForCreative(
           competitorAdvertisers: input.competitorAdvertisers,
           ourBrand: input.ourBrand,
         },
-        imagePath,
+        imagePath: allowedImagePath,
         trustedPromptPreamble,
         declaredIntent: input.declaredIntent,
         dahliaRubricBenchmark: input.dahliaRubricBenchmark,
@@ -1809,7 +1884,9 @@ async function runCopyQcForCreative(
     }
     return { verdict: parsed.verdict };
   } finally {
-    void unlink(imagePath).catch(() => {});
+    for (const f of tmpFiles) {
+      void unlink(f.path).catch(() => {});
+    }
   }
 }
 
@@ -2460,6 +2537,12 @@ async function stockProduct(
         // takes another attempt at the canonical too, so a transient sibling failure gets a full pack
         // regenerated. Aspect-ratio-only variation is why we don't re-QA each sibling (would 3× cost);
         // canonical passing signals the concept is legibly renderable.
+        // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — these are
+        // mutable across the outer creative-regen loop below (a creative-gate fail regenerates
+        // only the offending format's render); the OK-branch `insertReadyCreative` call reads
+        // whatever the final passing set was.
+        let currentCanonicalBuffer: Buffer = gen.buffer;
+        let currentCanonicalMime: string = gen.mimeType;
         const siblingRenders: RenderedPlacement[] = [];
         for (const sib of packPlan.siblings) {
           const sibGen = await generateCreative(workspaceId, brief, {
@@ -2492,6 +2575,11 @@ async function stockProduct(
         // (no dispatcher / kill-switch off). Persisted to `ad_creative_copy_qc_verdicts` after
         // `insertReadyCreative` returns the campaign id — same rail Phase 1 established.
         let maxCopyQcVerdict: CopyQaVerdict | null = null;
+        // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — counts
+        // extra Max sessions the creative-regen loop paid for (0 on the initial-pass /
+        // deterministic path). Hoisted here so the post-branch `insertCopyQaVerdict` call can
+        // stamp it as the persisted verdict's retryIndex.
+        let creativeRegenAttempts = 0;
         if (authorModeEngaged && copyAuthorDispatcher) {
           const audienceTemperature = resolveAudienceTemperature(angle);
           // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — build the six-slot
@@ -2598,6 +2686,14 @@ async function stockProduct(
                       description: verdict.description,
                     },
                     canonicalBuffer: gen.buffer,
+                    // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 —
+                    // hand ALL renders (canonical + siblings) so Max grades every placement's
+                    // creative dimension (product scale · hallucinated offers/badges · in-pixel
+                    // competitor leaks · on-image legibility). The Dahlia-bounce decision below
+                    // still gates on copy-QC eligibility only (creative_gate_pass is the outer
+                    // regen loop's signal, not Dahlia's — a creative defect isn't the caption's
+                    // fault).
+                    siblingRenders,
                     rubricText,
                     audienceTemperature: verdict.audience_temperature,
                     targetSchwartzLevel,
@@ -2852,6 +2948,147 @@ async function stockProduct(
           // dispatcher / kill-switch off), `outcome.maxCopyQcVerdict` is absent and the row lands
           // with no verdict.
           maxCopyQcVerdict = outcome.maxCopyQcVerdict ?? null;
+          // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — creative-gate
+          // fail bounces the offending format(s) to the render lane. Mirrors Dahlia's copy-fail bounce
+          // that runs inside `runCopyAuthorSession` above — cap at `MAX_CREATIVE_QC_ATTEMPTS`, on
+          // exhaustion emit `director_activity` (action_kind='max_creative_qc_exhausted') and REFUSE
+          // the bin insert (never persist a creative Max's per-format QC held). Copy is unchanged
+          // across the loop (creative defect isn't the caption's fault), so each retry only pays for
+          // the failed formats' image generation + one fresh Max session. Skipped when the copy-QC
+          // dispatcher wasn't injected (byte-identical to pre-Phase-2) — `maxCopyQcVerdict` is null
+          // and the branch below no-ops.
+          let creativeExhausted = false;
+          if (copyQcDispatcher && maxCopyQcVerdict && !maxCopyQcVerdict.creative_gate_pass) {
+            // Attempt 1 already ran (Max's verdict from Dahlia's loop) — retries start at 2.
+            for (let regenAttempt = 2; regenAttempt <= MAX_CREATIVE_QC_ATTEMPTS; regenAttempt++) {
+              const failedFormats = failedFormatsFromCreativeVerdict(maxCopyQcVerdict);
+              if (failedFormats.length === 0) break;
+              creativeRegenAttempts++;
+              let regenOk = true;
+              for (const fmt of failedFormats) {
+                try {
+                  const regen = await generateCreative(workspaceId, brief, {
+                    treatment,
+                    designReferenceUrl: plan.designReferenceUrl,
+                    compositionTransfer: plan.useCompositionTransfer,
+                    aspectRatio: PLACEMENT_ASPECT[fmt],
+                  });
+                  if (fmt === "feed_4x5") {
+                    currentCanonicalBuffer = regen.buffer;
+                    currentCanonicalMime = regen.mimeType;
+                  } else {
+                    // Update the matching sibling in-place; a format Max flagged that isn't in the
+                    // sibling set (e.g. reels_9x16 — the SKILL lists 4 formats but the runtime only
+                    // renders 3 placements today) is skipped rather than pushed as a spurious extra.
+                    const idx = siblingRenders.findIndex((s) => s.format === fmt);
+                    if (idx >= 0) {
+                      siblingRenders[idx] = { format: fmt, buffer: regen.buffer, mimeType: regen.mimeType };
+                    }
+                  }
+                } catch (err) {
+                  console.warn("max_creative_qc_regen_gen_failed", {
+                    workspaceId, productId, format: fmt, err: err instanceof Error ? err.message : String(err),
+                  });
+                  regenOk = false;
+                  break;
+                }
+              }
+              if (!regenOk) {
+                creativeExhausted = true;
+                break;
+              }
+              // Re-run Max's QC ONCE against the fresh renders (same copy — copy hasn't changed, so
+              // the copy gates should still pass; the only new signal is `creative_gate_pass`). The
+              // dispatcher spawns a fresh box session (Dahlia's session is done); the SDK writer
+              // stamps the retryIndex below so both verdicts land on the ledger.
+              const requeryVerdict = verifyMaxCopyQcForVerdict
+                ? await runCopyQcForCreative(
+                    {
+                      brief,
+                      copy: {
+                        headline: outcome.verdict.headline,
+                        primaryText: outcome.verdict.primaryText,
+                        description: outcome.verdict.description,
+                      },
+                      canonicalBuffer: currentCanonicalBuffer,
+                      siblingRenders,
+                      rubricText,
+                      audienceTemperature: outcome.verdict.audience_temperature,
+                      targetSchwartzLevel,
+                      marketSophisticationEvidence,
+                      dahliaSelfScore: outcome.verdict.selfScore,
+                      ourBrand,
+                      competitorAdvertisers: competitorAdvertiser ? [competitorAdvertiser] : [],
+                      declaredIntent: {
+                        audience_temperature: researchIntent.audience_temperature,
+                        purpose: researchIntent.purpose,
+                      },
+                      dahliaRubricBenchmark: rubricBenchmark,
+                    },
+                    copyQcDispatcher,
+                  )
+                : null;
+              if (!requeryVerdict || !requeryVerdict.verdict) {
+                // Dispatch / parse failure on the re-QA — treat as exhaustion (no verdict body
+                // to trust) so we don't persist a creative we can't re-check. The last-good
+                // `maxCopyQcVerdict` still carries the initial critique.
+                creativeExhausted = true;
+                break;
+              }
+              maxCopyQcVerdict = requeryVerdict.verdict;
+              if (maxCopyQcVerdict.creative_gate_pass) break;
+            }
+            if (!maxCopyQcVerdict.creative_gate_pass) {
+              creativeExhausted = true;
+            }
+          }
+          if (creativeExhausted && maxCopyQcVerdict) {
+            // The creative-gate fail never cleared inside the regen cap. Mirror Max's copy-QC
+            // exhaustion behavior: emit a director_activity ledger row (a distinct action_kind
+            // so operators can slice creative exhaustions apart from copy exhaustions) + REFUSE
+            // the bin insert so a defective render never reaches Bianca. No fallback insert —
+            // the concept needs a fresh angle / brief, not another retry of the same render.
+            const exhaustedVerdict = maxCopyQcVerdict;
+            const stillFailed = failedFormatsFromCreativeVerdict(exhaustedVerdict);
+            const reasonLine =
+              `max creative-QC bounce-back exhausted for ${productTitle} (${angle.source} angle) — ` +
+              `format(s) ${stillFailed.join(",") || "unknown"} failed after ${creativeRegenAttempts} regen attempt(s); ` +
+              `last verdict_reason: ${exhaustedVerdict.verdict_reason || "(none)"}`;
+            await recordDirectorActivity(admin, {
+              workspaceId,
+              directorFunction: "growth",
+              actionKind: "max_creative_qc_exhausted",
+              specSlug: "max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok",
+              reason: reasonLine,
+              metadata: {
+                product_id: productId,
+                product_title: productTitle,
+                angle_source: angle.source,
+                angle_hook: angle.hook,
+                audience_temperature: outcome.verdict.audience_temperature,
+                failed_formats: stillFailed,
+                regen_attempts: creativeRegenAttempts,
+                max_creative_qc_verdict: exhaustedVerdict,
+                creative_gate_pass: exhaustedVerdict.creative_gate_pass,
+                per_format_creative: exhaustedVerdict.creative,
+                verdict_reason: exhaustedVerdict.verdict_reason,
+                autonomous: true,
+              },
+            }).catch((e) => {
+              console.warn("max_creative_qc_exhausted_activity_failed", {
+                workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+              });
+            });
+            out.push({
+              productId,
+              angleHook: angle.hook,
+              campaignId: null,
+              ok: false,
+              reason: `max_creative_qc_exhausted: ${stillFailed.join(",") || "unknown"}`,
+            });
+            skipped = true;
+            break;
+          }
           insertOpts = {
             audienceTemperature: outcome.verdict.audience_temperature,
             authorModeCopy: outcome.verdict,
@@ -2875,7 +3112,11 @@ async function stockProduct(
           copyPack = buildMetaCopyPack(brief);
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
-          canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType },
+          // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — post-regen
+          // buffers: the canonical + siblingRenders were mutated in-place by the creative-regen
+          // loop when a per-format creative-gate check flipped false. On the initial-pass /
+          // deterministic path, these are byte-identical to gen.buffer + the original siblings.
+          canonical: { format: "feed_4x5", buffer: currentCanonicalBuffer, mimeType: currentCanonicalMime },
           siblings: siblingRenders,
         }, insertOpts);
         if (result.kind === "skip") {
@@ -2903,7 +3144,11 @@ async function stockProduct(
             workspaceId,
             adCampaignId: campaignId,
             verdict: maxCopyQcVerdict,
-            retryIndex: 0,
+            // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — the
+            // FINAL verdict is what lands here. `creativeRegenAttempts` counts the extra Max
+            // sessions the creative-regen loop paid for; 0 on the initial-pass / deterministic
+            // path (byte-identical to Phase 1); N when the outer loop ran N regen attempts.
+            retryIndex: creativeRegenAttempts,
           }).catch((err) => {
             console.warn("max_copy_qc_verdict_insert_failed", {
               workspaceId,

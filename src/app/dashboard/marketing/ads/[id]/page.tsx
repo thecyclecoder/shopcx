@@ -96,6 +96,15 @@ interface PostabilityOverride {
   override_at: string | null;
 }
 
+interface QaCreativeFormatVerdict {
+  format: string;
+  product_scale_ok: boolean;
+  no_hallucinated_offer_or_badge: boolean;
+  no_in_pixel_competitor_leak: boolean;
+  on_image_text_legible: boolean;
+  findings: string[];
+}
+
 interface QaVerdict {
   hard_gate_pass: boolean;
   hard_gates: {
@@ -116,10 +125,30 @@ interface QaVerdict {
     first_line_earns_the_second: number | null;
     evidence: string[];
   } | null;
+  // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — per-format
+  // creative-QC findings (product scale · hallucinated offers/badges · in-pixel competitor
+  // leaks · on-image legibility) that Phase 1 added to the SDK. Null on a legacy row that
+  // predates the migration; `creative_gate_pass` defaults to true on the read side.
+  creative: QaCreativeFormatVerdict[] | null;
+  creative_gate_pass: boolean;
   verdict_reason: string;
   retry_index: number;
   created_at: string;
 }
+
+const CREATIVE_CHECK_LABEL: Record<string, string> = {
+  product_scale_ok: "Product scale",
+  no_hallucinated_offer_or_badge: "No fabricated offer/badge",
+  no_in_pixel_competitor_leak: "No competitor leak",
+  on_image_text_legible: "On-image legibility",
+};
+
+const CREATIVE_FORMAT_LABEL: Record<string, string> = {
+  feed_4x5: "Feed 4:5",
+  stories_9x16: "Stories 9:16",
+  reels_9x16: "Reels 9:16",
+  right_column_1x1: "Right column 1:1",
+};
 
 interface PublishJob {
   id: string;
@@ -680,6 +709,58 @@ export default function AdDetailPage() {
                   <p className="mt-1 text-xs text-zinc-500">
                     Scroll-stop: readable {qa.scroll_stop.headline_readable_in_3_frames ?? "—"}/2 · hierarchy {qa.scroll_stop.visual_hierarchy_supports_headline ?? "—"}/2 · first-line {qa.scroll_stop.first_line_earns_the_second ?? "—"}/2
                   </p>
+                )}
+                {/* max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — the
+                    per-format creative-QC findings. Renders WHICH format failed WHICH check with
+                    the short human-readable finding string, so the reviewer sees the concrete
+                    defect (e.g. "feed_4x5: 'FREE TOTE' badge from competitor hook baked into the
+                    render") instead of just a binary render_ok. Null on a legacy row (predates
+                    the Phase-1 migration) — the block is omitted; creative_gate_pass defaults
+                    to true so the badge shows as passing. */}
+                {qa.creative && qa.creative.length > 0 && (
+                  <div className="mt-3 rounded-md border border-zinc-200 p-2.5 dark:border-zinc-800">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Per-format creative QC</p>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${qa.creative_gate_pass ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"}`}>
+                        {qa.creative_gate_pass ? "Gate ✓" : "Gate ✕"}
+                      </span>
+                    </div>
+                    <div className="space-y-2">
+                      {qa.creative.map((entry) => {
+                        const checks: Array<{ key: keyof QaCreativeFormatVerdict; pass: boolean }> = [
+                          { key: "product_scale_ok", pass: entry.product_scale_ok },
+                          { key: "no_hallucinated_offer_or_badge", pass: entry.no_hallucinated_offer_or_badge },
+                          { key: "no_in_pixel_competitor_leak", pass: entry.no_in_pixel_competitor_leak },
+                          { key: "on_image_text_legible", pass: entry.on_image_text_legible },
+                        ];
+                        const anyFail = checks.some((c) => !c.pass);
+                        return (
+                          <div key={entry.format} className="rounded bg-zinc-50 p-2 dark:bg-zinc-950">
+                            <div className="mb-1 flex items-center gap-2">
+                              <span className="text-[11px] font-semibold text-zinc-700 dark:text-zinc-200">
+                                {CREATIVE_FORMAT_LABEL[entry.format] || entry.format}
+                              </span>
+                              {anyFail && <span className="rounded bg-rose-100 px-1 py-0.5 text-[9px] font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">held</span>}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {checks.map((c) => (
+                                <span key={c.key} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${c.pass ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" : "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"}`}>
+                                  {c.pass ? "✓" : "✕"} {CREATIVE_CHECK_LABEL[c.key] || c.key.replace(/_/g, " ")}
+                                </span>
+                              ))}
+                            </div>
+                            {entry.findings.length > 0 && (
+                              <ul className="mt-1.5 space-y-0.5">
+                                {entry.findings.map((f, i) => (
+                                  <li key={i} className="text-[11px] text-zinc-600 dark:text-zinc-400">• {f}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 )}
                 {qa.verdict_reason && (
                   <div className="mt-3 rounded-md bg-zinc-50 p-2.5 dark:bg-zinc-950">

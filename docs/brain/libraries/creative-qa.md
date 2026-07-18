@@ -160,17 +160,58 @@ The migration adding the two columns is
 so legacy rows are never surfaced as false-fails on the read side; auto-applied by the
 Control Tower migration-drift reconciler once the PR merges to main).
 
-**Advisory in Phase 1 — no bounce driver yet.** Phase 2 (a later session) wires the
-render-lane bounce that reads `creative_gate_pass` + the per-format `findings[]` to
-regenerate the offending format, and surfaces the block on the grade card so a reviewer
-sees WHICH format failed and why. Phase 1 lands the storage + parser + SKILL only.
-
 Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] cases `(g)`-`(h)`:
 verdict with a full 4-format creative[] parses; a Feed find flags the tote AND drives
 `creative_gate_pass=false`; legacy verdicts without the block parse ok with
 `creative:null` + `creative_gate_pass:true`; malformed shapes (unknown format literal,
 non-boolean check, duplicate format, mismatched roll-up) fail-closed with a specific
 reason.
+
+### Phase 2 — creative-gate fail bounces to the render lane + grade card shows findings
+
+The Phase-2 wire-in ([[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 2)
+turns the Phase-1 advisory signal into a real bounce dispatch. All lives in
+[[creative-agent]]:
+
+- **`buildCopyQcPromptPreamble({..., formats: [{format, path}...]})`** — when the caller
+  hands per-format image paths, the preamble emits a trusted `FORMATS:` block ABOVE the
+  DATA fence (mirrors the [[../../../.claude/skills/max-copy-qc/SKILL|max-copy-qc]]
+  SKILL's documented schema). Max Reads each listed path + emits one `creative[]` entry
+  per format. When `formats` is omitted / empty, no FORMATS block is emitted (legacy
+  single-image call — byte-identical to Phase 1).
+- **`runCopyQcForCreative({..., siblingRenders})`** — accepts the sibling renders
+  alongside the canonical, writes ALL renders to per-format tmp jpegs
+  (`creative-copy-qc-<uuid>-<format>.jpg`), joins their paths comma-separated as
+  `AD_CREATIVE_QC_ALLOWED_IMAGE` so the shared PreToolUse gate lets Max Read every
+  format. When siblings are absent, the single-canonical legacy path runs (no FORMATS
+  block).
+- **`failedFormatsFromCreativeVerdict(verdict)`** — pure derivation: the format keys
+  whose per-format entry failed at least one of the four checks. Empty when the gate
+  passed or when the verdict has no `creative[]`.
+- **`MAX_CREATIVE_QC_ATTEMPTS`** (currently 2) — total attempts through the outer
+  creative-regen loop. Attempt 1 is the FIRST Max verdict from `runCopyAuthorSession`
+  (already produced inside Dahlia's self-heal loop — no extra cost). Attempts 2..MAX
+  regen ONLY the failed formats (via `generateCreative` with the format's aspect ratio
+  from [[creative-pack]] `PLACEMENT_ASPECT`) + re-run Max's QC ONCE per attempt.
+- **Outer creative-regen loop** in `stockProduct` — after Dahlia's session settles ok,
+  if `maxCopyQcVerdict.creative_gate_pass === false`, the loop regens the offending
+  formats and re-QAs. Copy is unchanged across the loop (creative defect isn't the
+  caption's fault), so each retry only pays for the failed formats' image gen + one
+  fresh Max session. The mutable `currentCanonicalBuffer` + in-place mutation of
+  `siblingRenders` mean `insertReadyCreative` receives the FINAL (passing) renders.
+- **Exhaustion → refuse insert.** When the cap is reached with `creative_gate_pass`
+  still false, `stockProduct` emits `director_activity` (action_kind =
+  `max_creative_qc_exhausted`, growth-owned) with the failed formats + last verdict +
+  regen attempts count, and SKIPS `insertReadyCreative` entirely. No fallback — the
+  concept needs a fresh angle / brief, not another retry.
+
+The Phase-2 wire-in is pinned by
+[[../../../src/lib/ads/creative-agent.creative-regen.test.ts]] — the FORMATS block
+placement/format, the `failedFormatsFromCreativeVerdict` derivation, and the attempt-cap
+invariant. The grade-card surface (WHICH format failed + WHY) is rendered in
+`src/app/dashboard/marketing/ads/[id]/page.tsx` from the same
+`readLatestCopyQaVerdict` payload — a `held` chip per failing format + the concrete
+`findings[]` strings, so a reviewer sees the same critique the regen loop consumed.
 
 ## Related
 [[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[copy-validator]] (SSOT safety rails).
