@@ -20,7 +20,7 @@ Ad tool — **single source of truth** for the direct-response frameworks the ge
 | `VIDEO_FORMATS` / `STATIC_FORMATS` | the four outputs every ad produces |
 | `STATIC_TEMPLATES` | brutalist/receipt/newspaper/meme/ingredient-stack |
 | `MOTION_PRESETS` + `eligibleMotions(vibeTags)` | DoP b-roll motion presets, biased jarring unless purely clinical |
-| `META_CAPS` | `{ headline:40, primary_text:125, description:30 }` |
+| `META_CAPS` | `{ headline:40, primary_text:1200, description:90 }` — `primary_text` raised 600 → **1200** (2026-07-18) to reconcile with the long-form 3-paragraph rail ([[creative-agent]] `validateCopyParagraphStructure`); at 600 the two rails were mutually unsatisfiable on some angles and Dahlia's revise loop exhausted with `validator_failed: meta_caps` (Ashwavana Zen Relax). 1200 comfortably fits a hook + 2-3x body + close and stays well under Meta's ~2200 truncation limit, so a runaway 3000-char primary still fails — the cap remains a real ceiling. Coexistence pinned in [[copy-validator]] tests (`long-form 3-paragraph primary passes BOTH meta_caps AND validateCopyParagraphStructure` + `runaway ~3000-char primary still fails meta_caps`). |
 | `MAX_SPOKEN_SECONDS` (30), `MAX_AVATARS_PER_WORKSPACE` (10), `DEFAULT_COST_CAP_CENTS` (1000 = $10/ad) | hard caps |
 | `AdToolSettings` + `DEFAULT_AD_TOOL_SETTINGS` + `resolveAdToolSettings(stored)` | per-workspace settings shape (`workspaces.ad_tool_settings`), merged over defaults |
 | `slugify(name)` | name → snake_case slug (used for `ingredient_*` media slots) |

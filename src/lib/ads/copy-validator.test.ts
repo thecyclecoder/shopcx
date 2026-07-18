@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { validateGeneratedCopy, type ValidatorContext } from "./copy-validator";
 import { META_CAPS } from "../ad-tool-config";
+import { validateCopyParagraphStructure } from "./creative-agent";
 import type { CreativeBrief } from "./creative-brief";
 
 // Minimal brief stub — Phase 1's validator does not read `brief`; it's threaded through so
@@ -182,4 +183,50 @@ test("pass = every check passes", () => {
     r.pass,
     r.checks.every((c) => c.pass),
   );
+});
+
+// reconcile-long-form-3-paragraph-primary-text-with-meta-primary-text-cap Phase 1 —
+// a representative long-form 3-paragraph primary (hook + 2-3x body + close) must pass BOTH
+// `validateGeneratedCopy` (meta_caps rail) AND `validateCopyParagraphStructure`. Prior to raising
+// META_CAPS.primary_text 600 → 1200 the two rails were mutually unsatisfiable on some angles, and
+// Dahlia's revise loop exhausted with `validator_failed: meta_caps`. Locks the coexistence so a
+// future cap change cannot silently re-break long-form.
+test("long-form 3-paragraph primary passes BOTH meta_caps AND validateCopyParagraphStructure", () => {
+  const longFormPrimary = [
+    // hook (~25 words): short, curiosity-shaped, front-loaded above the fold.
+    "I quit coffee for 30 days and my afternoon crash disappeared. What replaced it might be the best-kept energy secret of the last decade of nutrition research.",
+    // body (~110 words, ≥2x the hook): the info + proof stack, still human-voiced.
+    "Ashwagandha, cordyceps, and lion's mane give you steady, jitter-free morning energy — the kind that carries through 4pm without the coffee shakes. Real customers switched and stopped reaching for a second cup by lunch. One buyer wrote in that her focus at work sharpened within a week and she stopped needing the mid-afternoon nap she'd relied on for years. The blend is third-party tested for purity, USDA Organic certified, and delivered fresh from a family-owned farm. Every batch carries the same standardized adaptogen dose, so you know exactly what you're drinking. No fillers, no sugar, no crash. Just one clean cup that keeps you sharp from breakfast through the evening walk.",
+    // close (~18 words, ≤ PARAGRAPH_CLOSE_MAX_WORDS): one-sentence curiosity nudge.
+    "See why more than 40,000 people started their morning differently — and never went back to what they were drinking before.",
+  ].join("\n\n");
+  // A representative long-form primary sits comfortably above the old 600 cap and comfortably under
+  // the new 1200 cap — this is the whole point of the reconcile.
+  assert.ok(longFormPrimary.length > 600, `long-form primary length ${longFormPrimary.length} should exceed the old 600 cap`);
+  assert.ok(longFormPrimary.length <= META_CAPS.primary_text, `long-form primary length ${longFormPrimary.length} should fit within META_CAPS.primary_text ${META_CAPS.primary_text}`);
+  const paragraph = validateCopyParagraphStructure(longFormPrimary);
+  assert.equal(paragraph.ok, true, `expected paragraph structure ok; got ${JSON.stringify(paragraph)}`);
+  const r = validateGeneratedCopy(
+    { ...goodCopy, primaryText: longFormPrimary },
+    stubBrief,
+    baseContext,
+  );
+  const metaCap = r.checks.find((c) => c.rail === "meta_caps")!;
+  assert.equal(metaCap.pass, true, `expected meta_caps pass on long-form primary; got ${JSON.stringify(metaCap)}`);
+  assert.equal(r.pass, true, `expected all rails pass; got ${JSON.stringify(r.checks.filter((c) => !c.pass))}`);
+});
+
+test("runaway ~3000-char primary still fails meta_caps (cap remains a real ceiling)", () => {
+  // A genuinely runaway primary must still be rejected — the 1200 cap is a widening for long-form,
+  // not a removal. Keeps the rail's ceiling meaningful.
+  const runaway = "energy proven focus calm ".repeat(200); // ~5000 chars, definitely > 1200
+  assert.ok(runaway.length > META_CAPS.primary_text);
+  const r = validateGeneratedCopy(
+    { ...goodCopy, primaryText: runaway },
+    stubBrief,
+    baseContext,
+  );
+  const metaCap = r.checks.find((c) => c.rail === "meta_caps")!;
+  assert.equal(metaCap.pass, false, `expected meta_caps fail on runaway primary; got ${JSON.stringify(metaCap)}`);
+  assert.match(metaCap.reason ?? "", /primary text/);
 });

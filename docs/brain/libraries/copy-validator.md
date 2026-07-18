@@ -21,7 +21,7 @@ validateGeneratedCopy(
 | # | Rail | What it checks | SSOT reuse |
 |---|---|---|---|
 | 1 | `lf8` | `hasAnyLf8((headline + " " + primaryText).toLowerCase())` — headline+primary carries at least one Life-Force-8 keyword | [[lf8]] `hasAnyLf8` + `LF8_KEYWORDS` |
-| 2 | `meta_caps` | Each field within Meta's caption caps (headline ≤ 40, primary_text ≤ 600, description ≤ 90) | [[ad-tool-config]] `META_CAPS` |
+| 2 | `meta_caps` | Each field within Meta's caption caps (headline ≤ 40, primary_text ≤ 1200, description ≤ 90) | [[ad-tool-config]] `META_CAPS` — **primary_text raised 600 → 1200 on 2026-07-18** to reconcile with the long-form 3-paragraph rail ([[creative-agent]] `validateCopyParagraphStructure`); at 600 the two rails were mutually unsatisfiable on some angles and Dahlia's revise loop exhausted with `validator_failed: meta_caps` (Ashwavana Zen Relax). |
 | 3 | `no_msrp` | No bare `$N` in any field UNLESS the same field carries `~~` (strikethrough) or a `per serving` / `per cup` / `per pouch` phrase | inline regex — same rule as `buildMetaCopy`'s MSRP guard |
 | 4 | `no_competitor_leak` | For each token from `context.competitorAdvertisers` (≥3 chars, less the product-name allowlist), the token must NOT appear as a whole word in any field | mirrors debrand.ts `PRODUCT_NAME_ALLOWLIST` + word-boundary rule |
 | 5 | `cold_offer_gate` | When `context.audience_temperature === "cold"`, delegates to `hasColdOfferLeak(copy)` — otherwise `pass: true` (warm/hot/null untouched) | [[lf8]] `hasColdOfferLeak` + `COLD_OFFER_TOKENS` (shipped by the M1 `dahlia-audience-temperature-marking-and-cold-offer-gate` spec) |
