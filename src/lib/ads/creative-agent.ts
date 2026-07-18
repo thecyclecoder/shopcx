@@ -986,12 +986,16 @@ export function sanitizeAuthorField(raw: unknown): string {
   return s;
 }
 
-/** Cap for a sanitized revise reason inside the trusted REVISE instruction line. Reason
+/** Cap for a sanitized revise reason inside the trusted REVISE instruction line. Most reason
  *  strings are short by construction (`parse_failed: bad_concept_tag (...)`, `self_score_below_floor
- *  (total=n, floor=m)`, `cold_offer_leak`, `session_error`, `dispatch_threw: <err.message>`) — 240
- *  chars is more than enough for any real reason and small enough that even a maximally-adversarial
- *  injection can't crowd out the trusted instruction. */
-export const COPY_AUTHOR_REVISE_REASON_MAX_LEN = 240;
+ *  (total=n, floor=m)`, `cold_offer_leak`, `session_error`, `dispatch_threw: <err.message>`); the
+ *  firewall-miss reason built by `buildFirewallReviseReason` is the fatter one — it enumerates
+ *  each ClaimMiss + surfaces the brief's real grounded benefits + a concrete steer so Dahlia
+ *  can RECOVER instead of exhausting the loop (dahlia-recovers-from-firewall-claim-miss-actionable-
+ *  revise-reason-not-exhaust Phase 1). 500 chars fits that richer payload while staying small
+ *  compared to the trusted prompt frame (thousands of tokens) — a maximally-adversarial reason
+ *  still cannot crowd out the trusted instruction. */
+export const COPY_AUTHOR_REVISE_REASON_MAX_LEN = 500;
 
 /** Sanitize a retry reason string before it is interpolated into the TRUSTED REVISE instruction
  *  line of `buildCopyAuthorPrompt` (dahlia-cold-graded-inline-link-ctr-leading-signal Phase 4 /
@@ -1029,6 +1033,77 @@ export function sanitizeReviseReason(raw: unknown): string {
     return `${kept}…[TRUNCATED ${s.length - COPY_AUTHOR_REVISE_REASON_MAX_LEN} chars]`;
   }
   return s;
+}
+
+/** dahlia-recovers-from-firewall-claim-miss-actionable-revise-reason-not-exhaust Phase 1 —
+ *  Build the firewall revise reason so Dahlia can RECOVER from a claim miss instead of
+ *  exhausting the loop. The old shape (`firewall_claim_miss: <source>:<reason>, …`) told her
+ *  a claim was blocked but did NOT point at the real grounded benefits sitting right there
+ *  in the brief; on a competitor angle she chased the competitor's ungrounded hook again
+ *  and burned every attempt (Superfood Tabs free-tote COMPETITOR test — `leadProof:claim_not_in_source`
+ *  three attempts in a row while `supportingBenefits` = 'reduce bloating · support metabolism ·
+ *  curb cravings' sat unused). The fix is a per-miss ACTIONABLE, PRODUCT-ANCHORED reason:
+ *    • per ClaimMiss — name the source + reason + the exact claim that missed (clipped);
+ *    • SURFACE the product's available grounded benefits (leadProof text + supportingBenefits +
+ *      proofStack) so Dahlia can PIVOT to one of them;
+ *    • concrete STEER — DROP the ungrounded claim and LEAD with one of the listed real
+ *      benefits; on a competitor angle (brief.competitorDna set) the steer keeps the winner's
+ *      structure but grounds the promise in OUR listed benefit, NOT their offer.
+ *  Respects COPY_AUTHOR_REVISE_REASON_MAX_LEN — if the assembled string overflows, the benefit
+ *  list is truncated first (keeping the steer intact per the spec), then as a last resort the
+ *  benefits section is dropped. The firewall itself (`verifyClaimTrace`) is unchanged; only
+ *  the feedback loop is made actionable. */
+export function buildFirewallReviseReason(
+  misses: import("./never-fabricate").ClaimMiss[],
+  brief: Pick<CreativeBrief, "leadProof" | "supportingBenefits" | "proofStack" | "competitorDna">,
+): string {
+  const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+
+  const missLines =
+    misses.length === 0
+      ? "unknown"
+      : misses
+          .map((m) => {
+            const claim = m.claim ? ` ("${clip(m.claim, 60)}")` : "";
+            return `${m.source}:${m.reason}${claim}`;
+          })
+          .join("; ");
+
+  const rawBenefits: string[] = [];
+  if (brief.leadProof?.text) rawBenefits.push(clip(brief.leadProof.text, 60));
+  for (const b of brief.supportingBenefits ?? []) if (b) rawBenefits.push(clip(b, 60));
+  for (const p of brief.proofStack ?? []) if (p) rawBenefits.push(clip(p, 60));
+
+  const seen = new Set<string>();
+  const benefits: string[] = [];
+  for (const b of rawBenefits) {
+    const trimmed = b.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    benefits.push(trimmed);
+  }
+
+  const isCompetitorAngle = !!brief.competitorDna;
+  const steer = isCompetitorAngle
+    ? "DROP the ungrounded claim; keep the winner's structure but LEAD with OUR listed benefit, not their offer."
+    : "DROP the ungrounded claim and LEAD with one of these real benefits.";
+
+  const head = `firewall_claim_miss: ${missLines}`;
+  const build = (bs: string[]): string =>
+    bs.length === 0
+      ? `${head} | ${steer}`
+      : `${head} | available grounded benefits: ${bs.join(" · ")} | ${steer}`;
+
+  const full = build(benefits);
+  if (full.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return full;
+
+  for (let n = benefits.length - 1; n >= 1; n--) {
+    const candidate = build(benefits.slice(0, n));
+    if (candidate.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return candidate;
+  }
+  return build([]);
 }
 
 /** Build the prompt for one copy-author dispatch. Deterministic + side-effect-free so the
@@ -2629,7 +2704,7 @@ async function stockProduct(
             if (fw.ok) return { ok: true };
             return {
               ok: false,
-              reason: `firewall_claim_miss: ${fw.misses.map((m) => `${m.source}:${m.reason}`).join(", ")}`,
+              reason: buildFirewallReviseReason(fw.misses, brief),
               misses: fw.misses,
             };
           };
