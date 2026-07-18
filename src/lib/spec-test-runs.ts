@@ -684,6 +684,53 @@ export function isFoldSafeGivenGoalStatus(goalStatus: GoalStoredStatus): boolean
   return false;
 }
 
+/**
+ * fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 2 — the pure fold-ONLY
+ * allowance for a spec whose Verification genuinely defines NO machine-runnable checks. A run that
+ * agent-verdicts clean (`approved` / `needs_human`) but asserts 0 checks is REJECTED by
+ * [[isCleanMachinePassRun]]'s `run.checks.length >= 1` floor (the guard against a degenerate "silent
+ * empty pass" — the AgentVerdict doc's unparseable/errored run reading as clean). That floor is
+ * correct for the SHARED pre-merge promote gate ([[getSpecTestStateForBranch]]); loosening it there
+ * would let a genuinely-broken 0-check run merge.
+ *
+ * But the SAME floor strands a HUMAN-ONLY spec-test spec whose Verification is entirely `needs_human`
+ * / has zero `kind='auto'` rows in `spec_phase_checks`: the run has nothing to assert, agent-verdicts
+ * `approved` / `needs_human`, and the checks-floor blocks the fold forever (observed live for
+ * `dahlia-researches-from-winners-flow-ad-library`, which unblocked by hand). Phase 1's fold-queue
+ * reaper backstop catches this in the OUT-of-queue direction; THIS Phase 2 allowance closes the same
+ * gap at the fold-eligibility rail so the primary auto-fold sweep enqueues the spec on the first
+ * pass, instead of relying on the reaper to catch it later.
+ *
+ * The allowance is FOLD-ONLY: it explicitly does NOT change [[isCleanMachinePassRun]], so the
+ * pre-merge promote gate keeps its checks-floor (a pre-merge run is judged BEFORE its check row are
+ * declared, so a promote-side 0-check pass CAN be a silent empty pass — the floor still matters
+ * there). This function is called ONLY from [[getAutoFoldEligibleSlugs]] as an OR fallback AFTER
+ * `isCleanMachinePassRun` fails; it never crosses into any other rail.
+ *
+ * A run qualifies iff ALL hold:
+ *   - `agent_verdict` ∈ {`approved`, `needs_human`} (a genuine clean verdict; `issues`/`error` are
+ *     still rejected — the "silent empty pass" the checks-floor originally guarded against ONLY
+ *     shows up on a non-clean verdict here, so we keep that discriminator).
+ *   - `run.checks.length === 0` (the failing state the promote gate rejects; a spec that DID assert
+ *     ≥1 check is handled by the shared `isCleanMachinePassRun` path — this branch is for the exact
+ *     0-check case).
+ *   - `autoChecksDefinedCount === 0` — the spec's `spec_phase_checks` rows collectively declare ZERO
+ *     `kind='auto'` checks (a HUMAN-ONLY Verification). If the spec DEFINED auto checks but the run
+ *     asserted 0, that IS a degenerate empty run (the agent errored before running the declared
+ *     checks) and this branch REJECTS it — which preserves the checks-floor's original job.
+ *
+ * Pure — no I/O. Unit-covered in `spec-test-runs.test.ts`.
+ */
+export function isFoldAllowedZeroCheckRun(
+  run: SpecTestRun,
+  autoChecksDefinedCount: number,
+): boolean {
+  if (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human") return false;
+  if (run.checks.length !== 0) return false;
+  if (autoChecksDefinedCount !== 0) return false;
+  return true;
+}
+
 export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
   const admin = createAdminClient();
   // Rail 3 imports (goal-promotion-fold-collision-and-held-surfacing Phase 1) — hoisted so the loop
@@ -691,6 +738,11 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   // rest of this module already navigates the same way.
   const { resolveGoalSlugForSpec } = await import("@/lib/agent-jobs");
   const { getGoal } = await import("@/lib/goals-table");
+  // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 2 — hoisted so the
+  // spec-phases-checks read only fires for the Rail-2 fall-through (a spec whose latest run failed
+  // isCleanMachinePassRun's 0-check floor).
+  const { listSpecs } = await import("@/lib/specs-table");
+  const { listSpecPhaseChecks } = await import("@/lib/spec-phase-checks-table");
   const [{ specs }, archived, runs, resolutions, liveRows, securityBySlug] = await Promise.all([
     // Grade the SAME workspace whose spec-test runs we read below — `getRoadmap()` with no arg resolves a
     // non-deterministic DEFAULT workspace (latest agent_job), so the gate would otherwise grade the wrong
@@ -722,6 +774,13 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   // status, so this collapses N spec lookups → 1 goal lookup per goal in the batch. Populated lazily
   // as we resolve.
   const goalStatusCache = new Map<string, GoalStoredStatus>();
+  // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 2 — lazy cache for the
+  // zero-check fold-allowance: `slug → count of kind='auto' rows across the spec's spec_phase_checks`.
+  // Populated ONLY when a spec fails isCleanMachinePassRun AND the failure is specifically the 0-check
+  // case (a clean verdict with `run.checks.length === 0`); every other Rail-2 failure short-circuits
+  // BEFORE we touch this cache, so a workspace where every spec passes normally does zero extra reads.
+  const autoChecksBySlug = new Map<string, number>();
+  let workspaceSpecsBySlug: Map<string, { phases: { id: string; position: number; verification: string | null }[] }> | null = null;
   const eligible: string[] = [];
   for (const s of specs) {
     // Rail 1 — DERIVED-shipped only. `s.status` is the PHASE ROLLUP from getRoadmap (deriveSpecCardStatus),
@@ -742,7 +801,53 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     //     in_testing forever (CEO: human checks fully advisory — promote on 0 auto-fails without resolving them),
     //   - 0 UNRESOLVED auto-`fail` regressions — an evidence-backed broken bullet (a `verified`/`dismissed`
     //     resolution clears it). This keeps a `needs_human` run carrying a lingering machine `fail` OUT.
-    if (!run || !isCleanMachinePassRun(run, resolutions, s.slug)) continue;
+    if (!run || !isCleanMachinePassRun(run, resolutions, s.slug)) {
+      // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 2 — the
+      // FOLD-ONLY zero-check allowance. isCleanMachinePassRun rejects a run with
+      // `run.checks.length < 1` (the guard against a degenerate "silent empty pass") — but that
+      // ALSO strands a HUMAN-ONLY spec whose Verification defines zero `kind='auto'` checks
+      // (the primary auto-fold sweep drops it forever; observed live for
+      // dahlia-researches-from-winners-flow-ad-library). Only fall through when the run itself
+      // is the exact 0-check clean case (`isFoldAllowedZeroCheckRun`'s verdict+length gates hold);
+      // any other Rail-2 failure (verdict `issues`/`error`, an unresolved auto-`fail`, an empty
+      // run with checks defined) still rejects. DELIBERATELY leaves `isCleanMachinePassRun`
+      // unchanged so the SHARED pre-merge promote gate ([[getSpecTestStateForBranch]]) keeps
+      // its checks-floor — the two gates DIVERGE here on purpose (fold has post-merge signals
+      // like a clean security review + all-shipped phases; promote does not).
+      if (!run) continue;
+      if (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human") continue;
+      if (run.checks.length !== 0) continue;
+      // Load workspace specs on first miss so we can count kind='auto' checks per candidate.
+      if (!workspaceSpecsBySlug) {
+        try {
+          const wsSpecs = await listSpecs(workspaceId, { scope: "active" });
+          workspaceSpecsBySlug = new Map(
+            wsSpecs.map((row) => [
+              row.slug,
+              { phases: row.phases.map((p) => ({ id: p.id, position: p.position, verification: p.verification })) },
+            ]),
+          );
+        } catch {
+          workspaceSpecsBySlug = new Map();
+        }
+      }
+      let autoDefined = autoChecksBySlug.get(s.slug);
+      if (autoDefined === undefined) {
+        const specRow = workspaceSpecsBySlug.get(s.slug);
+        if (!specRow) {
+          autoDefined = -1; // sentinel: unknown → reject conservatively
+        } else {
+          try {
+            const checks = await listSpecPhaseChecks(specRow);
+            autoDefined = checks.filter((c) => c.kind === "auto").length;
+          } catch {
+            autoDefined = -1;
+          }
+        }
+        autoChecksBySlug.set(s.slug, autoDefined);
+      }
+      if (!isFoldAllowedZeroCheckRun(run, autoDefined)) continue;
+    }
 
     // Security-test gate (build-card-lifecycle-timeline Phase 3): require a clean terminal security review.
     // No record yet (`undefined`) is NOT clean — the post-merge security pass hasn't landed; defer. Live

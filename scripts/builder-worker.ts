@@ -38,6 +38,7 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // on-disk transcript jsonl for the last assistant message that carries the full envelope. Job
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
+import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -9486,10 +9487,10 @@ async function runFoldQueueReaperJob(): Promise<void> {
       .in("status", ["pending", "folding"]);
     if (error) {
       console.error("[fold-reaper] pending_folds query failed (skipping sweep):", error.message);
-      return;
+      // Fall through: even if pending_folds is unreadable, the stranded-fold pass can still recover
+      // shipped-but-never-enqueued specs — that pass is the whole point of the fold-stranding backstop.
     }
     const queue = (rows ?? []) as { workspace_id: string; status: string; job_id: string | null }[];
-    if (queue.length === 0) return; // nothing pending/folding anywhere — no-op
 
     const workspaces = [...new Set(queue.map((r) => r.workspace_id))];
     for (const workspaceId of workspaces) {
@@ -9542,8 +9543,151 @@ async function runFoldQueueReaperJob(): Promise<void> {
       // every other fold enqueue path.
       await reEnqueueFoldIfPending(workspaceId, tag);
     }
+
+    // (C) fold-stranding backstop (fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test
+    //     Phase 1): recover a shipped spec that never entered pending_folds at all. The primary
+    //     auto-fold sweep excludes a spec whose latest spec-test recorded 0 asserted checks (the
+    //     [[isCleanMachinePassRun]] checks-length floor that blocks a degenerate "silent empty pass"),
+    //     so a genuinely-shipped spec whose Verification defines no machine-runnable checks lands a
+    //     clean 0-check run — the pass side accepts it, the fold side rejects it — and nothing
+    //     enqueues it into pending_folds. That leaves it stranded in the "shipped" column forever
+    //     (build merged + all phases shipped + security clean, but never folded), leaking a stale
+    //     spec page and letting its knowledge never reach the brain (observed live for
+    //     dahlia-researches-from-winners-flow-ad-library).
+    //     This backstop enumerates DERIVED-shipped specs (getRoadmap phase rollup — the same rail
+    //     [[getAutoFoldEligibleSlugs]] Rail 1 uses), drops archived + in-flight + already-queued/
+    //     folding + already-folded, then requires the two REAL post-merge invariants that mean the
+    //     work truly landed: security-clean ([[getSecurityStateBySlug]].completedClean — the same
+    //     signal [[getAutoFoldEligibleSlugs]] uses) AND a merged build job (an agent_jobs row
+    //     kind='build' status='merged' — the [[reconcileMergedJobs]] stamp that means the PR
+    //     actually merged onto main). It DELIBERATELY does NOT apply the spec-test checks-length
+    //     floor — the whole point is to recover the 0-check strand — because a merged build + a
+    //     clean security review + a derived-shipped rollup is stronger evidence than any spec-test
+    //     signal, so the checks-floor is redundant here.
+    //     Enqueues each survivor via the SAME enqueue_fold RPC every other fold path uses
+    //     (advisory-lock coalesce + agent_jobs_one_queued_fold_idx unique index → idempotent; a
+    //     next-tick sweep never enqueues a duplicate). Best-effort per workspace + per spec so a
+    //     throw never breaks the reaper (the un-orphan + drainer passes above must still run for
+    //     other workspaces). Reuses the existing reaper node — no new node needed.
+    //
+    // Workspace enumeration mirrors the auto-fold cron ([[../inngest/spec-test-cron]]) — every
+    // workspace with any agent_jobs row (i.e. one that uses the build console). A workspace with
+    // NO pending/folding rows still needs this sweep, so the enumeration cannot come from the
+    // queue read above.
+    try {
+      const { data: wsRows } = await db
+        .from("agent_jobs")
+        .select("workspace_id")
+        .limit(1000);
+      const workspaceIds = Array.from(
+        new Set(((wsRows ?? []) as { workspace_id: string }[]).map((r) => r.workspace_id)),
+      );
+      for (const workspaceId of workspaceIds) {
+        await sweepStrandedFolds(workspaceId).catch((e) => {
+          console.warn(
+            `[fold-reaper:${workspaceId.slice(0, 8)}] stranded-fold pass errored (continuing): ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+      }
+    } catch (e) {
+      console.warn(
+        `[fold-reaper] stranded-fold workspace enumeration failed (continuing): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   } catch (e) {
     console.error("[fold-reaper] sweep errored (continuing):", e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — the per-workspace
+ * stranded-fold pass. Enumerates DERIVED-shipped specs, filters to those genuinely stranded
+ * (archived / in-flight / already-queued / already-folded dropped), requires security-clean + a
+ * merged build job, and enqueues each survivor through the shared `enqueue_fold` RPC. Idempotent
+ * (enqueue_fold coalesces per workspace; a second sweep against the same slug no-ops).
+ *
+ * Best-effort: any error is caught by the caller and logged; the reaper stays alive.
+ */
+async function sweepStrandedFolds(workspaceId: string): Promise<void> {
+  const tag = `[fold-reaper:${workspaceId.slice(0, 8)}]`;
+
+  const [{ getRoadmap, listArchivedSlugs }, { getSecurityStateBySlug }] = await Promise.all([
+    import("../src/lib/brain-roadmap"),
+    import("../src/lib/security-agent"),
+  ]);
+
+  const [{ specs: cards }, archived, securityBySlug] = await Promise.all([
+    getRoadmap(workspaceId),
+    listArchivedSlugs(),
+    getSecurityStateBySlug(db, workspaceId),
+  ]);
+  const archivedSet = new Set(archived);
+  // Derived-shipped only (the phase rollup — same rail getAutoFoldEligibleSlugs Rail 1 uses).
+  const shippedSlugs = cards.filter((c) => c.status === "shipped" && !archivedSet.has(c.slug)).map((c) => c.slug);
+  if (!shippedSlugs.length) return;
+
+  // Drop specs that already have a pending/folding row in this workspace — the queue already owns
+  // them and the primary drainer path will handle them. Read the full pending_folds set for this
+  // workspace once — cheap, and the caller's queueSnapshot didn't carry `spec_slug`.
+  const { data: pfRows } = await db
+    .from("pending_folds")
+    .select("spec_slug, status")
+    .eq("workspace_id", workspaceId)
+    .in("status", ["pending", "folding", "folded"]);
+  const alreadyQueued = new Set<string>();
+  const foldedSlugs = new Set<string>();
+  for (const r of (pfRows ?? []) as { spec_slug: string; status: string }[]) {
+    if (r.status === "folded") foldedSlugs.add(r.spec_slug);
+    else alreadyQueued.add(r.spec_slug);
+  }
+
+  // Drop specs with a live build/spec-test job (auto-folding it would orphan the running build —
+  // mirrors [[getAutoFoldEligibleSlugs]]'s fold-guard-live-build guard).
+  const { data: liveRows } = await db
+    .from("agent_jobs")
+    .select("spec_slug")
+    .eq("workspace_id", workspaceId)
+    .in("kind", ["build", "spec-test"])
+    .in("status", ACTIVE_BUILD_STATUSES);
+  const liveSlugs = new Set(((liveRows ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
+
+  // Merged-build set for this workspace — a build job kind='build' status='merged' means the PR
+  // actually landed on main ([[reconcileMergedJobs]] stamps it). Batched read over the shipped set.
+  const { data: buildRows } = await db
+    .from("agent_jobs")
+    .select("spec_slug")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "build")
+    .eq("status", "merged")
+    .in("spec_slug", shippedSlugs);
+  const mergedBuildSlugs = new Set(((buildRows ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
+
+  const recovered: string[] = [];
+  for (const slug of shippedSlugs) {
+    if (
+      !isStrandedFoldCandidate({
+        slug,
+        alreadyQueued,
+        foldedSlugs,
+        liveSlugs,
+        mergedBuildSlugs,
+        securityClean: !!securityBySlug[slug]?.completedClean,
+      })
+    ) {
+      continue;
+    }
+
+    // Enqueue via the SHARED enqueue_fold RPC (per-workspace advisory-lock coalesce; a second call
+    // for the same slug no-ops). Best-effort per spec — one RPC error must not break the sweep.
+    const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
+    if (error) {
+      console.warn(`${tag} stranded-fold enqueue_fold failed for ${slug}: ${error.message}`);
+      continue;
+    }
+    recovered.push(slug);
+  }
+  if (recovered.length) {
+    console.log(`${tag} recovered ${recovered.length} stranded shipped spec(s) via enqueue_fold: ${recovered.join(", ")}`);
   }
 }
 
