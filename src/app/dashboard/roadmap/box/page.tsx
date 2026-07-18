@@ -271,6 +271,47 @@ function fusedPreMergeInfo(
   };
 }
 
+// box-page-both-avatars-ping-pong Phase 1 — an ad-creative-copy-author session is a PING-PONG: Dahlia
+// (ad-creative) authors a creative, then Max (ad-creative-copy-qc / growth grader) independently grades
+// it, bouncing back and forth across the revise loop under ONE parent job. The card renders BOTH avatars
+// so the collaboration is visible at a glance — otherwise it reads as one long single-agent Dahlia
+// session. Every other kind (that isn't also a fused pre-merge lane) falls back to the single-avatar
+// path via the caller's `dual ?? single` compose.
+function pingPongInfo(
+  kind: string,
+): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
+  if (kind !== "ad-creative-copy-author") return null;
+  return {
+    personas: [getPersona("ad-creative"), getPersona("ad-creative-copy-qc")],
+    title: "Dahlia → Max · ad-creative ping-pong",
+    label: "author · copy-QC",
+  };
+}
+
+// box-page-both-avatars-ping-pong Phase 2 — while the parent ad-creative-copy-author job is a ping-pong,
+// only ONE sub-session is running at a time (Dahlia authoring OR Max grading). Phase 1 streams a
+// checklist from those sessions; whichever item is `in_progress` names the currently-active actor
+// (author/authoring/revise/revising → Dahlia; grade/grading/copy-qc/score → Max). Return that persona so
+// the card can render the single ACTIVE photo instead of the dual-avatar fallback — the ping-pong is
+// then legible at a glance both in composition (via the dual title/label chip from `dual`) AND in the
+// current actor. Return null when there's no unambiguous signal (idle, no checklist yet, or a step whose
+// text doesn't map to either persona) so the caller falls back to the dual (both-avatar) render.
+function activePingPongPersona(
+  kind: string,
+  checklist: SessionChecklistItem[] | null | undefined,
+): AgentPersona | null {
+  if (kind !== "ad-creative-copy-author") return null;
+  if (!checklist || checklist.length === 0) return null;
+  const inProgress = checklist.find((c) => c.status === "in_progress");
+  if (!inProgress) return null;
+  const text = `${inProgress.step} ${inProgress.note}`.toLowerCase();
+  // Match Max markers first — the copy-QC grader — so a "Max grade" step doesn't accidentally hit the
+  // Dahlia branch on the word "copy" (author/authoring/revise/revising = Dahlia is the fallback branch).
+  if (/\b(max|grade|grading|copy-?qc|qc|score)\b/.test(text)) return getPersona("ad-creative-copy-qc");
+  if (/\b(dahlia|author|authoring|revise|revising)\b/.test(text)) return getPersona("ad-creative");
+  return null;
+}
+
 function LaneCell({ lane }: { lane: LaneRow | null }) {
   if (!lane) {
     return (
@@ -285,11 +326,19 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
-  // A fused pre-merge lane (spec-test job on a claude/* branch) is ONE session emitting BOTH verdicts, so
-  // it renders both personas + a dual title / static sub-task label. Non-fused lanes are unchanged.
-  const fused = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge);
-  const title = fused
-    ? fused.title
+  // A card renders BOTH personas' avatars when the session has two collaborators: a fused pre-merge lane
+  // (spec-test job on a claude/* branch — ONE session emitting Vera's + Vault's verdicts off the same
+  // loaded diff) OR an ad-creative-copy-author ping-pong (Dahlia authors + Max independently grades under
+  // ONE parent job across the revise loop). Both cases render dual-avatar + a dual title + a static
+  // sub-task label chip; every other kind falls back to the single-avatar / single-persona path.
+  const dual = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge) ?? pingPongInfo(lane.kind);
+  // box-page-both-avatars-ping-pong Phase 2 — when Phase 1's checklist names an in-progress step whose
+  // text unambiguously maps to Dahlia (authoring/revising) or Max (grading), swap the ping-pong card's
+  // avatar to that persona's single photo so the currently-active actor is visible at a glance. Null
+  // (idle, no checklist, ambiguous step) means the card keeps the dual (both-avatar) fallback below.
+  const active = activePingPongPersona(lane.kind, lane.session_checklist);
+  const title = dual
+    ? dual.title
     : isCoach
       ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
       : gc
@@ -298,15 +347,20 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A fused
-          pre-merge lane shows BOTH avatars (Vera + Vault) side-by-side; every other lane keeps its single
+      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A dual-
+          persona lane (fused pre-merge OR ad-creative ping-pong) shows BOTH avatars side-by-side, unless
+          the ping-pong is currently mid-flight AND Phase 1's checklist unambiguously names the active
+          actor — then a single ACTIVE avatar swaps in (title/label chip below still reflect the dual
+          composition so the ping-pong context stays visible in text). Every other lane keeps its single
           avatar. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          {fused ? (
+          {active ? (
+            <PersonaAvatar persona={active} size={20} />
+          ) : dual ? (
             <span className="flex shrink-0 items-center -space-x-2">
-              <PersonaAvatar persona={fused.personas[0]} size={20} />
-              <PersonaAvatar persona={fused.personas[1]} size={20} />
+              <PersonaAvatar persona={dual.personas[0]} size={20} />
+              <PersonaAvatar persona={dual.personas[1]} size={20} />
             </span>
           ) : (
             <PersonaAvatar persona={persona} size={20} />
@@ -316,13 +370,13 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
         <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
       {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header).
-          A fused pre-merge lane appends a static 'spec-test · security' sub-task label so the card reads
-          correctly with NO session_checklist (Codex has no TodoWrite). */}
+          A dual-persona lane appends a static sub-task label so the card reads correctly with NO
+          session_checklist (Codex has no TodoWrite; the copy-QC bounce is fast). */}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-[26px]">
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
-        {fused && (
+        {dual && (
           <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-            {fused.label}
+            {dual.label}
           </span>
         )}
         {lane.account && (
@@ -554,28 +608,28 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
           {jobs.map((j) => {
             const persona = personaForKind(j.kind, j.director_function);
             const gc = gradeCoachInfo(j.kind, j.director_function); // grade/coach kinds → "Ada Grading" etc.
-            // A queued fused pre-merge spec-test renders both personas + a dual title, same as the
-            // in-flight lane treatment (consolidate-premerge-checks-one-session Phase 2).
-            const fused = fusedPreMergeInfo(j.kind, j.fused_pre_merge);
+            // A queued dual-persona job (fused pre-merge spec-test OR ad-creative-copy-author ping-pong)
+            // renders both personas + a dual title, same as the in-flight lane treatment.
+            const dual = fusedPreMergeInfo(j.kind, j.fused_pre_merge) ?? pingPongInfo(j.kind);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
-                {fused ? (
+                {dual ? (
                   <span className="flex shrink-0 items-center -space-x-2">
-                    <PersonaAvatar persona={fused.personas[0]} size={20} />
-                    <PersonaAvatar persona={fused.personas[1]} size={20} />
+                    <PersonaAvatar persona={dual.personas[0]} size={20} />
+                    <PersonaAvatar persona={dual.personas[1]} size={20} />
                   </span>
                 ) : (
                   <PersonaAvatar persona={persona} size={20} />
                 )}
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{fused ? fused.title : gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{dual ? dual.title : gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>
-                {fused && (
+                {dual && (
                   <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-                    {fused.label}
+                    {dual.label}
                   </span>
                 )}
                 {slugIsLink ? (
