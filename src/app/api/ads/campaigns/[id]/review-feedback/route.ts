@@ -84,7 +84,24 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       packet,
       createdBy: auth.user.id,
     });
-    return NextResponse.json({ feedback: row });
+    // Phase 2 auto-dispatch: enqueue an `ad-review-feedback` agent-jobs row so the box worker's
+    // deterministic router (`runAdReviewFeedbackJob` → `enqueueAdReviewFeedback`) plans the
+    // per-entry re-drives + the final Max re-QA. Fire-and-forget from the request's perspective —
+    // a driver error is logged but does NOT 500 the submit; the row is persisted (status='queued')
+    // and a future worker sweep can pick it up. Idempotency lives in the router's
+    // compare-and-set on `ad_review_feedback.status`, so a duplicate enqueue is a no-op.
+    const { error: jobErr } = await auth.admin.from("agent_jobs").insert({
+      workspace_id: workspaceId as string,
+      spec_slug: `ad-review-feedback:${row.id}`,
+      kind: "ad-review-feedback",
+      instructions: JSON.stringify({ ad_review_feedback_id: row.id }),
+    });
+    if (jobErr) {
+      console.error(
+        `[ad-review-feedback POST] agent_jobs enqueue failed for feedback=${row.id}: ${jobErr.message}`,
+      );
+    }
+    return NextResponse.json({ feedback: row, dispatched: !jobErr });
   } catch (e) {
     return NextResponse.json(
       { error: (e as Error).message },

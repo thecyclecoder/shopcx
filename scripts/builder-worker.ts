@@ -427,6 +427,13 @@ const MAX_AD_CREATIVE_COPY_AUTHOR = Number(process.env.AGENT_TODO_MAX_AD_CREATIV
 // nothing enqueues this kind yet. Concurrency-1 mirrors ad-creative-copy-author — the true
 // concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
 const MAX_AD_CREATIVE_COPY_QC = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_QC || 1);
+// ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-max-render Phase 2:
+// concurrency-1 claim lane for the new `ad-review-feedback` agent-kind. Deterministic-Node —
+// reads the queued ad_review_feedback row, plans the re-drives via routeAdReviewFeedback, and
+// inserts one agent_jobs row per plan step. Fast (a few DB writes); concurrency-1 keeps the
+// row-transition (queued → processing → done) trivially serialized, matching the sensor-trust
+// probe pattern.
+const MAX_AD_REVIEW_FEEDBACK = Number(process.env.AGENT_TODO_MAX_AD_REVIEW_FEEDBACK || 1);
 // dahlia-creative-qc-via-box-session Phase 1: each per-creative QC pass runs as a top-level
 // `claude -p` on Max via `runBoxLane`. Vision-only — reads ONE JPEG + emits the JSON verdict — so
 // a short cap is right; if the session blows past this we fail-closed to pass:false (regenerator
@@ -699,7 +706,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -777,6 +784,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "ad-creative",
   "ad-creative-copy-author",
   "ad-creative-copy-qc",
+  "ad-review-feedback",
   "ads-supervisor",
   "ticket-analyze",
   "ticket-handle",
@@ -3410,7 +3418,7 @@ const LANE_GROUPS = {
       MAX_GOD_MODE + MAX_PR_RESOLVE + MAX_REPAIR + MAX_REGRESSION + MAX_SECURITY_REVIEW +
       MAX_AGENT_GRADE + MAX_AGENT_COACH + MAX_DIRECTOR_GRADE + MAX_CAMPAIGN_GRADE + MAX_GAP_GRADE +
       MAX_RESEARCH + MAX_DR_CONTENT + MAX_MEDIA_BUYER + MAX_MEDIA_BUYER_GRADE + MAX_AD_CREATIVE +
-      MAX_AD_CREATIVE_COPY_AUTHOR + MAX_AD_CREATIVE_COPY_QC +
+      MAX_AD_CREATIVE_COPY_AUTHOR + MAX_AD_CREATIVE_COPY_QC + MAX_AD_REVIEW_FEEDBACK +
       MAX_STOREFRONT_OPTIMIZER + MAX_DB_HEALTH + MAX_COVERAGE_REGISTER + MAX_PROPOSED_GOAL +
       MAX_PROPOSED_MODEL_TIER,
     kinds: [
@@ -3418,7 +3426,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -21294,6 +21302,71 @@ async function runAdCreativeCopyQcJob(job: Job) {
 }
 
 /**
+ * ad-review-feedback lane (ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-
+ * max-render Phase 2). Deterministic-Node consumer of a queued `public.ad_review_feedback`
+ * row: reads the packet, calls `routeAdReviewFeedback` to plan the per-entry re-drives (copy →
+ * `ad-creative-copy-author`, image → `ad-creative`, max → `ad-creative-copy-qc`) plus a final
+ * whole-ad `ad-creative-copy-qc` re-QA, inserts one `agent_jobs` row per plan step, and flips
+ * the source row queued → processing → done via a compare-and-set (a same-row double-dispatch
+ * enqueues zero duplicates — the spec's idempotency rule).
+ *
+ * Instructions JSON (REQUIRED): { ad_review_feedback_id: string }. The row is looked up by
+ * `(workspace_id, id)`; a missing / non-queued row is a no-op.
+ *
+ * Always emits `emitAgentHeartbeat('ad-review-feedback', ok, latencyMs)` in a `finally`
+ * (the CLAUDE.md node-completeness invariant).
+ */
+async function runAdReviewFeedbackJob(job: Job) {
+  const tag = `[ad-review-feedback:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "started";
+  try {
+    let instr: { ad_review_feedback_id?: string } = {};
+    try {
+      instr = job.instructions ? JSON.parse(job.instructions) : {};
+    } catch {
+      /* not JSON — falls into the missing-id path below */
+    }
+    const feedbackId = instr.ad_review_feedback_id;
+    if (!feedbackId) {
+      ok = false;
+      detail = "missing ad_review_feedback_id in instructions";
+      console.error(`${tag} ${detail}`);
+      await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+      return;
+    }
+    const a = await admin();
+    const { enqueueAdReviewFeedback } = await import("../src/lib/ads/ad-review-feedback-router");
+    const result = await enqueueAdReviewFeedback(a, {
+      workspaceId: job.workspace_id,
+      adReviewFeedbackId: feedbackId,
+      specSlug: job.spec_slug,
+    });
+    detail = result.dispatched
+      ? `dispatched ${result.specs.length} re-drive(s) for feedback=${feedbackId}: ${result.specs.map((s) => s.kind).join(", ")}`
+      : `no-op (feedback=${feedbackId} not queued — already processing/done/failed)`;
+    console.log(`${tag} ${detail}`);
+    await update(job.id, {
+      status: "completed",
+      log_tail: JSON.stringify({ dispatched: result.dispatched, jobIds: result.jobIds }).slice(-2000),
+    });
+  } catch (err) {
+    ok = false;
+    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("ad-review-feedback", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
+/**
  * media-buyer-grade lane (media-buyer-test-winner-loop Phase 3). Deterministic-Node
  * grading pass over concluded Media Buyer director_activity rows. Reads each row's
  * decision-time signals (source_meta_ad_id, roas at decision time, policy version),
@@ -24197,6 +24270,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ad-creative") return runAdCreativeJob(job);
   if (job.kind === "ad-creative-copy-author") return runAdCreativeCopyAuthorJob(job);
   if (job.kind === "ad-creative-copy-qc") return runAdCreativeCopyQcJob(job);
+  if (job.kind === "ad-review-feedback") return runAdReviewFeedbackJob(job);
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
@@ -25688,7 +25762,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, ad-creative-copy-qc:${MAX_AD_CREATIVE_COPY_QC}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, ad-creative-copy-qc:${MAX_AD_CREATIVE_COPY_QC}, ad-review-feedback:${MAX_AD_REVIEW_FEEDBACK}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -25815,6 +25889,7 @@ async function main() {
   const countAdCreative = () => [...active.values()].filter((v) => v.kind === "ad-creative").length;
   const countAdCreativeCopyAuthor = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-author").length;
   const countAdCreativeCopyQc = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-qc").length;
+  const countAdReviewFeedback = () => [...active.values()].filter((v) => v.kind === "ad-review-feedback").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
@@ -26417,6 +26492,19 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ad-creative-copy-qc ${job.id.slice(0, 8)} → ${countAdCreativeCopyQc() + 1}/${MAX_AD_CREATIVE_COPY_QC} ad-creative-copy-qc lane`);
+        launch(job);
+      }
+      // Fill the ad-review-feedback lane (ceo-manual-ad-review-inline-per-element-feedback-
+      // routed-to-dahlia-max-render Phase 2): deterministic-Node consumer that reads a queued
+      // ad_review_feedback row, plans the per-entry re-drives via routeAdReviewFeedback, and
+      // inserts one agent_jobs row per plan step. Concurrency-1 keeps the row-transition
+      // (queued → processing → done) trivially serialized — the true concurrency of the
+      // resulting re-drives is enforced by the ad-creative* lanes themselves.
+      while (laneHasQueued(queuedKinds, ["ad-review-feedback"]) && countAdReviewFeedback() < MAX_AD_REVIEW_FEEDBACK) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["ad-review-feedback"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed ad-review-feedback ${job.id.slice(0, 8)} → ${countAdReviewFeedback() + 1}/${MAX_AD_REVIEW_FEEDBACK} ad-review-feedback lane`);
         launch(job);
       }
       // Fill the sensor-trust-probe lane (media-buyer-sensor-trust-probe Phase 2):
