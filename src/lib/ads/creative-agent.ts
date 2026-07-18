@@ -159,10 +159,17 @@ export const ANDROMEDA_CONCEPT_TAGS = [
 export type AndromedaConceptTag = (typeof ANDROMEDA_CONCEPT_TAGS)[number];
 
 /** dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — the SSOT enum of allowed
- *  `claim_trace.source` values. Mirrors the seven source-field names layer 1 names in the
+ *  `claim_trace.source` values. Mirrors the source-field names layer 1 names in the
  *  CLAIM-ONLY-WHAT'S-IN-THE-BRIEF table of `.claude/skills/dahlia-copy-author/SKILL.md`, and
  *  layer 3 (`src/lib/ads/never-fabricate.ts` `verifyClaimTrace`) branches on. A divergence would
- *  let a layer-1-valid citation fail layer-2 parse or vice-versa. */
+ *  let a layer-1-valid citation fail layer-2 parse or vice-versa.
+ *
+ *  `proofStack` — the brief's verified proof stack (`brief.proofStack`: 700K+ customers,
+ *  30-day money-back guarantee, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO,
+ *  3rd-party tested, Made In USA). Added by proofstack-is-a-citeable-claim-source so Dahlia
+ *  has a DIRECT source for the strongest brand facts (social proof + risk-reversal + authority)
+ *  instead of self-censoring them onto a non-existent `reviews-volume` cite. `supportingBenefit`
+ *  keeps its existing proof-stack fallback so grandfathered captions still ground. */
 export const AUTHOR_CLAIM_TRACE_SOURCES = [
   "ingredients",
   "ingredient_research",
@@ -171,6 +178,7 @@ export const AUTHOR_CLAIM_TRACE_SOURCES = [
   "supportingBenefit",
   "leadProof",
   "competitorDna",
+  "proofStack",
 ] as const;
 
 export type AuthorClaimTraceSource = (typeof AUTHOR_CLAIM_TRACE_SOURCES)[number];
@@ -824,7 +832,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna. A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts.",
   ].join("\n");
 }
 

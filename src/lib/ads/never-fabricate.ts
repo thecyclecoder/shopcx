@@ -22,10 +22,14 @@ import type { CreativeBrief } from "@/lib/ads/creative-brief";
 import type { PIReview, ProductIntelligence } from "@/lib/product-intelligence";
 import type { AuthorModeCopy } from "@/lib/ads/creative-agent";
 
-/** The seven allowed source-field names — the SSOT vocabulary layer 1 (SKILL.md) names in its
+/** The allowed source-field names — the SSOT vocabulary layer 1 (SKILL.md) names in its
  *  CLAIM-ONLY-WHAT'S-IN-THE-BRIEF table, layer 2 uses as the `claim_trace.source` enum on the
  *  AuthorModeCopy type, and layer 3 (this file) branches on. A divergence between the three would
- *  let a valid-per-layer-1 claim fail layer-2 parse or vice-versa. */
+ *  let a valid-per-layer-1 claim fail layer-2 parse or vice-versa.
+ *
+ *  `proofStack` is a first-class source (proofstack-is-a-citeable-claim-source) — Dahlia was
+ *  self-censoring 700K customers + 30-day money-back onto a non-existent `reviews-volume` cite;
+ *  giving her a direct source gate makes the strongest brand facts USABLE. */
 export const NEVER_FABRICATE_SOURCES = [
   "ingredients",
   "ingredient_research",
@@ -34,6 +38,7 @@ export const NEVER_FABRICATE_SOURCES = [
   "supportingBenefit",
   "leadProof",
   "competitorDna",
+  "proofStack",
 ] as const;
 
 export type NeverFabricateSource = (typeof NEVER_FABRICATE_SOURCES)[number];
@@ -167,6 +172,14 @@ function claimGroundedInSource(
  *   • `competitorDna` → the CreativeBrief today has no `competitorDna` field (the M2 debrand
  *     spec has not shipped yet), so the gate is fail-closed: `source_not_found`. When M2
  *     ships and the brief carries `competitorDna`, this branch will resolve the slot.
+ *   • `proofStack` → `brief.proofStack` contains an entry the `source_ref` matches (or the
+ *     claim is fact-grounded against the union of proofStack lines). This is the DIRECT
+ *     source for the verified brand facts (700K+ customers, 30-day money-back, 15K+
+ *     reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested, Made In USA) so
+ *     Dahlia doesn't have to launder them through `supportingBenefit`. Numbers still ground
+ *     against the same real-data corpus so a fabricated proofStack stat (e.g. "8,000,000+
+ *     customers") is `fabricated_number`. `supportingBenefit`'s existing proofStack fallback
+ *     is preserved for grandfathered captions.
  *
  * Returns `{ok:true, misses:[]}` when every entry traces cleanly; otherwise `ok=false` with a
  * typed miss per failing entry. The caller (creative-agent stockProduct) returns the miss list
@@ -278,6 +291,25 @@ export function verifyClaimTrace(
       if (!lp) { misses.push(miss("source_not_found")); continue; }
       const combined = `${lp.attribution ?? ""} ${lp.text ?? ""}`;
       { const g = claimGroundedInSource(claim, combined, numericFacts(combined)); if (g) { misses.push(miss(g)); continue; } }
+      continue;
+    }
+
+    if (source === "proofStack") {
+      // proofstack-is-a-citeable-claim-source — brief.proofStack is the DIRECT source for the
+      // verified brand facts (700K+ customers · 30-day money-back · 15K+ reviews · Gourmet
+      // Magazine 'Best Tasting' · Non-GMO · 3rd-party tested · Made In USA). The `source_ref`
+      // matches one of the proofStack lines (CI containsCI); the claim then grounds against
+      // the UNION of proofStack (a proof claim legitimately combines several verified points —
+      // "clean, non-GMO, 3rd party tested, made in USA"). Numbers still ground against the
+      // named corpus so a fabricated stat ("8,000,000+ customers") is `fabricated_number`
+      // even though the token appears elsewhere.
+      const stack = brief.proofStack ?? [];
+      if (stack.length === 0) { misses.push(miss("source_not_found")); continue; }
+      const match = stack.find((s) => containsCI(s, source_ref) || containsCI(source_ref, s))
+        ?? stack.find((s) => claimGroundedInSource(claim, s, numericFacts(s)) === null);
+      if (!match) { misses.push(miss("source_not_found")); continue; }
+      const joined = stack.join(" ");
+      { const g = claimGroundedInSource(claim, joined, numericFacts(joined)); if (g) { misses.push(miss(g)); continue; } }
       continue;
     }
 

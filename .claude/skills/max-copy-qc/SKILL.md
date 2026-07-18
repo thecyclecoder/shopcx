@@ -99,6 +99,21 @@ or in-copy phrase in `evidence` — no unattributed hard-gate fails.**
    the brief says "shown in a small pilot"), or an authority ("Harvard doctors recommend"). A
    claim the brief backs is fine — a claim only the caption backs, or that INFLATES the brief's
    claim, is a fail. Cite the fabricated phrase.
+
+   **⚠️ The brief's `proofStack` is GROUNDED — CREDIT it, never flag it as fabrication
+   (proofstack-is-a-citeable-claim-source).** These are REAL, CEO-verified brand facts and
+   are the strongest Cialdini levers we own:
+   - **`700,000+ customers`** — social proof (real customer count). Grounded.
+   - **`30-day money-back guarantee`** — risk reversal / Cialdini commitment. Grounded.
+   - **`15,000+ reviews`** — social-proof volume. Grounded.
+   - **`Best Tasting — Gourmet Magazine`** — authority endorsement. Grounded.
+   - **`Non-GMO`** · **`3rd-party tested`** · **`Made In USA`** — authority credentials. Grounded.
+
+   A caption that cites any of these is grounded proof — pass `no_fabrication:true` and REWARD
+   the use in the persuasion rubric (`cialdini` → social proof + commitment/risk-reversal +
+   authority). Dropping them or flagging them as fabrication is exactly the failure mode this
+   spec closes. Numbers still ground against the brief — a fabricated inflation like
+   `"8,000,000+ customers"` (when proofStack says 700K) IS fabrication and should fail.
 2. **`no_cold_offer`** — for a `cold` `AUDIENCE_TEMPERATURE`, the caption does NOT lead with a
    discount / percent-off / dollar-off / free-shipping / "limited time" bump; a cold buyer
    doesn't know the price they're saving off. A `warm` / `hot` audience is exempt (offer-first
@@ -130,7 +145,7 @@ string per non-zero score citing the phrase you're rewarding.
 |---|---|---|---|
 | **`lf8`** (LF8 — Life Force 8) | no primal driver invoked | one driver named | one driver embodied in a concrete, physical scene |
 | **`schwartz`** (Schwartz sophistication) | mismatched to audience temperature | correct level but generic | correct level executed with a fresh angle for the sophistication |
-| **`cialdini`** (Cialdini triggers) | no trigger | one trigger named | one trigger dramatized with a specific proof point |
+| **`cialdini`** (Cialdini triggers) | no trigger | one trigger named | one trigger dramatized with a specific proof point (the brief's `proofStack` — `700,000+ customers` / `30-day money-back guarantee` / `Best Tasting — Gourmet Magazine` — is grounded and should score `2` when actually used) |
 | **`hopkins`** (Hopkins specificity) | vague ("clinically studied") | one specific claim | multiple specifics stacked ("3-week pilot with 42 women showed 68% reported…") |
 | **`sugarman`** (Sugarman flow / seduction) | flat / disconnected | one seduction beat (curiosity, story hook) | multiple beats compounding — greased slide |
 
