@@ -8,26 +8,13 @@
 
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { decrypt } from "@/lib/crypto";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { appstleSubscriptionAction } from "@/lib/appstle";
 
 async function appstleResume(workspaceId: string, contractId: string) {
-  const { healOnTouch } = await import("@/lib/appstle-pricing");
-  await healOnTouch(workspaceId, contractId);
-  const admin = createAdminClient();
-  const { data: ws } = await admin.from("workspaces")
-    .select("appstle_api_key_encrypted")
-    .eq("id", workspaceId).single();
-  if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
-  const apiKey = decrypt(ws.appstle_api_key_encrypted);
-
-  const res = await fetch(
-    `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=ACTIVE`,
-    { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
-  );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Appstle API error: ${res.status} ${text}`);
+  const result = await appstleSubscriptionAction(workspaceId, contractId, "resume");
+  if (!result.success) {
+    throw new Error(`Appstle API error: ${result.error ?? "unknown"}`);
   }
 }
 
