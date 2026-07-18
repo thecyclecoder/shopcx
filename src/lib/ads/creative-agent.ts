@@ -1152,18 +1152,37 @@ async function runCopyAuthorSessionForImage(
   }
 }
 
-/** Broadcast an AuthorModeCopy verdict to a full MetaCopyPack whose 4 headlines + 4 primary texts
- *  are each a single-unique repeat of Dahlia's authored strings (author mode collapses the
- *  deterministic rotation to ONE variant — the caption Dahlia wrote is what Meta sees regardless
- *  of the placement it lands in). Passes CREATIVE_PACK_MIN.headlines / primaryTexts by
- *  construction so downstream `planCreativePackInserts` + `isCreativePackComplete` are unchanged.
- *  Each string is clipped to META_CAPS so a slightly-over-limit author string doesn't blow the
- *  DB write; the SKILL.md already tells Dahlia to stay under limit. */
-export function authorCopyPack(copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description">): MetaCopyPack {
+/** Build a MetaCopyPack from an AuthorModeCopy verdict. When the verdict carries
+ *  `variations` (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 —
+ *  five per-framework hooks LED by LF8 / Schwartz / Cialdini / Hopkins / Sugarman), the pack's
+ *  headlines[]/primaryTexts[] are the FIVE DISTINCT variation strings and `frameworks[]` is
+ *  parallel — headlines[i] came from frameworks[i]'s lens. This is the fix for
+ *  authorCopyPack's old one-caption-broadcast: Meta rotates true A/B lever tests instead of the
+ *  same string in four slots. When `variations` is absent (single-caption back-compat: legacy
+ *  author sessions, deterministic paths that hand a canonical caption without the five-variation
+ *  set), the pack falls back to CREATIVE_PACK_MIN copies of the single canonical headline +
+ *  primary text and omits `frameworks` — no fabricated labels. Every string is clipped to
+ *  META_CAPS so a slightly-over-limit author string doesn't blow the DB write; the SKILL.md
+ *  already tells Dahlia to stay under limit. CREATIVE_PACK_MIN.headlines / primaryTexts hold by
+ *  construction in both branches (5 ≥ 4 with variations, 4 = 4 without), so
+ *  `planCreativePackInserts` + `isCreativePackComplete` are unchanged. */
+export function authorCopyPack(
+  copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description" | "variations">,
+): MetaCopyPack {
   const clip = (s: string, cap: number): string => (s.length > cap ? s.slice(0, cap) : s);
+  const description = clip(copy.description, META_CAPS.description);
+  if (copy.variations && copy.variations.length > 0) {
+    // Five distinct framework-led variations → parallel headlines[]/primaryTexts[]/frameworks[].
+    // Each variation stays a COMPLETE ad (Phase 1's parser enforces non-empty headline + primary
+    // text per entry); the render on the detail page labels each slot by its framework.
+    const headlines = copy.variations.map((v) => clip(v.headline, META_CAPS.headline));
+    const primaryTexts = copy.variations.map((v) => clip(v.primaryText, META_CAPS.primary_text));
+    const frameworks = copy.variations.map((v) => v.framework);
+    return { headlines, primaryTexts, description, frameworks };
+  }
+  // Back-compat: single-caption verdict → the pre-Phase-2 broadcast shape (no frameworks[] label).
   const headline = clip(copy.headline, META_CAPS.headline);
   const primary = clip(copy.primaryText, META_CAPS.primary_text);
-  const description = clip(copy.description, META_CAPS.description);
   return {
     headlines: Array<string>(CREATIVE_PACK_MIN.headlines).fill(headline),
     primaryTexts: Array<string>(CREATIVE_PACK_MIN.primaryTexts).fill(primary),

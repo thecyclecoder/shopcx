@@ -393,6 +393,55 @@ test("authorCopyPack: clips strings past META_CAPS (Meta hard limits — headlin
   assert.ok(pack.description.length <= 90, `description over cap: ${pack.description.length}`);
 });
 
+// dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 2 —
+// authorCopyPack builds distinct labeled slots when the verdict carries the five per-framework
+// variations, and preserves the single-caption broadcast when absent.
+
+test("authorCopyPack (Phase 2): five per-framework variations → five DISTINCT labeled slots (no one-caption broadcast)", () => {
+  const variations = [
+    { framework: "lf8" as const, headline: "Feel lighter. Finally.", primaryText: "LF8-led hook." },
+    { framework: "schwartz" as const, headline: "Not another diet. A better cup.", primaryText: "Schwartz-led hook." },
+    { framework: "cialdini" as const, headline: "700,000+ customers. 15K reviews.", primaryText: "Cialdini-led hook." },
+    { framework: "hopkins" as const, headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hopkins-led hook." },
+    { framework: "sugarman" as const, headline: "Stop dieting. Drink this instead.", primaryText: "Sugarman-led hook." },
+  ];
+  const pack = authorCopyPack({ headline: "canonical", primaryText: "canonical primary", description: "desc", variations });
+  // Five slots — not the CREATIVE_PACK_MIN broadcast.
+  assert.equal(pack.headlines.length, 5);
+  assert.equal(pack.primaryTexts.length, 5);
+  assert.ok(pack.frameworks, "frameworks[] must be present when variations were supplied");
+  assert.equal(pack.frameworks!.length, 5);
+  // Every slot is DISTINCT — the one-caption-to-four-slots pattern is gone.
+  assert.equal(new Set(pack.headlines).size, 5, "headlines must be five distinct strings, not one broadcast");
+  assert.equal(new Set(pack.primaryTexts).size, 5, "primary texts must be five distinct strings, not one broadcast");
+  // frameworks[i] labels headlines[i] + primaryTexts[i].
+  for (let i = 0; i < variations.length; i++) {
+    assert.equal(pack.frameworks![i], variations[i].framework);
+    assert.equal(pack.headlines[i], variations[i].headline);
+    assert.equal(pack.primaryTexts[i], variations[i].primaryText);
+  }
+  // Every framework token is one of the five rubric axes.
+  const rubricAxes = new Set(["lf8", "schwartz", "cialdini", "hopkins", "sugarman"]);
+  assert.ok(pack.frameworks!.every((f) => rubricAxes.has(f)), "every framework label must be a rubric axis");
+});
+
+test("authorCopyPack (Phase 2): variations absent → back-compat broadcast (no frameworks[], four identical slots)", () => {
+  const pack = authorCopyPack({ headline: "A", primaryText: "B", description: "C" });
+  assert.equal(pack.headlines.length, 4);
+  assert.equal(pack.primaryTexts.length, 4);
+  assert.equal(pack.frameworks, undefined, "no fabricated framework labels when variations weren't authored");
+});
+
+test("authorCopyPack (Phase 2): variations clipped to META_CAPS per slot", () => {
+  const long = "x".repeat(2000);
+  const variations = AUTHOR_FRAMEWORK_KEYS.map((framework) => ({ framework, headline: long, primaryText: long }));
+  const pack = authorCopyPack({ headline: "c", primaryText: "c", description: "c", variations });
+  for (let i = 0; i < pack.headlines.length; i++) {
+    assert.ok(pack.headlines[i].length <= 40, `variation ${i} headline over cap: ${pack.headlines[i].length}`);
+    assert.ok(pack.primaryTexts[i].length <= 600, `variation ${i} primary over cap: ${pack.primaryTexts[i].length}`);
+  }
+});
+
 // ── runCopyAuthorSession — the revise loop ──────────────────────────────────────────────────────
 
 test("runCopyAuthorSession (b): a good verdict on the first attempt → ok with attempts=1", async () => {

@@ -51,13 +51,28 @@ export function placementPackPlan(): PlacementPackPlan {
   };
 }
 
-/** The 4-headline + 4-primary-text pack. One LF8 driver / consumer-psychology core, varied hooks —
- *  NOT a temperature spread. Every string is capped to Meta's hard limits ([[../ad-tool-config]]
- *  META_CAPS: headline ≤40 · primary_text ≤125). */
+/** The N-headline + N-primary-text pack (N ≥ CREATIVE_PACK_MIN, currently 4). One LF8 driver /
+ *  consumer-psychology core, varied hooks — NOT a temperature spread. Every string is capped to
+ *  Meta's hard limits ([[../ad-tool-config]] META_CAPS: headline ≤40 · primary_text ≤125). The
+ *  optional `frameworks` array is parallel to headlines[]/primaryTexts[] — when the copy came
+ *  from Dahlia's author session with per-framework variations
+ *  ([[../ads/creative-agent]] `AuthorModeCopy.variations` — LF8 / Schwartz / Cialdini / Hopkins /
+ *  Sugarman), each slot carries the framework token that LED its headline so the detail-page
+ *  render can label the variation and Meta rotates true A/B lever tests. When absent (deterministic
+ *  `buildMetaCopyPack` or the legacy single-caption author broadcast) the pack is unlabeled — no
+ *  fabricated framework tag. */
 export interface MetaCopyPack {
-  headlines: string[];      // exactly 4
-  primaryTexts: string[];   // exactly 4
+  headlines: string[];      // ≥ CREATIVE_PACK_MIN.headlines
+  primaryTexts: string[];   // ≥ CREATIVE_PACK_MIN.primaryTexts
   description: string;      // ≤30 chars (offer treatment)
+  /** dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 2 — one
+   *  conversion-psychology framework token per slot, PARALLEL to headlines[]/primaryTexts[]
+   *  (frameworks[i] labels headlines[i] + primaryTexts[i]). Present only when the copy came
+   *  from a variations-carrying `AuthorModeCopy`; absent for deterministic packs + legacy
+   *  broadcast packs. Persisted to `product_ad_angles.metadata.copy_pack.frameworks`
+   *  (JSONB — no migration, orthogonal to the temperature-keyed
+   *  ad_creative_copy_variants path). */
+  frameworks?: string[];
 }
 
 /** Minimum sizes for a "publish-ready" pack — [[../ads/creative-agent]] `readyStatusForAngle` +
