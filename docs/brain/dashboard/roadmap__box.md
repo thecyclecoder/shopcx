@@ -33,6 +33,8 @@ An unknown group key falls back to its raw key so a new group added on the box s
 
 The `BoxChip` on the roadmap header shows the BUILD/PLAN pool only (`lane_groups.build_plan.cap`) — before this it counted every non-fold kind against `build_lanes`, so the chip could also overflow.
 
+**⭐ Dual-persona session cards (`box-page-shows-both-avatars-for-ping-pong-ad-creative-sessions`).** A session that has TWO collaborators under ONE parent job renders BOTH personas' avatars side-by-side (overlapping via `-space-x-2`) + a dual title + a static sub-task label chip, so the collaboration is visible at a glance and the card doesn't read as one long single-agent session. Two flavors: (1) a fused pre-merge spec-test lane (`kind='spec-test' && fused_pre_merge=true`) — Vera + Vault emit both verdicts off the SAME loaded diff in ONE session (`fusedPreMergeInfo`); (2) an ad-creative-copy-author ping-pong (`kind='ad-creative-copy-author'`) — Dahlia (ad-creative) authors a creative and Max (ad-creative-copy-qc / growth grader) independently grades it, bouncing back and forth across the revise loop under ONE parent job (`pingPongInfo`). The `LaneCell` (in-flight) + `QueuedJobsLog` (queued) both compose `dual = fusedPreMergeInfo(...) ?? pingPongInfo(...)`; every other kind falls back to the single-avatar path via `personaForKind(kind)`. Pure display — no change to job/lane logic.
+
 ## Sub-routes
 
 _None._
