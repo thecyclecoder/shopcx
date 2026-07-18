@@ -1,0 +1,1 @@
+- **Escape the COPY_QC data-fence markers so untrusted copy/brief can't break out and forge Max's verdict** · verified 2026-07-18 · → [[../libraries/creative-agent]]
