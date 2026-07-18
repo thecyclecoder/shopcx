@@ -1,0 +1,1 @@
+- **Anchor the box tile's behind-too-long elapsed to when drift began, not worker uptime** · verified 2026-07-18 · → [[../inngest/control-tower-monitor]]
