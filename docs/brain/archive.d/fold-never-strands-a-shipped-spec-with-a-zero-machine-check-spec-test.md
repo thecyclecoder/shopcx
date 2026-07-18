@@ -1,0 +1,1 @@
+- **Fold must never strand a genuinely-shipped spec whose spec-test recorded 0 machine checks** · verified 2026-07-18 · → [[../tables/pending_folds]] · [[../libraries/spec-test-runs]]
