@@ -1,0 +1,1 @@
+- **Box page: split the 'other' lane bucket into Producer agents vs Supervisory agents** · verified 2026-07-18 · → [[../dashboard/roadmap__box]]
