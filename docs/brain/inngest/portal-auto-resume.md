@@ -1,8 +1,14 @@
 # inngest/portal-auto-resume
 
-Resumes paused subs at `pause_resume_at`. Used by cancel-flow pause remedies + crisis Tier 3.
+Resumes paused subs at `pause_resume_at` using the shared internal-aware subscription action path. Used by cancel-flow pause remedies + crisis Tier 3.
 
 **File:** `src/lib/inngest/portal-auto-resume.ts`
+
+## Implementation
+
+The cron uses [[../libraries/appstle]]'s `appstleSubscriptionAction` to resume subscriptions. This ensures internal subscriptions are handled correctly: internal subs are marked active locally without touching Appstle, while Appstle-managed subs resume through the Appstle API. This prevents internal-* contract ids from being sent to Appstle, which would fail as invalid (internal ids are UUIDs that Appstle doesn't recognize).
+
+Helper function: `appstleResume(workspaceId, contractId)` → calls `appstleSubscriptionAction(..., "resume")` and throws on error, preserving failure visibility in cron logs.
 
 ## Functions
 
