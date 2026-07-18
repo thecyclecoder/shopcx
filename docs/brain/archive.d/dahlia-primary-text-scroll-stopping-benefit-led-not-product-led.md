@@ -1,0 +1,1 @@
+- **Dahlia's primary text must be scroll-stopping and benefit-led (not product-led), front-loaded for Meta's ellipsis** · verified 2026-07-18 · → [[../libraries/copy-rubric]]
