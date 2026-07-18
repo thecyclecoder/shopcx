@@ -1,0 +1,1 @@
+- **Max's 7/10 gates only Bianca's postability — the ad is ALWAYS binned, never discarded; plus fix Max's null-verdict** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
