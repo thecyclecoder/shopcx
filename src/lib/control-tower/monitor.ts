@@ -1721,7 +1721,9 @@ const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "p
 
 /**
  * READ-ONLY: overdue active internal subscriptions that AREN'T already owned by an active
- * dunning cycle (build-control-tower-renewal-integrity-exclude-active-dunning Phase 1).
+ * dunning cycle (build-control-tower-renewal-integrity-exclude-active-dunning Phase 1) AND
+ * that were eligible for the LAST renewal-cron run (control-tower-renewal-integrity-post-cron-activation-grace
+ * Phase 1 — latest-renewal-cron-grace fingerprint).
  *
  * An overdue internal sub whose payment failed and dunning is waiting for the next retry is
  * a HEALTHY retention state, not a renewal-cron miss — counting it as renewal_integrity
@@ -1730,20 +1732,46 @@ const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "p
  * dunning-owned subs remain visible through the stuck-dunning assertion if their retry
  * schedule is missed.
  *
+ * `latestRenewalCronBeatIso` is the ran_at of the most recent internal-subscription-renewal-cron
+ * heartbeat. Subs whose `updated_at` is strictly LATER than that timestamp changed AFTER the
+ * cron already ran (e.g. a paused sub the portal auto-resumed post-cron), so the cron cannot
+ * be blamed for missing them yet — the assertion waits for the next daily cycle to judge. If
+ * the beat timestamp is null (no beat recorded), no grace is applied (fail-safe: the assertion
+ * still flags real misses).
+ *
  * The join is on subscription_id (internal UUID) per the CLAUDE.md invariant that internal
  * joins never go through shopify_*_id. The spec-test sandbox is excluded on both sides so a
  * seeded stuck-overdue fixture can't inflate the real count.
  */
-export async function countRenewalIntegrityOverdueSubs(admin: Admin, startOfTodayIso: string): Promise<number> {
+export async function countRenewalIntegrityOverdueSubs(
+  admin: Admin,
+  startOfTodayIso: string,
+  latestRenewalCronBeatIso: string | null = null,
+): Promise<number> {
   const { data: overdueRows, error: overdueErr } = await admin
     .from("subscriptions")
-    .select("id")
+    .select("id, updated_at")
     .eq("is_internal", true)
     .eq("status", "active")
     .lt("next_billing_date", startOfTodayIso)
     .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
   if (overdueErr || !overdueRows || overdueRows.length === 0) return 0;
-  const overdueIds = overdueRows.map((r) => (r as { id: string }).id);
+
+  // Latest-renewal-cron grace: drop overdue subs whose row changed strictly AFTER the last
+  // renewal-cron beat — those subs weren't eligible when the cron ran, so a miss isn't yet
+  // provable. The next daily cycle will re-judge them.
+  const beatMs = latestRenewalCronBeatIso != null ? new Date(latestRenewalCronBeatIso).getTime() : null;
+  const eligibleRows = beatMs == null || !Number.isFinite(beatMs)
+    ? overdueRows
+    : overdueRows.filter((r) => {
+        const upd = (r as { updated_at: string | null }).updated_at;
+        if (!upd) return true; // no updated_at → treat as pre-beat (conservative: still counted)
+        const updMs = new Date(upd).getTime();
+        if (!Number.isFinite(updMs)) return true;
+        return updMs <= beatMs;
+      });
+  if (eligibleRows.length === 0) return 0;
+  const overdueIds = eligibleRows.map((r) => (r as { id: string }).id);
 
   const { data: coveredRows, error: coveredErr } = await admin
     .from("dunning_cycles")
@@ -1773,7 +1801,18 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const segFreshCutoffIso = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
   const segStaleCutoffIso = new Date(Date.now() - SEGMENT_COVERAGE_MAX_AGE_MS).toISOString();
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, renewalCronBeat, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
+  // Read the latest renewal-cron beat FIRST — countRenewalIntegrityOverdueSubs uses it to grace
+  // out subs whose row changed after the cron already ran (post-cron-activation grace, Phase 1).
+  const { data: renewalCronBeatData } = await admin
+    .from("loop_heartbeats")
+    .select("ran_at")
+    .eq("loop_id", "internal-subscription-renewal-cron")
+    .order("ran_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const latestRenewalCronBeatIso = (renewalCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
+
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -1809,10 +1848,10 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     // Subs already owned by an ACTIVE dunning cycle (rotating/retrying/paused/skipped) are
     // subtracted — a payment-failed sub waiting for its retry date is healthy retention state,
     // not a renewal-cron miss (build-control-tower-renewal-integrity-exclude-active-dunning P1).
-    countRenewalIntegrityOverdueSubs(admin, startOfToday.toISOString()),
-    // The latest renewal-cron beat marks the start of the LIVE current cycle — outcome beats since
-    // then belong to it (vs everything older = the rolling baseline).
-    admin.from("loop_heartbeats").select("ran_at").eq("loop_id", "internal-subscription-renewal-cron").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
+    // Subs whose updated_at post-dates the latest renewal-cron beat are also skipped — they
+    // weren't eligible when the cron last ran, so a miss isn't yet provable
+    // (control-tower-renewal-integrity-post-cron-activation-grace P1).
+    countRenewalIntegrityOverdueSubs(admin, startOfToday.toISOString(), latestRenewalCronBeatIso),
     // Stuck dunning: 'retrying' with next_retry_at older than the grace. (next_retry_at < x is
     // null-safe — null next_retry_at rows are excluded, so a cycle awaiting scheduling isn't flagged.)
     admin
@@ -1849,7 +1888,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
   // rolling baseline (the prior cycles before it). Aggregated from the per-sub outcome beats.
-  const cycleStartIso = (renewalCronBeat.data as { ran_at: string } | null)?.ran_at ?? new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+  const cycleStartIso = latestRenewalCronBeatIso ?? new Date(Date.now() - 26 * 60 * 60_000).toISOString();
   const baselineStartIso = new Date(new Date(cycleStartIso).getTime() - RENEWAL_BASELINE_WINDOW_MS).toISOString();
   const [renewalCurrent, renewalBaseline] = await Promise.all([
     aggregateRenewalOutcomes(admin, cycleStartIso),

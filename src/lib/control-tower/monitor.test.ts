@@ -1037,6 +1037,7 @@ interface FakeSubscriptionRow {
   is_internal: boolean;
   status: string;
   next_billing_date: string;
+  updated_at?: string | null;
 }
 interface FakeDunningRow {
   subscription_id: string | null;
@@ -1180,6 +1181,72 @@ test("countRenewalIntegrityOverdueSubs: cancelled/inactive subs and non-internal
   });
   const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO);
   assert.equal(n, 0);
+});
+
+// ── Latest-renewal-cron-grace tests
+// (control-tower-renewal-integrity-post-cron-activation-grace P1) — an overdue sub whose row
+// changed AFTER the cron already ran (e.g. a paused sub the portal auto-resumed post-cron)
+// isn't yet blamable on the renewal cron; the next daily cycle re-judges it.
+
+// The last renewal cron ran a few hours before "today" — well before OVERDUE_ISO.
+const LAST_CRON_BEAT_ISO = "2026-07-13T09:00:00.000Z";
+// A sub row was updated AFTER the last cron ran (e.g. auto-resumed at 12:00 UTC).
+const POST_CRON_UPDATE_ISO = "2026-07-13T12:00:00.000Z";
+// A sub row that was last touched BEFORE the last cron beat.
+const PRE_CRON_UPDATE_ISO = "2026-07-13T06:00:00.000Z";
+
+test("countRenewalIntegrityOverdueSubs: overdue sub whose row was updated AFTER the last renewal-cron beat is graced (not counted)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      // Auto-resumed at 12:00 UTC — after the 09:00 UTC cron already finished. The cron
+      // couldn't renew this sub because it was still paused during its run, so the assertion
+      // must wait for the next daily cycle to judge it.
+      {
+        id: "sub-post-cron-resume",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: POST_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: overdue sub whose row was updated BEFORE the last renewal-cron beat still counts", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      // This sub was active + overdue at 06:00 UTC — the cron at 09:00 UTC should have
+      // renewed it and didn't. Real miss → still counts.
+      {
+        id: "sub-pre-cron",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 1);
+});
+
+test("countRenewalIntegrityOverdueSubs: grace is off when no renewal-cron beat is known (null) — every overdue sub still counts", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-a", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO, updated_at: POST_CRON_UPDATE_ISO },
+      { id: "sub-b", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO, updated_at: PRE_CRON_UPDATE_ISO },
+    ],
+    dunning_cycles: [],
+  });
+  // Null beat ⇒ fail-safe: no grace, both overdue rows count. A missing beat can't hide a real miss.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, null);
+  assert.equal(n, 2);
 });
 
 // ─── Box-emitted cron freshness suppression during worker outage
