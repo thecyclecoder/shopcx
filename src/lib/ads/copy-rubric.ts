@@ -73,9 +73,30 @@ Dr. Edward Whitman's Life-Force-8 is the eight desires ALL humans share (surviva
 food/drink, freedom from fear/pain, sexual companionship, comfortable living, superiority,
 protection of loved ones, social approval). A benefit-driven ad hits at least one; a feature-dump
 ad hits none.
-- 2: two or more distinct LF8 keywords appear in headline+primary text
-- 1: exactly one LF8 keyword appears
-- 0: zero LF8 keywords — the ad reads like a feature/spec dump`;
+Benefits-not-product (Cashvertising, advisory-soft) — LF8 counts keywords because those
+keywords ARE the reader's benefit vocabulary. Lead every headline and primary text with the
+OUTCOME the reader gets (the transformation, the feeling, the pain removed) — the product is
+only the vehicle, the benefit is the promise. Strongest for COLD audiences (Schwartz 1-2):
+they do not know the brand yet, they only care about the outcome; a product-led opener
+buries the benefit behind the SKU and typically scores 0-1 on this axis.
+- Reward a benefit-led opener that names the reader's outcome in the first line (LF8
+  keywords surface naturally): "feel lighter", "steady focus, no crash", "curb the
+  cravings", "sleep through the night".
+- Dock a product-led opener that names the product/brand before the benefit:
+  "Amazing Coffee is a mushroom coffee that…", "Meet Superfoods…", "Our formula contains…"
+  — the benefit is downstream, LF8 fires late (or not at all), the axis drops.
+- Dock a feature/ingredient list opener ("With lion's mane, chaga, and cordyceps…") — a
+  feature-dump lists what's in the box, not what the reader gets, so the keywords rarely
+  hit.
+Advisory-soft — this is the AUTHORING intent behind the deterministic keyword-density count;
+the scorer stays the same simple hit-counter, and the guidance is what pushes both Dahlia
+(self-score) and Max (QC) to write in a way that makes the count land honestly.
+- 2: two or more distinct LF8 keywords appear in headline+primary text (usually the sign of
+     a benefit-led opener)
+- 1: exactly one LF8 keyword appears (a mixed opener — one benefit token, otherwise
+     product/feature)
+- 0: zero LF8 keywords — the ad reads like a feature/spec dump or a product-led opener with
+     no benefit surfaced`;
 
 export const SCHWARTZ_LEVELS_1_TO_5 = `Schwartz (5 stages of awareness) — 0-2
 Eugene Schwartz's 5 stages: (1) UNAWARE — reader doesn't know they have a problem; (2)
@@ -164,6 +185,29 @@ Joe Sugarman's rule: the SOLE purpose of the first sentence is to get you to rea
 the second, to get you to read the third. Every line earns the next line, or gets cut.
 Curiosity hooks ("what if", "why", "how", "the truth", "here's", "imagine", or a direct
 question) plus a multi-sentence body keep the reader sliding.
+Scroll-stop + ellipsis-aware opener (advisory-soft) — Meta truncates primary text after
+roughly the first 1-2 lines with a '...more' ellipsis, so the OPENING 1-2 lines carry the
+entire scroll-stop burden. Those lines must be a curiosity / unexpected / contrarian
+pattern-interrupt that MAKES a scrolling reader think 'wait, what?' and tap '...more' —
+NOT a product intro, NOT a flat benefit-list summary, NOT a feature/ingredient list.
+- Reward a primary text whose opening (pre-ellipsis) 1-2 lines are a curiosity / unexpected
+  / contrarian pattern-interrupt that leads with the reader's BENEFIT: an open loop ("The
+  one thing every coffee drinker gets wrong…"), a reversal ("Everyone said cut back on
+  coffee. She did the opposite."), a contrarian claim ("Cutting calories is why the weight
+  came back."), a pattern-interrupt story ("Kaitlyn was down 40 lbs before she noticed her
+  cravings were gone.").
+- Dock a product-led opener ("<Product> is a mushroom coffee that…", "Meet <Brand>…",
+  "Our formula contains…") — the reader has no reason to expand past the ellipsis.
+- Dock a flat one-line benefit-summary that gives the whole promise away before the
+  ellipsis ("Lose weight, feel great, no jitters.") — a summary tells the reader they are
+  done; there is nothing left behind '...more'.
+- Dock a feature / ingredient list opener ("With lion's mane, chaga, and cordyceps…") —
+  the reader is scrolling for outcomes, not for a bill of materials.
+Advisory-soft — this is the AUTHORING intent behind the deterministic hook + multi-sentence
+scorer; the axis stays a simple 0-2 within the 0-10 self-score (never a hard gate). A hook
+strong enough to earn 2 despite an average score elsewhere is exactly the shape the
+scroll-stop rule rewards; a flat or product-led opener drops the axis regardless of how
+many sentences follow.
 Four line-earns-the-next micro-rules — apply in order when authoring:
 - Micro-rule 1: first sentence ≤ 1-second reading time. If a scroller can't finish the opener
   in a beat, they never see the second. Cut adjectives until it fits.
@@ -173,9 +217,12 @@ Four line-earns-the-next micro-rules — apply in order when authoring:
   benefit / proof so every claim earns credibility before the next claim asks for attention.
 - Micro-rule 4: the last line invites the click, does not summarize. A summary tells the
   reader they're done; a soft CTA ("see it before it restocks") slides them to the button.
-- 2: copy has a curiosity hook AND primary text has multiple sentences
-- 1: copy has a curiosity hook OR multi-sentence primary text (not both)
-- 0: neither — the copy is a flat one-line statement with no pull`;
+- 2: copy has a curiosity hook AND primary text has multiple sentences (front-loaded
+     curiosity+benefit opener that earns the '...more' expand)
+- 1: copy has a curiosity hook OR multi-sentence primary text (not both) — the opener
+     earns some expand but not both
+- 0: neither — a flat one-line statement, a product-led opener, or a benefit-list summary
+     with no pull past the ellipsis`;
 
 // ─── deterministic sub-scorers ────────────────────────────────────────────────────
 

@@ -345,6 +345,81 @@ test("scoreConversionPsychology: the Phase 3 rail is SOFT — a high-scoring RIF
   assert.ok(result.total >= 6, `expected soft rail to leave the total ≥6, got ${result.total} (subs=${JSON.stringify(result.subs)})`);
 });
 
+// ─── Phase 2 (dahlia-primary-text-scroll-stopping-benefit-led-not-product-led) ────
+// Scroll-stop + ellipsis-aware opener guidance (in SUGARMAN_SLIPPERY_SLIDE) and
+// benefits-not-product guidance (in LF8_SUBSCORE_RUBRIC) are advisory-soft — the
+// deterministic scorers stay the same, but the descriptor TEXT sharpens the authoring
+// intent so both Dahlia's self-score and Max's independent QC push toward a front-loaded
+// curiosity+benefit opener and away from a product-led or flat-summary opener. Pin the
+// tokens so a future refactor cannot quietly strip the guidance back to framework names.
+test("SUGARMAN_SLIPPERY_SLIDE: pins the scroll-stop + ellipsis-aware opener guidance (Phase 2)", () => {
+  // The core rule: opening 1-2 lines carry the entire scroll-stop burden because Meta
+  // truncates primary text with a '...more' ellipsis after ~1-2 lines.
+  assert.ok(/scroll-stop/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected 'scroll-stop' in Sugarman descriptor");
+  assert.ok(/ellipsis/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected 'ellipsis' in Sugarman descriptor");
+  assert.ok(/\.{3}more|…more|…more/.test(SUGARMAN_SLIPPERY_SLIDE), "expected Meta's '...more' / '…more' ellipsis marker verbatim");
+  // Advisory-soft — never a hard gate, so a strong hook offsets an average score elsewhere
+  // but does not deny the floor-clear.
+  assert.ok(/advisory-soft/i.test(SUGARMAN_SLIPPERY_SLIDE), "Sugarman scroll-stop guidance must be advisory-soft");
+  assert.ok(/never a hard gate/i.test(SUGARMAN_SLIPPERY_SLIDE), "Sugarman scroll-stop guidance must state 'never a hard gate'");
+  // Reward shape — a curiosity / unexpected / contrarian pattern-interrupt that leads
+  // with the reader's benefit.
+  assert.ok(/pattern-interrupt/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected 'pattern-interrupt' opener shape");
+  assert.ok(/contrarian/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected 'contrarian' opener shape");
+  // Anti-patterns docked: product-led opener + flat benefit-summary + feature list.
+  assert.ok(/product-led/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected 'product-led' opener listed as docked");
+  assert.ok(/flat.*benefit-summary|benefit-list|benefit-summary/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected flat benefit-summary / benefit-list opener listed as docked");
+  assert.ok(/feature\s*\/?\s*ingredient list|feature.*list/i.test(SUGARMAN_SLIPPERY_SLIDE), "expected feature/ingredient list opener listed as docked");
+});
+
+test("LF8_SUBSCORE_RUBRIC: pins the benefits-not-product Cashvertising guidance (Phase 2)", () => {
+  // The core rule: lead with the reader's OUTCOME; the product is the vehicle, the benefit
+  // is the promise. Strongest for COLD audiences (Schwartz 1-2).
+  assert.ok(/benefits-not-product/i.test(LF8_SUBSCORE_RUBRIC), "expected 'benefits-not-product' framing in LF8 descriptor");
+  assert.ok(/cashvertising/i.test(LF8_SUBSCORE_RUBRIC), "expected 'Cashvertising' reference in LF8 descriptor");
+  assert.ok(/advisory-soft/i.test(LF8_SUBSCORE_RUBRIC), "LF8 benefits-not-product guidance must be advisory-soft");
+  assert.ok(/vehicle/i.test(LF8_SUBSCORE_RUBRIC), "expected 'vehicle' framing (product is vehicle, benefit is promise)");
+  assert.ok(/cold/i.test(LF8_SUBSCORE_RUBRIC), "expected COLD-audience emphasis (Schwartz 1-2)");
+  // Reward shape — benefit-led opener.
+  assert.ok(/benefit-led opener/i.test(LF8_SUBSCORE_RUBRIC), "expected 'benefit-led opener' reward shape");
+  // Dock shape — product-led opener.
+  assert.ok(/product-led opener/i.test(LF8_SUBSCORE_RUBRIC), "expected 'product-led opener' dock shape");
+});
+
+test("renderRubricForPrompt: Phase 2 sharpening propagates into the rendered rubric prompt", () => {
+  // The renderer must embed the sharpened descriptors verbatim so Dahlia's author session
+  // and Max's QC session both see the scroll-stop + benefits-not-product guidance.
+  const rendered = renderRubricForPrompt();
+  assert.ok(/scroll-stop/i.test(rendered), "expected scroll-stop guidance in renderRubricForPrompt output");
+  assert.ok(/ellipsis/i.test(rendered), "expected ellipsis guidance in renderRubricForPrompt output");
+  assert.ok(/benefits-not-product/i.test(rendered), "expected benefits-not-product guidance in renderRubricForPrompt output");
+  // The rendered rubric must still be byte-stable across invocations after Phase 2.
+  const a = renderRubricForPrompt();
+  const b = renderRubricForPrompt();
+  assert.equal(a, b, "renderRubricForPrompt must remain byte-stable after Phase 2 sharpening");
+});
+
+test("Phase 2 rails are ADVISORY-SOFT — a rubric-good copy that ignores the scroll-stop opener still scores", () => {
+  // Belt-and-suspenders: prove the scroll-stop guidance does NOT hard-fail a copy that
+  // otherwise hits the axes. This is the "never a hard gate" invariant the spec pins.
+  const copy: Copy = {
+    headline: "43% more energy in 14 days — Superfoods Coffee",
+    primaryText: "Superfoods Coffee is a clean-energy blend. It has 6 hours of focus. Loved by 10,000+ customers. Try risk-free today.",
+    description: "Save 20% off today only.",
+  };
+  const result = scoreConversionPsychology(copy, makeBrief());
+  // A product-led opener ('Superfoods Coffee is a clean-energy blend.') would be DOCKED per
+  // the Phase 2 authoring guidance, but the deterministic Sugarman scorer still counts the
+  // multi-sentence body + a curiosity marker elsewhere — the axis is advisory-soft, not a
+  // hard gate. The total must still land in-range and the sub-scores must still be integers
+  // in {0,1,2}.
+  for (const key of SUB_KEYS) {
+    const v = result.subs[key];
+    assert.ok(v === 0 || v === 1 || v === 2, `sub-score ${key} out of {0,1,2}: ${v}`);
+  }
+  assert.ok(result.total >= 0 && result.total <= 10, `total out of 0..10: ${result.total}`);
+});
+
 test("copy-rubric.ts imports LF8_KEYWORDS from lf8.ts (no duplicate keyword list)", async () => {
   // If the module were to shadow LF8_KEYWORDS with its own list, this import would be dead
   // weight and the SSOT invariant would break. Read the source and pin the import line.

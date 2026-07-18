@@ -52,6 +52,15 @@ The deep vocabulary the descriptors carry:
 
 The unit tests pin the presence of `L1..L5`, the seven Cialdini names, the three Hopkins rules, and the four Sugarman micro-rules in `renderRubricForPrompt()`'s output while still enforcing byte-stability across repeated calls — the SSOT invariant [[../specs/dahlia-conversion-psychology-rubric-module]] shipped.
 
+### Phase 2 — scroll-stop + ellipsis-aware + benefits-not-product opener guidance ([[../specs/dahlia-primary-text-scroll-stopping-benefit-led-not-product-led]], 2026-07-18)
+
+The **SUGARMAN** and **LF8** sub-descriptors carry sharpened Cashvertising guidance so the 0-10 self-score honestly rewards a front-loaded curiosity+benefit opener and docks a product-led or flat-summary opener. Both rails are **advisory-soft** — never hard gates — so the deterministic scorers stay unchanged; the descriptor text is what pushes Dahlia's self-score and Max's independent QC toward the same authoring intent.
+
+- **SUGARMAN (scroll-stop + ellipsis-aware opener).** Meta truncates primary text after roughly the first 1-2 lines with a `…more` ellipsis, so the opening 1-2 lines carry the entire scroll-stop burden. The descriptor rewards a curiosity / unexpected / contrarian pattern-interrupt opener that leads with the reader's benefit (an open loop, a reversal, a contrarian claim, a pattern-interrupt story) and docks a product-led opener (`"<Product> is…"` / `"Meet <Brand>…"`), a flat one-line benefit-summary that gives the whole promise away before the ellipsis, and a feature/ingredient list opener. The `2 / 1 / 0` bands are updated so a hook the reader has no reason to expand past cannot score `2` regardless of how many sentences follow.
+- **LF8 (benefits-not-product Cashvertising).** LF8 counts keywords because those keywords ARE the reader's benefit vocabulary. The descriptor calls out that leading with the reader's OUTCOME (the transformation, the feeling, the pain removed) makes the LF8 keyword-count land honestly, while a product-led opener that names the product/brand before any benefit typically buries the count. Strongest for COLD audiences (Schwartz 1-2). The deterministic scorer stays the same simple hit-counter — the guidance is what makes the count reflect authoring intent.
+
+Both descriptors state `advisory-soft — never a hard gate` in their own text; the total remains a 0-10 self-score. Mirrored in the [[../../.claude/skills/dahlia-copy-author/SKILL.md]] `self_score` section so Dahlia self-scores against the same axis intent Max's QC will score against. Pinned in `src/lib/ads/copy-rubric.test.ts` (Phase 2 tokens: `scroll-stop`, `ellipsis`, `pattern-interrupt`, `contrarian`, `product-led`, `benefits-not-product`, `Cashvertising`, `advisory-soft`, `never a hard gate`, and the `…more` marker) with a belt-and-suspenders check that a product-led-but-otherwise-rubric-good copy still scores in-range — the "never a hard gate" invariant.
+
 ## API
 
 ```ts
