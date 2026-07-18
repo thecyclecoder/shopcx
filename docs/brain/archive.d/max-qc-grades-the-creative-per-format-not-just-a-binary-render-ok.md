@@ -1,0 +1,1 @@
+- **Max grades the creative per-format, not just a binary render_ok** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
