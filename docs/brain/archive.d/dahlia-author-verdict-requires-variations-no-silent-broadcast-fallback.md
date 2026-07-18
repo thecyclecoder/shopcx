@@ -1,0 +1,1 @@
+- **Require the per-framework variations array on Dahlia's author verdict — no silent fallback to identical broadcast** · verified 2026-07-18 · → [[../libraries/creative-agent]]
