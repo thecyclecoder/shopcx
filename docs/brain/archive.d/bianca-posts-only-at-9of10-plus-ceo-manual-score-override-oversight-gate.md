@@ -1,0 +1,1 @@
+- **CEO oversight gate: Bianca posts only at Max 9/10, plus a CEO manual score override (Max's real grade preserved)** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
