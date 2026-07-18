@@ -1,0 +1,1 @@
+- **Route portal auto-resume through the internal-aware subscription dispatcher** · verified 2026-07-18 · → [[../inngest/portal-auto-resume]]

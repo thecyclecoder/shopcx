@@ -127,6 +127,9 @@ async function appstleSwapProduct(workspaceId: string, contractId: string, oldVa
 - `src/lib/portal/handlers/order-now.ts`
 - `src/lib/portal/handlers/reactivate.ts`
 
+**Inngest + crons** (use the shared internal-aware dispatcher):
+- [[../inngest/portal-auto-resume]] — calls `appstleSubscriptionAction(..., "resume")` to resume paused subs, routing internal subs through local updates and Appstle subs through the Appstle API
+
 ## Gotchas
 
 - Internal-sub guard everywhere — `isInternalSubscription()` short-circuits before any HTTP call.
