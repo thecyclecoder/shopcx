@@ -1,0 +1,1 @@
+- **All product ads ALWAYS publish under the single Superfoods Company FB page + Instagram** · verified 2026-07-18 · → [[../libraries/media-buyer-publish-identity]]
