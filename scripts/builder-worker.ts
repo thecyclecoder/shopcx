@@ -60,6 +60,7 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
 import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2); isMissingSessionError powers the copy-author self-heal resume failsafe
 import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
+import type { CopyQcSessionDispatcher } from "../src/lib/ads/creative-qa"; // type-only — max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 dispatcher signature; the impl is dynamic-imported like the author/qa dispatchers
 
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) {
@@ -21012,6 +21013,49 @@ async function runAdCreativeJob(job: Job) {
     }
   };
   console.log(`${tag} DAHLIA_COPY_MODE=${copyAuthorMode}${copyAuthorMode === "author" ? " — per-creative dahlia-copy-author box session engaged" : " — deterministic buildMetaCopyPack (default)"}`);
+  // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — Max's INDEPENDENT
+  // copy-QC dispatcher. Mirrors the copy-author dispatcher above: same runBoxLane spawn on Max
+  // (kind='ad-creative-copy-qc', sandbox='qc' — no ANTHROPIC_API_KEY, minimal env), same
+  // PreToolUse gate script the QC/author paths use (allow Read on the exact tmp jpeg via
+  // AD_CREATIVE_QC_ALLOWED_IMAGE, deny everything else). Fail-closed contract: any spawn
+  // error / cap / timeout / gate deny surfaces as { isError:true } and
+  // runQaCreativeCopyViaBoxSession converts it to a fail-closed bounce so nothing unchecked
+  // reaches the persistence step.
+  //
+  // Kill-switch: DAHLIA_QC_COPY_MODE=off skips the dispatcher (workspace-level rollback lever).
+  // Default: 'box' (ON) — the CEO's design is that Max grades EVERY author-mode creative
+  // (spec: "enable it by default (not a dormant DAHLIA_QC_COPY_MODE=off)"). Any value other
+  // than 'off' falls through to the default 'box' path (safest default: fail toward the new
+  // path we tested rather than silently regressing).
+  const copyQcMode = (process.env.DAHLIA_QC_COPY_MODE || "box").toLowerCase() === "off" ? "off" : "box";
+  let copyQcCounter = 0;
+  const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+    copyQcCounter++;
+    const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+    try {
+      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+        configDir: cfg,
+        kind: "ad-creative-copy-qc",
+        // Least-privilege — same profile as `sandbox: "qc"` / the copy-author lane; the QC child
+        // only Reads ONE tmp jpeg + emits ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/
+        // META_/ANTHROPIC_/OPENAI_ credential.
+        sandbox: "qc",
+        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+        // Same env-var name keeps the gate script single-source-of-truth across QC / author / copy-qc.
+        permissionGate: { hookCommand: qcPermissionHookCommand },
+        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+      }));
+      if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
+      return { resultText: run.resultText || "", isError: run.isError };
+    } catch (err) {
+      console.error(`${qcTag} copy-QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      return { resultText: "", isError: true };
+    }
+  };
+  console.log(`${tag} DAHLIA_QC_COPY_MODE=${copyQcMode}${copyQcMode === "box" ? " — per-creative max-copy-qc box session engaged (default ON)" : " — Max copy-QC disabled"}`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
     const result = await runAdCreativeLoop(a, {
@@ -21025,6 +21069,10 @@ async function runAdCreativeJob(job: Job) {
       // the workspace-level flag is `author`; unset / `deterministic` leaves it undefined and
       // stockProduct's `authorModeEngaged` guard collapses to false (deterministic path).
       copyAuthorDispatcher: copyAuthorMode === "author" ? copyAuthorDispatcher : undefined,
+      // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — inject Max's copy-QC
+      // dispatcher by default (DAHLIA_QC_COPY_MODE=box). Skipped only when the workspace-level
+      // flag is explicitly 'off' — the CEO's design is Max grades EVERY author-mode creative.
+      copyQcDispatcher: copyQcMode === "box" ? copyQcDispatcher : undefined,
     });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
@@ -21133,6 +21181,32 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
         return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
       }
     };
+    // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — force Max's copy-QC
+    // ON in the bench lane too. The caller enqueued this kind to exercise the real box paths,
+    // so we always inject the copy-QC dispatcher regardless of DAHLIA_QC_COPY_MODE. Same
+    // sandbox / gate / env pattern as the copy-author dispatcher above (single tmp jpeg, minimal
+    // env, TodoWrite + Read on the allowed image only).
+    let copyQcCounter = 0;
+    const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+      copyQcCounter++;
+      const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-qc",
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }));
+        if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${qcTag} copy-QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
     const result = await runAdCreativeLoop(a, {
       workspaceId: job.workspace_id,
@@ -21144,6 +21218,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
       // path the box can't run — see the qa_no_anthropic_key note above.)
       qcDispatcher,
       copyAuthorDispatcher,
+      copyQcDispatcher,
     });
     detail = `produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`;
     console.log(`${tag} ${detail}`);
