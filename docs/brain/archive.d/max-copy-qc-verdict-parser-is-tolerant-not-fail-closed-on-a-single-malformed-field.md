@@ -1,0 +1,1 @@
+- **Max's copy-QC verdict parser tolerates a single malformed field instead of discarding the whole verdict** · verified 2026-07-18 · → [[../libraries/creative-qa]]
