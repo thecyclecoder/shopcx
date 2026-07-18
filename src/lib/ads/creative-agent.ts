@@ -665,9 +665,18 @@ const COPY_AUTHOR_INJECTION_GUARDRAIL =
  *  or the model's context. */
 const COPY_AUTHOR_FIELD_MAX_LEN = 8000;
 
-/** Sanitize ONE untrusted string for embedding inside the copy-author DATA block. Same rules as
- *  the QC sandbox's sanitizer: neutralize control chars, backticks, leading '---', and the DATA
- *  block boundary markers so a review body can't forge a new block or a fake JSON verdict. */
+/** Sanitize ONE untrusted string for embedding inside EITHER the copy-author DATA block OR
+ *  Max's copy-QC DATA block. Neutralizes control chars, backticks, leading '---', and BOTH
+ *  fence families' boundary markers (`===BEGIN/END_AUTHOR_DATA_v1===` +
+ *  `===BEGIN/END_COPY_QC_DATA_v1===`) so an untrusted product / review / brief / copy string
+ *  can't forge a fake block or a fake JSON verdict on either lane.
+ *
+ *  fix-copy-qc-data-fence-prompt-injection (2026-07-18) — this function is the single
+ *  choke-point sanitizer used by BOTH `buildCopyAuthorPrompt` (author fence) AND
+ *  `buildCopyQcPromptPreamble` (QC fence). Before this fix it only escaped the AUTHOR
+ *  markers, so an injected COPY_QC end marker in an untrusted brief / review / self-score
+ *  field could close Max's fence and inject a passing `CopyQaVerdict` — bypassing the 7/10
+ *  ad-spend gate. The symmetric COPY_QC marker escaping closes that hole. */
 export function sanitizeAuthorField(raw: unknown): string {
   if (typeof raw !== "string") return "";
   let s = raw.replace(/\r\n/g, "\n");
@@ -681,6 +690,8 @@ export function sanitizeAuthorField(raw: unknown): string {
   s = s.replace(/^---/gm, "\\---");
   s = s.replace(/===BEGIN_AUTHOR_DATA_v1===/g, "==\\=BEGIN_AUTHOR_DATA_v1=\\==");
   s = s.replace(/===END_AUTHOR_DATA_v1===/g, "==\\=END_AUTHOR_DATA_v1=\\==");
+  s = s.replace(/===BEGIN_COPY_QC_DATA_v1===/g, "==\\=BEGIN_COPY_QC_DATA_v1=\\==");
+  s = s.replace(/===END_COPY_QC_DATA_v1===/g, "==\\=END_COPY_QC_DATA_v1=\\==");
   if (s.length > COPY_AUTHOR_FIELD_MAX_LEN) {
     const kept = s.slice(0, COPY_AUTHOR_FIELD_MAX_LEN);
     return `${kept}…[TRUNCATED ${s.length - COPY_AUTHOR_FIELD_MAX_LEN} chars]`;
@@ -1287,7 +1298,10 @@ async function runCopyAuthorSessionForImage(
  *  `===END_COPY_QC_DATA_v1===` markers `.claude/skills/max-copy-qc/SKILL.md` documents; kept
  *  exported so a unit test can pin them. Every field inside the fence runs through
  *  `sanitizeAuthorField` so an untrusted brief/copy string can't forge a fake block or a fake
- *  verdict. */
+ *  verdict — fix-copy-qc-data-fence-prompt-injection (2026-07-18) extended that sanitizer to
+ *  escape BOTH marker families (AUTHOR + COPY_QC), so an injected COPY_QC end marker in any
+ *  untrusted field can no longer close the fence and forge a passing verdict that would
+ *  bypass the 7/10 ad-spend gate. */
 export const COPY_QC_DATA_BLOCK_BEGIN = "===BEGIN_COPY_QC_DATA_v1===";
 export const COPY_QC_DATA_BLOCK_END = "===END_COPY_QC_DATA_v1===";
 
