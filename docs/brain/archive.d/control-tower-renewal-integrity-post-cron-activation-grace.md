@@ -1,0 +1,1 @@
+- **Stop renewal-integrity from paging on subscriptions activated after the daily renewal cron** · verified 2026-07-18 · → [[../lifecycles/control-tower]]
