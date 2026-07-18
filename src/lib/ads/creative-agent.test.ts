@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief, ScoredAngle } from "@/lib/ads/creative-brief";
-import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature, markPureCompetitorMinoritySlot } from "./creative-agent";
+import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature, markPureCompetitorMinoritySlot, validateCopyParagraphStructure, PARAGRAPH_CLOSE_MAX_WORDS, validateCopyHumanVoice, formatHumanVoiceLocation, EM_DASH, EN_DASH } from "./creative-agent";
 
 test("readyStatusForAngle holds a null angle out of 'ready'", () => {
   assert.equal(readyStatusForAngle(null), "draft");
@@ -212,4 +212,257 @@ test("markPureCompetitorMinoritySlot: 2 competitor slots → the second (last) i
   markPureCompetitorMinoritySlot(plan);
   assert.equal(plan[0].pureCompetitor, undefined);
   assert.equal(plan[1].pureCompetitor, true);
+});
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 ────────────
+
+test("validateCopyParagraphStructure: a proper long-form 3-paragraph text passes", () => {
+  const primary = [
+    "Everyone said cut the coffee. She did the opposite.",
+    "",
+    "Barbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee, a real coffee roasted with six functional mushrooms and grass-fed collagen that 700,000 people quietly reach for every morning. No crash, no jitter, no afternoon dip.",
+    "",
+    "See what a different cup can do.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(primary);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.ok(result.hookWords > 0);
+    assert.ok(result.bodyWords > result.hookWords, "body should be longer than hook");
+    assert.ok(result.closeWords <= PARAGRAPH_CLOSE_MAX_WORDS);
+  }
+});
+
+test("validateCopyParagraphStructure: a one-line blob fails not_three_paragraphs", () => {
+  const blob = "Try Amazing Coffee — feel lighter, no jitters, all-day focus.";
+  const result = validateCopyParagraphStructure(blob);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 1);
+  }
+});
+
+test("validateCopyParagraphStructure: a 2-paragraph shape fails not_three_paragraphs", () => {
+  const twoPara = [
+    "Everyone said cut the coffee. She did the opposite.",
+    "",
+    "Barbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee and told her friends. See what a different cup can do.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(twoPara);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 2);
+  }
+});
+
+test("validateCopyParagraphStructure: a hook that isn't shorter than the body fails hook_not_shortest", () => {
+  const hookHeavy = [
+    "One two three four five six seven eight nine ten.",
+    "",
+    "One two three four five.",
+    "",
+    "Click here.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(hookHeavy);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "hook_not_shortest");
+    assert.equal(result.paragraphCount, 3);
+  }
+});
+
+test("validateCopyParagraphStructure: a runaway close fails close_too_long", () => {
+  const runawayClose = [
+    "Short hook line.",
+    "",
+    "This is a longer body paragraph with proof and specifics and multiple beats stacked to deliver the info that backs the hook and earns the click.",
+    "",
+    // 30 words — over the 25-word cap
+    "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(runawayClose);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "close_too_long");
+    assert.ok(result.closeWords > PARAGRAPH_CLOSE_MAX_WORDS);
+  }
+});
+
+test("validateCopyParagraphStructure: single \\n between lines is a same-paragraph break (splits only on blank lines)", () => {
+  // Two 'paragraphs' separated by a single \n stay as ONE paragraph — the split is on `/\n\s*\n/`.
+  const singleBreak = "Line one.\nLine two.\nLine three.";
+  const result = validateCopyParagraphStructure(singleBreak);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 1);
+  }
+});
+
+test("validateCopyParagraphStructure: tolerates whitespace-only 'blank' lines between paragraphs", () => {
+  // Real caption emitters sometimes indent a blank line with a space — the regex `\n\s*\n` covers it.
+  const spacedBlank = "Everyone said cut the coffee. She did the opposite.\n   \nBarbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee, and 700,000 people rely on it every morning.\n\nSee what a different cup can do.";
+  const result = validateCopyParagraphStructure(spacedBlank);
+  assert.equal(result.ok, true);
+});
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 — human-voice validator ─
+
+const cleanVariations = [
+  { framework: "lf8" as const, headline: "Feel lighter. Finally.", primaryText: "LF8 hook." },
+  { framework: "schwartz" as const, headline: "Not another diet.", primaryText: "Schwartz hook." },
+  { framework: "cialdini" as const, headline: "700K customers.", primaryText: "Cialdini hook." },
+  { framework: "hopkins" as const, headline: "15 lbs in 3 weeks.", primaryText: "Hopkins hook." },
+  { framework: "sugarman" as const, headline: "Stop dieting.", primaryText: "Sugarman hook." },
+];
+
+test("validateCopyHumanVoice: caption with NO em-dashes anywhere passes", () => {
+  const result = validateCopyHumanVoice({
+    headline: "Clean energy, no crash",
+    primaryText: "Steady focus, all morning. No jitter, no crash, no afternoon dip.",
+    description: "Adaptogens.",
+    variations: cleanVariations,
+  });
+  assert.equal(result.ok, true);
+});
+
+test("validateCopyHumanVoice: em-dash in primaryText fails em_dash_ai_tell with the canonical location", () => {
+  const result = validateCopyHumanVoice({
+    headline: "Clean energy",
+    primaryText: `Steady focus ${EM_DASH} no crash, no jitter.`,
+    description: "Adaptogens.",
+    variations: cleanVariations,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.misses.length, 1);
+    assert.equal(result.misses[0].reason, "em_dash_ai_tell");
+    assert.equal(result.misses[0].location.kind, "canonical");
+    if (result.misses[0].location.kind === "canonical") {
+      assert.equal(result.misses[0].location.field, "primaryText");
+    }
+    assert.match(result.misses[0].evidence, /—/);
+  }
+});
+
+test("validateCopyHumanVoice: em-dash in headline is caught separately", () => {
+  const result = validateCopyHumanVoice({
+    headline: `Clean energy ${EM_DASH} no crash`,
+    primaryText: "Steady focus, all morning.",
+    description: "Adaptogens.",
+    variations: cleanVariations,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.misses.length, 1);
+    assert.equal(result.misses[0].location.kind, "canonical");
+    if (result.misses[0].location.kind === "canonical") {
+      assert.equal(result.misses[0].location.field, "headline");
+    }
+  }
+});
+
+test("validateCopyHumanVoice: em-dash in a variation is caught with the framework name", () => {
+  const badVariations = [
+    { framework: "lf8" as const, headline: `Feel lighter ${EM_DASH} finally.`, primaryText: "clean." },
+    ...cleanVariations.slice(1),
+  ];
+  const result = validateCopyHumanVoice({
+    headline: "Clean",
+    primaryText: "Clean.",
+    description: "Clean.",
+    variations: badVariations,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.misses.length, 1);
+    assert.equal(result.misses[0].location.kind, "variation");
+    if (result.misses[0].location.kind === "variation") {
+      assert.equal(result.misses[0].location.framework, "lf8");
+      assert.equal(result.misses[0].location.field, "headline");
+    }
+  }
+});
+
+test("validateCopyHumanVoice: comma / period rewrite of an em-dash caption passes", () => {
+  // The exact rewrite the SKILL teaches — an em-dash caption gets a comma or a period.
+  const commaRewrite = validateCopyHumanVoice({
+    headline: "Clean energy, no crash",
+    primaryText: "Steady focus. No jitter. No crash. No afternoon dip.",
+    description: "Adaptogens.",
+    variations: cleanVariations,
+  });
+  assert.equal(commaRewrite.ok, true);
+});
+
+test("validateCopyHumanVoice: SPACED en-dash used as a sentence dash fails en_dash_as_sentence_dash", () => {
+  const result = validateCopyHumanVoice({
+    headline: "Clean",
+    primaryText: `Steady focus ${EN_DASH} no crash.`,
+    description: "Clean.",
+    variations: cleanVariations,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.misses.length, 1);
+    assert.equal(result.misses[0].reason, "en_dash_as_sentence_dash");
+  }
+});
+
+test("validateCopyHumanVoice: UNSPACED en-dash range (e.g. a numeric or date range) passes — only sentence-dash usage is flagged", () => {
+  // A `14–day` (no spaces) is a legitimate range; the validator must NOT flag it.
+  const result = validateCopyHumanVoice({
+    headline: `A 14${EN_DASH}day change`,
+    primaryText: `Between 14${EN_DASH}day and 30${EN_DASH}day windows, results held.`,
+    description: "Clean.",
+    variations: cleanVariations,
+  });
+  assert.equal(result.ok, true);
+});
+
+test("validateCopyHumanVoice: multiple offending fields → misses list carries every hit at once (revise reason cites all)", () => {
+  // Two hits — one canonical, one variation — so the caller can compose ONE revise reason
+  // string that names both instead of forcing two revises for two related issues.
+  const badVariations = [
+    { framework: "sugarman" as const, headline: `Stop dieting ${EM_DASH} drink this.`, primaryText: "clean." },
+    ...cleanVariations.slice(1),
+  ];
+  const result = validateCopyHumanVoice({
+    headline: `Clean energy ${EM_DASH} no crash`,
+    primaryText: "Clean.",
+    description: "Clean.",
+    variations: badVariations,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.misses.length, 2);
+    // A single scan surfaces every hit — the caller composes the revise reason from the whole list.
+    const locations = result.misses.map((m) => formatHumanVoiceLocation(m.location));
+    assert.deepEqual(locations.sort(), ["headline", "variations[sugarman].headline"]);
+  }
+});
+
+test("formatHumanVoiceLocation: canonical fields → bare field name; variation fields → variations[framework].field", () => {
+  assert.equal(
+    formatHumanVoiceLocation({ kind: "canonical", field: "primaryText" }),
+    "primaryText",
+  );
+  assert.equal(
+    formatHumanVoiceLocation({ kind: "canonical", field: "headline" }),
+    "headline",
+  );
+  assert.equal(
+    formatHumanVoiceLocation({ kind: "canonical", field: "description" }),
+    "description",
+  );
+  assert.equal(
+    formatHumanVoiceLocation({ kind: "variation", framework: "lf8", field: "headline" }),
+    "variations[lf8].headline",
+  );
+  assert.equal(
+    formatHumanVoiceLocation({ kind: "variation", framework: "sugarman", field: "primaryText" }),
+    "variations[sugarman].primaryText",
+  );
 });
