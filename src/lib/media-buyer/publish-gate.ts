@@ -24,6 +24,11 @@ import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { isCopyQcEligible, MAX_QC_ELIGIBILITY_FLOOR } from "@/lib/ads/creative-agent";
 import { readLatestCopyQaVerdict, type StoredCopyQaVerdict } from "@/lib/ads/creative-qa";
+import {
+  isPostabilityOverrideActive,
+  readPostabilityOverride,
+  type PostabilityOverride,
+} from "@/lib/ads/postability-override";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -647,8 +652,13 @@ export type MaxCopyQcPublishRefusalReason =
 
 export interface MaxCopyQcPublishGateAllowResult {
   ok: true;
-  verdict: StoredCopyQaVerdict;
+  verdict: StoredCopyQaVerdict | null;
   scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
+  /** bianca-posts-only-at-9of10 Phase 2 — the CEO override that authorized this
+   *  post, when Max's own verdict would have refused. `null` when Max cleared the
+   *  gate on his own (no override needed). Preserved on the allow-result so the
+   *  audit row + diagnostics cite whether the CEO or Max let it through. */
+  override: PostabilityOverride | null;
 }
 
 export interface MaxCopyQcPublishGateRefuseResult {
@@ -657,6 +667,7 @@ export interface MaxCopyQcPublishGateRefuseResult {
   reason: MaxCopyQcPublishRefusalReason;
   scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
   diagnosis: string;
+  override: PostabilityOverride | null;
 }
 
 export type MaxCopyQcPublishGateResult =
@@ -686,6 +697,27 @@ export function classifyMaxCopyQcAtPublish(
     return { ok: false, reason: "below_score_floor" };
   }
   return { ok: true };
+}
+
+/**
+ * PURE — the composite postability predicate the money step honors from
+ * bianca-posts-only-at-9of10 Phase 2 onward. `isPostable = (Max hard_gate_pass
+ * AND persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR) OR CEO override present`.
+ *
+ * Kept as a pure exported helper (parallel to `classifyMaxCopyQcAtPublish`) so
+ * a fixture (verdict, override) tuple can be pinned to expected postable state
+ * independent of any DB read. The DB-aware `evaluateMaxCopyQcAtPublish` wraps
+ * this. Max's real grade on the passed-in verdict is NEVER mutated — a truthy
+ * override just adds a second, orthogonal "yes" that shortcuts a would-be
+ * refusal.
+ */
+export function isPostable(
+  verdict: StoredCopyQaVerdict | null,
+  override: PostabilityOverride | null,
+  scoreFloor: number = MAX_QC_ELIGIBILITY_FLOOR,
+): boolean {
+  if (isPostabilityOverrideActive(override)) return true;
+  return classifyMaxCopyQcAtPublish(verdict, scoreFloor).ok;
 }
 
 /** Human diagnosis surfaced on the growth audit row's `reason`. */
@@ -744,10 +776,27 @@ export async function evaluateMaxCopyQcAtPublish(
   args: { workspaceId: string; adCampaignId: string; scoreFloor?: number },
 ): Promise<MaxCopyQcPublishGateResult> {
   const scoreFloor = args.scoreFloor ?? MAX_QC_ELIGIBILITY_FLOOR;
-  const verdict = await readLatestCopyQaVerdict(admin, {
-    workspaceId: args.workspaceId,
-    adCampaignId: args.adCampaignId,
-  });
+  // Read Max's real grade + the CEO override in parallel — they live in
+  // different tables (ad_creative_copy_qc_verdicts vs. ad_campaigns) and are
+  // independent: the override never mutates the QC verdict row, which is the
+  // whole point of preserving the Max-vs-CEO gap as the tuning signal.
+  const [verdict, override] = await Promise.all([
+    readLatestCopyQaVerdict(admin, {
+      workspaceId: args.workspaceId,
+      adCampaignId: args.adCampaignId,
+    }),
+    readPostabilityOverride(admin, {
+      workspaceId: args.workspaceId,
+      adCampaignId: args.adCampaignId,
+    }),
+  ]);
+  // bianca-posts-only-at-9of10 Phase 2 — CEO override shortcuts a would-be
+  // refusal. An active override (`override_postable=true`) says "post regardless
+  // of Max"; Max's real verdict rides on the allow-result unchanged so the
+  // audit trail still shows what Max said.
+  if (isPostabilityOverrideActive(override)) {
+    return { ok: true, verdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR, override };
+  }
   const classified = classifyMaxCopyQcAtPublish(verdict, scoreFloor);
   if (classified.ok) {
     // A verdict that classifies OK must also satisfy the shared isCopyQcEligible
@@ -760,9 +809,10 @@ export async function evaluateMaxCopyQcAtPublish(
         reason: "below_score_floor",
         scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
         diagnosis: maxCopyQcRefusalDiagnosis("below_score_floor", { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+        override,
       };
     }
-    return { ok: true, verdict: verdict as StoredCopyQaVerdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR };
+    return { ok: true, verdict: verdict as StoredCopyQaVerdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR, override };
   }
   return {
     ok: false,
@@ -770,5 +820,6 @@ export async function evaluateMaxCopyQcAtPublish(
     reason: classified.reason,
     scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
     diagnosis: maxCopyQcRefusalDiagnosis(classified.reason, { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+    override,
   };
 }

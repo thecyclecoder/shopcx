@@ -74,6 +74,11 @@ interface AdCampaignRow {
    *  detail page. Present in the row shape as a defensive belt-and-suspenders — a filter miss
    *  would still surface here for a downstream reader to see. */
   max_qc_eligible: boolean | null;
+  /** bianca-posts-only-at-9of10 Phase 2 — CEO manual postability override. When
+   *  TRUE, Bianca's list SURFACES the row even if `max_qc_eligible === false`
+   *  (Max held; CEO overruled). NULL = no override in play; the max_qc_eligible
+   *  filter above stands unchanged. Never FALSE — see the migration comment. */
+  override_postable: boolean | null;
 }
 
 interface AdPublishJobRow {
@@ -151,21 +156,23 @@ export async function listReadyToTest(
   // workspace-wide — the null-product default cohort still catches Superfood Tabs today).
   let campaignsQuery = admin
     .from("ad_campaigns")
-    .select("id, landing_url, status, created_at, concept_tag, audience_temperature, max_qc_eligible")
+    .select("id, landing_url, status, created_at, concept_tag, audience_temperature, max_qc_eligible, override_postable")
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
     .not("landing_url", "is", null)
     // Retiring a campaign (removing its landing URL) sets status='archived'; excluding these keeps
     // Dahlia's deficit truthful, /director-training's depth honest, and stops the media-buyer's
     // replenish from ever picking a retired creative.
-    .neq("status", "archived")
-    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — the always-bin flow
-    // means every finished creative lands in `ad_campaigns`, but only Max-eligible ones (or
-    // legacy / deterministic / kill-switch-off rows where Max never ran) should reach Bianca's
-    // postable list. `IS NOT FALSE` includes TRUE + NULL and excludes only FALSE (the explicit
-    // binned-but-ineligible marker stamped by insertReadyCreative on Max-below-floor
-    // exhaustion). Pre-Phase-2 rows stay NULL, so today's byte-for-byte behavior is preserved.
-    .not("max_qc_eligible", "is", false);
+    .neq("status", "archived");
+  // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 (with
+  // bianca-posts-only-at-9of10 Phase 2 CEO override) — the always-bin flow means every finished
+  // creative lands in `ad_campaigns`, but only Max-eligible ones (or legacy / deterministic /
+  // kill-switch-off rows where Max never ran, OR a CEO override) should reach Bianca's postable
+  // list. `max_qc_eligible IS NOT FALSE` includes TRUE + NULL and excludes FALSE; the OR arm
+  // re-includes a FALSE row when the CEO stamped `override_postable=true`. The JS-side belt-
+  // and-suspenders below mirrors the same predicate — a chain-mock miss can't leak or hide a
+  // row Bianca should see.
+  campaignsQuery = campaignsQuery.or("max_qc_eligible.is.null,max_qc_eligible.eq.true,override_postable.is.true");
   if (productId) campaignsQuery = campaignsQuery.eq("product_id", productId);
   // Phase 1 (bianca-route-ready-creatives-by-dahlia-temperature-tag) — when the caller pins a
   // temperature band, restrict at the DB. The null-default preserves the pre-Phase-1 shape byte-
@@ -197,13 +204,15 @@ export async function listReadyToTest(
     if (blocked.has(c.id)) continue;
     if (!c.landing_url) continue;
     if (c.status === "archived") continue;
-    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — JS-side belt-and-
-    // suspenders mirror of the `.not("max_qc_eligible","is",false)` DB filter. A binned-but-
-    // ineligible row (Max ran and rejected) must NEVER surface here even if the DB filter is
-    // bypassed by a chain-mock, a schema drift, or a stray null-vs-false coercion. NULL rows
-    // (Max never ran — deterministic / kill-switch off / legacy) stay through so today's
-    // byte-for-byte behavior is preserved.
-    if (c.max_qc_eligible === false) continue;
+    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 (with
+    // bianca-posts-only-at-9of10 Phase 2 CEO override) — JS-side belt-and-suspenders mirror of
+    // the DB predicate above. A binned-but-ineligible row (Max ran and rejected,
+    // `max_qc_eligible === false`) must NEVER surface here even if the DB filter is bypassed
+    // by a chain-mock, a schema drift, or a stray null-vs-false coercion — UNLESS the CEO
+    // stamped `override_postable === true` on it. NULL max_qc_eligible rows (Max never ran —
+    // deterministic / kill-switch off / legacy) stay through so today's byte-for-byte behavior
+    // is preserved.
+    if (c.max_qc_eligible === false && c.override_postable !== true) continue;
     const bucket = byCampaign.get(c.id);
     if (!bucket) continue;
     rows.push({
