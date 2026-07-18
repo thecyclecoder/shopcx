@@ -284,11 +284,27 @@ Rules for the envelope:
   compare.
 - `self_score.lf8` / `schwartz` / `cialdini` / `hopkins` / `sugarman` — each an integer in
   `{0, 1, 2}` judged against the exact `RUBRIC` text the DATA block gave you.
-- `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`). The worker
-  double-checks the sum against the parts and rejects a mismatched envelope.
+- `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`), THEN apply the
+  Phase-3 **LEAD-BENEFIT SIGNAL** (soft) as a total-level adjustment (`0` or `−1`) and clamp
+  to `0..10`. When the brief carries a `leadBenefitWeave` (Phase 2 marker — a competitor RIFF
+  is required) AND your headline touches NONE of the lead-benefit tokens (the `benefitName`,
+  a `softPhrasings` entry, or a distinctive word from the benefit name), deduct **one point**
+  from the total and note `lead_benefit_penalty=-1 (reason)` in `evidence`. The rail is
+  advisory-SOFT — never a hard gate — so a deliberately-explore competitor angle scoring well
+  on the other five sub-scores can still clear the floor; the MINORITY pure-competitor slot
+  has `leadBenefitWeave=null` and cannot receive the penalty at all. **North-star example
+  (CEO 2026-07-18):** for Amazing Coffee with `leadBenefitWeave.benefitName='Weight loss'`
+  and softPhrasings `['feel lighter', 'lost weight', 'curbs my appetite']`, a headline of
+  `"Tasty coffee, feel lighter, no jitters"` earns `lead_benefit_penalty=0` (RIFF present);
+  `"Tired of the coffee jitters?"` earns `lead_benefit_penalty=-1` (pure borrow — the
+  differentiator is absent). The worker double-checks the total against `sum(subs) +
+  leadBenefitPenalty` clamped to `0..10` and rejects a mismatched envelope.
 - `self_score.evidence` — one short human-readable string per sub-score naming what you saw
   (a keyword you hit, a stage-of-awareness you reached, a specificity marker you counted).
-  This is what the M1 Max QC compares against in a later spec.
+  This is what the M1 Max QC compares against in a later spec. **Phase 3:** include one
+  additional evidence line `lead_benefit_penalty=<0|-1> (reason)` naming whether the RIFF is
+  present in the headline (or, when the brief has no `leadBenefitWeave`, that the soft rail
+  is silent).
 - `claim_trace` — **REQUIRED** (firewall layer 2 of the never-fabricate firewall). A non-empty
   array of `{ claim, source, source_ref }` entries — ONE entry per substantive claim in your
   copy. This is the artifact layer 3 (the deterministic `verifyClaimTrace` in

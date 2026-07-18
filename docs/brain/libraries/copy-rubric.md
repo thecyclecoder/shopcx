@@ -30,6 +30,15 @@ The scorer is **pure** and **deterministic** — same inputs, same bytes out. Th
 
 Every sub-score contributes **≥1 evidence line** to `score.evidence[]`, so the caller can render "why we scored 7" for the human reviewer.
 
+### Phase 3 — LEAD-BENEFIT signal (soft penalty, [[../specs/dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit]], 2026-07-18)
+
+`scoreConversionPsychology` also emits a `leadBenefitPenalty: 0 | -1` field on the score, applied as a total-level adjustment BEFORE the `0..10` clamp. The rail is **advisory-soft** — never a hard gate:
+
+- `0` — no penalty. Fires when the brief has NO `leadBenefitWeave` (own-brand angle OR the [[creative-brief]] Phase 2 minority pure-competitor explore slot) OR when the headline touches a lead-benefit token (the `benefitName`, one of the `softPhrasings`, or a distinctive ≥5-char word from the benefit name).
+- `−1` — one-point deduction. Fires ONLY when the brief carries a `leadBenefitWeave` (a competitor RIFF is required, per Phase 2) AND the headline touches none of those tokens — the exact "pure borrow of a competitor commodity truth with the differentiator absent" state Amazing Coffee's 2026-07-18 cold creative surfaced (`"Tired of the coffee jitters?"` with our weight-loss differentiator nowhere in the hook).
+
+The rail is **soft by design** so a deliberately-explore competitor angle scoring well on the other five sub-scores can still clear the floor and ship; the minority explore slot's brief has `leadBenefitWeave=null` and cannot receive the penalty at all — the rail preserves the explore. CEO north-star example: `"Tasty coffee, feel lighter, no jitters"` → `0` (RIFF present via `feel lighter`); `"Tired of the coffee jitters?"` → `−1` (pure borrow). Pinned by `src/lib/ads/copy-rubric.test.ts` (Phase 3 blocks).
+
 ### M2 layer — deep DR vocabulary in the sub-descriptors
 
 The five sub-descriptor consts (`LF8_SUBSCORE_RUBRIC`, `SCHWARTZ_LEVELS_1_TO_5`, `CIALDINI_PRINCIPLES`, `HOPKINS_SPECIFICITY_RULES`, `SUGARMAN_SLIPPERY_SLIDE`) are the M2 **Five Frameworks in-context copy skill** layer over the M1 scorer SSOT (spec: [[../specs/dahlia-five-frameworks-copy-skill]]). Each descriptor carries the actual DR playbook prose Dahlia's author box session writes against — **not** just framework names. `renderRubricForPrompt()` embeds the descriptors verbatim, so a single edit here mutates both the Dahlia author-mode prompt AND the Max QC prompt in one commit.
@@ -59,9 +68,10 @@ export type CopyRubricSubs = {
 };
 
 export type CopyRubricScore = {
-  total: number;         // 0..10
+  total: number;             // 0..10 (post lead-benefit-signal adjust + clamp)
   subs: CopyRubricSubs;
-  evidence: string[];    // ≥5 lines — one per sub-score
+  leadBenefitPenalty: 0 | -1; // Phase 3 soft rail (2026-07-18)
+  evidence: string[];        // ≥5 lines (one per sub-score) + 1 for the lead-benefit signal
 };
 
 export function scoreConversionPsychology(copy: Copy, brief: CreativeBrief): CopyRubricScore;
@@ -72,6 +82,7 @@ export const SCHWARTZ_LEVELS_1_TO_5: string;
 export const CIALDINI_PRINCIPLES: string;
 export const HOPKINS_SPECIFICITY_RULES: string;
 export const SUGARMAN_SLIPPERY_SLIDE: string;
+export const LEAD_BENEFIT_SIGNAL: string;   // Phase 3 soft rail (2026-07-18)
 ```
 
 `renderRubricForPrompt()` returns a **byte-stable** multi-line string that both downstream skill prompts embed verbatim so Dahlia and Max render THE SAME BYTES. Pinned by the test suite.

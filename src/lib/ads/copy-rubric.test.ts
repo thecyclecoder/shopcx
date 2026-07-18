@@ -19,6 +19,7 @@ import {
   CIALDINI_PRINCIPLES,
   HOPKINS_SPECIFICITY_RULES,
   SUGARMAN_SLIPPERY_SLIDE,
+  LEAD_BENEFIT_SIGNAL,
   type Copy,
   type CopyRubricScore,
 } from "./copy-rubric";
@@ -221,6 +222,127 @@ test("renderRubricForPrompt: byte-length is large enough to carry the deep DR vo
     rendered.length >= 3000,
     `expected renderRubricForPrompt() to carry deep DR vocabulary (≥3000 bytes), got ${rendered.length}`,
   );
+});
+
+// ─── Phase 3: lead-benefit signal — soft penalty for a hook that ignores the lead benefit ─────
+// dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 3 (2026-07-18). Soft
+// point deduction (never a hard fail): a headline that ignores the brief's leadBenefitWeave
+// (Phase-2 competitor-riff marker) loses ONE point off the total; a headline that touches it
+// earns 0. The minority pure-competitor explore slot has `leadBenefitWeave=null` and cannot
+// receive the penalty at all — the rail is silent for it, preserving the explore.
+
+function makeBriefWithWeave(): CreativeBrief {
+  return {
+    ...makeBrief("Amazing Coffee"),
+    leadBenefitWeave: {
+      benefitName: "Weight loss",
+      softPhrasings: ["feel lighter", "lost weight", "curbs my appetite"],
+    },
+  };
+}
+
+test("renderRubricForPrompt: embeds the LEAD_BENEFIT_SIGNAL descriptor verbatim (Phase 3)", () => {
+  const rendered = renderRubricForPrompt();
+  assert.ok(rendered.includes(LEAD_BENEFIT_SIGNAL), "expected LEAD_BENEFIT_SIGNAL in rendered output");
+  // The rail is explicitly soft, not a hard gate — pin the positive wording so a refactor can't quietly harden it.
+  assert.ok(/advisory-soft|soft/i.test(LEAD_BENEFIT_SIGNAL));
+  assert.ok(/never a hard gate/i.test(LEAD_BENEFIT_SIGNAL), "descriptor must state 'never a hard gate' — the Phase 3 rail is advisory-soft");
+  // Names both the 0 and −1 outcomes deterministically.
+  assert.ok(/−1|-1/.test(LEAD_BENEFIT_SIGNAL), "expected a -1 (or unicode minus) point-value penalty in the descriptor");
+  // Carries the CEO's north-star example verbatim so downstream QC can grep it.
+  assert.ok(/tasty coffee, feel lighter, no jitters/i.test(LEAD_BENEFIT_SIGNAL));
+  assert.ok(/tired of the coffee jitters\?/i.test(LEAD_BENEFIT_SIGNAL));
+});
+
+test("scoreConversionPsychology: brief with NO leadBenefitWeave → penalty stays 0 (the soft rail is silent)", () => {
+  const copy: Copy = {
+    headline: "Tired of the 2pm crash?",
+    primaryText: "Superfoods Coffee — clean energy, no jitters. Loved by 10,000+ customers.",
+    description: "Try risk-free today.",
+  };
+  const result = scoreConversionPsychology(copy, makeBrief());
+  assert.equal(result.leadBenefitPenalty, 0);
+  // Total still equals sum of the five sub-scores (no adjustment) — the existing invariant.
+  const s = result.subs;
+  assert.equal(result.total, Math.max(0, Math.min(10, s.lf8 + s.schwartz + s.cialdini + s.hopkins + s.sugarman)));
+  // Evidence line is present and names the silent-rail reason.
+  assert.ok(result.evidence.some((e) => /lead_benefit_penalty=0/.test(e) && /own-brand|silent/i.test(e)));
+});
+
+test("scoreConversionPsychology: competitor RIFF hook that ignores the lead benefit → penalty=-1 (soft, total docks 1)", () => {
+  // The exact failure state Phase 3 exists to close (Amazing Coffee 2026-07-18): the headline
+  // is a pure borrow of the competitor's commodity truth with our differentiator (weight loss)
+  // nowhere in it.
+  const copy: Copy = {
+    headline: "Tired of the coffee jitters?",
+    primaryText: "Amazing Coffee — clean energy, no crash. Loved by 10,000+ customers.",
+    description: "Try risk-free today.",
+  };
+  const brief = makeBriefWithWeave();
+  const result = scoreConversionPsychology(copy, brief);
+  assert.equal(result.leadBenefitPenalty, -1);
+  // The rail is soft — the total docks EXACTLY one point vs the pre-Phase-3 sum, never more.
+  const s = result.subs;
+  const preAdjust = s.lf8 + s.schwartz + s.cialdini + s.hopkins + s.sugarman;
+  assert.equal(result.total, Math.max(0, Math.min(10, preAdjust - 1)));
+  // Evidence line names the miss.
+  assert.ok(result.evidence.some((e) => /lead_benefit_penalty=-1/.test(e)));
+});
+
+test("scoreConversionPsychology: competitor RIFF hook that WEAVES the lead benefit ('feel lighter') → penalty=0 (no dock)", () => {
+  // CEO north-star shape — the RIFF present, differentiator woven in via a soft phrasing.
+  const copy: Copy = {
+    headline: "Tasty coffee, feel lighter, no jitters",
+    primaryText: "Amazing Coffee — the coffee that helps you feel lighter. Loved by 10,000+ customers.",
+    description: "Try risk-free today.",
+  };
+  const brief = makeBriefWithWeave();
+  const result = scoreConversionPsychology(copy, brief);
+  assert.equal(result.leadBenefitPenalty, 0);
+  // Evidence line names the 'feel lighter' hit token verbatim so downstream logs can trace it.
+  assert.ok(result.evidence.some((e) => /lead_benefit_penalty=0/.test(e) && /feel lighter/i.test(e)));
+});
+
+test("scoreConversionPsychology: competitor RIFF hook that names the benefit_name directly ('weight') → penalty=0", () => {
+  // Distinctive-word match — 'weight' is a ≥5-char token from benefit_name='Weight loss'.
+  const copy: Copy = {
+    headline: "Coffee that helps with weight — no jitters",
+    primaryText: "Amazing Coffee — loved by 10,000+ customers.",
+    description: "Try risk-free.",
+  };
+  const brief = makeBriefWithWeave();
+  const result = scoreConversionPsychology(copy, brief);
+  assert.equal(result.leadBenefitPenalty, 0);
+});
+
+test("scoreConversionPsychology: total is CLAMPED to 0..10 even when the soft penalty would push below 0", () => {
+  // Bare copy that would score ~0 on every sub-score AND carries a leadBenefitWeave the headline
+  // ignores — the clamp keeps the final total at 0, not −1.
+  const copy: Copy = { headline: "our product", primaryText: "it works.", description: "" };
+  const brief = makeBriefWithWeave();
+  const result = scoreConversionPsychology(copy, brief);
+  assert.equal(result.leadBenefitPenalty, -1);
+  assert.ok(result.total >= 0, `total must be clamped to ≥0; got ${result.total}`);
+  assert.ok(result.total <= 10);
+});
+
+test("scoreConversionPsychology: the Phase 3 rail is SOFT — a high-scoring RIFF-less hook still clears the floor", () => {
+  // A well-crafted headline that hits ≥3 Cialdini principles + Hopkins specificity + Sugarman
+  // hook — WITHOUT the lead benefit — still scores well; the soft penalty only nudges the
+  // total down by 1, never denies a floor-clear on other strengths. This is the invariant the
+  // minority explore slot depends on.
+  const copy: Copy = {
+    headline: "Tired of the coffee jitters?",
+    primaryText:
+      "What if your coffee had 43% less caffeine in 14 days? Loved by 10,000+ customers. Doctor-formulated · risk-free 30-day trial. Try risk-free today.",
+    description: "Save 20% off today only.",
+  };
+  const brief = makeBriefWithWeave();
+  const result = scoreConversionPsychology(copy, brief);
+  assert.equal(result.leadBenefitPenalty, -1);
+  // With the sub-scores that high, the softly-adjusted total still clears a reasonable floor
+  // (6+) — the rail cannot single-handedly sink a hook that's strong on everything else.
+  assert.ok(result.total >= 6, `expected soft rail to leave the total ≥6, got ${result.total} (subs=${JSON.stringify(result.subs)})`);
 });
 
 test("copy-rubric.ts imports LF8_KEYWORDS from lf8.ts (no duplicate keyword list)", async () => {
