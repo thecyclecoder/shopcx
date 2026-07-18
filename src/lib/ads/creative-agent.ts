@@ -2154,8 +2154,9 @@ export function buildAdCampaignInsertBody(args: {
 }
 
 /** dahlia-names-each-ad-from-its-headline-minus-weight-loss-not-a-generic-template Phase 1 —
- *  derive `ad_campaigns.name` from the creative's canonical HEADLINE (unique per ad) instead of
- *  the generic `Dahlia · {product} · {source}` template. Sanitize:
+ *  sanitize the creative's canonical HEADLINE for the trailing slot of the composite ad name
+ *  `Dahlia - {productTitle} - {deriveAdName(headline)}` — the CEO's rule replaces the generic
+ *  `Dahlia · {product} · {source}` template. Sanitize rules:
  *    (a) remove any 'weight loss' / 'weightloss' substring (case-insensitive) — the CEO's rule
  *        for the name even when the headline itself carries it;
  *    (b) remove any competitor brand token (same tokenization rule the copy-validator's
@@ -2163,15 +2164,17 @@ export function buildAdCampaignInsertBody(args: {
  *        product-noun allowlist) plus the literal word `competitor`, so the name never leaks the
  *        rival's brand or the source label;
  *    (c) collapse whitespace + trim orphan leading/trailing punctuation;
- *    (d) fall back to the caller-supplied `fallback` (typically the product title) when the
- *        sanitized string is empty — a safe, non-empty name is guaranteed.
+ *    (d) fall back to the caller-supplied `fallback` (typically the creative's short concept-tag
+ *        label — an Andromeda tag like `transformation` / `objection` / `mechanism`) when the
+ *        sanitized string is empty, so the final composite is never `Dahlia - {product} - ` (a
+ *        blank trailing slot). Default fallback is `"ad"`.
  *  Pure + null-safe + exported for unit-test coverage. */
 export function deriveAdName(
   headline: string,
   competitorTokens: readonly string[],
-  fallback = "Dahlia ad",
+  fallback = "ad",
 ): string {
-  const safeFallback = fallback && fallback.trim().length > 0 ? fallback.trim() : "Dahlia ad";
+  const safeFallback = fallback && fallback.trim().length > 0 ? fallback.trim() : "ad";
   let s = typeof headline === "string" ? headline : "";
   // (a) weight loss / weightloss
   s = s.replace(/\bweight\s*loss\b/gi, "");
@@ -2342,17 +2345,24 @@ async function insertReadyCreative(
     .select("id").single();
 
   // dahlia-names-each-ad-from-its-headline-minus-weight-loss-not-a-generic-template Phase 1 —
-  // name the ad from its own canonical headline (unique per ad) instead of the generic
-  // 'Dahlia · {product} · {source}' template that made every row indistinguishable in the bin /
-  // Ads Manager. Weight-loss + competitor brand tokens + the literal source label 'competitor'
-  // are stripped by `deriveAdName`; product title is the safe non-empty fallback.
+  // compose the ad name as `Dahlia - {productTitle} - {sanitizedHeadline}` instead of the
+  // generic 'Dahlia · {product} · {source}' template that made every row indistinguishable in
+  // the bin / Ads Manager and leaked the 'competitor' source label. The 'Dahlia' owner prefix
+  // + product name are kept (CEO's rule — owner + product must stay identifiable); the trailing
+  // slot is the creative's own canonical headline, run through `deriveAdName` which strips
+  // 'weight loss' / 'weightloss' and any competitor brand token + the literal word 'competitor'.
+  // Fallback for the trailing slot when sanitizing empties the headline is the Andromeda
+  // concept-tag label (author-mode) — a short descriptive stand-in so the composite never ends
+  // with a blank slot; deterministic mode has no concept_tag, so it falls back to `"ad"`.
   const rawHeadline = copyPack.headlines[0] ?? "";
   const competitorTokens: string[] =
     angle.source === "competitor" &&
     typeof (angle.raw as { advertiser?: unknown } | undefined)?.advertiser === "string"
       ? ((angle.raw as { advertiser: string }).advertiser).split(/\s+/).map((t) => t.trim())
       : [];
-  const name = deriveAdName(rawHeadline, competitorTokens, productTitle);
+  const conceptTagFallback = opts?.authorModeCopy?.concept_tag ?? "ad";
+  const sanitizedHeadline = deriveAdName(rawHeadline, competitorTokens, conceptTagFallback);
+  const name = `Dahlia - ${productTitle} - ${sanitizedHeadline}`;
   const angleId = (angleRow as { id?: string } | null)?.id ?? null;
   const status = readyStatusForAngle(angleId);
   if (!angleId) {
