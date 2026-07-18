@@ -1875,13 +1875,14 @@ export async function runMediaBuyerLoop(
       });
       if (r.recorded) writes.directorActivityRows += 1;
     } else if (jobInsert.reason) {
-      // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
-      // a Max copy-QC refusal is a different-shape rail from a config gap: the audit row
-      // names the CREATIVE that failed the 7/10 hard gate (not a "config missing" reason),
-      // and we DON'T escalate the under-provisioned-cohort card (nothing about the cohort
-      // is under-provisioned — a sub-7 creative is a creative-quality signal owned by
-      // Dahlia's bin, not by cohort config). The generic "missing_config" path below still
-      // fires for the actual cohort/target/copy config gaps it was built for.
+      // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 (with
+      // bianca-posts-only-at-9of10 Phase 1 raising the floor 7→9) — a Max copy-QC refusal
+      // is a different-shape rail from a config gap: the audit row names the CREATIVE that
+      // failed the 9/10 hard gate (not a "config missing" reason), and we DON'T escalate
+      // the under-provisioned-cohort card (nothing about the cohort is under-provisioned —
+      // a below-floor creative is a creative-quality signal owned by Dahlia's bin, not by
+      // cohort config). The generic "missing_config" path below still fires for the actual
+      // cohort/target/copy config gaps it was built for.
       if (jobInsert.maxCopyQcRefusal) {
         const r = await recordDirectorActivity(admin, {
           workspaceId: opts.workspaceId,
@@ -1893,7 +1894,7 @@ export async function runMediaBuyerLoop(
             ad_campaign_id: a.adCampaignId,
             meta_adset_id: a.testMetaAdsetId,
             refusal_reason: jobInsert.maxCopyQcRefusal,
-            score_floor: 7,
+            score_floor: 9,
             autonomous: true,
           },
         });
@@ -2370,17 +2371,18 @@ async function enqueueReplenishPublish(
 }> {
   if (!cohort) return { inserted: false, jobId: null, reason: "no_active_cohort" };
 
-  // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
-  // fail-CLOSED hard rail at Bianca's money step: before any `ad_publish_jobs` row is
-  // inserted OR any Meta publish event is dispatched, INDEPENDENTLY re-verify that this
-  // creative carries a valid Max copy-QC verdict with `hard_gate_pass` AND
-  // `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A missing/NULL verdict or a sub-7
-  // score REFUSES the post — the creative is skipped, an audit row is written by the
-  // caller, and no dollars flow. This is DEFENCE-IN-DEPTH over the `ad_campaigns` bin
-  // eligibility flag: a mis-set flag or a NULL verdict routes to refusal here regardless.
-  // The check runs BEFORE the cohort-config check so a sub-7 creative held in a well-
-  // configured cohort still routes to `missing_max_copy_qc` (not a misleading "missing
-  // default target" reason).
+  // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 (with
+  // bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate Phase 1
+  // raising the floor from 7 to 9) — fail-CLOSED hard rail at Bianca's money step: before
+  // any `ad_publish_jobs` row is inserted OR any Meta publish event is dispatched,
+  // INDEPENDENTLY re-verify that this creative carries a valid Max copy-QC verdict with
+  // `hard_gate_pass` AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9). A
+  // missing/NULL verdict or a below-floor score REFUSES the post — the creative is
+  // skipped, an audit row is written by the caller, and no dollars flow. This is
+  // DEFENCE-IN-DEPTH over the `ad_campaigns` bin eligibility flag: a mis-set flag or a
+  // NULL verdict routes to refusal here regardless. The check runs BEFORE the
+  // cohort-config check so a below-floor creative held in a well-configured cohort still
+  // routes to `missing_max_copy_qc` (not a misleading "missing default target" reason).
   const qcGate = await evaluateMaxCopyQcAtPublish(admin, {
     workspaceId,
     adCampaignId: action.adCampaignId,

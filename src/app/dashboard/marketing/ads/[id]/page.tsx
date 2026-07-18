@@ -88,6 +88,14 @@ const EXPLOIT_SOURCE_LABEL: Record<string, string> = {
   authority: "an authority / expert proof",
 };
 
+interface PostabilityOverride {
+  override_postable: boolean | null;
+  override_score: number | null;
+  override_reason: string | null;
+  override_by: string | null;
+  override_at: string | null;
+}
+
 interface QaVerdict {
   hard_gate_pass: boolean;
   hard_gates: {
@@ -190,6 +198,7 @@ export default function AdDetailPage() {
   const [copyVariants, setCopyVariants] = useState<CopyVariant[]>([]);
   const [angle, setAngle] = useState<Angle | null>(null);
   const [qa, setQa] = useState<QaVerdict | null>(null);
+  const [override, setOverride] = useState<PostabilityOverride | null>(null);
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
   const [pageIdentity, setPageIdentity] = useState<PageIdentity | null>(null);
   const [loading, setLoading] = useState(true);
@@ -219,6 +228,7 @@ export default function AdDetailPage() {
       setCopyVariants(d.copyVariants || []);
       setAngle(d.angle || null);
       setQa(d.copyQaVerdict || null);
+      setOverride(d.postabilityOverride || null);
       setPublishJobs(d.publishJobs || []);
       setPageIdentity(d.pageIdentity || null);
     }
@@ -603,6 +613,13 @@ export default function AdDetailPage() {
 
       {/* ── Max's grade ────────────────────────────────────────────────────── */}
       <Section title="Max's grade" subtitle="Dahlia's self-score, then Max's independent copy-QC — hard gates + persuasion + suggestions">
+        <PostabilityOverrideCard
+          campaignId={id}
+          workspaceId={workspace.id}
+          override={override}
+          maxVerdict={qa}
+          onChange={setOverride}
+        />
         <div className="grid gap-4 lg:grid-cols-2">
           {/* Dahlia self-score */}
           <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -885,4 +902,159 @@ function publishTone(status: string): string {
   if (status === "published") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
   if (status === "failed") return "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300";
   return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
+}
+
+// bianca-posts-only-at-9of10 Phase 2 — CEO manual postability override control.
+// Owner-only action: mark this ad postable regardless of Max's grade (with a required
+// reason) or clear an existing override. Max's real grade is never touched — the
+// gap between his score and the CEO's override IS the tuning signal for future
+// live Claude sessions.
+function PostabilityOverrideCard({
+  campaignId,
+  workspaceId,
+  override,
+  maxVerdict,
+  onChange,
+}: {
+  campaignId: string;
+  workspaceId: string;
+  override: PostabilityOverride | null;
+  maxVerdict: QaVerdict | null;
+  onChange: (o: PostabilityOverride | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const active = override?.override_postable === true;
+  const maxScore = maxVerdict?.persuasion_score ?? null;
+
+  const submit = useCallback(async () => {
+    const cleaned = reason.trim();
+    if (!cleaned) {
+      setError("A reason is required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/ads/campaigns/${campaignId}/postability-override`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId, reason: cleaned }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      setError(b?.error || "override_failed");
+      return;
+    }
+    const d = await res.json();
+    onChange(d.override || null);
+    setEditing(false);
+    setReason("");
+  }, [campaignId, workspaceId, reason, onChange]);
+
+  const clear = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(
+      `/api/ads/campaigns/${campaignId}/postability-override?workspaceId=${workspaceId}`,
+      { method: "DELETE" },
+    );
+    setBusy(false);
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      setError(b?.error || "clear_failed");
+      return;
+    }
+    onChange(null);
+  }, [campaignId, workspaceId, onChange]);
+
+  return (
+    <div className={`mb-4 rounded-lg border p-4 ${active ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-800 dark:bg-emerald-900/20" : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950"}`}>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">CEO postability override</h3>
+        {active ? (
+          <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+            Postable · CEO override
+          </span>
+        ) : (
+          <span className="text-[11px] text-zinc-400">No override — Max&apos;s grade decides.</span>
+        )}
+      </div>
+      {active ? (
+        <>
+          <p className="text-xs text-zinc-600 dark:text-zinc-300">
+            Max {maxScore != null ? `${maxScore}/10` : "ungraded"} · CEO override → post
+            {override?.override_score != null && (
+              <span className="ml-1 text-zinc-500">(recorded as {override.override_score}/10)</span>
+            )}
+          </p>
+          {override?.override_reason && (
+            <p className="mt-2 rounded bg-white/60 p-2 text-xs text-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-200">
+              <span className="font-semibold">Reason:</span> {override.override_reason}
+            </p>
+          )}
+          {override?.override_at && (
+            <p className="mt-1 text-[10px] text-zinc-400">
+              Set {new Date(override.override_at).toLocaleString()}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={clear}
+            disabled={busy}
+            className="mt-3 rounded-md border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+          >
+            Clear override
+          </button>
+        </>
+      ) : editing ? (
+        <div>
+          <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300" htmlFor="ceo-override-reason">
+            Why is this ad postable despite Max&apos;s grade? (required)
+          </label>
+          <textarea
+            id="ceo-override-reason"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={3}
+            className="mt-1 w-full rounded-md border border-zinc-300 bg-white p-2 text-xs text-zinc-800 focus:border-indigo-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+            placeholder="e.g. Headline lands the objection Max under-weighted; render is clean."
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={submit}
+              disabled={busy}
+              className="rounded-md bg-indigo-600 px-3 py-1 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              Mark postable
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setReason("");
+                setError(null);
+              }}
+              disabled={busy}
+              className="rounded-md border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 dark:border-indigo-800 dark:bg-zinc-900 dark:text-indigo-300"
+        >
+          Mark postable (override Max)
+        </button>
+      )}
+      {error && <p className="mt-2 text-[11px] text-rose-600">{error}</p>}
+    </div>
+  );
 }

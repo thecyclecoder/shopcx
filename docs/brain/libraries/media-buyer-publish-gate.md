@@ -95,7 +95,7 @@ A fourth `no_active_cohort` refusal (the workspace hasn't opted in) is treated i
 
 ## Max copy-QC hard rail at Bianca's publish step
 
-[[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] Phase 1 — a **second, INDEPENDENT** fail-closed gate at the actual money step. Before Bianca's replenish path inserts an [[../tables/ad_publish_jobs]] row + dispatches `ad-tool/publish-to-meta`, [[media-buyer-agent]] `enqueueReplenishPublish` calls `evaluateMaxCopyQcAtPublish` on the ad campaign. A missing/NULL [[../tables/ad_creative_copy_qc_verdicts]] row, a `hard_gate_pass=false` verdict, or a hard-gate-pass verdict whose `persuasion_score < MAX_QC_ELIGIBILITY_FLOOR` (7) REFUSES the post — the creative is skipped, an audit row is written (`director_function='growth'`, `action_kind='media_buyer_publish_refused_missing_max_copy_qc'`), and no `ad_publish_jobs` row is ever inserted. This is DEFENCE-IN-DEPTH over the `ad_campaigns` bin eligibility flag — the last gate before ad spend.
+[[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] Phase 1 (with [[../specs/bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate]] Phase 1 raising the postability floor from 7 to 9) — a **second, INDEPENDENT** fail-closed gate at the actual money step. Before Bianca's replenish path inserts an [[../tables/ad_publish_jobs]] row + dispatches `ad-tool/publish-to-meta`, [[media-buyer-agent]] `enqueueReplenishPublish` calls `evaluateMaxCopyQcAtPublish` on the ad campaign. A missing/NULL [[../tables/ad_creative_copy_qc_verdicts]] row, a `hard_gate_pass=false` verdict, or a hard-gate-pass verdict whose `persuasion_score < MAX_QC_ELIGIBILITY_FLOOR` (**9** — raised from 7 by the CEO's tighter oversight floor while the creative system is being tuned; only near-perfect ads auto-post, 7-8 hold for CEO review) REFUSES the post — the creative is skipped, an audit row is written (`director_function='growth'`, `action_kind='media_buyer_publish_refused_missing_max_copy_qc'`, `metadata.score_floor=9`), and no `ad_publish_jobs` row is ever inserted. This is DEFENCE-IN-DEPTH over the `ad_campaigns` bin eligibility flag — the last gate before ad spend.
 
 ### `MaxCopyQcPublishRefusalReason` — type
 
@@ -110,7 +110,7 @@ function classifyMaxCopyQcAtPublish(
 ): { ok: true } | { ok: false; reason: MaxCopyQcPublishRefusalReason }
 ```
 
-Pure classification of a stored verdict. `scoreFloor` defaults to `MAX_QC_ELIGIBILITY_FLOOR` (7) — kept as a parameter so a unit test can pin the floor explicitly without threading through env config.
+Pure classification of a stored verdict. `scoreFloor` defaults to `MAX_QC_ELIGIBILITY_FLOOR` (**9** — raised from 7 by [[../specs/bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate]] Phase 1) — kept as a parameter so a unit test can pin the floor explicitly without threading through env config.
 
 ### `evaluateMaxCopyQcAtPublish` — function
 
@@ -121,10 +121,22 @@ async function evaluateMaxCopyQcAtPublish(
 ): Promise<MaxCopyQcPublishGateResult>
 ```
 
-DB-aware wrapper — reads the latest verdict via [[../libraries/creative-qa]] `readLatestCopyQaVerdict` (the SDK chokepoint for [[../tables/ad_creative_copy_qc_verdicts]]) and delegates to `classifyMaxCopyQcAtPublish`. On refusal returns `{ ok: false, reason, verdict, scoreFloor, diagnosis }` — `diagnosis` is human copy the runner surfaces on the `media_buyer_publish_refused_missing_max_copy_qc` `director_activity` row's `reason`. INDEPENDENT of the `ad_campaigns` bin-eligibility flag — a mis-flipped flag routes to refusal here regardless.
+DB-aware wrapper — reads the latest verdict via [[../libraries/creative-qa]] `readLatestCopyQaVerdict` (the SDK chokepoint for [[../tables/ad_creative_copy_qc_verdicts]]) IN PARALLEL with the CEO postability override via [[postability-override]] `readPostabilityOverride` (the SDK chokepoint for the [[../tables/ad_campaigns]] `override_postable/score/reason/by/at` columns added by [[../specs/bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate]] Phase 2). When `isPostabilityOverrideActive(override)` — i.e. `override_postable === true` — the gate SHORTCUTS to `{ ok: true, verdict, scoreFloor, override }` regardless of Max's score. Otherwise it delegates to `classifyMaxCopyQcAtPublish`. On refusal returns `{ ok: false, reason, verdict, scoreFloor, diagnosis, override }` — `override` rides on both branches for the audit trail. INDEPENDENT of the `ad_campaigns` bin-eligibility flag — a mis-flipped flag routes to refusal here regardless.
 
-**Why a distinct action_kind (`media_buyer_publish_refused_missing_max_copy_qc`) not the generic `media_buyer_replenish_missing_config`:** a Max copy-QC refusal is a creative-quality signal (Bianca's territory — Dahlia's bin), NOT a cohort-config gap. Emitting the config action_kind would misdirect Growth to fix cohort provisioning when the fix is actually to re-run Max copy-QC or drop the sub-7 creative from the bin. The runner also SKIPS the `escalateUnderProvisionedCohort` CEO card on this branch — a sub-7 creative isn't under-provisioning.
+### `isPostable` — function (PURE)
+
+```ts
+function isPostable(
+  verdict: StoredCopyQaVerdict | null,
+  override: PostabilityOverride | null,
+  scoreFloor?: number,
+): boolean
+```
+
+Pure composite predicate exported alongside `classifyMaxCopyQcAtPublish` — `isPostable = (Max hard_gate_pass AND persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR) OR CEO override present`. Kept as a pure exported helper so a fixture `(verdict, override)` tuple can be pinned to expected postable state independent of any DB read. Max's real grade on the verdict is NEVER mutated — a truthy override just adds a second, orthogonal "yes" that shortcuts a would-be refusal, preserving the Max-vs-CEO gap as the tuning signal for live Claude sessions. Pinned by the four `Phase 2 (pure): isPostable` cases in [[../../../src/lib/media-buyer/publish-gate.max-copy-qc.test.ts]] (Max 6 no override → false, Max 6 + override → true, Max 9 no override → true, override wins even on hard-gate fail).
+
+**Why a distinct action_kind (`media_buyer_publish_refused_missing_max_copy_qc`) not the generic `media_buyer_replenish_missing_config`:** a Max copy-QC refusal is a creative-quality signal (Bianca's territory — Dahlia's bin), NOT a cohort-config gap. Emitting the config action_kind would misdirect Growth to fix cohort provisioning when the fix is actually to re-run Max copy-QC or drop the below-floor creative from the bin OR set a CEO override. The runner also SKIPS the `escalateUnderProvisionedCohort` CEO card on this branch — a below-floor creative isn't under-provisioning.
 
 ## Related
 
-[[../tables/media_buyer_test_cohorts]] · [[../tables/ad_publish_jobs]] · [[../tables/ad_creative_copy_qc_verdicts]] · [[../tables/director_activity]] · [[../tables/dashboard_notifications]] · [[meta-ads]] · [[ad-spend-governor]] · [[platform-director]] · [[creative-qa]] · [[creative-agent]] (`MAX_QC_ELIGIBILITY_FLOOR`, `isCopyQcEligible`) · [[../inngest/ad-tool]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia]] · [[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+[[../tables/media_buyer_test_cohorts]] · [[../tables/ad_publish_jobs]] · [[../tables/ad_creative_copy_qc_verdicts]] · [[../tables/ad_campaigns]] (`override_postable/score/reason/by/at`) · [[../tables/director_activity]] · [[../tables/dashboard_notifications]] · [[meta-ads]] · [[ad-spend-governor]] · [[platform-director]] · [[creative-qa]] · [[creative-agent]] (`MAX_QC_ELIGIBILITY_FLOOR`, `isCopyQcEligible`) · [[postability-override]] (`setPostabilityOverride`, `clearPostabilityOverride`, `readPostabilityOverride`, `isPostabilityOverrideActive`) · [[../inngest/ad-tool]] · [[../lifecycles/ad-publish]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia]] · [[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] · [[../specs/bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)

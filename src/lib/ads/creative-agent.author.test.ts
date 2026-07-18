@@ -1116,10 +1116,12 @@ test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY wh
   assert.doesNotMatch(withoutDna.calls[0].prompt, /COMPETITOR_DNA:/);
 });
 
-// ── max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — 7/10 eligibility gate ──
+// ── max-final-qa-7of10-eligibility-gate + bianca-posts-only-at-9of10 Phase 1 — 9/10 postability gate ──
 //
 // Pin `isCopyQcEligible` — the pure predicate `stockProduct` uses to hold a below-floor Max verdict
-// out of Bianca's bin. The CEO's rule: eligible IFF hard_gate_pass AND persuasion_score >= 7.
+// out of Bianca's postable bin. The CEO's tighter oversight rule (2026-07-18): eligible IFF
+// hard_gate_pass AND persuasion_score >= 9 (raised from 7 by bianca-posts-only-at-9of10 Phase 1 —
+// only near-perfect ads auto-post while the creative system is being tuned).
 // Scroll-stop sub-scores are DELIBERATELY not in this predicate (advisory-only Goodhart guard).
 
 function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
@@ -1147,24 +1149,32 @@ function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
   } as CopyQaVerdict;
 }
 
-test("Phase 2 gate: floor is set to 7 (named constant, tunable in ONE place)", () => {
-  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 7);
+test("Phase 1 gate: floor is set to 9 (named constant, tunable in ONE place) — bianca-posts-only-at-9of10 raised it from 7", () => {
+  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 9);
 });
 
-test("Phase 2 gate: 7/10 verdict with all hard gates passing → ELIGIBLE (the exact boundary)", () => {
-  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 7 })), true);
+test("Phase 1 gate: 9/10 verdict with all hard gates passing → ELIGIBLE (the exact boundary at the new floor)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 9 })), true);
 });
 
-test("Phase 2 gate: 6/10 verdict with all hard gates passing → NOT eligible (below the floor by 1)", () => {
+test("Phase 1 gate: 8/10 verdict with all hard gates passing → NOT eligible (below the floor by 1 — the old 7/10 pass floor is now a HOLD)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 8 })), false);
+});
+
+test("Phase 1 gate: 7/10 verdict with all hard gates passing → NOT eligible (the previous floor no longer clears)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 7 })), false);
+});
+
+test("Phase 1 gate: 6/10 verdict with all hard gates passing → NOT eligible (well below the floor)", () => {
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 6 })), false);
 });
 
-test("Phase 2 gate: 10/10 verdict → eligible; 0/10 verdict → not eligible (the extremes)", () => {
+test("Phase 1 gate: 10/10 verdict → eligible; 0/10 verdict → not eligible (the extremes)", () => {
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 10 })), true);
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 0 })), false);
 });
 
-test("Phase 2 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (hard gates dominate the floor)", () => {
+test("Phase 1 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (hard gates dominate the floor)", () => {
   assert.equal(
     isCopyQcEligible(
       copyQcVerdict({
@@ -1183,21 +1193,21 @@ test("Phase 2 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (
   );
 });
 
-test("Phase 2 gate: NULL verdict → NOT eligible (parse error / dispatch error routes to hold)", () => {
+test("Phase 1 gate: NULL verdict → NOT eligible (parse error / dispatch error routes to hold)", () => {
   assert.equal(isCopyQcEligible(null), false);
 });
 
-test("Phase 2 gate: hard-gate pass with a NULL persuasion_score → NOT eligible (defence-in-depth null-fallback)", () => {
+test("Phase 1 gate: hard-gate pass with a NULL persuasion_score → NOT eligible (defence-in-depth null-fallback)", () => {
   // parseCopyQaVerdict fail-closes on a null score alongside a hard-gate pass — this is the
   // guard for the pathological case where a verdict slips through with null anyway.
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: null })), false);
 });
 
-test("Phase 2 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart guard — only the top-line score gates)", () => {
-  // A 7/10 top-line with catastrophic scroll-stop sub-scores is STILL eligible — the top-line is
+test("Phase 1 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart guard — only the top-line score gates)", () => {
+  // A 9/10 top-line with catastrophic scroll-stop sub-scores is STILL eligible — the top-line is
   // Max's synthesis, sub-scores are recorded for later CAC correlation and never gate.
   const badScrollStop = copyQcVerdict({
-    persuasion_score: 7,
+    persuasion_score: 9,
     scroll_stop: {
       headline_readable_in_3_frames: 0,
       visual_hierarchy_supports_headline: 0,
@@ -1209,8 +1219,9 @@ test("Phase 2 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart g
 });
 
 // ── max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — bounce-back-to-Dahlia loop ──
+// (floor raised 7→9 by bianca-posts-only-at-9of10 Phase 1)
 //
-// Pin the Max→Dahlia self-heal wire: when Max's copy-QC comes back sub-7 (or hard-gate-fail /
+// Pin the Max→Dahlia self-heal wire: when Max's copy-QC comes back below-floor (or hard-gate-fail /
 // verdict-missing), `runCopyAuthorSession`'s loop treats it like the firewall miss — the revise
 // reason is stamped from Max's critique, Dahlia's SAME session is resumed (cache-warm), and she
 // rewrites addressing Max's notes. Repeats until Max clears or the cap is exhausted.
@@ -1261,15 +1272,15 @@ function scriptedMaxQc(
   return { closure, seen };
 }
 
-test("Phase 3 loop: buildMaxQcReviseReason: sub-7 verdict → `max_qc_below_floor: <verdict_reason> (score=N, floor=7)`", () => {
+test("Phase 3 loop: buildMaxQcReviseReason: below-floor verdict → `max_qc_below_floor: <verdict_reason> (score=N, floor=9)` (bianca-posts-only-at-9of10 raised floor 7→9)", () => {
   const reason = buildMaxQcReviseReason(copyQcVerdictP3(6));
   assert.match(reason, /^max_qc_below_floor: /);
-  assert.match(reason, /score=6, floor=7/);
+  assert.match(reason, /score=6, floor=9/);
   assert.match(reason, /generic supplement pitch/);
 });
 
 test("Phase 3 loop: buildMaxQcReviseReason: null verdict → distinct `max_qc_verdict_missed` prefix (dispatch/parse miss)", () => {
-  assert.match(buildMaxQcReviseReason(null), /^max_qc_verdict_missed \(floor=7\)$/);
+  assert.match(buildMaxQcReviseReason(null), /^max_qc_verdict_missed \(floor=9\)$/);
 });
 
 test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gates so Dahlia can address them", () => {
@@ -1279,30 +1290,30 @@ test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gat
   assert.match(reason, /no_fabrication|no_cold_offer|no_competitor_leak|single_promise|render_ok/);
 });
 
-test("Phase 3 loop: Max grades 8/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed)", async () => {
+test("Phase 3 loop: Max grades 9/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed; 9 is the new floor)", async () => {
   const { dispatch } = scriptedDispatcher([{ resultText: envelope() }]);
-  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(8)]);
+  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(9)]);
   const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: closure }), dispatch);
   assert.equal(outcome.kind, "ok");
   if (outcome.kind === "ok") {
     assert.equal(outcome.attempts, 1);
     assert.ok(outcome.maxCopyQcVerdict, "maxCopyQcVerdict must ride on ok outcome so caller persists it");
-    assert.equal(outcome.maxCopyQcVerdict!.persuasion_score, 8);
+    assert.equal(outcome.maxCopyQcVerdict!.persuasion_score, 9);
   }
   assert.equal(seen.length, 1, "Max was invoked exactly once on the first-pass ok path");
 });
 
-test("Phase 3 loop: Max grades 5/10 → RESUME Dahlia + retry with critique → 8/10 → ok with attempts=2", async () => {
+test("Phase 3 loop: Max grades 5/10 → RESUME Dahlia + retry with critique → 9/10 → ok with attempts=2", async () => {
   const { dispatch, calls } = scriptedDispatcher([
     { resultText: envelope({ headline: "Weak hook" }) },
     { resultText: envelope({ headline: "Strong scroll-stopper" }) },
   ]);
-  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(5), copyQcVerdictP3(8)]);
+  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(5), copyQcVerdictP3(9)]);
   const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: closure }), dispatch);
   assert.equal(outcome.kind, "ok");
   if (outcome.kind === "ok") {
     assert.equal(outcome.attempts, 2, "one bounce ⇒ two dispatches (attempt 1 + revise)");
-    assert.equal(outcome.maxCopyQcVerdict?.persuasion_score, 8);
+    assert.equal(outcome.maxCopyQcVerdict?.persuasion_score, 9);
   }
   assert.equal(seen.length, 2, "Max was re-invoked on the revised copy");
   // The revise turn must have RESUMED the same session — the self-heal cache-warm invariant.
@@ -1335,7 +1346,7 @@ test("Phase 3 loop: Max grades 4/10 every round → EXHAUSTED with maxCopyQcMiss
 test("Phase 3 loop: Max grades a HARD-GATE FAIL → bounce back on the hard-gate names (not just score)", async () => {
   const failThenPass = [
     copyQcVerdictP3(null, { hard_gate_pass: false }),
-    copyQcVerdictP3(8),
+    copyQcVerdictP3(9),
   ];
   const { dispatch, calls } = scriptedDispatcher([
     { resultText: envelope({ headline: "Fabrication-y hook" }) },

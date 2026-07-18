@@ -145,6 +145,18 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     adCampaignId: id,
   }).catch(() => null);
 
+  // bianca-posts-only-at-9of10 Phase 2 — the CEO manual postability override
+  // record. Null when the campaign row is missing entirely (upstream 404 already
+  // fired); the record shape is always present with the five nullable columns
+  // ({override_postable, override_score, override_reason, override_by,
+  // override_at}) so the UI can render both Max's real grade AND the override
+  // (or the empty "no override" state) without a second fetch.
+  const { readPostabilityOverride } = await import("@/lib/ads/postability-override");
+  const postabilityOverride = await readPostabilityOverride(auth.admin, {
+    workspaceId: workspaceId as string,
+    adCampaignId: id,
+  }).catch(() => null);
+
   // "Posted by" identity — the FB page + linked IG handle chosen on the most recent publish job.
   // Read-only enrichment; null when nothing has been published yet.
   let pageIdentity: { page_id: string; page_name: string | null; instagram_id: string | null } | null = null;
@@ -173,6 +185,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     copyVariants,
     angle,
     copyQaVerdict,
+    postabilityOverride,
     pageIdentity,
   });
 }
