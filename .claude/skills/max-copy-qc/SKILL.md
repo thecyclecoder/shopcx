@@ -140,11 +140,69 @@ or in-copy phrase in `evidence` — no unattributed hard-gate fails.**
    the image doesn't show ("look at the pouch" when there's no pouch, "the yellow label" when
    the pack is red). This is NOT the full render-defect QC — Dahlia's own creative-qc pass
    already ran; you're the cross-check for caption↔image consistency. Cite the mismatch on a
-   fail.
+   fail. **This gate is COARSE + global** — for the granular per-format creative critique
+   (mis-scaled products, hallucinated offers/badges, in-pixel competitor leaks, on-image
+   legibility per format), see the **per-format creative QC** section below and emit
+   `creative[]` on the verdict.
 
 **`hard_gate_pass` is `true` ONLY when every gate is `true`.** A single `false` forces
 `hard_gate_pass=false` (the Node caller treats a mismatched pair as a defect and fails closed).
 
+## Per-format creative QC (hard gate — grade EACH format render, don't rubber-stamp `render_ok`)
+
+⚠️ **The 5 hard gates above are copy-level and use one representative image. They MISS
+creative defects that only surface in ONE of the placement crops** — a mis-scaled product
+in the 1:1 crop, a hallucinated "FREE TOTE" badge Nano Banana baked into the Feed 4:5, a
+competitor's offer leaked into the 9:16 pixels while the 4:5 render happened to be clean.
+A binary `render_ok:true` over one image passed all three defects into the bin in prod.
+This is exactly what this section fixes.
+
+The Node lane (`src/lib/ads/creative-qa.ts` `runQaCreativeCopyViaBoxSession`) MAY hand you
+between 1 and 4 rendered format images (the four Meta placement statics
+[[../../../src/lib/ads/creative-pack|creative-pack]] renders — `feed_4x5` ·
+`stories_9x16` · `reels_9x16` · `right_column_1x1`). When more than one is provided, they
+appear in the TRUSTED CONTEXT block as:
+
+```
+FORMATS:
+  - format: feed_4x5           path: /tmp/creative-copy-qc-<uuid>-feed_4x5.jpg
+  - format: stories_9x16       path: /tmp/creative-copy-qc-<uuid>-stories_9x16.jpg
+  - format: reels_9x16         path: /tmp/creative-copy-qc-<uuid>-reels_9x16.jpg
+  - format: right_column_1x1   path: /tmp/creative-copy-qc-<uuid>-right_column_1x1.jpg
+```
+
+**Read every listed path** (the PreToolUse gate allows Read on each one; every other path
+is denied). For each format you Read, judge these four checks and emit ONE entry per
+format in the verdict's top-level `creative[]` array. Every `false` MUST cite the format
+that failed and the specific on-image element in `findings` — no unattributed creative
+fails.
+
+| check | fails when |
+|---|---|
+| `product_scale_ok` | the product renders at an unbelievable size for a real SKU — a giant pack floating over a tiny mug, a bottle stretched to twice the height it would be on a shelf, a pack shrunk to the size of a coin. Cite the format + the size mismatch |
+| `no_hallucinated_offer_or_badge` | the image bakes an offer / badge / sticker / text callout NOT in the brief — e.g. a "FREE TOTE" badge Nano Banana invented from a competitor hook, an "AS SEEN ON TV" sticker no product actually has, a bogus discount tag ("50% OFF" when the real offer is "34% off"). This is a creative-side twin of `no_hallucinated_offer_or_badge`'s copy sibling `no_fabrication`. Cite the fabricated element |
+| `no_in_pixel_competitor_leak` | a competitor's brand name, logo, verbatim slogan, or offer is visible in the pixels — even when the caption is clean, the pixels can carry a leak (a competitor's wordmark left on the pack, a "FREE TOTE" badge that was really the competitor's promo). This is the creative twin of copy's `no_competitor_leak`. Cite the leaked element |
+| `on_image_text_legible` | on-image text is illegible or the hierarchy fails for THIS format's crop — a headline that fit at 4:5 but was squeezed off-frame in the 9:16 story crop, a subhead that overlaps the pack in the 1:1 right-column, a badge that's readable in one format and mush in another. This is per-format; the copy-side `render_ok` was one binary over one image |
+
+**Backwards compatibility:** if the FORMATS block lists only ONE format (a single-image
+legacy call), emit ONE `creative[]` entry for it. If the invocation prompt does NOT
+include a `FORMATS:` block at all (pre-Phase-1 caller), you MAY omit `creative` from the
+verdict entirely — the parser is tolerant of absence for legacy calls and defaults
+`creative_gate_pass` to `true`. Do NOT invent extra format entries you weren't handed
+paths for; a fabricated entry is worse than an absence.
+
+**`creative_gate_pass` is `true` ONLY when every entry in `creative[]` has all four
+checks `true`.** A single per-format `false` forces `creative_gate_pass=false`. The Node
+caller treats a mismatched pair (`creative_gate_pass=true` with a per-format `false`
+inside, or vice versa) as a defect and fails closed. Phase 2 (a later session) wires the
+bounce dispatch: on a `creative_gate_pass=false` the offending format regenerates via the
+render lane; on a pass every format is clean and Bianca's bin receives the pack.
+
+The `findings[]` array on each entry MUST be present (may be `[]` on an all-pass entry).
+Cite the format + defect in ONE short line per failed check (e.g.
+`"no_hallucinated_offer_or_badge: 'FREE TOTE' badge baked into the feed 4:5 — not in the
+brief"`). This is the string a downstream reader sees on the grade card and the Phase-2
+bounce dispatch threads into the render-lane regenerate prompt.
 ## ⚠️ Expect long-form 3-paragraph primary text — do NOT dock for length (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1)
 
 Every `PRIMARY:` string Dahlia hands you should be a **long-form 3-paragraph shape** (a short
@@ -299,7 +357,44 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
       "first_line_earns_the_second: primary opens 'Drink one cup and get through the afternoon' — a specific promise, not stacked with a second beat"
     ]
   },
-  "verdict_reason": "clean caption grounded in the brief; one specific proof stack lifts the score above the generic-pitch floor"
+  "creative": [
+    {
+      "format": "feed_4x5",
+      "product_scale_ok": true,
+      "no_hallucinated_offer_or_badge": false,
+      "no_in_pixel_competitor_leak": true,
+      "on_image_text_legible": true,
+      "findings": [
+        "no_hallucinated_offer_or_badge: 'FREE TOTE' badge in the top-right — not in the brief"
+      ]
+    },
+    {
+      "format": "stories_9x16",
+      "product_scale_ok": true,
+      "no_hallucinated_offer_or_badge": true,
+      "no_in_pixel_competitor_leak": true,
+      "on_image_text_legible": true,
+      "findings": []
+    },
+    {
+      "format": "reels_9x16",
+      "product_scale_ok": true,
+      "no_hallucinated_offer_or_badge": true,
+      "no_in_pixel_competitor_leak": true,
+      "on_image_text_legible": true,
+      "findings": []
+    },
+    {
+      "format": "right_column_1x1",
+      "product_scale_ok": true,
+      "no_hallucinated_offer_or_badge": true,
+      "no_in_pixel_competitor_leak": true,
+      "on_image_text_legible": true,
+      "findings": []
+    }
+  ],
+  "creative_gate_pass": false,
+  "verdict_reason": "clean caption grounded in the brief; but the feed 4:5 render baked a fabricated 'FREE TOTE' badge — bounce that format to regenerate"
 }
 ```
 
@@ -320,6 +415,15 @@ Rules for the envelope:
   malformed shape (sub-score outside 0..2 / non-integer / non-object) is still fail-closed.
 - `evidence` (persuasion_rubric) — a NON-EMPTY string array on a pass (cite the phrases you
   rewarded); an empty array is fine on a fail.
+- `creative` + `creative_gate_pass` — per-format creative-QC findings, one entry per
+  format image path listed under `FORMATS:` in the invocation prompt. Each entry MUST
+  carry all four checks (`product_scale_ok`, `no_hallucinated_offer_or_badge`,
+  `no_in_pixel_competitor_leak`, `on_image_text_legible`) as booleans + a `findings[]`
+  array (may be `[]` on an all-pass entry). `creative_gate_pass` is `true` iff every
+  entry has all four checks `true` — a mismatched pair is a defect and the parser fails
+  closed. On a legacy invocation with no `FORMATS:` block, you MAY omit `creative`
+  entirely; the parser tolerates absence and defaults `creative_gate_pass` to `true`.
+  Never invent a format entry for a path you weren't handed.
 - `verdict_reason` — one plain-English line summarizing WHY you passed or failed. On a fail,
   this is the string threaded into Dahlia's revise prompt, so make it specific ("primary text
   invents a '35% of women' stat the brief doesn't ground").

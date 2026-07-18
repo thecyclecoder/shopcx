@@ -120,5 +120,57 @@ The migration adding the two `jsonb` columns is `supabase/migrations/20261102120
 
 Pinned by [[../../../src/lib/ads/creative-qa.dahlia-rubric.test.ts]] (12 cases).
 
+## Per-format creative-QC ([[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 1)
+
+Max's binary `hard_gates.render_ok` was one boolean over ONE canonical image — coarse
+enough that a mis-scaled product in the 1:1 crop, a hallucinated "FREE TOTE" badge in the
+Feed 4:5, and a competitor's offer leaked into the 9:16 pixels all passed into the bin
+in prod (2026-07-14 competitor-tote regression). Phase 1 adds a granular per-format
+creative-QC layer beside `render_ok`:
+
+- **`CopyQaCreativeFormatVerdict`** — one entry per placement render Max was handed. Four
+  booleans (`product_scale_ok` · `no_hallucinated_offer_or_badge` ·
+  `no_in_pixel_competitor_leak` · `on_image_text_legible`) + a `findings[]` array naming
+  the format + defect on any `false`.
+- **`COPY_QC_CREATIVE_FORMATS`** — the four Meta placement statics [[creative-pack]]
+  renders (`feed_4x5` · `stories_9x16` · `reels_9x16` · `right_column_1x1`). Kept as a
+  `const readonly` here so the [[../../../.claude/skills/max-copy-qc/SKILL|max-copy-qc]]
+  SKILL, the parser, and the SDK writer share ONE source-of-truth; a divergence between
+  the type and this list is a build-time bug.
+- **`parsePerFormatCreative(raw)`** + **`deriveCreativeGatePass(creative)`** — pure
+  parser + gate derivation wired into `parseCopyQaVerdict`. Absence is TOLERATED (legacy
+  single-image call → `creative:null` + `creative_gate_pass:true`); present-but-malformed
+  (unknown format literal, non-boolean check, duplicate format entry, non-string
+  finding) fails-closed with a specific reason. A mismatched pair (Max claims
+  `creative_gate_pass:true` while a per-format check is `false`, or vice versa) is
+  treated as a defect and rejected — same Goodhart-adjacent guard as `hard_gate_pass`.
+- **`creative_gate_pass`** — top-level roll-up boolean the [[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok|Phase-2]]
+  bounce dispatch reads to regenerate the offending format (mirroring the copy-fail
+  bounce to Dahlia). Derived from the per-format entries; absent when `creative` is null.
+  Max may omit it — the parser fills the derivation.
+- **`insertCopyQaVerdict`** — persists `per_format_creative` + `creative_gate_pass` on
+  the [[../tables/ad_creative_copy_qc_verdicts]] row alongside `scroll_stop` +
+  `dahlia_rubric`.
+- **`readLatestCopyQaVerdict`** — surfaces the two new fields alongside the existing
+  ones; null-tolerant for legacy rows (predate the migration).
+
+The migration adding the two columns is
+`supabase/migrations/20261114120000_ad_creative_copy_qc_verdicts_per_format_creative.sql`
+(additive `add column if not exists`, `creative_gate_pass boolean not null default true`
+so legacy rows are never surfaced as false-fails on the read side; auto-applied by the
+Control Tower migration-drift reconciler once the PR merges to main).
+
+**Advisory in Phase 1 — no bounce driver yet.** Phase 2 (a later session) wires the
+render-lane bounce that reads `creative_gate_pass` + the per-format `findings[]` to
+regenerate the offending format, and surfaces the block on the grade card so a reviewer
+sees WHICH format failed and why. Phase 1 lands the storage + parser + SKILL only.
+
+Pinned by [[../../../src/lib/ads/creative-qa.copy-qc.test.ts]] cases `(g)`-`(h)`:
+verdict with a full 4-format creative[] parses; a Feed find flags the tote AND drives
+`creative_gate_pass=false`; legacy verdicts without the block parse ok with
+`creative:null` + `creative_gate_pass:true`; malformed shapes (unknown format literal,
+non-boolean check, duplicate format, mismatched roll-up) fail-closed with a specific
+reason.
+
 ## Related
 [[creative-agent]] · [[creative-generate]] · [[creative-brief]] · [[creative-skeleton]] (the winning-ad vision pattern this mirrors) · [[../lifecycles/ad-creative]] · [[creative-qc]] (the box-session skill) · [[creative-qc-sandbox]] (the guardrails + prompt-building layer) · [[ad-creative-qc-permission-gate]] (the PreToolUse hook) · [[copy-validator]] (SSOT safety rails).
