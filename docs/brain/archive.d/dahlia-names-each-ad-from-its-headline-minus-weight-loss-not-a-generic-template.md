@@ -1,0 +1,1 @@
+- **Dahlia names each ad 'Dahlia - {Product} - {Headline}' (headline minus weight-loss, no competitor)** · verified 2026-07-18 · → [[../libraries/creative-agent]]
