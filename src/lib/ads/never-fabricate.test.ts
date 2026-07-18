@@ -152,6 +152,77 @@ test("fact-grounded: a fabricated stat is blocked ('clinically proven 90% more f
   assert.equal(r.misses[0].reason, "fabricated_number");
 });
 
+// ── proofStack as a first-class claim_trace source (proofstack-is-a-citeable-claim-source) ──────
+
+test("proofStack: '700,000+ customers' cited via source='proofStack' grounds ok", () => {
+  const r = verifyClaimTrace(
+    [{ claim: "700,000+ customers", source: "proofStack", source_ref: "700,000+ customers across the country trust Superfoods Company" }],
+    factBrief(),
+    emptyPi,
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.misses.length, 0);
+});
+
+test("proofStack: '30-day money-back guarantee' cited via source='proofStack' grounds ok", () => {
+  const briefWithGuarantee = {
+    leadProof: { kind: "review" as const, text: "great", attribution: "A." },
+    transformation: null,
+    supportingBenefits: [],
+    proofStack: [
+      "700,000+ customers across the country trust Superfoods Company",
+      "30-day money-back guarantee",
+      "Non-GMO",
+      "3rd Party Tested",
+      "Made In The USA",
+      "15,000+ reviews",
+      "Best Tasting — Gourmet Magazine",
+    ],
+  } as unknown as Parameters<typeof verifyClaimTrace>[1];
+  const r = verifyClaimTrace(
+    [{ claim: "risk-free with our 30-day money-back guarantee", source: "proofStack", source_ref: "30-day money-back guarantee" }],
+    briefWithGuarantee,
+    emptyPi,
+  );
+  assert.equal(r.ok, true);
+});
+
+test("proofStack: a fabricated inflation ('8,000,000+ customers') is fabricated_number", () => {
+  const r = verifyClaimTrace(
+    [{ claim: "8,000,000+ customers", source: "proofStack", source_ref: "700,000+ customers across the country trust Superfoods Company" }],
+    factBrief(),
+    emptyPi,
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.misses[0].reason, "fabricated_number");
+  assert.equal(r.misses[0].source, "proofStack");
+});
+
+test("proofStack: cited when brief.proofStack is empty → source_not_found", () => {
+  const noStack = {
+    leadProof: null, transformation: null, supportingBenefits: [], proofStack: [],
+  } as unknown as Parameters<typeof verifyClaimTrace>[1];
+  const r = verifyClaimTrace(
+    [{ claim: "700,000+ customers", source: "proofStack", source_ref: "anything" }],
+    noStack,
+    emptyPi,
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.misses[0].reason, "source_not_found");
+  assert.equal(r.misses[0].source, "proofStack");
+});
+
+test("proofStack: an off-topic hijack ('700,000+ cured of cancer') is claim_not_in_source", () => {
+  const r = verifyClaimTrace(
+    [{ claim: "700,000+ cured of cancer", source: "proofStack", source_ref: "700,000+ customers across the country trust Superfoods Company" }],
+    factBrief(),
+    emptyPi,
+  );
+  assert.equal(r.ok, false);
+  // Number IS grounded (700,000+ is in proofStack) — the failure is topical relevance, not the number.
+  assert.equal(r.misses[0].reason, "claim_not_in_source");
+});
+
 // ── (c) ingredients with source_ref='L-theanine' when pi.ingredients carries only ashwagandha
 //      → ok:false with source_not_found ─────────────────────────────────────────────────────────
 

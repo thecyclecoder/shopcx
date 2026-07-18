@@ -102,12 +102,12 @@ generic benefit ("supports focus", "helps with sustained energy") that lifts fro
 `brief.supportingBenefits` is always safe; a specific claim with no source is a fabrication
 and will fail the layer-3 verifier that ships in the same firewall.
 
-There are FIVE claim classes. For each class, the ONLY allowed source fields are named
+There are SIX claim classes. For each class, the ONLY allowed source fields are named
 below — nothing else counts as evidence. The field names here are the SAME vocabulary the
 layer-2 `claim_trace` `source` enum uses (`ingredients` / `ingredient_research` /
 `reviews.byClaim` / `transformationStory` / `supportingBenefit` / `leadProof` /
-`competitorDna`), so learning these seven now means you already know what layer 2 will
-require you to emit.
+`competitorDna` / `proofStack`), so learning these eight now means you already know what
+layer 2 will require you to emit.
 
 | # | Claim class | Example (do NOT write unless you can cite one of these) | The ONLY allowed source fields |
 |---|-------------|---------------------------------------------------------|--------------------------------|
@@ -116,6 +116,7 @@ require you to emit.
 | 3 | **Ingredient names** — any specific ingredient, mechanism molecule, or clinical study name (`ashwagandha`, `L-theanine`, `KSM-66`, `citrus polyphenols`) | `KSM-66 ashwagandha`, `patented L-carnitine complex` | `pi.ingredients` (a row whose `name` matches the ingredient you're about to write) OR `pi.ingredientResearch` (a row whose ingredient name matches). If the ingredient isn't in either list, it isn't in this product — do not name it. |
 | 4 | **Timeframes** — any duration attached to a result (`in 14 days`, `by week 3`, `overnight`, `within a month`) | `results in 7 days`, `noticed a change in 2 weeks` | A timeframe token literally present in one of the reviews returned by `pi.reviews.byClaim(benefitName)` OR literally present in `brief.transformation.quote`. Never write a timeframe from your own generalization of "typical" outcomes; if a real customer didn't say the duration, do not claim the duration. |
 | 5 | **Comparative claims** — any "versus" claim against another product, category, or approach (`unlike stimulants`, `better than melatonin`, `no jitters like caffeine`, `beats the leading pre-workout`) | `outperforms `<brand>``, `unlike other greens powders` | A token in `brief.supportingBenefits` (the brief's own vetted comparison line — e.g. "no jitters", "no crash") OR `brief.competitorDna` (the debranded competitor angle the M2 competitor-DNA spec surfaces, when the angle is `source='competitor'`). A comparative claim outside both sources is a fabrication — the M2 debrand pass exists precisely so you don't have to invent one. |
+| 6 | **Brand proof / social proof / risk reversal / authority** — the verified brand facts (`700,000+ customers` = social proof · `30-day money-back guarantee` = risk reversal / Cialdini commitment · `15,000+ reviews` = social-proof volume · `Best Tasting — Gourmet Magazine` = authority · `Non-GMO` · `3rd-party tested` · `Made In USA`) | `700,000+ customers`, `risk-free with our 30-day money-back guarantee`, `15,000+ 5-star reviews`, `named "Best Tasting" by Gourmet Magazine`, `Non-GMO, 3rd-party tested, made in USA` | `brief.proofStack` — the verified proof stack (product awards + certifications + store brandProofPoints). Cite `source='proofStack'` with `source_ref` = the proofStack line you're pulling from (a case-insensitive substring match is enough; a proof claim that COMBINES multiple lines cites the closest one). **USE these facts** — they are our strongest Cialdini levers (social proof + commitment/risk-reversal + authority). Never self-censor `700,000+ customers` or the `30-day money-back guarantee` onto a non-existent `reviews-volume` cite: `proofStack` is the source. Numbers still ground against the SAME real-data corpus — `700,000+` is grounded; `8,000,000+` is `fabricated_number`. |
 
 **Cross-cutting reminders.**
 
@@ -347,7 +348,9 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
   "claim_trace": [
     { "claim": "600mg L-theanine", "source": "ingredients", "source_ref": "L-theanine" },
     { "claim": "\"I dropped 40 lbs\" — Kaitlyn", "source": "transformationStory", "source_ref": "Kaitlyn" },
-    { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" }
+    { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" },
+    { "claim": "700,000+ customers", "source": "proofStack", "source_ref": "700,000+ customers across the country trust Superfoods Company" },
+    { "claim": "risk-free with our 30-day money-back guarantee", "source": "proofStack", "source_ref": "30-day money-back guarantee" }
   ],
   "variations": [
     { "framework": "lf8", "headline": "Feel lighter. Finally.", "primaryText": "…a self-contained hook led by the reader's raw Life-Force-8 desire — feel better, less pain, more comfort. No product intro, no offer on cold." },
@@ -394,9 +397,14 @@ variation per rail 4.
   UNIQUE mechanism / a fresh promise; on an empty shelf it names the problem in the reader's
   own words.
 - **Cialdini-led** — LEAD with one of the seven principles of influence (reciprocity,
-  commitment/consistency, social proof, authority, liking, scarcity, unity). Real numbers only
-  — `700,000+ customers` needs a `pi.reviews`-volume cite; `4.7 stars` needs a real average;
-  `featured in Gourmet Magazine` needs a real endorsement. NEVER a fabricated stat.
+  commitment/consistency, social proof, authority, liking, scarcity, unity). Real numbers only.
+  **The verified brand facts on `brief.proofStack` are the go-to grounding** — `700,000+
+  customers` cites `source='proofStack'` with `source_ref` matching the `"700,000+ customers …"`
+  proofStack line; the `30-day money-back guarantee` cites `source='proofStack'` (commitment /
+  risk-reversal — one of the strongest Cialdini levers); `15,000+ reviews`, `"Best Tasting" —
+  Gourmet Magazine`, `Non-GMO`, `3rd-party tested` are all citeable via `proofStack` too.
+  NEVER self-censor these onto a non-existent `reviews-volume` cite. NEVER a fabricated stat
+  (`8,000,000+ customers` is `fabricated_number`).
 - **Hopkins-led** — LEAD with specificity + a reason-why. Real number, real duration, real
   ingredient dose — every one cited in `claim_trace`. `"She lost 15 lbs in 3 weeks"` needs a
   real transformation reviewer with those exact numbers in the review body per rail 1's
@@ -507,18 +515,32 @@ Rules for the envelope:
   concrete defect cited so you can revise. Rules:
   - `claim` — the exact substring from your headline / primary text / description you are
     citing (e.g. `"600mg L-theanine"`, `"lost 40 lbs"`, `"4.7-star average"`).
-  - `source` — exactly one of the seven enum values (SAME seven names layer 1 above uses):
+  - `source` — exactly one of the eight enum values (SAME eight names layer 1 above uses):
     `ingredients` · `ingredient_research` · `reviews.byClaim` · `transformationStory` ·
-    `supportingBenefit` · `leadProof` · `competitorDna`.
+    `supportingBenefit` · `leadProof` · `competitorDna` · `proofStack`.
   - `source_ref` — the specific reference inside that source: an ingredient name for
     `ingredients` / `ingredient_research` (e.g. `"L-theanine"`), a benefit name for
     `reviews.byClaim` (the argument you'd pass to `pi.reviews.byClaim(benefitName)`), a
     reviewer name for `transformationStory` (matched against `brief.transformation.reviewer`),
     a benefit token for `supportingBenefit` (matched against `brief.supportingBenefits`), a
-    slot key for `competitorDna` (e.g. `"mechanism"`), or an empty-string-safe attribution
-    marker for `leadProof`. Emit ONE entry per specific claim — the generic benefit strings
-    that lift verbatim from `brief.supportingBenefits` still need a `supportingBenefit`
-    entry so layer 3 can confirm the token was in the brief.
+    slot key for `competitorDna` (e.g. `"mechanism"`), a proofStack line for `proofStack`
+    (matched against `brief.proofStack` — e.g. `"700,000+ customers across the country trust
+    Superfoods Company"` or `"30-day money-back guarantee"`), or an empty-string-safe
+    attribution marker for `leadProof`. Emit ONE entry per specific claim — the generic
+    benefit strings that lift verbatim from `brief.supportingBenefits` still need a
+    `supportingBenefit` entry so layer 3 can confirm the token was in the brief.
+
+### USE THE PROOF — never self-censor a real proofStack item
+
+The brief's `proofStack` carries our strongest Cialdini levers: **`700,000+ customers`**
+(social proof), **`30-day money-back guarantee`** (risk reversal / commitment), **`15,000+
+reviews`** (social-proof volume), **`Best Tasting — Gourmet Magazine`** (authority),
+**`Non-GMO`** · **`3rd-party tested`** · **`Made In USA`** (authority). These are REAL facts
+the CEO has verified. **CITE them via `source='proofStack'` and USE them** — a Cialdini-led
+variation that leaves the money-back guarantee off the table is a variation writing weaker
+copy than we've earned. If a fact is on `brief.proofStack`, it is grounded — do not drop it
+because your search for a matching `reviews.byClaim` closure came up empty; `proofStack` is
+the direct source and layer 3 verifies against `brief.proofStack` exactly.
 
 ### Andromeda concept-diversity taxonomy (the 10 valid `concept_tag` values)
 
