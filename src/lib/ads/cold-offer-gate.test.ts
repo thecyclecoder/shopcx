@@ -68,3 +68,62 @@ test("hasColdOfferLeak lowercases before matching (mixed-case leaks still trip)"
   assert.equal(hasColdOfferLeak(emptyRest("SAVE big TODAY")), true);
   assert.equal(hasColdOfferLeak(emptyRest("Free Shipping over $50")), true);
 });
+
+// ── debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-offer
+// Phase 1 — the allowedOffer allowlist ───────────────────────────────────────────────────────
+// When the caller passes OUR real brief.offer, the exact headline / disclaimer strings are
+// stripped from the joined scan text BEFORE the leak predicate runs — so an offer-for-offer
+// swap that renders our real offer verbatim (e.g. `Up to 34% off + free shipping` with
+// disclaimer `with 3+ units on Subscribe & Save`) is NOT flagged as a cold-audience leak. A
+// DIFFERENT discount (`50% off today`) still trips the gate because only the exact allowed
+// phrases are removed.
+
+const OUR_REAL_OFFER = {
+  headline: "Up to 34% off + free shipping",
+  disclaimer: "with 3+ units on Subscribe & Save",
+};
+
+test("offer-for-offer swap: OUR real offer verbatim in the headline is NOT a leak (allowedOffer allowlists it)", () => {
+  const copy = emptyRest("Up to 34% off + free shipping");
+  // Without the allowlist, the gate flags this ("off", "free shipping", "34% off").
+  assert.equal(hasColdOfferLeak(copy), true);
+  // With the allowlist, our real offer is stripped from the scan text — no leak.
+  assert.equal(hasColdOfferLeak(copy, OUR_REAL_OFFER), false);
+});
+
+test("offer-for-offer swap: OUR real offer's disclaimer verbatim in the primary text is not a leak", () => {
+  // The disclaimer alone doesn't carry an offer token, but this pins that a disclaimer text
+  // (e.g. "with 3+ units on Subscribe & Save") is treated as allowed content.
+  const copy = { headline: "Steady energy, all morning", primaryText: "with 3+ units on Subscribe & Save", description: "" };
+  assert.equal(hasColdOfferLeak(copy, OUR_REAL_OFFER), false);
+});
+
+test("offer-for-offer swap: a DIFFERENT discount ('50% off today') still trips the gate even with allowedOffer", () => {
+  // The allowlist is strict — a phrase we don't really run is NOT excused.
+  const copy = emptyRest("50% off today");
+  assert.equal(hasColdOfferLeak(copy, OUR_REAL_OFFER), true);
+});
+
+test("offer-for-offer swap: a bare currency ('$5') is still a leak even with allowedOffer (our real offer doesn't lead with a bare price)", () => {
+  const copy = emptyRest("just $5 today");
+  assert.equal(hasColdOfferLeak(copy, OUR_REAL_OFFER), true);
+});
+
+test("offer-for-offer swap: allowedOffer=null preserves the current (pre-Phase-1) behavior byte-for-byte", () => {
+  const copy = emptyRest("Up to 34% off + free shipping");
+  assert.equal(hasColdOfferLeak(copy, null), true);
+  assert.equal(hasColdOfferLeak(copy, undefined), true);
+});
+
+test("offer-for-offer swap: allowedOffer with empty/whitespace headline is a no-op (falls through to today's behavior)", () => {
+  const copy = emptyRest("Up to 34% off + free shipping");
+  assert.equal(
+    hasColdOfferLeak(copy, { headline: "   ", disclaimer: null }),
+    true,
+  );
+});
+
+test("offer-for-offer swap: allowedOffer matches case-insensitively (our real offer as 'UP TO 34% OFF + FREE SHIPPING' still allowlisted)", () => {
+  const copy = emptyRest("UP TO 34% OFF + FREE SHIPPING");
+  assert.equal(hasColdOfferLeak(copy, OUR_REAL_OFFER), false);
+});

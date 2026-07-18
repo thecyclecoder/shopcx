@@ -1526,11 +1526,18 @@ export async function runCopyAuthorSession(
     }
     if (
       verdict.audience_temperature === "cold" &&
-      hasColdOfferLeak({
-        headline: verdict.headline,
-        primaryText: verdict.primaryText,
-        description: verdict.description,
-      })
+      hasColdOfferLeak(
+        {
+          headline: verdict.headline,
+          primaryText: verdict.primaryText,
+          description: verdict.description,
+        },
+        // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-
+        // for-offer Phase 1 — OUR real brief.offer (free shipping with Subscribe & Save) is
+        // an ALLOWED offer for the cold gate, so an offer-for-offer swap that renders it
+        // verbatim is not flagged. A different discount ("50% off today") still trips.
+        inputs.brief.offer,
+      )
     ) {
       lastReason = "cold_offer_leak";
       lastValidatorMisses = undefined;
@@ -2188,21 +2195,33 @@ async function insertReadyCreative(
      *  kill-switch off / legacy) — Bianca's filter treats NULL identically to TRUE, so today's
      *  byte-for-byte behavior is preserved for those callers. */
     maxQcEligible?: boolean | null;
+    /** debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-
+     *  offer Phase 1 — OUR real brief.offer is an ALLOWED offer for the cold gate. When the
+     *  offer-for-offer swap renders it verbatim into the copy (via [[../ads/debrand]]
+     *  `chooseGroundedSubstitute`), the exact headline/disclaimer strings are stripped from
+     *  the scan text so the swap isn't flagged as a cold-audience leak. Absent / null →
+     *  today's behavior (no allowance). */
+    allowedOffer?: CreativeBrief["offer"];
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. NULL /
   // warm / hot pass through untouched (the deterministic buildMetaCopyPack path is temperature-
   // agnostic and always leaves audience_temperature undefined here). Check ALL rotated pack copy
   // (headlines + primary texts joined) so the pack is refused if ANY variant leaks a cold offer.
-  // See [[../ads/lf8]] `hasColdOfferLeak`.
+  // See [[../ads/lf8]] `hasColdOfferLeak`. OUR real brief.offer (opts.allowedOffer) passes
+  // through as an offer allowlist — the offer-for-offer swap that renders it verbatim isn't
+  // flagged as a leak.
   const audienceTemperature: "cold" | "warm" | "hot" | null = opts?.audienceTemperature ?? null;
   if (
     audienceTemperature === "cold" &&
-    hasColdOfferLeak({
-      headline: copyPack.headlines.join(" "),
-      primaryText: copyPack.primaryTexts.join(" "),
-      description: copyPack.description,
-    })
+    hasColdOfferLeak(
+      {
+        headline: copyPack.headlines.join(" "),
+        primaryText: copyPack.primaryTexts.join(" "),
+        description: copyPack.description,
+      },
+      opts?.allowedOffer ?? null,
+    )
   ) {
     return { kind: "skip", reason: "cold_offer_leak" };
   }
@@ -2666,6 +2685,10 @@ async function stockProduct(
           /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — threaded
            *  into `insertReadyCreative` so Max's eligibility lands on the row Bianca reads. */
           maxQcEligible?: boolean | null;
+          /** debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-
+           *  for-offer Phase 1 — OUR real brief.offer threaded through as the cold gate's
+           *  allowlist so an offer-for-offer swap that renders it verbatim isn't flagged. */
+          allowedOffer?: CreativeBrief["offer"];
         } | undefined = undefined;
         let authorVerdict: AuthorModeCopy | null = null;
         // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's eligible verdict
@@ -2982,6 +3005,11 @@ async function stockProduct(
                   audienceTemperature: lastAuthorVerdict.audience_temperature,
                   authorModeCopy: lastAuthorVerdict,
                   maxQcEligible: false,
+                  // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
+                  // offer-for-offer Phase 1 — OUR real offer is an allowed offer on the cold
+                  // gate (an offer-for-offer swap renders it verbatim); a different discount
+                  // still trips.
+                  allowedOffer: brief.offer,
                 };
                 const binResult = await insertReadyCreative(
                   admin, workspaceId, productId, product.handle, productTitle, angle, ineligibleCopyPack,
@@ -3231,6 +3259,9 @@ async function stockProduct(
             // (`copyQcDispatcher` absent → `maxCopyQcVerdict` null) we pass null so the row stays
             // legacy-postable — byte-identical to pre-Phase-2 today.
             maxQcEligible: maxCopyQcVerdict ? isCopyQcEligible(maxCopyQcVerdict) : null,
+            // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
+            // offer-for-offer Phase 1 — thread OUR real offer as the cold gate's allowlist.
+            allowedOffer: brief.offer,
           };
         } else {
           // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`

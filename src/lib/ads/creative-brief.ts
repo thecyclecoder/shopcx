@@ -463,11 +463,15 @@ export async function buildCreativeBrief(
     const rawOfferInput = typeof raw.offer === "string" ? raw.offer : null;
     const competitorAdvertiser = typeof raw.advertiser === "string" ? raw.advertiser : null;
 
-    // Substitute is chosen ONCE from the brief data available so far — the swap on offer + hook
-    // both draw from the same grounded pool (proofStack → supportingBenefits → leadProof →
-    // productFeatures). Null when the brief carries no grounded selling point at all; the offer
-    // slot then becomes null and the hook keeps only its structural words.
+    // Substitute is chosen ONCE from the brief data available so far. Priority is offer-for-
+    // offer first: OUR real brief.offer (free shipping with Subscribe & Save) is preferred as
+    // the swap-in so the ad's OFFER POSITION survives without leading on a coupon. Only when
+    // brief.offer is null does the chooser fall back to the grounded proof/benefit/feature
+    // chain (proofStack → supportingBenefits → leadProof → productFeatures). Null when
+    // nothing is available at all; the offer slot then becomes null and the hook keeps only
+    // its structural words.
     const substitute = chooseGroundedSubstitute({
+      offer,
       proofStack,
       supportingBenefits,
       leadProof,

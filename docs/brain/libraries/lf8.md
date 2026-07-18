@@ -37,6 +37,7 @@ Pinned by `src/lib/ads/lf8.test.ts` (`npm run test:ads-lf8`), which asserts `has
 ## API
 
 - `hasAnyLf8(copyLower: string): boolean` — returns true if the lowercase copy contains **any** LF8 keyword as a substring. Used by ads-supervisor to detect drift and by `buildMetaCopy` to prefer LF8-carrying supporting benefits in the generated ad text.
+- `hasColdOfferLeak(copy, allowedOffer?): boolean` — DETERMINISTIC gate the persister chokepoint (`insertReadyCreative`) runs before writing a status='ready' row. True iff the joined copy carries any `COLD_OFFER_TOKENS` whole-word hit, a discount-percent hit (`%` adjacent to an offer word), or a bare-currency hit. The optional `allowedOffer: { headline?, disclaimer? }` — OUR real `brief.offer` — allowlists our own store offer: those exact phrases are stripped from the scan text BEFORE the predicate runs, so an offer-for-offer swap (see [[debrand]] `chooseGroundedSubstitute`) that renders our real offer verbatim isn't flagged. A DIFFERENT discount (`50% off today`) still trips the gate. Absent / null → today's byte-for-byte behavior (no allowance). Pin: `src/lib/ads/cold-offer-gate.test.ts`.
 
 ## Related
 

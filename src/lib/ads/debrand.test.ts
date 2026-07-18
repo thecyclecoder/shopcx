@@ -180,3 +180,56 @@ test("chooseGroundedSubstitute — returns null when the brief carries no ground
     null,
   );
 });
+
+// ── Phase 1 — offer-for-offer swap (debrand-offer-swap-prefers-our-real-offer-free-shipping-
+// subscribe-and-save-offer-for-offer) ─────────────────────────────────────────────────────────
+// When a competitor offer we don't run needs a substitute AND we have a REAL brief.offer
+// (free shipping + Subscribe & Save), PREFER our real offer as the swap-in — an offer-for-offer
+// swap keeps the ad's OFFER POSITION intact without leading on coupons. Fallback to
+// proof/benefit/feature only when brief.offer is null.
+
+test("chooseGroundedSubstitute — a competitor 'free tote' with a present brief.offer swaps to OUR real offer (offer-for-offer)", () => {
+  const brief = {
+    offer: {
+      headline: "Up to 34% off + free shipping",
+      disclaimer: "with 3+ units on Subscribe & Save",
+    },
+    proofStack: ["700,000+ customers", "Non-GMO"],
+    supportingBenefits: ["no crash"],
+    leadProof: { text: "curb cravings" },
+    productFeatures: ["15 superfoods per tab"],
+  };
+  const sub = chooseGroundedSubstitute(brief);
+  assert.equal(
+    sub,
+    "Up to 34% off + free shipping (with 3+ units on Subscribe & Save)",
+  );
+  // Ordering assertion — the offer beats the proofStack (which would otherwise win).
+  assert.equal(/700,000\+/.test(sub ?? ""), false);
+});
+
+test("chooseGroundedSubstitute — no brief.offer → falls back to a proofStack proof point (grounded proof/benefit/feature chain intact)", () => {
+  const brief = {
+    offer: null,
+    proofStack: ["700,000+ customers"],
+    supportingBenefits: ["no crash"],
+    leadProof: { text: "curb cravings" },
+  };
+  assert.equal(chooseGroundedSubstitute(brief), "700,000+ customers");
+});
+
+test("chooseGroundedSubstitute — brief.offer with a headline only (no disclaimer) renders as just the headline", () => {
+  const brief = { offer: { headline: "Free shipping on Subscribe & Save", disclaimer: null } };
+  assert.equal(
+    chooseGroundedSubstitute(brief),
+    "Free shipping on Subscribe & Save",
+  );
+});
+
+test("chooseGroundedSubstitute — brief.offer with an empty headline is ignored (falls back to the proof chain)", () => {
+  const brief = {
+    offer: { headline: "   ", disclaimer: "with 3+ units" },
+    proofStack: ["700,000+ customers"],
+  };
+  assert.equal(chooseGroundedSubstitute(brief), "700,000+ customers");
+});
