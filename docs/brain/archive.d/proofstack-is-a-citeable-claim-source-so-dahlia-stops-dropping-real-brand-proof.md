@@ -1,0 +1,1 @@
+- **proofStack is a first-class citeable claim source for Dahlia and Max** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
