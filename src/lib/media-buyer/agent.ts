@@ -49,6 +49,12 @@ import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
 import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, evaluateMaxCopyQcAtPublish, type MediaBuyerTestCohort, type CreateAdsetSpec, type MaxCopyQcPublishRefusalReason } from "@/lib/media-buyer/publish-gate";
+import {
+  hasResolvedInstagramIdentity,
+  MISSING_CANONICAL_INSTAGRAM_IDENTITY_REASON,
+  resolvePublishIdentity,
+  type PublishIdentity,
+} from "@/lib/media-buyer/publish-identity";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
 import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
@@ -2183,7 +2189,16 @@ export interface BuildReplenishJobInsertInput {
   cohort: MediaBuyerTestCohort;
   action: MediaBuyerReplenishAction;
   accountId: string;
-  pageId: string;
+  /**
+   * [[../../../docs/brain/specs/all-product-ads-always-publish-under-the-superfoods-company-fb-page-and-instagram]]
+   * Phase 1 — the CANONICAL Facebook Page + Instagram user id every ad publishes
+   * under, resolved from [[./publish-identity]] `resolvePublishIdentity`. The
+   * cohort's `defaultMetaPageId` / `defaultMetaInstagramUserId` are IGNORED for
+   * the shipped values (they only serve as a legacy per-cohort fallback surface
+   * before Phase 1 backfill and are no longer consulted here). Passed in so unit
+   * tests can pin a fixture identity without the resolver's Superfoods lookup.
+   */
+  publishIdentity: PublishIdentity;
   videoId: string;
   adName: string;
   destination: string;
@@ -2217,7 +2232,7 @@ export interface ReplenishJobInsertBody {
 
 export type BuildReplenishJobInsertResult =
   | { ok: true; insert: ReplenishJobInsertBody; createAdsetSpec: CreateAdsetSpec | null; metaAdsetIdForJob: string | null }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; refusalKind?: typeof MISSING_CANONICAL_INSTAGRAM_IDENTITY_REASON };
 
 /**
  * PURE — ensure `targeting.excluded_custom_audiences` lists an entry whose `id === audienceId`.
@@ -2281,7 +2296,22 @@ export function ensureExcludedAudiences(
 }
 
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
-  const { workspaceId, cohort, action, accountId, pageId, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
+  const { workspaceId, cohort, action, accountId, publishIdentity, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
+
+  // all-product-ads-always-publish-under-the-superfoods-company-fb-page-and-instagram Phase 1 —
+  // fail-CLOSED at the money step if the resolved canonical identity is missing an Instagram user id
+  // (never mint an orphan ad set: Meta's placement-customized creative rejects a null IG with a 400,
+  // leaving a live ad set that spends nothing but occupies concurrency). The resolver already returns
+  // a stable, non-empty pair for Superfoods; this predicate is the belt-and-suspenders guard for a
+  // future edit that leaves the constant empty. Skip a job insert here rather than escalate — the
+  // caller (`enqueueReplenishPublish`) surfaces the reason on its `media_buyer_replenish_*` audit row.
+  if (!hasResolvedInstagramIdentity(publishIdentity)) {
+    return {
+      ok: false,
+      reason: MISSING_CANONICAL_INSTAGRAM_IDENTITY_REASON,
+      refusalKind: MISSING_CANONICAL_INSTAGRAM_IDENTITY_REASON,
+    };
+  }
 
   // Per-test-adset mode: this job carries a `create_adset_spec` — the publisher mints a dedicated
   // ~$150/day ad set for THIS one creative (in the cohort's testing campaign) so the whole budget tests
@@ -2337,8 +2367,12 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
       meta_account_id: accountId,
       meta_adset_id: metaAdsetIdForJob,
       create_adset_spec: createAdsetSpec,
-      meta_page_id: pageId,
-      meta_instagram_user_id: cohort.defaultMetaInstagramUserId,
+      // Always the CANONICAL Superfoods Company page + IG from resolvePublishIdentity — never the
+      // per-cohort `default_meta_page_id` / `default_meta_instagram_user_id`. Fixes the 5-of-6
+      // cohorts-missing-IG cohort and the two-different-Facebook-Pages divergence in one place
+      // (all-product-ads-always-publish-under-the-superfoods-company-fb-page-and-instagram Phase 1).
+      meta_page_id: publishIdentity.pageId,
+      meta_instagram_user_id: publishIdentity.instagramUserId,
       headlines,
       primary_texts: primaryTexts,
       descriptions: descriptions.length ? descriptions : null,
@@ -2397,17 +2431,28 @@ async function enqueueReplenishPublish(
   }
 
   const accountId = cohort.defaultMetaAccountId;
-  const pageId = cohort.defaultMetaPageId;
-  if (!accountId || !pageId) {
+  if (!accountId) {
     return {
       inserted: false,
       jobId: null,
-      reason: `cohort missing default publish target(s): ${[
-        !accountId && "default_meta_account_id",
-        !pageId && "default_meta_page_id",
-      ]
-        .filter(Boolean)
-        .join(", ")}`,
+      reason: `cohort missing default publish target(s): default_meta_account_id`,
+    };
+  }
+  // all-product-ads-always-publish-under-the-superfoods-company-fb-page-and-instagram Phase 1 —
+  // resolve the CANONICAL Superfoods Company Facebook Page + Instagram user id from the workspace
+  // registry, never the cohort's per-row `default_meta_page_id` / `default_meta_instagram_user_id`.
+  // The resolver throws for an unregistered workspace so we can never silently publish under an
+  // unintended brand identity; a future workspace has to opt in to the resolver map first.
+  let publishIdentity: PublishIdentity;
+  try {
+    publishIdentity = resolvePublishIdentity(workspaceId);
+  } catch (e) {
+    return {
+      inserted: false,
+      jobId: null,
+      reason: `no canonical publish identity registered for workspace ${workspaceId}: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
     };
   }
   const { data: campaign } = await admin
@@ -2472,7 +2517,7 @@ async function enqueueReplenishPublish(
     cohort,
     action,
     accountId,
-    pageId,
+    publishIdentity,
     videoId: video.id,
     adName,
     destination,
