@@ -1,0 +1,1 @@
+- **Dahlia writes long-form 3-paragraph primary text in a human voice — hook / expand / curiosity-close, no em-dashes, no AI tells** · verified 2026-07-18 · → [[../libraries/creative-agent]]
