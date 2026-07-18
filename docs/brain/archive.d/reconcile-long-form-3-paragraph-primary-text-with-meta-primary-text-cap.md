@@ -1,0 +1,1 @@
+- **Reconcile long-form 3-paragraph primary text with Meta primary-text cap** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
