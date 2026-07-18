@@ -154,6 +154,18 @@ sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a wa
     > `isCleanMachinePassRun`. The overlay matters: `applyInTestingOverlay` forces `in_testing` (overriding `shipped`) unless the
     > spec-test is green — so if the overlay disagreed, a merged human-only spec would be downgraded out of `shipped` and the fold
     > gate's `s.status === "shipped"` check would re-strand it. One predicate ⇒ they can never disagree.
+    >
+    > **FOLD-vs-PROMOTE divergence — `isFoldAllowedZeroCheckRun`** ([[../specs/fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test]] Phase 2).
+    > `getAutoFoldEligibleSlugs` Rail 2 has an OR fallback for a specific stranded class: a spec whose Verification defines **zero
+    > `kind='auto'` rows in `spec_phase_checks`** (a HUMAN-ONLY spec) lands a clean 0-check run — the checks-floor rejects it and
+    > the primary sweep strands it (observed live for `dahlia-researches-from-winners-flow-ad-library`). The fold rail accepts
+    > this exact case (verdict ∈ {`approved`,`needs_human`} AND `run.checks.length === 0` AND the spec DEFINES 0 auto checks); a
+    > spec that DEFINED auto checks but asserted 0 is still rejected (that's the degenerate silent-empty-pass the checks-floor
+    > exists to catch). **`isCleanMachinePassRun` is INTENTIONALLY left unchanged** — the SHARED pre-merge promote gate
+    > (`getSpecTestStateForBranch`) keeps its checks-floor: a pre-merge run is judged before the spec's rows are declared, so the
+    > "silent empty pass" risk is real there; the fold rail has post-merge signals (clean security review, all-shipped phases,
+    > merged build) that the promote rail does not, so the DIVERGENCE is safe. `isFoldAllowedZeroCheckRun` is called ONLY from
+    > this rail; every other caller of `isCleanMachinePassRun` sees the unchanged predicate.
   - **Security-test gate (Phase 3):** the per-diff [[security-agent]] review for the slug must be `completedClean` via
     [[security-agent]] `getSecurityStateBySlug` (a `completed` job exists AND no live `queued`/`claimed`/`building`/
     `needs_input`/`queued_resume` job AND no surfaced `needs_approval` routed fix / `needs_attention` needs-human finding).
