@@ -589,28 +589,35 @@ export async function runQaCreativeCopyViaBoxSession(
 // `public.ad_creative_copy_qc_verdicts` (the SDK-chokepoint rule from CLAUDE.md's "raw .from()
 // with no SDK → STOP" convention — no raw insert lands anywhere else in the codebase).
 //
-// Fail-closed on parse — an undecodable JSON, a missing hard_gates entry, a mismatched pair
-// (hard_gate_pass=true with a false gate inside), or a missing / null `scroll_stop` all resolve
-// to `{ kind: "parse_error", reason }`. The caller treats a parse_error the same as a hard-gate
-// fail (bounce Dahlia's session; never let unchecked bytes land on the row).
+// Fail-closed on parse — an undecodable JSON, a missing hard_gates entry, or a mismatched pair
+// (hard_gate_pass=true with a false gate inside) resolves to `{ kind: "parse_error", reason }`.
+// The caller treats a parse_error the same as a hard-gate fail (bounce Dahlia's session; never
+// let unchecked bytes land on the row).
 //
 // `scroll_stop` is the max-copy-qc-scroll-stop-dims Phase 1 extension — three ADVISORY 0-2
 // sub-scores (`headline_readable_in_3_frames` / `visual_hierarchy_supports_headline` /
-// `first_line_earns_the_second`) + an `evidence[]` array, REQUIRED on every verdict so
-// downstream CAC-correlation always has the granular signal. The sub-scores never gate the bin
-// insert (Goodhart guard); a low `first_line_earns_the_second` with every hard gate green still
-// passes.
+// `first_line_earns_the_second`) + an `evidence[]` array. Advisory-only: never gates the bin
+// insert (Goodhart guard); a low `first_line_earns_the_second` with every hard gate green
+// still passes. A MISSING / NULL `scroll_stop` defaults to a neutral advisory value (all
+// sub-scores null + empty evidence) rather than fail-closing the whole verdict — an advisory
+// sub-score should never nuke a real hard_gates + persuasion_score grade
+// (max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1). Present-but-malformed
+// (non-object, non-integer sub-score, sub-score outside 0..2, non-string-array evidence) is
+// still fail-closed — a genuine defect surfaces, absence is tolerated.
 
-/** Max's advisory scroll-stop sub-scores. All three dimensions REQUIRED on every verdict —
- *  parseCopyQaVerdict refuses fail-closed on a missing or null `scroll_stop`. See
- *  `.claude/skills/max-copy-qc/SKILL.md` § "SCROLL-STOP sub-scores" for the definitions and the
- *  bold ADVISORY-only rule. Each sub-score is 0 / 1 / 2 (absent / weak / strong). */
+/** Max's advisory scroll-stop sub-scores. See `.claude/skills/max-copy-qc/SKILL.md` §
+ *  "SCROLL-STOP sub-scores" for the definitions and the bold ADVISORY-only rule. Each sub-score
+ *  is 0 / 1 / 2 (absent / weak / strong) when Max scored it, or `null` when he omitted the
+ *  scroll_stop object entirely (the parser fills a neutral default so the real hard_gates +
+ *  persuasion_score aren't lost —
+ *  max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1). */
 export interface CopyQaScrollStop {
-  headline_readable_in_3_frames: 0 | 1 | 2;
-  visual_hierarchy_supports_headline: 0 | 1 | 2;
-  first_line_earns_the_second: 0 | 1 | 2;
+  headline_readable_in_3_frames: 0 | 1 | 2 | null;
+  visual_hierarchy_supports_headline: 0 | 1 | 2 | null;
+  first_line_earns_the_second: 0 | 1 | 2 | null;
   /** One short line per non-zero sub-score citing the phrase / defect. MAY be empty on an
-   *  all-zeros verdict; MUST be present as a `[]` — never omitted, never `null`. */
+   *  all-zeros verdict OR on a neutral-default (scroll_stop was absent from Max's output);
+   *  MUST be present as a `[]` — never omitted, never `null`. */
   evidence: string[];
 }
 
@@ -713,9 +720,11 @@ export interface CopyQaVerdict {
   persuasion_score: number | null;
   /** Advisory 5-lens rubric; NULL on a hard-gate fail. */
   persuasion_rubric: CopyQaPersuasionRubric | null;
-  /** Advisory scroll-stop dimensions — REQUIRED on every verdict (pass AND fail); the row on
-   *  disk records what the copy WAS like even when the safety rails failed. Never null, never
-   *  omitted — parseCopyQaVerdict refuses fail-closed on missing / null. */
+  /** Advisory scroll-stop dimensions — the row on disk records what the copy WAS like even
+   *  when the safety rails failed. The SKILL still requires Max to emit it on every verdict
+   *  (pass AND fail); when he omits or nulls it the parser fills a NEUTRAL advisory default
+   *  (all sub-scores null + empty evidence) so the real hard_gates + persuasion_score aren't
+   *  lost — max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1. */
   scroll_stop: CopyQaScrollStop;
   /** dahlia-researches-from-winners-flow-ad-library Phase 2 — the declared-intent envelope Max
    *  was graded against for THIS creative. When the caller threaded a declared intent into the
@@ -850,10 +859,15 @@ function extractJsonObject(raw: string): string | null {
  *   - missing / non-boolean hard-gate key
  *   - `hard_gate_pass=true` with any per-check `false` (mismatched pair)
  *   - persuasion_score outside 0..10 on a pass
- *   - MISSING or NULL `scroll_stop` (max-copy-qc-scroll-stop-dims Phase 1 contract — the sub-
- *     scores are advisory but the FIELD is required so downstream CAC-correlation always has
- *     the granular signal)
- *   - a scroll_stop sub-score outside 0..2 or not an integer
+ *   - a PRESENT-but-malformed `scroll_stop` (non-object, non-integer sub-score, sub-score
+ *     outside 0..2, non-string-array evidence)
+ *
+ *  A MISSING or NULL `scroll_stop` is TOLERATED: the parser fills a neutral advisory default
+ *  (all sub-scores null + empty evidence) so the real hard_gates + persuasion_score aren't
+ *  lost when Max's SKILL omits the advisory field —
+ *  max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1. An advisory sub-score
+ *  should never nuke a real grade; present-but-malformed still fail-closes because that's a
+ *  genuine defect.
  *
  *  The parser NORMALIZES `hard_gate_pass` from `hard_gates` before returning — a top-level
  *  `true` with a per-check `false` inside is REJECTED (parse_error) rather than silently
@@ -885,31 +899,43 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
   // over (a top-level `true` with a false inside is likely a rubric-mirror lie — surface it).
   if (claimedPass !== allGatesTrue) return { kind: "parse_error", reason: "copy_qc_verdict_hard_gate_pass_mismatch" };
 
+  // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1 — a MISSING or NULL
+  // scroll_stop tolerates to a neutral advisory default (all sub-scores null + empty evidence)
+  // so the real hard_gates + persuasion_score survive when Max omits the advisory field. A
+  // present-but-malformed scroll_stop is still fail-closed (that's a genuine defect, not an
+  // absence).
   const rawScrollStop = parsed.scroll_stop;
+  let scrollStop: CopyQaScrollStop;
   if (rawScrollStop === undefined || rawScrollStop === null) {
-    return { kind: "parse_error", reason: "copy_qc_verdict_missing_scroll_stop" };
-  }
-  if (!isPlainObject(rawScrollStop)) {
-    return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_not_object" };
-  }
-  const scrollStopScores: Record<string, 0 | 1 | 2> = {};
-  for (const key of SCROLL_STOP_KEYS) {
-    const v = rawScrollStop[key];
-    if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 2) {
-      return { kind: "parse_error", reason: `copy_qc_verdict_scroll_stop_${key}_out_of_range` };
+    scrollStop = {
+      headline_readable_in_3_frames: null,
+      visual_hierarchy_supports_headline: null,
+      first_line_earns_the_second: null,
+      evidence: [],
+    };
+  } else {
+    if (!isPlainObject(rawScrollStop)) {
+      return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_not_object" };
     }
-    scrollStopScores[key] = v as 0 | 1 | 2;
+    const scrollStopScores: Record<string, 0 | 1 | 2> = {};
+    for (const key of SCROLL_STOP_KEYS) {
+      const v = rawScrollStop[key];
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 2) {
+        return { kind: "parse_error", reason: `copy_qc_verdict_scroll_stop_${key}_out_of_range` };
+      }
+      scrollStopScores[key] = v as 0 | 1 | 2;
+    }
+    const rawEvidence = rawScrollStop.evidence;
+    if (!Array.isArray(rawEvidence) || !rawEvidence.every((e) => typeof e === "string")) {
+      return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_evidence_not_string_array" };
+    }
+    scrollStop = {
+      headline_readable_in_3_frames: scrollStopScores.headline_readable_in_3_frames,
+      visual_hierarchy_supports_headline: scrollStopScores.visual_hierarchy_supports_headline,
+      first_line_earns_the_second: scrollStopScores.first_line_earns_the_second,
+      evidence: rawEvidence.slice(),
+    };
   }
-  const rawEvidence = rawScrollStop.evidence;
-  if (!Array.isArray(rawEvidence) || !rawEvidence.every((e) => typeof e === "string")) {
-    return { kind: "parse_error", reason: "copy_qc_verdict_scroll_stop_evidence_not_string_array" };
-  }
-  const scrollStop: CopyQaScrollStop = {
-    headline_readable_in_3_frames: scrollStopScores.headline_readable_in_3_frames,
-    visual_hierarchy_supports_headline: scrollStopScores.visual_hierarchy_supports_headline,
-    first_line_earns_the_second: scrollStopScores.first_line_earns_the_second,
-    evidence: rawEvidence.slice(),
-  };
 
   let persuasionScore: number | null;
   if (allGatesTrue) {
@@ -989,9 +1015,11 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
 
 /** SDK helper — persists Max's parsed verdict into `public.ad_creative_copy_qc_verdicts`. THE
  *  only writer for the table (CLAUDE.md's SDK-chokepoint rule: raw `.from("ad_creative_copy_qc_verdicts").insert(...)`
- *  in a route or worker is a lint-fail). Always writes `scroll_stop` — the max-copy-qc-scroll-stop-dims
- *  Phase 1 contract makes the field required on every verdict, and parseCopyQaVerdict has
- *  already fail-closed on missing / null / out-of-range values by the time we get here.
+ *  in a route or worker is a lint-fail). Always writes `scroll_stop` — parseCopyQaVerdict has
+ *  already validated present-but-malformed sub-scores by the time we get here; a missing / null
+ *  scroll_stop on Max's side was tolerated to a neutral-default (all sub-scores null +
+ *  empty evidence — max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1) so the
+ *  row still records the shape even when Max omitted the advisory field.
  *
  *  Returns `{ id }` on the successful insert; returns `null` when the insert errors so the caller
  *  can escalate rather than crash (the row is durable audit — the pipeline continues).

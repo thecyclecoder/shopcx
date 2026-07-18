@@ -167,10 +167,21 @@ defect you're marking down) in `scroll_stop.evidence` — one short line per non
 downstream reader can inspect the reasoning. The evidence list is REQUIRED (may be empty on an
 all-zeros verdict, but MUST be present as a `[]`).
 
-`scroll_stop` is REQUIRED on EVERY verdict — pass and fail. A `hard_gate_pass=false` bounce
-still carries the scroll_stop sub-scores (they're advisory, not gate-conditioned) so the row on
-disk records what the copy WAS like even when the safety rails failed. Never omit the field and
-never set it to `null` — the .ts parser refuses fail-closed on a missing or null `scroll_stop`.
+`scroll_stop` is REQUIRED on EVERY verdict you emit — pass and fail. A `hard_gate_pass=false`
+bounce still carries the scroll_stop sub-scores (they're advisory, not gate-conditioned) so the
+row on disk records what the copy WAS like even when the safety rails failed. Always include the
+object with all three named sub-scores and the `evidence` array (may be `[]` on an all-zeros
+verdict, but the array MUST be present).
+
+**Parser tolerance (no rubric-mirror escape hatch).** If you truly cannot judge a scroll-stop
+dimension, the .ts parser now TOLERATES a missing / null `scroll_stop` by filling a neutral
+advisory default (all sub-scores null + empty evidence) — an omitted advisory field will no
+longer nuke your real hard_gates + persuasion_score grade
+(max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1). This is a safety net for a
+partial verdict, NOT a shortcut: skipping scroll_stop is a REAL signal loss for downstream CAC
+correlation and you should only do it when you genuinely can't judge (e.g. the image failed to
+Read). A present-but-malformed scroll_stop (sub-score outside 0..2, non-integer, wrong shape) is
+STILL fail-closed — that's a defect, not an absence.
 
 ## Output contract — ONLY the CopyQaVerdict JSON
 
@@ -223,10 +234,13 @@ Rules for the envelope:
   forces `hard_gate_pass:false` (the worker treats a mismatched pair as a defect and fails
   closed).
 - `persuasion_score` / `persuasion_rubric` — required on a pass, MAY be `null` on a fail.
-- `scroll_stop` — REQUIRED on EVERY verdict (pass AND fail). Never `null`, never omitted; the
-  three named sub-scores are each 0 / 1 / 2 and the `evidence` array MUST be present (may be
-  `[]` if you gave every dimension 0). Advisory only — a low sub-score NEVER blocks
-  `hard_gate_pass`.
+- `scroll_stop` — REQUIRED on EVERY verdict you emit (pass AND fail); the three named
+  sub-scores are each 0 / 1 / 2 and the `evidence` array MUST be present (may be `[]` if you
+  gave every dimension 0). Advisory only — a low sub-score NEVER blocks `hard_gate_pass`. The
+  parser will tolerate a missing / null `scroll_stop` by filling a neutral default so an omitted
+  advisory field doesn't nuke your real grade
+  (max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1), but a present-but-
+  malformed shape (sub-score outside 0..2 / non-integer / non-object) is still fail-closed.
 - `evidence` (persuasion_rubric) — a NON-EMPTY string array on a pass (cite the phrases you
   rewarded); an empty array is fine on a fail.
 - `verdict_reason` — one plain-English line summarizing WHY you passed or failed. On a fail,
