@@ -1,0 +1,1 @@
+- **CEO feedback on a render format EDITS that format on the EXISTING ad in place** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
