@@ -557,6 +557,7 @@ const KIND_PERSONA_ALIAS: Record<string, string> = {
   // the box card wants the ACTING persona — Dahlia (ad-creative) for authoring, Max (growth) for QC.
   "ad-creative-copy-author": "ad-creative", // Dahlia's per-creative copy-author box session
   "ad-creative-copy-qc": "growth", // Max's independent per-creative copy-QC box session
+  "ad-review-feedback": "ad-creative", // Dahlia is the ACTING persona for the CEO-review re-drive router (ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-max-render Phase 2). Node-registry OWNER is `growth` (Max), but the box card renders Dahlia's face because she's the one acting on the CEO's surgical notes.
 };
 
 export function getPersona(slug: string, label?: string): AgentPersona {

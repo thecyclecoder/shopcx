@@ -1,9 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import {
+  AD_REVIEW_COMMENT_MAX_LEN,
+  type AdReviewFeedbackEntry,
+  type AdReviewFeedbackPacket,
+  type AdReviewFramework,
+  type AdReviewRenderFormat,
+} from "@/lib/ads/ad-review-feedback";
 
 // ── Read-only ad lifecycle preview ──────────────────────────────────────────
 // This page is a READ-ONLY preview of a finished ad and its full lifecycle. Ads
@@ -162,6 +169,17 @@ const PLACEMENTS: Array<{ key: string; label: string; ratio: string; formats: st
   { key: "right_column", label: "Right column", ratio: "1:1", formats: ["right_column_1x1"] },
 ];
 
+// ── CEO manual-review feedback shape (Phase 1) ──────────────────────────────
+// Keys used to index the annotation-mode comment map, so an assembled packet can
+// be built purely from the map without threading state through the tree. The
+// canonical-copy + max-grade slots collapse to a single fixed string each; render
+// and copy slots are namespaced by their target key.
+const CANONICAL_COPY_KEY = "canonical-copy";
+const MAX_GRADE_KEY = "max-grade";
+const RENDER_PREFIX = "render:";
+const COPY_PREFIX = "copy:";
+type CommentMap = Record<string, string>;
+
 export default function AdDetailPage() {
   const workspace = useWorkspace();
   const params = useParams<{ id: string }>();
@@ -175,6 +193,22 @@ export default function AdDetailPage() {
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
   const [pageIdentity, setPageIdentity] = useState<PageIdentity | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // CEO manual-review feedback state (Phase 1). `annotate=true` flips the read-only page
+  // into annotation mode, revealing one optional comment box beside each reviewable element;
+  // `comments` holds only the reviewer's typed strings (empty values are omitted from the
+  // packet at submit time so nothing raw leaks through).
+  const [annotate, setAnnotate] = useState(false);
+  const [comments, setComments] = useState<CommentMap>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitOk, setSubmitOk] = useState(false);
+
+  const setComment = useCallback((key: string, value: string) => {
+    setSubmitError(null);
+    setSubmitOk(false);
+    setComments((prev) => ({ ...prev, [key]: value }));
+  }, []);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/ads/campaigns/${id}?workspaceId=${workspace.id}`);
@@ -194,6 +228,63 @@ export default function AdDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Assemble the packet from ONLY the non-empty comment boxes. The typed union in the
+  // SDK (AdReviewFeedbackEntry) is what Phase 2's dispatcher switches on, so the
+  // targetKind + framework/format we tag here IS the routing key. Empty boxes are
+  // dropped so a Submit with two comments produces a packet with two entries, not ten.
+  const packetPreview: AdReviewFeedbackPacket = useMemo(() => {
+    const entries: AdReviewFeedbackEntry[] = [];
+    for (const [key, raw] of Object.entries(comments)) {
+      const comment = raw.trim();
+      if (!comment) continue;
+      if (key === CANONICAL_COPY_KEY) {
+        entries.push({ targetKind: "canonical-copy", comment });
+      } else if (key === MAX_GRADE_KEY) {
+        entries.push({ targetKind: "max-grade", comment });
+      } else if (key.startsWith(RENDER_PREFIX)) {
+        entries.push({
+          targetKind: "render-format",
+          format: key.slice(RENDER_PREFIX.length) as AdReviewRenderFormat,
+          comment,
+        });
+      } else if (key.startsWith(COPY_PREFIX)) {
+        entries.push({
+          targetKind: "copy-variation",
+          framework: key.slice(COPY_PREFIX.length) as AdReviewFramework,
+          comment,
+        });
+      }
+    }
+    return { entries };
+  }, [comments]);
+
+  const submit = useCallback(async () => {
+    if (packetPreview.entries.length === 0) {
+      setSubmitError("Add at least one comment before submitting.");
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const res = await fetch(`/api/ads/campaigns/${id}/review-feedback`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: workspace.id, packet: packetPreview }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `submit failed (${res.status})`);
+      }
+      setSubmitOk(true);
+      setComments({});
+      setAnnotate(false);
+    } catch (e) {
+      setSubmitError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [id, packetPreview, workspace.id]);
 
   if (loading) {
     return (
@@ -259,11 +350,37 @@ export default function AdDetailPage() {
               {campaign.concept_tag}
             </span>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            {submitOk && (
+              <span className="rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                Feedback submitted ✓
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setAnnotate((v) => !v);
+                setSubmitError(null);
+                setSubmitOk(false);
+              }}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                annotate
+                  ? "bg-zinc-200 text-zinc-800 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-100"
+                  : "bg-indigo-600 text-white hover:bg-indigo-500"
+              }`}
+            >
+              {annotate ? "Cancel feedback" : "Submit feedback"}
+            </button>
+          </div>
         </div>
         <p className="mt-1 flex items-center gap-2 text-sm text-zinc-500">
           <span>{campaign.products?.title || "—"}</span>
           <span className="text-zinc-300 dark:text-zinc-600">·</span>
-          <span className="text-xs text-zinc-400">Read-only preview — authored by Dahlia, graded by Max</span>
+          <span className="text-xs text-zinc-400">
+            {annotate
+              ? "Annotation mode — leave a comment beside anything you want changed, then Submit."
+              : "Read-only preview — authored by Dahlia, graded by Max"}
+          </span>
         </p>
       </div>
 
@@ -330,6 +447,11 @@ export default function AdDetailPage() {
         <div className="grid gap-4 sm:grid-cols-3">
           {PLACEMENTS.map((p) => {
             const src = placementImage(p.formats);
+            // The canonical format actually shown in this placement — the annotation
+            // tag uses this so Phase 2's regenerate lane knows which format render to
+            // redo (a placement with no canonical image gets no comment box).
+            const canonicalFormat = placementCanonicalFormat(statics, p.formats);
+            const commentKey = canonicalFormat ? `${RENDER_PREFIX}${canonicalFormat}` : null;
             return (
               <div key={p.key} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                 <div className="mb-2 flex items-center justify-between">
@@ -344,6 +466,13 @@ export default function AdDetailPage() {
                     Not rendered
                   </div>
                 )}
+                {annotate && commentKey && (
+                  <FeedbackBox
+                    value={comments[commentKey] || ""}
+                    onChange={(v) => setComment(commentKey, v)}
+                    placeholder={`Note on ${p.label} render — e.g. resize the product box`}
+                  />
+                )}
               </div>
             );
           })}
@@ -352,7 +481,7 @@ export default function AdDetailPage() {
         {/* Ad mock (feed layout) using the canonical copy + the page identity */}
         {canonical && (canonical.headline || canonical.primary_text) && (
           <div className="mt-5">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Preview</p>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Preview · canonical copy</p>
             <div className="mx-auto max-w-md overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
               <div className="flex items-center gap-2 p-3">
                 <div className="h-8 w-8 shrink-0 rounded-full bg-gradient-to-br from-indigo-400 to-emerald-400" />
@@ -379,6 +508,15 @@ export default function AdDetailPage() {
                 <span className="shrink-0 rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{ctaLabel}</span>
               </div>
             </div>
+            {annotate && (
+              <div className="mx-auto mt-2 max-w-md">
+                <FeedbackBox
+                  value={comments[CANONICAL_COPY_KEY] || ""}
+                  onChange={(v) => setComment(CANONICAL_COPY_KEY, v)}
+                  placeholder="Note on the canonical copy shown in the preview"
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -395,6 +533,11 @@ export default function AdDetailPage() {
               {angle.copy_pack.frameworks.map((framework, i) => {
                 const headline = angle.copy_pack?.headlines?.[i] ?? "";
                 const primary = angle.copy_pack?.primaryTexts?.[i] ?? "";
+                // A framework named outside the 5-known set (an older pack) still renders,
+                // but doesn't get a comment box — Phase 2's dispatcher only knows how to
+                // revise the 5 canonical frameworks.
+                const canRevise = KNOWN_FRAMEWORK_SET.has(framework);
+                const commentKey = canRevise ? `${COPY_PREFIX}${framework}` : null;
                 return (
                   <div key={`${framework}-${i}`} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                     <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${FRAMEWORK_TONE[framework] ?? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
@@ -402,6 +545,13 @@ export default function AdDetailPage() {
                     </span>
                     <p className="mt-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">{headline}</p>
                     <p className="mt-1 whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-300">{primary}</p>
+                    {annotate && commentKey && (
+                      <FeedbackBox
+                        value={comments[commentKey] || ""}
+                        onChange={(v) => setComment(commentKey, v)}
+                        placeholder={`Note on the ${FRAMEWORK_LABEL[framework] ?? framework} variation`}
+                      />
+                    )}
                   </div>
                 );
               })}
@@ -525,6 +675,13 @@ export default function AdDetailPage() {
             ) : (
               <p className="text-sm text-zinc-500">Awaiting Max&apos;s copy-QC.</p>
             )}
+            {annotate && (
+              <FeedbackBox
+                value={comments[MAX_GRADE_KEY] || ""}
+                onChange={(v) => setComment(MAX_GRADE_KEY, v)}
+                placeholder="Note on Max's grade — e.g. 'you scored this too low, the hook is a proven winner'"
+              />
+            )}
           </div>
         </div>
       </Section>
@@ -590,8 +747,69 @@ export default function AdDetailPage() {
           </div>
         </Section>
       )}
+
+      {/* Bottom submit bar — only appears while in annotation mode. Empty boxes are dropped
+          from the packet at build time (packetPreview); Submit is disabled until at least
+          one comment is filled. Persist happens through the SDK-fronted POST route. */}
+      {annotate && (
+        <div className="sticky bottom-4 mt-6 flex items-center justify-between rounded-lg border border-indigo-200 bg-white p-3 shadow-lg dark:border-indigo-800 dark:bg-zinc-900">
+          <div className="text-xs text-zinc-500">
+            {packetPreview.entries.length === 0
+              ? "Add a comment beside anything you want changed."
+              : `${packetPreview.entries.length} comment${packetPreview.entries.length === 1 ? "" : "s"} ready to submit.`}
+            {submitError && <span className="ml-2 text-rose-600">{submitError}</span>}
+          </div>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting || packetPreview.entries.length === 0}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitting ? "Submitting…" : "Submit feedback"}
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+// Reusable per-element comment input. Kept out of the render tree so the annotation
+// blocks stay concise; identical shape everywhere so the CEO's muscle memory is stable.
+function FeedbackBox({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      rows={2}
+      maxLength={AD_REVIEW_COMMENT_MAX_LEN}
+      className="mt-3 w-full rounded-md border border-indigo-200 bg-indigo-50/40 p-2 text-xs text-zinc-800 outline-none placeholder:text-indigo-400 focus:border-indigo-400 dark:border-indigo-900 dark:bg-indigo-950/20 dark:text-zinc-100 dark:placeholder:text-indigo-600"
+    />
+  );
+}
+
+// The 5 canonical frameworks whose per-variation comments Phase 2 knows how to revise.
+// A framework named outside this set (an older / experimental pack) still renders, but
+// won't get a comment box — surfacing it would only produce a packet entry the
+// dispatcher can't route.
+const KNOWN_FRAMEWORK_SET = new Set<string>(["lf8", "schwartz", "cialdini", "hopkins", "sugarman"]);
+
+// Resolve the canonical format key for a placement — the one Phase 2's regenerate lane
+// will actually redo. Mirrors placementImage's canonical-picking (format_variant_of_id
+// null wins; else first). Returns null when no static is ready for this placement.
+function placementCanonicalFormat(statics: AdVideo[], formats: string[]): string | null {
+  const rows = statics.filter((v) => formats.includes(v.format));
+  if (!rows.length) return null;
+  const canonical = rows.find((v) => v.format_variant_of_id === null) || rows[0];
+  return canonical.format;
 }
 
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
