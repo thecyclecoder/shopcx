@@ -1,0 +1,1 @@
+- **Producer agent-kinds get up to 3 concurrent lanes** · verified 2026-07-18 · → [[../libraries/builder-worker]] (§ Producer kinds concurrency)
