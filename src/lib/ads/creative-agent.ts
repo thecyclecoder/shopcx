@@ -254,10 +254,16 @@ export interface AuthorModeCopy {
    *  variation is a self-contained headline + primary-text hook grounded in the same brief +
    *  never-fabricate firewall + shared validator as the top-level canonical caption. Phase 2
    *  replaces `authorCopyPack`'s one-caption-broadcast so the five variations become the
-   *  four-slot Meta pack (labeled by framework on the detail page). When absent, the top-level
-   *  fields ARE the single-variant M1 result and the pre-Phase-1 identical-slot broadcast
-   *  behaviour is preserved. */
-  variations?: AuthorModeCopyFrameworkVariation[];
+   *  four-slot Meta pack (labeled by framework on the detail page).
+   *
+   *  dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+   *  REQUIRED. Was optional under the pre-fix contract (silently degraded to
+   *  identical-broadcast when absent), which defeated the distinct-per-framework A/B test.
+   *  `parseAuthorVerdict` now fail-closes with `missing_variations` / `bad_variations(…)` when
+   *  the array is absent / empty / not-five-per-framework / duplicate-framework / duplicate-copy —
+   *  same fail-closed shape claim_trace uses — so the revise loop cites it back and Dahlia
+   *  re-emits the five distinct hooks. */
+  variations: AuthorModeCopyFrameworkVariation[];
 }
 
 /** dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — one temperature-banded variant in
@@ -838,7 +844,7 @@ export function buildCopyAuthorRevisePrompt(reviseReason: string): string {
   return [
     `REVISE — reuse the SAME image and brief already in this session (do not ask for a new image, do not re-read anything you don't need). Your previous AuthorModeCopy emit did not land; the reason from the worker is: ${sanitized}. Address that reason head-on and emit ONE fresh AuthorModeCopy envelope. Rails 1-5 and the never-fabricate firewall still apply — if the reason names a fabricated or ungrounded claim, drop or re-ground it against real brief evidence rather than restating it. Do not hedge with a needs_attention / needs_input status — the verdict is a JSON envelope, always.`,
     "",
-    "Return ONLY the AuthorModeCopy JSON (same shape as before: headline, primaryText, description, audience_temperature, concept_tag, self_score{…}, claim_trace[…]). No prose, no code fences, no wrapper.",
+    "Return ONLY the AuthorModeCopy JSON (same shape as before: headline, primaryText, description, audience_temperature, concept_tag, self_score{…}, claim_trace[…], variations[{framework, headline, primaryText} x5 — one per lf8|schwartz|cialdini|hopkins|sugarman, no duplicate frameworks or duplicate copies]). No prose, no code fences, no wrapper.",
   ].join("\n");
 }
 
@@ -949,51 +955,60 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
     if (!sr) return { kind: "invalid", reason: `firewall_missing_claim_trace (missing_source_ref_at_${i})` };
     claim_trace.push({ claim: c, source: s as AuthorClaimTraceSource, source_ref: sr });
   }
-  // dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 — validate
-  // the optional per-framework variations array. When present, exactly five entries, one per
-  // framework, no duplicates, non-empty headline + primaryText per entry. When absent, the
-  // top-level fields carry the single-variant M1 result (pre-Phase-1 behaviour). A malformed
-  // variations array fails with a concrete reason so the revise loop can cite it back — same
-  // fail-closed treatment as the claim_trace layer.
-  let variations: AuthorModeCopyFrameworkVariation[] | undefined = undefined;
-  if (obj.variations !== undefined) {
-    const rawVariations = obj.variations;
-    if (!Array.isArray(rawVariations)) {
-      return { kind: "invalid", reason: "bad_variations (not_array)" };
+  // dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 +
+  // dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+  // REQUIRED per-framework variations array. Exactly five entries, one per AUTHOR_FRAMEWORK_KEYS
+  // value, no duplicates (framework OR copy), non-empty headline + primaryText per entry. A
+  // missing / empty / mis-shaped array fail-closes with the concrete `missing_variations` /
+  // `bad_variations(...)` reason so the revise loop can cite it back — same fail-closed shape
+  // the claim_trace layer uses. Was optional under the pre-fix contract (silent broadcast
+  // fallback when absent), which defeated the whole point: Meta needs to A/B-test which
+  // psychological lever converts, and identical broadcast slots teach nothing.
+  const rawVariations = obj.variations;
+  if (rawVariations === undefined) return { kind: "invalid", reason: "missing_variations" };
+  if (!Array.isArray(rawVariations)) return { kind: "invalid", reason: "bad_variations (not_array)" };
+  if (rawVariations.length === 0) return { kind: "invalid", reason: "missing_variations (empty)" };
+  if (rawVariations.length !== AUTHOR_FRAMEWORK_KEYS.length) {
+    return {
+      kind: "invalid",
+      reason: `bad_variations (expected_${AUTHOR_FRAMEWORK_KEYS.length}_entries, got_${rawVariations.length})`,
+    };
+  }
+  const seenFrameworks = new Set<string>();
+  const seenCopies = new Set<string>();
+  const parsedVariations: AuthorModeCopyFrameworkVariation[] = [];
+  for (let i = 0; i < rawVariations.length; i++) {
+    const raw = rawVariations[i];
+    if (!raw || typeof raw !== "object") {
+      return { kind: "invalid", reason: `bad_variations (bad_shape_at_${i})` };
     }
-    if (rawVariations.length !== AUTHOR_FRAMEWORK_KEYS.length) {
+    const r = raw as Record<string, unknown>;
+    const framework = r.framework;
+    if (typeof framework !== "string" || !(AUTHOR_FRAMEWORK_KEYS as readonly string[]).includes(framework)) {
       return {
         kind: "invalid",
-        reason: `bad_variations (expected_${AUTHOR_FRAMEWORK_KEYS.length}_entries, got_${rawVariations.length})`,
+        reason: `bad_variations (bad_framework_at_${i}: ${typeof framework === "string" ? framework : typeof framework})`,
       };
     }
-    const seenFrameworks = new Set<string>();
-    const parsed: AuthorModeCopyFrameworkVariation[] = [];
-    for (let i = 0; i < rawVariations.length; i++) {
-      const raw = rawVariations[i];
-      if (!raw || typeof raw !== "object") {
-        return { kind: "invalid", reason: `bad_variations (bad_shape_at_${i})` };
-      }
-      const r = raw as Record<string, unknown>;
-      const framework = r.framework;
-      if (typeof framework !== "string" || !(AUTHOR_FRAMEWORK_KEYS as readonly string[]).includes(framework)) {
-        return {
-          kind: "invalid",
-          reason: `bad_variations (bad_framework_at_${i}: ${typeof framework === "string" ? framework : typeof framework})`,
-        };
-      }
-      if (seenFrameworks.has(framework)) {
-        return { kind: "invalid", reason: `bad_variations (duplicate_framework_at_${i}: ${framework})` };
-      }
-      seenFrameworks.add(framework);
-      const h = typeof r.headline === "string" ? r.headline.trim() : "";
-      const p = typeof r.primaryText === "string" ? r.primaryText.trim() : "";
-      if (!h) return { kind: "invalid", reason: `bad_variations (missing_headline_at_${i}: ${framework})` };
-      if (!p) return { kind: "invalid", reason: `bad_variations (missing_primary_text_at_${i}: ${framework})` };
-      parsed.push({ framework: framework as AuthorFrameworkKey, headline: h, primaryText: p });
+    if (seenFrameworks.has(framework)) {
+      return { kind: "invalid", reason: `bad_variations (duplicate_framework_at_${i}: ${framework})` };
     }
-    variations = parsed;
+    seenFrameworks.add(framework);
+    const h = typeof r.headline === "string" ? r.headline.trim() : "";
+    const p = typeof r.primaryText === "string" ? r.primaryText.trim() : "";
+    if (!h) return { kind: "invalid", reason: `bad_variations (missing_headline_at_${i}: ${framework})` };
+    if (!p) return { kind: "invalid", reason: `bad_variations (missing_primary_text_at_${i}: ${framework})` };
+    // Duplicate-copy check — same headline+primaryText across two variations is the identical-
+    // broadcast bug the required treatment exists to prevent (five slots teach nothing when four
+    // are identical). Framework label alone can't rescue it: Meta shows the copy, not the label.
+    const copyKey = `${h.toLowerCase()}||${p.toLowerCase()}`;
+    if (seenCopies.has(copyKey)) {
+      return { kind: "invalid", reason: `bad_variations (duplicate_copy_at_${i}: ${framework})` };
+    }
+    seenCopies.add(copyKey);
+    parsedVariations.push({ framework: framework as AuthorFrameworkKey, headline: h, primaryText: p });
   }
+  const variations = parsedVariations;
   return {
     kind: "ok",
     verdict: {
@@ -1012,7 +1027,7 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
         evidence: rawEvidence,
       },
       claim_trace,
-      ...(variations ? { variations } : {}),
+      variations,
     },
   };
 }
@@ -1511,16 +1526,23 @@ async function runCopyQcForCreative(
  *  headlines[]/primaryTexts[] are the FIVE DISTINCT variation strings and `frameworks[]` is
  *  parallel — headlines[i] came from frameworks[i]'s lens. This is the fix for
  *  authorCopyPack's old one-caption-broadcast: Meta rotates true A/B lever tests instead of the
- *  same string in four slots. When `variations` is absent (single-caption back-compat: legacy
- *  author sessions, deterministic paths that hand a canonical caption without the five-variation
- *  set), the pack falls back to CREATIVE_PACK_MIN copies of the single canonical headline +
- *  primary text and omits `frameworks` — no fabricated labels. Every string is clipped to
- *  META_CAPS so a slightly-over-limit author string doesn't blow the DB write; the SKILL.md
- *  already tells Dahlia to stay under limit. CREATIVE_PACK_MIN.headlines / primaryTexts hold by
- *  construction in both branches (5 ≥ 4 with variations, 4 = 4 without), so
- *  `planCreativePackInserts` + `isCreativePackComplete` are unchanged. */
+ *  same string in four slots.
+ *
+ *  dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+ *  every parsed author-mode verdict now carries `variations` (parseAuthorVerdict fail-closes
+ *  when absent), so the author path ALWAYS goes through the five-distinct-slot branch. The
+ *  single-caption fallback below stays as defensive back-compat ONLY for deterministic /
+ *  non-verdict callers that pass a hand-built `{headline, primaryText, description}` object
+ *  (no `variations`) — the author path can never silently degrade to identical broadcast.
+ *  Every string is clipped to META_CAPS so a slightly-over-limit author string doesn't blow
+ *  the DB write; the SKILL.md already tells Dahlia to stay under limit.
+ *  CREATIVE_PACK_MIN.headlines / primaryTexts hold by construction in both branches
+ *  (5 ≥ 4 with variations, 4 = 4 without), so `planCreativePackInserts` +
+ *  `isCreativePackComplete` are unchanged. */
 export function authorCopyPack(
-  copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description" | "variations">,
+  copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description"> & {
+    variations?: AuthorModeCopyFrameworkVariation[];
+  },
 ): MetaCopyPack {
   const clip = (s: string, cap: number): string => (s.length > cap ? s.slice(0, cap) : s);
   const description = clip(copy.description, META_CAPS.description);

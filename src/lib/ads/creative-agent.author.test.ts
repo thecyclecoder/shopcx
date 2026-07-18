@@ -98,6 +98,17 @@ function envelope(overrides: Record<string, unknown> = {}): string {
   const defaultClaimTrace = [
     { claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" },
   ];
+  // dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+  // `variations` is REQUIRED (parseAuthorVerdict fail-closes on absence). Default fixture emits
+  // five distinct per-framework hooks so every non-variations test still parses ok; tests that
+  // pin a specific variations shape (or the fail-closed branches) override this field.
+  const defaultVariations = [
+    { framework: "lf8", headline: "Feel lighter. Finally.", primaryText: "LF8-led fixture hook." },
+    { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "Schwartz-led fixture hook." },
+    { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "Cialdini-led fixture hook." },
+    { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hopkins-led fixture hook." },
+    { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Sugarman-led fixture hook." },
+  ];
   const body = {
     headline: "Clean energy — no crash",
     primaryText: "Steady 4-hour energy from adaptogens. No jitters, no crash. Shop now 👉",
@@ -106,6 +117,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
     concept_tag: "mechanism",
     self_score: defaultScore,
     claim_trace: defaultClaimTrace,
+    variations: defaultVariations,
     ...overrides,
   };
   return JSON.stringify(body);
@@ -306,12 +318,57 @@ function validVariations(): Array<{ framework: string; headline: string; primary
   ];
 }
 
-test("parseAuthorVerdict: no variations field → still ok (single-caption back-compat)", () => {
-  const result = parseAuthorVerdict(envelope());
+// dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+// `variations` is REQUIRED on Dahlia's author verdict. Under the pre-fix contract the field was
+// OPTIONAL: a missing array was silently accepted and authorCopyPack fell back to broadcasting
+// ONE caption into every slot — exactly what the CEO saw on the 7/10 live run (identical
+// headlines, no framework labels). The parser now fail-closes with `missing_variations` /
+// `missing_variations (empty)` so the revise loop cites it back and Dahlia re-emits the five
+// distinct hooks. Same fail-closed shape claim_trace uses.
+
+test("parseAuthorVerdict: no variations field → invalid (missing_variations)", () => {
+  const body = {
+    headline: "Clean energy — no crash",
+    primaryText: "Steady 4-hour energy.",
+    description: "Adaptogens",
+    audience_temperature: "warm",
+    concept_tag: "mechanism",
+    self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
+    claim_trace: [{ claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" }],
+    // variations omitted — the exact silent-broadcast bug the required treatment prevents
+  };
+  const result = parseAuthorVerdict(JSON.stringify(body));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "missing_variations");
+});
+
+test("parseAuthorVerdict: empty variations array → invalid (missing_variations (empty))", () => {
+  const result = parseAuthorVerdict(envelope({ variations: [] }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /missing_variations \(empty\)/);
+});
+
+test("parseAuthorVerdict: five distinct per-framework variations → ok with variations on the verdict", () => {
+  const result = parseAuthorVerdict(envelope({ variations: validVariations() }));
   assert.equal(result.kind, "ok");
   if (result.kind === "ok") {
-    assert.equal(result.verdict.variations, undefined);
+    assert.ok(result.verdict.variations, "variations must ride on a parsed author verdict");
+    assert.equal(result.verdict.variations.length, 5);
+    // Five DISTINCT headlines — not one caption fanned to identical slots.
+    const headlines = result.verdict.variations.map((v) => v.headline);
+    assert.equal(new Set(headlines).size, 5, "variations must carry five DISTINCT headlines, not identical broadcast");
   }
+});
+
+test("parseAuthorVerdict: variations with two entries carrying identical headline+primaryText → invalid (duplicate_copy)", () => {
+  const dupe = validVariations();
+  // Cialdini + Hopkins now carry identical copies — the silent-broadcast bug in a framework
+  // disguise (labels differ, copy is identical → Meta shows the same ad twice).
+  dupe[3].headline = dupe[2].headline;
+  dupe[3].primaryText = dupe[2].primaryText;
+  const result = parseAuthorVerdict(envelope({ variations: dupe }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(duplicate_copy_at_3: hopkins\)/);
 });
 
 test("parseAuthorVerdict: five distinct framework-led variations → ok with variations round-tripped in AUTHOR_FRAMEWORK_KEYS order", () => {
@@ -664,6 +721,17 @@ function authorCopy(overrides: Partial<AuthorModeCopy> = {}): AuthorModeCopy {
     selfScore: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: ["ok"] },
     // dahlia-never-fabricate-copy-firewall Phase 2 — REQUIRED claim_trace field on AuthorModeCopy.
     claim_trace: [{ claim: "steady focus", source: "supportingBenefit", source_ref: "steady focus" }],
+    // dahlia-author-verdict-requires-variations-no-silent-broadcast-fallback Phase 1 —
+    // REQUIRED variations field. Five distinct per-framework hooks so the fixture matches a
+    // parsed author verdict; tests that pin the deterministic-mode / no-variations path build
+    // their own inline objects (authorCopyPack test).
+    variations: [
+      { framework: "lf8", headline: "Feel lighter. Finally.", primaryText: "LF8-led fixture hook." },
+      { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "Schwartz-led fixture hook." },
+      { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "Cialdini-led fixture hook." },
+      { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hopkins-led fixture hook." },
+      { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Sugarman-led fixture hook." },
+    ],
     ...overrides,
   };
 }
