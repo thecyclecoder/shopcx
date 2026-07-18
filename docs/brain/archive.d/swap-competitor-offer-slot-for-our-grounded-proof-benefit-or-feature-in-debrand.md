@@ -1,0 +1,1 @@
+- **Debrand swaps a competitor's OFFER slot for one of OUR grounded proof points / benefits / features — keep the winning structure, ground the promise** · verified 2026-07-18 · → [[../libraries/debrand|debrand]], [[../libraries/creative-agent|creative-agent]], [[../libraries/creative-brief|creative-brief]]
