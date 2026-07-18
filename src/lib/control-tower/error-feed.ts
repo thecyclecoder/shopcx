@@ -356,24 +356,34 @@ export function isTransientShopifyWebhookHmacFailure(
  * loop that already self-heals (Control Tower `vercel:cec725132e1eef09`).
  *
  * `true` ONLY when ALL of:
- *   1. `path === '/api/inngest'` (the durable Inngest step that calls updateBillingInterval),
+ *   1. `path` is on the small allowlist of surfaces that call `updateBillingInterval` —
+ *      currently `/api/inngest` (the durable Inngest step) and `/api/portal` (the
+ *      customer portal frequency route), which share the exact same helper + 20s abort
+ *      + `verifyBillingInterval` recovery, so their timeout lines are the same
+ *      pre-recovery sighting (Control Tower `vercel:63b8e91c77459378`),
  *   2. the trimmed message begins with the exact `Appstle frequency update failed` prefix
  *      (the catch's console.error label — not any other Appstle failure log), AND
  *   3. the message carries the `Error: upstream_timeout` marker (the 20s abort's error).
  *
  * A non-timeout Appstle failure (a 4xx/5xx from Appstle carrying a different error class,
  * a JSON parse throw, a downstream helper throw) carries a different marker and stays
- * captured / paged on first sighting. Wired in `/api/webhooks/vercel-logs` as the
- * `transient` flag to `recordError`, which auto-resolves a first sighting (recorded for
- * visibility, NOT paged, no repair fan-out) and escalates to a real open+page ONLY if the
- * SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a one-off Appstle stall is
- * dropped while a chronic Appstle outage (would recur every beat) still surfaces.
+ * captured / paged on first sighting, regardless of which allowlisted path it fired from.
+ * Wired in `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which
+ * auto-resolves a first sighting (recorded for visibility, NOT paged, no repair fan-out)
+ * and escalates to a real open+page ONLY if the SAME signature recurs within
+ * `TRANSIENT_RECUR_WINDOW_MS` — so a one-off Appstle stall is dropped while a chronic
+ * Appstle outage (would recur every beat) still surfaces.
  */
+const APPSTLE_FREQUENCY_UPDATE_PATHS: ReadonlySet<string> = new Set([
+  "/api/inngest",
+  "/api/portal",
+]);
+
 export function isTransientAppstleFrequencyUpstreamTimeout(
   path: string | null | undefined,
   message: string | null | undefined,
 ): boolean {
-  if (path !== "/api/inngest") return false;
+  if (!path || !APPSTLE_FREQUENCY_UPDATE_PATHS.has(path)) return false;
   const text = (message ?? "").trim();
   if (!text) return false;
   if (!text.startsWith("Appstle frequency update failed")) return false;
