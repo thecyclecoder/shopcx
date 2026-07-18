@@ -458,26 +458,104 @@ test("(h) parseCopyQaVerdict: unknown format literal → parse_error (fail-close
   }
 });
 
-test("(h) parseCopyQaVerdict: non-boolean check → parse_error (fail-closed on malformed)", () => {
-  const badCheck = {
+test("(h) parseCopyQaVerdict: boolean-ish per-format check ('yes'/'no'/1/0) → COERCED, verdict survives (max-copy-qc-verdict-parser-is-tolerant Phase 1)", () => {
+  // Superfood Tabs regression: the per-format parse used to hard-fail with
+  // `copy_qc_verdict_creative_feed_4x5_product_scale_ok_not_boolean` the instant one check
+  // came back a boolean-ish string. That threw away Max's ENTIRE grade over one wobbly
+  // field. Now: coerce 'yes'/'no'/'true'/'false'/1/0 to the obvious boolean so the
+  // hard_gates + persuasion_score still land.
+  const boolish = {
     ...passVerdictWithPerFormatCreative,
     creative: [
       {
         format: "feed_4x5",
         product_scale_ok: "yes",
+        no_hallucinated_offer_or_badge: 1,
+        no_in_pixel_competitor_leak: "true",
+        on_image_text_legible: true,
+        findings: [],
+      },
+      ...passVerdictWithPerFormatCreative.creative.slice(1),
+    ],
+    creative_gate_pass: true,
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(boolish));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  // The real hard_gates + persuasion_score MUST survive the wobble — the whole point.
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.persuasion_score, 7);
+  // The wobbly checks coerced to true — the derived gate matches Max's roll-up.
+  const feed = parsed.verdict.creative!.find((e) => e.format === "feed_4x5");
+  assert.ok(feed);
+  assert.equal(feed!.product_scale_ok, true);
+  assert.equal(feed!.no_hallucinated_offer_or_badge, true);
+  assert.equal(feed!.no_in_pixel_competitor_leak, true);
+  assert.equal(parsed.verdict.creative_gate_pass, true);
+});
+
+test("(h) parseCopyQaVerdict: uncoercible per-format check (object) → defaults to true (advisory: no creative signal to fail on)", () => {
+  // A per-format check whose value is a nested object / random garbage is neither a
+  // boolean nor a boolean-ish literal we can coerce. Rather than discard the verdict,
+  // default the field to true — same tolerance class as a missing scroll_stop advisory
+  // sub-score. The COPY hard_gates + persuasion_score are what matter; a wobbly creative
+  // field is advisory.
+  const uncoercible = {
+    ...passVerdictWithPerFormatCreative,
+    creative: [
+      {
+        format: "feed_4x5",
+        product_scale_ok: { unexpected: "shape" },
         no_hallucinated_offer_or_badge: true,
         no_in_pixel_competitor_leak: true,
         on_image_text_legible: true,
         findings: [],
       },
+      ...passVerdictWithPerFormatCreative.creative.slice(1),
     ],
     creative_gate_pass: true,
   };
-  const parsed = parseCopyQaVerdict(JSON.stringify(badCheck));
+  const parsed = parseCopyQaVerdict(JSON.stringify(uncoercible));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  const feed = parsed.verdict.creative!.find((e) => e.format === "feed_4x5");
+  assert.ok(feed);
+  assert.equal(feed!.product_scale_ok, true);
+});
+
+test("(h) parseCopyQaVerdict: missing hard_gates STILL parse_errors (fundamentally unusable — the tolerance only extends to advisory fields)", () => {
+  // The tolerance introduced in Phase 1 is scoped: hard_gates + persuasion_score are the
+  // spine of the verdict. When those are unreadable, the verdict is genuinely unusable
+  // and the caller MUST fail-closed. This pin guards against a "tolerate everything"
+  // slippage that would let a truly-defective verdict through.
+  const noHardGates = { ...passVerdictWithPerFormatCreative } as Record<string, unknown>;
+  delete noHardGates.hard_gates;
+  const parsed = parseCopyQaVerdict(JSON.stringify(noHardGates));
   assert.equal(parsed.kind, "parse_error");
   if (parsed.kind === "parse_error") {
-    assert.match(parsed.reason, /copy_qc_verdict_creative_feed_4x5_product_scale_ok_not_boolean/);
+    assert.match(parsed.reason, /copy_qc_verdict_missing_hard_gates/);
   }
+});
+
+test("(h) parseCopyQaVerdict: wobbly declared_intent.audience_temperature → normalized to the run's target (max-copy-qc-verdict-parser-is-tolerant Phase 1)", () => {
+  // Third failure signature the spec cites:
+  // `copy_qc_verdict_declared_intent_bad_audience_temperature`. A wobbly literal
+  // ("lukewarm") no longer discards the whole verdict — it normalizes to the run's
+  // target temperature so the real grade lands.
+  const wobbly = {
+    ...passVerdictWithPerFormatCreative,
+    declared_intent: { audience_temperature: "lukewarm", purpose: "test-to-find-winner" },
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(wobbly), { runTargetTemperature: "cold" });
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.persuasion_score, 7);
+  assert.deepEqual(parsed.verdict.declared_intent, {
+    audience_temperature: "cold",
+    purpose: "test-to-find-winner",
+  });
 });
 
 test("(h) parseCopyQaVerdict: creative_gate_pass=true claimed while a per-format check is false → parse_error (mismatched pair, Goodhart-adjacent lie)", () => {

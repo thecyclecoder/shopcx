@@ -209,11 +209,22 @@ test("(P2-4) parseCopyQaVerdict: legacy verdict WITHOUT declared_intent + dahlia
   assert.equal(parsed.verdict.hard_gate_pass, true);
 });
 
-test("(P2-4) parseDeclaredIntent: bad audience_temperature → parse_error", () => {
+test("(P2-4) parseDeclaredIntent: bad audience_temperature → normalizes to the run's target temperature (max-copy-qc-verdict-parser-is-tolerant Phase 1)", () => {
+  // A wobbly temperature literal (e.g. "lukewarm") no longer discards Max's whole verdict —
+  // it normalizes to the run's target (what Max was told the creative was authored for).
   const bad = { audience_temperature: "lukewarm", purpose: "test-to-find-winner" };
-  const parsed = parseDeclaredIntent(bad);
-  assert.equal(parsed.kind, "parse_error");
-  if (parsed.kind === "parse_error") assert.match(parsed.reason, /bad_audience_temperature/);
+  const parsed = parseDeclaredIntent(bad, "cold");
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind === "ok") {
+    assert.deepEqual(parsed.value, { audience_temperature: "cold", purpose: "test-to-find-winner" });
+  }
+  // No run-target provided → defaults to "warm" (safe centre) so a legacy caller keeps
+  // getting a usable verdict.
+  const parsedNoTarget = parseDeclaredIntent(bad);
+  assert.equal(parsedNoTarget.kind, "ok");
+  if (parsedNoTarget.kind === "ok") {
+    assert.equal(parsedNoTarget.value?.audience_temperature, "warm");
+  }
 });
 
 // ── 5. TRUSTED CONTEXT block ────────────────────────────────────────────

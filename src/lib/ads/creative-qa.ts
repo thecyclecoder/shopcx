@@ -853,30 +853,63 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** max-copy-qc-verdict-parser-is-tolerant Phase 1 — coerce an obvious boolean-ish value
+ *  (true/false, 'true'/'false', 1/0, 'yes'/'no') and return `null` when it is genuinely
+ *  uncoercible. Used by `parsePerFormatCreative` so a wobbly per-format check never
+ *  discards Max's whole verdict — an uncoercible value defaults to `true` (advisory: no
+ *  creative signal to fail on) at the call site. Kept intentionally narrow: only the
+ *  literal-set that Max's SKILL.md documents as valid, plus the numeric/string forms a
+ *  session might smuggle in when the model wobbles under load. */
+export function coerceBoolish(v: unknown): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") {
+    if (v === 1) return true;
+    if (v === 0) return false;
+    return null;
+  }
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "yes") return true;
+    if (s === "false" || s === "no") return false;
+  }
+  return null;
+}
+
 /** dahlia-researches-from-winners-flow-ad-library Phase 2 — pure parser + validator for the
- *  declared-intent envelope. Absent = ok/null (legacy). Present-but-malformed = parse_error
- *  with a specific reason. Pure + exported for the Phase 2 vitest. */
+ *  declared-intent envelope. Absent = ok/null (legacy). A NON-OBJECT payload is still
+ *  fail-closed (there's nothing to normalize).
+ *
+ *  max-copy-qc-verdict-parser-is-tolerant Phase 1 — a wobbly `audience_temperature` no
+ *  longer discards the whole verdict. Coerce/normalize (case-insensitive literal match)
+ *  and, when the value is missing or uncoercible, DEFAULT to the run's target temperature
+ *  (`runTargetTemperature` — the temp Max was told this creative was authored for) so a
+ *  gradeable ad's hard_gates + persuasion_score still land. Same tolerance for `purpose`
+ *  (default to today's only literal). Pure + exported for the vitest. */
 export function parseDeclaredIntent(
   raw: unknown,
+  runTargetTemperature?: "cold" | "warm" | "hot" | null,
 ): { kind: "ok"; value: CopyQaDeclaredIntent | null } | { kind: "parse_error"; reason: string } {
   if (raw === undefined || raw === null) return { kind: "ok", value: null };
   if (!isPlainObject(raw)) {
     return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_not_object" };
   }
-  const temp = raw.audience_temperature;
-  if (typeof temp !== "string" || !(DECLARED_INTENT_TEMPERATURES as readonly string[]).includes(temp)) {
-    return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_bad_audience_temperature" };
-  }
-  const purpose = raw.purpose;
-  if (typeof purpose !== "string" || !(DECLARED_INTENT_PURPOSES as readonly string[]).includes(purpose)) {
-    return { kind: "parse_error", reason: "copy_qc_verdict_declared_intent_bad_purpose" };
-  }
+  const defaultTemp: CopyQaDeclaredIntent["audience_temperature"] =
+    runTargetTemperature && (DECLARED_INTENT_TEMPERATURES as readonly string[]).includes(runTargetTemperature)
+      ? runTargetTemperature
+      : "warm";
+  const rawTemp = raw.audience_temperature;
+  const normTemp = typeof rawTemp === "string" ? rawTemp.trim().toLowerCase() : "";
+  const audience_temperature: CopyQaDeclaredIntent["audience_temperature"] = (DECLARED_INTENT_TEMPERATURES as readonly string[]).includes(normTemp)
+    ? (normTemp as CopyQaDeclaredIntent["audience_temperature"])
+    : defaultTemp;
+  const rawPurpose = raw.purpose;
+  const normPurpose = typeof rawPurpose === "string" ? rawPurpose.trim().toLowerCase() : "";
+  const purpose: CopyQaDeclaredIntent["purpose"] = (DECLARED_INTENT_PURPOSES as readonly string[]).includes(normPurpose)
+    ? (normPurpose as CopyQaDeclaredIntent["purpose"])
+    : "test-to-find-winner";
   return {
     kind: "ok",
-    value: {
-      audience_temperature: temp as CopyQaDeclaredIntent["audience_temperature"],
-      purpose: purpose as CopyQaDeclaredIntent["purpose"],
-    },
+    value: { audience_temperature, purpose },
   };
 }
 
@@ -946,16 +979,27 @@ export function parsePerFormatCreative(
     }
     seenFormats.add(format);
     const checks: Record<string, boolean> = {};
+    // max-copy-qc-verdict-parser-is-tolerant Phase 1 — a wobbly per-format check no
+    // longer discards Max's whole verdict. Coerce boolean-ish values (true/false,
+    // 'true'/'false', 1/0, 'yes'/'no') and DEFAULT a missing/uncoercible check to
+    // `true` (advisory: no creative signal to fail on) so a real, gradeable ad's
+    // hard_gates + persuasion_score still land. Same tolerance class as scroll_stop —
+    // an advisory sub-field should never nuke a real grade.
     for (const key of ["product_scale_ok", "no_hallucinated_offer_or_badge", "no_in_pixel_competitor_leak", "on_image_text_legible"] as const) {
-      const v = entry[key];
-      if (typeof v !== "boolean") {
-        return { kind: "parse_error", reason: `copy_qc_verdict_creative_${format}_${key}_not_boolean` };
-      }
-      checks[key] = v;
+      const coerced = coerceBoolish(entry[key]);
+      checks[key] = coerced === null ? true : coerced;
     }
     const rawFindings = entry.findings;
-    if (!Array.isArray(rawFindings) || !rawFindings.every((f) => typeof f === "string")) {
-      return { kind: "parse_error", reason: `copy_qc_verdict_creative_${format}_findings_not_string_array` };
+    let findings: string[];
+    if (rawFindings === undefined || rawFindings === null) {
+      // Same tolerance class — a missing findings[] defaults to [] rather than
+      // discarding the verdict. Max's SKILL still requires the array, but a wobble
+      // shouldn't nuke a gradeable ad.
+      findings = [];
+    } else if (Array.isArray(rawFindings)) {
+      findings = rawFindings.filter((f): f is string => typeof f === "string");
+    } else {
+      findings = [];
     }
     built.push({
       format: format as CopyQaCreativeFormat,
@@ -963,7 +1007,7 @@ export function parsePerFormatCreative(
       no_hallucinated_offer_or_badge: checks.no_hallucinated_offer_or_badge,
       no_in_pixel_competitor_leak: checks.no_in_pixel_competitor_leak,
       on_image_text_legible: checks.on_image_text_legible,
-      findings: rawFindings.slice(),
+      findings,
     });
   }
   return { kind: "ok", value: built };
@@ -1013,11 +1057,26 @@ function extractJsonObject(raw: string): string | null {
  *  should never nuke a real grade; present-but-malformed still fail-closes because that's a
  *  genuine defect.
  *
+ *  max-copy-qc-verdict-parser-is-tolerant Phase 1 — same tolerance class extends to the
+ *  per-format `creative[]` checks + `declared_intent`. A wobbly `product_scale_ok` /
+ *  `no_hallucinated_offer_or_badge` / `no_in_pixel_competitor_leak` /
+ *  `on_image_text_legible` (e.g. `"yes"` or `1`) is COERCED via `coerceBoolish`, and a
+ *  missing / uncoercible per-format check defaults to `true` (advisory: no creative signal
+ *  to fail on) rather than discarding Max's whole grade. A malformed
+ *  `declared_intent.audience_temperature` / `purpose` NORMALIZES to the run's target
+ *  temperature (via `opts.runTargetTemperature`) / today's only purpose literal instead of
+ *  returning `parse_error`. The verdict is only discarded when it is FUNDAMENTALLY
+ *  unusable (no hard_gates, no persuasion_score) — not when one creative boolean or the
+ *  intent echo is off-shape.
+ *
  *  The parser NORMALIZES `hard_gate_pass` from `hard_gates` before returning — a top-level
  *  `true` with a per-check `false` inside is REJECTED (parse_error) rather than silently
  *  flipped, because a mismatched pair from a real session is likely a Goodhart-adjacent lie
  *  and the caller should see it as a defect. */
-export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
+export function parseCopyQaVerdict(
+  raw: string,
+  opts?: { runTargetTemperature?: "cold" | "warm" | "hot" | null },
+): ParseCopyQaVerdictResult {
   const jsonBlob = extractJsonObject(raw);
   if (!jsonBlob) return { kind: "parse_error", reason: "copy_qc_verdict_no_json_block" };
   let parsed: unknown;
@@ -1131,7 +1190,7 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
   // dahlia-researches-from-winners-flow-ad-library Phase 2 — read the declared-intent envelope
   // + Max's 5-axis rubric. Both are absent-tolerant (a legacy caller / M1 verdict never emits
   // them); a PRESENT but malformed payload fail-closes with a specific reason.
-  const declaredIntentResult = parseDeclaredIntent(parsed.declared_intent);
+  const declaredIntentResult = parseDeclaredIntent(parsed.declared_intent, opts?.runTargetTemperature ?? null);
   if (declaredIntentResult.kind === "parse_error") return declaredIntentResult;
   const rubricResult = parseDahliaRubric(parsed.dahlia_rubric);
   if (rubricResult.kind === "parse_error") return rubricResult;

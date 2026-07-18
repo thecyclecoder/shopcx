@@ -1976,7 +1976,9 @@ async function runCopyQcForCreative(
     if (outcome.kind !== "ok") {
       return { verdict: null, reason: outcome.reason };
     }
-    const parsed = parseCopyQaVerdict(outcome.resultText);
+    const parsed = parseCopyQaVerdict(outcome.resultText, {
+      runTargetTemperature: input.audienceTemperature,
+    });
     if (parsed.kind !== "ok") {
       return { verdict: null, reason: `copy_qc_parse_error: ${parsed.reason}` };
     }
