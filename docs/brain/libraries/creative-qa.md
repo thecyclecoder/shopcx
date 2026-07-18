@@ -120,7 +120,7 @@ The migration adding the two `jsonb` columns is `supabase/migrations/20261102120
 
 Pinned by [[../../../src/lib/ads/creative-qa.dahlia-rubric.test.ts]] (12 cases).
 
-## Per-format creative-QC ([[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 1)
+## Per-format creative-QC ([[../archive.d/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 1)
 
 Max's binary `hard_gates.render_ok` was one boolean over ONE canonical image — coarse
 enough that a mis-scaled product in the 1:1 crop, a hallucinated "FREE TOTE" badge in the
@@ -144,7 +144,7 @@ creative-QC layer beside `render_ok`:
   finding) fails-closed with a specific reason. A mismatched pair (Max claims
   `creative_gate_pass:true` while a per-format check is `false`, or vice versa) is
   treated as a defect and rejected — same Goodhart-adjacent guard as `hard_gate_pass`.
-- **`creative_gate_pass`** — top-level roll-up boolean the [[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok|Phase-2]]
+- **`creative_gate_pass`** — top-level roll-up boolean the [[../archive.d/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok|Phase-2]]
   bounce dispatch reads to regenerate the offending format (mirroring the copy-fail
   bounce to Dahlia). Derived from the per-format entries; absent when `creative` is null.
   Max may omit it — the parser fills the derivation.
@@ -169,7 +169,7 @@ reason.
 
 ### Phase 2 — creative-gate fail bounces to the render lane + grade card shows findings
 
-The Phase-2 wire-in ([[../specs/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 2)
+The Phase-2 wire-in ([[../archive.d/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 2)
 turns the Phase-1 advisory signal into a real bounce dispatch. All lives in
 [[creative-agent]]:
 
