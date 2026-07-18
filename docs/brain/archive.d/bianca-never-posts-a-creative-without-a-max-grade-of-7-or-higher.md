@@ -1,0 +1,1 @@
+- **Bianca hard-refuses posting any creative without a Max copy-QC grade of 7/10 or higher** · verified 2026-07-18 · → [[lifecycles/ad-publish]]
