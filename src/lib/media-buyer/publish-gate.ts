@@ -24,6 +24,11 @@ import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { isCopyQcEligible, MAX_QC_ELIGIBILITY_FLOOR } from "@/lib/ads/creative-agent";
 import { readLatestCopyQaVerdict, type StoredCopyQaVerdict } from "@/lib/ads/creative-qa";
+import {
+  isPostabilityOverrideActive,
+  readPostabilityOverride,
+  type PostabilityOverride,
+} from "@/lib/ads/postability-override";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -625,29 +630,35 @@ export async function escalateMediaBuyerTestPublishRefusal(
 }
 
 // ── Max copy-QC hard gate at Bianca's publish step ──────────────────────────
-// bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
-// defence-in-depth over the ad_campaigns eligibility flag: at the actual money
-// step (the `ad_publish_jobs` insert + Meta post fan-out), independently re-verify
-// the creative carries a valid Max copy-QC verdict with `hard_gate_pass` AND
-// `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A null/missing verdict or a
-// sub-7 score REFUSES the post — the creative is skipped, an audit row is written,
-// and no dollars flow. Mirrors the shape of the media-buyer test-cohort gate: a
-// dispatched fail-closed rail evaluated at the same last-mile chokepoint.
+// bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 (with
+// bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate Phase 1
+// raising the floor from 7 to 9) — defence-in-depth over the ad_campaigns eligibility
+// flag: at the actual money step (the `ad_publish_jobs` insert + Meta post fan-out),
+// independently re-verify the creative carries a valid Max copy-QC verdict with
+// `hard_gate_pass` AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9). A
+// null/missing verdict or a below-floor score REFUSES the post — the creative is
+// skipped, an audit row is written, and no dollars flow. Mirrors the shape of the
+// media-buyer test-cohort gate: a dispatched fail-closed rail evaluated at the same
+// last-mile chokepoint.
 //
 // Shares the `MAX_QC_ELIGIBILITY_FLOOR` constant + `isCopyQcEligible` predicate
-// with Dahlia's bin gate (max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia
-// Phase 2) so the floor can never diverge between the two rails.
+// with Dahlia's bin gate so the floor can never diverge between the two rails.
 
 /** Why Bianca's publish path refused to post a creative to Meta. */
 export type MaxCopyQcPublishRefusalReason =
   | "missing_max_copy_qc_verdict" // no ad_creative_copy_qc_verdicts row (Max never scored the creative).
   | "hard_gate_fail" // verdict exists but a Max hard gate failed (fabrication, cold-offer, competitor leak, single-promise, render).
-  | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (7).
+  | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (9).
 
 export interface MaxCopyQcPublishGateAllowResult {
   ok: true;
-  verdict: StoredCopyQaVerdict;
+  verdict: StoredCopyQaVerdict | null;
   scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
+  /** bianca-posts-only-at-9of10 Phase 2 — the CEO override that authorized this
+   *  post, when Max's own verdict would have refused. `null` when Max cleared the
+   *  gate on his own (no override needed). Preserved on the allow-result so the
+   *  audit row + diagnostics cite whether the CEO or Max let it through. */
+  override: PostabilityOverride | null;
 }
 
 export interface MaxCopyQcPublishGateRefuseResult {
@@ -656,6 +667,7 @@ export interface MaxCopyQcPublishGateRefuseResult {
   reason: MaxCopyQcPublishRefusalReason;
   scoreFloor: typeof MAX_QC_ELIGIBILITY_FLOOR;
   diagnosis: string;
+  override: PostabilityOverride | null;
 }
 
 export type MaxCopyQcPublishGateResult =
@@ -670,7 +682,7 @@ export type MaxCopyQcPublishGateResult =
  * Refusal precedence: missing verdict → hard-gate fail → below the score floor.
  * `hard_gate_fail` fires FIRST when `hard_gate_pass === false` regardless of the
  * (advisory / null-forced) `persuasion_score`; below-floor only fires when hard
- * gates passed but the score didn't clear the CEO's 7/10 rule. Mirrors
+ * gates passed but the score didn't clear the CEO's 9/10 rule. Mirrors
  * `isCopyQcEligible`'s ordering exactly so the two predicates can never disagree.
  */
 export function classifyMaxCopyQcAtPublish(
@@ -685,6 +697,27 @@ export function classifyMaxCopyQcAtPublish(
     return { ok: false, reason: "below_score_floor" };
   }
   return { ok: true };
+}
+
+/**
+ * PURE — the composite postability predicate the money step honors from
+ * bianca-posts-only-at-9of10 Phase 2 onward. `isPostable = (Max hard_gate_pass
+ * AND persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR) OR CEO override present`.
+ *
+ * Kept as a pure exported helper (parallel to `classifyMaxCopyQcAtPublish`) so
+ * a fixture (verdict, override) tuple can be pinned to expected postable state
+ * independent of any DB read. The DB-aware `evaluateMaxCopyQcAtPublish` wraps
+ * this. Max's real grade on the passed-in verdict is NEVER mutated — a truthy
+ * override just adds a second, orthogonal "yes" that shortcuts a would-be
+ * refusal.
+ */
+export function isPostable(
+  verdict: StoredCopyQaVerdict | null,
+  override: PostabilityOverride | null,
+  scoreFloor: number = MAX_QC_ELIGIBILITY_FLOOR,
+): boolean {
+  if (isPostabilityOverrideActive(override)) return true;
+  return classifyMaxCopyQcAtPublish(verdict, scoreFloor).ok;
 }
 
 /** Human diagnosis surfaced on the growth audit row's `reason`. */
@@ -731,7 +764,7 @@ function maxCopyQcRefusalDiagnosis(
  * DB-aware wrapper — reads the latest Max copy-QC verdict for a creative via the
  * `readLatestCopyQaVerdict` SDK chokepoint, then delegates to `classifyMaxCopyQcAtPublish`.
  * Bianca's replenish path calls this BEFORE inserting an `ad_publish_jobs` row so a
- * sub-7 / ungraded creative is skipped at the money step — never enqueued, never posted.
+ * below-floor / ungraded creative is skipped at the money step — never enqueued, never posted.
  *
  * INDEPENDENT of the `ad_campaigns` bin-eligibility flag: a mis-flipped flag or a
  * missing / NULL verdict routes to refusal here too. This is the "second, fail-closed
@@ -743,10 +776,27 @@ export async function evaluateMaxCopyQcAtPublish(
   args: { workspaceId: string; adCampaignId: string; scoreFloor?: number },
 ): Promise<MaxCopyQcPublishGateResult> {
   const scoreFloor = args.scoreFloor ?? MAX_QC_ELIGIBILITY_FLOOR;
-  const verdict = await readLatestCopyQaVerdict(admin, {
-    workspaceId: args.workspaceId,
-    adCampaignId: args.adCampaignId,
-  });
+  // Read Max's real grade + the CEO override in parallel — they live in
+  // different tables (ad_creative_copy_qc_verdicts vs. ad_campaigns) and are
+  // independent: the override never mutates the QC verdict row, which is the
+  // whole point of preserving the Max-vs-CEO gap as the tuning signal.
+  const [verdict, override] = await Promise.all([
+    readLatestCopyQaVerdict(admin, {
+      workspaceId: args.workspaceId,
+      adCampaignId: args.adCampaignId,
+    }),
+    readPostabilityOverride(admin, {
+      workspaceId: args.workspaceId,
+      adCampaignId: args.adCampaignId,
+    }),
+  ]);
+  // bianca-posts-only-at-9of10 Phase 2 — CEO override shortcuts a would-be
+  // refusal. An active override (`override_postable=true`) says "post regardless
+  // of Max"; Max's real verdict rides on the allow-result unchanged so the
+  // audit trail still shows what Max said.
+  if (isPostabilityOverrideActive(override)) {
+    return { ok: true, verdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR, override };
+  }
   const classified = classifyMaxCopyQcAtPublish(verdict, scoreFloor);
   if (classified.ok) {
     // A verdict that classifies OK must also satisfy the shared isCopyQcEligible
@@ -759,9 +809,10 @@ export async function evaluateMaxCopyQcAtPublish(
         reason: "below_score_floor",
         scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
         diagnosis: maxCopyQcRefusalDiagnosis("below_score_floor", { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+        override,
       };
     }
-    return { ok: true, verdict: verdict as StoredCopyQaVerdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR };
+    return { ok: true, verdict: verdict as StoredCopyQaVerdict, scoreFloor: MAX_QC_ELIGIBILITY_FLOOR, override };
   }
   return {
     ok: false,
@@ -769,5 +820,6 @@ export async function evaluateMaxCopyQcAtPublish(
     reason: classified.reason,
     scoreFloor: MAX_QC_ELIGIBILITY_FLOOR,
     diagnosis: maxCopyQcRefusalDiagnosis(classified.reason, { adCampaignId: args.adCampaignId, verdict, scoreFloor }),
+    override,
   };
 }

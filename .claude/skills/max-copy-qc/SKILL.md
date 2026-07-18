@@ -203,6 +203,58 @@ Cite the format + defect in ONE short line per failed check (e.g.
 `"no_hallucinated_offer_or_badge: 'FREE TOTE' badge baked into the feed 4:5 — not in the
 brief"`). This is the string a downstream reader sees on the grade card and the Phase-2
 bounce dispatch threads into the render-lane regenerate prompt.
+## ⚠️ Expect long-form 3-paragraph primary text — do NOT dock for length (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1)
+
+Every `PRIMARY:` string Dahlia hands you should be a **long-form 3-paragraph shape** (a short
+punchy HOOK, a longer BODY 2-3x the hook that delivers info + proof, and a short one-sentence
+CURIOSITY CLOSE) separated by true blank lines. This is enforced by the deterministic
+`validateCopyParagraphStructure` rail in `src/lib/ads/creative-agent.ts` — a shape miss is
+already bounced back to Dahlia BEFORE you see the caption, so what reaches you is either
+long-form-compliant or a legitimate edge case.
+
+**Score the copy on its merits, NOT on its length.** A multi-sentence body IS the shape —
+reward the specifics, the proof stack cites, the flow of hook → body → close in `sugarman`
+and `hopkins`. Do NOT flag a long primary as "wordy" / "over-written" / "TL;DR" — short blob
+copy is the exact failure mode this rail closes, and Dahlia was told to write long-form. A
+one-line primary text that reaches you (edge-case fall-through) should be flagged in
+`persuasion_rubric.evidence` under `sugarman` as failing the ellipsis-earning expand (that IS
+a scroll-stop miss) — but the shape is judged as a persuasion signal, not as a hard gate.
+
+## ⚠️ Distrust AI-tell copy — penalize it in persuasion / scroll_stop (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2)
+
+A scrolling Meta buyer distrusts copy that smells AI-written before they even read the
+promise. The CEO called this out by name after last night's ads: "the copy reads like AI."
+Two rails close it — the deterministic em-dash gate (already enforced on Dahlia's side by
+`validateCopyHumanVoice`; a caption with U+2014 is bounced before it reaches you), plus
+YOUR judgment on the softer tells a regex can't catch.
+
+When you see any of these in the copy, **penalize the persuasion score and cite it as
+scroll-stop evidence** — a buyer who feels "this is AI slop" scrolls past no matter how
+good the rest of the caption is:
+
+- **Balanced `not just X, it's Y` (or `it's not just X, it's Y`) constructions.** Chatbot
+  cadence — the symmetry gives it away. Dock 1-2 points on `sugarman` (flat / mechanical
+  cadence) and note the phrase in `persuasion_rubric.evidence`.
+- **Overused rule-of-three.** A tricolon that lands (`No spike, no crash, no jitter.`) is
+  fine — real DR uses it. A tricolon that's fluff (`clean, effective, and delicious`) is a
+  tell. If the three items don't each carry weight, dock `hopkins` (specificity is missing
+  and the tricolon is padding to fake it).
+- **AI-flavored verbs / adjectives.** `elevate`, `unlock`, `transform`, `supercharge`,
+  `revolutionize`, `game-changer`, `next-level`, `cutting-edge`, `seamless`, `curated`.
+  Never a real customer's word for what happened. Dock `lf8` (the raw driver was replaced
+  with a chatbot's neutral abstraction).
+- **AI-flavored opener phrases.** `In a world where …`, `Say goodbye to …`, `Introducing
+  …`, `Meet …`, `Imagine a …`. Template phrases. Dock `sugarman` — the opener earned no
+  scroll-stop; a real DR hook is contrarian or curiosity-driven, not templated.
+- **Em-dash slip-through.** The deterministic rail should have caught U+2014 upstream. If
+  one survived (edge case, or a spaced en-dash used as a sentence dash — ` – ` — still
+  reads as machine substitution), fail `hard_gates.no_fabrication` NO — but note it as a
+  human-voice miss in `persuasion_rubric.evidence` and dock `sugarman`. The rail is
+  Dahlia's; your job is the judgment that survives when a rail glitches.
+
+Cite the exact phrase you're penalizing (verbatim from `PRIMARY:` / `HEADLINE:`) so the
+recorded score is auditable — a downstream reader must be able to see WHY you docked, not
+just that you docked.
 
 ## Advisory persuasion score (0-10, RECORDED, never blocks)
 
@@ -242,7 +294,7 @@ sub-score blocks the pipeline, it stops being an honest signal and becomes somet
 |---|---|---|---|
 | **`headline_readable_in_3_frames`** — the top-line copy is legible within ≤3 feed-scroll frames of Meta thumb-cadence viewing (a real buyer flicks through Reels/Feed at ~1 second per card; text you can't read in that window doesn't earn a scroll-stop) | unreadable at thumb pace (too small, low contrast against the plate, dropped into a crowded band, or the wordmark competes) | legible but requires stopping to parse (unusually long headline, tight leading, a soft contrast that reads only after a second look) | reads in one glance — a scanner in the first frame lands the entire headline without slowing down |
 | **`visual_hierarchy_supports_headline`** — there is a single dominant visual anchor that doesn't fight the headline for attention (one hero object, one focal face, one focal transformation — not three competing anchors that split the buyer's eye) | anchor competes with the headline (a busy pack shot, a competing overlay, a face that looks past rather than at the copy zone, two focal points side-by-side) | anchor coexists with the headline but doesn't lift it (functional composition, no visual pull toward the copy) | anchor supports the headline — a leading line, focal contrast, or gaze direction pulls the eye toward the top-line copy |
-| **`first_line_earns_the_second`** — the primary-text opener creates enough curiosity / stakes / specificity to keep the reader past the '…See more' fold (≈125 chars into `PRIMARY:` in Meta feed rendering); a flat generic opener earns nothing | generic first line ("Discover our best-selling…", "Try our…"); the reader has no reason to expand | a specific claim or one hook lever that could pull ("42 women tried it — here's what happened") but not stacked with a second beat | multiple beats compounding in the first line — a specific number + a curiosity gap + a benefit anchor, so the reader must keep going to resolve the tension |
+| **`first_line_earns_the_second`** — the primary-text opener (the HOOK paragraph in the long-form 3-paragraph shape — everything the reader sees BEFORE Meta's `…more` fold) creates enough curiosity / stakes / specificity to keep the reader expanding into the BODY paragraph; a flat generic opener earns nothing. Score the HOOK paragraph, not the body — a long-form body is expected and does NOT dock this dimension | generic hook ("Discover our best-selling…", "Try our…"); the reader has no reason to expand | a specific claim or one hook lever that could pull ("42 women tried it — here's what happened") but not stacked with a second beat | multiple beats compounding in the hook — a specific number + a curiosity gap + a benefit anchor, so the reader must keep going to resolve the tension |
 
 For each dimension, give it 0 / 1 / 2 based on what you see in the image and read in the copy —
 NOT on what Dahlia claimed in `DAHLIA_SELF_SCORE`. Cite the phrase you're rewarding (or the

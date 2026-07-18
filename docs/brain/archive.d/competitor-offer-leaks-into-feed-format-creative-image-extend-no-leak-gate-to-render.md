@@ -1,0 +1,1 @@
+- **Competitor offer ('free tote') leaks into the Feed-format creative image — extend the no-competitor-leak guard to the render** · verified 2026-07-18 · → [[../libraries/creative-generate]]

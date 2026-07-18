@@ -102,16 +102,65 @@ function envelope(overrides: Record<string, unknown> = {}): string {
   // `variations` is REQUIRED (parseAuthorVerdict fail-closes on absence). Default fixture emits
   // five distinct per-framework hooks so every non-variations test still parses ok; tests that
   // pin a specific variations shape (or the fail-closed branches) override this field.
+  // dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — every primaryText fixture
+  // (canonical + per-framework variation) is a valid 3-paragraph long-form shape so the default
+  // envelope clears `validateCopyParagraphStructure` in the revise loop; tests that pin the shape
+  // gate's fail branches override the field explicitly.
+  const longForm = (hook: string, body: string, close: string): string => `${hook}\n\n${body}\n\n${close}`;
   const defaultVariations = [
-    { framework: "lf8", headline: "Feel lighter. Finally.", primaryText: "LF8-led fixture hook." },
-    { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "Schwartz-led fixture hook." },
-    { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "Cialdini-led fixture hook." },
-    { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hopkins-led fixture hook." },
-    { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Sugarman-led fixture hook." },
+    {
+      framework: "lf8",
+      headline: "Feel lighter. Finally.",
+      primaryText: longForm(
+        "She stopped counting calories.",
+        "Barbara traded her regular cup for Amazing Coffee and the cravings faded on their own, thanks to six functional mushrooms, grass-fed collagen, no crash, no jitter, and no afternoon dip after 700,000 people quietly made the switch.",
+        "See what a different cup can do.",
+      ),
+    },
+    {
+      framework: "schwartz",
+      headline: "Not another diet. A better cup.",
+      primaryText: longForm(
+        "It is not another diet.",
+        "It is a real coffee that swaps out the crash without asking you to give up the ritual, because the mechanism is functional mushrooms plus grass-fed collagen, not restriction, and a 30-day money-back guarantee covers you if it does not land.",
+        "Try a cup that actually earns its place.",
+      ),
+    },
+    {
+      framework: "cialdini",
+      headline: "700,000+ customers. 15K reviews.",
+      primaryText: longForm(
+        "700,000 people cannot be wrong.",
+        "Every morning, 700,000 customers reach for Amazing Coffee and 15,000 of them left reviews, and every order is backed by a 30-day money-back guarantee so a first cup costs nothing but the ritual of trying it.",
+        "Join the morning routine that stuck.",
+      ),
+    },
+    {
+      framework: "hopkins",
+      headline: "She lost 15 lbs in 3 weeks.",
+      primaryText: longForm(
+        "Fifteen pounds in three weeks.",
+        "Barbara lost 15 pounds in 3 weeks after she swapped her regular cup for Amazing Coffee, and it was the same brew 700,000 customers keep on their counter, real coffee, six functional mushrooms, one scoop of grass-fed collagen.",
+        "Read the reviews and decide for yourself.",
+      ),
+    },
+    {
+      framework: "sugarman",
+      headline: "Stop dieting. Drink this instead.",
+      primaryText: longForm(
+        "Stop dieting. Drink this instead.",
+        "The trick is the coffee, roasted with six functional mushrooms and a scoop of grass-fed collagen so the cravings soften without a spike and without a crash, and 700,000 customers quietly reach for it every single morning.",
+        "See what a different cup can do.",
+      ),
+    },
   ];
   const body = {
-    headline: "Clean energy — no crash",
-    primaryText: "Steady 4-hour energy from adaptogens. No jitters, no crash. Shop now 👉",
+    headline: "Clean energy, no crash",
+    primaryText: longForm(
+      "Steady focus. All morning.",
+      "The adaptogens hit within twenty minutes and hold four hours without a spike, without a crash, without the afternoon dip a regular cup always ends in, and 700,000 customers keep it on their counter every day.",
+      "See what a different cup can do.",
+    ),
     description: "Adaptogens · steady energy",
     audience_temperature: "warm",
     concept_tag: "mechanism",
@@ -176,7 +225,7 @@ test("parseAuthorVerdict: happy path → ok with all fields", () => {
   const result = parseAuthorVerdict(envelope());
   assert.equal(result.kind, "ok");
   if (result.kind === "ok") {
-    assert.equal(result.verdict.headline, "Clean energy — no crash");
+    assert.equal(result.verdict.headline, "Clean energy, no crash");
     assert.equal(result.verdict.audience_temperature, "warm");
     assert.equal(result.verdict.concept_tag, "mechanism");
     assert.equal(result.verdict.selfScore.total, 10);
@@ -586,16 +635,20 @@ test("runCopyAuthorSession (e): dispatcher THROWS → treated as a revise trigge
 });
 
 test("runCopyAuthorSession (f): cold audience emit that leaks offer language → revise trigger; second attempt cleans up → ok", async () => {
+  // Both primaryText fixtures are valid 3-paragraph long-form shapes so the paragraph-structure
+  // gate PASSES and the cold-offer gate is the one that fires (dahlia-long-form-3-paragraph-
+  // primary-text-in-human-voice Phase 1). The HEADLINE carries the offer leak that trips the
+  // cold-offer gate on the first attempt.
   const leaky = envelope({
     headline: "Save 25% today",
-    primaryText: "Free shipping on cold energy — buy now.",
+    primaryText: "Everyone said cut the coffee.\n\nBarbara traded her regular cup for Amazing Coffee and the cravings faded on their own, six functional mushrooms and grass-fed collagen holding four hours without a spike or a crash, the way 700,000 people quietly start their morning.\n\nSee what a different cup can do.",
     description: "Shop now",
     audience_temperature: "cold",
     self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
   });
   const clean = envelope({
     headline: "Energy without the 3pm slump",
-    primaryText: "Adaptogens that steady your afternoon focus.",
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours without a spike or a crash, without the afternoon dip a regular cup always ends in, and 700,000 people quietly reach for it every day.\n\nSee what a different cup can do.",
     description: "Steady focus",
     audience_temperature: "cold",
     self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
@@ -854,8 +907,11 @@ test("runCopyAuthorSession: verdict that fails the shared validator (no_competit
   // First emit leaks the competitor advertiser token; second emit is clean. The revise prompt
   // MUST cite `validator_failed` so Dahlia knows which SSOT gate she tripped.
   const leaky = envelope({
+    // Headline carries the competitor leak; primaryText stays valid 3-paragraph long-form so the
+    // paragraph-structure gate PASSES and the shared validator's no_competitor_leak rail is the
+    // one that fires (per dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1).
     headline: "Cleaner than MUD/WTR",
-    primaryText: "Steady 4-hour energy — no crash.",
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours without a spike, without a crash, without the afternoon dip a regular cup always ends in, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
     description: "Adaptogens",
     audience_temperature: "warm",
     self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
@@ -886,8 +942,11 @@ test("runCopyAuthorSession: verdict that fails the shared validator (no_competit
 
 test("runCopyAuthorSession: validator failure that keeps repeating → exhausted with validatorMisses carrying the failing checks", async () => {
   const leaky = envelope({
+    // Headline carries the competitor leak; primaryText stays valid 3-paragraph long-form so the
+    // paragraph-structure gate PASSES and the shared validator's no_competitor_leak rail is the
+    // one that fires (per dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1).
     headline: "Cleaner than MUD/WTR",
-    primaryText: "Steady 4-hour energy — no crash.",
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours without a spike, without a crash, without the afternoon dip a regular cup always ends in, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
     description: "Adaptogens",
     audience_temperature: "warm",
     self_score: { lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total: 10, evidence: [] },
@@ -919,6 +978,121 @@ test("runCopyAuthorSession: validator failure that keeps repeating → exhausted
   }
 });
 
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — paragraph-structure gate ──
+
+test("runCopyAuthorSession: verdict whose canonical primaryText is a one-line blob → paragraph_structure_failed revise; second attempt with long-form → ok", async () => {
+  // Short-blob primaryText (the CEO's exact complaint) is what the rail closes — force the first
+  // attempt into a `not_three_paragraphs` miss and prove the SAME revise mechanism the other gates
+  // use fires; the SECOND attempt is the default long-form envelope which passes every gate.
+  const blob = envelope({ primaryText: "Steady 4-hour energy — clean, no crash. Shop now." });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: blob }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    // The revise prompt carries the concrete typed reason so Dahlia knows WHAT to fix.
+    assert.match(calls[1].prompt, /paragraph_structure_failed/);
+    assert.match(calls[1].prompt, /canonical=not_three_paragraphs/);
+  }
+});
+
+test("runCopyAuthorSession: a variation whose primaryText is a one-line blob triggers the same gate, citing the framework", async () => {
+  // Canonical primaryText is long-form; a SINGLE variation carries a blob — the miss must still
+  // fire and the reason must NAME the offending framework so the revise prompt can cite it.
+  const badVariation = [
+    { framework: "lf8", headline: "Feel lighter. Finally.", primaryText: "LF8 blob." },
+    { framework: "schwartz", headline: "Not another diet.", primaryText: "Hook.\n\nBody delivers the info about mushrooms and collagen and 700,000 customers across the country.\n\nSee more." },
+    { framework: "cialdini", headline: "700K reviews.", primaryText: "Hook.\n\nBody delivers proof stack about customers and reviews and the 30-day money-back guarantee 700,000 customers rely on.\n\nSee more." },
+    { framework: "hopkins", headline: "15 lbs in 3 weeks.", primaryText: "Hook.\n\nBody delivers Barbara's 15 pounds in 3 weeks with real coffee and six functional mushrooms and grass-fed collagen every morning.\n\nSee more." },
+    { framework: "sugarman", headline: "Stop dieting.", primaryText: "Hook.\n\nBody delivers the curiosity payoff about the coffee mushrooms and collagen and the crash-free morning 700,000 customers share.\n\nSee more." },
+  ];
+  const badFirst = envelope({ variations: badVariation });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: badFirst }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    // Only the lf8 variation is blob — the reason must call it out by framework name.
+    assert.match(calls[1].prompt, /variations\[lf8\]=not_three_paragraphs/);
+  }
+});
+
+test("runCopyAuthorSession: paragraph-structure failure that keeps repeating → exhausted with the paragraph_structure_failed reason", async () => {
+  const blob = envelope({ primaryText: "Steady 4-hour energy — clean, no crash." });
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: blob }));
+  const { dispatch } = scriptedDispatcher(replies);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.match(outcome.reason, /paragraph_structure_failed/);
+    // A paragraph-structure exhaustion is NOT a validator / firewall / max-qc exhaustion — the
+    // distinguishing fields stay undefined so stockProduct routes it to the plain
+    // `dahlia_copy_author_exhausted` escalation.
+    assert.equal(outcome.validatorMisses, undefined);
+    assert.equal(outcome.firewallMisses, undefined);
+    assert.equal(outcome.maxCopyQcMissed, undefined);
+  }
+});
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 — human-voice gate ─────
+
+test("runCopyAuthorSession: canonical primaryText carrying an em-dash → human_voice_failed revise; clean second attempt → ok", async () => {
+  // Long-form paragraph shape stays valid (so the paragraph gate passes), but the middle
+  // paragraph carries an em-dash — the CEO's exact call-out. The human-voice gate must fire
+  // and the revise reason must cite the em-dash so Dahlia knows what to rewrite.
+  const withDash = envelope({
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours — no spike, no crash, no afternoon dip, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
+  });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: withDash }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /human_voice_failed/);
+    assert.match(calls[1].prompt, /primaryText=em_dash_ai_tell/);
+  }
+});
+
+test("runCopyAuthorSession: em-dash in a variation headline is caught with the framework name in the revise reason", async () => {
+  // Canonical is clean; one variation's headline carries the em-dash — the revise reason must
+  // NAME the offending variation so Dahlia knows which slot to fix.
+  const withDashVariation = envelope({
+    variations: [
+      { framework: "lf8", headline: "Feel lighter — finally.", primaryText: "Hook.\n\nBody delivers info about mushrooms and collagen and 700,000 customers across the country.\n\nSee more." },
+      { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "Hook.\n\nBody delivers info about mushrooms and collagen and 700,000 customers across the country.\n\nSee more." },
+      { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "Hook.\n\nBody delivers proof stack about customers and reviews and the 30-day money-back guarantee 700,000 customers rely on.\n\nSee more." },
+      { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hook.\n\nBody delivers Barbara's 15 pounds in 3 weeks with real coffee and six functional mushrooms and grass-fed collagen every morning.\n\nSee more." },
+      { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Hook.\n\nBody delivers the curiosity payoff about the coffee mushrooms and collagen and the crash-free morning 700,000 customers share.\n\nSee more." },
+    ],
+  });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: withDashVariation }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /variations\[lf8\]\.headline=em_dash_ai_tell/);
+  }
+});
+
+test("runCopyAuthorSession: em-dash failure that keeps repeating → exhausted with the human_voice_failed reason", async () => {
+  const withDash = envelope({
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours — no spike, no crash, no afternoon dip, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
+  });
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: withDash }));
+  const { dispatch } = scriptedDispatcher(replies);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.match(outcome.reason, /human_voice_failed/);
+    // A human-voice exhaustion is NOT a validator / firewall / paragraph / max-qc exhaustion —
+    // the distinguishing fields stay undefined so stockProduct routes it to the plain
+    // `dahlia_copy_author_exhausted` escalation.
+    assert.equal(outcome.validatorMisses, undefined);
+    assert.equal(outcome.firewallMisses, undefined);
+    assert.equal(outcome.maxCopyQcMissed, undefined);
+  }
+});
+
 test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY when supplied", async () => {
   const withDna = scriptedDispatcher([{ resultText: envelope() }]);
   await runCopyAuthorSession(
@@ -942,10 +1116,12 @@ test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY wh
   assert.doesNotMatch(withoutDna.calls[0].prompt, /COMPETITOR_DNA:/);
 });
 
-// ── max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — 7/10 eligibility gate ──
+// ── max-final-qa-7of10-eligibility-gate + bianca-posts-only-at-9of10 Phase 1 — 9/10 postability gate ──
 //
 // Pin `isCopyQcEligible` — the pure predicate `stockProduct` uses to hold a below-floor Max verdict
-// out of Bianca's bin. The CEO's rule: eligible IFF hard_gate_pass AND persuasion_score >= 7.
+// out of Bianca's postable bin. The CEO's tighter oversight rule (2026-07-18): eligible IFF
+// hard_gate_pass AND persuasion_score >= 9 (raised from 7 by bianca-posts-only-at-9of10 Phase 1 —
+// only near-perfect ads auto-post while the creative system is being tuned).
 // Scroll-stop sub-scores are DELIBERATELY not in this predicate (advisory-only Goodhart guard).
 
 function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
@@ -975,24 +1151,32 @@ function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
   } as CopyQaVerdict;
 }
 
-test("Phase 2 gate: floor is set to 7 (named constant, tunable in ONE place)", () => {
-  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 7);
+test("Phase 1 gate: floor is set to 9 (named constant, tunable in ONE place) — bianca-posts-only-at-9of10 raised it from 7", () => {
+  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 9);
 });
 
-test("Phase 2 gate: 7/10 verdict with all hard gates passing → ELIGIBLE (the exact boundary)", () => {
-  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 7 })), true);
+test("Phase 1 gate: 9/10 verdict with all hard gates passing → ELIGIBLE (the exact boundary at the new floor)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 9 })), true);
 });
 
-test("Phase 2 gate: 6/10 verdict with all hard gates passing → NOT eligible (below the floor by 1)", () => {
+test("Phase 1 gate: 8/10 verdict with all hard gates passing → NOT eligible (below the floor by 1 — the old 7/10 pass floor is now a HOLD)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 8 })), false);
+});
+
+test("Phase 1 gate: 7/10 verdict with all hard gates passing → NOT eligible (the previous floor no longer clears)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 7 })), false);
+});
+
+test("Phase 1 gate: 6/10 verdict with all hard gates passing → NOT eligible (well below the floor)", () => {
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 6 })), false);
 });
 
-test("Phase 2 gate: 10/10 verdict → eligible; 0/10 verdict → not eligible (the extremes)", () => {
+test("Phase 1 gate: 10/10 verdict → eligible; 0/10 verdict → not eligible (the extremes)", () => {
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 10 })), true);
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 0 })), false);
 });
 
-test("Phase 2 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (hard gates dominate the floor)", () => {
+test("Phase 1 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (hard gates dominate the floor)", () => {
   assert.equal(
     isCopyQcEligible(
       copyQcVerdict({
@@ -1011,21 +1195,21 @@ test("Phase 2 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (
   );
 });
 
-test("Phase 2 gate: NULL verdict → NOT eligible (parse error / dispatch error routes to hold)", () => {
+test("Phase 1 gate: NULL verdict → NOT eligible (parse error / dispatch error routes to hold)", () => {
   assert.equal(isCopyQcEligible(null), false);
 });
 
-test("Phase 2 gate: hard-gate pass with a NULL persuasion_score → NOT eligible (defence-in-depth null-fallback)", () => {
+test("Phase 1 gate: hard-gate pass with a NULL persuasion_score → NOT eligible (defence-in-depth null-fallback)", () => {
   // parseCopyQaVerdict fail-closes on a null score alongside a hard-gate pass — this is the
   // guard for the pathological case where a verdict slips through with null anyway.
   assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: null })), false);
 });
 
-test("Phase 2 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart guard — only the top-line score gates)", () => {
-  // A 7/10 top-line with catastrophic scroll-stop sub-scores is STILL eligible — the top-line is
+test("Phase 1 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart guard — only the top-line score gates)", () => {
+  // A 9/10 top-line with catastrophic scroll-stop sub-scores is STILL eligible — the top-line is
   // Max's synthesis, sub-scores are recorded for later CAC correlation and never gate.
   const badScrollStop = copyQcVerdict({
-    persuasion_score: 7,
+    persuasion_score: 9,
     scroll_stop: {
       headline_readable_in_3_frames: 0,
       visual_hierarchy_supports_headline: 0,
@@ -1037,8 +1221,9 @@ test("Phase 2 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart g
 });
 
 // ── max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — bounce-back-to-Dahlia loop ──
+// (floor raised 7→9 by bianca-posts-only-at-9of10 Phase 1)
 //
-// Pin the Max→Dahlia self-heal wire: when Max's copy-QC comes back sub-7 (or hard-gate-fail /
+// Pin the Max→Dahlia self-heal wire: when Max's copy-QC comes back below-floor (or hard-gate-fail /
 // verdict-missing), `runCopyAuthorSession`'s loop treats it like the firewall miss — the revise
 // reason is stamped from Max's critique, Dahlia's SAME session is resumed (cache-warm), and she
 // rewrites addressing Max's notes. Repeats until Max clears or the cap is exhausted.
@@ -1091,15 +1276,15 @@ function scriptedMaxQc(
   return { closure, seen };
 }
 
-test("Phase 3 loop: buildMaxQcReviseReason: sub-7 verdict → `max_qc_below_floor: <verdict_reason> (score=N, floor=7)`", () => {
+test("Phase 3 loop: buildMaxQcReviseReason: below-floor verdict → `max_qc_below_floor: <verdict_reason> (score=N, floor=9)` (bianca-posts-only-at-9of10 raised floor 7→9)", () => {
   const reason = buildMaxQcReviseReason(copyQcVerdictP3(6));
   assert.match(reason, /^max_qc_below_floor: /);
-  assert.match(reason, /score=6, floor=7/);
+  assert.match(reason, /score=6, floor=9/);
   assert.match(reason, /generic supplement pitch/);
 });
 
 test("Phase 3 loop: buildMaxQcReviseReason: null verdict → distinct `max_qc_verdict_missed` prefix (dispatch/parse miss)", () => {
-  assert.match(buildMaxQcReviseReason(null), /^max_qc_verdict_missed \(floor=7\)$/);
+  assert.match(buildMaxQcReviseReason(null), /^max_qc_verdict_missed \(floor=9\)$/);
 });
 
 test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gates so Dahlia can address them", () => {
@@ -1109,30 +1294,30 @@ test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gat
   assert.match(reason, /no_fabrication|no_cold_offer|no_competitor_leak|single_promise|render_ok/);
 });
 
-test("Phase 3 loop: Max grades 8/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed)", async () => {
+test("Phase 3 loop: Max grades 9/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed; 9 is the new floor)", async () => {
   const { dispatch } = scriptedDispatcher([{ resultText: envelope() }]);
-  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(8)]);
+  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(9)]);
   const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: closure }), dispatch);
   assert.equal(outcome.kind, "ok");
   if (outcome.kind === "ok") {
     assert.equal(outcome.attempts, 1);
     assert.ok(outcome.maxCopyQcVerdict, "maxCopyQcVerdict must ride on ok outcome so caller persists it");
-    assert.equal(outcome.maxCopyQcVerdict!.persuasion_score, 8);
+    assert.equal(outcome.maxCopyQcVerdict!.persuasion_score, 9);
   }
   assert.equal(seen.length, 1, "Max was invoked exactly once on the first-pass ok path");
 });
 
-test("Phase 3 loop: Max grades 5/10 → RESUME Dahlia + retry with critique → 8/10 → ok with attempts=2", async () => {
+test("Phase 3 loop: Max grades 5/10 → RESUME Dahlia + retry with critique → 9/10 → ok with attempts=2", async () => {
   const { dispatch, calls } = scriptedDispatcher([
     { resultText: envelope({ headline: "Weak hook" }) },
     { resultText: envelope({ headline: "Strong scroll-stopper" }) },
   ]);
-  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(5), copyQcVerdictP3(8)]);
+  const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(5), copyQcVerdictP3(9)]);
   const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: closure }), dispatch);
   assert.equal(outcome.kind, "ok");
   if (outcome.kind === "ok") {
     assert.equal(outcome.attempts, 2, "one bounce ⇒ two dispatches (attempt 1 + revise)");
-    assert.equal(outcome.maxCopyQcVerdict?.persuasion_score, 8);
+    assert.equal(outcome.maxCopyQcVerdict?.persuasion_score, 9);
   }
   assert.equal(seen.length, 2, "Max was re-invoked on the revised copy");
   // The revise turn must have RESUMED the same session — the self-heal cache-warm invariant.
@@ -1165,7 +1350,7 @@ test("Phase 3 loop: Max grades 4/10 every round → EXHAUSTED with maxCopyQcMiss
 test("Phase 3 loop: Max grades a HARD-GATE FAIL → bounce back on the hard-gate names (not just score)", async () => {
   const failThenPass = [
     copyQcVerdictP3(null, { hard_gate_pass: false }),
-    copyQcVerdictP3(8),
+    copyQcVerdictP3(9),
   ];
   const { dispatch, calls } = scriptedDispatcher([
     { resultText: envelope({ headline: "Fabrication-y hook" }) },

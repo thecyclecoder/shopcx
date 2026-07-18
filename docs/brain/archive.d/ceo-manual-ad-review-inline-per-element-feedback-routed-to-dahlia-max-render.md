@@ -1,0 +1,1 @@
+- **CEO manual ad review: inline per-element feedback on the ad detail page, routed as a structured packet to Dahlia / Max / the render lane** · verified 2026-07-18 · → [[lifecycles/ad-creative]]

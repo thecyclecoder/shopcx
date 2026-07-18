@@ -31,6 +31,10 @@ function makeChain(result: FakeTableRow) {
   chain.in = () => chain;
   chain.not = () => chain;
   chain.is = () => chain;
+  // bianca-posts-only-at-9of10 Phase 2 — the reader now uses `.or(...)` to
+  // include a max_qc_eligible=false row with an active CEO override. The fake
+  // chain ignores the filter arg (JS-side guard is what actually filters here).
+  chain.or = () => chain;
   chain.then = (onFulfilled: (v: FakeTableRow) => unknown) => Promise.resolve(result).then(onFulfilled);
   return chain;
 }
@@ -283,4 +287,49 @@ test("Phase 2: `max_qc_eligible=null` campaign SURFACES (legacy / deterministic 
   const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
   assert.equal(readyToTest.length, 1);
   assert.equal(readyToTest[0].ad_campaign_id, "C9");
+});
+
+// ── bianca-posts-only-at-9of10 Phase 2 — CEO postability override surfaces a
+// max_qc_eligible=false row that a Max-only gate would have hidden. Belt-and-
+// suspenders JS guard pins the semantic; the DB predicate covers the wire.
+
+test("Phase 2 (CEO override): `max_qc_eligible=false` + `override_postable=true` campaign SURFACES (CEO overruled Max)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C10", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/10.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C10", landing_url: "https://superfoods.com/products/ceo-postable", status: "ready", created_at: "2026-07-18T10:00:00Z", max_qc_eligible: false, override_postable: true },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 1);
+  assert.equal(readyToTest[0].ad_campaign_id, "C10");
+});
+
+test("Phase 2 (CEO override): `max_qc_eligible=false` + no override (`override_postable=null`) → STILL EXCLUDED (nothing changed for the unrescued rows)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C11", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/11.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C11", landing_url: "https://superfoods.com/products/still-held", status: "ready", created_at: "2026-07-18T10:00:00Z", max_qc_eligible: false, override_postable: null },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 0);
 });

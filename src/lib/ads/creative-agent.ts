@@ -93,20 +93,22 @@ export const AUTHOR_SELF_SCORE_FLOOR = 6;
  *  goal's success metric depends on. */
 export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
 
-/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — the persuasion-score
- *  floor Max's copy-QC verdict must clear before the creative is eligible for Bianca's bin.
- *  The CEO's rule from the spec: "a creative is bin-eligible only if Max's hard gates pass
- *  AND his whole-ad score is at least 7/10; below 7 it is NOT eligible." Kept as a NAMED
- *  exported constant so a founder can tune it in one place without hunting through call sites.
- *  Read by `isCopyQcEligible` — the pure predicate `stockProduct` gates on before it hands the
- *  creative to `insertReadyCreative`. */
-export const MAX_QC_ELIGIBILITY_FLOOR = 7;
+/** The persuasion-score floor Max's copy-QC verdict must clear before the creative is
+ *  eligible for AUTO-POSTABILITY (Bianca posts it to Meta unattended). Raised from 7 to 9
+ *  by bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate Phase 1 — the
+ *  CEO's tighter oversight floor while the creative system is being tuned: only near-perfect
+ *  ads auto-post; 7-8 hold. Kept as a NAMED exported constant so a founder can tune it in one
+ *  place without hunting through call sites. Read by `isCopyQcEligible` — the pure predicate
+ *  `stockProduct` gates on before it hands the creative to `insertReadyCreative` — and by
+ *  `media-buyer/publish-gate.ts` `evaluateMaxCopyQcAtPublish` as the defence-in-depth gate at
+ *  the money step. Historical spec slugs still say "7of10" because they were named at the
+ *  earlier floor; the ACTIVE floor is this constant. */
+export const MAX_QC_ELIGIBILITY_FLOOR = 9;
 
-/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — pure predicate for
- *  bin eligibility on Max's copy-QC verdict. Eligible IFF the verdict exists AND
- *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A `null`
- *  verdict (dispatch error / parse error / no dispatcher) is NOT eligible — the CEO's rule:
- *  "below 7 (or a hard-gate fail, or a parse error) means NOT eligible." Scroll-stop sub-scores
+/** Pure predicate for postability on Max's copy-QC verdict. Eligible IFF the verdict exists AND
+ *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9 — raised from
+ *  7 by bianca-posts-only-at-9of10 Phase 1). A `null` verdict (dispatch error / parse error /
+ *  no dispatcher) is NOT eligible. Scroll-stop sub-scores
  *  are DELIBERATELY not in this predicate (Goodhart guard — advisory only; only the top-line
  *  persuasion score + hard gates gate). Pure, exported, unit-testable so the floor is provable
  *  from a fixture verdict.
@@ -318,6 +320,234 @@ export function pickCanonicalVariant(
   const cold = variants.find((v) => v.audience_temperature === "cold");
   if (cold) return cold;
   return variants.find((v) => v.audience_temperature === "hot") ?? null;
+}
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 ────────────────────────────
+
+/** The close-paragraph word cap. Lenient by design (25 words ≈ two short sentences) so the rail
+ *  doesn't thrash on a slightly-long-but-legitimate curiosity close — the point is to catch a
+ *  runaway paragraph masquerading as a close, not to police prose length. */
+export const PARAGRAPH_CLOSE_MAX_WORDS = 25;
+
+/** Typed reason strings the paragraph-structure validator returns on a miss. Each reason names the
+ *  exact defect the copy-only revise prompt cites back to Dahlia:
+ *    • `not_three_paragraphs` — the primary text didn't split on a true blank line into exactly 3
+ *      non-empty paragraphs (short-blob copy, single-paragraph copy, or a bunched 2-paragraph shape).
+ *    • `hook_not_shortest` — para-1 (hook) is not fewer words than para-2 (body). The shape's whole
+ *      point is a punchy short hook and a longer supporting body; a hook that's as long as the body
+ *      buries the ellipsis-earning first line.
+ *    • `close_too_long` — para-3 (close) exceeded `PARAGRAPH_CLOSE_MAX_WORDS` and reads as a second
+ *      body rather than a one-sentence curiosity nudge. */
+export type ParagraphStructureReason =
+  | "not_three_paragraphs"
+  | "hook_not_shortest"
+  | "close_too_long";
+
+/** Structured result of `validateCopyParagraphStructure` — either `ok:true` with the per-paragraph
+ *  word counts (useful as a downstream signal) or a typed `reason` the revise loop consumes. Kept
+ *  pure + exported so a unit test can pin every branch. */
+export type ParagraphStructureResult =
+  | { ok: true; hookWords: number; bodyWords: number; closeWords: number }
+  | {
+      ok: false;
+      reason: ParagraphStructureReason;
+      hookWords: number;
+      bodyWords: number;
+      closeWords: number;
+      paragraphCount: number;
+    };
+
+/** dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — the paragraph-structure
+ *  validator. Real DR Meta primary text is a long-form 3-paragraph shape:
+ *    (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads
+ *        above Meta's `…more` fold,
+ *    (2) a BODY paragraph 2-3x longer that delivers the info + proof stack, then
+ *    (3) a short single-sentence CURIOSITY CLOSE that pushes the click to the landing page.
+ *  Split on `/\n\s*\n/` (a true blank line — a single `\n` is a same-paragraph line break) and
+ *  require exactly 3 non-empty paragraphs, hook word-count strictly less than body word-count,
+ *  and close word-count ≤ `PARAGRAPH_CLOSE_MAX_WORDS`. Lenient thresholds by design so the rail
+ *  doesn't thrash on a legit hook that's within a few words of its body; it catches the two real
+ *  defects (a one/two-line blob without paragraph breaks; a runaway close pretending to be another
+ *  body).
+ *
+ *  Pure, side-effect-free, exported — the revise loop in `runCopyAuthorSession` calls it for the
+ *  canonical `primaryText` AND every `variations[].primaryText`. A miss becomes the revise reason
+ *  `paragraph_structure_failed: canonical=<reason>, variations[<framework>]=<reason>, ...` that
+ *  the existing copy-only revise consumes — same mechanism the shared validator, cold-offer gate,
+ *  and firewall use. */
+export function validateCopyParagraphStructure(primaryText: string): ParagraphStructureResult {
+  const paragraphs = primaryText
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  const wordCount = (s: string | undefined): number =>
+    !s ? 0 : s.trim().split(/\s+/).filter((w) => w.length > 0).length;
+  const hookWords = wordCount(paragraphs[0]);
+  const bodyWords = wordCount(paragraphs[1]);
+  const closeWords = wordCount(paragraphs[2]);
+  if (paragraphs.length !== 3) {
+    return {
+      ok: false,
+      reason: "not_three_paragraphs",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: paragraphs.length,
+    };
+  }
+  if (hookWords >= bodyWords) {
+    return {
+      ok: false,
+      reason: "hook_not_shortest",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: 3,
+    };
+  }
+  if (closeWords > PARAGRAPH_CLOSE_MAX_WORDS) {
+    return {
+      ok: false,
+      reason: "close_too_long",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: 3,
+    };
+  }
+  return { ok: true, hookWords, bodyWords, closeWords };
+}
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 ────────────────────────────
+
+/** The em-dash character (U+2014) — the single biggest AI-copy tell the CEO flagged. Cleanly
+ *  machine-checkable, so it's a hard rail (rejected in every user-facing copy field). Kept as an
+ *  exported constant so a unit test can reference the same code-point the validator scans for. */
+export const EM_DASH = "—";
+
+/** The en-dash character (U+2013). Legitimate as a numeric or date range (`14-day`, `Mon–Fri` in
+ *  a numeric range) but a spaced en-dash reads as a machine substitute for the em-dash (`focus –
+ *  no crash`) and carries the same AI-tell smell. The validator flags a spaced en-dash as
+ *  `en_dash_as_sentence_dash` and leaves an unspaced range en-dash alone. */
+export const EN_DASH = "–";
+
+/** Regex for an en-dash used as a sentence dash — a leading whitespace, the en-dash, and a
+ *  trailing whitespace. Kept exported so the unit tests can pin the exact predicate the runtime
+ *  scans against. A `14–day` (no spaces) does NOT match; `focus – no crash` (spaced) does. */
+export const EN_DASH_SENTENCE_RE = new RegExp(`\\s${EN_DASH}\\s`);
+
+/** Typed reason strings the human-voice validator returns on a miss. Each names the exact defect
+ *  the copy-only revise prompt cites back to Dahlia:
+ *    • `em_dash_ai_tell` — U+2014 anywhere in a user-facing copy field. The CEO called this out
+ *      by name; there is no legitimate em-dash use in a Meta caption (a comma, period, or
+ *      parenthesis works everywhere the em-dash would).
+ *    • `en_dash_as_sentence_dash` — a SPACED en-dash (` ` + U+2013 + ` `) used as a substitute
+ *      for the em-dash. A range en-dash (`14-day`, `Mon–Fri`) is untouched — only the spaced
+ *      sentence-dash usage is flagged. */
+export type HumanVoiceReason = "em_dash_ai_tell" | "en_dash_as_sentence_dash";
+
+/** Where a human-voice miss was found. Names the field so the revise reason can cite it
+ *  precisely (`primaryText`, `headline`, `description`) and, for a variation, the framework the
+ *  offending variation was LED by. */
+export type HumanVoiceField =
+  | { kind: "canonical"; field: "headline" | "primaryText" | "description" }
+  | { kind: "variation"; framework: AuthorFrameworkKey; field: "headline" | "primaryText" };
+
+/** Structured result of `validateCopyHumanVoice` — either `ok:true` or a list of every miss
+ *  the scan surfaced. `misses` is a NON-EMPTY list on a fail (the scan reports every offense so
+ *  the revise reason cites all of them at once and Dahlia doesn't have to spend a full revise per
+ *  hit). Each miss carries the typed reason + the exact substring caught + the field it came
+ *  from. Kept pure + exported so a unit test can pin every branch. */
+export interface HumanVoiceMiss {
+  reason: HumanVoiceReason;
+  evidence: string;
+  location: HumanVoiceField;
+}
+
+export type HumanVoiceResult = { ok: true } | { ok: false; misses: HumanVoiceMiss[] };
+
+/** Scan one copy field for the machine-checkable AI tells. Emits ONE miss per hit (em-dash and
+ *  spaced-en-dash-as-sentence-dash) so the caller can compose a full miss list across every
+ *  user-facing surface. */
+function scanFieldForHumanVoice(
+  text: string,
+  location: HumanVoiceField,
+): HumanVoiceMiss[] {
+  const misses: HumanVoiceMiss[] = [];
+  if (text.includes(EM_DASH)) {
+    // Evidence is a short window around the first em-dash hit — helps Dahlia see WHERE she used
+    // it without dumping the entire caption back into the revise prompt.
+    const idx = text.indexOf(EM_DASH);
+    const start = Math.max(0, idx - 20);
+    const end = Math.min(text.length, idx + 21);
+    misses.push({
+      reason: "em_dash_ai_tell",
+      evidence: text.slice(start, end),
+      location,
+    });
+  }
+  const enDashMatch = EN_DASH_SENTENCE_RE.exec(text);
+  if (enDashMatch) {
+    const idx = enDashMatch.index;
+    const start = Math.max(0, idx - 20);
+    const end = Math.min(text.length, idx + enDashMatch[0].length + 20);
+    misses.push({
+      reason: "en_dash_as_sentence_dash",
+      evidence: text.slice(start, end),
+      location,
+    });
+  }
+  return misses;
+}
+
+/** dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 — the human-voice validator.
+ *  Rejects the em-dash (U+2014) and a SPACED en-dash used as a sentence dash (` ` + U+2013 + ` `)
+ *  in any user-facing copy field — headline, primaryText, description, AND every variation's
+ *  headline + primaryText. The em-dash is the CEO's exact call-out ("the single biggest tell is
+ *  the em-dash"): a scrolling buyer distrusts copy that smells AI-written, so em-dashes are a
+ *  hard rail (use a comma, period, or parenthesis instead). The softer AI tells — balanced 'not
+ *  just X, it's Y', overused rule-of-three, `elevate` / `unlock` / `transform` / `supercharge`,
+ *  `in a world where`, `say goodbye to` — live in the dahlia-copy-author SKILL guidance and
+ *  Max's judgment (they need context a regex can't provide); this validator locks the two
+ *  cleanly machine-checkable tells.
+ *
+ *  Pure, side-effect-free, exported — the revise loop in `runCopyAuthorSession` calls it after
+ *  the paragraph-structure gate. A miss becomes the revise reason
+ *  `human_voice_failed: <location>=<reason>, ...` that the existing copy-only revise consumes —
+ *  same mechanism the shared validator, cold-offer gate, paragraph-structure gate, and firewall
+ *  use. */
+export function validateCopyHumanVoice(input: {
+  headline: string;
+  primaryText: string;
+  description: string;
+  variations: readonly { framework: AuthorFrameworkKey; headline: string; primaryText: string }[];
+}): HumanVoiceResult {
+  const misses: HumanVoiceMiss[] = [];
+  misses.push(...scanFieldForHumanVoice(input.headline, { kind: "canonical", field: "headline" }));
+  misses.push(...scanFieldForHumanVoice(input.primaryText, { kind: "canonical", field: "primaryText" }));
+  misses.push(...scanFieldForHumanVoice(input.description, { kind: "canonical", field: "description" }));
+  for (const v of input.variations) {
+    misses.push(
+      ...scanFieldForHumanVoice(v.headline, { kind: "variation", framework: v.framework, field: "headline" }),
+    );
+    misses.push(
+      ...scanFieldForHumanVoice(v.primaryText, {
+        kind: "variation",
+        framework: v.framework,
+        field: "primaryText",
+      }),
+    );
+  }
+  if (misses.length === 0) return { ok: true };
+  return { ok: false, misses };
+}
+
+/** Human-readable location tag for a `HumanVoiceMiss` — used in the revise reason string so
+ *  Dahlia can see which field she needs to fix. Pure + exported so a unit test can pin the
+ *  exact strings the runtime interpolates. */
+export function formatHumanVoiceLocation(location: HumanVoiceField): string {
+  if (location.kind === "canonical") return location.field;
+  return `variations[${location.framework}].${location.field}`;
 }
 
 /** Dispatcher contract for the per-creative copy-author box session. Mirrors QcSessionDispatcher:
@@ -832,7 +1062,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts. LONG-FORM 3-PARAGRAPH PRIMARY TEXT (canonical AND every variation): every `primaryText` MUST be exactly THREE paragraphs separated by a true BLANK LINE (a `\\n\\n` between paragraphs — a bare `\\n` is a same-paragraph line break) — (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads the framework's lever above Meta's `…more` fold, (2) a BODY paragraph 2-3x longer than the hook that delivers the info + the proof stack, (3) a short single-sentence CURIOSITY CLOSE that pushes the click. The paragraph-structure validator rejects a one-line blob / a 2-paragraph shape / a hook longer than the body / a runaway close and triggers the copy-only revise. HUMAN VOICE — NO AI TELLS: NEVER use an em-dash (U+2014, `—`) anywhere in headline / primaryText / description / variations — use a comma, period, or parenthesis instead; NEVER use a spaced en-dash (` – `) as a sentence dash (a range en-dash like `14-day` is fine). Avoid the softer AI-copy tells too: balanced `not just X, it's Y` / `it's not just X, it's Y` constructions, mechanical rule-of-three fluff, `elevate` / `unlock` / `transform` / `supercharge` / `game-changer`, `in a world where`, `say goodbye to`. Write in a real casual human voice — contractions (`don't`, `it's`, `you're`), plain specific words, occasional sentence fragments. A scrolling buyer distrusts copy that smells AI-written; the em-dash rail is deterministic and will trigger the copy-only revise.",
   ].join("\n");
 }
 
@@ -1209,6 +1439,60 @@ export async function runCopyAuthorSession(
       lastAuthorVerdict = null;
       continue;
     }
+    // dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — long-form
+    // 3-paragraph shape gate. Runs AFTER the shared validator so a paragraph-structure miss
+    // is a distinct revise trigger with a concrete typed reason
+    // (`paragraph_structure_failed: canonical=<reason>, variations[<framework>]=<reason>, ...`),
+    // consumed by the same one-per-revise loop the other gates use. Checks the CANONICAL
+    // primaryText AND every `variations[].primaryText` — short blob copy fails no matter which
+    // slot ships it. Thresholds are lenient (hook strictly shorter than body; close ≤
+    // `PARAGRAPH_CLOSE_MAX_WORDS`) so a small hook-vs-body word-count wobble doesn't revise-thrash.
+    const paragraphMisses: string[] = [];
+    const canonicalParagraph = validateCopyParagraphStructure(verdict.primaryText);
+    if (!canonicalParagraph.ok) {
+      paragraphMisses.push(`canonical=${canonicalParagraph.reason}`);
+    }
+    for (const v of verdict.variations) {
+      const variationParagraph = validateCopyParagraphStructure(v.primaryText);
+      if (!variationParagraph.ok) {
+        paragraphMisses.push(`variations[${v.framework}]=${variationParagraph.reason}`);
+      }
+    }
+    if (paragraphMisses.length > 0) {
+      lastReason = `paragraph_structure_failed: ${paragraphMisses.join(", ")}`;
+      lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
+      continue;
+    }
+    // dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 — human-voice gate.
+    // Rejects the em-dash (U+2014) and a spaced en-dash used as a sentence dash in ANY user-facing
+    // copy field (headline / primaryText / description + each variation's headline + primaryText).
+    // Runs AFTER the paragraph-structure gate so a shape miss is fixed first (the human-voice
+    // reason only ever names the specific dashes still present after the long-form pass). The
+    // softer AI tells ('not just X, it's Y', mechanical tricolons, elevate/unlock/transform/
+    // supercharge, 'in a world where', 'say goodbye to') live in the dahlia-copy-author SKILL
+    // guidance and Max's judgment — this deterministic rail locks the CEO-flagged em-dash tell.
+    const humanVoice = validateCopyHumanVoice({
+      headline: verdict.headline,
+      primaryText: verdict.primaryText,
+      description: verdict.description,
+      variations: verdict.variations,
+    });
+    if (!humanVoice.ok) {
+      const humanVoiceReasons = humanVoice.misses
+        .map((m) => `${formatHumanVoiceLocation(m.location)}=${m.reason}`)
+        .join(", ");
+      lastReason = `human_voice_failed: ${humanVoiceReasons}`;
+      lastValidatorMisses = undefined;
+      lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
+      continue;
+    }
     // copy-author-self-heal (2026-07-17) — the never-fabricate FIREWALL, now the LAST gate INSIDE the
     // loop (was a post-session hold in stockProduct that burned the whole box session on a single
     // ungrounded number). A miss becomes the revise reason + drives another RESUME turn so Dahlia can
@@ -1426,11 +1710,12 @@ export function buildCopyQcPromptPreamble(input: {
  *  runs it through `sanitizeReviseReason` at the choke-point (identical guard as the firewall /
  *  validator reasons — no interpolation of untrusted strings the model could weaponize as
  *  instructions). Format is one-line, ≤ ~500 chars: `max_qc_below_floor: <verdict_reason>
- *  (score=N, floor=7)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]`. The
+ *  (score=N, floor=M)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]` — floor
+ *  is `MAX_QC_ELIGIBILITY_FLOOR` (currently 9 after bianca-posts-only-at-9of10 Phase 1). The
  *  hard-gate list and persuasion-gap list are elided when empty so Dahlia sees only the
  *  critiques that actually apply. A NULL verdict (Max session dispatch/parse miss) yields the
  *  distinct `max_qc_verdict_missed` prefix so operators can slice miss rates apart from a
- *  legitimate sub-7 bounce. */
+ *  legitimate below-floor bounce. */
 export function buildMaxQcReviseReason(
   verdict: CopyQaVerdict | null,
   floor: number = MAX_QC_ELIGIBILITY_FLOOR,

@@ -9,6 +9,89 @@
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 
+// ── Render-side no-competitor-leak guard ────────────────────────────────────
+// The copy-side no-competitor-leak gate only inspects TEXT; a leak that lives in the pixels
+// (a competitor's 'free tote' offer graphic baked into the Feed 4:5 render) passed unseen —
+// the 2026-07-18 Superfoods Tabs regression that seeded this file's guard. The competitor's
+// promotional freebie (tote / free gift / bonus item / GWP / giveaway) is NOT part of our
+// real store offer; on a composition-transfer path the model sees the competitor's ad as
+// design reference and can carry the freebie ARTIFACT into our render even when the copy
+// stays clean. Twin of `sanitizeCompetitorHook` in `creative-brief` — that helper strips
+// discount NUMBERS from a competitor hook before it becomes copy; these patterns strip
+// GRAPHIC ARTIFACT tokens from the composed RENDER prompt so the model isn't seeded with
+// them, and are ALSO negative-prompted into the model instructions (below) for every
+// format render (Feed / Reels / Stories / Feed-JPG all share `buildPrompt`).
+const RENDER_COMPETITOR_OFFER_PATTERNS: readonly RegExp[] = [
+  /\bfree\s+tote\b/gi,
+  /\bfree\s+gift\b/gi,
+  /\bfree\s+bag\b/gi,
+  /\bbonus\s+(?:item|gift|pack|tote|bag)\b/gi,
+  /\bgift\s+with\s+purchase\b/gi,
+  /\bgwp\b/gi,
+  /\bgiveaway\b/gi,
+  // Standalone "tote" — the specific artifact that seeded the 2026-07-18 Feed leak. A
+  // real Superfoods product is never a tote, so the token is safe to strip wholesale from
+  // any RENDER prompt (this is not applied to product copy — only to prompt composition).
+  /\btote\b/gi,
+];
+
+/** Sentinel header that marks the start of the negative-prompt / hard-rules block in the
+ *  composed prompt (see `buildPrompt`). The render-side guard scans ONLY the composed
+ *  CONTENT above this marker — the hard-rules block below enumerates the artifact tokens
+ *  by name to negative-prompt the model, and scanning the whole prompt would false-positive
+ *  on our own enumeration ("NO tote, NO free gift…"). Kept as a module-level constant so
+ *  the two halves stay in lockstep. */
+const NEGATIVE_PROMPT_MARKER = "OFFER FIDELITY (hard rule)";
+
+/**
+ * Pure guard — does the CONTENT portion of the composed render prompt (everything above
+ * the hard-rules block starting at `NEGATIVE_PROMPT_MARKER`) still contain a competitor-
+ * offer artifact token (free tote / free gift / bonus item / gift-with-purchase /
+ * giveaway)? Deterministic + pure. The scan excludes the hard-rules block by design
+ * because that block negative-prompts the model with the same token names by intent (a
+ * NEGATIVE prompt has to enumerate what NOT to render). Used by `generateCreative` on
+ * the composition-transfer path as belt-and-suspenders after the strip helper + the
+ * negative-prompt clause: if a token still survives all three layers we refuse to hand
+ * the prompt to Nano Banana and let the caller's retry loop take another attempt instead
+ * of shipping the leak.
+ */
+export function renderPromptHasCompetitorOffer(prompt: string): boolean {
+  const idx = prompt.indexOf(NEGATIVE_PROMPT_MARKER);
+  const scanRegion = idx >= 0 ? prompt.slice(0, idx) : prompt;
+  for (const re of RENDER_COMPETITOR_OFFER_PATTERNS) {
+    re.lastIndex = 0;
+    if (re.test(scanRegion)) return true;
+  }
+  return false;
+}
+
+/**
+ * Strip competitor-offer artifact tokens (tote / free gift / bonus item / GWP / giveaway)
+ * out of a text fragment that will be composed into the render prompt. Deterministic +
+ * pure. Collapses whitespace + trims orphan punctuation left behind, so the debranded
+ * competitor hook reads naturally after the scrub. Only applied to prompt-composition
+ * inputs — never to customer copy.
+ */
+export function stripCompetitorOfferArtifacts(text: string): string {
+  let out = text;
+  for (const re of RENDER_COMPETITOR_OFFER_PATTERNS) out = out.replace(re, " ");
+  out = out.replace(/\s+[—–\-|·+&]\s+/g, " ");
+  out = out.replace(/^[\s,;:.|\-·—–+&]+|[\s,;:.|\-·—–+&]+$/g, "");
+  out = out.replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
+/** Sentinel error thrown by `generateCreative` when the composed prompt still carries a
+ *  competitor-offer artifact token after the strip helper + negative clause both ran.
+ *  Caught by the ad-creative retry loop in `creative-agent.ts` and surfaced as a regen
+ *  reason (never persisted — this is a bug in the strip layer surfaced loudly). */
+export class RenderPromptCompetitorOfferError extends Error {
+  constructor(prompt: string) {
+    super(`render_prompt_has_competitor_offer: composed prompt still contains a competitor freebie artifact token after strip + negative clause. Prompt head: ${prompt.slice(0, 200)}…`);
+    this.name = "RenderPromptCompetitorOfferError";
+  }
+}
+
 export interface GenerateCreativeOpts {
   aspectRatio?: NanoBananaAspect; // default "4:5" (Meta feed)
   /** A proven winner to match design language (e.g. the skeptic winner). Passed as the FIRST image. */
@@ -48,7 +131,13 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
   // hook's STRUCTURE while naming ONLY our product, and QC verifies OUR product name renders (ungarbled)
   // instead of demanding the competitor string. A normal (own-brand) angle keeps render-exact behavior.
   const isImitation = !!compositionTransfer && hasDesignRef;
-  const headline = brief.angle.hook;
+  // Render-side no-competitor-leak (Phase 1) — on the imitation path the competitor's
+  // debranded hook may still carry a freebie ARTIFACT ("Free tote with subscription")
+  // that our copy-side sanitizer doesn't scrub (it only strips DISCOUNT numbers). Strip
+  // those artifact tokens before the hook becomes the headline the model must echo, so
+  // the model isn't seeded with the competitor's freebie language. Own-brand angles
+  // pass through unchanged — no competitor DNA to leak.
+  const headline = isImitation ? stripCompetitorOfferArtifacts(brief.angle.hook) : brief.angle.hook;
   const trust = brief.proofStack.slice(0, 4).join(" · ");
   const treatmentClause = treatment ? `\n${TREATMENT_STEER[treatment]}` : "";
   // Price: allowed treatments only. Prefer the offer headline; if a number is warranted, per-serving or strikethrough.
@@ -114,6 +203,8 @@ CLAIM FIDELITY (hard rule): every product attribute, ingredient, or nutrient des
 
 REVIEW FIDELITY (hard rule): any customer review, testimonial, quote, reviewer name, or star-rating visible in the competitor reference is THEIRS — it is NOT about ${brief.productTitle}. NEVER copy, echo, paraphrase, or render the competitor's review text, reviewer name, or rating. ${hasProvidedReview ? "Render ONLY the customer review provided above — it is a real, featured review of OUR product. You MAY tighten a long review to its strongest, most relevant lines (a faithful condensation is fine), but keep the reviewer NAME exactly as given and never embellish, invent, or add a claim the review does not actually make." : "NO review of our product is provided, so render NO customer review, testimonial, quote, reviewer name, or star-rating anywhere — do NOT invent one and do NOT carry over the competitor's."} Rendering a competitor's (or an invented) review on our ad is a fabricated-testimonial defect.
 
+NO COMPETITOR OFFER (hard rule — applies to EVERY format render: Feed 4:5, Reels 9:16, Stories 9:16, right-column 1:1): a competitor's promotional freebie (a bonus tote, a free gift-with-purchase pouch, a giveaway sticker, a bonus item, a "GWP" badge, a "free bag" callout) is NOT part of OUR real store offer — do NOT paint, render, badge, sticker, tag, or otherwise depict any of these anywhere in the image, even when the design reference clearly carries one. Specifically: NO tote, NO free tote, NO free gift, NO bonus item, NO gift-with-purchase, NO free bag, NO giveaway artifact of any kind. Rendering a competitor's offer graphic on our ad is a defect (the 2026-07-18 Superfoods Tabs Feed leak — the competitor's 'free tote' bled into the pixels while our copy stayed clean).
+
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 
   // expectedCopy.headline drives the QC exact-headline check. For an imitation we deliberately let the model
@@ -128,6 +219,16 @@ HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and 
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
   const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer);
+  // Render-side no-competitor-leak deterministic guard (Phase 1) — after the strip
+  // helper scrubbed the imitation headline AND the NO COMPETITOR OFFER hard rule was
+  // negative-prompted into the composed prompt, a lingering freebie artifact token in
+  // the prompt string means the strip layer has a gap and the model would still be
+  // seeded with a competitor's promotional graphic language. Refuse to hand the prompt
+  // to Nano Banana and let the retry loop take another attempt; the sentinel error
+  // rides the existing `qa_or_gen_failed` regen path in `creative-agent.ts`.
+  if (opts.compositionTransfer && renderPromptHasCompetitorOffer(prompt)) {
+    throw new RenderPromptCompetitorOfferError(prompt);
+  }
   // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
   // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
   const imageUrls = [

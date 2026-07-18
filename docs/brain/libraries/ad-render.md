@@ -19,6 +19,7 @@ Ad tool — Phase 5 render orchestration. Two halves: **pure planning** (caption
 ## Callers
 
 - `src/lib/inngest/ad-tool.ts` — `adToolRenderRequested` builds props + renders all 4 formats
+- **CEO-review re-drive** — the [[../tables/ad_review_feedback]] router (see [[ads/ad-review-feedback-router]]) enqueues an `agent_jobs.kind='ad-creative'` re-drive per `render-format`-target packet entry, carrying `{ ad_review_feedback_id, ad_campaign_id, format, revise_reason }`. Phase 2 wires the router + the queued job; consuming that instruction to actually regenerate ONLY the named format (rather than re-running the whole `stockProduct` pass) is the follow-up on `runAdCreativeJob`.
 
 ## Gotchas
 
