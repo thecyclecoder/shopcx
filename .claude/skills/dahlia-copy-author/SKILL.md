@@ -372,6 +372,24 @@ Rules for the envelope:
   compare.
 - `self_score.lf8` / `schwartz` / `cialdini` / `hopkins` / `sugarman` — each an integer in
   `{0, 1, 2}` judged against the exact `RUBRIC` text the DATA block gave you.
+- **Front-loaded curiosity+benefit opener (SCROLL-STOP + BENEFITS-NOT-PRODUCT self-scoring,
+  advisory-soft):** the PRIMARY-TEXT CRAFT rules above are enforced through the SUGARMAN and
+  LF8 axes of the rubric — do not treat them as separate scores. When you self-score:
+  - **Sugarman** — reward a `2` when the opening 1-2 lines of `primaryText` (everything the
+    reader sees BEFORE Meta's `…more` ellipsis) are a curiosity / unexpected / contrarian
+    pattern-interrupt that leads with the reader's benefit AND the body has multiple
+    sentences. Dock toward `0` for a product-led opener (`"<Product> is…"`, `"Meet
+    <Brand>…"`), a flat one-line benefit-summary that gives the whole promise away before
+    the ellipsis, or a feature/ingredient list opener. A hook the reader has no reason to
+    expand past cannot score `2` no matter how many sentences follow.
+  - **LF8** — reward when the opener leads with the reader's OUTCOME (LF8 keywords surface
+    naturally on `"feel lighter"` / `"steady focus, no crash"` / `"curb the cravings"`).
+    Dock a product-led opener that names the product/brand before any benefit — LF8 keywords
+    typically fire late or not at all in that shape.
+  - Advisory-soft. The rubric total stays a 0-10 self-score, never a hard gate on any single
+    axis — you can still ship a strong ad that scored `1` on Sugarman if the other four
+    axes carry it — but a product-led opener and a flat-summary opener BOTH consistently
+    dock these two axes, so the self-score honestly reflects the scroll-stop cost.
 - `self_score.total` — the arithmetic sum of the five sub-scores (`0..10`), THEN apply the
   Phase-3 **LEAD-BENEFIT SIGNAL** (soft) as a total-level adjustment (`0` or `−1`) and clamp
   to `0..10`. When the brief carries a `leadBenefitWeave` (Phase 2 marker — a competitor RIFF
