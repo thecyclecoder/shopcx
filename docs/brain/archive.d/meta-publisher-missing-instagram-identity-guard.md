@@ -1,0 +1,1 @@
+- **Guard Meta publisher when Instagram identity is missing** · verified 2026-07-18 · → [[../libraries/ads__publish-instagram-identity-guard]] · [[../inngest/ad-tool]]
