@@ -43,6 +43,7 @@ import { KILLER_ARCHETYPES, KILLER_FORMATS, loadKillerAssets, buildKillerStatic,
 import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, uploadAdImage, createAdCreative, createDualAssetCreative, createPlacementCreative, createAd, createAdSet } from "@/lib/meta-ads";
 import { resolvePlacementPublish } from "@/lib/ads/placement-publish";
 import { evaluateCreativePackGate, missingCreativePackDiagnosis, MISSING_CREATIVE_PACK_REASON } from "@/lib/ads/creative-pack-gate";
+import { MISSING_INSTAGRAM_IDENTITY_REASON, shouldRefuseForMissingInstagramIdentity } from "@/lib/ads/publish-instagram-identity-guard";
 import type { CreativePackSnapshot } from "@/lib/ads/creative-pack";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -1015,6 +1016,23 @@ export const adToolPublishToMeta = inngest.createFunction(
       && !!ctx.feedUrl
       && !!ctx.storyUrl
       && !!ctx.rightColumnUrl;
+
+    // Fail closed on a resolved publish path that would submit a placement-
+    // customized creative to Meta with no linked Instagram identity. Meta's
+    // `createPlacementCreative` / `createDualAssetCreative` builders attach
+    // asset-customization rules for IG placements; without
+    // `object_story_spec.instagram_user_id` Meta rejects them with a 400. The
+    // publisher already has everything it needs to make this decision, so it
+    // refuses cleanly here rather than letting `/api/inngest` emit an
+    // unhandled Graph error. See src/lib/ads/publish-instagram-identity-guard.ts.
+    if (shouldRefuseForMissingInstagramIdentity({
+      placementReady,
+      dual,
+      instagramUserId: j.meta_instagram_user_id as string | null | undefined,
+    })) {
+      await setStatus("failed", { error: MISSING_INSTAGRAM_IDENTITY_REASON });
+      return { ok: false, reason: MISSING_INSTAGRAM_IDENTITY_REASON };
+    }
 
     const result = await step.run("publish", async () => {
       try {
