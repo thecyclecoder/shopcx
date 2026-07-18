@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import type { CopyAuthorSessionDispatcher, CopyAuthorSessionInputs } from "./creative-agent";
 import {
   ANDROMEDA_CONCEPT_TAGS,
+  AUTHOR_FRAMEWORK_KEYS,
   AUTHOR_SELF_SCORE_FLOOR,
   MAX_COPY_AUTHOR_REVISE_ATTEMPTS,
   authorCopyPack,
@@ -280,6 +281,97 @@ test("parseAuthorVerdict: happy path parses claim_trace into the verdict", () =>
     assert.equal(result.verdict.claim_trace[0].source_ref, "L-theanine");
     assert.equal(result.verdict.claim_trace[1].source, "supportingBenefit");
   }
+});
+
+// ── dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 —
+// per-framework variations shape + parse gating ───────────────────────────────────────────────
+
+/** Build a valid five-entry variations array — one per AUTHOR_FRAMEWORK_KEYS token — so tests
+ *  can mutate it (drop an entry, dupe a framework, empty a string) to pin each rejection branch. */
+function validVariations(): Array<{ framework: string; headline: string; primaryText: string }> {
+  return [
+    { framework: "lf8", headline: "Feel lighter. Finally.", primaryText: "…LF8-led hook." },
+    { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "…Schwartz-led hook." },
+    { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "…Cialdini-led hook." },
+    { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "…Hopkins-led hook." },
+    { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "…Sugarman-led hook." },
+  ];
+}
+
+test("parseAuthorVerdict: no variations field → still ok (single-caption back-compat)", () => {
+  const result = parseAuthorVerdict(envelope());
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.equal(result.verdict.variations, undefined);
+  }
+});
+
+test("parseAuthorVerdict: five distinct framework-led variations → ok with variations round-tripped in AUTHOR_FRAMEWORK_KEYS order", () => {
+  const result = parseAuthorVerdict(envelope({ variations: validVariations() }));
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.ok(result.verdict.variations, "variations must round-trip onto the verdict");
+    assert.equal(result.verdict.variations!.length, 5);
+    // All five framework tokens (LF8 · Schwartz · Cialdini · Hopkins · Sugarman) present.
+    const frameworks = result.verdict.variations!.map((v) => v.framework).sort();
+    assert.deepEqual(frameworks, [...AUTHOR_FRAMEWORK_KEYS].sort());
+    // Headlines are the five distinct exemplars — not one caption fanned to identical slots.
+    const headlines = result.verdict.variations!.map((v) => v.headline);
+    assert.equal(new Set(headlines).size, 5, "variations must carry five DISTINCT headlines, not one broadcast");
+  }
+});
+
+test("parseAuthorVerdict: variations not an array → bad_variations (not_array)", () => {
+  const result = parseAuthorVerdict(envelope({ variations: "not an array" }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(not_array\)/);
+});
+
+test("parseAuthorVerdict: variations with fewer than five entries → bad_variations (wrong count)", () => {
+  const short = validVariations().slice(0, 4);
+  const result = parseAuthorVerdict(envelope({ variations: short }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(expected_5_entries, got_4\)/);
+});
+
+test("parseAuthorVerdict: variations with duplicate framework → bad_variations (duplicate_framework)", () => {
+  const dupe = validVariations();
+  dupe[1].framework = "lf8"; // two lf8-led variations, no schwartz — the one-broadcast pattern
+  const result = parseAuthorVerdict(envelope({ variations: dupe }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(duplicate_framework_at_1: lf8\)/);
+});
+
+test("parseAuthorVerdict: variations with off-vocabulary framework → bad_variations (bad_framework)", () => {
+  const bad = validVariations();
+  bad[2].framework = "carnegie"; // not one of the five rubric axes
+  const result = parseAuthorVerdict(envelope({ variations: bad }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(bad_framework_at_2: carnegie\)/);
+});
+
+test("parseAuthorVerdict: variations with empty headline → bad_variations (missing_headline)", () => {
+  const bad = validVariations();
+  bad[3].headline = "   "; // whitespace-only, no real hook
+  const result = parseAuthorVerdict(envelope({ variations: bad }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(missing_headline_at_3: hopkins\)/);
+});
+
+test("parseAuthorVerdict: variations with empty primaryText → bad_variations (missing_primary_text)", () => {
+  const bad = validVariations();
+  bad[4].primaryText = ""; // no primary text — a headline-only "variation" is not a full hook
+  const result = parseAuthorVerdict(envelope({ variations: bad }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(missing_primary_text_at_4: sugarman\)/);
+});
+
+test("parseAuthorVerdict: variation entry that is not an object → bad_variations (bad_shape)", () => {
+  const bad: unknown[] = validVariations();
+  bad[0] = "just a string"; // a stringly-typed variation is not a real hook
+  const result = parseAuthorVerdict(envelope({ variations: bad }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_variations \(bad_shape_at_0\)/);
 });
 
 // ── authorCopyPack ──────────────────────────────────────────────────────────────────────────────
