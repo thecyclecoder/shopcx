@@ -78,6 +78,37 @@ const DISCOUNT_PERCENT_RE = /(\bsave\b[^.\n]{0,12}\d{1,3}\s*%)|(\d{1,3}\s*%\s*(o
 /** Bare-currency leak (e.g. "$29", "$5") — a price shown to a cold stranger is a warm/hot move. */
 const BARE_CURRENCY_RE = /\$\d/;
 
+/** debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-offer
+ *  Phase 1 — OUR real store offer allowlist. When a caller passes `brief.offer`, the exact
+ *  headline / disclaimer strings are stripped from the joined scan text BEFORE the leak
+ *  predicate runs, so an offer-for-offer swap that renders OUR real offer verbatim (e.g.
+ *  `Up to 34% off + free shipping` with disclaimer `with 3+ units on Subscribe & Save`) is
+ *  NOT flagged as a cold-audience leak. A different discount (`50% off today`) still trips
+ *  the gate because only the EXACT allowed phrases are removed. */
+export interface AllowedOffer {
+  headline?: string | null;
+  disclaimer?: string | null;
+}
+
+function escapeRegExpString(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Return the joined scan text with each allowed-offer phrase (headline / disclaimer)
+ *  removed (case-insensitive, whole-string). Only non-empty, trimmed phrases participate. */
+function stripAllowedOfferPhrases(joined: string, allowed: AllowedOffer | null | undefined): string {
+  if (!allowed) return joined;
+  const phrases: string[] = [];
+  if (typeof allowed.headline === "string" && allowed.headline.trim()) phrases.push(allowed.headline.trim());
+  if (typeof allowed.disclaimer === "string" && allowed.disclaimer.trim()) phrases.push(allowed.disclaimer.trim());
+  if (phrases.length === 0) return joined;
+  let out = joined;
+  for (const p of phrases) {
+    out = out.replace(new RegExp(escapeRegExpString(p), "gi"), " ");
+  }
+  return out;
+}
+
 /**
  * hasColdOfferLeak — DETERMINISTIC gate the persister chokepoint (insertReadyCreative) runs
  * before writing a status='ready' row. Given the three Meta copy fields, return true iff:
@@ -85,12 +116,21 @@ const BARE_CURRENCY_RE = /\$\d/;
  *   (b) a DISCOUNT-percent pattern hits (a % adjacent to an offer word — NOT a bare benefit stat), OR
  *   (c) a bare-currency pattern hits (a price shown to a cold viewer).
  *
+ * When `allowedOffer` is provided (OUR real brief.offer), its exact headline / disclaimer
+ * strings are stripped from the joined scan text BEFORE the predicate runs — so an offer-for-
+ * offer swap that renders our real offer verbatim isn't flagged (see [[../ads/debrand]]
+ * `chooseGroundedSubstitute`). A DIFFERENT discount ("50% off today") still trips the gate.
+ *
  * The temperature check itself lives at the CALLER — this predicate just classifies the copy.
  * The caller fires it only when the row's audience_temperature is 'cold'; warm/hot/null rows
  * pass through untouched. See [[../ads/creative-agent]] insertReadyCreative.
  */
-export function hasColdOfferLeak(copy: { headline: string; primaryText: string; description: string }): boolean {
-  const joined = `${copy.headline} ${copy.primaryText} ${copy.description}`;
+export function hasColdOfferLeak(
+  copy: { headline: string; primaryText: string; description: string },
+  allowedOffer?: AllowedOffer | null,
+): boolean {
+  const joinedRaw = `${copy.headline} ${copy.primaryText} ${copy.description}`;
+  const joined = stripAllowedOfferPhrases(joinedRaw, allowedOffer);
   for (const re of COLD_OFFER_TOKEN_RES) if (re.test(joined)) return true;
   if (DISCOUNT_PERCENT_RE.test(joined)) return true;
   if (BARE_CURRENCY_RE.test(joined)) return true;

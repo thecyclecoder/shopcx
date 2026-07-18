@@ -235,9 +235,17 @@ function checkNoCompetitorLeak(copy: ValidatorCopy, competitorAdvertisers: strin
   return { rail: "no_competitor_leak", pass: true };
 }
 
-function checkColdOfferGate(copy: ValidatorCopy, temperature: AudienceTemperature): ValidatorCheck {
+function checkColdOfferGate(
+  copy: ValidatorCopy,
+  temperature: AudienceTemperature,
+  briefOffer: CreativeBrief["offer"],
+): ValidatorCheck {
   if (temperature !== "cold") return { rail: "cold_offer_gate", pass: true };
-  if (!hasColdOfferLeak(copy)) return { rail: "cold_offer_gate", pass: true };
+  // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-offer
+  // Phase 1 — OUR real brief.offer is an ALLOWED offer (an offer-for-offer swap of a
+  // competitor's offer slot renders the exact headline/disclaimer into the copy). The gate
+  // strips those phrases before scanning, so the swapped-in real offer never flags itself.
+  if (!hasColdOfferLeak(copy, briefOffer ?? null)) return { rail: "cold_offer_gate", pass: true };
   return {
     rail: "cold_offer_gate",
     pass: false,
@@ -279,7 +287,6 @@ function checkSinglePromise(copy: ValidatorCopy): ValidatorCheck {
  */
 export function validateGeneratedCopy(
   copy: ValidatorCopy,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   brief: CreativeBrief,
   context: ValidatorContext,
 ): ValidatorResult {
@@ -288,7 +295,7 @@ export function validateGeneratedCopy(
     checkMetaCaps(copy),
     checkNoMsrp(copy),
     checkNoCompetitorLeak(copy, context.competitorAdvertisers),
-    checkColdOfferGate(copy, context.audience_temperature),
+    checkColdOfferGate(copy, context.audience_temperature, brief.offer),
     checkSinglePromise(copy),
   ];
   return { pass: checks.every((c) => c.pass), checks };

@@ -32,9 +32,19 @@
  *   • `stripCompetitorOffer(text)` — remove those phrases from a hook so an offer surviving in
  *     the hook doesn't leak either (structural words are preserved).
  *   • `chooseGroundedSubstitute(brief)` — pick the best grounded selling point from the brief:
- *     proofStack proof point → supportingBenefit → leadProof text → productFeatures fallback.
- * The brief's REAL offer (`brief.offer`, populated from our own pricing) is a different type
- * and is never touched — only the competitor's un-runnable offer is swapped.
+ *     brief.offer (OUR real offer — an offer-for-offer swap) → proofStack proof point →
+ *     supportingBenefit → leadProof text → productFeatures fallback.
+ *
+ * ── OFFER-FOR-OFFER SWAP (debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-
+ * and-save-offer-for-offer Phase 1) ─────────────────────────────────────────────────────────
+ * When the competitor's slot is an OFFER we don't run (free tote / bonus item / discount) AND
+ * we have a REAL brief.offer of our own (e.g. `Up to 34% off + free shipping` with disclaimer
+ * `with 3+ units on Subscribe & Save`), PREFER our real offer as the swap-in — an offer-for-
+ * offer swap keeps the ad's persuasive OFFER POSITION intact without leading on coupons. Only
+ * when brief.offer is null does the chooser fall back to the proof / benefit / feature chain.
+ * The cold-offer gate ([[./lf8]] `hasColdOfferLeak`) accepts an `allowedOffer` allowlist so
+ * OUR real offer (which naturally carries `free shipping` / `save` LF8 tokens) is NOT flagged
+ * as a cold-audience leak — brief.offer is the only allowed source of an offer phrase.
  */
 
 const PRODUCT_NAME_ALLOWLIST: ReadonlySet<string> = new Set([
@@ -191,6 +201,11 @@ export function stripCompetitorOffer(text: string): string {
  * assignable (all fields optional / nullable — a fake brief in a test is trivial to build).
  */
 export interface GroundedSubstituteSource {
+  /** OUR real store offer (e.g. `headline: "Up to 34% off + free shipping"`, `disclaimer:
+   *  "with 3+ units on Subscribe & Save"`). PREFERRED as the offer-slot substitute so the
+   *  swap is offer-for-offer — the ad's persuasive OFFER POSITION survives without leading
+   *  on a coupon. Missing / null → the chooser falls back to proof / benefit / feature. */
+  offer?: { headline?: string | null; disclaimer?: string | null } | null;
   proofStack?: string[] | null;
   supportingBenefits?: string[] | null;
   leadProof?: { text: string | null } | null;
@@ -200,14 +215,32 @@ export interface GroundedSubstituteSource {
   productFeatures?: string[] | null;
 }
 
+/** Render brief.offer as an offer-slot string — the ad-ready headline joined with the disclaimer
+ *  in parens when present. Returns null when the offer has no usable headline. */
+function renderBriefOffer(offer: GroundedSubstituteSource["offer"]): string | null {
+  if (!offer) return null;
+  const headline = typeof offer.headline === "string" ? offer.headline.trim() : "";
+  if (!headline) return null;
+  const disclaimer = typeof offer.disclaimer === "string" ? offer.disclaimer.trim() : "";
+  return disclaimer ? `${headline} (${disclaimer})` : headline;
+}
+
 /**
- * Pick the best grounded selling point to swap for a competitor offer we do not run. Priority
- * mirrors the CEO's fix note: a verified proof point (700K+ customers, awards, certs) beats a
- * retention benefit, which beats the lead proof text, which beats a derived product feature.
- * Returns null when the brief carries none — the caller then nulls the competitorDna.offer
- * slot (Dahlia's session already accepts a null offer for cold audiences).
+ * Pick the best substitute for a competitor offer we do not run. Priority (per the CEO's
+ * offer-for-offer fix note):
+ *   (1) brief.offer — OUR real store offer (e.g. free shipping with Subscribe & Save). Keeps
+ *       the ad's OFFER POSITION intact — an offer-for-offer swap. Only when brief.offer is
+ *       null / empty do we fall back to a grounded proof/benefit/feature.
+ *   (2) proofStack proof point (verified proof — 700K+ customers, awards, certs)
+ *   (3) supportingBenefits (a retention benefit)
+ *   (4) leadProof.text
+ *   (5) productFeatures (derived: ingredient count, format)
+ * Returns null when the brief carries no substitute at all — the caller then nulls the
+ * competitorDna.offer slot (Dahlia's session already accepts a null offer for cold audiences).
  */
 export function chooseGroundedSubstitute(brief: GroundedSubstituteSource): string | null {
+  const ourOffer = renderBriefOffer(brief.offer ?? null);
+  if (ourOffer) return ourOffer;
   const proof = brief.proofStack?.find((p) => typeof p === "string" && p.trim().length > 0);
   if (proof) return proof.trim();
   const support = brief.supportingBenefits?.find((b) => typeof b === "string" && b.trim().length > 0);
