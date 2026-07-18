@@ -116,7 +116,7 @@ layer 2 will require you to emit.
 | 3 | **Ingredient names** — any specific ingredient, mechanism molecule, or clinical study name (`ashwagandha`, `L-theanine`, `KSM-66`, `citrus polyphenols`) | `KSM-66 ashwagandha`, `patented L-carnitine complex` | `pi.ingredients` (a row whose `name` matches the ingredient you're about to write) OR `pi.ingredientResearch` (a row whose ingredient name matches). If the ingredient isn't in either list, it isn't in this product — do not name it. |
 | 4 | **Timeframes** — any duration attached to a result (`in 14 days`, `by week 3`, `overnight`, `within a month`) | `results in 7 days`, `noticed a change in 2 weeks` | A timeframe token literally present in one of the reviews returned by `pi.reviews.byClaim(benefitName)` OR literally present in `brief.transformation.quote`. Never write a timeframe from your own generalization of "typical" outcomes; if a real customer didn't say the duration, do not claim the duration. |
 | 5 | **Comparative claims** — any "versus" claim against another product, category, or approach (`unlike stimulants`, `better than melatonin`, `no jitters like caffeine`, `beats the leading pre-workout`) | `outperforms `<brand>``, `unlike other greens powders` | A token in `brief.supportingBenefits` (the brief's own vetted comparison line — e.g. "no jitters", "no crash") OR `brief.competitorDna` (the debranded competitor angle the M2 competitor-DNA spec surfaces, when the angle is `source='competitor'`). A comparative claim outside both sources is a fabrication — the M2 debrand pass exists precisely so you don't have to invent one. |
-| 6 | **Brand proof / social proof / risk reversal / authority** — the verified brand facts (`700,000+ customers` = social proof · `30-day money-back guarantee` = risk reversal / Cialdini commitment · `15,000+ reviews` = social-proof volume · `Best Tasting — Gourmet Magazine` = authority · `Non-GMO` · `3rd-party tested` · `Made In USA`) | `700,000+ customers`, `risk-free with our 30-day money-back guarantee`, `15,000+ 5-star reviews`, `named "Best Tasting" by Gourmet Magazine`, `Non-GMO, 3rd-party tested, made in USA` | `brief.proofStack` — the verified proof stack (product awards + certifications + store brandProofPoints). Cite `source='proofStack'` with `source_ref` = the proofStack line you're pulling from (a case-insensitive substring match is enough; a proof claim that COMBINES multiple lines cites the closest one). **USE these facts** — they are our strongest Cialdini levers (social proof + commitment/risk-reversal + authority). Never self-censor `700,000+ customers` or the `30-day money-back guarantee` onto a non-existent `reviews-volume` cite: `proofStack` is the source. Numbers still ground against the SAME real-data corpus — `700,000+` is grounded; `8,000,000+` is `fabricated_number`. |
+| 6 | **Brand proof / social proof / risk reversal / authority** — verified brand facts, split two ways. **COMPANY-WIDE (true for EVERY product)**: `700,000+ customers` = social proof · `30-day money-back guarantee` = risk reversal / Cialdini commitment · `15,000+ reviews` = social-proof volume. **PRODUCT-SPECIFIC (only the product that actually holds it)**: awards like `Best Tasting — Gourmet Magazine` = authority, and certs (`Non-GMO` · `3rd-party tested` · `Made In USA` / `Natural Ingredients`) — these come from THIS product's own intelligence (`products.awards` / `certifications`). | `700,000+ customers`, `risk-free with our 30-day money-back guarantee`, `15,000+ 5-star reviews` (any product); `named "Best Tasting" by Gourmet Magazine`, `Non-GMO, 3rd-party tested, made in USA` (only if in THIS product's proofStack) | `brief.proofStack` — the verified proof stack (product awards + certifications + store brandProofPoints). Cite `source='proofStack'` with `source_ref` = the proofStack line you're pulling from (a case-insensitive substring match is enough; a proof claim that COMBINES multiple lines cites the closest one). **USE these facts** — they are our strongest Cialdini levers (social proof + commitment/risk-reversal + authority). Never self-censor `700,000+ customers` or the `30-day money-back guarantee` onto a non-existent `reviews-volume` cite: `proofStack` is the source. **Company-wide vs product-specific — this matters:** `700,000+ customers` and the `30-day money-back guarantee` are true for EVERY product (always in `brief.proofStack`, always usable). Awards + certs are PRODUCT-SPECIFIC — they appear in `brief.proofStack` ONLY for the product whose own `products.awards`/`certifications` hold them. `Best Tasting — Gourmet Magazine` is **Amazing Coffee's** award; it is NOT in Superfood Tabs' (or any other product's) proofStack. Cite an award/cert ONLY when its exact line is in THIS product's `brief.proofStack`; never port one product's award onto another and never conjure one out of thin air — the firewall grounds every `proofStack` cite against THIS product's `brief.proofStack`, so a ported/invented award fails `source_not_found`. Numbers still ground against the SAME real-data corpus — `700,000+` is grounded; `8,000,000+` is `fabricated_number`. |
 
 **Cross-cutting reminders.**
 
@@ -401,9 +401,14 @@ variation per rail 4.
   **The verified brand facts on `brief.proofStack` are the go-to grounding** — `700,000+
   customers` cites `source='proofStack'` with `source_ref` matching the `"700,000+ customers …"`
   proofStack line; the `30-day money-back guarantee` cites `source='proofStack'` (commitment /
-  risk-reversal — one of the strongest Cialdini levers); `15,000+ reviews`, `"Best Tasting" —
-  Gourmet Magazine`, `Non-GMO`, `3rd-party tested` are all citeable via `proofStack` too.
-  NEVER self-censor these onto a non-existent `reviews-volume` cite. NEVER a fabricated stat
+  risk-reversal — one of the strongest Cialdini levers); `15,000+ reviews` is citeable too.
+  **But mind what is company-wide vs product-specific:** `700,000+ customers`, the `30-day
+  money-back guarantee`, and `15,000+ reviews` are true for EVERY product. Awards + certs —
+  `"Best Tasting" — Gourmet Magazine`, `Non-GMO`, `3rd-party tested` — are PRODUCT-SPECIFIC and
+  appear only in the proofStack of the product that holds them (Gourmet Magazine is **Amazing
+  Coffee's** award — it is NOT in any other product's proofStack). Cite an award/cert ONLY when
+  its line is in THIS product's `brief.proofStack`; never port it from another product.
+  NEVER self-censor a real fact onto a non-existent `reviews-volume` cite. NEVER a fabricated stat
   (`8,000,000+ customers` is `fabricated_number`).
 - **Hopkins-led** — LEAD with specificity + a reason-why. Real number, real duration, real
   ingredient dose — every one cited in `claim_trace`. `"She lost 15 lbs in 3 weeks"` needs a
@@ -532,15 +537,20 @@ Rules for the envelope:
 
 ### USE THE PROOF — never self-censor a real proofStack item
 
-The brief's `proofStack` carries our strongest Cialdini levers: **`700,000+ customers`**
-(social proof), **`30-day money-back guarantee`** (risk reversal / commitment), **`15,000+
-reviews`** (social-proof volume), **`Best Tasting — Gourmet Magazine`** (authority),
-**`Non-GMO`** · **`3rd-party tested`** · **`Made In USA`** (authority). These are REAL facts
-the CEO has verified. **CITE them via `source='proofStack'` and USE them** — a Cialdini-led
-variation that leaves the money-back guarantee off the table is a variation writing weaker
-copy than we've earned. If a fact is on `brief.proofStack`, it is grounded — do not drop it
-because your search for a matching `reviews.byClaim` closure came up empty; `proofStack` is
-the direct source and layer 3 verifies against `brief.proofStack` exactly.
+The brief's `proofStack` carries our strongest Cialdini levers. Two of them are **company-wide —
+true for EVERY product**: **`700,000+ customers`** (social proof) and the **`30-day money-back
+guarantee`** (risk reversal / commitment), plus **`15,000+ reviews`** (social-proof volume).
+The rest are **product-specific** — awards + certs that appear in `brief.proofStack` ONLY for
+the product that actually holds them: **`Best Tasting — Gourmet Magazine`** (authority — this is
+**Amazing Coffee's** award, from *its* product intelligence; it is NOT in Superfood Tabs' or any
+other product's proofStack), **`Non-GMO`** · **`3rd-party tested`** · **`Made In USA`**. These
+are REAL facts the CEO has verified. **CITE them via `source='proofStack'` and USE them** — a
+Cialdini-led variation that leaves the money-back guarantee off the table is writing weaker copy
+than we've earned. If a fact is on **THIS product's** `brief.proofStack`, it is grounded — do not
+drop it because your `reviews.byClaim` search came up empty; `proofStack` is the direct source
+and layer 3 verifies against `brief.proofStack` exactly. **But never lift an award/cert from one
+product onto another and never invent one** — Gourmet Magazine on a product whose proofStack
+lacks it fails the firewall (`source_not_found`), exactly as it should.
 
 ### Andromeda concept-diversity taxonomy (the 10 valid `concept_tag` values)
 
