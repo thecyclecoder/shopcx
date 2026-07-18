@@ -1,0 +1,1 @@
+- **Box page shows both avatars for ping-pong ad-creative sessions, with active-persona swap** · verified 2026-07-18 · → [[../dashboard/roadmap__box]]
