@@ -465,6 +465,31 @@ export function planCompositionTransfer(
   return { kind: "run", useCompositionTransfer: true, designReferenceUrl: refUrl };
 }
 
+// ── dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 ─────────────────────────
+
+/**
+ * Phase 2 minority-slot allocator — for the batch `plan` stockProduct builds, mark AT MOST ONE
+ * competitor-source slot as `pureCompetitor: true` (a pure-borrow explore for learning), and
+ * ONLY when the batch already carries ≥2 competitor slots so the minority slot never crowds out
+ * the anchor RIFF creatives (which weave our role='lead' benefit into the competitor's proven
+ * framework — the strong default). The LAST competitor slot is the one flagged so the highest-
+ * ranked competitor riff still leads the pool. Own-brand slots and single-competitor-slot batches
+ * are untouched. Mutates `plan` in place and returns it for chaining/testability.
+ *
+ * See [[../../../docs/brain/libraries/creative-brief.md]] § RIFF for the rule.
+ */
+export function markPureCompetitorMinoritySlot<T extends { angle: Pick<ScoredAngle, "source">; pureCompetitor?: boolean }>(
+  plan: T[],
+): T[] {
+  const competitorIdx: number[] = [];
+  for (let i = 0; i < plan.length; i++) if (plan[i].angle.source === "competitor") competitorIdx.push(i);
+  if (competitorIdx.length >= 2) {
+    const last = competitorIdx[competitorIdx.length - 1];
+    plan[last] = { ...plan[last], pureCompetitor: true };
+  }
+  return plan;
+}
+
 // ── dahlia-copy-author-box-session Phase 3 — author-mode pure helpers ────────────────────────────
 
 /** Deterministic audience-temperature resolver Dahlia's caller uses to tag EACH creative before
@@ -1507,7 +1532,7 @@ async function stockProduct(
       || (b.acquisitionPower - a.acquisitionPower));
 
   // Build the slot plan: aim for half exploit / half explore, then backfill from whichever pool has more.
-  const plan: Array<{ angle: ScoredAngle; intent: "exploit" | "explore" }> = [];
+  const plan: Array<{ angle: ScoredAngle; intent: "exploit" | "explore"; pureCompetitor?: boolean }> = [];
   let ei = 0, xi = 0;
   const wantExploit = Math.min(Math.floor(count / 2), exploitPool.length);
   for (let n = 0; n < wantExploit; n++) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
@@ -1515,12 +1540,21 @@ async function stockProduct(
   while (plan.length < count && ei < exploitPool.length) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
   if (!plan.length) for (const a of (eligible.length ? eligible : ranked).slice(0, count)) plan.push({ angle: a, intent: "explore" });
 
+  // dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — RIFF is the STRONG
+  // DEFAULT for every competitor slot (buildCreativeBrief weaves the product's role='lead'
+  // benefit onto the brief so the authored hook blends both). Reserve AT MOST ONE competitor
+  // slot per batch as a PURE-COMPETITOR explore for learning (no lead-benefit weave) — only
+  // when the batch already carries ≥2 competitor slots, so the minority slot never crowds out
+  // the anchor riffs. Chooses the LAST competitor slot so the top-ranked competitor riff still
+  // leads the pool.
+  markPureCompetitorMinoritySlot(plan);
+
   // Assign a DISTINCT treatment per creative up front — so a batch of the same concept spreads across
   // treatments (before_after, testimonial, big_claim, …) instead of all landing on the top one. Excludes
   // both ledger-tried treatments AND treatments already assigned earlier in THIS batch (the in-loop
   // `learning` snapshot doesn't update between generations, which is what made the last 3 all before_after).
   const batchUsed = new Map<string, Set<string>>();
-  const planned = plan.map(({ angle, intent }) => {
+  const planned = plan.map(({ angle, intent, pureCompetitor }) => {
     const ak = angleKey(angle.hook);
     const tried = learning.byAngle.get(ak)?.triedTreatments ?? new Set<string>();
     const used = batchUsed.get(ak) ?? new Set<string>();
@@ -1529,7 +1563,7 @@ async function stockProduct(
       ?? learning.bestTreatments.find((t) => !used.has(t))
       ?? nextTreatmentFor(ak, learning)) as (typeof learning.bestTreatments)[number];
     used.add(treatment); batchUsed.set(ak, used);
-    return { angle, intent, treatment };
+    return { angle, intent, treatment, pureCompetitor };
   });
 
   // Product-scoped escalation dedupe: even though `escalateDiagnosisToCeo` dedupes on `dedupe_key`
@@ -1538,14 +1572,17 @@ async function stockProduct(
   // missing packshot). Set holds product ids that already escalated in THIS call.
   const escalatedForPackshot = new Set<string>();
 
-  for (const { angle, intent, treatment } of planned) {
+  for (const { angle, intent, treatment, pureCompetitor } of planned) {
     const ak = angleKey(angle.hook);
     let landed = false;
     let skipped = false;
     let lastIssues: string[] = [];
     for (let attempt = 0; attempt < MAX_QA_ATTEMPTS && !landed && !skipped; attempt++) {
       try {
-        const brief = await buildCreativeBrief(pi, angle, stories);
+        // Phase 2 riff: pass `pureCompetitor` through so a competitor-source brief carries the
+        // product's role='lead' benefit UNLESS this slot is the batch's minority pure-competitor
+        // explore. Own-brand angles are untouched by the flag.
+        const brief = await buildCreativeBrief(pi, angle, stories, { pureCompetitor: !!pureCompetitor });
         // Cold-audience creatives lead with the hook, NEVER a discount (CEO: a cold ad doesn't need to
         // lead with an offer). The cold-offer gate (`hasColdOfferLeak`) already enforces this on the
         // COPY, but the IMAGE prompt renders `brief.offer` regardless of temperature — so a cold

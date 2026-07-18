@@ -272,6 +272,38 @@ export interface CreativeBrief {
    *     unaware/problem_aware — a mismatch scores lower on the competitor-selection axis).
    */
   conceptTags?: ConceptTags | null;
+  /**
+   * dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — the product's
+   * curated LEAD BENEFIT (`product_benefit_selections` role='lead') threaded onto a
+   * source='competitor' brief so the authored hook must BLEND the competitor's proven
+   * framework/mechanism (from `competitorDna`) with our differentiated lead benefit — a RIFF,
+   * not a pure borrow. Populated only when `angle.source === 'competitor'` AND the brief is
+   * NOT built for the minority PURE-COMPETITOR explore slot (`opts.pureCompetitor`).
+   * Own-brand angles and the pure-competitor slot leave this null. The `softPhrasings`
+   * comes verbatim from the benefit row's `customer_phrases`, so Dahlia can pick a naturally-
+   * spoken phrase ('feel lighter' / 'curbs my appetite') without inventing one — the
+   * never-fabricate firewall keeps the vocabulary honest. Consumed by:
+   *   • Dahlia's copy-author SKILL IMITATE-DEBRANDED rule — the RIFF rail requires this
+   *     benefit to be present in the hook alongside the debranded competitor framework;
+   *   • Max's independent copy QC — 'lead-benefit-woven-in' is scored against this field.
+   */
+  leadBenefitWeave?: {
+    benefitName: string;
+    softPhrasings: string[];
+  } | null;
+}
+
+/**
+ * dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — build-time options for
+ * `buildCreativeBrief`. `pureCompetitor` is the escape hatch stockProduct uses for the MINORITY
+ * explore slot per batch (at most one) so we still ship a pure competitor imitation for learning;
+ * every other competitor-source brief gets the RIFF (lead benefit blended in) by default.
+ */
+export interface BuildCreativeBriefOpts {
+  /** When true AND the driving angle is `source:'competitor'`, DO NOT thread the product's
+   *  role='lead' benefit onto the brief. The riff is the STRONG DEFAULT (`false`); the
+   *  minority pure-competitor slot is opt-in for learning. Ignored for own-brand angles. */
+  pureCompetitor?: boolean;
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -283,7 +315,12 @@ function money(cents: number | null | undefined): string | null {
  * review (via byClaim) or an ingredient citation; the transformation is a real reviewer + their photo; the
  * offer uses an allowed price treatment. Nothing is invented.
  */
-export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredAngle, transformationStories: PIReview[] = []): Promise<CreativeBrief> {
+export async function buildCreativeBrief(
+  pi: ProductIntelligence,
+  angle: ScoredAngle,
+  transformationStories: PIReview[] = [],
+  opts: BuildCreativeBriefOpts = {},
+): Promise<CreativeBrief> {
   const productTitle = str((pi.product as Row | null)?.title) || "the product";
 
   // Competitor hook sanitization: strip any percent-off / $-off / free-shipping / BOGO claim the
@@ -421,7 +458,34 @@ export async function buildCreativeBrief(pi: ProductIntelligence, angle: ScoredA
     }
   }
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags };
+  // dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — WEAVE the product's
+  // curated LEAD benefit onto a competitor-source brief so the authored hook must BLEND the
+  // competitor's proven framework with our differentiated benefit (a RIFF) — the fix for the
+  // 2026-07-18 Amazing Coffee cold creative whose headline led with a purely borrowed commodity
+  // hook ('Tired of the coffee jitters?') with our real differentiator (weight loss) nowhere
+  // in it. The RIFF is the STRONG DEFAULT for every competitor imitation; `opts.pureCompetitor`
+  // is the MINORITY explore-slot escape hatch stockProduct reserves per batch (at most one) so
+  // we still ship one pure-borrow imitation for learning. Missing role='lead' benefit → null
+  // (degrades gracefully to today's behavior). Own-brand angles are never woven — their hook
+  // already carries the benefit.
+  let leadBenefitWeave: CreativeBrief["leadBenefitWeave"] = null;
+  if (angle.source === "competitor" && !opts.pureCompetitor) {
+    const leadBenefitRow = (pi.benefits as Row[]).find((b) => str(b.role) === "lead");
+    if (leadBenefitRow) {
+      const name = str(leadBenefitRow.benefit_name).trim();
+      const phrases = Array.isArray(leadBenefitRow.customer_phrases)
+        ? (leadBenefitRow.customer_phrases as unknown[]).map(str).filter(Boolean)
+        : [];
+      if (name) leadBenefitWeave = { benefitName: name, softPhrasings: phrases.slice(0, 5) };
+    }
+  }
+  if (leadBenefitWeave) {
+    guardrails.push(
+      `RIFF: lead benefit '${leadBenefitWeave.benefitName}' must weave into the competitor angle`,
+    );
+  }
+
+  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave };
 }
 
 /**

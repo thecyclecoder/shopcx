@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMetaCopy, sanitizeCompetitorHook, selectAngles, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import { buildCreativeBrief, buildMetaCopy, sanitizeCompetitorHook, selectAngles, type CreativeBrief, type ScoredAngle } from "./creative-brief";
 import type { ProductIntelligence, PIReview } from "@/lib/product-intelligence";
 import { hasAnyLf8 } from "./lf8";
 
@@ -228,4 +228,98 @@ test("selectAngles — a role='lead' row with no customer_phrases falls back to 
   assert.ok(seeded, "expected a seeded lead-benefit angle even without customer phrases");
   assert.equal(seeded.hook, "Weight loss");
   assert.equal(seeded.leadBenefit, "Weight loss");
+});
+
+// ── buildCreativeBrief: Phase 2 RIFF — weave the lead benefit into a competitor brief ──────────
+// dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — every competitor-source
+// brief carries the product's role='lead' benefit as a REQUIRED ingredient of the authored hook
+// (the strong default RIFF); the minority pure-competitor explore slot passes
+// `{ pureCompetitor: true }` to opt out for learning. Own-brand angles never carry the field —
+// their hook already carries the benefit.
+
+const AMAZING_COFFEE_PI = () => makePi({
+  product: { title: "Amazing Coffee" },
+  benefits: [
+    {
+      benefit_name: "Weight loss",
+      role: "lead",
+      customer_phrases: ["feel lighter", "lost weight", "curbs my appetite"],
+      science_confirmed: true,
+      customer_confirmed: true,
+      display_order: 0,
+    },
+    {
+      benefit_name: "No jitters",
+      role: "supporting",
+      customer_phrases: ["no crash", "steady energy"],
+      display_order: 1,
+    },
+  ],
+});
+
+const COMPETITOR_ANGLE = (): ScoredAngle => ({
+  hook: "Tired of the coffee jitters?",
+  source: "competitor",
+  leadBenefit: "no jitters",
+  acquisitionPower: 8,
+  retentionTruth: 6,
+  commodity: false,
+  hasRealPhoto: false,
+  reasons: [],
+  raw: { hook: "Tired of the coffee jitters?", framework: "problem→solution", mechanism: "adaptogens", proof: "10k reviews", offer: "50% off", advertiser: "MUD/WTR" },
+});
+
+test("buildCreativeBrief — RIFF: competitor angle brief carries leadBenefitWeave from pi.benefits role='lead'", async () => {
+  const pi = AMAZING_COFFEE_PI();
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  assert.ok(brief.leadBenefitWeave, "expected leadBenefitWeave on a competitor-source brief with a role='lead' benefit");
+  assert.equal(brief.leadBenefitWeave.benefitName, "Weight loss");
+  // Soft phrasings are threaded verbatim from the benefit's customer_phrases — grounded, no fabrication.
+  assert.deepEqual(brief.leadBenefitWeave.softPhrasings, ["feel lighter", "lost weight", "curbs my appetite"]);
+  // Both DNA and weave are present — Dahlia has BOTH the competitor framework AND our lead benefit.
+  assert.ok(brief.competitorDna, "expected competitorDna to still be present alongside the weave");
+  // The guardrails attest to the RIFF requirement so downstream QC can grep it.
+  assert.ok(
+    brief.guardrails.some((g) => /RIFF/.test(g) && /weight loss/i.test(g)),
+    `expected a RIFF guardrail naming the lead benefit; got ${JSON.stringify(brief.guardrails)}`,
+  );
+});
+
+test("buildCreativeBrief — minority pure-competitor explore slot ({ pureCompetitor: true }) skips the weave", async () => {
+  const pi = AMAZING_COFFEE_PI();
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE(), [], { pureCompetitor: true });
+  // The pure-competitor slot ships one pure-borrow imitation per batch for learning — no weave.
+  assert.equal(brief.leadBenefitWeave, null);
+  // Competitor DNA is still preserved — this is still a competitor imitation, just without the weave.
+  assert.ok(brief.competitorDna);
+  // The RIFF guardrail is silent in this case.
+  assert.ok(!brief.guardrails.some((g) => /RIFF/.test(g)));
+});
+
+test("buildCreativeBrief — own-brand angle never carries leadBenefitWeave (the hook already carries the benefit)", async () => {
+  const pi = AMAZING_COFFEE_PI();
+  const ownAngle: ScoredAngle = {
+    hook: "Lost 15 lbs",
+    source: "transformation",
+    leadBenefit: "Weight loss",
+    acquisitionPower: 10,
+    retentionTruth: 6,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+  };
+  const brief = await buildCreativeBrief(pi, ownAngle);
+  assert.equal(brief.leadBenefitWeave, null);
+  assert.ok(!brief.guardrails.some((g) => /RIFF/.test(g)));
+});
+
+test("buildCreativeBrief — competitor angle with NO role='lead' benefit degrades gracefully (leadBenefitWeave=null)", async () => {
+  const pi = makePi({
+    product: { title: "Amazing Coffee" },
+    benefits: [
+      { benefit_name: "Great taste", role: "supporting", customer_phrases: ["delicious"], display_order: 0 },
+    ],
+  });
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  assert.equal(brief.leadBenefitWeave, null, "no role='lead' benefit → the RIFF field stays null (today's behavior)");
 });

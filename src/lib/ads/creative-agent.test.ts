@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief, ScoredAngle } from "@/lib/ads/creative-brief";
-import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature } from "./creative-agent";
+import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature, markPureCompetitorMinoritySlot } from "./creative-agent";
 
 test("readyStatusForAngle holds a null angle out of 'ready'", () => {
   assert.equal(readyStatusForAngle(null), "draft");
@@ -170,4 +170,46 @@ test("imageOfferForAudience: a WARM angle passes the offer through unchanged", (
 test("imageOfferForAudience: a null offer stays null regardless of temperature", () => {
   assert.equal(imageOfferForAudience({ source: "competitor", acquisitionPower: 5 }, null), null);
   assert.equal(imageOfferForAudience({ source: "review_cluster", acquisitionPower: 3 }, null), null);
+});
+
+// ── markPureCompetitorMinoritySlot — Phase 2 RIFF minority-slot allocator ────────────────────────
+// dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — the batch's
+// competitor-source slots default to RIFFs (lead benefit woven into the competitor angle).
+// AT MOST ONE per batch is reserved as a pure-competitor explore for learning, and only when
+// there are ≥2 competitor slots so the minority slot never crowds out the anchor riffs.
+
+type Slot = { angle: Pick<ScoredAngle, "source">; pureCompetitor?: boolean };
+const c = (): Slot => ({ angle: { source: "competitor" } });
+const own = (src: ScoredAngle["source"] = "transformation"): Slot => ({ angle: { source: src } });
+
+test("markPureCompetitorMinoritySlot: no competitor slots → unchanged (own-brand batch is riff-agnostic)", () => {
+  const plan: Slot[] = [own("transformation"), own("ad_angle"), own("review_cluster")];
+  markPureCompetitorMinoritySlot(plan);
+  assert.ok(plan.every((s) => !s.pureCompetitor));
+});
+
+test("markPureCompetitorMinoritySlot: exactly ONE competitor slot → NOT flagged (the strong default is riff, not pure)", () => {
+  const plan: Slot[] = [own("transformation"), c(), own("ad_angle")];
+  markPureCompetitorMinoritySlot(plan);
+  const compSlots = plan.filter((s) => s.angle.source === "competitor");
+  assert.equal(compSlots.length, 1);
+  assert.equal(compSlots[0].pureCompetitor, undefined, "the single competitor slot must riff, not go pure");
+});
+
+test("markPureCompetitorMinoritySlot: ≥2 competitor slots → only the LAST is flagged pure (top-ranked riff leads the pool)", () => {
+  const plan: Slot[] = [c(), own("ad_angle"), c(), c()];
+  markPureCompetitorMinoritySlot(plan);
+  // The first two competitor slots stay riff (undefined); only the last is flagged pure.
+  assert.equal(plan[0].pureCompetitor, undefined, "first competitor slot must be a riff");
+  assert.equal(plan[2].pureCompetitor, undefined, "middle competitor slot must be a riff");
+  assert.equal(plan[3].pureCompetitor, true, "only the LAST competitor slot is the minority pure slot");
+  // At most ONE per batch — the invariant Phase 2 pins.
+  assert.equal(plan.filter((s) => s.pureCompetitor).length, 1);
+});
+
+test("markPureCompetitorMinoritySlot: 2 competitor slots → the second (last) is flagged pure, the first is the anchor riff", () => {
+  const plan: Slot[] = [c(), c()];
+  markPureCompetitorMinoritySlot(plan);
+  assert.equal(plan[0].pureCompetitor, undefined);
+  assert.equal(plan[1].pureCompetitor, true);
 });

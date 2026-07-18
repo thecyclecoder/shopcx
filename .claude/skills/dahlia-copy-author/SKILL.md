@@ -176,6 +176,43 @@ rival's DNA you're imitating; it is **NOT** a claim you may ever surface in the 
 rail 2. If any of the debranded slots is empty (the worker's strip removed everything, or the
 skeleton row had a null column), treat that slot as absent and fall back to OUR brief's
 own supporting benefit for that surface — never invent a slot value.
+
+### RIFF — weave in the lead benefit (dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2)
+
+When `COMPETITOR_DNA` is present AND the brief carries a `leadBenefitWeave` field, you MUST
+**RIFF** on the competitor angle — keep their proven framework AND weave in the brief's lead
+benefit (soft phrasing OK) so our differentiator is present in the hook. Never a pure borrow
+with our benefit absent. This is the strong default for every competitor-source creative; a
+minority slot per batch reserves a pure-competitor explore (`leadBenefitWeave: null`) and the
+worker signals that by omitting the field — when the field IS present, the RIFF rule applies.
+
+The lead benefit may be phrased softly (`"feel lighter"` instead of `"lose 40 lbs"`) — that's
+both a stronger conversion frame AND a friendlier Meta weight-loss ad-policy read. Pick a
+phrase from `leadBenefitWeave.softPhrasings` (verbatim customer phrases pulled from the
+`product_benefit_selections` row's `customer_phrases` array — already grounded, no
+fabrication) OR paraphrase the `benefitName` softly. Never invent a new phrasing that isn't
+supported by either the benefit name or the customer phrases list.
+
+**North-star example (CEO 2026-07-18, verbatim):** for Amazing Coffee with competitor DNA hook
+`"Tired of the coffee jitters?"` (MUD/WTR's commodity no-jitters angle) and
+`leadBenefitWeave = { benefitName: "Weight loss", softPhrasings: [...] }`, the RIFF hook is
+**`"Tasty coffee, feel lighter, no jitters"`** — a blend of experience (`"tasty coffee"`) +
+our lead benefit stated softly (`"feel lighter"` = weight loss, ad-compliance-friendly) +
+the competitor's proven no-jitters angle. Pure borrow (`"Tired of the coffee jitters?"`
+with our benefit nowhere) is the FAIL state this rail closes.
+
+Every RIFF claim MUST still cite its source in `claim_trace`:
+
+- The lead-benefit weave (`"feel lighter"`) cites `source='supportingBenefit'` with
+  `source_ref` naming the phrase from `leadBenefitWeave.softPhrasings` OR
+  `source='reviews.byClaim'` with `source_ref` = `leadBenefitWeave.benefitName` (whichever
+  is closest — a soft-phrasing lifted verbatim from `softPhrasings` uses `supportingBenefit`).
+- The competitor-borrowed portion cites `source='competitorDna'` with `source_ref='hook'`
+  (or the framework/mechanism slot you actually kept).
+
+If the brief has no `leadBenefitWeave` (a pure-competitor explore slot OR the product has no
+role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED as-is.
+
 3. **Never emit a bare MSRP.** No standalone `$59` / `$29.99` sticker price. Prices are OK
    only as: strikethrough → discount (`~~$59~~ $39`), per-serving value
    (`$1.30 per serving`), or a comparison anchor. Bare-price is the top Meta policy reject.
