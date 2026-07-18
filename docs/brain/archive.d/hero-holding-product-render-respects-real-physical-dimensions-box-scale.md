@@ -1,0 +1,1 @@
+- **Hero 'holding product' render respects the product's real physical dimensions** · verified 2026-07-18 · → [[../lifecycles/ad-render]]
