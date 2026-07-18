@@ -348,9 +348,88 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
     { "claim": "600mg L-theanine", "source": "ingredients", "source_ref": "L-theanine" },
     { "claim": "\"I dropped 40 lbs\" — Kaitlyn", "source": "transformationStory", "source_ref": "Kaitlyn" },
     { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" }
+  ],
+  "variations": [
+    { "framework": "lf8", "headline": "Feel lighter. Finally.", "primaryText": "…a self-contained hook led by the reader's raw Life-Force-8 desire — feel better, less pain, more comfort. No product intro, no offer on cold." },
+    { "framework": "schwartz", "headline": "Not another diet. A better cup.", "primaryText": "…a self-contained hook matched to the market's awareness/sophistication level — write ONE step above the shelf's modal level so it lands as fresh, not repeated. Cite the fallback if you drop." },
+    { "framework": "cialdini", "headline": "700,000+ customers. 15K reviews.", "primaryText": "…a self-contained hook led by social proof / authority / scarcity — real numbers only (traceable to `pi.reviews` volume, `pi.reviews.byClaim` counts, real endorsements)." },
+    { "framework": "hopkins", "headline": "She lost 15 lbs in 3 weeks.", "primaryText": "…a self-contained hook led by specificity + a reason-why — a real number, a real duration, a real ingredient dose, all citable per claim_trace." },
+    { "framework": "sugarman", "headline": "Stop dieting. Drink this instead.", "primaryText": "…a self-contained hook led by curiosity + a slippery-slide first line the reader has to expand past the `…more` ellipsis to close. Contrarian pattern-interrupt, no flat benefit summary." }
   ]
 }
 ```
+
+### VARIATIONS — five per-framework hooks, not one caption fanned to five slots (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1)
+
+The `variations` field is **REQUIRED** — exactly FIVE entries, ONE per conversion-psychology
+framework, no duplicates. Same brief, same product truth, same firewall — DIFFERENT
+psychological lever per variation — so Meta can test which lever stops the scroll for THIS
+product + audience. The five frameworks are the SAME five axes the rubric already scores
+(LF8 · Schwartz · Cialdini · Hopkins · Sugarman), so a variation LED by a framework is graded
+on the same lever the rubric measures — the mapping is principled, not arbitrary.
+
+Each variation is a **self-contained** `{ framework, headline, primaryText }` hook — a real
+scroll-stopping opener the reader can act on, not a reword of the canonical caption. Every
+claim in every variation MUST still trace to the brief per rail 1's CLAIM-ONLY-WHAT'S-IN-THE-BRIEF
+table (a fabricated number / invented reviewer / phantom ingredient is a firewall miss regardless
+of which framework LED the variation). Cold audiences still get NO offer language in ANY
+variation per rail 4.
+
+- `framework` — one of: `lf8` · `schwartz` · `cialdini` · `hopkins` · `sugarman`. Each appears
+  exactly once; a duplicate framework fails the parse.
+- `headline` / `primaryText` — non-empty strings that LEAD with that framework's lever
+  (see the per-framework guidance below). The headline is the ellipsis-earning first line;
+  the primary text is the multi-sentence body.
+
+**Per-framework LEAD guidance** — what each framework's variation MUST do:
+
+- **LF8-led** — LEAD with a raw Life-Force-8 desire (survival, enjoyment of food/drink, freedom
+  from fear/pain, sexual companionship, comfortable living, superiority, protection of loved
+  ones, social approval). Feel-lighter / no-more-crashes / stop-the-cravings — the reader's
+  outcome first, no product/brand in the first line. Cross-check LF8_KEYWORDS in
+  [[../../../src/lib/ads/lf8.ts]] — the exact vocabulary the rubric's LF8 axis scans.
+- **Schwartz-led** — LEAD with a hook MATCHED to the market's awareness/sophistication level
+  (`TARGET_SCHWARTZ_LEVEL` in the DATA block). Write AT target — the shelf modal is `target-1`
+  and everyone at `target-1` loses. A Schwartz-led variation on a saturated market names the
+  UNIQUE mechanism / a fresh promise; on an empty shelf it names the problem in the reader's
+  own words.
+- **Cialdini-led** — LEAD with one of the seven principles of influence (reciprocity,
+  commitment/consistency, social proof, authority, liking, scarcity, unity). Real numbers only
+  — `700,000+ customers` needs a `pi.reviews`-volume cite; `4.7 stars` needs a real average;
+  `featured in Gourmet Magazine` needs a real endorsement. NEVER a fabricated stat.
+- **Hopkins-led** — LEAD with specificity + a reason-why. Real number, real duration, real
+  ingredient dose — every one cited in `claim_trace`. `"She lost 15 lbs in 3 weeks"` needs a
+  real transformation reviewer with those exact numbers in the review body per rail 1's
+  timeframe rule.
+- **Sugarman-led** — LEAD with a curiosity gap / slippery-slide first line the reader has to
+  expand past the `…more` ellipsis to close. Contrarian pattern-interrupt, unexpected reversal,
+  mid-scene story. NOT a flat one-line benefit summary that gives the whole promise away.
+
+**CEO-CONFIRMED EXEMPLAR (2026-07-18 — Amazing Coffee, quality bar):**
+
+- `lf8` → `"Feel lighter. Finally."`
+- `schwartz` → `"Not another diet. A better cup."`
+- `cialdini` → `"700,000+ customers. 15K reviews."`
+- `hopkins` → `"She lost 15 lbs in 3 weeks."`
+- `sugarman` → `"Stop dieting. Drink this instead."`
+
+Each a distinct framework-led hook, benefits-not-product, scroll-stopping first line,
+weight-loss lead benefit anchored (Amazing Coffee's lead benefit), every claim grounded (real
+reviews: Barbara H. 40+ lbs, 15 lbs in 3 weeks; 700K customers; 15K reviews; Gourmet Magazine;
+Non-GMO / 3rd-party tested / made in USA / 30-day refund). NEVER `"USDA-backed"` (not our
+claim) — Non-GMO.
+
+**Fail state this rail closes:** four identical headlines (`"Tired of the coffee jitters?"` ×4)
+and four identical primary texts — one caption broadcast to identical slots by
+`authorCopyPack`. Meta then rotates four copies of the same ad and we learn nothing about
+which ANGLE works. Five distinct framework-led variations MEAN five real A/B lever tests.
+
+The top-level `headline` / `primaryText` / `description` remain the CANONICAL caption
+(the single-caption fallback readers of the parent row still use); one of the five variations
+may share those strings, but the CANONICAL is not "the variation Dahlia liked most" — it's
+the deterministic Warm > Cold > Hot / brand-safe surface downstream single-caption readers
+lean on. Phase 2 wires the variations into `authorCopyPack` so the pack carries five distinct
+slots (labeled by framework) instead of one broadcast.
 
 Rules for the envelope:
 
@@ -411,6 +490,14 @@ Rules for the envelope:
   additional evidence line `lead_benefit_penalty=<0|-1> (reason)` naming whether the RIFF is
   present in the headline (or, when the brief has no `leadBenefitWeave`, that the soft rail
   is silent).
+- `variations` — **REQUIRED** (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast
+  Phase 1). Exactly FIVE `{ framework, headline, primaryText }` entries, one per
+  `AUTHOR_FRAMEWORK_KEYS` value (`lf8` · `schwartz` · `cialdini` · `hopkins` · `sugarman`), no
+  duplicates. See the VARIATIONS section above for the per-framework LEAD guidance. A missing
+  / wrong-count / duplicate-framework / off-vocabulary / empty-string variation fails the parse
+  with a concrete `bad_variations (...)` reason and the M1 revise loop consumes it. Every claim
+  in every variation is subject to the SAME never-fabricate firewall (rail 1) and, on
+  `AUDIENCE_TEMPERATURE=cold`, the SAME rail 4 offer-language ban.
 - `claim_trace` — **REQUIRED** (firewall layer 2 of the never-fabricate firewall). A non-empty
   array of `{ claim, source, source_ref }` entries — ONE entry per substantive claim in your
   copy. This is the artifact layer 3 (the deterministic `verifyClaimTrace` in

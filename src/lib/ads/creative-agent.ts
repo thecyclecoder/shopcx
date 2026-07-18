@@ -175,6 +175,35 @@ export const AUTHOR_CLAIM_TRACE_SOURCES = [
 
 export type AuthorClaimTraceSource = (typeof AUTHOR_CLAIM_TRACE_SOURCES)[number];
 
+/** dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 — the SSOT enum
+ *  of conversion-psychology framework keys the `variations` array is keyed by. Same five axes the
+ *  copy-rubric already scores (LF8 · Schwartz · Cialdini · Hopkins · Sugarman), so a variation
+ *  LED by a framework is graded on the same lever the rubric measures — the mapping is principled,
+ *  not arbitrary. Mirrored verbatim in the dahlia-copy-author SKILL.md output contract; a divergence
+ *  would let a valid-per-parser framework fail the skill's schema or vice-versa. */
+export const AUTHOR_FRAMEWORK_KEYS = [
+  "lf8",
+  "schwartz",
+  "cialdini",
+  "hopkins",
+  "sugarman",
+] as const;
+
+export type AuthorFrameworkKey = (typeof AUTHOR_FRAMEWORK_KEYS)[number];
+
+/** dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 — one
+ *  per-framework variation Dahlia emits inside the `variations` array. Each entry is a
+ *  self-contained headline + primary-text LED by its framework's lever, grounded in the same
+ *  brief + never-fabricate firewall + shared validator as the top-level canonical caption. The
+ *  top-level `claim_trace` covers the whole envelope; per-variation gating (cold-offer, validator,
+ *  firewall) is exercised in Phase 2's `authorCopyPack` build (where the variations become the
+ *  four-slot pack instead of a single caption broadcast to identical slots). */
+export interface AuthorModeCopyFrameworkVariation {
+  framework: AuthorFrameworkKey;
+  headline: string;
+  primaryText: string;
+}
+
 /** dahlia-never-fabricate-copy-firewall Phase 2 (layer 2) — the witnessed-citation entry Dahlia's
  *  session emits alongside each substantive claim. Each entry names ONE specific claim substring,
  *  the enumerated source field it comes from, and a `source_ref` (an ingredient name / benefit
@@ -218,6 +247,17 @@ export interface AuthorModeCopy {
    *  when absent, the top-level fields ARE the single-variant M1 result. See `AuthorModeCopyVariant`
    *  + `pickCanonicalVariant`. */
   variants?: AuthorModeCopyVariant[];
+  /** dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 — one
+   *  per-framework variation LED by a distinct conversion-psychology lever
+   *  (LF8 / Schwartz / Cialdini / Hopkins / Sugarman — the same five axes the rubric already
+   *  scores). Exactly five entries, one per `AUTHOR_FRAMEWORK_KEYS` value, no duplicates. Each
+   *  variation is a self-contained headline + primary-text hook grounded in the same brief +
+   *  never-fabricate firewall + shared validator as the top-level canonical caption. Phase 2
+   *  replaces `authorCopyPack`'s one-caption-broadcast so the five variations become the
+   *  four-slot Meta pack (labeled by framework on the detail page). When absent, the top-level
+   *  fields ARE the single-variant M1 result and the pre-Phase-1 identical-slot broadcast
+   *  behaviour is preserved. */
+  variations?: AuthorModeCopyFrameworkVariation[];
 }
 
 /** dahlia-temperature-banded-multi-variant-copy-pack Phase 1 — one temperature-banded variant in
@@ -758,7 +798,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna. A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna. A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts.",
   ].join("\n");
 }
 
@@ -889,6 +929,51 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
     if (!sr) return { kind: "invalid", reason: `firewall_missing_claim_trace (missing_source_ref_at_${i})` };
     claim_trace.push({ claim: c, source: s as AuthorClaimTraceSource, source_ref: sr });
   }
+  // dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 — validate
+  // the optional per-framework variations array. When present, exactly five entries, one per
+  // framework, no duplicates, non-empty headline + primaryText per entry. When absent, the
+  // top-level fields carry the single-variant M1 result (pre-Phase-1 behaviour). A malformed
+  // variations array fails with a concrete reason so the revise loop can cite it back — same
+  // fail-closed treatment as the claim_trace layer.
+  let variations: AuthorModeCopyFrameworkVariation[] | undefined = undefined;
+  if (obj.variations !== undefined) {
+    const rawVariations = obj.variations;
+    if (!Array.isArray(rawVariations)) {
+      return { kind: "invalid", reason: "bad_variations (not_array)" };
+    }
+    if (rawVariations.length !== AUTHOR_FRAMEWORK_KEYS.length) {
+      return {
+        kind: "invalid",
+        reason: `bad_variations (expected_${AUTHOR_FRAMEWORK_KEYS.length}_entries, got_${rawVariations.length})`,
+      };
+    }
+    const seenFrameworks = new Set<string>();
+    const parsed: AuthorModeCopyFrameworkVariation[] = [];
+    for (let i = 0; i < rawVariations.length; i++) {
+      const raw = rawVariations[i];
+      if (!raw || typeof raw !== "object") {
+        return { kind: "invalid", reason: `bad_variations (bad_shape_at_${i})` };
+      }
+      const r = raw as Record<string, unknown>;
+      const framework = r.framework;
+      if (typeof framework !== "string" || !(AUTHOR_FRAMEWORK_KEYS as readonly string[]).includes(framework)) {
+        return {
+          kind: "invalid",
+          reason: `bad_variations (bad_framework_at_${i}: ${typeof framework === "string" ? framework : typeof framework})`,
+        };
+      }
+      if (seenFrameworks.has(framework)) {
+        return { kind: "invalid", reason: `bad_variations (duplicate_framework_at_${i}: ${framework})` };
+      }
+      seenFrameworks.add(framework);
+      const h = typeof r.headline === "string" ? r.headline.trim() : "";
+      const p = typeof r.primaryText === "string" ? r.primaryText.trim() : "";
+      if (!h) return { kind: "invalid", reason: `bad_variations (missing_headline_at_${i}: ${framework})` };
+      if (!p) return { kind: "invalid", reason: `bad_variations (missing_primary_text_at_${i}: ${framework})` };
+      parsed.push({ framework: framework as AuthorFrameworkKey, headline: h, primaryText: p });
+    }
+    variations = parsed;
+  }
   return {
     kind: "ok",
     verdict: {
@@ -907,6 +992,7 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
         evidence: rawEvidence,
       },
       claim_trace,
+      ...(variations ? { variations } : {}),
     },
   };
 }
@@ -1376,18 +1462,37 @@ async function runCopyQcForCreative(
   }
 }
 
-/** Broadcast an AuthorModeCopy verdict to a full MetaCopyPack whose 4 headlines + 4 primary texts
- *  are each a single-unique repeat of Dahlia's authored strings (author mode collapses the
- *  deterministic rotation to ONE variant — the caption Dahlia wrote is what Meta sees regardless
- *  of the placement it lands in). Passes CREATIVE_PACK_MIN.headlines / primaryTexts by
- *  construction so downstream `planCreativePackInserts` + `isCreativePackComplete` are unchanged.
- *  Each string is clipped to META_CAPS so a slightly-over-limit author string doesn't blow the
- *  DB write; the SKILL.md already tells Dahlia to stay under limit. */
-export function authorCopyPack(copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description">): MetaCopyPack {
+/** Build a MetaCopyPack from an AuthorModeCopy verdict. When the verdict carries
+ *  `variations` (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1 —
+ *  five per-framework hooks LED by LF8 / Schwartz / Cialdini / Hopkins / Sugarman), the pack's
+ *  headlines[]/primaryTexts[] are the FIVE DISTINCT variation strings and `frameworks[]` is
+ *  parallel — headlines[i] came from frameworks[i]'s lens. This is the fix for
+ *  authorCopyPack's old one-caption-broadcast: Meta rotates true A/B lever tests instead of the
+ *  same string in four slots. When `variations` is absent (single-caption back-compat: legacy
+ *  author sessions, deterministic paths that hand a canonical caption without the five-variation
+ *  set), the pack falls back to CREATIVE_PACK_MIN copies of the single canonical headline +
+ *  primary text and omits `frameworks` — no fabricated labels. Every string is clipped to
+ *  META_CAPS so a slightly-over-limit author string doesn't blow the DB write; the SKILL.md
+ *  already tells Dahlia to stay under limit. CREATIVE_PACK_MIN.headlines / primaryTexts hold by
+ *  construction in both branches (5 ≥ 4 with variations, 4 = 4 without), so
+ *  `planCreativePackInserts` + `isCreativePackComplete` are unchanged. */
+export function authorCopyPack(
+  copy: Pick<AuthorModeCopy, "headline" | "primaryText" | "description" | "variations">,
+): MetaCopyPack {
   const clip = (s: string, cap: number): string => (s.length > cap ? s.slice(0, cap) : s);
+  const description = clip(copy.description, META_CAPS.description);
+  if (copy.variations && copy.variations.length > 0) {
+    // Five distinct framework-led variations → parallel headlines[]/primaryTexts[]/frameworks[].
+    // Each variation stays a COMPLETE ad (Phase 1's parser enforces non-empty headline + primary
+    // text per entry); the render on the detail page labels each slot by its framework.
+    const headlines = copy.variations.map((v) => clip(v.headline, META_CAPS.headline));
+    const primaryTexts = copy.variations.map((v) => clip(v.primaryText, META_CAPS.primary_text));
+    const frameworks = copy.variations.map((v) => v.framework);
+    return { headlines, primaryTexts, description, frameworks };
+  }
+  // Back-compat: single-caption verdict → the pre-Phase-2 broadcast shape (no frameworks[] label).
   const headline = clip(copy.headline, META_CAPS.headline);
   const primary = clip(copy.primaryText, META_CAPS.primary_text);
-  const description = clip(copy.description, META_CAPS.description);
   return {
     headlines: Array<string>(CREATIVE_PACK_MIN.headlines).fill(headline),
     primaryTexts: Array<string>(CREATIVE_PACK_MIN.primaryTexts).fill(primary),

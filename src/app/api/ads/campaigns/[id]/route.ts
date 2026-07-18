@@ -115,7 +115,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         meta_headline: string | null;
         meta_primary_text: string | null;
         meta_description: string | null;
-        copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string } | null;
+        copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string; frameworks?: string[] } | null;
         provenance: import("@/lib/ads/creative-agent").AngleProvenance | null;
       }
     | null = null;
