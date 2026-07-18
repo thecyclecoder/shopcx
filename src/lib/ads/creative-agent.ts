@@ -2276,6 +2276,69 @@ export function buildAdCampaignInsertBody(args: {
   };
 }
 
+/** dahlia-names-each-ad-from-its-headline-minus-weight-loss-not-a-generic-template Phase 1 —
+ *  sanitize the creative's canonical HEADLINE for the trailing slot of the composite ad name
+ *  `Dahlia - {productTitle} - {deriveAdName(headline)}` — the CEO's rule replaces the generic
+ *  `Dahlia · {product} · {source}` template. Sanitize rules:
+ *    (a) remove any 'weight loss' / 'weightloss' substring (case-insensitive) — the CEO's rule
+ *        for the name even when the headline itself carries it;
+ *    (b) remove any competitor brand token (same tokenization rule the copy-validator's
+ *        no-competitor-leak rail uses — whitespace-split, keep tokens ≥3 chars, drop the shared
+ *        product-noun allowlist) plus the literal word `competitor`, so the name never leaks the
+ *        rival's brand or the source label;
+ *    (c) collapse whitespace + trim orphan leading/trailing punctuation;
+ *    (d) fall back to the caller-supplied `fallback` (typically the creative's short concept-tag
+ *        label — an Andromeda tag like `transformation` / `objection` / `mechanism`) when the
+ *        sanitized string is empty, so the final composite is never `Dahlia - {product} - ` (a
+ *        blank trailing slot). Default fallback is `"ad"`.
+ *  Pure + null-safe + exported for unit-test coverage. */
+export function deriveAdName(
+  headline: string,
+  competitorTokens: readonly string[],
+  fallback = "ad",
+): string {
+  const safeFallback = fallback && fallback.trim().length > 0 ? fallback.trim() : "ad";
+  let s = typeof headline === "string" ? headline : "";
+  // (a) weight loss / weightloss
+  s = s.replace(/\bweight\s*loss\b/gi, "");
+  // (b) competitor tokens + literal 'competitor'
+  const tokens = [...competitorTokens, "competitor"];
+  for (const raw of tokens) {
+    if (typeof raw !== "string") continue;
+    const token = raw.trim();
+    if (token.length < 3) continue;
+    const escaped = token.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+    // Match the token as a whole word or with a possessive suffix. Use the same
+    // manual boundary check as debrand so a token like `MUD/WTR` still strips cleanly.
+    const re = new RegExp(`${escaped}(?:['’]s)?`, "gi");
+    let out = "";
+    let cursor = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      const isWord = (i: number) => {
+        if (i < 0 || i >= s.length) return false;
+        const c = s.charCodeAt(i);
+        return (
+          (c >= 48 && c <= 57) ||
+          (c >= 65 && c <= 90) ||
+          (c >= 97 && c <= 122) ||
+          c === 95
+        );
+      };
+      if (isWord(start - 1) || isWord(end)) { re.lastIndex = end; continue; }
+      out += s.slice(cursor, start);
+      cursor = end;
+    }
+    out += s.slice(cursor);
+    s = out;
+  }
+  // (c) collapse whitespace + trim orphan separators
+  s = s.replace(/\s{2,}/g, " ").replace(/^[\s,;:.|\-·—–+&]+|[\s,;:.|\-·—–+&]+$/g, "").trim();
+  return s.length > 0 ? s : safeFallback;
+}
+
 /** Provenance of a creative — WHERE its angle came from, persisted on the angle so the read-only
  *  ad detail page can show "the competitor ad this explores" vs "the own asset this exploits".
  *  `mode` is the coarse explore/exploit split: a `source:'competitor'` angle is EXPLORING a rival's
@@ -2405,17 +2468,26 @@ async function insertReadyCreative(
     .select("id").single();
 
   // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
-  // Phase 1 — use Dahlia's per-creative `composition_name` (a short static-composition
-  // description like `two ways color pop benefits`) as the campaign name so every ad is
-  // uniquely identifiable in the bin / Ads Manager. Deterministic-mode inserts (no author
-  // verdict — legacy path) fall back to the pre-fix `Dahlia · {product} · {source}` template
-  // so their row shape stays byte-identical. The `composition_name` was validated inside
-  // `runCopyAuthorSession` (empty / weight-loss / competitor-brand → copy-only revise), so
-  // by the time we reach this insert the string is guaranteed safe.
+  // Phase 1 — prefer Dahlia's per-creative `composition_name` (a short static-composition
+  // description like `two ways color pop benefits`) as the campaign name. The value was
+  // validated inside `runCopyAuthorSession` (empty / weight-loss / competitor-brand →
+  // copy-only revise), so by insert time it is safe.
   const composition = opts?.authorModeCopy?.composition_name?.trim();
+  // dahlia-names-each-ad-from-its-headline-minus-weight-loss-not-a-generic-template Phase 1 —
+  // legacy / deterministic fallback: compose `Dahlia - {productTitle} - {sanitizedHeadline}`
+  // so rows without author-mode `composition_name` still avoid the old indistinguishable
+  // `Dahlia · {product} · {source}` template and the competitor source label.
+  const rawHeadline = copyPack.headlines[0] ?? "";
+  const competitorTokens: string[] =
+    angle.source === "competitor" &&
+    typeof (angle.raw as { advertiser?: unknown } | undefined)?.advertiser === "string"
+      ? ((angle.raw as { advertiser: string }).advertiser).split(/\s+/).map((t) => t.trim())
+      : [];
+  const conceptTagFallback = opts?.authorModeCopy?.concept_tag ?? "ad";
+  const sanitizedHeadline = deriveAdName(rawHeadline, competitorTokens, conceptTagFallback);
   const name = composition && composition.length > 0
     ? composition
-    : `Dahlia · ${productTitle} · ${angle.source}`;
+    : `Dahlia - ${productTitle} - ${sanitizedHeadline}`;
   const angleId = (angleRow as { id?: string } | null)?.id ?? null;
   const status = readyStatusForAngle(angleId);
   if (!angleId) {

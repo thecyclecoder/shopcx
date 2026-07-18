@@ -20895,11 +20895,81 @@ async function runMediaBuyerJob(job: Job) {
 async function runAdCreativeJob(job: Job) {
   const tag = `[ad-creative:${job.id.slice(0, 8)}]`;
   const a = await admin();
-  let instr: { product_id?: string; count?: number } = {};
+  let instr: {
+    product_id?: string;
+    count?: number;
+    // ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
+    // the ad-review-feedback router (src/lib/ads/ad-review-feedback-router.ts `specForEntry` on
+    // `targetKind: 'render-format'`) enqueues an `ad-creative` job carrying these fields. On this
+    // shape we take the surgical in-place branch below INSTEAD of runAdCreativeLoop's fresh
+    // whole-pack path — the CEO's note is applied to the ONE named format on the EXISTING campaign.
+    ad_campaign_id?: string;
+    format?: string;
+    revise_reason?: string;
+    targetKind?: string;
+  } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
     /* not JSON — degrade to workspace-wide top-up */
+  }
+
+  // ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
+  // detect the feedback context ({ad_campaign_id, format, revise_reason}) the router supplies. On
+  // that shape run the surgical in-place regen and RETURN — never call runAdCreativeLoop for a
+  // feedback edit (that path builds a fresh whole-pack and creates a NEW ad_campaigns row, which is
+  // exactly what the CEO called out: "it's almost like she just made 2 new ads instead of editing
+  // the existing one"). The router already validated it's one of the four AdReviewFeedbackEntry
+  // targetKinds; we accept ANY invocation carrying all three fields so a manual replay via the
+  // dev-ask API doesn't need to spoof `targetKind`.
+  if (instr.ad_campaign_id && instr.format && instr.revise_reason) {
+    const { PLACEMENT_ASPECT } = await import("../src/lib/ads/creative-pack");
+    if (!(instr.format in PLACEMENT_ASPECT)) {
+      console.warn(`${tag} feedback-targeted job with unknown format=${instr.format} — refusing`);
+      await update(job.id, { status: "failed", log_tail: `unknown_format:${instr.format}` });
+      return;
+    }
+    console.log(
+      `${tag} feedback-targeted in-place regen: ad_campaign_id=${instr.ad_campaign_id} format=${instr.format}`,
+    );
+    try {
+      const { regenerateExistingFormat } = await import("../src/lib/ads/regenerate-existing-format");
+      const result = await regenerateExistingFormat(a, {
+        workspaceId: job.workspace_id,
+        adCampaignId: instr.ad_campaign_id,
+        format: instr.format as import("../src/lib/ads/creative-pack").PlacementFormat,
+        ceoReviseReason: instr.revise_reason,
+      });
+      if (result.ok) {
+        console.log(`${tag} in-place regen ok: ad_video_id=${result.adVideoId} storage=${result.storagePath}`);
+        await update(job.id, {
+          status: "completed",
+          log_tail: JSON.stringify({
+            path: "feedback_in_place_regen",
+            ad_campaign_id: instr.ad_campaign_id,
+            format: instr.format,
+            ad_video_id: result.adVideoId,
+            storage_path: result.storagePath,
+          }).slice(-4000),
+        });
+      } else {
+        console.warn(`${tag} in-place regen failed: ${result.reason}`);
+        await update(job.id, {
+          status: "failed",
+          log_tail: JSON.stringify({
+            path: "feedback_in_place_regen",
+            ad_campaign_id: instr.ad_campaign_id,
+            format: instr.format,
+            reason: result.reason,
+          }).slice(-4000),
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${tag} in-place regen threw: ${msg}`);
+      await update(job.id, { status: "failed", log_tail: msg.slice(-4000) });
+    }
+    return;
   }
   // dahlia-creative-qc-via-box-session Phase 1 — inject the QC dispatcher: each per-creative QC
   // pass spawns a top-level `claude -p` on Max via runBoxLane (kind='ad-creative-qc', sandbox='max'
