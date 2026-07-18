@@ -625,24 +625,25 @@ export async function escalateMediaBuyerTestPublishRefusal(
 }
 
 // ── Max copy-QC hard gate at Bianca's publish step ──────────────────────────
-// bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
-// defence-in-depth over the ad_campaigns eligibility flag: at the actual money
-// step (the `ad_publish_jobs` insert + Meta post fan-out), independently re-verify
-// the creative carries a valid Max copy-QC verdict with `hard_gate_pass` AND
-// `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A null/missing verdict or a
-// sub-7 score REFUSES the post — the creative is skipped, an audit row is written,
-// and no dollars flow. Mirrors the shape of the media-buyer test-cohort gate: a
-// dispatched fail-closed rail evaluated at the same last-mile chokepoint.
+// bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 (with
+// bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate Phase 1
+// raising the floor from 7 to 9) — defence-in-depth over the ad_campaigns eligibility
+// flag: at the actual money step (the `ad_publish_jobs` insert + Meta post fan-out),
+// independently re-verify the creative carries a valid Max copy-QC verdict with
+// `hard_gate_pass` AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9). A
+// null/missing verdict or a below-floor score REFUSES the post — the creative is
+// skipped, an audit row is written, and no dollars flow. Mirrors the shape of the
+// media-buyer test-cohort gate: a dispatched fail-closed rail evaluated at the same
+// last-mile chokepoint.
 //
 // Shares the `MAX_QC_ELIGIBILITY_FLOOR` constant + `isCopyQcEligible` predicate
-// with Dahlia's bin gate (max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia
-// Phase 2) so the floor can never diverge between the two rails.
+// with Dahlia's bin gate so the floor can never diverge between the two rails.
 
 /** Why Bianca's publish path refused to post a creative to Meta. */
 export type MaxCopyQcPublishRefusalReason =
   | "missing_max_copy_qc_verdict" // no ad_creative_copy_qc_verdicts row (Max never scored the creative).
   | "hard_gate_fail" // verdict exists but a Max hard gate failed (fabrication, cold-offer, competitor leak, single-promise, render).
-  | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (7).
+  | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (9).
 
 export interface MaxCopyQcPublishGateAllowResult {
   ok: true;
@@ -670,7 +671,7 @@ export type MaxCopyQcPublishGateResult =
  * Refusal precedence: missing verdict → hard-gate fail → below the score floor.
  * `hard_gate_fail` fires FIRST when `hard_gate_pass === false` regardless of the
  * (advisory / null-forced) `persuasion_score`; below-floor only fires when hard
- * gates passed but the score didn't clear the CEO's 7/10 rule. Mirrors
+ * gates passed but the score didn't clear the CEO's 9/10 rule. Mirrors
  * `isCopyQcEligible`'s ordering exactly so the two predicates can never disagree.
  */
 export function classifyMaxCopyQcAtPublish(
@@ -731,7 +732,7 @@ function maxCopyQcRefusalDiagnosis(
  * DB-aware wrapper — reads the latest Max copy-QC verdict for a creative via the
  * `readLatestCopyQaVerdict` SDK chokepoint, then delegates to `classifyMaxCopyQcAtPublish`.
  * Bianca's replenish path calls this BEFORE inserting an `ad_publish_jobs` row so a
- * sub-7 / ungraded creative is skipped at the money step — never enqueued, never posted.
+ * below-floor / ungraded creative is skipped at the money step — never enqueued, never posted.
  *
  * INDEPENDENT of the `ad_campaigns` bin-eligibility flag: a mis-flipped flag or a
  * missing / NULL verdict routes to refusal here too. This is the "second, fail-closed

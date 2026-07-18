@@ -1,10 +1,11 @@
 /**
  * Unit tests for the Max copy-QC hard rail at Bianca's publish step —
- * bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1.
+ * bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1
+ * (floor raised from 7 to 9 by bianca-posts-only-at-9of10 Phase 1).
  *
  * Covers the three states the spec's verification calls out:
- *   1) `>=7 verdict with hard_gate_pass=true` → gate PASSES  (post allowed)
- *   2) sub-7 verdict with hard_gate_pass=true → gate REFUSES ('below_score_floor')
+ *   1) `>=9 verdict with hard_gate_pass=true` → gate PASSES  (post allowed)
+ *   2) below-floor verdict with hard_gate_pass=true → gate REFUSES ('below_score_floor')
  *   3) NULL / missing verdict                → gate REFUSES ('missing_max_copy_qc_verdict')
  *
  * Plus the hard-gate-fail branch (a 10/10 score behind a failed hard gate must still
@@ -55,15 +56,27 @@ function verdict(overrides: Partial<StoredCopyQaVerdict> = {}): StoredCopyQaVerd
 
 // ── Pure classifier ──────────────────────────────────────────────────────────
 
-test("classifyMaxCopyQcAtPublish — 7/10 hard-gate-pass verdict → ok (the exact boundary)", () => {
-  assert.deepEqual(classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 7 })), { ok: true });
+test("classifyMaxCopyQcAtPublish — 9/10 hard-gate-pass verdict → ok (the exact boundary at the new floor)", () => {
+  assert.deepEqual(classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 9 })), { ok: true });
 });
 
 test("classifyMaxCopyQcAtPublish — 10/10 verdict → ok", () => {
   assert.deepEqual(classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 10 })), { ok: true });
 });
 
-test("classifyMaxCopyQcAtPublish — sub-7 (6/10) verdict → refuse 'below_score_floor'", () => {
+test("classifyMaxCopyQcAtPublish — 8/10 verdict → refuse 'below_score_floor' (previously eligible at 7, now held by the 9/10 CEO oversight floor)", () => {
+  const r = classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 8 }));
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.reason, "below_score_floor");
+});
+
+test("classifyMaxCopyQcAtPublish — 7/10 verdict → refuse 'below_score_floor' (old floor no longer clears)", () => {
+  const r = classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 7 }));
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.reason, "below_score_floor");
+});
+
+test("classifyMaxCopyQcAtPublish — 6/10 verdict → refuse 'below_score_floor'", () => {
   const r = classifyMaxCopyQcAtPublish(verdict({ persuasion_score: 6 }));
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.reason, "below_score_floor");
@@ -99,8 +112,8 @@ test("classifyMaxCopyQcAtPublish — hard-gate pass with NULL persuasion_score �
   if (!r.ok) assert.equal(r.reason, "below_score_floor");
 });
 
-test("classifyMaxCopyQcAtPublish — floor constant is 7 (shared with Dahlia's bin gate)", () => {
-  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 7);
+test("classifyMaxCopyQcAtPublish — floor constant is 9 (shared with Dahlia's bin gate; bianca-posts-only-at-9of10 Phase 1 raised it from 7)", () => {
+  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 9);
 });
 
 // ── DB-aware wrapper ─────────────────────────────────────────────────────────
@@ -142,20 +155,20 @@ function makeAdmin(rows: StoredCopyQaVerdict[]) {
   } as unknown as Parameters<typeof evaluateMaxCopyQcAtPublish>[0];
 }
 
-test("evaluateMaxCopyQcAtPublish — >=7 verdict on record → gate returns ok:true", async () => {
-  const admin = makeAdmin([verdict({ persuasion_score: 8 })]);
+test("evaluateMaxCopyQcAtPublish — >=9 verdict on record → gate returns ok:true", async () => {
+  const admin = makeAdmin([verdict({ persuasion_score: 9 })]);
   const gate = await evaluateMaxCopyQcAtPublish(admin, {
     workspaceId: "ws-1",
     adCampaignId: "campaign-1",
   });
   assert.equal(gate.ok, true);
   if (gate.ok) {
-    assert.equal(gate.scoreFloor, 7);
-    assert.equal(gate.verdict.persuasion_score, 8);
+    assert.equal(gate.scoreFloor, 9);
+    assert.equal(gate.verdict.persuasion_score, 9);
   }
 });
 
-test("evaluateMaxCopyQcAtPublish — sub-7 verdict on record → gate refuses ('below_score_floor') + diagnosis names the campaign", async () => {
+test("evaluateMaxCopyQcAtPublish — below-floor verdict on record → gate refuses ('below_score_floor') + diagnosis names the campaign", async () => {
   const admin = makeAdmin([verdict({ persuasion_score: 5 })]);
   const gate = await evaluateMaxCopyQcAtPublish(admin, {
     workspaceId: "ws-1",

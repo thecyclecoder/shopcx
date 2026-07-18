@@ -93,20 +93,22 @@ export const AUTHOR_SELF_SCORE_FLOOR = 6;
  *  goal's success metric depends on. */
 export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
 
-/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — the persuasion-score
- *  floor Max's copy-QC verdict must clear before the creative is eligible for Bianca's bin.
- *  The CEO's rule from the spec: "a creative is bin-eligible only if Max's hard gates pass
- *  AND his whole-ad score is at least 7/10; below 7 it is NOT eligible." Kept as a NAMED
- *  exported constant so a founder can tune it in one place without hunting through call sites.
- *  Read by `isCopyQcEligible` — the pure predicate `stockProduct` gates on before it hands the
- *  creative to `insertReadyCreative`. */
-export const MAX_QC_ELIGIBILITY_FLOOR = 7;
+/** The persuasion-score floor Max's copy-QC verdict must clear before the creative is
+ *  eligible for AUTO-POSTABILITY (Bianca posts it to Meta unattended). Raised from 7 to 9
+ *  by bianca-posts-only-at-9of10-plus-ceo-manual-score-override-oversight-gate Phase 1 — the
+ *  CEO's tighter oversight floor while the creative system is being tuned: only near-perfect
+ *  ads auto-post; 7-8 hold. Kept as a NAMED exported constant so a founder can tune it in one
+ *  place without hunting through call sites. Read by `isCopyQcEligible` — the pure predicate
+ *  `stockProduct` gates on before it hands the creative to `insertReadyCreative` — and by
+ *  `media-buyer/publish-gate.ts` `evaluateMaxCopyQcAtPublish` as the defence-in-depth gate at
+ *  the money step. Historical spec slugs still say "7of10" because they were named at the
+ *  earlier floor; the ACTIVE floor is this constant. */
+export const MAX_QC_ELIGIBILITY_FLOOR = 9;
 
-/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — pure predicate for
- *  bin eligibility on Max's copy-QC verdict. Eligible IFF the verdict exists AND
- *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A `null`
- *  verdict (dispatch error / parse error / no dispatcher) is NOT eligible — the CEO's rule:
- *  "below 7 (or a hard-gate fail, or a parse error) means NOT eligible." Scroll-stop sub-scores
+/** Pure predicate for postability on Max's copy-QC verdict. Eligible IFF the verdict exists AND
+ *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (9 — raised from
+ *  7 by bianca-posts-only-at-9of10 Phase 1). A `null` verdict (dispatch error / parse error /
+ *  no dispatcher) is NOT eligible. Scroll-stop sub-scores
  *  are DELIBERATELY not in this predicate (Goodhart guard — advisory only; only the top-line
  *  persuasion score + hard gates gate). Pure, exported, unit-testable so the floor is provable
  *  from a fixture verdict.
@@ -1426,11 +1428,12 @@ export function buildCopyQcPromptPreamble(input: {
  *  runs it through `sanitizeReviseReason` at the choke-point (identical guard as the firewall /
  *  validator reasons — no interpolation of untrusted strings the model could weaponize as
  *  instructions). Format is one-line, ≤ ~500 chars: `max_qc_below_floor: <verdict_reason>
- *  (score=N, floor=7)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]`. The
+ *  (score=N, floor=M)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]` — floor
+ *  is `MAX_QC_ELIGIBILITY_FLOOR` (currently 9 after bianca-posts-only-at-9of10 Phase 1). The
  *  hard-gate list and persuasion-gap list are elided when empty so Dahlia sees only the
  *  critiques that actually apply. A NULL verdict (Max session dispatch/parse miss) yields the
  *  distinct `max_qc_verdict_missed` prefix so operators can slice miss rates apart from a
- *  legitimate sub-7 bounce. */
+ *  legitimate below-floor bounce. */
 export function buildMaxQcReviseReason(
   verdict: CopyQaVerdict | null,
   floor: number = MAX_QC_ELIGIBILITY_FLOOR,
