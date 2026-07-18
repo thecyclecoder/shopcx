@@ -1,0 +1,1 @@
+- **Dahlia's copy variations each LEAD with a different conversion-psychology framework — still complete ads, persisted in copy_pack** · verified 2026-07-18 · → [[ad-creative]]
