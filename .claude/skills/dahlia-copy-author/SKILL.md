@@ -112,7 +112,7 @@ layer 2 will require you to emit.
 | # | Claim class | Example (do NOT write unless you can cite one of these) | The ONLY allowed source fields |
 |---|-------------|---------------------------------------------------------|--------------------------------|
 | 1 | **Numbers** — any specific number attached to a benefit or dose (`600mg`, `43%`, `8 out of 10`, `4.7 stars`, `40 lbs`) | `600mg L-theanine`, `lost 43% of my belly fat`, `4.7-star average` | `pi.ingredients` (a dosage row on a real ingredient — e.g. `600mg` on the L-theanine row) OR the rating on a review returned by `pi.reviews.byClaim(benefitName)` (the lazy closure exported by [[../../../src/lib/product-intelligence.ts]] `getProductIntelligence`). A number that appears in neither is a fabrication — do not write it. |
-| 2 | **First-person testimony** — a named reviewer + a quote in their voice (`"I dropped 40 lbs in 12 weeks" — Kaitlyn`) | `"changed my life" — Sarah`, a `John H.` quote | `brief.transformation.reviewer` + `brief.transformation.quote` (a real customer transformation the brief already surfaces) OR `brief.leadProof.attribution` + `brief.leadProof.text` (the lead-proof review the brief already picked). Never invent a reviewer name; never paraphrase a quote so hard the words aren't in the source. |
+| 2 | **First-person testimony** — a named reviewer + a quote in their voice (`Kaitlyn said, "I dropped 40 lbs in 12 weeks"`) | `Sarah said "it changed my life"`, a `John H.` quote | `brief.transformation.reviewer` + `brief.transformation.quote` (a real customer transformation the brief already surfaces) OR `brief.leadProof.attribution` + `brief.leadProof.text` (the lead-proof review the brief already picked). Never invent a reviewer name; never paraphrase a quote so hard the words aren't in the source. **NEVER use an em-dash for attribution** (`"…" — Kaitlyn` fails the human-voice rail); use a comma-attribution (`Kaitlyn said, "…"`) or a period-attribution (`"…" Kaitlyn wrote.`) instead. |
 | 3 | **Ingredient names** — any specific ingredient, mechanism molecule, or clinical study name (`ashwagandha`, `L-theanine`, `KSM-66`, `citrus polyphenols`) | `KSM-66 ashwagandha`, `patented L-carnitine complex` | `pi.ingredients` (a row whose `name` matches the ingredient you're about to write) OR `pi.ingredientResearch` (a row whose ingredient name matches). If the ingredient isn't in either list, it isn't in this product — do not name it. |
 | 4 | **Timeframes** — any duration attached to a result (`in 14 days`, `by week 3`, `overnight`, `within a month`) | `results in 7 days`, `noticed a change in 2 weeks` | A timeframe token literally present in one of the reviews returned by `pi.reviews.byClaim(benefitName)` OR literally present in `brief.transformation.quote`. Never write a timeframe from your own generalization of "typical" outcomes; if a real customer didn't say the duration, do not claim the duration. |
 | 5 | **Comparative claims** — any "versus" claim against another product, category, or approach (`unlike stimulants`, `better than melatonin`, `no jitters like caffeine`, `beats the leading pre-workout`) | `outperforms `<brand>``, `unlike other greens powders` | A token in `brief.supportingBenefits` (the brief's own vetted comparison line — e.g. "no jitters", "no crash") OR `brief.competitorDna` (the debranded competitor angle the M2 competitor-DNA spec surfaces, when the angle is `source='competitor'`). A comparative claim outside both sources is a fabrication — the M2 debrand pass exists precisely so you don't have to invent one. |
@@ -120,7 +120,7 @@ layer 2 will require you to emit.
 
 **Cross-cutting reminders.**
 
-- A claim that mixes classes (a specific number in a first-person quote — `"lost 40 lbs in 12 weeks" — Kaitlyn`) needs BOTH cited — the number must literally appear in the quote itself (i.e. the review body already contains "40 lbs" and "12 weeks"), and the quote must be a real `brief.transformation` / `brief.leadProof` line. Don't stitch a real reviewer onto an invented outcome.
+- A claim that mixes classes (a specific number in a first-person quote — `Kaitlyn said, "I lost 40 lbs in 12 weeks"`) needs BOTH cited — the number must literally appear in the quote itself (i.e. the review body already contains "40 lbs" and "12 weeks"), and the quote must be a real `brief.transformation` / `brief.leadProof` line. Don't stitch a real reviewer onto an invented outcome.
 - A `reviews.byClaim(benefitName)` citation is only valid when the review body actually contains the specific claim substring. Calling `byClaim("focus")` and then writing "43% sharper focus" only works when a real returned review says "43% sharper" — the closure returns real review bodies, not permission to invent.
 - A `pi.ingredients` citation is only valid when the ingredient row actually carries the specific number you're writing (the dosage / display fields). "600mg L-theanine" cites the L-theanine row's `600mg` dosage; "1000mg L-theanine" is a fabrication even though L-theanine is real.
 - A `pi.ingredientResearch` citation is for research-backed mechanism claims (a clinical study, a mechanism sentence); the claim substring must appear in that research row's text.
@@ -332,7 +332,7 @@ the never-fabricate firewall):**
 
 > `Everyone said cut the coffee. She did the opposite.`
 >
-> `Barbara H. dropped 40+ lbs the year she swapped her regular cup for a mug of Amazing Coffee. It's a real coffee, roasted with six functional mushrooms and a scoop of grass-fed collagen, and 700,000+ people quietly rely on it every morning. There's no crash, no jitter, no afternoon dip — and it comes with a 30-day money-back guarantee, so trying it costs you nothing.`
+> `Barbara H. dropped 40+ lbs the year she swapped her regular cup for a mug of Amazing Coffee. It's a real coffee, roasted with six functional mushrooms and a scoop of grass-fed collagen, and 700,000+ people quietly rely on it every morning. There's no crash, no jitter, no afternoon dip, and it comes with a 30-day money-back guarantee so trying it costs you nothing.`
 >
 > `See what a different cup can do.`
 
@@ -340,6 +340,76 @@ Notice the shape: a short hook (8 words) that's a contrarian pattern-interrupt a
 `…more` fold, a body (about 3-4x longer) that stacks the specifics + the proofStack cites,
 and a one-sentence close under 25 words. The BLANK lines between paragraphs are what the
 validator splits on — do not collapse them to a single `\n`.
+
+### WRITE LIKE A PERSON, NOT AI (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2)
+
+A scrolling Meta buyer distrusts copy that smells AI-written before they even read it, and
+the CEO called this out by name: the copy last night's ads shipped read as machine-flat, and
+the number-one signature was the em-dash. Two rails close that gap — a HARD deterministic
+rail for the em-dash (the biggest single tell), and SKILL guidance you must obey for the
+softer tells that need context a regex can't provide.
+
+**HARD RAIL — NO EM-DASHES anywhere.** Never write the em-dash character (U+2014, `—`) in
+`headline`, `primaryText`, `description`, or any `variations[].headline` /
+`variations[].primaryText`. `validateCopyHumanVoice` in
+`src/lib/ads/creative-agent.ts` scans every user-facing field for U+2014 and fails
+`em_dash_ai_tell` with the exact location (`primaryText`, `variations[lf8].headline`, etc.);
+the miss becomes the revise reason and triggers the ONE copy-only revise. Also never use a
+SPACED en-dash (` – `, a leading whitespace + U+2013 + trailing whitespace) as a sentence
+dash — the validator flags it as `en_dash_as_sentence_dash`. A range en-dash (`14-day`,
+`Mon–Fri`) with no surrounding spaces is fine — only the spaced sentence-dash usage is the
+AI tell.
+
+**Rewrite every em-dash to one of these instead:**
+
+- A comma (`Steady focus, no crash`).
+- A period (`Steady focus. No crash.`).
+- A parenthesis (`Steady focus (and no crash)`).
+- Two sentences (`Steady focus. That's the whole point.`).
+
+**SKILL guidance — the softer AI tells you MUST also avoid.** These are contextual, so
+they're your job to spot and Max's job to penalize, not the deterministic rail's:
+
+- **No `not just X, it's Y` (or `it's not just X, it's Y`) balanced constructions.** The
+  parallel `A, but B` cadence is a chatbot tell — it feels balanced because a chatbot was
+  optimizing symmetry, not talking. Kill the balance: pick a side and mean it (`It's a
+  better cup.` instead of `It's not just a coffee, it's a better cup.`).
+- **No mechanical rule-of-three fluff.** A honest tricolon lands (`No spike, no crash, no
+  jitter.`); a forced one reads AI (`clean, effective, and delicious`). If the three
+  items don't each carry weight, cut to one strong one.
+- **No AI-flavored verbs / adjectives.** Ban `elevate`, `unlock`, `transform`,
+  `supercharge`, `revolutionize`, `game-changer`, `game-changing`, `next-level`,
+  `cutting-edge`, `state-of-the-art`, `seamless`, `curated`, `handcrafted` (unless the
+  brief literally says so). Say what happens instead: not `elevate your morning`, say
+  `Barbara stopped skipping breakfast`.
+- **No AI-flavored opener phrases.** Ban `In a world where …`, `Say goodbye to …`, `Say
+  hello to …`, `Introducing …`, `Meet …`, `Imagine a …`, `Picture this …`. All chatbot
+  templates. Start with a real hook (`Everyone said cut the coffee. She did the
+  opposite.`).
+
+**Human-voice moves to REACH FOR instead:**
+
+- **Contractions.** `don't`, `it's`, `you're`, `here's`, `can't` — a real person writes
+  them; a chatbot's default output frequently over-formalizes. `Here's what she did`, not
+  `Here is what she did`.
+- **Plain specific words.** Say `coffee`, not `beverage`. Say `40 pounds`, not `a
+  significant amount of weight`. Say `morning`, not `AM routine`.
+- **Occasional sentence fragments.** Real DR copy uses them for punch. `No crash. All
+  morning.` A model's default cadence favors full sentences; you're allowed to break it.
+- **Concrete, cited detail over generic promise.** Not `feel better` — `Barbara lost 15
+  pounds in 3 weeks` (still traced through the never-fabricate firewall).
+
+**Two before / after examples (illustrative — every real claim still traces the firewall):**
+
+- **BAD (em-dash + not-just balanced construction + AI verb):**
+  > `Elevate your mornings — not just another coffee, but a transformative ritual.`
+
+  Fails `em_dash_ai_tell` deterministically; also reads AI on `elevate`, the balanced
+  `not just X, but Y`, and `transformative`. Kill the em-dash, kill the balance, name what
+  actually happens.
+
+- **GOOD (contraction, specific detail, no em-dash, no not-just):**
+  > `She lost 15 pounds in 3 weeks and didn't count a single calorie.`
 
 ### BAD vs GOOD (illustrative — every real claim still traces through the never-fabricate firewall)
 
@@ -352,7 +422,7 @@ validator splits on — do not collapse them to a single `\n`.
 
 - **GOOD — illustrative shape** (contrarian curiosity opener that front-loads the reader's
   benefit):
-  > `"Everyone said cut back on coffee. She did the opposite — and dropped 40 lbs."`
+  > `"Everyone said cut back on coffee. She did the opposite, and dropped 40 lbs."`
 
   Why it works: contrarian pattern-interrupt ("everyone said X, she did the opposite")
   earns the `…more` expand; front-loads the reader's outcome (weight loss) softly; the
@@ -393,17 +463,17 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
   },
   "claim_trace": [
     { "claim": "600mg L-theanine", "source": "ingredients", "source_ref": "L-theanine" },
-    { "claim": "\"I dropped 40 lbs\" — Kaitlyn", "source": "transformationStory", "source_ref": "Kaitlyn" },
+    { "claim": "Kaitlyn said, \"I dropped 40 lbs\"", "source": "transformationStory", "source_ref": "Kaitlyn" },
     { "claim": "steady focus", "source": "supportingBenefit", "source_ref": "steady focus" },
     { "claim": "700,000+ customers", "source": "proofStack", "source_ref": "700,000+ customers across the country trust Superfoods Company" },
     { "claim": "risk-free with our 30-day money-back guarantee", "source": "proofStack", "source_ref": "30-day money-back guarantee" }
   ],
   "variations": [
-    { "framework": "lf8", "headline": "Feel lighter. Finally.", "primaryText": "…a self-contained hook led by the reader's raw Life-Force-8 desire — feel better, less pain, more comfort. No product intro, no offer on cold." },
-    { "framework": "schwartz", "headline": "Not another diet. A better cup.", "primaryText": "…a self-contained hook matched to the market's awareness/sophistication level — write ONE step above the shelf's modal level so it lands as fresh, not repeated. Cite the fallback if you drop." },
-    { "framework": "cialdini", "headline": "700,000+ customers. 15K reviews.", "primaryText": "…a self-contained hook led by social proof / authority / scarcity — real numbers only (traceable to `pi.reviews` volume, `pi.reviews.byClaim` counts, real endorsements)." },
-    { "framework": "hopkins", "headline": "She lost 15 lbs in 3 weeks.", "primaryText": "…a self-contained hook led by specificity + a reason-why — a real number, a real duration, a real ingredient dose, all citable per claim_trace." },
-    { "framework": "sugarman", "headline": "Stop dieting. Drink this instead.", "primaryText": "…a self-contained hook led by curiosity + a slippery-slide first line the reader has to expand past the `…more` ellipsis to close. Contrarian pattern-interrupt, no flat benefit summary." }
+    { "framework": "lf8", "headline": "Feel lighter. Finally.", "primaryText": "…a self-contained hook led by the reader's raw Life-Force-8 desire (feel better, less pain, more comfort). No product intro. No offer on cold." },
+    { "framework": "schwartz", "headline": "Not another diet. A better cup.", "primaryText": "…a self-contained hook matched to the market's awareness/sophistication level. Write ONE step above the shelf's modal level so it lands as fresh, not repeated. Cite the fallback if you drop." },
+    { "framework": "cialdini", "headline": "700,000+ customers. 15K reviews.", "primaryText": "…a self-contained hook led by social proof / authority / scarcity. Real numbers only (traceable to `pi.reviews` volume, `pi.reviews.byClaim` counts, real endorsements)." },
+    { "framework": "hopkins", "headline": "She lost 15 lbs in 3 weeks.", "primaryText": "…a self-contained hook led by specificity plus a reason-why. A real number, a real duration, a real ingredient dose, all citable per claim_trace." },
+    { "framework": "sugarman", "headline": "Stop dieting. Drink this instead.", "primaryText": "…a self-contained hook led by curiosity plus a slippery-slide first line the reader has to expand past the `…more` ellipsis to close. Contrarian pattern-interrupt, no flat benefit summary." }
   ]
 }
 ```

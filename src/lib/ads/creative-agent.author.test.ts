@@ -113,7 +113,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
       headline: "Feel lighter. Finally.",
       primaryText: longForm(
         "She stopped counting calories.",
-        "Barbara traded her regular cup for Amazing Coffee and the cravings faded on their own — six functional mushrooms, grass-fed collagen, no crash, no jitter, no afternoon dip after 700,000 people quietly made the switch.",
+        "Barbara traded her regular cup for Amazing Coffee and the cravings faded on their own, thanks to six functional mushrooms, grass-fed collagen, no crash, no jitter, and no afternoon dip after 700,000 people quietly made the switch.",
         "See what a different cup can do.",
       ),
     },
@@ -140,7 +140,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
       headline: "She lost 15 lbs in 3 weeks.",
       primaryText: longForm(
         "Fifteen pounds in three weeks.",
-        "Barbara lost 15 pounds in 3 weeks after she swapped her regular cup for Amazing Coffee, and it was the same brew 700,000 customers keep on their counter — real coffee, six functional mushrooms, one scoop of grass-fed collagen.",
+        "Barbara lost 15 pounds in 3 weeks after she swapped her regular cup for Amazing Coffee, and it was the same brew 700,000 customers keep on their counter, real coffee, six functional mushrooms, one scoop of grass-fed collagen.",
         "Read the reviews and decide for yourself.",
       ),
     },
@@ -155,7 +155,7 @@ function envelope(overrides: Record<string, unknown> = {}): string {
     },
   ];
   const body = {
-    headline: "Clean energy — no crash",
+    headline: "Clean energy, no crash",
     primaryText: longForm(
       "Steady focus. All morning.",
       "The adaptogens hit within twenty minutes and hold four hours without a spike, without a crash, without the afternoon dip a regular cup always ends in, and 700,000 customers keep it on their counter every day.",
@@ -225,7 +225,7 @@ test("parseAuthorVerdict: happy path → ok with all fields", () => {
   const result = parseAuthorVerdict(envelope());
   assert.equal(result.kind, "ok");
   if (result.kind === "ok") {
-    assert.equal(result.verdict.headline, "Clean energy — no crash");
+    assert.equal(result.verdict.headline, "Clean energy, no crash");
     assert.equal(result.verdict.audience_temperature, "warm");
     assert.equal(result.verdict.concept_tag, "mechanism");
     assert.equal(result.verdict.selfScore.total, 10);
@@ -1027,6 +1027,65 @@ test("runCopyAuthorSession: paragraph-structure failure that keeps repeating →
     assert.match(outcome.reason, /paragraph_structure_failed/);
     // A paragraph-structure exhaustion is NOT a validator / firewall / max-qc exhaustion — the
     // distinguishing fields stay undefined so stockProduct routes it to the plain
+    // `dahlia_copy_author_exhausted` escalation.
+    assert.equal(outcome.validatorMisses, undefined);
+    assert.equal(outcome.firewallMisses, undefined);
+    assert.equal(outcome.maxCopyQcMissed, undefined);
+  }
+});
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2 — human-voice gate ─────
+
+test("runCopyAuthorSession: canonical primaryText carrying an em-dash → human_voice_failed revise; clean second attempt → ok", async () => {
+  // Long-form paragraph shape stays valid (so the paragraph gate passes), but the middle
+  // paragraph carries an em-dash — the CEO's exact call-out. The human-voice gate must fire
+  // and the revise reason must cite the em-dash so Dahlia knows what to rewrite.
+  const withDash = envelope({
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours — no spike, no crash, no afternoon dip, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
+  });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: withDash }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /human_voice_failed/);
+    assert.match(calls[1].prompt, /primaryText=em_dash_ai_tell/);
+  }
+});
+
+test("runCopyAuthorSession: em-dash in a variation headline is caught with the framework name in the revise reason", async () => {
+  // Canonical is clean; one variation's headline carries the em-dash — the revise reason must
+  // NAME the offending variation so Dahlia knows which slot to fix.
+  const withDashVariation = envelope({
+    variations: [
+      { framework: "lf8", headline: "Feel lighter — finally.", primaryText: "Hook.\n\nBody delivers info about mushrooms and collagen and 700,000 customers across the country.\n\nSee more." },
+      { framework: "schwartz", headline: "Not another diet. A better cup.", primaryText: "Hook.\n\nBody delivers info about mushrooms and collagen and 700,000 customers across the country.\n\nSee more." },
+      { framework: "cialdini", headline: "700,000+ customers. 15K reviews.", primaryText: "Hook.\n\nBody delivers proof stack about customers and reviews and the 30-day money-back guarantee 700,000 customers rely on.\n\nSee more." },
+      { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hook.\n\nBody delivers Barbara's 15 pounds in 3 weeks with real coffee and six functional mushrooms and grass-fed collagen every morning.\n\nSee more." },
+      { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Hook.\n\nBody delivers the curiosity payoff about the coffee mushrooms and collagen and the crash-free morning 700,000 customers share.\n\nSee more." },
+    ],
+  });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: withDashVariation }, { resultText: envelope() }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2);
+    assert.match(calls[1].prompt, /variations\[lf8\]\.headline=em_dash_ai_tell/);
+  }
+});
+
+test("runCopyAuthorSession: em-dash failure that keeps repeating → exhausted with the human_voice_failed reason", async () => {
+  const withDash = envelope({
+    primaryText: "Steady focus, all morning.\n\nThe adaptogens hit within twenty minutes and hold four hours — no spike, no crash, no afternoon dip, and 700,000 customers keep it on their counter every day.\n\nSee what a different cup can do.",
+  });
+  const replies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({ resultText: withDash }));
+  const { dispatch } = scriptedDispatcher(replies);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.match(outcome.reason, /human_voice_failed/);
+    // A human-voice exhaustion is NOT a validator / firewall / paragraph / max-qc exhaustion —
+    // the distinguishing fields stay undefined so stockProduct routes it to the plain
     // `dahlia_copy_author_exhausted` escalation.
     assert.equal(outcome.validatorMisses, undefined);
     assert.equal(outcome.firewallMisses, undefined);

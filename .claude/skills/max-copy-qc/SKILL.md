@@ -162,6 +162,42 @@ one-line primary text that reaches you (edge-case fall-through) should be flagge
 `persuasion_rubric.evidence` under `sugarman` as failing the ellipsis-earning expand (that IS
 a scroll-stop miss) — but the shape is judged as a persuasion signal, not as a hard gate.
 
+## ⚠️ Distrust AI-tell copy — penalize it in persuasion / scroll_stop (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 2)
+
+A scrolling Meta buyer distrusts copy that smells AI-written before they even read the
+promise. The CEO called this out by name after last night's ads: "the copy reads like AI."
+Two rails close it — the deterministic em-dash gate (already enforced on Dahlia's side by
+`validateCopyHumanVoice`; a caption with U+2014 is bounced before it reaches you), plus
+YOUR judgment on the softer tells a regex can't catch.
+
+When you see any of these in the copy, **penalize the persuasion score and cite it as
+scroll-stop evidence** — a buyer who feels "this is AI slop" scrolls past no matter how
+good the rest of the caption is:
+
+- **Balanced `not just X, it's Y` (or `it's not just X, it's Y`) constructions.** Chatbot
+  cadence — the symmetry gives it away. Dock 1-2 points on `sugarman` (flat / mechanical
+  cadence) and note the phrase in `persuasion_rubric.evidence`.
+- **Overused rule-of-three.** A tricolon that lands (`No spike, no crash, no jitter.`) is
+  fine — real DR uses it. A tricolon that's fluff (`clean, effective, and delicious`) is a
+  tell. If the three items don't each carry weight, dock `hopkins` (specificity is missing
+  and the tricolon is padding to fake it).
+- **AI-flavored verbs / adjectives.** `elevate`, `unlock`, `transform`, `supercharge`,
+  `revolutionize`, `game-changer`, `next-level`, `cutting-edge`, `seamless`, `curated`.
+  Never a real customer's word for what happened. Dock `lf8` (the raw driver was replaced
+  with a chatbot's neutral abstraction).
+- **AI-flavored opener phrases.** `In a world where …`, `Say goodbye to …`, `Introducing
+  …`, `Meet …`, `Imagine a …`. Template phrases. Dock `sugarman` — the opener earned no
+  scroll-stop; a real DR hook is contrarian or curiosity-driven, not templated.
+- **Em-dash slip-through.** The deterministic rail should have caught U+2014 upstream. If
+  one survived (edge case, or a spaced en-dash used as a sentence dash — ` – ` — still
+  reads as machine substitution), fail `hard_gates.no_fabrication` NO — but note it as a
+  human-voice miss in `persuasion_rubric.evidence` and dock `sugarman`. The rail is
+  Dahlia's; your job is the judgment that survives when a rail glitches.
+
+Cite the exact phrase you're penalizing (verbatim from `PRIMARY:` / `HEADLINE:`) so the
+recorded score is auditable — a downstream reader must be able to see WHY you docked, not
+just that you docked.
+
 ## Advisory persuasion score (0-10, RECORDED, never blocks)
 
 Score the caption on FIVE lenses, each 0-2 (min 0, max 10 total). Include a short evidence
