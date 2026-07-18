@@ -288,6 +288,30 @@ function pingPongInfo(
   };
 }
 
+// box-page-both-avatars-ping-pong Phase 2 — while the parent ad-creative-copy-author job is a ping-pong,
+// only ONE sub-session is running at a time (Dahlia authoring OR Max grading). Phase 1 streams a
+// checklist from those sessions; whichever item is `in_progress` names the currently-active actor
+// (author/authoring/revise/revising → Dahlia; grade/grading/copy-qc/score → Max). Return that persona so
+// the card can render the single ACTIVE photo instead of the dual-avatar fallback — the ping-pong is
+// then legible at a glance both in composition (via the dual title/label chip from `dual`) AND in the
+// current actor. Return null when there's no unambiguous signal (idle, no checklist yet, or a step whose
+// text doesn't map to either persona) so the caller falls back to the dual (both-avatar) render.
+function activePingPongPersona(
+  kind: string,
+  checklist: SessionChecklistItem[] | null | undefined,
+): AgentPersona | null {
+  if (kind !== "ad-creative-copy-author") return null;
+  if (!checklist || checklist.length === 0) return null;
+  const inProgress = checklist.find((c) => c.status === "in_progress");
+  if (!inProgress) return null;
+  const text = `${inProgress.step} ${inProgress.note}`.toLowerCase();
+  // Match Max markers first — the copy-QC grader — so a "Max grade" step doesn't accidentally hit the
+  // Dahlia branch on the word "copy" (author/authoring/revise/revising = Dahlia is the fallback branch).
+  if (/\b(max|grade|grading|copy-?qc|qc|score)\b/.test(text)) return getPersona("ad-creative-copy-qc");
+  if (/\b(dahlia|author|authoring|revise|revising)\b/.test(text)) return getPersona("ad-creative");
+  return null;
+}
+
 function LaneCell({ lane }: { lane: LaneRow | null }) {
   if (!lane) {
     return (
@@ -308,6 +332,11 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   // ONE parent job across the revise loop). Both cases render dual-avatar + a dual title + a static
   // sub-task label chip; every other kind falls back to the single-avatar / single-persona path.
   const dual = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge) ?? pingPongInfo(lane.kind);
+  // box-page-both-avatars-ping-pong Phase 2 — when Phase 1's checklist names an in-progress step whose
+  // text unambiguously maps to Dahlia (authoring/revising) or Max (grading), swap the ping-pong card's
+  // avatar to that persona's single photo so the currently-active actor is visible at a glance. Null
+  // (idle, no checklist, ambiguous step) means the card keeps the dual (both-avatar) fallback below.
+  const active = activePingPongPersona(lane.kind, lane.session_checklist);
   const title = dual
     ? dual.title
     : isCoach
@@ -319,11 +348,16 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A dual-
-          persona lane (fused pre-merge OR ad-creative ping-pong) shows BOTH avatars side-by-side; every
-          other lane keeps its single avatar. */}
+          persona lane (fused pre-merge OR ad-creative ping-pong) shows BOTH avatars side-by-side, unless
+          the ping-pong is currently mid-flight AND Phase 1's checklist unambiguously names the active
+          actor — then a single ACTIVE avatar swaps in (title/label chip below still reflect the dual
+          composition so the ping-pong context stays visible in text). Every other lane keeps its single
+          avatar. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          {dual ? (
+          {active ? (
+            <PersonaAvatar persona={active} size={20} />
+          ) : dual ? (
             <span className="flex shrink-0 items-center -space-x-2">
               <PersonaAvatar persona={dual.personas[0]} size={20} />
               <PersonaAvatar persona={dual.personas[1]} size={20} />
