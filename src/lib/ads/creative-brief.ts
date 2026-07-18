@@ -21,6 +21,7 @@
 import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-intelligence";
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { hasAnyLf8 } from "@/lib/ads/lf8";
+import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
 import type { ConceptTags } from "@/lib/creative-skeleton";
 
 type Row = Record<string, unknown>;
@@ -291,6 +292,16 @@ export interface CreativeBrief {
     benefitName: string;
     softPhrasings: string[];
   } | null;
+  /**
+   * swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 —
+   * derived product features (ingredient count, format) surfaced as the LAST-RESORT substitute
+   * pool for `chooseGroundedSubstitute` when the competitor's offer slot needs swapping and the
+   * brief carries no proofStack proof point / supporting benefit / lead proof. Populated from
+   * `pi.ingredients.length` (e.g. `"15 superfoods per tab"`); rarely fires since proofStack is
+   * usually rich, but keeps the substitute chooser closed under empty briefs. Optional; the
+   * substitute chooser handles a missing / empty array as "no feature available."
+   */
+  productFeatures?: string[];
 }
 
 /**
@@ -413,29 +424,79 @@ export async function buildCreativeBrief(
     offer ? "price shown only via allowed treatment (no bare MSRP)" : "no price shown",
   ];
 
+  // swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 —
+  // derived product features (ingredient count) as the LAST-RESORT substitute pool. Populated
+  // whenever pi.ingredients carries rows so `chooseGroundedSubstitute` has a grounded fallback
+  // when proofStack / benefits / leadProof are all empty. Rarely fires (proofStack is usually
+  // rich) but keeps the substitute chooser closed under empty briefs.
+  const productFeatures: string[] = [];
+  const ingredientCount = Array.isArray(pi.ingredients) ? pi.ingredients.length : 0;
+  if (ingredientCount > 0) {
+    productFeatures.push(`${ingredientCount} superfoods per serving`);
+  }
+
   // Preserve competitor copy DNA (dahlia-preserve-competitor-copy-dna-debranded Phase 1). The
   // creative-agent competitor-angle mapper (creative-agent.ts stockProduct) threads the
   // underlying skeleton's advertiser + hook + framework + mechanism_claim + proof + offer via
   // `angle.raw` so we can populate the four slots without a second DB read. Own-brand angles
   // leave the field unset. The RAW hook (pre-sanitizer) is carried so Dahlia's author session
   // can see the winner's original words before applying `debrandForOurBrand` at author time.
+  //
+  // ── swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 ──
+  // When the competitor's offer slot (or the raw hook) carries an OFFER we do not run (free
+  // tote / free gift / bonus item / discount), SWAP it for a grounded selling point from OUR
+  // brief (proofStack proof point → supportingBenefit → leadProof → derived feature). Preserves
+  // the WINNING STRUCTURE (the framework / mechanism / proof survives) while grounding the
+  // promise so downstream gates (firewall claim-miss on ungrounded freebie, cold-offer-leak on
+  // discount to cold audience) can pass. The brief's REAL offer (`brief.offer`, populated from
+  // our own pricing above) is a different type and is never touched — only the competitor's
+  // un-runnable offer is swapped.
   let competitorDna: CreativeBrief["competitorDna"];
   if (angle.source === "competitor") {
     const raw = angle.raw ?? {};
-    const rawHook = typeof raw.hook === "string" && raw.hook ? raw.hook : angle.hook;
+    const rawHookInput = typeof raw.hook === "string" && raw.hook ? raw.hook : angle.hook;
     const framework = typeof raw.framework === "string" ? raw.framework : null;
     const mechanismClaim = typeof raw.mechanismClaim === "string"
       ? raw.mechanismClaim
       : typeof raw.mechanism === "string" ? raw.mechanism : null;
     const proof = typeof raw.proof === "string" ? raw.proof : null;
-    const rawOffer = typeof raw.offer === "string" ? raw.offer : null;
+    const rawOfferInput = typeof raw.offer === "string" ? raw.offer : null;
     const competitorAdvertiser = typeof raw.advertiser === "string" ? raw.advertiser : null;
+
+    // Substitute is chosen ONCE from the brief data available so far — the swap on offer + hook
+    // both draw from the same grounded pool (proofStack → supportingBenefits → leadProof →
+    // productFeatures). Null when the brief carries no grounded selling point at all; the offer
+    // slot then becomes null and the hook keeps only its structural words.
+    const substitute = chooseGroundedSubstitute({
+      proofStack,
+      supportingBenefits,
+      leadProof,
+      productFeatures,
+    });
+
+    // OFFER SLOT — if the competitor's offer is an un-runnable OFFER, swap it for the grounded
+    // substitute (or null). A slot that ISN'T an offer (e.g. a plain framework line the source
+    // row happened to put in `offer`) passes through untouched.
+    const swappedOffer = rawOfferInput && isCompetitorOffer(rawOfferInput) ? substitute : rawOfferInput;
+
+    // HOOK — strip a lingering offer phrase from the raw hook so the winning structure survives
+    // without the freebie. When stripping would leave the hook empty (offer WAS the entire hook)
+    // fall back to `[substitute] + surviving structure` so Dahlia still sees the winner's shape;
+    // when nothing survives, keep the pre-strip hook (Dahlia's SKILL handles empty gracefully).
+    let hookOut = rawHookInput;
+    if (isCompetitorOffer(rawHookInput)) {
+      const stripped = stripCompetitorOffer(rawHookInput);
+      if (stripped) {
+        hookOut = substitute ? `${substitute} ${stripped}` : stripped;
+      }
+    }
+
     competitorDna = {
-      hook: rawHook,
+      hook: hookOut,
       framework,
       mechanismClaim,
       proof,
-      offer: rawOffer,
+      offer: swappedOffer,
       competitorAdvertiser,
     };
   }
@@ -485,7 +546,7 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave };
+  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
 }
 
 /**

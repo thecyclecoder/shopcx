@@ -323,3 +323,176 @@ test("buildCreativeBrief — competitor angle with NO role='lead' benefit degrad
   const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
   assert.equal(brief.leadBenefitWeave, null, "no role='lead' benefit → the RIFF field stays null (today's behavior)");
 });
+
+// ── buildCreativeBrief: Phase 1 — swap competitor offer for a grounded selling point ──────────
+// swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 — a
+// competitor's offer slot (free tote / free gift / bonus item / discount) is an offer we do not
+// run. It must be SWAPPED for a grounded selling point from OUR brief (proofStack proof point
+// preferred), not carried through into Dahlia's imitation rubric where the firewall + cold-offer
+// gate would correctly refuse the ungrounded / cold-offer claim.
+
+const SUPERFOOD_TABS_PI = () => makePi({
+  product: {
+    title: "Superfood Tabs",
+    certifications: ["Non-GMO", "3rd-party tested"],
+  },
+  benefits: [
+    { benefit_name: "Reduce bloating", role: "supporting", customer_phrases: ["less bloated"], display_order: 0 },
+  ],
+  store: { brandProofPoints: ["700,000+ customers", "30-day money-back", "15,000+ reviews"] },
+});
+
+test("buildCreativeBrief — a 'Free tote' competitor offer is SWAPPED for a grounded selling point (never 'tote')", async () => {
+  const pi = SUPERFOOD_TABS_PI();
+  const angle: ScoredAngle = {
+    hook: "Free tote badge with product held up outdoors",
+    source: "competitor",
+    leadBenefit: "curiosity",
+    acquisitionPower: 7,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: {
+      hook: "Free tote badge with product held up outdoors",
+      offer: "Free tote with every order",
+      advertiser: "Rival Superfoods",
+    },
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  assert.ok(brief.competitorDna, "expected competitorDna to be assembled for a competitor-source angle");
+  // The offer slot no longer carries the un-runnable competitor freebie.
+  assert.ok(!/tote/i.test(brief.competitorDna.offer ?? ""), `expected 'tote' scrubbed from competitorDna.offer; got ${brief.competitorDna.offer}`);
+  assert.ok(!/free/i.test(brief.competitorDna.offer ?? ""), `expected 'free' scrubbed from competitorDna.offer; got ${brief.competitorDna.offer}`);
+  // The swap picked a grounded selling point from proofStack (700K+ customers is the top-priority pool).
+  // proofStack is [awards, certifications, brandProofPoints], so 'Non-GMO' (first certification)
+  // wins over '700,000+ customers' (a brandProofPoint) — either is a valid grounded selling
+  // point; what matters is the invariant that a real proof point replaced the freebie.
+  assert.equal(brief.competitorDna.offer, "Non-GMO");
+  // The hook's freebie phrase is also stripped so the winning STRUCTURE ("product held up outdoors")
+  // survives without carrying "free tote" into Dahlia's imitation.
+  assert.ok(!/tote/i.test(brief.competitorDna.hook), `expected 'tote' scrubbed from competitorDna.hook; got ${brief.competitorDna.hook}`);
+  assert.ok(brief.competitorDna.hook.includes("with product held up outdoors"), `expected winning structure preserved; got ${brief.competitorDna.hook}`);
+});
+
+test("buildCreativeBrief — a NON-offer competitor offer slot (a plain framework line) passes through UNTOUCHED", async () => {
+  // Not every source row's `offer` field is a promotional freebie/discount — sometimes it's a
+  // plain outcome line. Those pass through so a legit competitor DNA slot isn't over-scrubbed.
+  const pi = SUPERFOOD_TABS_PI();
+  const angle: ScoredAngle = {
+    hook: "The morning routine everyone's copying",
+    source: "competitor",
+    leadBenefit: "curiosity",
+    acquisitionPower: 7,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: {
+      hook: "The morning routine everyone's copying",
+      offer: "Try it risk-free for 30 days",
+      advertiser: "Rival Superfoods",
+    },
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  assert.ok(brief.competitorDna);
+  assert.equal(brief.competitorDna.offer, "Try it risk-free for 30 days", "non-offer text should pass through untouched");
+});
+
+test("buildCreativeBrief — brief.offer (our REAL offer from pi.offer) is UNTOUCHED by the swap", async () => {
+  // The swap only applies to `competitorDna.offer` (competitor's un-runnable offer). Our own
+  // offer (populated from pi.offer with allowed price treatment) is a different type entirely
+  // and must render as today.
+  const pi = makePi({
+    product: { title: "Superfood Tabs" },
+    store: { brandProofPoints: ["700,000+ customers"] },
+    offer: {
+      subscribeDiscountPct: 25,
+      freeShipping: true,
+      quantityBreaks: [],
+      maxCompoundDiscountPct: 34,
+      headline: "Up to 34% off + free shipping",
+      msrpCents: 4900,
+      discountedUnitCents: 3234,
+      servingsPerUnit: 30,
+      perServingCents: 108,
+      disclaimer: "with 3+ units on Subscribe & Save",
+    },
+  });
+  const angle: ScoredAngle = {
+    hook: "Free tote with every order",
+    source: "competitor",
+    leadBenefit: "curiosity",
+    acquisitionPower: 7,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: { hook: "Free tote with every order", offer: "Free tote with every order", advertiser: "Rival" },
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  // brief.offer is our real store offer — untouched, still the headline the discount badge renders from.
+  assert.ok(brief.offer);
+  assert.equal(brief.offer.headline, "Up to 34% off + free shipping");
+  // competitorDna.offer got the swap (not brief.offer).
+  assert.ok(brief.competitorDna);
+  assert.ok(!/tote/i.test(brief.competitorDna.offer ?? ""));
+});
+
+test("buildCreativeBrief — a competitor discount ('50% OFF Today') in the OFFER slot is swapped for the grounded substitute", async () => {
+  const pi = SUPERFOOD_TABS_PI();
+  const angle: ScoredAngle = {
+    hook: "Wake up feeling amazing",
+    source: "competitor",
+    leadBenefit: "energy",
+    acquisitionPower: 7,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: { hook: "Wake up feeling amazing", offer: "50% OFF Today", advertiser: "Rival" },
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  assert.ok(brief.competitorDna);
+  // The competitor's discount is out — replaced with a grounded proof point from proofStack.
+  assert.ok(!/%|off/i.test(brief.competitorDna.offer ?? ""), `expected discount stripped; got ${brief.competitorDna.offer}`);
+  // proofStack is [awards, certifications, brandProofPoints], so 'Non-GMO' (first certification)
+  // wins over '700,000+ customers' (a brandProofPoint) — either is a valid grounded selling
+  // point; what matters is the invariant that a real proof point replaced the freebie.
+  assert.equal(brief.competitorDna.offer, "Non-GMO");
+});
+
+test("buildCreativeBrief — competitor angle with NO grounded selling point at all nulls the swapped offer", async () => {
+  // Degenerate brief: no proofStack, no supporting benefits, no lead proof, no ingredients. The
+  // swap can't pick a substitute — the offer slot becomes null and Dahlia's SKILL handles null.
+  const pi = makePi({ product: { title: "Superfood Tabs" } });
+  const angle: ScoredAngle = {
+    hook: "Try it today",
+    source: "competitor",
+    leadBenefit: "curiosity",
+    acquisitionPower: 5,
+    retentionTruth: 5,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+    raw: { hook: "Try it today", offer: "Free tote", advertiser: "Rival" },
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  assert.ok(brief.competitorDna);
+  assert.equal(brief.competitorDna.offer, null, "no grounded substitute → offer nulled");
+});
+
+test("buildCreativeBrief — brief.productFeatures is populated from pi.ingredients count (last-resort substitute pool)", async () => {
+  const pi = makePi({
+    product: { title: "Superfood Tabs" },
+    ingredients: [
+      { ingredient_name: "spinach" }, { ingredient_name: "kale" }, { ingredient_name: "acerola" },
+    ],
+  });
+  const angle: ScoredAngle = {
+    hook: "own hook", source: "ad_angle", leadBenefit: "focus",
+    acquisitionPower: 5, retentionTruth: 5, commodity: false, hasRealPhoto: false, reasons: [],
+  };
+  const brief = await buildCreativeBrief(pi, angle);
+  assert.deepEqual(brief.productFeatures, ["3 superfoods per serving"]);
+});

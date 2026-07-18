@@ -17,6 +17,24 @@
  * `\b…\b` — a competitor token like "MUD/WTR" carries a `/` (non-word char) so `\b` on the
  * inside boundary fails; we require the char BEFORE the match to be nothing / start / non-word
  * and the char AFTER to be nothing / end / non-word / apostrophe (so `MUD/WTR's` also matches).
+ *
+ * ── OFFER SWAP (swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand
+ * Phase 1) ────────────────────────────────────────────────────────────────────────────────────
+ * A competitor's offer slot (free tote / free gift / bonus item / discount) is an OFFER we do
+ * not actually run — carrying it through the debrand into Dahlia's imitation rubric fails every
+ * downstream gate (firewall claim-miss on the ungrounded freebie, cold-offer-leak on the
+ * discount to a cold audience — both correctly refusing an offer we don't run). The fix is to
+ * SWAP the offer slot for one of OUR grounded selling points from the brief (a proofStack proof
+ * point, a supportingBenefit / lead benefit, or a derived product feature like ingredient count
+ * / format) so the WINNING STRUCTURE survives but the promise becomes grounded.
+ *   • `isCompetitorOffer(text)` — detector for free-gift / free-tote / bonus item / giveaway /
+ *     discount phrasing.
+ *   • `stripCompetitorOffer(text)` — remove those phrases from a hook so an offer surviving in
+ *     the hook doesn't leak either (structural words are preserved).
+ *   • `chooseGroundedSubstitute(brief)` — pick the best grounded selling point from the brief:
+ *     proofStack proof point → supportingBenefit → leadProof text → productFeatures fallback.
+ * The brief's REAL offer (`brief.offer`, populated from our own pricing) is a different type
+ * and is never touched — only the competitor's un-runnable offer is swapped.
  */
 
 const PRODUCT_NAME_ALLOWLIST: ReadonlySet<string> = new Set([
@@ -106,4 +124,97 @@ export function debrandForOurBrand(
   // Collapse whitespace and trim; also trim orphan leading/trailing punctuation left behind.
   out = out.replace(/\s{2,}/g, " ").replace(/^[\s,;:.|\-·—–+&]+|[\s,;:.|\-·—–+&]+$/g, "").trim();
   return out;
+}
+
+// ── Offer swap (Phase 1) ────────────────────────────────────────────────────
+// A competitor's offer slot (free tote / free gift / bonus item / giveaway / discount) is an
+// offer we do not run. Detect + swap upstream so it never rides the debrand into Dahlia's
+// imitation rubric. See file header § OFFER SWAP.
+
+// Freebie/bonus phrasing patterns. The `free (thing)` list is deliberately narrow — a proven
+// competitor freebie vocabulary (tote, mug, gift, sample, bottle, scoop, shaker, kit) — because
+// a broad `\bfree\s+\w+\b` catches sentence tails like "free of" / "free from". Discount
+// patterns mirror sanitizeCompetitorHook (percent-off / $-off / free-shipping / BOGO / X for $Y)
+// so the two helpers agree on what a competitor OFFER is.
+const OFFER_TOKEN_PATTERNS: readonly RegExp[] = [
+  /\bfree\s+(?:tote|bag|gift|mug|shaker|bottle|scoop|frother|book|guide|pack|kit|set|sample|samples|item|bonus)\b/gi,
+  /\b(?:bonus|complimentary)\s+(?:gift|item|pack|bag|tote|mug|scoop|shaker)\b/gi,
+  /\bgiveaway\b/gi,
+  /\b(?:up to\s+)?\d{1,3}\s*%\s*(?:off|discount|savings?)\b/gi,
+  /\bsave\s+(?:up to\s+)?(?:\$\d[\d.,]*|\d{1,3}\s*%)(?=\s|$|[^\w%])/gi,
+  /\b\$\d[\d.,]*\s*off\b/gi,
+  /\bfree\s+shipping\b/gi,
+  /\b(?:bogo|buy\s+one\s+get\s+one(?:\s+free)?)\b/gi,
+  /\b\d+\s+for\s+\$?\d[\d.,]*\b/gi,
+  /\b\d+\s+for\s+the\s+price\s+of\s+\d+\b/gi,
+];
+
+/**
+ * True when `text` carries a competitor-offer token (free gift / free tote / bonus item /
+ * giveaway / a percent-off, $-off, free-shipping, BOGO or "X for $Y" discount). Null-safe.
+ * Used to decide whether to SWAP the competitor's offer slot (or an offer that survived in the
+ * hook) for a grounded selling point from OUR brief.
+ */
+export function isCompetitorOffer(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return OFFER_TOKEN_PATTERNS.some((re) => {
+    re.lastIndex = 0;
+    return re.test(text);
+  });
+}
+
+/**
+ * Strip every competitor-offer phrase (see `isCompetitorOffer`) out of `text`, collapse
+ * orphan separators + whitespace, and trim orphan leading/trailing punctuation. Preserves the
+ * structural words that carry the WINNING STRUCTURE (e.g. "Free tote badge with product held
+ * up outdoors" → "with product held up outdoors"). Null-safe — an empty string is returned
+ * unchanged.
+ */
+export function stripCompetitorOffer(text: string): string {
+  if (!text) return text;
+  let out = text;
+  for (const re of OFFER_TOKEN_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, " ");
+  }
+  // A stripped phrase often leaves an orphan separator between two spaces ("Coffee  —  today")
+  // and dangling punctuation at either end. Collapse both so what remains reads naturally.
+  out = out.replace(/\s+[—–\-|·+&]\s+/g, " ");
+  out = out.replace(/^[\s,;:.|\-·—–+&]+|[\s,;:.|\-·—–+&]+$/g, "");
+  out = out.replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
+/**
+ * Minimal shape `chooseGroundedSubstitute` reads from the brief. Kept local so `debrand.ts`
+ * has no import cycle with `creative-brief.ts`; a real `CreativeBrief` is structurally
+ * assignable (all fields optional / nullable — a fake brief in a test is trivial to build).
+ */
+export interface GroundedSubstituteSource {
+  proofStack?: string[] | null;
+  supportingBenefits?: string[] | null;
+  leadProof?: { text: string | null } | null;
+  /** Derived product features (e.g. "15 superfoods per tab", "fizz and drink" format). The
+   *  brief builder populates this from `pi.ingredients.length` + product title when available;
+   *  a substitute rarely falls this far since proofStack usually carries a real proof point. */
+  productFeatures?: string[] | null;
+}
+
+/**
+ * Pick the best grounded selling point to swap for a competitor offer we do not run. Priority
+ * mirrors the CEO's fix note: a verified proof point (700K+ customers, awards, certs) beats a
+ * retention benefit, which beats the lead proof text, which beats a derived product feature.
+ * Returns null when the brief carries none — the caller then nulls the competitorDna.offer
+ * slot (Dahlia's session already accepts a null offer for cold audiences).
+ */
+export function chooseGroundedSubstitute(brief: GroundedSubstituteSource): string | null {
+  const proof = brief.proofStack?.find((p) => typeof p === "string" && p.trim().length > 0);
+  if (proof) return proof.trim();
+  const support = brief.supportingBenefits?.find((b) => typeof b === "string" && b.trim().length > 0);
+  if (support) return support.trim();
+  const leadText = brief.leadProof?.text;
+  if (typeof leadText === "string" && leadText.trim().length > 0) return leadText.trim();
+  const feat = brief.productFeatures?.find((f) => typeof f === "string" && f.trim().length > 0);
+  if (feat) return feat.trim();
+  return null;
 }
