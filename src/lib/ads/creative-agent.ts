@@ -1035,54 +1035,66 @@ export function sanitizeReviseReason(raw: unknown): string {
   return s;
 }
 
-/** dahlia-recovers-from-firewall-claim-miss-actionable-revise-reason-not-exhaust Phase 1 —
- *  Build the firewall revise reason so Dahlia can RECOVER from a claim miss instead of
- *  exhausting the loop. The old shape (`firewall_claim_miss: <source>:<reason>, …`) told her
- *  a claim was blocked but did NOT point at the real grounded benefits sitting right there
- *  in the brief; on a competitor angle she chased the competitor's ungrounded hook again
- *  and burned every attempt (Superfood Tabs free-tote COMPETITOR test — `leadProof:claim_not_in_source`
- *  three attempts in a row while `supportingBenefits` = 'reduce bloating · support metabolism ·
- *  curb cravings' sat unused). The fix is a per-miss ACTIONABLE, PRODUCT-ANCHORED reason:
- *    • per ClaimMiss — name the source + reason + the exact claim that missed (clipped);
- *    • SURFACE the product's available grounded benefits (leadProof text + supportingBenefits +
- *      proofStack) so Dahlia can PIVOT to one of them;
+/** dahlia-recovers-from-firewall-claim-miss-actionable-revise-reason-not-exhaust Phase 1 (Fix 1
+ *  — trusted-tokens-only, security-review-hardened): build the firewall revise reason so Dahlia
+ *  can RECOVER from a claim miss instead of exhausting the loop. The old shape
+ *  (`firewall_claim_miss: <source>:<reason>, …`) told her a claim was blocked but did NOT
+ *  point at the real grounded benefits sitting right there in the brief; on a competitor angle
+ *  she chased the competitor's ungrounded hook again and burned every attempt (Superfood Tabs
+ *  free-tote COMPETITOR test — `leadProof:claim_not_in_source` three attempts in a row while
+ *  `supportingBenefits` = 'reduce bloating · support metabolism · curb cravings' sat unused).
+ *
+ *  The returned string is interpolated into the TRUSTED REVISE instruction line of
+ *  `buildCopyAuthorPrompt` / `buildCopyAuthorRevisePrompt`. **Security invariant (Fix 1, pre-merge
+ *  spec-test):** the trusted line MUST contain only DETERMINISTIC tokens — enum source names,
+ *  the enum reason names, deterministic field-name references, and literal steer text — NEVER
+ *  raw model-authored claim snippets, brief text, review bodies, or supportingBenefit strings.
+ *  Untrusted content (the actual claim body, the actual benefit text) already sits INSIDE the
+ *  `===BEGIN_AUTHOR_DATA_v1===` fenced block Dahlia sees on the same session (brief JSON with
+ *  `leadProof` / `supportingBenefits` / `proofStack` fields); the trusted reason merely POINTS
+ *  her at those already-fenced fields by name, so `sanitizeReviseReason`'s marker escaping is
+ *  the only content-shaped defense needed and no adversarial claim/benefit can forge instructions
+ *  from inside the trusted line. Shape:
+ *    • per ClaimMiss — `<source>:<reason>` where BOTH are enum tokens (source validated against
+ *      AUTHOR_CLAIM_TRACE_SOURCES; a mis-typed source degrades to the literal `unknown`);
+ *    • field-name reference — `see BRIEF fields: leadProof, supportingBenefits, proofStack`
+ *      enumerating ONLY the deterministic field names the brief actually populated (empty ones
+ *      omitted so the pointer is truthful);
  *    • concrete STEER — DROP the ungrounded claim and LEAD with one of the listed real
  *      benefits; on a competitor angle (brief.competitorDna set) the steer keeps the winner's
  *      structure but grounds the promise in OUR listed benefit, NOT their offer.
- *  Respects COPY_AUTHOR_REVISE_REASON_MAX_LEN — if the assembled string overflows, the benefit
- *  list is truncated first (keeping the steer intact per the spec), then as a last resort the
- *  benefits section is dropped. The firewall itself (`verifyClaimTrace`) is unchanged; only
- *  the feedback loop is made actionable. */
+ *  Respects COPY_AUTHOR_REVISE_REASON_MAX_LEN — the whole reason is short by construction now
+ *  (deterministic tokens only), so the cap is only a safety belt. The firewall itself
+ *  (`verifyClaimTrace`) is unchanged; only the feedback loop is made actionable. */
 export function buildFirewallReviseReason(
   misses: import("./never-fabricate").ClaimMiss[],
   brief: Pick<CreativeBrief, "leadProof" | "supportingBenefits" | "proofStack" | "competitorDna">,
 ): string {
-  const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+  const allowedSources = new Set<string>(AUTHOR_CLAIM_TRACE_SOURCES);
+  const allowedReasons = new Set(["source_not_found", "claim_not_in_source", "fabricated_number"]);
 
-  const missLines =
+  const missTokens =
     misses.length === 0
-      ? "unknown"
-      : misses
-          .map((m) => {
-            const claim = m.claim ? ` ("${clip(m.claim, 60)}")` : "";
-            return `${m.source}:${m.reason}${claim}`;
-          })
-          .join("; ");
+      ? ["unknown"]
+      : misses.map((m) => {
+          const source = allowedSources.has(m.source) ? m.source : "unknown";
+          const reason = allowedReasons.has(m.reason) ? m.reason : "unknown";
+          return `${source}:${reason}`;
+        });
 
-  const rawBenefits: string[] = [];
-  if (brief.leadProof?.text) rawBenefits.push(clip(brief.leadProof.text, 60));
-  for (const b of brief.supportingBenefits ?? []) if (b) rawBenefits.push(clip(b, 60));
-  for (const p of brief.proofStack ?? []) if (p) rawBenefits.push(clip(p, 60));
-
-  const seen = new Set<string>();
-  const benefits: string[] = [];
-  for (const b of rawBenefits) {
-    const trimmed = b.trim();
-    if (!trimmed) continue;
-    const key = trimmed.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    benefits.push(trimmed);
+  // Field-name reference points Dahlia back at the ALREADY-FENCED BRIEF fields — the raw text of
+  // those fields already sits inside the untrusted `===BEGIN_AUTHOR_DATA_v1===` block on her
+  // session, so we never re-echo any of it into the trusted line. Only enumerate populated fields
+  // so the pointer stays truthful (empty leadProof / supportingBenefits / proofStack are omitted).
+  const populatedBriefFields: string[] = [];
+  if (brief.leadProof && brief.leadProof.text && brief.leadProof.text.trim()) {
+    populatedBriefFields.push("leadProof");
+  }
+  if ((brief.supportingBenefits ?? []).some((b) => typeof b === "string" && b.trim().length > 0)) {
+    populatedBriefFields.push("supportingBenefits");
+  }
+  if ((brief.proofStack ?? []).some((p) => typeof p === "string" && p.trim().length > 0)) {
+    populatedBriefFields.push("proofStack");
   }
 
   const isCompetitorAngle = !!brief.competitorDna;
@@ -1090,20 +1102,31 @@ export function buildFirewallReviseReason(
     ? "DROP the ungrounded claim; keep the winner's structure but LEAD with OUR listed benefit, not their offer."
     : "DROP the ungrounded claim and LEAD with one of these real benefits.";
 
-  const head = `firewall_claim_miss: ${missLines}`;
-  const build = (bs: string[]): string =>
-    bs.length === 0
-      ? `${head} | ${steer}`
-      : `${head} | available grounded benefits: ${bs.join(" · ")} | ${steer}`;
+  const briefRef =
+    populatedBriefFields.length === 0 ? "" : ` | see BRIEF fields: ${populatedBriefFields.join(", ")}`;
 
-  const full = build(benefits);
+  const buildWith = (tokens: string[], includeBriefRef: boolean): string => {
+    const head = `firewall_claim_miss: ${tokens.join("; ")}`;
+    const ref = includeBriefRef ? briefRef : "";
+    return `${head}${ref} | ${steer}`;
+  };
+
+  const full = buildWith(missTokens, true);
   if (full.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return full;
 
-  for (let n = benefits.length - 1; n >= 1; n--) {
-    const candidate = build(benefits.slice(0, n));
+  // Defensive: with only deterministic tokens the reason is short by construction, but a
+  // pathological miss list can still overflow. Drop the brief-field reference first (steer
+  // stays intact per the spec), then trim excess misses (keep at least one + "+N more"
+  // counter so the count survives). Steer + at least one miss + counter always survive.
+  const noBriefRef = buildWith(missTokens, false);
+  if (noBriefRef.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return noBriefRef;
+
+  for (let n = missTokens.length - 1; n >= 1; n--) {
+    const trimmed = [...missTokens.slice(0, n), `+${missTokens.length - n} more`];
+    const candidate = buildWith(trimmed, false);
     if (candidate.length <= COPY_AUTHOR_REVISE_REASON_MAX_LEN) return candidate;
   }
-  return build([]);
+  return buildWith([missTokens[0], `+${missTokens.length - 1} more`], false);
 }
 
 /** Build the prompt for one copy-author dispatch. Deterministic + side-effect-free so the
