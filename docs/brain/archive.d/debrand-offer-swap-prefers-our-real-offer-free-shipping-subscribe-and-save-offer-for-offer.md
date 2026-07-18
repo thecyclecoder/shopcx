@@ -1,0 +1,1 @@
+- **Debrand offer-swap prefers OUR real offer (free shipping with Subscribe & Save) — an offer-for-offer swap that doesn't lead with coupons** · verified 2026-07-18 · → [[../libraries/debrand.md]]
