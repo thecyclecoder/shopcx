@@ -21,7 +21,10 @@ import {
   computeCopyQcPreCheck,
   runQaCreativeCopyViaBoxSession,
   parseCopyQaVerdict,
+  parsePerFormatCreative,
+  deriveCreativeGatePass,
   insertCopyQaVerdict,
+  type CopyQaCreativeFormatVerdict,
   type CopyQcSessionDispatcher,
 } from "./creative-qa";
 import type { CreativeBrief } from "./creative-brief";
@@ -289,6 +292,283 @@ test("(f) parseCopyQaVerdict: scroll_stop sub-score out of 0..2 range → parse_
   if (parsed.kind === "parse_error") {
     assert.match(parsed.reason, /scroll_stop_first_line_earns_the_second_out_of_range/);
   }
+});
+
+// ── max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 pinning ──
+// These cases pin the parser + gate-derivation contract for the new per-format
+// creative[] block:
+//   (g) parseCopyQaVerdict accepts a verdict CARRYING creative[] → the parsed
+//       CopyQaVerdict has one entry per format with all four checks + a findings[]
+//       populated, AND the top-level creative_gate_pass matches the derivation.
+//   (g) a per-format Feed find (fabricated "FREE TOTE" badge) flags the tote AND drives
+//       creative_gate_pass=false — this is the exact 2026-07-14 competitor-tote
+//       regression the spec cites in its Why line.
+//   (h) parseCopyQaVerdict is TOLERANT of absence — legacy single-image verdicts
+//       (creative absent / null) parse ok with creative:null + creative_gate_pass:true.
+//   (h) present-but-malformed shapes (unknown format literal, non-boolean check,
+//       mismatched top-level roll-up) fail-closed with a specific reason.
+//   (h) insertCopyQaVerdict writes per_format_creative + creative_gate_pass on the row
+//       body handed to admin.from(...).insert().
+
+const allPassCreative: CopyQaCreativeFormatVerdict[] = [
+  {
+    format: "feed_4x5",
+    product_scale_ok: true,
+    no_hallucinated_offer_or_badge: true,
+    no_in_pixel_competitor_leak: true,
+    on_image_text_legible: true,
+    findings: [],
+  },
+  {
+    format: "stories_9x16",
+    product_scale_ok: true,
+    no_hallucinated_offer_or_badge: true,
+    no_in_pixel_competitor_leak: true,
+    on_image_text_legible: true,
+    findings: [],
+  },
+  {
+    format: "reels_9x16",
+    product_scale_ok: true,
+    no_hallucinated_offer_or_badge: true,
+    no_in_pixel_competitor_leak: true,
+    on_image_text_legible: true,
+    findings: [],
+  },
+  {
+    format: "right_column_1x1",
+    product_scale_ok: true,
+    no_hallucinated_offer_or_badge: true,
+    no_in_pixel_competitor_leak: true,
+    on_image_text_legible: true,
+    findings: [],
+  },
+];
+
+const passVerdictWithPerFormatCreative = {
+  ...passVerdictWithScrollStop,
+  creative: allPassCreative,
+  creative_gate_pass: true,
+};
+
+test("(g) parseCopyQaVerdict: verdict carrying per-format creative[] → parsed with all 4 entries + gate_pass=true", () => {
+  const parsed = parseCopyQaVerdict(JSON.stringify(passVerdictWithPerFormatCreative));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.creative_gate_pass, true);
+  assert.ok(parsed.verdict.creative);
+  assert.equal(parsed.verdict.creative!.length, 4);
+  const feedEntry = parsed.verdict.creative!.find((e) => e.format === "feed_4x5");
+  assert.ok(feedEntry, "feed_4x5 entry must be present");
+  assert.equal(feedEntry!.product_scale_ok, true);
+  assert.equal(feedEntry!.no_hallucinated_offer_or_badge, true);
+  assert.deepEqual(feedEntry!.findings, []);
+});
+
+test("(g) parseCopyQaVerdict: a Feed find flags the tote → creative_gate_pass=false + finding on the feed_4x5 entry (2026-07-14 competitor-tote regression)", () => {
+  // The exact regression the spec's Why line cites: a competitor's "FREE TOTE" baked into
+  // the Feed 4:5 render. The per-format entry MUST flag it AND the roll-up MUST fail.
+  const toteFound = {
+    ...passVerdictWithPerFormatCreative,
+    creative: [
+      {
+        format: "feed_4x5",
+        product_scale_ok: true,
+        no_hallucinated_offer_or_badge: false,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: [
+          "no_hallucinated_offer_or_badge: 'FREE TOTE' badge baked into the feed 4:5 top-right — not in the brief",
+        ],
+      },
+      ...passVerdictWithPerFormatCreative.creative.slice(1),
+    ],
+    creative_gate_pass: false,
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(toteFound));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  // The hard COPY gates are still clean — this defect is CREATIVE, not copy — but the
+  // creative gate MUST fail so the Phase-2 bounce dispatch regenerates the Feed 4:5.
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.creative_gate_pass, false);
+  const feedEntry = parsed.verdict.creative!.find((e) => e.format === "feed_4x5");
+  assert.ok(feedEntry);
+  assert.equal(feedEntry!.no_hallucinated_offer_or_badge, false);
+  assert.match(feedEntry!.findings[0], /FREE TOTE/);
+  // Sibling entries stay clean — this is per-format, not a global roll-up.
+  const storiesEntry = parsed.verdict.creative!.find((e) => e.format === "stories_9x16");
+  assert.equal(storiesEntry!.no_hallucinated_offer_or_badge, true);
+});
+
+test("(g) parseCopyQaVerdict: verdict OMITTING creative_gate_pass but PROVIDING creative[] → gate derived from entries (convenience roll-up)", () => {
+  const derivedOnly = { ...passVerdictWithPerFormatCreative } as Record<string, unknown>;
+  delete derivedOnly.creative_gate_pass;
+  const parsed = parseCopyQaVerdict(JSON.stringify(derivedOnly));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  // All entries pass → derived gate is true even though Max omitted the top-level roll-up.
+  assert.equal(parsed.verdict.creative_gate_pass, true);
+});
+
+test("(g) deriveCreativeGatePass: pure derivation matches per-format checks (all-pass → true; any per-format fail → false; null → true)", () => {
+  assert.equal(deriveCreativeGatePass(null), true);
+  assert.equal(deriveCreativeGatePass(passVerdictWithPerFormatCreative.creative), true);
+  const oneFail = passVerdictWithPerFormatCreative.creative.map((e, i) =>
+    i === 0 ? { ...e, product_scale_ok: false } : e,
+  );
+  assert.equal(deriveCreativeGatePass(oneFail), false);
+});
+
+test("(h) parseCopyQaVerdict: verdict OMITTING creative entirely → ok with creative:null + creative_gate_pass:true (legacy single-image tolerance)", () => {
+  const legacy = { ...passVerdictWithScrollStop } as Record<string, unknown>;
+  // Sanity: neither creative[] nor the roll-up is present on this legacy shape.
+  assert.equal("creative" in legacy, false);
+  assert.equal("creative_gate_pass" in legacy, false);
+  const parsed = parseCopyQaVerdict(JSON.stringify(legacy));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  // The real M1 grade MUST survive the absence — that's the whole point of tolerance.
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.persuasion_score, 7);
+  assert.equal(parsed.verdict.creative, null);
+  assert.equal(parsed.verdict.creative_gate_pass, true);
+});
+
+test("(h) parseCopyQaVerdict: unknown format literal → parse_error (fail-closed on malformed)", () => {
+  const badFormat = {
+    ...passVerdictWithPerFormatCreative,
+    creative: [
+      {
+        format: "square_1x1_legacy",
+        product_scale_ok: true,
+        no_hallucinated_offer_or_badge: true,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: [],
+      },
+    ],
+    creative_gate_pass: true,
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(badFormat));
+  assert.equal(parsed.kind, "parse_error");
+  if (parsed.kind === "parse_error") {
+    assert.match(parsed.reason, /copy_qc_verdict_creative_0_unknown_format/);
+  }
+});
+
+test("(h) parseCopyQaVerdict: non-boolean check → parse_error (fail-closed on malformed)", () => {
+  const badCheck = {
+    ...passVerdictWithPerFormatCreative,
+    creative: [
+      {
+        format: "feed_4x5",
+        product_scale_ok: "yes",
+        no_hallucinated_offer_or_badge: true,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: [],
+      },
+    ],
+    creative_gate_pass: true,
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(badCheck));
+  assert.equal(parsed.kind, "parse_error");
+  if (parsed.kind === "parse_error") {
+    assert.match(parsed.reason, /copy_qc_verdict_creative_feed_4x5_product_scale_ok_not_boolean/);
+  }
+});
+
+test("(h) parseCopyQaVerdict: creative_gate_pass=true claimed while a per-format check is false → parse_error (mismatched pair, Goodhart-adjacent lie)", () => {
+  const mismatched = {
+    ...passVerdictWithPerFormatCreative,
+    creative: [
+      {
+        format: "feed_4x5",
+        product_scale_ok: true,
+        no_hallucinated_offer_or_badge: false,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: ["no_hallucinated_offer_or_badge: bogus badge"],
+      },
+      ...passVerdictWithPerFormatCreative.creative.slice(1),
+    ],
+    creative_gate_pass: true,
+  };
+  const parsed = parseCopyQaVerdict(JSON.stringify(mismatched));
+  assert.equal(parsed.kind, "parse_error");
+  if (parsed.kind === "parse_error") {
+    assert.equal(parsed.reason, "copy_qc_verdict_creative_gate_pass_mismatch");
+  }
+});
+
+test("(h) parsePerFormatCreative: duplicate format literal → parse_error", () => {
+  const dup = [
+    {
+      format: "feed_4x5",
+      product_scale_ok: true,
+      no_hallucinated_offer_or_badge: true,
+      no_in_pixel_competitor_leak: true,
+      on_image_text_legible: true,
+      findings: [],
+    },
+    {
+      format: "feed_4x5",
+      product_scale_ok: true,
+      no_hallucinated_offer_or_badge: true,
+      no_in_pixel_competitor_leak: true,
+      on_image_text_legible: true,
+      findings: [],
+    },
+  ];
+  const parsed = parsePerFormatCreative(dup);
+  assert.equal(parsed.kind, "parse_error");
+  if (parsed.kind === "parse_error") {
+    assert.match(parsed.reason, /copy_qc_verdict_creative_duplicate_format_feed_4x5/);
+  }
+});
+
+test("(h) insertCopyQaVerdict: writes per_format_creative + creative_gate_pass on the row body", async () => {
+  const parsed = parseCopyQaVerdict(JSON.stringify(passVerdictWithPerFormatCreative));
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  let capturedBody: Record<string, unknown> | null = null;
+  const fakeAdmin = {
+    from(_table: string) {
+      return {
+        insert(body: Record<string, unknown>) {
+          capturedBody = body;
+          return {
+            select(_cols: string) {
+              return {
+                async single() {
+                  return { data: { id: "verdict-pf-uuid" }, error: null };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as Parameters<typeof insertCopyQaVerdict>[0];
+  const result = await insertCopyQaVerdict(fakeAdmin, {
+    workspaceId: "ws-2",
+    adCampaignId: "camp-2",
+    verdict: parsed.verdict,
+    retryIndex: 0,
+  });
+  assert.deepEqual(result, { id: "verdict-pf-uuid" });
+  assert.ok(capturedBody);
+  const body = capturedBody as unknown as Record<string, unknown>;
+  assert.equal(body.creative_gate_pass, true);
+  // per_format_creative MUST land on the row (Phase-2 bounce dispatch reads it).
+  const persisted = body.per_format_creative as Array<Record<string, unknown>>;
+  assert.equal(Array.isArray(persisted), true);
+  assert.equal(persisted.length, 4);
+  const feedRow = persisted.find((e) => e.format === "feed_4x5");
+  assert.ok(feedRow);
+  assert.equal(feedRow!.product_scale_ok, true);
 });
 
 test("(f) parseCopyQaVerdict: hard-gate fail carries scroll_stop unchanged (advisory-only contract)", () => {

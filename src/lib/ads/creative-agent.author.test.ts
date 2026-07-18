@@ -968,6 +968,8 @@ function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
     },
     declared_intent: null,
     dahlia_rubric: null,
+    creative: null,
+    creative_gate_pass: true,
     verdict_reason: "",
     ...overrides,
   } as CopyQaVerdict;
@@ -1064,6 +1066,8 @@ function copyQcVerdictP3(score: number | null, opts: { hard_gate_pass?: boolean 
     },
     declared_intent: null,
     dahlia_rubric: null,
+    creative: null,
+    creative_gate_pass: true,
     verdict_reason: score !== null && score < MAX_QC_ELIGIBILITY_FLOOR ? "reads as a generic supplement pitch" : "clear scroll-stop hook",
   } as CopyQaVerdict;
 }

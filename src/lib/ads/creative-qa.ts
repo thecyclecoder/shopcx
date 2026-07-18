@@ -692,6 +692,70 @@ export interface CopyQaDeclaredIntent {
   purpose: "test-to-find-winner";
 }
 
+// ── max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 ─────────────
+//
+// Max's binary `render_ok` hard gate is too coarse: one boolean over ONE canonical image
+// can't catch a mis-scaled product in the 1:1 crop, a hallucinated free-tote badge baked
+// into the Feed 4:5, or a competitor's offer leaked into the 9:16 pixels while the 4:5
+// render happened to be clean. The four Meta placement statics ([[creative-pack]]
+// `feed_4x5` · `stories_9x16` · `reels_9x16` · `right_column_1x1`) each render the SAME
+// concept but at different aspect ratios, and any one of them can carry a creative defect
+// the others do not. Extend Max's copy-QC verdict with a per-format `creative[]` block so
+// he can name WHICH format failed WHICH check with a short finding, and roll them up into
+// a top-level `creative_gate_pass` boolean the Phase-2 bounce dispatch reads to regenerate
+// the offending format (mirroring the copy-fail bounce to Dahlia).
+//
+// The block is TOLERANT-of-absence in Phase 1: a verdict without `creative` (legacy /
+// single-image call) parses `creative:null` + `creative_gate_pass:true` (no creative
+// signal, don't false-fail). A PRESENT-but-malformed block (missing check boolean,
+// non-string finding, unknown format literal, mismatched `creative_gate_pass` vs the
+// per-format checks) is fail-closed — that's a genuine defect, not an absence, same
+// contract as `scroll_stop`.
+
+/** The four Meta placement formats [[creative-pack]] renders per creative — the exact set
+ *  Max grades in Phase 1. Kept as a `const readonly` here so the SKILL, parser, and SDK
+ *  writer share ONE source-of-truth; a divergence between the type and this list is a
+ *  build-time bug. */
+export const COPY_QC_CREATIVE_FORMATS = [
+  "feed_4x5",
+  "stories_9x16",
+  "reels_9x16",
+  "right_column_1x1",
+] as const;
+
+export type CopyQaCreativeFormat = (typeof COPY_QC_CREATIVE_FORMATS)[number];
+
+/** Per-format creative-QC verdict Max emits when he grades one of the placement renders.
+ *  Each of the four checks is `true` when clean, `false` when defective — the coarse
+ *  binary `hard_gates.render_ok` couldn't distinguish which of these dimensions failed on
+ *  which format. `findings` carries one short human-readable string per failed check
+ *  (e.g. "no_in_pixel_competitor_leak: 'FREE TOTE' badge from competitor hook baked into
+ *  the feed 4:5") — REQUIRED as a `[]` even when every check passed. */
+export interface CopyQaCreativeFormatVerdict {
+  format: CopyQaCreativeFormat;
+  /** The product renders at a believable size — an on-pack product looks its true SKU
+   *  size (not a giant/tiny distortion of the pack in the compose). Fail on a mis-scaled
+   *  product that would confuse a scroller. */
+  product_scale_ok: boolean;
+  /** No fabricated offers/badges/text/stickers not present in the brief (e.g. a "FREE
+   *  TOTE" badge Nano Banana invented from a competitor hook, an "AS SEEN ON TV" sticker,
+   *  a bogus "50% OFF" tag when the real offer says "34% off"). Fail cites the invented
+   *  element. */
+  no_hallucinated_offer_or_badge: boolean;
+  /** No competitor brand name / logo / offer / verbatim slogan leaked into the pixels
+   *  (a competitor's "FREE TOTE" or MUD/WTR wordmark rendered visibly on the ad). Fail
+   *  cites the leaked element. */
+  no_in_pixel_competitor_leak: boolean;
+  /** The on-image copy (headline, subhead, badges, quotes) is legible AND laid out with
+   *  a clean hierarchy — a scroller can read the top-line without stopping to parse. Not
+   *  the same as `hard_gates.render_ok` (which was global); this is per-format so a 9:16
+   *  crop that squeezed the headline off-frame can be caught. */
+  on_image_text_legible: boolean;
+  /** One short line per failed check citing the phrase / defect. MAY be empty on an
+   *  all-pass verdict; MUST be present as a `[]` — never omitted, never `null`. */
+  findings: string[];
+}
+
 /** The 5 axis keys — used by the parser + the SDK writer. Kept as a `const readonly` so the
  *  order + spelling live in ONE place; a divergence between the type + this list is a build
  *  bug. */
@@ -740,6 +804,21 @@ export interface CopyQaVerdict {
    *  rubric — absence is tolerated for backcompat, but a partial or out-of-range payload is a
    *  defect. */
   dahlia_rubric: DahliaCreativeRubric | null;
+  /** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — per-format
+   *  creative-QC findings (product_scale_ok · no_hallucinated_offer_or_badge ·
+   *  no_in_pixel_competitor_leak · on_image_text_legible), one entry per placement render
+   *  Max was handed. Tolerant of absence for backcompat (a legacy call with only ONE image
+   *  parses `creative:null` + `creative_gate_pass:true` — no creative signal, don't
+   *  false-fail); a PRESENT-but-malformed entry (unknown format, missing check bool,
+   *  non-string finding) is fail-closed. */
+  creative: CopyQaCreativeFormatVerdict[] | null;
+  /** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — top-level
+   *  hard creative gate the Phase-2 bounce dispatch reads. `true` when every entry in
+   *  `creative[]` has all four checks true (or when `creative` is null — legacy absent
+   *  case, no gate). `false` when any entry has any check `false`. The Node-lane caller
+   *  treats a mismatched pair (creative_gate_pass=true with a per-format false inside) as
+   *  a defect and fails closed, same contract as `hard_gate_pass`. */
+  creative_gate_pass: boolean;
   verdict_reason: string;
 }
 
@@ -838,6 +917,71 @@ export function parseDahliaRubric(
       dr_consumer_psychology: built.dr_consumer_psychology!,
     },
   };
+}
+
+/** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — pure parser +
+ *  validator for the per-format creative[] block. Absent = ok/null (legacy single-image
+ *  call). Present-but-malformed = parse_error naming the failing format/check. Pure +
+ *  exported for the Phase 1 vitest. */
+export function parsePerFormatCreative(
+  raw: unknown,
+): { kind: "ok"; value: CopyQaCreativeFormatVerdict[] | null } | { kind: "parse_error"; reason: string } {
+  if (raw === undefined || raw === null) return { kind: "ok", value: null };
+  if (!Array.isArray(raw)) {
+    return { kind: "parse_error", reason: "copy_qc_verdict_creative_not_array" };
+  }
+  const built: CopyQaCreativeFormatVerdict[] = [];
+  const seenFormats = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (!isPlainObject(entry)) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_creative_${i}_not_object` };
+    }
+    const format = entry.format;
+    if (typeof format !== "string" || !(COPY_QC_CREATIVE_FORMATS as readonly string[]).includes(format)) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_creative_${i}_unknown_format` };
+    }
+    if (seenFormats.has(format)) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_creative_duplicate_format_${format}` };
+    }
+    seenFormats.add(format);
+    const checks: Record<string, boolean> = {};
+    for (const key of ["product_scale_ok", "no_hallucinated_offer_or_badge", "no_in_pixel_competitor_leak", "on_image_text_legible"] as const) {
+      const v = entry[key];
+      if (typeof v !== "boolean") {
+        return { kind: "parse_error", reason: `copy_qc_verdict_creative_${format}_${key}_not_boolean` };
+      }
+      checks[key] = v;
+    }
+    const rawFindings = entry.findings;
+    if (!Array.isArray(rawFindings) || !rawFindings.every((f) => typeof f === "string")) {
+      return { kind: "parse_error", reason: `copy_qc_verdict_creative_${format}_findings_not_string_array` };
+    }
+    built.push({
+      format: format as CopyQaCreativeFormat,
+      product_scale_ok: checks.product_scale_ok,
+      no_hallucinated_offer_or_badge: checks.no_hallucinated_offer_or_badge,
+      no_in_pixel_competitor_leak: checks.no_in_pixel_competitor_leak,
+      on_image_text_legible: checks.on_image_text_legible,
+      findings: rawFindings.slice(),
+    });
+  }
+  return { kind: "ok", value: built };
+}
+
+/** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — pure
+ *  derivation: the top-level hard creative gate is `true` iff every per-format entry has
+ *  all four checks true, OR `creative` is null (legacy absent case, no gate to enforce).
+ *  Exported so callers + the parser share ONE derivation. */
+export function deriveCreativeGatePass(creative: CopyQaCreativeFormatVerdict[] | null): boolean {
+  if (creative === null) return true;
+  return creative.every(
+    (e) =>
+      e.product_scale_ok &&
+      e.no_hallucinated_offer_or_badge &&
+      e.no_in_pixel_competitor_leak &&
+      e.on_image_text_legible,
+  );
 }
 
 /** Extract the outermost `{ … }` JSON block from a raw session response. Max's final message is
@@ -992,6 +1136,31 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
   const rubricResult = parseDahliaRubric(parsed.dahlia_rubric);
   if (rubricResult.kind === "parse_error") return rubricResult;
 
+  // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — read the
+  // per-format creative[] block + verify Max's top-level `creative_gate_pass` matches the
+  // derivation. Absence is tolerated (legacy single-image call); present-but-malformed +
+  // a mismatched pair (claimed pass with a per-format false inside) are fail-closed, same
+  // contract as hard_gate_pass.
+  const creativeResult = parsePerFormatCreative(parsed.creative);
+  if (creativeResult.kind === "parse_error") return creativeResult;
+  const derivedCreativeGate = deriveCreativeGatePass(creativeResult.value);
+  const rawCreativeGate = parsed.creative_gate_pass;
+  let creativeGatePass: boolean;
+  if (rawCreativeGate === undefined || rawCreativeGate === null) {
+    // Absence tolerated when creative is absent (pure legacy). When creative[] is PRESENT
+    // but Max omitted the top-level roll-up, we compute it from the entries rather than
+    // fail-close — the entries ARE the signal, the roll-up is a convenience.
+    creativeGatePass = derivedCreativeGate;
+  } else if (typeof rawCreativeGate !== "boolean") {
+    return { kind: "parse_error", reason: "copy_qc_verdict_creative_gate_pass_not_boolean" };
+  } else if (rawCreativeGate !== derivedCreativeGate) {
+    // Mismatched pair — treat as a defect (a claimed pass with a per-format false inside
+    // is a Goodhart-adjacent lie; a claimed fail with every check true is a data bug).
+    return { kind: "parse_error", reason: "copy_qc_verdict_creative_gate_pass_mismatch" };
+  } else {
+    creativeGatePass = rawCreativeGate;
+  }
+
   return {
     kind: "ok",
     verdict: {
@@ -1008,6 +1177,8 @@ export function parseCopyQaVerdict(raw: string): ParseCopyQaVerdictResult {
       scroll_stop: scrollStop,
       declared_intent: declaredIntentResult.value,
       dahlia_rubric: rubricResult.value,
+      creative: creativeResult.value,
+      creative_gate_pass: creativeGatePass,
       verdict_reason: verdictReason,
     },
   };
@@ -1052,6 +1223,14 @@ export async function insertCopyQaVerdict(
       // auto-applied on merge by the Control Tower migration-drift reconciler.
       declared_intent: verdict.declared_intent,
       dahlia_rubric: verdict.dahlia_rubric,
+      // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 —
+      // persist the per-format creative[] block + top-level roll-up so the Phase-2 bounce
+      // dispatch + grade card can read WHICH format failed WHICH check. Null on a legacy
+      // single-image verdict (creative absent). Column added by the paired additive
+      // migration 20261114120000_ad_creative_copy_qc_verdicts_per_format_creative.sql —
+      // auto-applied on merge by the Control Tower migration-drift reconciler.
+      per_format_creative: verdict.creative,
+      creative_gate_pass: verdict.creative_gate_pass,
       verdict_reason: verdict.verdict_reason || null,
       retry_index: retryIndex,
     })
@@ -1172,7 +1351,7 @@ export async function readLatestCopyQaVerdict(
   const { data, error } = await admin
     .from("ad_creative_copy_qc_verdicts")
     .select(
-      "id, hard_gate_pass, hard_gates, persuasion_score, persuasion_rubric, scroll_stop, declared_intent, dahlia_rubric, verdict_reason, retry_index, created_at",
+      "id, hard_gate_pass, hard_gates, persuasion_score, persuasion_rubric, scroll_stop, declared_intent, dahlia_rubric, per_format_creative, creative_gate_pass, verdict_reason, retry_index, created_at",
     )
     .eq("workspace_id", workspaceId)
     .eq("ad_campaign_id", adCampaignId)
@@ -1182,6 +1361,14 @@ export async function readLatestCopyQaVerdict(
     .maybeSingle();
   if (error || !data) return null;
   const r = data as Record<string, unknown>;
+  // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 1 — surface the
+  // per-format creative[] block + top-level roll-up alongside the existing fields. Null-
+  // tolerant for legacy rows (predate the migration) — creative_gate_pass defaults to true
+  // so a legacy row is never surfaced as a false-fail on the read side. When present, the
+  // stored roll-up is trusted verbatim (the writer already validated it against the entries).
+  const rawCreative = r.per_format_creative as CopyQaCreativeFormatVerdict[] | null | undefined;
+  const creative = rawCreative ?? null;
+  const creativeGatePass = typeof r.creative_gate_pass === "boolean" ? r.creative_gate_pass : true;
   return {
     id: r.id as string,
     hard_gate_pass: !!r.hard_gate_pass,
@@ -1194,6 +1381,8 @@ export async function readLatestCopyQaVerdict(
     // (predate this migration) and for hard-gate-fail verdicts that never scored the rubric.
     declared_intent: (r.declared_intent as CopyQaDeclaredIntent | null) ?? null,
     dahlia_rubric: (r.dahlia_rubric as DahliaCreativeRubric | null) ?? null,
+    creative,
+    creative_gate_pass: creativeGatePass,
     verdict_reason: (r.verdict_reason as string | null) || "",
     retry_index: (r.retry_index as number | null) ?? 0,
     created_at: r.created_at as string,
