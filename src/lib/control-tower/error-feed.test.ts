@@ -843,8 +843,11 @@ test("isTransientShopifyWebhookHmacFailure returns false on empty / nullish inpu
 // failed:", err)` and then RECOVERS via `verifyBillingInterval` — the log-drain line is a
 // pre-recovery sighting of a 20s abort the code already knows how to handle. Classifying it
 // transient auto-resolves a first sighting (recorded, not paged); a chronic Appstle outage
-// would recur within the window and still surface. The false positive that opened Control
-// Tower `vercel:cec725132e1eef09`.
+// would recur within the window and still surface. Both `/api/inngest` (the durable step)
+// and `/api/portal` (the customer portal frequency route) call the SAME helper + share the
+// same 20s abort + `verifyBillingInterval` recovery, so their timeout lines are the same
+// signature. The false positives that opened Control Tower `vercel:cec725132e1eef09`
+// (`/api/inngest`) and later `vercel:63b8e91c77459378` (`/api/portal`).
 
 test("isTransientAppstleFrequencyUpstreamTimeout matches the captured /api/inngest signature", () => {
   assert.equal(
@@ -885,10 +888,54 @@ test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-timeout Appstle fai
   );
 });
 
-test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-/api/inngest path even with the marker", () => {
+test("isTransientAppstleFrequencyUpstreamTimeout matches the captured /api/portal signature", () => {
+  // The customer portal frequency route (`/api/portal`) calls the SAME
+  // `updateBillingInterval` helper as `/api/inngest`, so its 20s abort surfaces the identical
+  // pre-recovery line — auto-resolve on first sighting (Control Tower
+  // `vercel:63b8e91c77459378`).
   assert.equal(
     isTransientAppstleFrequencyUpstreamTimeout(
       "/api/portal",
+      "Appstle frequency update failed: Error: upstream_timeout",
+    ),
+    true,
+  );
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/portal",
+      "Appstle frequency update failed: Error: upstream_timeout\n    at loggedAppstleFetch (src/lib/appstle.ts:120:11)",
+    ),
+    true,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-timeout Appstle failure on /api/portal (paged)", () => {
+  // The allowlist widens ONLY the timeout marker — an unrelated Appstle failure on
+  // `/api/portal` (e.g. a real 5xx, a JSON parse throw) still opens + pages on first
+  // sighting.
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/portal",
+      "Appstle frequency update failed: Error: Appstle API error: 500",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/portal",
+      "Appstle frequency update failed: TypeError: Cannot read properties of undefined (reading 'apiKey')",
+    ),
+    false,
+  );
+});
+
+test("isTransientAppstleFrequencyUpstreamTimeout KEEPS a non-allowlisted path even with the marker", () => {
+  // The allowlist is the exact set of routes that call `updateBillingInterval` — anything
+  // else carrying the same marker is a different signature (a different caller, a copy-paste
+  // in an unrelated surface) and stays captured / paged.
+  assert.equal(
+    isTransientAppstleFrequencyUpstreamTimeout(
+      "/api/webhooks/appstle",
       "Appstle frequency update failed: Error: upstream_timeout",
     ),
     false,
