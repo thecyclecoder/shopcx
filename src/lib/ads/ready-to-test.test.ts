@@ -213,3 +213,74 @@ test("a campaign with no landing_url is excluded even when its videos are ready"
   const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
   assert.equal(readyToTest.length, 0);
 });
+
+// ── max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 ────────────────────────
+// The always-bin flow drops binned-but-ineligible creatives (Max ran + rejected) into
+// `ad_campaigns` alongside eligible ones — Bianca's reader must filter them out. The DB filter
+// is `.not("max_qc_eligible","is",false)`; the JS-side belt-and-suspenders drops any row where
+// `max_qc_eligible === false` even if the DB filter is bypassed by a chain-mock / schema drift.
+
+test("Phase 2: `max_qc_eligible=false` campaign is EXCLUDED (binned-but-ineligible — visible on detail page, hidden from Bianca's postable list)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C7", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/7.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    // The fake chain ignores the `.not("max_qc_eligible","is",false)` filter arg — the JS-side
+    // guard is what actually drops this row. Prove that guard by handing the reader an
+    // ineligible campaign and asserting it does not surface.
+    ad_campaigns: {
+      data: [
+        { id: "C7", landing_url: "https://superfoods.com/products/ineligible", status: "ready", created_at: "2026-07-18T10:00:00Z", max_qc_eligible: false },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 0);
+});
+
+test("Phase 2: `max_qc_eligible=true` campaign SURFACES normally (postable — Max scored ≥7 + passed hard gates)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C8", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/8.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C8", landing_url: "https://superfoods.com/products/eligible", status: "ready", created_at: "2026-07-18T10:00:00Z", max_qc_eligible: true },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 1);
+  assert.equal(readyToTest[0].ad_campaign_id, "C8");
+});
+
+test("Phase 2: `max_qc_eligible=null` campaign SURFACES (legacy / deterministic mode / kill-switch off — today's byte-for-byte behavior preserved)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C9", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/9.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C9", landing_url: "https://superfoods.com/products/legacy", status: "ready", created_at: "2026-07-18T10:00:00Z", max_qc_eligible: null },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 1);
+  assert.equal(readyToTest[0].ad_campaign_id, "C9");
+});

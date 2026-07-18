@@ -93,9 +93,12 @@ interface QaVerdict {
   persuasion_score: number | null;
   persuasion_rubric: { lf8: number; schwartz: number; cialdini: number; hopkins: number; sugarman: number; evidence: string[] } | null;
   scroll_stop: {
-    headline_readable_in_3_frames: number;
-    visual_hierarchy_supports_headline: number;
-    first_line_earns_the_second: number;
+    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1 — sub-scores are
+    // nullable when Max omitted the advisory scroll_stop and the parser filled a neutral
+    // default; the object shape is still present so the row layout is stable.
+    headline_readable_in_3_frames: number | null;
+    visual_hierarchy_supports_headline: number | null;
+    first_line_earns_the_second: number | null;
     evidence: string[];
   } | null;
   verdict_reason: string;
@@ -508,7 +511,7 @@ export default function AdDetailPage() {
                 )}
                 {qa.scroll_stop && (
                   <p className="mt-1 text-xs text-zinc-500">
-                    Scroll-stop: readable {qa.scroll_stop.headline_readable_in_3_frames}/2 · hierarchy {qa.scroll_stop.visual_hierarchy_supports_headline}/2 · first-line {qa.scroll_stop.first_line_earns_the_second}/2
+                    Scroll-stop: readable {qa.scroll_stop.headline_readable_in_3_frames ?? "—"}/2 · hierarchy {qa.scroll_stop.visual_hierarchy_supports_headline ?? "—"}/2 · first-line {qa.scroll_stop.first_line_earns_the_second ?? "—"}/2
                   </p>
                 )}
                 {qa.verdict_reason && (

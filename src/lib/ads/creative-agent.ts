@@ -465,6 +465,15 @@ export type CopyAuthorSessionOutcome =
        *  (still a below-floor hold, but no verdict body to stamp). Absent when the closure never
        *  ran. */
       lastMaxCopyQcVerdict?: CopyQaVerdict | null;
+      /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — the last AuthorModeCopy
+       *  Dahlia produced BEFORE Max rejected it. Populated ONLY when `maxCopyQcMissed` is true
+       *  (Max's gate was the failing gate on the last attempt) AND the verdict was fully authored
+       *  (Dahlia cleared parse / self-score / cold-offer / validator / firewall — Max was the only
+       *  block). Absent on firewall / author-self / dispatch exhaustions (no safe caption to bin).
+       *  The caller (stockProduct) uses this to bin the last-attempted caption at
+       *  `max_qc_eligible=false` instead of discarding the whole session — the CEO's rule: never
+       *  waste a produced creative. */
+      lastAuthorVerdict?: AuthorModeCopy | null;
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -1047,6 +1056,12 @@ export async function runCopyAuthorSession(
   // `max_qc_below_floor_exhausted` escalation + stamp the last score/critiques.
   let lastMaxCopyQcMissed = false;
   let lastMaxCopyQcVerdict: CopyQaVerdict | null = null;
+  // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — the LAST AuthorModeCopy
+  // Dahlia produced whose Max gate then rejected. Captured at the Max-gate branch below and
+  // cleared on every earlier gate (parse / self-score / cold-offer / validator / firewall) so
+  // exhaustion only surfaces a caption when Max was the block AND the caption is otherwise safe
+  // to bin.
+  let lastAuthorVerdict: AuthorModeCopy | null = null;
   // copy-author-self-heal (2026-07-17) — the box session to RESUME on the next revise turn. Set from
   // each healthy dispatch's returned sessionId/configDir; cleared to null whenever we must go fresh (a
   // lost session, a dispatch that threw, or one that never established a session). null ⇒ the next turn
@@ -1073,6 +1088,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       resumeSessionId = null; // unknown state after a throw — rebuild fresh next turn
       resumeConfigDir = null;
       continue;
@@ -1100,6 +1116,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       continue;
     }
     const parsed = parseAuthorVerdict(dispatchResult.resultText);
@@ -1109,6 +1126,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       continue;
     }
     const verdict = parsed.verdict;
@@ -1118,6 +1136,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       continue;
     }
     if (
@@ -1133,6 +1152,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       continue;
     }
     // dahlia-shared-deterministic-copy-validator Phase 2 — SSOT self-check. Runs AFTER the
@@ -1163,6 +1183,7 @@ export async function runCopyAuthorSession(
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
       continue;
     }
     // copy-author-self-heal (2026-07-17) — the never-fabricate FIREWALL, now the LAST gate INSIDE the
@@ -1180,6 +1201,7 @@ export async function runCopyAuthorSession(
         lastFirewallMisses = firewall.misses;
         lastMaxCopyQcMissed = false;
         lastMaxCopyQcVerdict = null;
+        lastAuthorVerdict = null;
         continue;
       }
     }
@@ -1198,10 +1220,17 @@ export async function runCopyAuthorSession(
         lastFirewallMisses = undefined;
         lastMaxCopyQcMissed = true;
         lastMaxCopyQcVerdict = maxCheck.maxVerdict;
+        // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — capture the
+        // fully-authored AuthorModeCopy (parse / self-score / cold-offer / validator / firewall
+        // all cleared; Max was the only block) so stockProduct can bin it at
+        // `max_qc_eligible=false` if the loop exhausts on this class. Never captures a caption
+        // that failed an earlier gate — those are unsafe to bin.
+        lastAuthorVerdict = verdict;
         continue;
       }
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = maxCheck.maxVerdict;
+      lastAuthorVerdict = null;
       return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: maxCheck.maxVerdict };
     }
     return { kind: "ok", verdict, attempts: attempt + 1 };
@@ -1213,7 +1242,7 @@ export async function runCopyAuthorSession(
     ...(lastValidatorMisses ? { validatorMisses: lastValidatorMisses } : {}),
     ...(lastFirewallMisses ? { firewallMisses: lastFirewallMisses } : {}),
     ...(lastMaxCopyQcMissed
-      ? { maxCopyQcMissed: true, lastMaxCopyQcVerdict }
+      ? { maxCopyQcMissed: true, lastMaxCopyQcVerdict, lastAuthorVerdict }
       : {}),
   };
 }
@@ -1537,9 +1566,11 @@ export type InsertReadyCreativeResult =
 
 /** The exact row body `insertReadyCreative` writes to `ad_campaigns`. Extracted as a pure helper
  *  so the row-stamping flow — audience_temperature + author_self_score + Andromeda concept_tag
- *  — is unit-testable end-to-end (dahlia-andromeda-concept-diversity-tags Phase 1). Author mode:
- *  every field is CITED from `AuthorModeCopy`. Deterministic mode (opts.authorModeCopy absent):
- *  author_self_score + concept_tag are both null, byte-identical to today's row shape. */
+ *  + max_qc_eligible — is unit-testable end-to-end. Author mode: every field is CITED from
+ *  `AuthorModeCopy` + Max's eligibility verdict. Deterministic mode (opts.authorModeCopy absent):
+ *  author_self_score + concept_tag are both null; max_qc_eligible is null (byte-identical to
+ *  pre-Phase-2 today, and Bianca's `.not("max_qc_eligible","is",false)` filter treats null
+ *  the same as true — legacy / deterministic rows stay postable). */
 export interface AdCampaignInsertBody {
   workspace_id: string;
   product_id: string;
@@ -1549,12 +1580,20 @@ export interface AdCampaignInsertBody {
   audience_temperature: "cold" | "warm" | "hot" | null;
   author_self_score: AuthorSelfScore | null;
   concept_tag: AndromedaConceptTag | null;
+  /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's copy-QC
+   *  eligibility verdict. TRUE = postable (Bianca picks it up), FALSE = binned-but-ineligible
+   *  (row exists, visible on detail page, hidden from Bianca's postable list), NULL = Max never
+   *  ran (deterministic mode / kill-switch off / legacy). Bianca's `listReadyToTest` filters
+   *  `.not("max_qc_eligible","is",false)` so NULL and TRUE both surface. */
+  max_qc_eligible: boolean | null;
 }
 
 /** Pure — construct the `ad_campaigns` row body `insertReadyCreative` writes for one creative. The
  *  concept_tag / author_self_score come straight from the AuthorModeCopy verdict when present, both
- *  NULL otherwise (deterministic-mode path). Keeping this a pure helper lets the author-mode row-
- *  stamping flow be pinned in unit tests without stubbing the storage / DB chains. */
+ *  NULL otherwise (deterministic-mode path). `maxQcEligible` reflects Max's gate: TRUE = postable,
+ *  FALSE = binned-ineligible, NULL = Max never ran (Bianca reads NULL as pass-through, preserving
+ *  the pre-Phase-2 behavior for deterministic / kill-switch-off callers). Pure helper so the
+ *  row-stamping flow is provable without stubbing the storage / DB chains. */
 export function buildAdCampaignInsertBody(args: {
   workspaceId: string;
   productId: string;
@@ -1563,6 +1602,10 @@ export function buildAdCampaignInsertBody(args: {
   status: "ready" | "draft";
   audienceTemperature: "cold" | "warm" | "hot" | null;
   authorModeCopy?: AuthorModeCopy;
+  /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's copy-QC
+   *  eligibility. Undefined / null → stamps NULL (deterministic-mode / no dispatcher / legacy);
+   *  TRUE → postable; FALSE → binned-but-ineligible. */
+  maxQcEligible?: boolean | null;
 }): AdCampaignInsertBody {
   return {
     workspace_id: args.workspaceId,
@@ -1573,6 +1616,7 @@ export function buildAdCampaignInsertBody(args: {
     audience_temperature: args.audienceTemperature,
     author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
     concept_tag: args.authorModeCopy ? args.authorModeCopy.concept_tag : null,
+    max_qc_eligible: args.maxQcEligible ?? null,
   };
 }
 
@@ -1647,6 +1691,13 @@ async function insertReadyCreative(
      *  the AuthorModeCopy have already been broadcast into `copyPack` by the caller — this arg
      *  only carries the self-score envelope. */
     authorModeCopy?: AuthorModeCopy;
+    /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's copy-QC
+     *  eligibility. TRUE = postable (Bianca's ready-to-test picks it up); FALSE = binned-but-
+     *  ineligible (the creative row exists + is visible on the detail page with Max's critiques,
+     *  but Bianca skips it until eligible). NULL / undefined = Max never ran (deterministic mode /
+     *  kill-switch off / legacy) — Bianca's filter treats NULL identically to TRUE, so today's
+     *  byte-for-byte behavior is preserved for those callers. */
+    maxQcEligible?: boolean | null;
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. NULL /
@@ -1707,6 +1758,10 @@ async function insertReadyCreative(
     workspaceId, productId, name, angleId, status,
     audienceTemperature,
     authorModeCopy: opts?.authorModeCopy,
+    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's eligibility
+    // verdict, threaded from stockProduct. Absent (deterministic / kill-switch off) → NULL;
+    // Bianca's `.not("max_qc_eligible","is",false)` keeps NULL rows postable.
+    maxQcEligible: opts?.maxQcEligible ?? null,
   });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
@@ -2112,6 +2167,9 @@ async function stockProduct(
         let insertOpts: {
           audienceTemperature?: "cold" | "warm" | "hot" | null;
           authorModeCopy?: AuthorModeCopy;
+          /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — threaded
+           *  into `insertReadyCreative` so Max's eligibility lands on the row Bianca reads. */
+          maxQcEligible?: boolean | null;
         } | undefined = undefined;
         let authorVerdict: AuthorModeCopy | null = null;
         // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's eligible verdict
@@ -2274,9 +2332,17 @@ async function stockProduct(
             copyAuthorDispatcher,
           );
           if (outcome.kind === "exhausted") {
-            // director_activity ledger + StockedCreative failure row — NO insertReadyCreative call,
-            // so no product_ad_angles / ad_campaigns / ad_videos rows are ever written. Best-effort
-            // per director-activity; a write miss must NOT crash the batch.
+            // director_activity ledger + StockedCreative row. Firewall / author-self exhaustion
+            // NEVER produced a claim-safe caption — no insertReadyCreative call, so no
+            // product_ad_angles / ad_campaigns / ad_videos rows are written; the escalation is
+            // the durable record. max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2
+            // flips the max-QC exhaustion class alone: when Dahlia cleared every earlier gate and
+            // Max was the only block, the last-attempted caption is BINNED at
+            // `max_qc_eligible=false` (visible on the detail page with Max's critiques; excluded
+            // from Bianca's postable list) instead of discarded — the CEO's rule: never waste a
+            // produced creative. Firewall (fabrication miss) + author-self (parse / self-score /
+            // cold-offer / validator) still discard-and-escalate because the caption isn't safe to
+            // bin. Best-effort per director-activity; a write miss must NOT crash the batch.
             //
             // copy-author-self-heal (2026-07-17) — the firewall now exhausts INSIDE the loop, so its
             // DISTINCT escalation is keyed off `outcome.firewallMisses` (set when the LAST failed
@@ -2358,6 +2424,91 @@ async function stockProduct(
                     : "dahlia_copy_author_exhausted_activity_failed";
               console.warn(failKey, { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
             });
+            // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max-QC
+            // exhaustion class ALWAYS bins the last-attempted caption at
+            // `max_qc_eligible=false` instead of discarding it. Dahlia cleared every earlier
+            // gate (parse / self-score / cold-offer / validator / firewall) and Max was the
+            // only block — the caption is safe to persist as an audit + inspectable ledger,
+            // and Bianca's `.not("max_qc_eligible","is",false)` filter hides it from her
+            // postable list. `outcome.lastAuthorVerdict` is populated by the loop at the
+            // Max-fail branch (never populated on firewall / author-self exhaustion — those
+            // paths keep discard-and-escalate because the caption isn't claim-safe).
+            const lastAuthorVerdict = isMaxQcExhaustion ? outcome.lastAuthorVerdict ?? null : null;
+            if (isMaxQcExhaustion && lastAuthorVerdict) {
+              try {
+                const ineligibleCopyPack = authorCopyPack(lastAuthorVerdict);
+                const ineligibleInsertOpts = {
+                  audienceTemperature: lastAuthorVerdict.audience_temperature,
+                  authorModeCopy: lastAuthorVerdict,
+                  maxQcEligible: false,
+                };
+                const binResult = await insertReadyCreative(
+                  admin, workspaceId, productId, product.handle, productTitle, angle, ineligibleCopyPack,
+                  { canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType }, siblings: siblingRenders },
+                  ineligibleInsertOpts,
+                );
+                const binCampaignId = binResult.kind === "ok" ? binResult.campaignId : null;
+                // Persist Max's last verdict on the ineligible row so the detail page shows the
+                // critiques that kept bouncing. Best-effort — a write miss must not crash the batch.
+                if (binCampaignId && lastMaxVerdict) {
+                  await insertCopyQaVerdict(admin, {
+                    workspaceId,
+                    adCampaignId: binCampaignId,
+                    verdict: lastMaxVerdict,
+                    retryIndex: outcome.attempts - 1,
+                  }).catch((err) => {
+                    console.warn("max_copy_qc_verdict_insert_failed_on_ineligible", {
+                      workspaceId, productId, campaignId: binCampaignId,
+                      err: err instanceof Error ? err.message : String(err),
+                    });
+                    return null;
+                  });
+                }
+                await recordCombinationGenerated(admin, {
+                  workspaceId, productId, angleKey: ak, adCampaignId: binCampaignId, intent,
+                  elements: {
+                    treatment,
+                    headline: ineligibleCopyPack.headlines[0],
+                    description: ineligibleCopyPack.primaryTexts[0],
+                    cta: "Shop now",
+                    destinationUrl: await resolveLandingUrl(admin, workspaceId, product.handle),
+                  },
+                }).catch((e) => {
+                  console.warn("combination_record_failed_on_ineligible_bin", {
+                    workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+                  });
+                });
+                out.push({
+                  productId,
+                  angleHook: angle.hook,
+                  campaignId: binCampaignId,
+                  // Landed a row (albeit ineligible) — treat as success for the batch summary. The
+                  // director_activity ledger + `max_qc_below_floor_exhausted` action_kind above
+                  // still carries the operator distinction; the StockedCreative row just names the
+                  // durable landing state so the batch summary reports "1 binned-ineligible" vs
+                  // the "0 produced" the pre-Phase-2 discard reported.
+                  ok: !!binCampaignId,
+                  reason: binCampaignId
+                    ? `binned_ineligible_max_qc_below_floor: ${outcome.reason}`
+                    : `bin_ineligible_insert_failed: ${outcome.reason}`,
+                });
+                landed = !!binCampaignId;
+                skipped = true;
+                break;
+              } catch (err) {
+                // A throw from the ineligible-bin path must not crash the batch — fall through to
+                // the discard-and-escalate default below with the driver reason recorded.
+                console.warn("max_qc_below_floor_bin_ineligible_threw", {
+                  workspaceId, productId,
+                  err: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            // Fallthrough: firewall / author-self exhaustion, OR max_qc exhaustion without a
+            // captured lastAuthorVerdict (Max exhaustion where the FIRST attempt errored at
+            // dispatch — no safe caption ever produced). Preserve the pre-Phase-2 discard-and-
+            // escalate contract — the director_activity ledger row already emitted above is the
+            // durable record.
             out.push({
               productId,
               angleHook: angle.hook,
@@ -2378,10 +2529,6 @@ async function stockProduct(
           }
           authorVerdict = outcome.verdict;
           copyPack = authorCopyPack(outcome.verdict);
-          insertOpts = {
-            audienceTemperature: outcome.verdict.audience_temperature,
-            authorModeCopy: outcome.verdict,
-          };
           // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's verdict now
           // rides on the ok outcome (`outcome.maxCopyQcVerdict`) because the QC gate ran INSIDE
           // Dahlia's self-heal loop. A sub-7 verdict never gets here — it was already bounced back
@@ -2390,6 +2537,19 @@ async function stockProduct(
           // dispatcher / kill-switch off), `outcome.maxCopyQcVerdict` is absent and the row lands
           // with no verdict.
           maxCopyQcVerdict = outcome.maxCopyQcVerdict ?? null;
+          insertOpts = {
+            audienceTemperature: outcome.verdict.audience_temperature,
+            authorModeCopy: outcome.verdict,
+            // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — stamp Max's
+            // eligibility on the same insert so Bianca's `.not("max_qc_eligible","is",false)` filter
+            // reads it directly. On the ok path Max's gate ALREADY cleared inside Dahlia's self-heal
+            // loop (else this branch never runs) — the eligibility is TRUE by construction; the
+            // explicit call is defence-in-depth so a hypothetical divergence between the loop's
+            // gate + the pure predicate is visible. When the closure was not injected
+            // (`copyQcDispatcher` absent → `maxCopyQcVerdict` null) we pass null so the row stays
+            // legacy-postable — byte-identical to pre-Phase-2 today.
+            maxQcEligible: maxCopyQcVerdict ? isCopyQcEligible(maxCopyQcVerdict) : null,
+          };
         } else {
           // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
           // (the canonical is its first entry) with 3 hook rotations across the brief's real material.

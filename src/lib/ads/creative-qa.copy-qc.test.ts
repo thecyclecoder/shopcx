@@ -235,23 +235,45 @@ test("(e) insertCopyQaVerdict: writes scroll_stop on the row body it hands to th
   });
 });
 
-test("(f) parseCopyQaVerdict: verdict MISSING scroll_stop → parse_error (fail-closed)", () => {
+// max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 1 — MISSING or NULL
+// scroll_stop now TOLERATES to a neutral advisory default (all sub-scores null + empty
+// evidence) so an omitted advisory field doesn't nuke Max's real hard_gates + persuasion_score
+// grade. Present-but-malformed (out-of-range sub-score, non-object) is STILL fail-closed —
+// that's a genuine defect, not an absence.
+
+test("(f) parseCopyQaVerdict: verdict MISSING scroll_stop → ok with neutral-default scroll_stop (advisory absence tolerated, real grade preserved)", () => {
   const missing = { ...passVerdictWithScrollStop } as Record<string, unknown>;
   delete missing.scroll_stop;
   const parsed = parseCopyQaVerdict(JSON.stringify(missing));
-  assert.equal(parsed.kind, "parse_error");
-  if (parsed.kind === "parse_error") {
-    assert.equal(parsed.reason, "copy_qc_verdict_missing_scroll_stop");
-  }
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  // The real hard_gates + persuasion_score grade MUST survive — that's the whole point of the
+  // Phase 1 tolerance (previously these fields were discarded via parse_error).
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.persuasion_score, 7);
+  assert.ok(parsed.verdict.persuasion_rubric, "persuasion_rubric must survive scroll_stop absence");
+  // scroll_stop is filled with a NEUTRAL default (all sub-scores null + empty evidence).
+  assert.deepEqual(parsed.verdict.scroll_stop, {
+    headline_readable_in_3_frames: null,
+    visual_hierarchy_supports_headline: null,
+    first_line_earns_the_second: null,
+    evidence: [],
+  });
 });
 
-test("(f) parseCopyQaVerdict: verdict with scroll_stop:null → parse_error (fail-closed)", () => {
+test("(f) parseCopyQaVerdict: verdict with scroll_stop:null → ok with neutral-default scroll_stop (real grade preserved)", () => {
   const nulled = { ...passVerdictWithScrollStop, scroll_stop: null };
   const parsed = parseCopyQaVerdict(JSON.stringify(nulled));
-  assert.equal(parsed.kind, "parse_error");
-  if (parsed.kind === "parse_error") {
-    assert.equal(parsed.reason, "copy_qc_verdict_missing_scroll_stop");
-  }
+  assert.equal(parsed.kind, "ok");
+  if (parsed.kind !== "ok") return;
+  assert.equal(parsed.verdict.hard_gate_pass, true);
+  assert.equal(parsed.verdict.persuasion_score, 7);
+  assert.deepEqual(parsed.verdict.scroll_stop, {
+    headline_readable_in_3_frames: null,
+    visual_hierarchy_supports_headline: null,
+    first_line_earns_the_second: null,
+    evidence: [],
+  });
 });
 
 test("(f) parseCopyQaVerdict: scroll_stop sub-score out of 0..2 range → parse_error (fail-closed)", () => {
