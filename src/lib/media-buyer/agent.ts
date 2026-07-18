@@ -48,7 +48,7 @@ import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
 import { loadActivePolicy, type IterationPolicy } from "@/lib/meta/decision-engine";
-import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, type MediaBuyerTestCohort, type CreateAdsetSpec } from "@/lib/media-buyer/publish-gate";
+import { getEffectiveMediaBuyerTestCohort, MEDIA_BUYER_TEST_ORIGIN, countLiveTestAdsetsInCampaign, evaluateMaxCopyQcAtPublish, type MediaBuyerTestCohort, type CreateAdsetSpec, type MaxCopyQcPublishRefusalReason } from "@/lib/media-buyer/publish-gate";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
 import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
@@ -1875,32 +1875,57 @@ export async function runMediaBuyerLoop(
       });
       if (r.recorded) writes.directorActivityRows += 1;
     } else if (jobInsert.reason) {
-      const r = await recordDirectorActivity(admin, {
-        workspaceId: opts.workspaceId,
-        directorFunction: GROWTH_DIRECTOR_FUNCTION,
-        actionKind: "media_buyer_replenish_missing_config",
-        specSlug: null,
-        reason: `Replenish deferred for campaign ${a.adCampaignId}: ${jobInsert.reason}`,
-        metadata: {
-          ad_campaign_id: a.adCampaignId,
-          meta_adset_id: a.testMetaAdsetId,
-          missing: jobInsert.reason,
-          autonomous: true,
-        },
-      });
-      if (r.recorded) writes.directorActivityRows += 1;
-
-      // Phase 3 — a rail hit on an ACTIVE cohort must ESCALATE, not silently sit under target
-      // (north star). The audit row above is a quiet ledger; this raises a deduped CEO card so
-      // an under-provisioned product screams instead of stalling like Superfood Tabs did.
-      if (cohort?.isActive && cohort.id) {
-        await escalateUnderProvisionedCohort(admin, {
+      // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
+      // a Max copy-QC refusal is a different-shape rail from a config gap: the audit row
+      // names the CREATIVE that failed the 7/10 hard gate (not a "config missing" reason),
+      // and we DON'T escalate the under-provisioned-cohort card (nothing about the cohort
+      // is under-provisioned — a sub-7 creative is a creative-quality signal owned by
+      // Dahlia's bin, not by cohort config). The generic "missing_config" path below still
+      // fires for the actual cohort/target/copy config gaps it was built for.
+      if (jobInsert.maxCopyQcRefusal) {
+        const r = await recordDirectorActivity(admin, {
           workspaceId: opts.workspaceId,
-          productId: cohort.productId ?? null,
-          cohortId: cohort.id,
+          directorFunction: GROWTH_DIRECTOR_FUNCTION,
+          actionKind: "media_buyer_publish_refused_missing_max_copy_qc",
+          specSlug: null,
           reason: jobInsert.reason,
-          nowMs,
+          metadata: {
+            ad_campaign_id: a.adCampaignId,
+            meta_adset_id: a.testMetaAdsetId,
+            refusal_reason: jobInsert.maxCopyQcRefusal,
+            score_floor: 7,
+            autonomous: true,
+          },
         });
+        if (r.recorded) writes.directorActivityRows += 1;
+      } else {
+        const r = await recordDirectorActivity(admin, {
+          workspaceId: opts.workspaceId,
+          directorFunction: GROWTH_DIRECTOR_FUNCTION,
+          actionKind: "media_buyer_replenish_missing_config",
+          specSlug: null,
+          reason: `Replenish deferred for campaign ${a.adCampaignId}: ${jobInsert.reason}`,
+          metadata: {
+            ad_campaign_id: a.adCampaignId,
+            meta_adset_id: a.testMetaAdsetId,
+            missing: jobInsert.reason,
+            autonomous: true,
+          },
+        });
+        if (r.recorded) writes.directorActivityRows += 1;
+
+        // Phase 3 — a rail hit on an ACTIVE cohort must ESCALATE, not silently sit under target
+        // (north star). The audit row above is a quiet ledger; this raises a deduped CEO card so
+        // an under-provisioned product screams instead of stalling like Superfood Tabs did.
+        if (cohort?.isActive && cohort.id) {
+          await escalateUnderProvisionedCohort(admin, {
+            workspaceId: opts.workspaceId,
+            productId: cohort.productId ?? null,
+            cohortId: cohort.id,
+            reason: jobInsert.reason,
+            nowMs,
+          });
+        }
       }
     }
   }
@@ -2331,8 +2356,44 @@ async function enqueueReplenishPublish(
   workspaceId: string,
   cohort: MediaBuyerTestCohort | null,
   action: MediaBuyerReplenishAction,
-): Promise<{ inserted: boolean; jobId: string | null; reason?: string }> {
+): Promise<{
+  inserted: boolean;
+  jobId: string | null;
+  reason?: string;
+  /**
+   * bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
+   * discriminator so the runner can emit a distinct `media_buyer_publish_refused_missing_max_copy_qc`
+   * audit row for the Max copy-QC hard rail (not the generic `media_buyer_replenish_missing_config`
+   * shape). Non-null only when this call refused on the QC gate.
+   */
+  maxCopyQcRefusal?: MaxCopyQcPublishRefusalReason | null;
+}> {
   if (!cohort) return { inserted: false, jobId: null, reason: "no_active_cohort" };
+
+  // bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher Phase 1 —
+  // fail-CLOSED hard rail at Bianca's money step: before any `ad_publish_jobs` row is
+  // inserted OR any Meta publish event is dispatched, INDEPENDENTLY re-verify that this
+  // creative carries a valid Max copy-QC verdict with `hard_gate_pass` AND
+  // `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A missing/NULL verdict or a sub-7
+  // score REFUSES the post — the creative is skipped, an audit row is written by the
+  // caller, and no dollars flow. This is DEFENCE-IN-DEPTH over the `ad_campaigns` bin
+  // eligibility flag: a mis-set flag or a NULL verdict routes to refusal here regardless.
+  // The check runs BEFORE the cohort-config check so a sub-7 creative held in a well-
+  // configured cohort still routes to `missing_max_copy_qc` (not a misleading "missing
+  // default target" reason).
+  const qcGate = await evaluateMaxCopyQcAtPublish(admin, {
+    workspaceId,
+    adCampaignId: action.adCampaignId,
+  });
+  if (!qcGate.ok) {
+    return {
+      inserted: false,
+      jobId: null,
+      reason: qcGate.diagnosis,
+      maxCopyQcRefusal: qcGate.reason,
+    };
+  }
+
   const accountId = cohort.defaultMetaAccountId;
   const pageId = cohort.defaultMetaPageId;
   if (!accountId || !pageId) {

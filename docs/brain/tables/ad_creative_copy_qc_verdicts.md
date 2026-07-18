@@ -40,6 +40,12 @@ Mirrors [[ad_campaigns]] · [[creative_test_outcomes]]:
 - `ad_creative_copy_qc_verdicts_service_all` — service role does all writes.
 - `ad_creative_copy_qc_verdicts_member_select` — any authenticated workspace member can select.
 
+## Readers
+
+- **Dahlia's bin gate** — `isCopyQcEligible(verdict)` in [[../libraries/creative-agent]] (max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2): the pure predicate `stockProduct` uses to hold a below-floor Max verdict out of Bianca's bin at author time.
+- **Bianca's publish-time hard rail** — `evaluateMaxCopyQcAtPublish(admin, {workspaceId, adCampaignId})` in [[../libraries/media-buyer-publish-gate]] ([[../specs/bianca-never-posts-a-creative-without-a-max-grade-of-7-or-higher]] Phase 1): the DB-aware wrapper Bianca's replenish calls BEFORE any [[ad_publish_jobs]] insert. Reads the latest verdict via `readLatestCopyQaVerdict` and REFUSES a null / hard-gate-fail / sub-7 verdict fail-closed — the last gate before real ad spend, INDEPENDENT of the [[ad_campaigns]] bin eligibility flag. A refusal writes ONE `media_buyer_publish_refused_missing_max_copy_qc` [[director_activity]] row citing the refusal reason.
+- **Dashboard read** — `readLatestCopyQaVerdict(admin, {workspaceId, adCampaignId})` in [[../libraries/creative-qa]] — the SDK chokepoint (CLAUDE.md rule). Never raw `.from("ad_creative_copy_qc_verdicts").select(...)` from a route.
+
 ## Common queries
 
 ### Latest verdict for a campaign
