@@ -67,7 +67,7 @@ interface Angle {
   meta_headline: string | null;
   meta_primary_text: string | null;
   meta_description: string | null;
-  copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string } | null;
+  copy_pack: { headlines?: string[]; primaryTexts?: string[]; description?: string; frameworks?: string[] } | null;
   provenance: AngleProvenance | null;
 }
 
@@ -131,6 +131,25 @@ const TEMP_TONE: Record<string, string> = {
   cold: "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300",
   warm: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   hot: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
+};
+
+// dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 2 — the five
+// conversion-psychology frameworks Dahlia's variations lead with (mirror of AUTHOR_FRAMEWORK_KEYS
+// in creative-agent.ts, human-formatted here for the detail-page chip). Unknown tokens fall through
+// to the raw string + a neutral zinc chip (see FRAMEWORK_TONE default in the render).
+const FRAMEWORK_LABEL: Record<string, string> = {
+  lf8: "LF8",
+  schwartz: "Schwartz",
+  cialdini: "Cialdini",
+  hopkins: "Hopkins",
+  sugarman: "Sugarman",
+};
+const FRAMEWORK_TONE: Record<string, string> = {
+  lf8: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300",
+  schwartz: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300",
+  cialdini: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  hopkins: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  sugarman: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
 };
 
 // The three Meta placements a Dahlia pack renders, in display order.
@@ -360,12 +379,36 @@ export default function AdDetailPage() {
           </div>
         )}
 
-        {/* Copy variations */}
+        {/* Copy variations — framework-labeled when Dahlia's per-framework variations landed
+            (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 2),
+            temperature-banded when the temperature path fired, else legacy pack fallback. */}
         <div className="mt-5">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
-            Copy variations{copyVariants.length ? " · temperature-banded" : ""}
+            Copy variations
+            {angle?.copy_pack?.frameworks?.length ? " · framework-led" : copyVariants.length ? " · temperature-banded" : ""}
           </p>
-          {copyVariants.length > 0 ? (
+          {angle?.copy_pack?.frameworks?.length ? (
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {angle.copy_pack.frameworks.map((framework, i) => {
+                const headline = angle.copy_pack?.headlines?.[i] ?? "";
+                const primary = angle.copy_pack?.primaryTexts?.[i] ?? "";
+                return (
+                  <div key={`${framework}-${i}`} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${FRAMEWORK_TONE[framework] ?? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
+                      {FRAMEWORK_LABEL[framework] ?? framework}
+                    </span>
+                    <p className="mt-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">{headline}</p>
+                    <p className="mt-1 whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-300">{primary}</p>
+                  </div>
+                );
+              })}
+              {angle.copy_pack.description && (
+                <div className="rounded-lg border border-dashed border-zinc-200 bg-transparent p-3 text-[11px] italic text-zinc-500 dark:border-zinc-800 dark:text-zinc-400 md:col-span-2 lg:col-span-3">
+                  {angle.copy_pack.description}
+                </div>
+              )}
+            </div>
+          ) : copyVariants.length > 0 ? (
             <div className="grid gap-3 md:grid-cols-3">
               {copyVariants.map((v) => (
                 <div key={v.audience_temperature} className="rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
