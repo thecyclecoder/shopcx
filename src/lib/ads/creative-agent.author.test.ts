@@ -1128,5 +1128,106 @@ test("Phase 3 loop: firewall exhaustion WINS over Max exhaustion (tie-break — 
   if (outcome.kind === "exhausted") {
     assert.ok(outcome.firewallMisses, "firewall miss must ride on the exhaustion (tie-break)");
     assert.equal(outcome.maxCopyQcMissed, undefined, "Max flag must NOT be set when the firewall was the last failing gate");
+    // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — the firewall-exhaustion
+    // path must NOT surface a `lastAuthorVerdict`. A fabricated caption is not safe to bin —
+    // stockProduct falls through to discard-and-escalate.
+    assert.equal(outcome.lastAuthorVerdict, undefined, "firewall exhaustion must not carry an authored verdict to bin");
+  }
+});
+
+// ── max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 ────────────────────────
+// The always-bin flow relies on TWO composable pieces:
+//   (P2-a) buildAdCampaignInsertBody carries `max_qc_eligible` through to the ad_campaigns row
+//          — deterministic-mode + kill-switch-off callers stamp NULL (byte-identical to today);
+//          Max-eligible callers stamp TRUE; Max-below-floor callers stamp FALSE.
+//   (P2-b) A Max-below-floor exhaustion surfaces `lastAuthorVerdict` on the exhausted outcome
+//          so stockProduct can bin the last-attempted caption at `max_qc_eligible=false` instead
+//          of discarding it. Firewall / author-self exhaustion still hides the field (unsafe to
+//          bin — those captions never cleared the pre-Max gates).
+
+test("Phase 2 (P2-a): buildAdCampaignInsertBody defaults max_qc_eligible=null when the arg is absent (deterministic / kill-switch-off / legacy — byte-identical to pre-Phase-2)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: null,
+  });
+  assert.equal(body.max_qc_eligible, null);
+});
+
+test("Phase 2 (P2-a): buildAdCampaignInsertBody stamps max_qc_eligible=true → postable (Bianca's ready-to-test picks it up)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "warm",
+    authorModeCopy: authorCopy(),
+    maxQcEligible: true,
+  });
+  assert.equal(body.max_qc_eligible, true);
+  assert.equal(body.status, "ready");
+});
+
+test("Phase 2 (P2-a): buildAdCampaignInsertBody stamps max_qc_eligible=false → binned-but-ineligible (row exists + visible on detail page; Bianca's `.not(is,false)` filter hides it)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "warm",
+    authorModeCopy: authorCopy(),
+    maxQcEligible: false,
+  });
+  assert.equal(body.max_qc_eligible, false);
+  // The row still lands at status='ready' — status is the angle-driven readiness signal
+  // (readyStatusForAngle), NOT the Max eligibility. A sub-7 creative with a valid angle_id still
+  // stamps status='ready'; the eligibility gate is the max_qc_eligible column alone.
+  assert.equal(body.status, "ready");
+});
+
+test("Phase 2 (P2-b): a Max-below-floor exhaustion surfaces `lastAuthorVerdict` — stockProduct can bin the last-attempted caption at max_qc_eligible=false instead of discarding", async () => {
+  // Dahlia produces a clean caption on every attempt; Max scores every attempt sub-floor (4/10).
+  const dahliaReplies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({
+    resultText: envelope({ headline: "Cleaner morning energy" }),
+  }));
+  const { dispatch } = scriptedDispatcher(dahliaReplies);
+  const { closure } = scriptedMaxQc(
+    Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => copyQcVerdictP3(4)),
+  );
+  const outcome = await runCopyAuthorSession(
+    sessionInputs({ verifyMaxCopyQc: closure }),
+    dispatch,
+  );
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.equal(outcome.maxCopyQcMissed, true, "Max was the last failing gate");
+    assert.ok(outcome.lastMaxCopyQcVerdict, "the last sub-floor Max verdict must ride on the exhaustion");
+    // The key new invariant — the last-attempted AuthorModeCopy must surface so stockProduct
+    // can bin it. Without this, the always-bin path can't reconstruct the copyPack + insertOpts.
+    assert.ok(outcome.lastAuthorVerdict, "lastAuthorVerdict must be present on a Max-below-floor exhaustion");
+    assert.equal(outcome.lastAuthorVerdict!.headline, "Cleaner morning energy");
+  }
+});
+
+test("Phase 2 (P2-b): self-score exhaustion does NOT surface `lastAuthorVerdict` (caption never cleared Dahlia's own gates — not safe to bin)", async () => {
+  // Every attempt lands a below-floor self-score (total=5 < AUTHOR_SELF_SCORE_FLOOR=6); the loop
+  // never even reaches Max. The envelope's parsed key is `self_score` (snake_case JSON) that
+  // parseAuthorVerdict maps to `selfScore` — the override key matches the envelope, not the type.
+  const dahliaReplies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({
+    resultText: envelope({
+      self_score: { lf8: 1, schwartz: 1, cialdini: 1, hopkins: 1, sugarman: 1, total: 5, evidence: ["low"] },
+    }),
+  }));
+  const { dispatch } = scriptedDispatcher(dahliaReplies);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.equal(outcome.maxCopyQcMissed, undefined, "self-score exhaustion is not a Max exhaustion");
+    assert.equal(outcome.lastAuthorVerdict, undefined, "self-score exhaustion must not surface a lastAuthorVerdict — the caption isn't safe to bin");
   }
 });
