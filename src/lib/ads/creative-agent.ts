@@ -93,6 +93,34 @@ export const AUTHOR_SELF_SCORE_FLOOR = 6;
  *  goal's success metric depends on. */
 export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
 
+/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — the persuasion-score
+ *  floor Max's copy-QC verdict must clear before the creative is eligible for Bianca's bin.
+ *  The CEO's rule from the spec: "a creative is bin-eligible only if Max's hard gates pass
+ *  AND his whole-ad score is at least 7/10; below 7 it is NOT eligible." Kept as a NAMED
+ *  exported constant so a founder can tune it in one place without hunting through call sites.
+ *  Read by `isCopyQcEligible` — the pure predicate `stockProduct` gates on before it hands the
+ *  creative to `insertReadyCreative`. */
+export const MAX_QC_ELIGIBILITY_FLOOR = 7;
+
+/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — pure predicate for
+ *  bin eligibility on Max's copy-QC verdict. Eligible IFF the verdict exists AND
+ *  `hard_gate_pass` is true AND `persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR` (7). A `null`
+ *  verdict (dispatch error / parse error / no dispatcher) is NOT eligible — the CEO's rule:
+ *  "below 7 (or a hard-gate fail, or a parse error) means NOT eligible." Scroll-stop sub-scores
+ *  are DELIBERATELY not in this predicate (Goodhart guard — advisory only; only the top-line
+ *  persuasion score + hard gates gate). Pure, exported, unit-testable so the floor is provable
+ *  from a fixture verdict.
+ *
+ *  Semantics of `persuasion_score`: the shared parser (`parseCopyQaVerdict`) forces this null
+ *  on a hard-gate fail (advisory contract) and requires a 0..10 integer on a hard-gate pass —
+ *  the `?? 0` fallback below is defence-in-depth so a null score on a hard-gate pass (should
+ *  never happen — the parser fail-closes) still routes to ineligible instead of throwing. */
+export function isCopyQcEligible(verdict: CopyQaVerdict | null): boolean {
+  if (!verdict) return false;
+  if (!verdict.hard_gate_pass) return false;
+  return (verdict.persuasion_score ?? 0) >= MAX_QC_ELIGIBILITY_FLOOR;
+}
+
 // ── dahlia-copy-author-box-session Phase 3 — author-mode types (Phase 2 was folded in) ──────────
 
 /** Dahlia's self-score against the shared 0-10 Conversion-Psychology rubric (LF8 + Schwartz +
@@ -2030,11 +2058,68 @@ async function stockProduct(
           if (qcRun.verdict) {
             maxCopyQcVerdict = qcRun.verdict;
           } else {
-            // Advisory-only in Phase 1 — a QC dispatch/parse miss does NOT bounce the creative;
-            // Phase 2's eligibility gate will treat a missing verdict as ineligible. Log so
-            // operators can slice miss rates before the gate lands.
+            // A QC dispatch/parse miss routes to ineligible in Phase 2's gate below — the CEO's
+            // rule: "below 7 (or a hard-gate fail, or a parse error) means NOT eligible." Log so
+            // operators can slice miss rates apart from below-floor bounces.
             console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
           }
+        }
+        // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — bin-eligibility
+        // gate. When Max's copy-QC is engaged (copyQcDispatcher injected AND Dahlia authored ok),
+        // a creative is bin-eligible IFF `isCopyQcEligible(maxCopyQcVerdict)` — the pure predicate
+        // checks: verdict exists AND hard_gate_pass AND persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR (7).
+        // A null / hard-gate-fail / sub-7 verdict does NOT reach `insertReadyCreative`; instead the
+        // creative is HELD out of the bin, a growth `director_activity` row records the below-floor
+        // hold (Phase 3 will replace the hold with a bounce-back-to-Dahlia self-heal revise loop),
+        // and the StockedCreative row surfaces the distinct `max_qc_below_floor` reason for the
+        // batch summary. Runs ONLY when the dispatcher was injected AND Dahlia authored ok — the
+        // deterministic path (`authorModeEngaged` false, no author verdict) skips the gate
+        // byte-identical to today, and the kill-switch (`DAHLIA_QC_COPY_MODE=off`) leaves the
+        // dispatcher unset so the gate never fires.
+        if (copyQcDispatcher && authorVerdict && !isCopyQcEligible(maxCopyQcVerdict)) {
+          const persuasionScore = maxCopyQcVerdict?.persuasion_score ?? null;
+          const hardGatePass = maxCopyQcVerdict?.hard_gate_pass ?? null;
+          const bounceReason = !maxCopyQcVerdict
+            ? "verdict_missing"
+            : !maxCopyQcVerdict.hard_gate_pass
+              ? "hard_gate_fail"
+              : `below_floor:${persuasionScore ?? "null"}`;
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "growth",
+            actionKind: "max_qc_below_floor_hold",
+            specSlug: "max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia",
+            reason: `max copy-QC held ${productTitle} (${angle.source} angle) out of the bin — ${bounceReason} (score=${persuasionScore ?? "null"} / floor=${MAX_QC_ELIGIBILITY_FLOOR})`,
+            metadata: {
+              product_id: productId,
+              product_title: productTitle,
+              angle_source: angle.source,
+              angle_hook: angle.hook,
+              persuasion_score: persuasionScore,
+              hard_gate_pass: hardGatePass,
+              hard_gates: maxCopyQcVerdict?.hard_gates ?? null,
+              verdict_reason: maxCopyQcVerdict?.verdict_reason ?? null,
+              floor: MAX_QC_ELIGIBILITY_FLOOR,
+              bounce_reason: bounceReason,
+              audience_temperature: authorVerdict.audience_temperature,
+              autonomous: true,
+            },
+          }).catch((e) => {
+            console.warn("max_qc_below_floor_hold_activity_failed", {
+              workspaceId,
+              productId,
+              err: e instanceof Error ? e.message : String(e),
+            });
+          });
+          out.push({
+            productId,
+            angleHook: angle.hook,
+            campaignId: null,
+            ok: false,
+            reason: `max_qc_below_floor: ${bounceReason}`,
+          });
+          skipped = true;
+          break;
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
           canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType },

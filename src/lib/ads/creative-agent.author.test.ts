@@ -26,13 +26,16 @@ import {
   ANDROMEDA_CONCEPT_TAGS,
   AUTHOR_SELF_SCORE_FLOOR,
   MAX_COPY_AUTHOR_REVISE_ATTEMPTS,
+  MAX_QC_ELIGIBILITY_FLOOR,
   authorCopyPack,
   buildAdCampaignInsertBody,
+  isCopyQcEligible,
   parseAuthorVerdict,
   resolveAudienceTemperature,
   runCopyAuthorSession,
   type AuthorModeCopy,
 } from "./creative-agent";
+import type { CopyQaVerdict } from "./creative-qa";
 import type { ScoredAngle } from "./creative-brief";
 import type { ClaimMiss } from "./never-fabricate";
 
@@ -723,4 +726,96 @@ test("runCopyAuthorSession: competitor DNA is embedded in the DATA block ONLY wh
   const withoutDna = scriptedDispatcher([{ resultText: envelope() }]);
   await runCopyAuthorSession(sessionInputs(), withoutDna.dispatch);
   assert.doesNotMatch(withoutDna.calls[0].prompt, /COMPETITOR_DNA:/);
+});
+
+// ── max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — 7/10 eligibility gate ──
+//
+// Pin `isCopyQcEligible` — the pure predicate `stockProduct` uses to hold a below-floor Max verdict
+// out of Bianca's bin. The CEO's rule: eligible IFF hard_gate_pass AND persuasion_score >= 7.
+// Scroll-stop sub-scores are DELIBERATELY not in this predicate (advisory-only Goodhart guard).
+
+function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
+  return {
+    hard_gate_pass: true,
+    hard_gates: {
+      no_fabrication: true,
+      no_cold_offer: true,
+      no_competitor_leak: true,
+      single_promise: true,
+      render_ok: true,
+    },
+    persuasion_score: 7,
+    persuasion_rubric: null,
+    scroll_stop: {
+      headline_readable_in_3_frames: 2,
+      visual_hierarchy_supports_headline: 2,
+      first_line_earns_the_second: 2,
+      evidence: [],
+    },
+    declared_intent: null,
+    dahlia_rubric: null,
+    verdict_reason: "",
+    ...overrides,
+  } as CopyQaVerdict;
+}
+
+test("Phase 2 gate: floor is set to 7 (named constant, tunable in ONE place)", () => {
+  assert.equal(MAX_QC_ELIGIBILITY_FLOOR, 7);
+});
+
+test("Phase 2 gate: 7/10 verdict with all hard gates passing → ELIGIBLE (the exact boundary)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 7 })), true);
+});
+
+test("Phase 2 gate: 6/10 verdict with all hard gates passing → NOT eligible (below the floor by 1)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 6 })), false);
+});
+
+test("Phase 2 gate: 10/10 verdict → eligible; 0/10 verdict → not eligible (the extremes)", () => {
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 10 })), true);
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: 0 })), false);
+});
+
+test("Phase 2 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (hard gates dominate the floor)", () => {
+  assert.equal(
+    isCopyQcEligible(
+      copyQcVerdict({
+        hard_gate_pass: false,
+        hard_gates: {
+          no_fabrication: true,
+          no_cold_offer: true,
+          no_competitor_leak: true,
+          single_promise: true,
+          render_ok: false,
+        },
+        persuasion_score: 10,
+      }),
+    ),
+    false,
+  );
+});
+
+test("Phase 2 gate: NULL verdict → NOT eligible (parse error / dispatch error routes to hold)", () => {
+  assert.equal(isCopyQcEligible(null), false);
+});
+
+test("Phase 2 gate: hard-gate pass with a NULL persuasion_score → NOT eligible (defence-in-depth null-fallback)", () => {
+  // parseCopyQaVerdict fail-closes on a null score alongside a hard-gate pass — this is the
+  // guard for the pathological case where a verdict slips through with null anyway.
+  assert.equal(isCopyQcEligible(copyQcVerdict({ persuasion_score: null })), false);
+});
+
+test("Phase 2 gate: scroll-stop sub-scores are IGNORED (advisory-only Goodhart guard — only the top-line score gates)", () => {
+  // A 7/10 top-line with catastrophic scroll-stop sub-scores is STILL eligible — the top-line is
+  // Max's synthesis, sub-scores are recorded for later CAC correlation and never gate.
+  const badScrollStop = copyQcVerdict({
+    persuasion_score: 7,
+    scroll_stop: {
+      headline_readable_in_3_frames: 0,
+      visual_hierarchy_supports_headline: 0,
+      first_line_earns_the_second: 0,
+      evidence: ["catastrophic"],
+    },
+  });
+  assert.equal(isCopyQcEligible(badScrollStop), true);
 });
