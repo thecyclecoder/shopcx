@@ -15,6 +15,10 @@ Every kind's lane looks the same:
 
 CI static check `scripts/_check-worker-lanes.ts` enforces that every kind in the `Job.kind` union has (1) a claim lane, (2) a dispatcher entry (or a `DISPATCH_BY_FALLTHROUGH` exemption), and no dangling literals. Ownership routing lives in [[approval-inbox]] `ownerFunctionForKind`.
 
+### Producer kinds run up to 3 concurrent lanes ([[../specs/producer-agent-kinds-get-up-to-3-concurrent-lanes-not-1]] Phase 1)
+
+The **producer** agent-kinds (artifact-creators — `product-seed`, `dr-content`, `media-buyer`, `ad-creative`, `ad-creative-copy-author`, `ad-creative-copy-qc`, `storefront-optimizer`) default to `MAX_* = 3` (was 1), so per-format ad-review feedback or a multi-product test run fills three lanes in parallel instead of serially. Env-overridable via `AGENT_TODO_MAX_<KIND>`. Supervisory / router / interactive kinds (`spec-chat`, `ticket-improve`, `ticket-handle`, `platform-director`, `triage-escalations`, `ad-review-feedback`, `mario`, `pr-resolve`, `dev-ask`, `spec-test`, `deploy-review`, …) stay at `MAX_* = 1` — serialized by design. The `other` bucket cap in the account-usage rollup is a plain sum of every `MAX_*`, so raising the producer defaults widens that bucket automatically without any downstream reconciliation.
+
 ## Lanes (per-kind lookup)
 
 | Lane / kind | Owner | Docs |
@@ -70,7 +74,7 @@ The `dr-content` kind is registered in `Job.kind` and served by `runDrContentJob
 The Growth-owned lane that fills a queued [[../tables/lander_blueprints]] row's `content` bucket — DR copy per skeleton block + a per-image-slot verdict per asset slot (generate → Nano Banana Pro compose + a categorized [[../tables/product_media]] row · flag_gap → a [[../tables/lander_content_gaps]] row for Max). Enforces the never-fake-a-customer-result rail: a real-evidence category (`before_after` / `ugc` / `testimonial_photo` / `press_logo`) is HARD-refused for `generate` in the worker and routed to a gap instead — defense-in-depth even if Carrie's session hallucinates a verdict.
 
 - **Enqueue** — [[cleo-blueprint]] `enqueueDrContentJob` (called by `runCleoBlueprintSweep` — [[../specs/cleo-lander-blueprint]] Phase 2). One `kind='dr-content'` row per newly-landed blueprint, blueprint id in `spec_slug` (dedup-gated on any in-flight `dr-content` job for the same blueprint).
-- **Cap** — `MAX_DR_CONTENT=1` concurrency lane, `DR_CONTENT_TIMEOUT_MS=30 min`. Env-tunable (`AGENT_TODO_MAX_DR_CONTENT`).
+- **Cap** — `MAX_DR_CONTENT=3` concurrency lanes (producer default, raised from 1 in [[../specs/producer-agent-kinds-get-up-to-3-concurrent-lanes-not-1]] Phase 1), `DR_CONTENT_TIMEOUT_MS=30 min`. Env-tunable (`AGENT_TODO_MAX_DR_CONTENT`).
 - **`runDrContentJob(job)`** (the runner, in `scripts/builder-worker.ts`):
   1. Load the blueprint via [[lander-blueprints]] `getBlueprint` (workspace-scoped). Fail if missing; idempotent no-op if the blueprint is already past `content_in_progress` / `awaiting_upload` (never clobber a submitted build).
   2. Load the product's intelligence bundle read-only: `products` (title / target_customer / certifications), `product_ingredients` (with dosages), `product_benefit_selections` (lead + supporting benefits with `customer_phrases`), `product_review_analysis` (phrases the customer used), and the existing categorized [[../tables/product_media]] via [[lander-blueprints]] `listCategorizedProductMedia`.

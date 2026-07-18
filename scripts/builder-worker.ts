@@ -137,7 +137,10 @@ const MAX_FOLD = 1;
 // (seed-product skill) in their own lane so a long seed (per-ingredient web
 // research + ~2000-review analysis + imagery) never occupies a feature-build
 // lane. Each is one long-running claude session, so a small cap is right.
-const MAX_SEED = 2;
+// producer-agent-kinds-get-up-to-3-concurrent-lanes-not-1 Phase 1: raise producer
+// default 1→3 (product-seed) so three seeds run concurrently instead of serially.
+// Still env-overridable via AGENT_TODO_MAX_PRODUCT_SEED (added).
+const MAX_SEED = Number(process.env.AGENT_TODO_MAX_PRODUCT_SEED || 3);
 // Spec-chat turns (box-spec-chat) run a long-running, resumable top-level Max `claude -p` (the authoring
 // chat moved off the Anthropic API onto the box). Its OWN concurrency-1 lane: interactive + serialized
 // per box, so a chat turn never occupies a feature-build lane (and vice-versa). One turn at a time is
@@ -297,7 +300,7 @@ const PR_RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
 // auto-queues the build for an allow-listed mechanical class, or no-op-resolves a transient, or
 // surfaces needs-human. It NEVER edits product code / opens a PR / applies a migration. A few lanes
 // so N errors at once drain a few at a time without a pileup; re-claimable (a restart re-runs it).
-const MAX_STOREFRONT_OPTIMIZER = Number(process.env.AGENT_TODO_MAX_STOREFRONT_OPTIMIZER || 1);
+const MAX_STOREFRONT_OPTIMIZER = Number(process.env.AGENT_TODO_MAX_STOREFRONT_OPTIMIZER || 3);
 // A storefront-optimizer campaign cycle: read-only diagnose on Max → propose a typed campaign / a
 // missing-capability spec. Generous — it may generate a Nano-Banana hero on the worker side post-approval.
 const STOREFRONT_OPTIMIZER_TIMEOUT_MS = 20 * 60 * 1000;
@@ -409,24 +412,24 @@ const RESEARCH_BATCH_CAP = 8;
 // (product intelligence + skeleton) then per-image-slot she classifies; the worker executes the
 // generate/flag deterministically. 30 min mirrors the research lane cap.
 const DR_CONTENT_TIMEOUT_MS = 30 * 60 * 1000;
-const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 1);
+const MAX_DR_CONTENT = Number(process.env.AGENT_TODO_MAX_DR_CONTENT || 3);
 // media-buyer-test-winner-loop Phase 2: concurrency-1 lane for the Media Buyer's
 // cadence pass. Deterministic-Node lane (no Max session), light on I/O — one
 // pass per workspace at a time is more than enough for the weekly cadence.
-const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 1);
-const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 1);
+const MAX_MEDIA_BUYER = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER || 3);
+const MAX_AD_CREATIVE = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE || 3);
 // dahlia-copy-author-box-session Phase 1: concurrency-1 claim lane for the new
 // `ad-creative-copy-author` agent-kind. Phase 1 lands the scaffold only (the runner is a
 // stub that just heartbeats); Phase 3 wires the real per-creative Max box session from
 // stockProduct via runBoxLane. Keeping the claim lane at 1 mirrors ad-creative — the true
 // concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
-const MAX_AD_CREATIVE_COPY_AUTHOR = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_AUTHOR || 1);
+const MAX_AD_CREATIVE_COPY_AUTHOR = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_AUTHOR || 3);
 // dahlia-max-independent-copy-qc-box-session Phase 1: concurrency-1 claim lane for the new
 // `ad-creative-copy-qc` agent-kind. Phase 1 lands the scaffold only (the runner is a stub that
 // just heartbeats — Phase 2 wires `runQaCreativeCopyViaBoxSession` in `src/lib/ads/creative-qa.ts`);
 // nothing enqueues this kind yet. Concurrency-1 mirrors ad-creative-copy-author — the true
 // concurrency is enforced INSIDE stockProduct's per-creative loop, not the top-level poll.
-const MAX_AD_CREATIVE_COPY_QC = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_QC || 1);
+const MAX_AD_CREATIVE_COPY_QC = Number(process.env.AGENT_TODO_MAX_AD_CREATIVE_COPY_QC || 3);
 // ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-max-render Phase 2:
 // concurrency-1 claim lane for the new `ad-review-feedback` agent-kind. Deterministic-Node —
 // reads the queued ad_review_feedback row, plans the re-drives via routeAdReviewFeedback, and
