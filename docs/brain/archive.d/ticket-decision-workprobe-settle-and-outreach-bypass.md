@@ -1,0 +1,1 @@
+- **Prevent fresh outreach emails from falsely red-tiling the AI orchestrator** · verified 2026-07-18 · → [[lifecycles/control-tower]]
