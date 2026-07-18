@@ -118,6 +118,80 @@ export const MAX_QC_ELIGIBILITY_FLOOR = 9;
  *  operators tune it in one place. */
 export const MAX_CREATIVE_QC_ATTEMPTS = 2;
 
+/** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+ *  Phase 1 — max length for the composition-derived ad name. Sized to Meta's Ads Manager
+ *  campaign name UI (comfortably reads on one line) while leaving room for the 3-6 word
+ *  descriptive shape the SKILL asks for. Enforced by `parseAuthorVerdict` (a longer emit fails
+ *  with `bad_composition_name (too_long: N>MAX)` and triggers the copy-only revise). */
+export const COMPOSITION_NAME_MAX_LEN = 80;
+
+/** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+ *  Phase 1 — the CEO-flagged phrases the ad name may NEVER contain. Case-insensitive
+ *  substring match on a whitespace-normalized name (so `Weight-Loss`, `WEIGHTLOSS`, and
+ *  `weight   loss` all trip). The literal `competitor` is banned too — that string is the
+ *  ANGLE SOURCE label (`angle.source === 'competitor'`), not a composition descriptor.
+ *  Kept as a NAMED exported list so the guard is provable from the test file without
+ *  reflecting a regex from the source. */
+export const AD_NAME_BANNED_PHRASES: readonly string[] = ["weight loss", "weightloss", "competitor"];
+
+/** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+ *  Phase 1 — pure token derivation used ONLY by the ad-name validator. Mirrors the copy-side
+ *  `competitorTokensFor` (in [[./copy-validator]]) rule: split the advertiser on whitespace,
+ *  keep tokens ≥3 chars, drop generic product-noun allowlist entries (`coffee`, `tea`, `mud`,
+ *  `drink`, `creamer`, `matcha`) so a competitor whose brand happens to be `Mud Water` doesn't
+ *  ban the word `mud` from a composition. Kept in this module so a downstream reader can
+ *  see the whole ad-name guard in one place; the copy-side function stays private to
+ *  copy-validator per its file header (single source of truth for the copy leak scan). */
+const AD_NAME_PRODUCT_NOUN_ALLOWLIST: ReadonlySet<string> = new Set([
+  "coffee", "tea", "mud", "drink", "creamer", "matcha",
+]);
+export function competitorTokensForName(advertiser: string): string[] {
+  return advertiser
+    .split(/\s+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 3 && !AD_NAME_PRODUCT_NOUN_ALLOWLIST.has(t));
+}
+
+/** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+ *  Phase 1 — deterministic ad-name validator. Returns `{ ok: true }` when the name is safe
+ *  to write to `ad_campaigns.name`; on a miss, returns `{ ok: false, reason }` where `reason`
+ *  is a concrete string the copy-only revise loop cites back to Dahlia so she can re-emit a
+ *  compliant `composition_name` in the same session.
+ *
+ *  Rails (in order — the first miss wins):
+ *   1. empty / whitespace-only → `empty_name`.
+ *   2. contains any AD_NAME_BANNED_PHRASES substring (`weight loss` / `weightloss` /
+ *      `competitor`, case-insensitive on whitespace-normalized name) →
+ *      `banned_phrase("<phrase>")`.
+ *   3. contains any competitor brand token (case-insensitive substring on a whitespace-
+ *      normalized name) → `competitor_brand("<token>")`. The token set is derived from the
+ *      caller-supplied `competitorAdvertisers` via `competitorTokensForName` — same
+ *      source-of-truth the copy-side no-competitor-leak gate uses in
+ *      [[./copy-validator]]. Substring (not word-boundary) is deliberate: a 3-6-word name
+ *      concatenating tokens (`nikeypop`) would slip a word-boundary check.
+ *  Pure — no I/O, no Date/random — so the test file can pin every branch from fixtures. */
+export function validateAdName(
+  name: string,
+  competitorAdvertisers: readonly string[],
+): { ok: true } | { ok: false; reason: string } {
+  const normalized = name.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return { ok: false, reason: "empty_name" };
+  for (const phrase of AD_NAME_BANNED_PHRASES) {
+    if (normalized.includes(phrase)) {
+      return { ok: false, reason: `banned_phrase("${phrase}")` };
+    }
+  }
+  for (const advertiser of competitorAdvertisers) {
+    if (!advertiser) continue;
+    for (const token of competitorTokensForName(advertiser)) {
+      if (normalized.includes(token)) {
+        return { ok: false, reason: `competitor_brand("${token}")` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 /** max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — pure derivation:
  *  the set of format keys whose per-format entry in Max's `creative[]` block failed at least one
  *  check. Empty when the verdict cleared the creative gate or when Max didn't grade formats (legacy
@@ -320,6 +394,20 @@ export interface AuthorModeCopy {
   concept_tag: AndromedaConceptTag;
   selfScore: AuthorSelfScore;
   claim_trace: AuthorClaimTraceEntry[];
+  /** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+   *  Phase 1 — a short (3-6 word) descriptive name of the static's composition (layout + visual
+   *  style + benefit focus) Dahlia emits per creative. Used as `ad_campaigns.name` in place of
+   *  the pre-fix `Dahlia · {product} · {source}` template so every ad is uniquely identifiable
+   *  in the bin / Ads Manager. Two deterministic bans enforced by `validateAdName`:
+   *  (a) the name must contain no `weight loss` / `weightloss` substring (CEO block),
+   *  (b) the name must not reference the competitor's brand (any `competitorTokensForName` token
+   *      from the same source the copy-side no-competitor-leak gate uses) or the literal
+   *      `competitor` (which is the ANGLE SOURCE label — never the ad name).
+   *  A missing / empty / mis-shaped / banned name fails `parseAuthorVerdict` with
+   *  `missing_composition_name` / `bad_composition_name(...)` and the copy-only revise loop
+   *  consumes it. Examples: `two ways color pop benefits`, `hand-hold fizz closeup cravings`,
+   *  `before-after split bloating`. */
+  composition_name: string;
   /** Optional pack — one AuthorModeCopyVariant per requested band. When present, treated as the
    *  M3 temperature-banded pack (dahlia-temperature-banded-multi-variant-copy-pack Phase 1);
    *  when absent, the top-level fields ARE the single-variant M1 result. See `AuthorModeCopyVariant`
@@ -1228,7 +1316,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts. LONG-FORM 3-PARAGRAPH PRIMARY TEXT (canonical AND every variation): every `primaryText` MUST be exactly THREE paragraphs separated by a true BLANK LINE (a `\\n\\n` between paragraphs — a bare `\\n` is a same-paragraph line break) — (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads the framework's lever above Meta's `…more` fold, (2) a BODY paragraph 2-3x longer than the hook that delivers the info + the proof stack, (3) a short single-sentence CURIOSITY CLOSE that pushes the click. The paragraph-structure validator rejects a one-line blob / a 2-paragraph shape / a hook longer than the body / a runaway close and triggers the copy-only revise. HUMAN VOICE — NO AI TELLS: NEVER use an em-dash (U+2014, `—`) anywhere in headline / primaryText / description / variations — use a comma, period, or parenthesis instead; NEVER use a spaced en-dash (` – `) as a sentence dash (a range en-dash like `14-day` is fine). Avoid the softer AI-copy tells too: balanced `not just X, it's Y` / `it's not just X, it's Y` constructions, mechanical rule-of-three fluff, `elevate` / `unlock` / `transform` / `supercharge` / `game-changer`, `in a world where`, `say goodbye to`. Write in a real casual human voice — contractions (`don't`, `it's`, `you're`), plain specific words, occasional sentence fragments. A scrolling buyer distrusts copy that smells AI-written; the em-dash rail is deterministic and will trigger the copy-only revise.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }], composition_name }. `composition_name` is REQUIRED — a short (3-6 word) descriptive name of THIS static's composition (layout + visual style + benefit focus, e.g. `two ways color pop benefits`, `hand-hold fizz closeup cravings`, `before-after split bloating`). It replaces the pre-fix `Dahlia · {product} · {source}` template so every ad is uniquely identifiable in the bin / Ads Manager. HARD RULES — the name must NOT contain `weight loss` / `weightloss` (banned), must NOT contain the literal `competitor` (that string is the angle SOURCE label, not a composition descriptor), and must NOT reference the competitor's brand name or any word from it (describe the composition, not the rival you were inspired by). A miss triggers the copy-only revise citing the exact phrase / token to fix. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts. LONG-FORM 3-PARAGRAPH PRIMARY TEXT (canonical AND every variation): every `primaryText` MUST be exactly THREE paragraphs separated by a true BLANK LINE (a `\\n\\n` between paragraphs — a bare `\\n` is a same-paragraph line break) — (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads the framework's lever above Meta's `…more` fold, (2) a BODY paragraph 2-3x longer than the hook that delivers the info + the proof stack, (3) a short single-sentence CURIOSITY CLOSE that pushes the click. The paragraph-structure validator rejects a one-line blob / a 2-paragraph shape / a hook longer than the body / a runaway close and triggers the copy-only revise. HUMAN VOICE — NO AI TELLS: NEVER use an em-dash (U+2014, `—`) anywhere in headline / primaryText / description / variations — use a comma, period, or parenthesis instead; NEVER use a spaced en-dash (` – `) as a sentence dash (a range en-dash like `14-day` is fine). Avoid the softer AI-copy tells too: balanced `not just X, it's Y` / `it's not just X, it's Y` constructions, mechanical rule-of-three fluff, `elevate` / `unlock` / `transform` / `supercharge` / `game-changer`, `in a world where`, `say goodbye to`. Write in a real casual human voice — contractions (`don't`, `it's`, `you're`), plain specific words, occasional sentence fragments. A scrolling buyer distrusts copy that smells AI-written; the em-dash rail is deterministic and will trigger the copy-only revise.",
   ].join("\n");
 }
 
@@ -1248,7 +1336,7 @@ export function buildCopyAuthorRevisePrompt(reviseReason: string): string {
   return [
     `REVISE — reuse the SAME image and brief already in this session (do not ask for a new image, do not re-read anything you don't need). Your previous AuthorModeCopy emit did not land; the reason from the worker is: ${sanitized}. Address that reason head-on and emit ONE fresh AuthorModeCopy envelope. Rails 1-5 and the never-fabricate firewall still apply — if the reason names a fabricated or ungrounded claim, drop or re-ground it against real brief evidence rather than restating it. Do not hedge with a needs_attention / needs_input status — the verdict is a JSON envelope, always.`,
     "",
-    "Return ONLY the AuthorModeCopy JSON (same shape as before: headline, primaryText, description, audience_temperature, concept_tag, self_score{…}, claim_trace[…], variations[{framework, headline, primaryText} x5 — one per lf8|schwartz|cialdini|hopkins|sugarman, no duplicate frameworks or duplicate copies]). No prose, no code fences, no wrapper.",
+    "Return ONLY the AuthorModeCopy JSON (same shape as before: headline, primaryText, description, audience_temperature, concept_tag, self_score{…}, claim_trace[…], variations[{framework, headline, primaryText} x5 — one per lf8|schwartz|cialdini|hopkins|sugarman, no duplicate frameworks or duplicate copies], composition_name). Keep `composition_name` a short (3-6 word) description of THIS static's composition (never `weight loss`, never `competitor`, never the competitor brand). No prose, no code fences, no wrapper.",
   ].join("\n");
 }
 
@@ -1413,6 +1501,22 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
     parsedVariations.push({ framework: framework as AuthorFrameworkKey, headline: h, primaryText: p });
   }
   const variations = parsedVariations;
+  // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+  // Phase 1 — composition_name is REQUIRED. Checked AFTER every other parse gate so an existing
+  // pin (missing_concept_tag / missing_claim_trace / missing_variations) still surfaces its
+  // intended reason and this new field only fires when everything upstream is clean. A short
+  // (>=1 char after trim, <=COMPOSITION_NAME_MAX_LEN chars) descriptive string. The deterministic
+  // BAN checks (weight loss / competitor brand token / the literal `competitor`) live in
+  // `validateAdName`, run in the copy-only revise loop AFTER this parse gate so a specific ban
+  // reason surfaces separately from a shape miss.
+  const compositionNameRaw = typeof obj.composition_name === "string" ? obj.composition_name.trim() : "";
+  if (!compositionNameRaw) return { kind: "invalid", reason: "missing_composition_name" };
+  if (compositionNameRaw.length > COMPOSITION_NAME_MAX_LEN) {
+    return {
+      kind: "invalid",
+      reason: `bad_composition_name (too_long: ${compositionNameRaw.length}>${COMPOSITION_NAME_MAX_LEN})`,
+    };
+  }
   return {
     kind: "ok",
     verdict: {
@@ -1432,6 +1536,7 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
       },
       claim_trace,
       variations,
+      composition_name: compositionNameRaw,
     },
   };
 }
@@ -1606,6 +1711,24 @@ export async function runCopyAuthorSession(
       const failing = validator.checks.filter((c) => !c.pass);
       lastReason = `validator_failed: ${failing.map((c) => c.rail).join(", ")}`;
       lastValidatorMisses = failing;
+      lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
+      continue;
+    }
+    // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+    // Phase 1 — deterministic ad-name guard. Runs AFTER the shared validator so a name miss is
+    // a distinct revise trigger citing the exact phrase / competitor token to fix. Uses the
+    // same competitor advertiser set the copy-side no-competitor-leak scan uses so a name
+    // banned here would also be banned inside the copy — no drift between the two SSOTs.
+    const nameCheck = validateAdName(
+      verdict.composition_name,
+      inputs.competitorDna?.competitorAdvertiser ? [inputs.competitorDna.competitorAdvertiser] : [],
+    );
+    if (!nameCheck.ok) {
+      lastReason = `ad_name_invalid: ${nameCheck.reason}`;
+      lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;
@@ -2281,7 +2404,18 @@ async function insertReadyCreative(
     })
     .select("id").single();
 
-  const name = `Dahlia · ${productTitle} · ${angle.source}`;
+  // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+  // Phase 1 — use Dahlia's per-creative `composition_name` (a short static-composition
+  // description like `two ways color pop benefits`) as the campaign name so every ad is
+  // uniquely identifiable in the bin / Ads Manager. Deterministic-mode inserts (no author
+  // verdict — legacy path) fall back to the pre-fix `Dahlia · {product} · {source}` template
+  // so their row shape stays byte-identical. The `composition_name` was validated inside
+  // `runCopyAuthorSession` (empty / weight-loss / competitor-brand → copy-only revise), so
+  // by the time we reach this insert the string is guaranteed safe.
+  const composition = opts?.authorModeCopy?.composition_name?.trim();
+  const name = composition && composition.length > 0
+    ? composition
+    : `Dahlia · ${productTitle} · ${angle.source}`;
   const angleId = (angleRow as { id?: string } | null)?.id ?? null;
   const status = readyStatusForAngle(angleId);
   if (!angleId) {

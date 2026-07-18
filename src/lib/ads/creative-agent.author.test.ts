@@ -24,8 +24,10 @@ import assert from "node:assert/strict";
 import type { CopyAuthorSessionDispatcher, CopyAuthorSessionInputs } from "./creative-agent";
 import {
   ANDROMEDA_CONCEPT_TAGS,
+  AD_NAME_BANNED_PHRASES,
   AUTHOR_FRAMEWORK_KEYS,
   AUTHOR_SELF_SCORE_FLOOR,
+  COMPOSITION_NAME_MAX_LEN,
   COPY_QC_DATA_BLOCK_BEGIN,
   COPY_QC_DATA_BLOCK_END,
   MAX_COPY_AUTHOR_REVISE_ATTEMPTS,
@@ -34,12 +36,14 @@ import {
   buildAdCampaignInsertBody,
   buildCopyQcPromptPreamble,
   buildMaxQcReviseReason,
+  competitorTokensForName,
   isCopyQcEligible,
   parseAuthorVerdict,
   resolveAudienceTemperature,
   runCopyAuthorSession,
   sanitizeAuthorField,
   shouldRefuseColdOfferInsert,
+  validateAdName,
   type AuthorModeCopy,
 } from "./creative-agent";
 import type { CopyQaVerdict } from "./creative-qa";
@@ -169,6 +173,11 @@ function envelope(overrides: Record<string, unknown> = {}): string {
     self_score: defaultScore,
     claim_trace: defaultClaimTrace,
     variations: defaultVariations,
+    // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+    // Phase 1 — parseAuthorVerdict requires a non-empty composition_name. The default fixture
+    // uses a clean composition string so every non-name test continues to parse ok; name tests
+    // override this field to exercise the missing / too-long / banned branches.
+    composition_name: "two ways color pop energy",
     ...overrides,
   };
   return JSON.stringify(body);
@@ -787,6 +796,10 @@ function authorCopy(overrides: Partial<AuthorModeCopy> = {}): AuthorModeCopy {
       { framework: "hopkins", headline: "She lost 15 lbs in 3 weeks.", primaryText: "Hopkins-led fixture hook." },
       { framework: "sugarman", headline: "Stop dieting. Drink this instead.", primaryText: "Sugarman-led fixture hook." },
     ],
+    // dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
+    // Phase 1 — REQUIRED composition_name on AuthorModeCopy. A clean, ban-passing fixture so
+    // downstream row-body tests exercise the new insertReadyCreative name construction end-to-end.
+    composition_name: "two ways color pop energy",
     ...overrides,
   };
 }
@@ -1696,5 +1709,176 @@ test("buildCopyQcPromptPreamble: the real COPY_QC fence markers still frame the 
   assert.equal(prompt.split(COPY_QC_DATA_BLOCK_END).length, 2, "exactly one real END in a clean render");
   // The BEGIN must come before the END.
   assert.ok(prompt.indexOf(COPY_QC_DATA_BLOCK_BEGIN) < prompt.indexOf(COPY_QC_DATA_BLOCK_END));
+});
+
+// ── dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name Phase 1 ──
+// Pins the composition_name field on Dahlia's AuthorModeCopy verdict + the deterministic ad-name
+// validator (weight loss / competitor brand / literal `competitor` bans) + the insertReadyCreative
+// name construction that consumes the field. The validator is pure, so every branch is unit-covered
+// from fixtures; the parse tests reuse the shared envelope() helper so they exercise the SAME
+// parseAuthorVerdict pipeline the deployed runCopyAuthorSession loop uses.
+
+test("parseAuthorVerdict: missing composition_name → invalid (missing_composition_name)", () => {
+  const result = parseAuthorVerdict(envelope({ composition_name: "" }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "missing_composition_name");
+});
+
+test("parseAuthorVerdict: composition_name of the wrong type (number) → invalid (missing_composition_name)", () => {
+  // A non-string composition_name (Sonnet-tier error) reads as trim-empty on the string check
+  // and fails the same fail-closed branch as a missing field — the loop's revise reason still
+  // cites the concrete field name so Dahlia can re-emit a string.
+  const result = parseAuthorVerdict(envelope({ composition_name: 42 }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.equal(result.reason, "missing_composition_name");
+});
+
+test("parseAuthorVerdict: composition_name longer than COMPOSITION_NAME_MAX_LEN → invalid (bad_composition_name too_long)", () => {
+  const tooLong = "a".repeat(COMPOSITION_NAME_MAX_LEN + 1);
+  const result = parseAuthorVerdict(envelope({ composition_name: tooLong }));
+  assert.equal(result.kind, "invalid");
+  if (result.kind === "invalid") assert.match(result.reason, /bad_composition_name \(too_long:/);
+});
+
+test("parseAuthorVerdict: happy path parses composition_name onto the verdict (trimmed)", () => {
+  const result = parseAuthorVerdict(envelope({ composition_name: "  two ways color pop energy  " }));
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") assert.equal(result.verdict.composition_name, "two ways color pop energy");
+});
+
+// ── validateAdName — pure deterministic branches ────────────────────────────────────────────────
+
+test("validateAdName: clean composition name (no banned phrase, no competitor token) → ok", () => {
+  const v = validateAdName("two ways color pop benefits", ["Rival Corp"]);
+  assert.equal(v.ok, true);
+});
+
+test("validateAdName: empty / whitespace-only name → not ok (empty_name)", () => {
+  const v = validateAdName("   ", []);
+  assert.equal(v.ok, false);
+  if (!v.ok) assert.equal(v.reason, "empty_name");
+});
+
+test("validateAdName: name containing 'weight loss' → not ok (banned_phrase weight loss)", () => {
+  const v = validateAdName("weight loss transformation split", ["Rival Corp"]);
+  assert.equal(v.ok, false);
+  if (!v.ok) assert.match(v.reason, /banned_phrase\("weight loss"\)/);
+});
+
+test("validateAdName: 'Weight Loss' variants → not ok (case-fold + `weightloss` alias for the no-space form Sonnet sometimes emits)", () => {
+  // Case-folded substring: `Weight Loss` → `weight loss`, trips the phrase. Separately the
+  // `weightloss` alias catches the compressed no-space form (Dahlia occasionally elides).
+  const spaced = validateAdName("Weight Loss transformation split", []);
+  assert.equal(spaced.ok, false);
+  if (!spaced.ok) assert.match(spaced.reason, /banned_phrase\("weight loss"\)/);
+  const compressed = validateAdName("weightloss transformation split", []);
+  assert.equal(compressed.ok, false);
+  if (!compressed.ok) assert.match(compressed.reason, /banned_phrase\("weightloss"\)/);
+});
+
+test("validateAdName: name containing literal 'competitor' → not ok (banned_phrase competitor — the SOURCE label is not an ad name)", () => {
+  const v = validateAdName("competitor split before after", ["Rival Corp"]);
+  assert.equal(v.ok, false);
+  if (!v.ok) assert.match(v.reason, /banned_phrase\("competitor"\)/);
+});
+
+test("validateAdName: name containing a competitor brand token → not ok (competitor_brand token cited)", () => {
+  // `Rival Corp` tokenizes to `rival` + `corp` (≥3 chars, not on the product-noun allowlist),
+  // so a name that includes either token fails. `Corp` alone would clip; `Rival` is the
+  // stronger branding signal — pinning that branch here.
+  const v = validateAdName("Rival style split before after", ["Rival Corp"]);
+  assert.equal(v.ok, false);
+  if (!v.ok) assert.match(v.reason, /competitor_brand\("rival"\)/);
+});
+
+test("validateAdName: product-noun allowlist tokens (coffee/tea/mud/drink/creamer/matcha) don't count as competitor tokens", () => {
+  // Advertiser `Mud Water` tokenizes to `mud` (allowlist) + `water` (kept). `mud` MUST NOT
+  // trigger a competitor_brand hit on a composition like `mud closeup cravings` — that's a
+  // generic product noun. `water` is kept, so a name that includes `water` on that advertiser
+  // still trips.
+  const okName = validateAdName("mud closeup cravings", ["Mud Water"]);
+  assert.equal(okName.ok, true);
+  const trippedByRealToken = validateAdName("water closeup cravings", ["Mud Water"]);
+  assert.equal(trippedByRealToken.ok, false);
+  if (!trippedByRealToken.ok) assert.match(trippedByRealToken.reason, /competitor_brand\("water"\)/);
+});
+
+test("validateAdName: banned-phrase list matches AD_NAME_BANNED_PHRASES (`weight loss`, `weightloss`, `competitor`)", () => {
+  // Same shape claim_trace + concept_tag pin — the constant is the SSOT the SKILL points at.
+  assert.deepEqual([...AD_NAME_BANNED_PHRASES], ["weight loss", "weightloss", "competitor"]);
+});
+
+test("competitorTokensForName: keeps ≥3-char tokens, drops product-noun allowlist entries, case-normalized", () => {
+  assert.deepEqual(competitorTokensForName("Rival Corp"), ["rival", "corp"]);
+  assert.deepEqual(competitorTokensForName("Mud Water"), ["water"]);
+  assert.deepEqual(competitorTokensForName("XL Co"), []); // both tokens are <3 chars
+});
+
+// ── uniqueness — two runs yield distinct names (the CEO's core ask) ──────────────────────────────
+
+test("parseAuthorVerdict: two runs emit distinct composition_names → both parse ok with the emitted string verbatim", () => {
+  const a = parseAuthorVerdict(envelope({ composition_name: "two ways color pop benefits" }));
+  const b = parseAuthorVerdict(envelope({ composition_name: "hand-hold fizz closeup cravings" }));
+  assert.equal(a.kind, "ok");
+  assert.equal(b.kind, "ok");
+  if (a.kind === "ok" && b.kind === "ok") {
+    assert.notEqual(a.verdict.composition_name, b.verdict.composition_name);
+    assert.equal(a.verdict.composition_name, "two ways color pop benefits");
+    assert.equal(b.verdict.composition_name, "hand-hold fizz closeup cravings");
+  }
+});
+
+// ── row-stamping flow — insertReadyCreative's ad_campaigns.name uses composition_name ────────────
+
+test("buildAdCampaignInsertBody: passes through a custom name verbatim (composition_name path pinned via the row body)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "w",
+    productId: "p",
+    name: "two ways color pop benefits",
+    angleId: "a",
+    status: "ready",
+    audienceTemperature: "cold",
+    authorModeCopy: authorCopy({ composition_name: "two ways color pop benefits" }),
+  });
+  // The insert body carries the exact name the caller passed — insertReadyCreative constructs
+  // that string from `opts.authorModeCopy.composition_name` (when set) or falls back to the
+  // legacy `Dahlia · {productTitle} · {angle.source}` template.
+  assert.equal(body.name, "two ways color pop benefits");
+});
+
+// ── revise-loop integration — ad-name invalid → revise triggered, second attempt cleans up → ok ──
+
+test("runCopyAuthorSession: ad-name invalid (weight loss) on attempt 1 → revise triggered → clean composition_name on attempt 2 → ok", async () => {
+  const banned = envelope({ composition_name: "weight loss reset split" });
+  const clean = envelope({ composition_name: "two ways color pop benefits" });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: banned }, { resultText: clean }]);
+  const outcome = await runCopyAuthorSession(sessionInputs(), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.verdict.composition_name, "two ways color pop benefits");
+    assert.match(calls[1].prompt, /ad_name_invalid/);
+    assert.match(calls[1].prompt, /banned_phrase\("weight loss"\)/);
+  }
+});
+
+test("runCopyAuthorSession: ad-name invalid (competitor brand token) → revise triggered → clean name → ok", async () => {
+  // Set competitorDna so the validator has a token set to scan against; the first emit uses
+  // the advertiser's own name as an ad-name token (the exact leak the ban exists to stop).
+  const inputs = sessionInputs({
+    competitorDna: {
+      hook: "riff", framework: null, mechanismClaim: null, proof: null, offer: null,
+      competitorAdvertiser: "Rival Corp",
+    },
+  });
+  const leaky = envelope({ composition_name: "rival style split before after" });
+  const clean = envelope({ composition_name: "two-way split before after" });
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: leaky }, { resultText: clean }]);
+  const outcome = await runCopyAuthorSession(inputs, dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.verdict.composition_name, "two-way split before after");
+    assert.match(calls[1].prompt, /ad_name_invalid/);
+    assert.match(calls[1].prompt, /competitor_brand\("rival"\)/);
+  }
 });
 
