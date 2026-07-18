@@ -362,13 +362,40 @@ export interface CopyAuthorSessionInputs {
     | { ok: true }
     | { ok: false; reason: string; misses: import("./never-fabricate").ClaimMiss[] }
   >;
+  /** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's INDEPENDENT
+   *  copy-QC as the LAST gate INSIDE the self-heal loop. Mirrors `verifyClaimTrace`'s
+   *  pattern: on !ok, the reason (built from Max's `verdict_reason` + hard-gate failures +
+   *  persuasion evidence gaps) becomes the revise reason and Dahlia's SAME session is RESUMED
+   *  (cache-warm) so she rewrites addressing Max's notes — instead of the Phase-2 post-loop
+   *  hold that dropped a sub-7 creative on the floor without ever showing her the critique.
+   *  Max's verdict is always returned (even on !ok) so the caller (stockProduct) can carry
+   *  the last verdict onto the exhaustion escalation and the ok outcome. Optional so
+   *  pre-existing callers (bench / deterministic tests) keep compiling; when omitted the
+   *  loop skips the Max gate byte-identical to Phase 1/2 behavior. */
+  verifyMaxCopyQc?: (
+    verdict: AuthorModeCopy,
+  ) => Promise<
+    | { ok: true; maxVerdict: CopyQaVerdict }
+    | { ok: false; reason: string; maxVerdict: CopyQaVerdict | null }
+  >;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
  *  dispatches ran (1 = first pass ok; 2 = first pass revised); `exhausted` carries the last
  *  reason so the caller can stamp it into the escalation. */
 export type CopyAuthorSessionOutcome =
-  | { kind: "ok"; verdict: AuthorModeCopy; attempts: number }
+  | {
+      kind: "ok";
+      verdict: AuthorModeCopy;
+      attempts: number;
+      /** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — populated ONLY when
+       *  `inputs.verifyMaxCopyQc` was injected AND the LAST successful attempt cleared Max's
+       *  copy-QC gate (hard_gate_pass + persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR). Carried on
+       *  the ok outcome so stockProduct persists Max's verdict via `insertCopyQaVerdict` alongside
+       *  the ad_campaign row without spawning a second Max session. Undefined when the closure
+       *  was not injected (bench / deterministic mode). */
+      maxCopyQcVerdict?: CopyQaVerdict | null;
+    }
   | {
       kind: "exhausted";
       reason: string;
@@ -385,6 +412,19 @@ export type CopyAuthorSessionOutcome =
        *  (preserving the pre-move operator distinction between fabrication holds and self-score/
        *  validator holds) and to stamp the concrete miss list. Undefined on non-firewall exhaustion. */
       firewallMisses?: import("./never-fabricate").ClaimMiss[];
+      /** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — TRUE when the last
+       *  failed attempt tripped Max's copy-QC gate (a sub-7 verdict or a hard-gate fail).
+       *  Presence tells stockProduct to emit the DISTINCT `max_qc_below_floor_exhausted`
+       *  escalation (preserving operator distinction from self-score / firewall / validator
+       *  holds) and to stamp the concrete last Max verdict + score. Undefined on non-Max
+       *  exhaustion. */
+      maxCopyQcMissed?: boolean;
+      /** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — the LAST Max copy-QC
+       *  verdict when the last failed attempt tripped Max's gate. May be `null` even when
+       *  `maxCopyQcMissed` is true — Max's session errored / parse-failed on the last try
+       *  (still a below-floor hold, but no verdict body to stamp). Absent when the closure never
+       *  ran. */
+      lastMaxCopyQcVerdict?: CopyQaVerdict | null;
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -904,6 +944,12 @@ export async function runCopyAuthorSession(
   let lastReason = "";
   let lastValidatorMisses: ValidatorCheck[] | undefined = undefined;
   let lastFirewallMisses: import("./never-fabricate").ClaimMiss[] | undefined = undefined;
+  // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — the LAST Max copy-QC
+  // verdict + a boolean naming whether Max's gate was the failing gate on the last attempt.
+  // Both are used on the exhaustion outcome so stockProduct can emit the DISTINCT
+  // `max_qc_below_floor_exhausted` escalation + stamp the last score/critiques.
+  let lastMaxCopyQcMissed = false;
+  let lastMaxCopyQcVerdict: CopyQaVerdict | null = null;
   // copy-author-self-heal (2026-07-17) — the box session to RESUME on the next revise turn. Set from
   // each healthy dispatch's returned sessionId/configDir; cleared to null whenever we must go fresh (a
   // lost session, a dispatch that threw, or one that never established a session). null ⇒ the next turn
@@ -928,6 +974,8 @@ export async function runCopyAuthorSession(
       lastReason = `dispatch_threw: ${err instanceof Error ? err.message : String(err)}`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       resumeSessionId = null; // unknown state after a throw — rebuild fresh next turn
       resumeConfigDir = null;
       continue;
@@ -953,6 +1001,8 @@ export async function runCopyAuthorSession(
       lastReason = "session_error";
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       continue;
     }
     const parsed = parseAuthorVerdict(dispatchResult.resultText);
@@ -960,6 +1010,8 @@ export async function runCopyAuthorSession(
       lastReason = `parse_failed: ${parsed.reason}`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       continue;
     }
     const verdict = parsed.verdict;
@@ -967,6 +1019,8 @@ export async function runCopyAuthorSession(
       lastReason = `self_score_below_floor (total=${verdict.selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR})`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       continue;
     }
     if (
@@ -980,6 +1034,8 @@ export async function runCopyAuthorSession(
       lastReason = "cold_offer_leak";
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       continue;
     }
     // dahlia-shared-deterministic-copy-validator Phase 2 — SSOT self-check. Runs AFTER the
@@ -1008,6 +1064,8 @@ export async function runCopyAuthorSession(
       lastReason = `validator_failed: ${failing.map((c) => c.rail).join(", ")}`;
       lastValidatorMisses = failing;
       lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
       continue;
     }
     // copy-author-self-heal (2026-07-17) — the never-fabricate FIREWALL, now the LAST gate INSIDE the
@@ -1023,8 +1081,31 @@ export async function runCopyAuthorSession(
         lastReason = firewall.reason;
         lastValidatorMisses = undefined;
         lastFirewallMisses = firewall.misses;
+        lastMaxCopyQcMissed = false;
+        lastMaxCopyQcVerdict = null;
         continue;
       }
+    }
+    // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's INDEPENDENT
+    // copy-QC as the LAST gate INSIDE the self-heal loop. Mirrors the firewall pattern above:
+    // a sub-7 verdict (or hard-gate fail, or dispatch/parse miss) becomes the revise reason
+    // carrying Max's critiques and drives another RESUME turn so Dahlia rewrites addressing
+    // Max's notes — instead of Phase 2's post-loop hold that dropped the creative on the floor
+    // without ever showing her the critique. Skipped when the caller injected no closure (the
+    // bench / deterministic callers stay Phase-1/2 behavior byte-identical).
+    if (inputs.verifyMaxCopyQc) {
+      const maxCheck = await inputs.verifyMaxCopyQc(verdict);
+      if (!maxCheck.ok) {
+        lastReason = maxCheck.reason;
+        lastValidatorMisses = undefined;
+        lastFirewallMisses = undefined;
+        lastMaxCopyQcMissed = true;
+        lastMaxCopyQcVerdict = maxCheck.maxVerdict;
+        continue;
+      }
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = maxCheck.maxVerdict;
+      return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: maxCheck.maxVerdict };
     }
     return { kind: "ok", verdict, attempts: attempt + 1 };
   }
@@ -1034,6 +1115,9 @@ export async function runCopyAuthorSession(
     attempts: cap + 1,
     ...(lastValidatorMisses ? { validatorMisses: lastValidatorMisses } : {}),
     ...(lastFirewallMisses ? { firewallMisses: lastFirewallMisses } : {}),
+    ...(lastMaxCopyQcMissed
+      ? { maxCopyQcMissed: true, lastMaxCopyQcVerdict }
+      : {}),
   };
 }
 
@@ -1062,6 +1146,12 @@ async function runCopyAuthorSessionForImage(
      *  INSIDE the revise loop (a miss → resume + re-author, not a wasted session). Passed straight
      *  through to `runCopyAuthorSession`. Optional so pre-existing callers keep compiling. */
     verifyClaimTrace?: CopyAuthorSessionInputs["verifyClaimTrace"];
+    /** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's copy-QC gate
+     *  closure, injected so it runs as the LAST gate INSIDE the revise loop (a sub-7 verdict
+     *  → resume + re-author with Max's critiques, not a wasted session + a Phase-2 post-loop
+     *  hold). Passed straight through to `runCopyAuthorSession`. Optional so pre-existing
+     *  callers keep compiling. */
+    verifyMaxCopyQc?: CopyAuthorSessionInputs["verifyMaxCopyQc"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -1097,6 +1187,7 @@ async function runCopyAuthorSessionForImage(
         marketSophisticationEvidence: input.marketSophisticationEvidence,
         ourBrand: input.ourBrand,
         verifyClaimTrace: input.verifyClaimTrace,
+        verifyMaxCopyQc: input.verifyMaxCopyQc,
       },
       dispatch,
     );
@@ -1177,6 +1268,42 @@ export function buildCopyQcPromptPreamble(input: {
  *  returns the campaign id (the `ad_creative_copy_qc_verdicts` row is keyed on
  *  `ad_campaign_id`, so we can only write once the row exists).
  */
+/** max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — turn Max's copy-QC verdict
+ *  (or its absence) into the revise-reason string Dahlia sees on the RESUME turn. Exported +
+ *  pure so a unit test can pin the exact bytes; feeds `buildCopyAuthorRevisePrompt` which
+ *  runs it through `sanitizeReviseReason` at the choke-point (identical guard as the firewall /
+ *  validator reasons — no interpolation of untrusted strings the model could weaponize as
+ *  instructions). Format is one-line, ≤ ~500 chars: `max_qc_below_floor: <verdict_reason>
+ *  (score=N, floor=7)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]`. The
+ *  hard-gate list and persuasion-gap list are elided when empty so Dahlia sees only the
+ *  critiques that actually apply. A NULL verdict (Max session dispatch/parse miss) yields the
+ *  distinct `max_qc_verdict_missed` prefix so operators can slice miss rates apart from a
+ *  legitimate sub-7 bounce. */
+export function buildMaxQcReviseReason(
+  verdict: CopyQaVerdict | null,
+  floor: number = MAX_QC_ELIGIBILITY_FLOOR,
+): string {
+  if (!verdict) return `max_qc_verdict_missed (floor=${floor})`;
+  const parts: string[] = [];
+  const score = verdict.persuasion_score ?? null;
+  const base = verdict.verdict_reason?.trim() ? verdict.verdict_reason.trim() : "(no verdict_reason)";
+  parts.push(`${base} (score=${score ?? "null"}, floor=${floor})`);
+  const failedGates = Object.entries(verdict.hard_gates)
+    .filter(([, ok]) => ok === false)
+    .map(([name]) => name);
+  if (failedGates.length > 0) {
+    parts.push(`hard_gates_failed=${failedGates.join(",")}`);
+  }
+  if (verdict.persuasion_rubric?.evidence?.length) {
+    // Only include the first ~3 lines so the revise reason stays short. Each entry is a
+    // human string of the form "axis: reason"; the SKILL doesn't guarantee the axis-prefix
+    // shape, so we treat them as opaque strings.
+    const evidence = verdict.persuasion_rubric.evidence.slice(0, 3).join(" | ");
+    parts.push(`persuasion_gaps=${evidence}`);
+  }
+  return `max_qc_below_floor: ${parts.join("; ")}`.slice(0, 500);
+}
+
 async function runCopyQcForCreative(
   input: {
     brief: CreativeBrief;
@@ -1868,6 +1995,11 @@ async function stockProduct(
           authorModeCopy?: AuthorModeCopy;
         } | undefined = undefined;
         let authorVerdict: AuthorModeCopy | null = null;
+        // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's eligible verdict
+        // when the copy-QC gate ran and passed inside Dahlia's loop; null in the deterministic path
+        // (no dispatcher / kill-switch off). Persisted to `ad_creative_copy_qc_verdicts` after
+        // `insertReadyCreative` returns the campaign id — same rail Phase 1 established.
+        let maxCopyQcVerdict: CopyQaVerdict | null = null;
         if (authorModeEngaged && copyAuthorDispatcher) {
           const audienceTemperature = resolveAudienceTemperature(angle);
           // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — build the six-slot
@@ -1921,88 +2053,12 @@ async function stockProduct(
               misses: fw.misses,
             };
           };
-          const outcome = await runCopyAuthorSessionForImage(
-            { brief, angle, canonicalBuffer: gen.buffer, rubricText, audienceTemperature, competitorDna, targetSchwartzLevel, marketSophisticationEvidence, ourBrand, verifyClaimTrace: verifyClaimTraceForVerdict },
-            copyAuthorDispatcher,
-          );
-          if (outcome.kind === "exhausted") {
-            // director_activity ledger + StockedCreative failure row — NO insertReadyCreative call,
-            // so no product_ad_angles / ad_campaigns / ad_videos rows are ever written. Best-effort
-            // per director-activity; a write miss must NOT crash the batch.
-            //
-            // copy-author-self-heal (2026-07-17) — the firewall now exhausts INSIDE the loop, so its
-            // DISTINCT escalation is keyed off `outcome.firewallMisses` (set when the LAST failed
-            // attempt was a firewall miss). This preserves the pre-move operator distinction:
-            // `dahlia_copy_firewall_exhausted` (fabrication) vs `dahlia_copy_author_exhausted`
-            // (self-score / parse / cold-offer / validator).
-            const isFirewallExhaustion = !!outcome.firewallMisses;
-            await recordDirectorActivity(admin, {
-              workspaceId,
-              directorFunction: "growth",
-              actionKind: isFirewallExhaustion ? "dahlia_copy_firewall_exhausted" : "dahlia_copy_author_exhausted",
-              specSlug: isFirewallExhaustion ? "dahlia-never-fabricate-copy-firewall" : "dahlia-copy-author-box-session",
-              reason: isFirewallExhaustion
-                ? `dahlia never-fabricate firewall exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — ${outcome.firewallMisses!.length} untraceable claim(s); last reason: ${outcome.reason}`
-                : `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`,
-              metadata: {
-                product_id: productId,
-                product_title: productTitle,
-                angle_source: angle.source,
-                angle_hook: angle.hook,
-                audience_temperature: audienceTemperature,
-                attempts: outcome.attempts,
-                last_reason: outcome.reason,
-                // dahlia-shared-deterministic-copy-validator Phase 2 — populated only when the
-                // last failed attempt tripped `validateGeneratedCopy`. Operators can slice
-                // validator-driven exhaustions apart from self-score / parse / cold-offer ones
-                // by whether this array is present + non-empty.
-                ...(outcome.validatorMisses ? { validator_misses: outcome.validatorMisses } : {}),
-                // copy-author-self-heal — the concrete firewall miss list when the last attempt was
-                // a fabrication miss (mirrors the pre-move `misses` metadata on the firewall row).
-                ...(outcome.firewallMisses ? { misses: outcome.firewallMisses } : {}),
-                autonomous: true,
-              },
-            }).catch((e) => {
-              console.warn(
-                isFirewallExhaustion ? "dahlia_copy_firewall_exhausted_activity_failed" : "dahlia_copy_author_exhausted_activity_failed",
-                { workspaceId, productId, err: e instanceof Error ? e.message : String(e) },
-              );
-            });
-            out.push({
-              productId,
-              angleHook: angle.hook,
-              campaignId: null,
-              ok: false,
-              // Firewall exhaustion's `outcome.reason` already carries the `firewall_claim_miss: …`
-              // prefix (set by the injected closure), so surface it verbatim; author exhaustion keeps
-              // its own prefix.
-              reason: isFirewallExhaustion ? outcome.reason : `dahlia_copy_author_exhausted: ${outcome.reason}`,
-            });
-            skipped = true;
-            break;
-          }
-          authorVerdict = outcome.verdict;
-          copyPack = authorCopyPack(outcome.verdict);
-          insertOpts = {
-            audienceTemperature: outcome.verdict.audience_temperature,
-            authorModeCopy: outcome.verdict,
-          };
-        } else {
-          // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
-          // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
-          // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
-          // pack, not just the first pair. Deterministic path is temperature-agnostic — no
-          // audienceTemperature is passed, so insertReadyCreative treats the pack as NULL/untagged and
-          // the Phase-2 cold-offer gate skips.
-          copyPack = buildMetaCopyPack(brief);
-        }
-        // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — Max's INDEPENDENT
-        // copy-QC session runs on every author-mode creative AFTER Dahlia authors + BEFORE
-        // `insertReadyCreative`. The verdict is persisted below (Phase 1: advisory-only, does NOT
-        // gate; Phase 2 wires the 7/10 eligibility floor). Runs only when the caller injected a
-        // dispatcher AND Dahlia's session returned ok — the deterministic path is unchanged.
-        let maxCopyQcVerdict: CopyQaVerdict | null = null;
-        if (copyQcDispatcher && authorVerdict) {
+          // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — resolve the
+          // competitor-advertiser + Dahlia-rubric benchmark ABOVE the loop so the injected Max-QC
+          // closure carries the same session-invariant context on every attempt. Own-brand angles
+          // pass a null benchmark; competitor-imitation angles thread the underlying skeleton's
+          // concept_tags so Max can benchmark competitor-selection against what the winner
+          // concept actually looked like (dahlia-researches-from-winners-flow-ad-library Phase 2).
           const competitorAdvertiser =
             angle.source === "competitor"
               ? typeof (angle.raw as { advertiser?: unknown } | undefined)?.advertiser === "string"
@@ -2028,98 +2084,201 @@ async function stockProduct(
                   })(),
                 }
               : null;
-          const qcRun = await runCopyQcForCreative(
+          // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's INDEPENDENT
+          // copy-QC as the LAST gate INSIDE Dahlia's self-heal loop. On a sub-7 / hard-gate-fail /
+          // dispatch-error verdict, `runCopyAuthorSession` uses the returned reason string to
+          // RESUME Dahlia's SAME box session (cache-warm) with `buildCopyAuthorRevisePrompt` so
+          // she rewrites addressing Max's critiques. On an eligible verdict, the closure returns
+          // ok + the verdict body, which the loop stamps on the ok outcome for the caller to
+          // persist against the fresh `ad_campaigns` row. Skipped when `copyQcDispatcher` was not
+          // injected (DAHLIA_QC_COPY_MODE=off) — the loop then only runs Dahlia-side gates,
+          // byte-identical to the pre-Phase-1 behavior. Runs FRESH per author attempt (Max sees
+          // Dahlia's revised strings each time); the `runCopyQcForCreative` helper mints its own
+          // tmp jpeg + fail-closes on dispatch/parse errors.
+          const verifyMaxCopyQcForVerdict: CopyAuthorSessionInputs["verifyMaxCopyQc"] | undefined = copyQcDispatcher
+            ? async (verdict) => {
+                const qcRun = await runCopyQcForCreative(
+                  {
+                    brief,
+                    copy: {
+                      headline: verdict.headline,
+                      primaryText: verdict.primaryText,
+                      description: verdict.description,
+                    },
+                    canonicalBuffer: gen.buffer,
+                    rubricText,
+                    audienceTemperature: verdict.audience_temperature,
+                    targetSchwartzLevel,
+                    marketSophisticationEvidence,
+                    dahliaSelfScore: verdict.selfScore,
+                    ourBrand,
+                    competitorAdvertisers: competitorAdvertiser ? [competitorAdvertiser] : [],
+                    declaredIntent: {
+                      audience_temperature: researchIntent.audience_temperature,
+                      purpose: researchIntent.purpose,
+                    },
+                    dahliaRubricBenchmark: rubricBenchmark,
+                  },
+                  copyQcDispatcher,
+                ).catch((err) => ({
+                  verdict: null as null,
+                  reason: `max_copy_qc_threw: ${err instanceof Error ? err.message : String(err)}`,
+                }));
+                if (!qcRun.verdict) {
+                  console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
+                  return { ok: false, reason: buildMaxQcReviseReason(null), maxVerdict: null };
+                }
+                if (isCopyQcEligible(qcRun.verdict)) {
+                  return { ok: true, maxVerdict: qcRun.verdict };
+                }
+                return {
+                  ok: false,
+                  reason: buildMaxQcReviseReason(qcRun.verdict),
+                  maxVerdict: qcRun.verdict,
+                };
+              }
+            : undefined;
+          const outcome = await runCopyAuthorSessionForImage(
             {
               brief,
-              copy: {
-                headline: authorVerdict.headline,
-                primaryText: authorVerdict.primaryText,
-                description: authorVerdict.description,
-              },
+              angle,
               canonicalBuffer: gen.buffer,
               rubricText,
-              audienceTemperature: authorVerdict.audience_temperature,
+              audienceTemperature,
+              competitorDna,
               targetSchwartzLevel,
               marketSophisticationEvidence,
-              dahliaSelfScore: authorVerdict.selfScore,
               ourBrand,
-              competitorAdvertisers: competitorAdvertiser ? [competitorAdvertiser] : [],
-              declaredIntent: {
-                audience_temperature: researchIntent.audience_temperature,
-                purpose: researchIntent.purpose,
-              },
-              dahliaRubricBenchmark: rubricBenchmark,
+              verifyClaimTrace: verifyClaimTraceForVerdict,
+              verifyMaxCopyQc: verifyMaxCopyQcForVerdict,
             },
-            copyQcDispatcher,
-          ).catch((err) => ({
-            verdict: null as null,
-            reason: `max_copy_qc_threw: ${err instanceof Error ? err.message : String(err)}`,
-          }));
-          if (qcRun.verdict) {
-            maxCopyQcVerdict = qcRun.verdict;
-          } else {
-            // A QC dispatch/parse miss routes to ineligible in Phase 2's gate below — the CEO's
-            // rule: "below 7 (or a hard-gate fail, or a parse error) means NOT eligible." Log so
-            // operators can slice miss rates apart from below-floor bounces.
-            console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
-          }
-        }
-        // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 2 — bin-eligibility
-        // gate. When Max's copy-QC is engaged (copyQcDispatcher injected AND Dahlia authored ok),
-        // a creative is bin-eligible IFF `isCopyQcEligible(maxCopyQcVerdict)` — the pure predicate
-        // checks: verdict exists AND hard_gate_pass AND persuasion_score >= MAX_QC_ELIGIBILITY_FLOOR (7).
-        // A null / hard-gate-fail / sub-7 verdict does NOT reach `insertReadyCreative`; instead the
-        // creative is HELD out of the bin, a growth `director_activity` row records the below-floor
-        // hold (Phase 3 will replace the hold with a bounce-back-to-Dahlia self-heal revise loop),
-        // and the StockedCreative row surfaces the distinct `max_qc_below_floor` reason for the
-        // batch summary. Runs ONLY when the dispatcher was injected AND Dahlia authored ok — the
-        // deterministic path (`authorModeEngaged` false, no author verdict) skips the gate
-        // byte-identical to today, and the kill-switch (`DAHLIA_QC_COPY_MODE=off`) leaves the
-        // dispatcher unset so the gate never fires.
-        if (copyQcDispatcher && authorVerdict && !isCopyQcEligible(maxCopyQcVerdict)) {
-          const persuasionScore = maxCopyQcVerdict?.persuasion_score ?? null;
-          const hardGatePass = maxCopyQcVerdict?.hard_gate_pass ?? null;
-          const bounceReason = !maxCopyQcVerdict
-            ? "verdict_missing"
-            : !maxCopyQcVerdict.hard_gate_pass
-              ? "hard_gate_fail"
-              : `below_floor:${persuasionScore ?? "null"}`;
-          await recordDirectorActivity(admin, {
-            workspaceId,
-            directorFunction: "growth",
-            actionKind: "max_qc_below_floor_hold",
-            specSlug: "max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia",
-            reason: `max copy-QC held ${productTitle} (${angle.source} angle) out of the bin — ${bounceReason} (score=${persuasionScore ?? "null"} / floor=${MAX_QC_ELIGIBILITY_FLOOR})`,
-            metadata: {
-              product_id: productId,
-              product_title: productTitle,
-              angle_source: angle.source,
-              angle_hook: angle.hook,
-              persuasion_score: persuasionScore,
-              hard_gate_pass: hardGatePass,
-              hard_gates: maxCopyQcVerdict?.hard_gates ?? null,
-              verdict_reason: maxCopyQcVerdict?.verdict_reason ?? null,
-              floor: MAX_QC_ELIGIBILITY_FLOOR,
-              bounce_reason: bounceReason,
-              audience_temperature: authorVerdict.audience_temperature,
-              autonomous: true,
-            },
-          }).catch((e) => {
-            console.warn("max_qc_below_floor_hold_activity_failed", {
+            copyAuthorDispatcher,
+          );
+          if (outcome.kind === "exhausted") {
+            // director_activity ledger + StockedCreative failure row — NO insertReadyCreative call,
+            // so no product_ad_angles / ad_campaigns / ad_videos rows are ever written. Best-effort
+            // per director-activity; a write miss must NOT crash the batch.
+            //
+            // copy-author-self-heal (2026-07-17) — the firewall now exhausts INSIDE the loop, so its
+            // DISTINCT escalation is keyed off `outcome.firewallMisses` (set when the LAST failed
+            // attempt was a firewall miss). This preserves the pre-move operator distinction:
+            // `dahlia_copy_firewall_exhausted` (fabrication) vs `dahlia_copy_author_exhausted`
+            // (self-score / parse / cold-offer / validator).
+            const isFirewallExhaustion = !!outcome.firewallMisses;
+            // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — a DISTINCT
+            // exhaustion class when the LAST failed attempt tripped Max's copy-QC gate (either
+            // a sub-7 verdict, a hard-gate fail, or a Max session dispatch/parse miss on the
+            // final try). The firewall wins over Max on the exhaustion-class tie-break: a
+            // fabrication miss is a stronger north-star signal than a below-floor persuasion
+            // score, and the firewall's `misses` metadata already carries the concrete evidence.
+            const isMaxQcExhaustion = !isFirewallExhaustion && !!outcome.maxCopyQcMissed;
+            const exhaustionKind = isFirewallExhaustion
+              ? "firewall"
+              : isMaxQcExhaustion
+                ? "max_qc_below_floor"
+                : "author";
+            const lastMaxVerdict = outcome.lastMaxCopyQcVerdict ?? null;
+            const actionKind = isFirewallExhaustion
+              ? "dahlia_copy_firewall_exhausted"
+              : isMaxQcExhaustion
+                ? "max_qc_below_floor_exhausted"
+                : "dahlia_copy_author_exhausted";
+            const specSlug = isFirewallExhaustion
+              ? "dahlia-never-fabricate-copy-firewall"
+              : isMaxQcExhaustion
+                ? "max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia"
+                : "dahlia-copy-author-box-session";
+            const reasonLine = isFirewallExhaustion
+              ? `dahlia never-fabricate firewall exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — ${outcome.firewallMisses!.length} untraceable claim(s); last reason: ${outcome.reason}`
+              : isMaxQcExhaustion
+                ? `max copy-QC bounce-back exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — held out of the bin (last score=${lastMaxVerdict?.persuasion_score ?? "null"} / floor=${MAX_QC_ELIGIBILITY_FLOOR}); last reason: ${outcome.reason}`
+                : `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`;
+            await recordDirectorActivity(admin, {
               workspaceId,
-              productId,
-              err: e instanceof Error ? e.message : String(e),
+              directorFunction: "growth",
+              actionKind,
+              specSlug,
+              reason: reasonLine,
+              metadata: {
+                product_id: productId,
+                product_title: productTitle,
+                angle_source: angle.source,
+                angle_hook: angle.hook,
+                audience_temperature: audienceTemperature,
+                attempts: outcome.attempts,
+                last_reason: outcome.reason,
+                // dahlia-shared-deterministic-copy-validator Phase 2 — populated only when the
+                // last failed attempt tripped `validateGeneratedCopy`. Operators can slice
+                // validator-driven exhaustions apart from self-score / parse / cold-offer ones
+                // by whether this array is present + non-empty.
+                ...(outcome.validatorMisses ? { validator_misses: outcome.validatorMisses } : {}),
+                // copy-author-self-heal — the concrete firewall miss list when the last attempt was
+                // a fabrication miss (mirrors the pre-move `misses` metadata on the firewall row).
+                ...(outcome.firewallMisses ? { misses: outcome.firewallMisses } : {}),
+                // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — the last
+                // Max verdict body + top-line score so operators can slice Max-driven exhaustions
+                // apart from the other classes and see the exact critique that kept bouncing.
+                ...(isMaxQcExhaustion
+                  ? {
+                      max_copy_qc_verdict: lastMaxVerdict,
+                      persuasion_score: lastMaxVerdict?.persuasion_score ?? null,
+                      hard_gate_pass: lastMaxVerdict?.hard_gate_pass ?? null,
+                      hard_gates: lastMaxVerdict?.hard_gates ?? null,
+                      verdict_reason: lastMaxVerdict?.verdict_reason ?? null,
+                      floor: MAX_QC_ELIGIBILITY_FLOOR,
+                    }
+                  : {}),
+                autonomous: true,
+              },
+            }).catch((e) => {
+              const failKey =
+                exhaustionKind === "firewall"
+                  ? "dahlia_copy_firewall_exhausted_activity_failed"
+                  : exhaustionKind === "max_qc_below_floor"
+                    ? "max_qc_below_floor_exhausted_activity_failed"
+                    : "dahlia_copy_author_exhausted_activity_failed";
+              console.warn(failKey, { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
             });
-          });
-          out.push({
-            productId,
-            angleHook: angle.hook,
-            campaignId: null,
-            ok: false,
-            reason: `max_qc_below_floor: ${bounceReason}`,
-          });
-          skipped = true;
-          break;
+            out.push({
+              productId,
+              angleHook: angle.hook,
+              campaignId: null,
+              ok: false,
+              // Firewall exhaustion's `outcome.reason` already carries the `firewall_claim_miss: …`
+              // prefix (set by the injected closure), so surface it verbatim; author exhaustion keeps
+              // its own prefix. Max-below-floor exhaustion re-uses the exhausted reason too — the
+              // closure already emitted `max_qc_below_floor: <verdict_reason>…`, so the batch
+              // summary shows the concrete critique.
+              reason:
+                isFirewallExhaustion || isMaxQcExhaustion
+                  ? outcome.reason
+                  : `dahlia_copy_author_exhausted: ${outcome.reason}`,
+            });
+            skipped = true;
+            break;
+          }
+          authorVerdict = outcome.verdict;
+          copyPack = authorCopyPack(outcome.verdict);
+          insertOpts = {
+            audienceTemperature: outcome.verdict.audience_temperature,
+            authorModeCopy: outcome.verdict,
+          };
+          // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's verdict now
+          // rides on the ok outcome (`outcome.maxCopyQcVerdict`) because the QC gate ran INSIDE
+          // Dahlia's self-heal loop. A sub-7 verdict never gets here — it was already bounced back
+          // to Dahlia for a cache-warm revise via `buildMaxQcReviseReason`, or the loop exhausted
+          // and `outcome.kind` was `exhausted` above. When the closure was not injected (no
+          // dispatcher / kill-switch off), `outcome.maxCopyQcVerdict` is absent and the row lands
+          // with no verdict.
+          maxCopyQcVerdict = outcome.maxCopyQcVerdict ?? null;
+        } else {
+          // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
+          // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
+          // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
+          // pack, not just the first pair. Deterministic path is temperature-agnostic — no
+          // audienceTemperature is passed, so insertReadyCreative treats the pack as NULL/untagged and
+          // the Phase-2 cold-offer gate skips.
+          copyPack = buildMetaCopyPack(brief);
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
           canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType },
