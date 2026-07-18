@@ -592,6 +592,102 @@ test("evalWorker still flags behind+busy as GREEN (existing behavior — never i
   }
 });
 
+// ─── behindTooLong anchored to firstDivergentAt (drift age), not worker uptime ───
+// control-tower-box-behind-elapsed-anchored-to-drift-not-uptim (signal loop:box, verdict
+// monitor-false-positive). The originating false page: worker booted 44 minutes ago on
+// 5c923ae9e, origin/main advanced ~5 minutes before the alert, and the tile immediately fired
+// "self-update stuck for 44m." The 44-min claim was factually wrong — the drift was 5 minutes
+// old — because the anchor was worker uptime, not when drift began. Anchoring elapsed to
+// `min(uptime, driftAge)` gives a fresh commit its full shaGrace poll window even on a
+// long-lived worker, matching the actual self-update SLA.
+
+test("evalWorker stays out of RED on fresh drift even when worker uptime is past shaGrace (the incident this fix targets)", () => {
+  // Worker booted ~44m ago (past the 30m shaGrace), origin/main advanced ~5m ago (well inside
+  // shaGrace). Prior code compared worker uptime to shaGrace and reddened; the new anchor uses
+  // min(uptime, driftAge), so drift-age (5m) < shaGrace(30m) ⇒ no red. The tile should sit in
+  // the AMBER "updating" state (behind+idle, within grace) with no violation raised.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    // started_at at 11:16 ⇒ 44m uptime; firstDivergentAt at 11:55 ⇒ 5m drift.
+    const result = evalWorker(
+      workerLoop,
+      idleBehindWorker({ started_at: "2026-06-25T11:16:00Z" }),
+      0,
+      false,
+      "worker-behind",
+      "2026-06-25T11:55:00Z",
+    );
+    assert.notEqual(result.color, "red");
+    assert.equal(result.violation, null);
+    assert.doesNotMatch(result.statusText, /behind origin\/main/);
+    assert.match(result.statusText, /updating —/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker still flips RED when BOTH the uptime anchor AND the drift anchor are past shaGrace", () => {
+  // Regression guard: the min-anchor must not hide a genuinely stuck worker. Long uptime AND
+  // drift older than shaGrace ⇒ still red, with the accurate drift-age in the violation detail.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    // started_at 2h ago; firstDivergentAt 1h ago — both past the 30m shaGrace.
+    const result = evalWorker(
+      workerLoop,
+      idleBehindWorker({ started_at: "2026-06-25T10:00:00Z" }),
+      0,
+      false,
+      "worker-behind",
+      "2026-06-25T11:00:00Z",
+    );
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "liveness");
+    assert.match(result.statusText, /behind origin\/main/);
+    assert.match(result.violation!.detail, /behind for /);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
+test("evalWorker still flips RED when firstDivergentAt is null and worker uptime is past shaGrace (fallback path — no regression on the ambiguous case)", () => {
+  // No compare-API drift-age available (e.g. malformed response, missing commits[0].commit.author.date).
+  // The uptime anchor must still trip the shaGrace red — otherwise a genuinely stuck worker with
+  // no drift-timestamp evidence would silently ride forever.
+  const realEnv = process.env.VERCEL_GIT_COMMIT_SHA;
+  const realNow = Date.now;
+  process.env.VERCEL_GIT_COMMIT_SHA = "bbbbbbbcccccccc";
+  Date.now = () => Date.parse("2026-06-25T12:00:00Z");
+  try {
+    // Explicitly pass null for firstDivergentAt — the compare API confirmed worker-behind but
+    // didn't surface a divergent-at timestamp.
+    const result = evalWorker(
+      workerLoop,
+      idleBehindWorker(), // started_at at 10:00 ⇒ 2h uptime, well past 30m grace.
+      0,
+      false,
+      "worker-behind",
+      null,
+    );
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "liveness");
+    assert.match(result.statusText, /behind origin\/main/);
+  } finally {
+    Date.now = realNow;
+    if (realEnv === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = realEnv;
+  }
+});
+
 // ─── SHA-direction gate (control-tower-box-sha-direction-check) ───
 // A plain string mismatch can't distinguish "worker on stale code" from "worker on newer main
 // but Vercel deploy still lags." The originating false page (signal loop:box, verdict
