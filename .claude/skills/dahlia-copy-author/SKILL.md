@@ -474,9 +474,46 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
     { "framework": "cialdini", "headline": "700,000+ customers. 15K reviews.", "primaryText": "…a self-contained hook led by social proof / authority / scarcity. Real numbers only (traceable to `pi.reviews` volume, `pi.reviews.byClaim` counts, real endorsements)." },
     { "framework": "hopkins", "headline": "She lost 15 lbs in 3 weeks.", "primaryText": "…a self-contained hook led by specificity plus a reason-why. A real number, a real duration, a real ingredient dose, all citable per claim_trace." },
     { "framework": "sugarman", "headline": "Stop dieting. Drink this instead.", "primaryText": "…a self-contained hook led by curiosity plus a slippery-slide first line the reader has to expand past the `…more` ellipsis to close. Contrarian pattern-interrupt, no flat benefit summary." }
-  ]
+  ],
+  "composition_name": "two ways color pop benefits"
 }
 ```
+
+### COMPOSITION_NAME — name each ad by its static composition, unique per ad (dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name Phase 1)
+
+The `composition_name` field is **REQUIRED** — a short (3-6 word) descriptive name of THIS
+static's composition (layout + visual style + benefit focus) that becomes the campaign name
+on Meta Ads Manager and in the bin. It replaces the pre-fix generic template `Dahlia · {product} · {source}`
+that made every ad indistinguishable AND leaked the SOURCE label `competitor` — the CEO wants
+every ad uniquely identifiable by its composition, never by the rival it was inspired by.
+
+You author the creative and know its composition, so you write the name. Describe the STATIC
+you just captioned — its layout (split screen, two-way, before-after, closeup, hand-hold,
+grid), its visual style (color pop, minimal, chalkboard, testimonial card), and its benefit
+focus (cravings, bloating, energy, focus). String them together in 3-6 words, all lowercase,
+no punctuation. Examples of the shape:
+
+- `two ways color pop benefits`
+- `hand-hold fizz closeup cravings`
+- `before-after split bloating`
+- `three-panel review grid focus`
+- `chalkboard ingredient list energy`
+
+Two HARD RULES on the name (deterministic — a miss triggers the copy-only revise citing the
+exact phrase / token to fix):
+
+- **NEVER `weight loss`** (or `weightloss`) — a CEO-level block. Describe the composition
+  and the reader's outcome without using the phrase. Use `cravings`, `bloating`, `metabolism`,
+  `body reset`, `figure`, or `results` instead.
+- **NEVER the competitor's brand name** (or the literal word `competitor`) — describe the
+  static, not the rival it was inspired by. `competitor` is the ANGLE SOURCE label
+  (`angle.source === 'competitor'`), never the composition. If the debranded competitor DNA
+  drove the concept, name the COMPOSITION (`two ways split before-after`), not the source
+  (never `nike-style split`, never `competitor two ways`).
+
+Names should be UNIQUE per ad — no template, no shared prefix like `Dahlia ·`, and no
+recycled name across creatives in the same run. The composition you actually captured is
+the differentiator.
 
 ### VARIATIONS — five per-framework hooks, not one caption fanned to five slots (dahlia-authors-distinct-psychological-copy-variations-not-one-broadcast Phase 1)
 
