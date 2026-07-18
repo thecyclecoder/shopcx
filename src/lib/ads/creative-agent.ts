@@ -157,6 +157,40 @@ export function isCopyQcEligible(verdict: CopyQaVerdict | null): boolean {
   return (verdict.persuasion_score ?? 0) >= MAX_QC_ELIGIBILITY_FLOOR;
 }
 
+/** Pure predicate for `insertReadyCreative`'s pre-write cold-offer refusal
+ *  (dahlia-audience-temperature-marking-and-cold-offer-gate Phase 2). Returns TRUE when the caller
+ *  must refuse the insert BEFORE any DB write: audience is `cold` AND any rotated copy trips
+ *  `hasColdOfferLeak`.
+ *
+ *  a-max-copy-qc-miss-still-bins-the-ad-held-never-drops-it-so-ceo-can-review Phase 1 — the
+ *  refusal is BYPASSED when the caller is intentionally binning-ineligible (`maxQcEligible ===
+ *  false`). The always-bin oversight model requires every produced creative to reach the
+ *  reviewable bin: on a Max copy-QC miss the last-attempted caption lands HELD/ineligible
+ *  (`ad_campaigns.max_qc_eligible=false`), so the ad EXISTS for CEO review + Max's critiques
+ *  are inspectable on the detail page + Bianca's `.not("max_qc_eligible","is",false)` filter
+ *  still hides it from her postable list. A cold-offer leak on a held row is just another
+ *  disposition on the row — never a silent drop before the CEO can review or override. TRUE and
+ *  NULL / undefined inserts (a postable creative, or a deterministic-mode legacy insert) still
+ *  refuse on a cold-offer leak — a postable creative with a cold offer must never reach
+ *  ready-to-test. Pure so the always-bin invariant is provable from fixtures without a DB. */
+export function shouldRefuseColdOfferInsert(
+  audienceTemperature: "cold" | "warm" | "hot" | null,
+  copyPack: { headlines: string[]; primaryTexts: string[]; description: string },
+  maxQcEligible: boolean | null,
+  allowedOffer?: CreativeBrief["offer"],
+): boolean {
+  if (maxQcEligible === false) return false;
+  if (audienceTemperature !== "cold") return false;
+  return hasColdOfferLeak(
+    {
+      headline: copyPack.headlines.join(" "),
+      primaryText: copyPack.primaryTexts.join(" "),
+      description: copyPack.description,
+    },
+    allowedOffer ?? null,
+  );
+}
+
 // ── dahlia-copy-author-box-session Phase 3 — author-mode types (Phase 2 was folded in) ──────────
 
 /** Dahlia's self-score against the shared 0-10 Conversion-Psychology rubric (LF8 + Schwartz +
@@ -1983,7 +2017,9 @@ async function runCopyQcForCreative(
     if (outcome.kind !== "ok") {
       return { verdict: null, reason: outcome.reason };
     }
-    const parsed = parseCopyQaVerdict(outcome.resultText);
+    const parsed = parseCopyQaVerdict(outcome.resultText, {
+      runTargetTemperature: input.audienceTemperature,
+    });
     if (parsed.kind !== "ok") {
       return { verdict: null, reason: `copy_qc_parse_error: ${parsed.reason}` };
     }
@@ -2168,6 +2204,15 @@ export function buildAngleProvenance(angle: ScoredAngle): AngleProvenance {
  *  self-describing (M1 keystone author session sets 'cold'/'warm'/'hot'; the deterministic
  *  buildMetaCopyPack path leaves the option undefined → NULL, gate skips).
  *
+ *  ALWAYS-BIN OVERRIDE (a-max-copy-qc-miss-still-bins-the-ad-held-never-drops-it-so-ceo-can-review
+ *  Phase 1): the cold-offer refusal above is bypassed when the caller passes `maxQcEligible: false`
+ *  — the row is intentionally landing HELD/ineligible for CEO review, so a cold-offer leak becomes
+ *  just another disposition on the row (visible on the ad detail page, Bianca's postability filter
+ *  hides it) rather than a silent drop. Postability stays gated by max_qc_eligible + Bianca's
+ *  filter; the ad is simply always reviewable. Only TRUE / NULL inserts (a postable or
+ *  deterministic-mode creative) still refuse on a cold-offer leak — a postable creative with a
+ *  cold offer must never reach ready-to-test.
+ *
  *  Returns a discriminated result: `ok` with the campaign id, `skip` on a cold-offer refusal, or
  *  `failed` when the angle/campaign insert missed. */
 async function insertReadyCreative(
@@ -2204,22 +2249,17 @@ async function insertReadyCreative(
     allowedOffer?: CreativeBrief["offer"];
   },
 ): Promise<InsertReadyCreativeResult> {
-  // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. NULL /
-  // warm / hot pass through untouched (the deterministic buildMetaCopyPack path is temperature-
-  // agnostic and always leaves audience_temperature undefined here). Check ALL rotated pack copy
-  // (headlines + primary texts joined) so the pack is refused if ANY variant leaks a cold offer.
-  // See [[../ads/lf8]] `hasColdOfferLeak`. OUR real brief.offer (opts.allowedOffer) passes
-  // through as an offer allowlist — the offer-for-offer swap that renders it verbatim isn't
-  // flagged as a leak.
+  // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. The
+  // decision is delegated to the pure `shouldRefuseColdOfferInsert` predicate so the always-bin
+  // invariant (a `maxQcEligible=false` insert is intentionally landing HELD for CEO review and
+  // MUST NOT be dropped on a cold-offer leak) is unit-testable without stubbing this DB path. OUR
+  // real brief.offer (opts.allowedOffer) is still passed as an allowlist for offer-for-offer swaps.
   const audienceTemperature: "cold" | "warm" | "hot" | null = opts?.audienceTemperature ?? null;
   if (
-    audienceTemperature === "cold" &&
-    hasColdOfferLeak(
-      {
-        headline: copyPack.headlines.join(" "),
-        primaryText: copyPack.primaryTexts.join(" "),
-        description: copyPack.description,
-      },
+    shouldRefuseColdOfferInsert(
+      audienceTemperature,
+      copyPack,
+      opts?.maxQcEligible ?? null,
       opts?.allowedOffer ?? null,
     )
   ) {

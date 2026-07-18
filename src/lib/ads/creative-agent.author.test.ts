@@ -39,6 +39,7 @@ import {
   resolveAudienceTemperature,
   runCopyAuthorSession,
   sanitizeAuthorField,
+  shouldRefuseColdOfferInsert,
   type AuthorModeCopy,
 } from "./creative-agent";
 import type { CopyQaVerdict } from "./creative-qa";
@@ -1491,6 +1492,122 @@ test("Phase 2 (P2-b): self-score exhaustion does NOT surface `lastAuthorVerdict`
   if (outcome.kind === "exhausted") {
     assert.equal(outcome.maxCopyQcMissed, undefined, "self-score exhaustion is not a Max exhaustion");
     assert.equal(outcome.lastAuthorVerdict, undefined, "self-score exhaustion must not surface a lastAuthorVerdict — the caption isn't safe to bin");
+  }
+});
+
+// ── a-max-copy-qc-miss-still-bins-the-ad-held-never-drops-it-so-ceo-can-review Phase 1 ──────
+//
+// The always-bin oversight model: every ad Dahlia produces should land in the bin (held /
+// ineligible, with the miss reason recorded), never be dropped before the CEO can review or
+// override. The `bin_ineligible_insert_failed: max_qc_verdict_missed` incident was a real,
+// potentially-good creative silently vanishing because `insertReadyCreative` refused a
+// bin-ineligible insert on the cold-offer gate — a shape technicality, not a content failure.
+//
+// `shouldRefuseColdOfferInsert` is the pure predicate the persister chokepoint runs before any DB
+// write. On a Max copy-QC miss (exhaustion / verdict-missed / parse miss) the caller stamps
+// `maxQcEligible=false` on the row so the ad is intentionally binning-ineligible; the cold-offer
+// refusal MUST bypass so the row lands + becomes reviewable. The predicate still fires on a
+// postable insert (TRUE) or a deterministic-mode legacy insert (NULL) — a cold-audience
+// creative with offer language must never reach Bianca's ready-to-test as postable.
+//
+// The pack fixture that trips the gate: a cold-audience creative with a bare currency ("$29") in
+// the primary text — the exact class of leak that today refuses a bin-ineligible insert and
+// silently drops a Dahlia-produced ad.
+
+function coldOfferLeakingPack(): { headlines: string[]; primaryTexts: string[]; description: string } {
+  return {
+    headlines: ["A cleaner morning ritual"],
+    primaryTexts: ["Steady focus without the crash — try it today for $29 and save 40% off your first pack."],
+    description: "Sample the switch.",
+  };
+}
+
+function cleanPack(): { headlines: string[]; primaryTexts: string[]; description: string } {
+  return {
+    headlines: ["A cleaner morning ritual"],
+    primaryTexts: ["Steady focus without the crash — thousands quietly made the switch."],
+    description: "See what a different cup can do.",
+  };
+}
+
+test("Phase 1: shouldRefuseColdOfferInsert BYPASSES the cold-offer refusal when maxQcEligible=false → the Max-miss bin path lands the row (never a silent drop)", () => {
+  // The always-bin fix: a Max copy-QC miss (exhaustion / verdict-missed / parse miss) stamps
+  // maxQcEligible=false on the ineligible-bin insert. Even if a variation carries a cold-offer
+  // leak (a rare edge — Dahlia's canonical loop already rejects cold offers, but a variation
+  // slipping through would silently drop the row today), the row MUST land in the bin so the
+  // CEO can review or override; the leak becomes just another disposition on the held row.
+  const refused = shouldRefuseColdOfferInsert("cold", coldOfferLeakingPack(), false);
+  assert.equal(refused, false, "maxQcEligible=false MUST bypass the cold-offer refusal — the ad has to bin for CEO review, never drop");
+});
+
+test("Phase 1: shouldRefuseColdOfferInsert STILL refuses a cold-audience insert with an offer leak when maxQcEligible=true (postability invariant preserved)", () => {
+  // Regression pin: the Phase-1 bypass MUST be scoped to bin-ineligible inserts alone. A postable
+  // (maxQcEligible=true) creative with a cold-audience offer leak still refuses — a postable
+  // creative with offer language reaching Bianca's ready-to-test is the #1 DTC creative error
+  // (dahlia-audience-temperature-marking-and-cold-offer-gate Phase 2).
+  const refused = shouldRefuseColdOfferInsert("cold", coldOfferLeakingPack(), true);
+  assert.equal(refused, true, "a postable cold-audience insert with an offer leak MUST still refuse — the eligibility gate stays intact");
+});
+
+test("Phase 1: shouldRefuseColdOfferInsert STILL refuses a cold-audience insert with an offer leak when maxQcEligible=null (deterministic-mode / kill-switch-off — pre-Phase-1 behavior preserved)", () => {
+  // The bypass is EXACTLY `maxQcEligible === false` — NULL / undefined (deterministic
+  // buildMetaCopyPack callers, kill-switch-off callers, legacy rows Bianca treats as postable via
+  // `.not("max_qc_eligible","is",false)`) stays on the pre-Phase-1 refuse-and-drop rail. This
+  // preserves the deterministic-mode contract: a null-max-qc row is treated as postable, so the
+  // cold-offer refusal must still fire.
+  const refused = shouldRefuseColdOfferInsert("cold", coldOfferLeakingPack(), null);
+  assert.equal(refused, true, "a null-max-qc insert (deterministic-mode / legacy) MUST still refuse on a cold-offer leak — treated as postable");
+});
+
+test("Phase 1: shouldRefuseColdOfferInsert passes a WARM audience through untouched regardless of maxQcEligible (temperature-scoped by design)", () => {
+  // The cold-offer gate is scoped to a cold audience — a warm/hot/null-temperature pack passes
+  // through untouched (offer language is expected in warm/hot creatives). Same behavior across
+  // every maxQcEligible value — the eligibility axis only matters when the temperature axis is
+  // 'cold'.
+  assert.equal(shouldRefuseColdOfferInsert("warm", coldOfferLeakingPack(), false), false);
+  assert.equal(shouldRefuseColdOfferInsert("warm", coldOfferLeakingPack(), true), false);
+  assert.equal(shouldRefuseColdOfferInsert("warm", coldOfferLeakingPack(), null), false);
+  assert.equal(shouldRefuseColdOfferInsert("hot", coldOfferLeakingPack(), false), false);
+  assert.equal(shouldRefuseColdOfferInsert(null, coldOfferLeakingPack(), false), false);
+});
+
+test("Phase 1: shouldRefuseColdOfferInsert passes a CLEAN cold pack through (regression — the always-bin bypass only skips a REAL leak)", () => {
+  // A cold-audience creative without any offer leak passes the gate on every eligibility value.
+  // Pinning that the bypass predicate itself doesn't emit spurious refusals.
+  assert.equal(shouldRefuseColdOfferInsert("cold", cleanPack(), true), false);
+  assert.equal(shouldRefuseColdOfferInsert("cold", cleanPack(), false), false);
+  assert.equal(shouldRefuseColdOfferInsert("cold", cleanPack(), null), false);
+});
+
+test("Phase 1: exhausted-with-verdict-missed outcome surfaces `lastAuthorVerdict` — the always-bin path has a caption to bin held on parse / dispatch misses (not just below-floor)", async () => {
+  // Simulates the spec's concrete miss: Max's session parse-errors on every attempt (verdict is
+  // null throughout — the `bin_ineligible_insert_failed: max_qc_verdict_missed` case). Dahlia
+  // still produces a valid AuthorModeCopy on each attempt (clears every earlier gate); the
+  // runCopyAuthorSession loop captures the last-attempted AuthorModeCopy on
+  // `lastAuthorVerdict` even when Max's own verdict is null. stockProduct's always-bin branch
+  // reads BOTH — a captured caption + Max-was-the-block signal (`maxCopyQcMissed=true`) — to
+  // reach `insertReadyCreative(maxQcEligible: false)`, which the shouldRefuseColdOfferInsert
+  // bypass above now lets through.
+  const dahliaReplies = Array.from({ length: 1 + MAX_COPY_AUTHOR_REVISE_ATTEMPTS }, () => ({
+    resultText: envelope({ headline: "Cleaner morning energy" }),
+  }));
+  // Max session errors every attempt — closure returns { ok:false, maxVerdict:null } like the
+  // stockProduct closure does on a parse/dispatch miss (the `!qcRun.verdict` branch that emits
+  // buildMaxQcReviseReason(null)).
+  const verdictMissedClosure: CopyAuthorSessionInputs["verifyMaxCopyQc"] = async () => ({
+    ok: false,
+    reason: buildMaxQcReviseReason(null),
+    maxVerdict: null,
+  });
+  const { dispatch } = scriptedDispatcher(dahliaReplies);
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: verdictMissedClosure }), dispatch);
+  assert.equal(outcome.kind, "exhausted");
+  if (outcome.kind === "exhausted") {
+    assert.equal(outcome.maxCopyQcMissed, true, "Max was the last failing gate (a verdict miss counts as a Max exhaustion for stockProduct's bin routing)");
+    assert.equal(outcome.lastMaxCopyQcVerdict, null, "no Max verdict was ever produced — the miss reason rides on outcome.reason, not on a verdict body");
+    assert.ok(outcome.lastAuthorVerdict, "lastAuthorVerdict MUST surface so the always-bin path can insert the caption at max_qc_eligible=false");
+    assert.equal(outcome.lastAuthorVerdict!.headline, "Cleaner morning energy");
+    assert.match(outcome.reason, /^max_qc_verdict_missed/, "the miss reason is the distinct `max_qc_verdict_missed` prefix (dispatch/parse miss), not `max_qc_below_floor`");
   }
 });
 
