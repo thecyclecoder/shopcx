@@ -1,0 +1,1 @@
+- **Dahlia should RIFF on competitor angles and weave in the product's lead benefit — not just borrow the competitor's hook** · verified 2026-07-18 · → [[../lifecycles/ad-creative]]
