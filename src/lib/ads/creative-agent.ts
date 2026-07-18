@@ -320,6 +320,102 @@ export function pickCanonicalVariant(
   return variants.find((v) => v.audience_temperature === "hot") ?? null;
 }
 
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 ────────────────────────────
+
+/** The close-paragraph word cap. Lenient by design (25 words ≈ two short sentences) so the rail
+ *  doesn't thrash on a slightly-long-but-legitimate curiosity close — the point is to catch a
+ *  runaway paragraph masquerading as a close, not to police prose length. */
+export const PARAGRAPH_CLOSE_MAX_WORDS = 25;
+
+/** Typed reason strings the paragraph-structure validator returns on a miss. Each reason names the
+ *  exact defect the copy-only revise prompt cites back to Dahlia:
+ *    • `not_three_paragraphs` — the primary text didn't split on a true blank line into exactly 3
+ *      non-empty paragraphs (short-blob copy, single-paragraph copy, or a bunched 2-paragraph shape).
+ *    • `hook_not_shortest` — para-1 (hook) is not fewer words than para-2 (body). The shape's whole
+ *      point is a punchy short hook and a longer supporting body; a hook that's as long as the body
+ *      buries the ellipsis-earning first line.
+ *    • `close_too_long` — para-3 (close) exceeded `PARAGRAPH_CLOSE_MAX_WORDS` and reads as a second
+ *      body rather than a one-sentence curiosity nudge. */
+export type ParagraphStructureReason =
+  | "not_three_paragraphs"
+  | "hook_not_shortest"
+  | "close_too_long";
+
+/** Structured result of `validateCopyParagraphStructure` — either `ok:true` with the per-paragraph
+ *  word counts (useful as a downstream signal) or a typed `reason` the revise loop consumes. Kept
+ *  pure + exported so a unit test can pin every branch. */
+export type ParagraphStructureResult =
+  | { ok: true; hookWords: number; bodyWords: number; closeWords: number }
+  | {
+      ok: false;
+      reason: ParagraphStructureReason;
+      hookWords: number;
+      bodyWords: number;
+      closeWords: number;
+      paragraphCount: number;
+    };
+
+/** dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — the paragraph-structure
+ *  validator. Real DR Meta primary text is a long-form 3-paragraph shape:
+ *    (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads
+ *        above Meta's `…more` fold,
+ *    (2) a BODY paragraph 2-3x longer that delivers the info + proof stack, then
+ *    (3) a short single-sentence CURIOSITY CLOSE that pushes the click to the landing page.
+ *  Split on `/\n\s*\n/` (a true blank line — a single `\n` is a same-paragraph line break) and
+ *  require exactly 3 non-empty paragraphs, hook word-count strictly less than body word-count,
+ *  and close word-count ≤ `PARAGRAPH_CLOSE_MAX_WORDS`. Lenient thresholds by design so the rail
+ *  doesn't thrash on a legit hook that's within a few words of its body; it catches the two real
+ *  defects (a one/two-line blob without paragraph breaks; a runaway close pretending to be another
+ *  body).
+ *
+ *  Pure, side-effect-free, exported — the revise loop in `runCopyAuthorSession` calls it for the
+ *  canonical `primaryText` AND every `variations[].primaryText`. A miss becomes the revise reason
+ *  `paragraph_structure_failed: canonical=<reason>, variations[<framework>]=<reason>, ...` that
+ *  the existing copy-only revise consumes — same mechanism the shared validator, cold-offer gate,
+ *  and firewall use. */
+export function validateCopyParagraphStructure(primaryText: string): ParagraphStructureResult {
+  const paragraphs = primaryText
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  const wordCount = (s: string | undefined): number =>
+    !s ? 0 : s.trim().split(/\s+/).filter((w) => w.length > 0).length;
+  const hookWords = wordCount(paragraphs[0]);
+  const bodyWords = wordCount(paragraphs[1]);
+  const closeWords = wordCount(paragraphs[2]);
+  if (paragraphs.length !== 3) {
+    return {
+      ok: false,
+      reason: "not_three_paragraphs",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: paragraphs.length,
+    };
+  }
+  if (hookWords >= bodyWords) {
+    return {
+      ok: false,
+      reason: "hook_not_shortest",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: 3,
+    };
+  }
+  if (closeWords > PARAGRAPH_CLOSE_MAX_WORDS) {
+    return {
+      ok: false,
+      reason: "close_too_long",
+      hookWords,
+      bodyWords,
+      closeWords,
+      paragraphCount: 3,
+    };
+  }
+  return { ok: true, hookWords, bodyWords, closeWords };
+}
+
 /** Dispatcher contract for the per-creative copy-author box session. Mirrors QcSessionDispatcher:
  *  the child runs as `sandbox: "qc"` on Max via runBoxLane (no ANTHROPIC_API_KEY, minimal env,
  *  PreToolUse gate allows only Read on the exact tmp jpeg path). Any spawn error / cap / timeout
@@ -832,7 +928,7 @@ export function buildCopyAuthorPrompt(
     ...(dna ? ["", `COMPETITOR_DNA: ${dna}`] : []),
     COPY_AUTHOR_DATA_BLOCK_END,
     "",
-    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts.",
+    "Return ONLY the AuthorModeCopy JSON — { headline, primaryText, description, audience_temperature, concept_tag, self_score: { lf8, schwartz, cialdini, hopkins, sugarman, total, evidence[] }, claim_trace: [{ claim, source, source_ref }], variations: [{ framework, headline, primaryText }] }. Every sub-score is an integer in {0,1,2}; `total` must equal the arithmetic sum of the five sub-scores or the worker will reject the envelope. Echo `audience_temperature` back verbatim from the value above. `concept_tag` MUST be exactly one of the 10 Andromeda tokens: transformation | objection | curiosity | mechanism | authority | social-proof | scarcity | negation | story | comparison — pick the token that best names the DR pattern the caption you wrote actually hits. `claim_trace` is REQUIRED (firewall layer 2) — a non-empty array with one entry per substantive claim; each entry's `source` is one of: ingredients | ingredient_research | reviews.byClaim | transformationStory | supportingBenefit | leadProof | competitorDna | proofStack (proofStack covers the brief's verified brand facts — 700K+ customers, 30-day money-back, 15K+ reviews, 'Best Tasting' Gourmet Magazine, Non-GMO, 3rd-party tested — USE them, never self-censor). A missing / empty / mis-shaped claim_trace fails the parse (`firewall_missing_claim_trace`) and triggers the ONE sanctioned copy-only revise. `variations` is REQUIRED — exactly FIVE entries, one per conversion-psychology framework (lf8, schwartz, cialdini, hopkins, sugarman — the same five axes the rubric scores), no duplicates, each a self-contained {framework, headline, primaryText} hook LED by that framework's lever and grounded in the same brief + firewall + validator. Not one caption fanned to five slots — five genuinely distinct angles so Meta can test which psychological lever converts. LONG-FORM 3-PARAGRAPH PRIMARY TEXT (canonical AND every variation): every `primaryText` MUST be exactly THREE paragraphs separated by a true BLANK LINE (a `\\n\\n` between paragraphs — a bare `\\n` is a same-paragraph line break) — (1) a short punchy HOOK that creates curiosity or takes a contrarian stance and front-loads the framework's lever above Meta's `…more` fold, (2) a BODY paragraph 2-3x longer than the hook that delivers the info + the proof stack, (3) a short single-sentence CURIOSITY CLOSE that pushes the click. The paragraph-structure validator rejects a one-line blob / a 2-paragraph shape / a hook longer than the body / a runaway close and triggers the copy-only revise.",
   ].join("\n");
 }
 
@@ -1203,6 +1299,34 @@ export async function runCopyAuthorSession(
       const failing = validator.checks.filter((c) => !c.pass);
       lastReason = `validator_failed: ${failing.map((c) => c.rail).join(", ")}`;
       lastValidatorMisses = failing;
+      lastFirewallMisses = undefined;
+      lastMaxCopyQcMissed = false;
+      lastMaxCopyQcVerdict = null;
+      lastAuthorVerdict = null;
+      continue;
+    }
+    // dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 — long-form
+    // 3-paragraph shape gate. Runs AFTER the shared validator so a paragraph-structure miss
+    // is a distinct revise trigger with a concrete typed reason
+    // (`paragraph_structure_failed: canonical=<reason>, variations[<framework>]=<reason>, ...`),
+    // consumed by the same one-per-revise loop the other gates use. Checks the CANONICAL
+    // primaryText AND every `variations[].primaryText` — short blob copy fails no matter which
+    // slot ships it. Thresholds are lenient (hook strictly shorter than body; close ≤
+    // `PARAGRAPH_CLOSE_MAX_WORDS`) so a small hook-vs-body word-count wobble doesn't revise-thrash.
+    const paragraphMisses: string[] = [];
+    const canonicalParagraph = validateCopyParagraphStructure(verdict.primaryText);
+    if (!canonicalParagraph.ok) {
+      paragraphMisses.push(`canonical=${canonicalParagraph.reason}`);
+    }
+    for (const v of verdict.variations) {
+      const variationParagraph = validateCopyParagraphStructure(v.primaryText);
+      if (!variationParagraph.ok) {
+        paragraphMisses.push(`variations[${v.framework}]=${variationParagraph.reason}`);
+      }
+    }
+    if (paragraphMisses.length > 0) {
+      lastReason = `paragraph_structure_failed: ${paragraphMisses.join(", ")}`;
+      lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = null;

@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief, ScoredAngle } from "@/lib/ads/creative-brief";
-import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature, markPureCompetitorMinoritySlot } from "./creative-agent";
+import { readyStatusForAngle, briefHasFaithfulPackshot, planCompositionTransfer, buildAngleProvenance, imageOfferForAudience, resolveAudienceTemperature, markPureCompetitorMinoritySlot, validateCopyParagraphStructure, PARAGRAPH_CLOSE_MAX_WORDS } from "./creative-agent";
 
 test("readyStatusForAngle holds a null angle out of 'ready'", () => {
   assert.equal(readyStatusForAngle(null), "draft");
@@ -212,4 +212,98 @@ test("markPureCompetitorMinoritySlot: 2 competitor slots → the second (last) i
   markPureCompetitorMinoritySlot(plan);
   assert.equal(plan[0].pureCompetitor, undefined);
   assert.equal(plan[1].pureCompetitor, true);
+});
+
+// ── dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1 ────────────
+
+test("validateCopyParagraphStructure: a proper long-form 3-paragraph text passes", () => {
+  const primary = [
+    "Everyone said cut the coffee. She did the opposite.",
+    "",
+    "Barbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee, a real coffee roasted with six functional mushrooms and grass-fed collagen that 700,000 people quietly reach for every morning. No crash, no jitter, no afternoon dip.",
+    "",
+    "See what a different cup can do.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(primary);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.ok(result.hookWords > 0);
+    assert.ok(result.bodyWords > result.hookWords, "body should be longer than hook");
+    assert.ok(result.closeWords <= PARAGRAPH_CLOSE_MAX_WORDS);
+  }
+});
+
+test("validateCopyParagraphStructure: a one-line blob fails not_three_paragraphs", () => {
+  const blob = "Try Amazing Coffee — feel lighter, no jitters, all-day focus.";
+  const result = validateCopyParagraphStructure(blob);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 1);
+  }
+});
+
+test("validateCopyParagraphStructure: a 2-paragraph shape fails not_three_paragraphs", () => {
+  const twoPara = [
+    "Everyone said cut the coffee. She did the opposite.",
+    "",
+    "Barbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee and told her friends. See what a different cup can do.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(twoPara);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 2);
+  }
+});
+
+test("validateCopyParagraphStructure: a hook that isn't shorter than the body fails hook_not_shortest", () => {
+  const hookHeavy = [
+    "One two three four five six seven eight nine ten.",
+    "",
+    "One two three four five.",
+    "",
+    "Click here.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(hookHeavy);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "hook_not_shortest");
+    assert.equal(result.paragraphCount, 3);
+  }
+});
+
+test("validateCopyParagraphStructure: a runaway close fails close_too_long", () => {
+  const runawayClose = [
+    "Short hook line.",
+    "",
+    "This is a longer body paragraph with proof and specifics and multiple beats stacked to deliver the info that backs the hook and earns the click.",
+    "",
+    // 30 words — over the 25-word cap
+    "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty.",
+  ].join("\n");
+  const result = validateCopyParagraphStructure(runawayClose);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "close_too_long");
+    assert.ok(result.closeWords > PARAGRAPH_CLOSE_MAX_WORDS);
+  }
+});
+
+test("validateCopyParagraphStructure: single \\n between lines is a same-paragraph break (splits only on blank lines)", () => {
+  // Two 'paragraphs' separated by a single \n stay as ONE paragraph — the split is on `/\n\s*\n/`.
+  const singleBreak = "Line one.\nLine two.\nLine three.";
+  const result = validateCopyParagraphStructure(singleBreak);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "not_three_paragraphs");
+    assert.equal(result.paragraphCount, 1);
+  }
+});
+
+test("validateCopyParagraphStructure: tolerates whitespace-only 'blank' lines between paragraphs", () => {
+  // Real caption emitters sometimes indent a blank line with a space — the regex `\n\s*\n` covers it.
+  const spacedBlank = "Everyone said cut the coffee. She did the opposite.\n   \nBarbara dropped 40 pounds the year she swapped her regular cup for Amazing Coffee, and 700,000 people rely on it every morning.\n\nSee what a different cup can do.";
+  const result = validateCopyParagraphStructure(spacedBlank);
+  assert.equal(result.ok, true);
 });

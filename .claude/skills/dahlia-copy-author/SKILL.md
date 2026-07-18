@@ -295,6 +295,52 @@ Front-loading applies whether or not `COMPETITOR_DNA` is present. When it IS pre
 RIFF section above already tells you how to blend the competitor's proven hook shape with
 our lead benefit — the same ellipsis-earning bar still applies to that opener.
 
+### LONG-FORM 3-PARAGRAPH STRUCTURE (dahlia-long-form-3-paragraph-primary-text-in-human-voice Phase 1)
+
+Every `primaryText` you write — the CANONICAL one AND each of the five per-framework
+variations — MUST be **exactly THREE paragraphs separated by a true blank line**. Short blob
+copy (one or two sentences of run-on prose) is what the CEO flagged; real direct-response
+Meta primary text has a deliberate 3-paragraph shape.
+
+- **Paragraph 1 — HOOK (short, punchy).** A super punchy short opener that creates curiosity
+  or takes a contrarian stance. This is the ellipsis-earning line the reader sees BEFORE
+  Meta's `…more` fold. It also **leads with THIS variation's framework lever** (LF8 desire /
+  Schwartz level / Cialdini trigger / Hopkins specificity / Sugarman curiosity slide) — so a
+  reader who scrolls no further already got the framework's promise.
+- **Paragraph 2 — BODY (2-3x longer than the hook).** Separated from paragraph 1 by a **true
+  double line break** (a blank line between paragraphs — a `\n\n`, NOT a bare `\n`). Delivers
+  the info and the proof stack that back the hook. This is where the specific numbers, the
+  ingredient dose, the transformation quote, the `proofStack` cites (700K+ customers, 30-day
+  money-back, 15K+ reviews, product-specific awards) live — grounded per rail 1.
+- **Paragraph 3 — CURIOSITY CLOSE (short single sentence).** Again separated by a **true
+  double line break**. One sentence, ≤25 words, pushing the click to the landing page — a
+  final curiosity nudge (`"See why 700,000 people made the switch."`), NOT a second body
+  paragraph and NOT a summary of what you just said.
+
+**The paragraph-structure validator (`validateCopyParagraphStructure` in
+`src/lib/ads/creative-agent.ts`) is a deterministic rail** — the worker splits your
+`primaryText` on `/\n\s*\n/`, requires exactly 3 non-empty paragraphs, requires the hook to
+be strictly SHORTER than the body (word count), and requires the close to be short (≤25
+words). A miss fails with `not_three_paragraphs` / `hook_not_shortest` / `close_too_long`
+and triggers the ONE copy-only revise — same mechanism as the shared validator, cold-offer
+gate, and firewall. This applies to the canonical `primaryText` AND to **every** entry in
+`variations[].primaryText` — five long-form 3-paragraph hooks, not one blob broadcast to
+five slots.
+
+**Worked example (illustrative shape — specific numbers and reviewers still trace through
+the never-fabricate firewall):**
+
+> `Everyone said cut the coffee. She did the opposite.`
+>
+> `Barbara H. dropped 40+ lbs the year she swapped her regular cup for a mug of Amazing Coffee. It's a real coffee, roasted with six functional mushrooms and a scoop of grass-fed collagen, and 700,000+ people quietly rely on it every morning. There's no crash, no jitter, no afternoon dip — and it comes with a 30-day money-back guarantee, so trying it costs you nothing.`
+>
+> `See what a different cup can do.`
+
+Notice the shape: a short hook (8 words) that's a contrarian pattern-interrupt above the
+`…more` fold, a body (about 3-4x longer) that stacks the specifics + the proofStack cites,
+and a one-sentence close under 25 words. The BLANK lines between paragraphs are what the
+validator splits on — do not collapse them to a single `\n`.
+
 ### BAD vs GOOD (illustrative — every real claim still traces through the never-fabricate firewall)
 
 - **BAD** (product-led, flat, no curiosity):
@@ -448,7 +494,11 @@ Rules for the envelope:
 
 - `headline` / `primaryText` / `description` — non-empty strings, Meta-safe (under Meta's
   25% text-in-image rule is a RENDER concern, not a caption concern — just don't stuff the
-  primary text with hashtags). Every claim traces to the brief per rail 1.
+  primary text with hashtags). Every claim traces to the brief per rail 1. **`primaryText`
+  (canonical AND each variation) MUST be the long-form 3-paragraph shape** — hook + body +
+  curiosity close, separated by blank lines — per the LONG-FORM 3-PARAGRAPH STRUCTURE
+  section above; a one-line blob or 2-paragraph shape fails
+  `validateCopyParagraphStructure` and triggers the copy-only revise.
 - `audience_temperature` — echo back the exact value the DATA block gave you (`cold` /
   `warm` / `hot`). Do not invent a different value; the deterministic pre-insert gate uses
   YOUR echo to decide whether the cold-offer-gate applies.
