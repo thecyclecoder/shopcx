@@ -1,0 +1,1 @@
+- **Cold prospecting never imitates a warm/hot offer/retargeting (or cross-category) competitor ad — stamp a cold temperature + hard-exclude offer mismatches** · verified 2026-07-19 · → [[lifecycles/ad-creative]]
