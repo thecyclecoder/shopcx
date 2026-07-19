@@ -20,7 +20,7 @@ import { join } from "path";
 import sharp from "sharp";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
+import { selectAngles, selectAnglesForTemperature, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
@@ -2799,7 +2799,18 @@ async function stockProduct(
         winnerScore: c.winnerScore,
       } as Record<string, unknown>,
     }));
-  const ranked = [...competitorAngles, ...ownAngles];
+  // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 —
+  // HARD-EXCLUDE warm/hot competitor angles (offer/discount/bundle/bonus/scarcity/social-proof/
+  // retargeting per `competitorFocalIsWarmHot`) when the declared research intent is COLD, then
+  // fall back to own-brand cold angles when the filtered competitor pool empties. Before this
+  // fix the merge was a raw `[...competitorAngles, ...ownAngles]`, so the selector only
+  // DEPRIORITIZED warm/hot competitor ads (they sorted to the tail but stayed eligible) — an
+  // offer-heavy or cross-category competitor set still yielded a retargeting ad as the
+  // "least-bad" pick (the 2026-07-17 Amazing Creamer regression: a Holiday-bundle GLP-1
+  // slimming-probiotic ad — retargeting + wrong category — was selected for a cold creamer
+  // test). Warm/hot intents keep the raw pool (temperature-scoped exclusion — warm/hot tests
+  // WANT the offer/mechanism/review angles as their imitation base).
+  const ranked = selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
 
   // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
   // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only

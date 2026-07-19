@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCreativeBrief, buildMetaCopy, sanitizeCompetitorHook, selectAngles, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import { buildCreativeBrief, buildMetaCopy, sanitizeCompetitorHook, selectAngles, selectAnglesForTemperature, type CreativeBrief, type ScoredAngle } from "./creative-brief";
 import type { ProductIntelligence, PIReview } from "@/lib/product-intelligence";
 import { hasAnyLf8 } from "./lf8";
 
@@ -228,6 +228,117 @@ test("selectAngles — a role='lead' row with no customer_phrases falls back to 
   assert.ok(seeded, "expected a seeded lead-benefit angle even without customer phrases");
   assert.equal(seeded.hook, "Weight loss");
   assert.equal(seeded.leadBenefit, "Weight loss");
+});
+
+// ── selectAnglesForTemperature — Phase 2 cold hard-exclude + own-brand fallback ──────────────
+// cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 — cold
+// selection HARD-EXCLUDES competitor angles whose focal point reads warm/hot (offer/discount/
+// bundle/bonus/scarcity/social-proof/retargeting per competitorFocalIsWarmHot) rather than
+// merely deprioritizing them. When the cold-appropriate competitor pool is empty, the fallback
+// is the own-brand cold angles at their natural rank — never a warm/hot competitor ad.
+
+function makeCompetitorAngle(overrides: Partial<ScoredAngle> & { offer?: string | null } = {}): ScoredAngle {
+  const { offer, ...rest } = overrides;
+  const raw: Record<string, unknown> = { offer: offer ?? null, ...(overrides.raw as Record<string, unknown> | undefined) };
+  return makeAngle({ source: "competitor", ...rest, raw });
+}
+
+function makeOwnBrandAngle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
+  return makeAngle({ source: "benefit", hook: "own-brand cold angle", acquisitionPower: 10, ...overrides });
+}
+
+test("selectAnglesForTemperature: COLD + only warm/hot (offer/discount/bundle) competitor angles → returns an own-brand cold angle, never the offer ad", () => {
+  const holidayOffer = makeCompetitorAngle({
+    hook: "Holiday bundle with GLP-1 Natural slimming probiotic plus bonus gifts",
+    offer: "50% OFF holiday bundle + free gifts",
+    acquisitionPower: 9,
+  });
+  const socialProof = makeCompetitorAngle({
+    hook: "15,000+ 5-star reviews",
+    offer: null,
+    conceptTags: { cialdini_lever: "social_proof", awareness_stage: "product_aware", archetype: null, angle: null, why_it_works: null, format: null },
+  });
+  const ownBrand = makeOwnBrandAngle();
+  const pool = selectAnglesForTemperature([holidayOffer, socialProof], [ownBrand], "cold");
+  // The offer ad + the social-proof ad are HARD-EXCLUDED — a scrolling cold stranger sees an
+  // own-brand cold angle instead.
+  assert.equal(pool.length, 1);
+  assert.equal(pool[0].source, "benefit");
+  assert.equal(pool[0].hook, "own-brand cold angle");
+  // Zero competitor angles survived the cold filter.
+  assert.ok(!pool.some((a) => a.source === "competitor"), "no competitor angle should survive the cold hard-exclude");
+});
+
+test("selectAnglesForTemperature: COLD + a cold competitor angle (curiosity / problem_aware, no offer) → the cold competitor angle IS selected", () => {
+  const coldCompetitor = makeCompetitorAngle({
+    hook: "Nobody tells you the real reason your belly won't flatten",
+    offer: null,
+    conceptTags: { cialdini_lever: "liking", awareness_stage: "problem_aware", archetype: "curiosity", angle: "problem-agitate", why_it_works: null, format: null },
+  });
+  const warmCompetitor = makeCompetitorAngle({
+    hook: "40% off today",
+    offer: "40% off",
+  });
+  const ownBrand = makeOwnBrandAngle();
+  const pool = selectAnglesForTemperature([coldCompetitor, warmCompetitor], [ownBrand], "cold");
+  // The cold-appropriate competitor angle survives (its focal is problem-aware curiosity —
+  // exactly the imitation base a cold test should lead with); the offer ad is dropped.
+  assert.ok(pool.some((a) => a.source === "competitor" && /nobody tells you/i.test(a.hook)));
+  assert.ok(!pool.some((a) => /40% off/i.test(a.hook)), "the offer competitor ad should be hard-excluded");
+  // The own-brand pool still fills the tail (never starve).
+  assert.ok(pool.some((a) => a.source === "benefit"));
+});
+
+test("selectAnglesForTemperature: WARM selection is UNCHANGED — offer/review/mechanism competitor angles pass through (exclusion is temperature-scoped)", () => {
+  const holidayOffer = makeCompetitorAngle({
+    hook: "Holiday bundle with bonus gifts",
+    offer: "50% OFF",
+  });
+  const socialProof = makeCompetitorAngle({
+    hook: "15,000+ 5-star reviews",
+    offer: null,
+    conceptTags: { cialdini_lever: "social_proof", awareness_stage: "product_aware", archetype: null, angle: null, why_it_works: null, format: null },
+  });
+  const ownBrand = makeOwnBrandAngle();
+  const pool = selectAnglesForTemperature([holidayOffer, socialProof], [ownBrand], "warm");
+  // Every competitor angle is still in the warm pool — the hard-exclude is COLD-ONLY.
+  assert.equal(pool.filter((a) => a.source === "competitor").length, 2);
+  assert.ok(pool.some((a) => /holiday bundle/i.test(a.hook)));
+  assert.ok(pool.some((a) => /5-star reviews/i.test(a.hook)));
+});
+
+test("selectAnglesForTemperature: HOT selection is UNCHANGED — offer/scarcity competitor angles pass through", () => {
+  const scarcity = makeCompetitorAngle({
+    hook: "Last day — 40% off ends midnight",
+    offer: "40% off",
+  });
+  const ownBrand = makeOwnBrandAngle();
+  const pool = selectAnglesForTemperature([scarcity], [ownBrand], "hot");
+  assert.equal(pool.filter((a) => a.source === "competitor").length, 1);
+});
+
+test("selectAnglesForTemperature: COLD + own-brand-only pool → returns own-brand angles verbatim (no competitor to filter)", () => {
+  const ownBrand = makeOwnBrandAngle();
+  const otherOwn = makeOwnBrandAngle({ hook: "Feel lighter in 3 weeks", leadBenefit: "Weight loss" });
+  const pool = selectAnglesForTemperature([], [ownBrand, otherOwn], "cold");
+  assert.equal(pool.length, 2);
+  assert.ok(pool.every((a) => a.source !== "competitor"));
+});
+
+test("selectAnglesForTemperature: COLD + Amazing Creamer regression fixture (GLP-1 holiday bundle from a DIFFERENT category) is HARD-EXCLUDED — the exact scenario the spec cites", () => {
+  // The 2026-07-17 Amazing Creamer regression: the selected competitor angle led with a
+  // holiday bundle from a SLIMMING PROBIOTIC (cross-category retargeting/offer ad). This
+  // fixture asserts the spec's hard-exclude at the exact real-world shape.
+  const regression = makeCompetitorAngle({
+    hook: "Holiday bundle with GLP-1 Natural slimming probiotic plus bonus gifts",
+    offer: "Holiday bundle 50% off + bonus gifts",
+    acquisitionPower: 9,
+  });
+  const ownBrand = makeOwnBrandAngle({ hook: "Results-first: what real cream drinkers noticed" });
+  const pool = selectAnglesForTemperature([regression], [ownBrand], "cold");
+  assert.equal(pool.length, 1);
+  assert.equal(pool[0].source, "benefit");
+  assert.ok(!pool.some((a) => /holiday bundle|glp-1|slimming/i.test(a.hook)));
 });
 
 // ── buildCreativeBrief: Phase 2 RIFF — weave the lead benefit into a competitor brief ──────────
