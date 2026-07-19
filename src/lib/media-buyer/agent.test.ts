@@ -26,6 +26,7 @@ import {
   evaluateSensorTrustSnapshot,
   executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
+  MAX_COPY_PACK_ENTRIES,
   readActiveCohortProductIds,
   readCurrentTestCohortSize,
   resolveReplenishAdCopy,
@@ -1548,6 +1549,147 @@ test("resolveReplenishAdCopy: variants with blank headline are dropped (fail-clo
   // All variants dropped → fall back to the angle-caption (single-element arrays).
   assert.equal(r.ok, true);
   assert.deepEqual(r.headlines, ["fallback"]);
+});
+
+// ── bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement Phase 1 ──
+// The angle's metadata.copy_pack (Dahlia's 5 psychological framework variations — lf8 / schwartz /
+// cialdini / hopkins / sugarman) is the preferred source of publish copy. Prior behavior collapsed
+// to the single meta_headline because the resolver only ever looked at readCopyVariants (empty for
+// most angles); the fix is to read the copy_pack too and splat all 5 into the asset_feed_spec so
+// Meta rotates every framework across every placement.
+
+test("Phase 1 — copy_pack of 5 → 5-entry headlines/primaryTexts (canonical index 0 first); variants + angle IGNORED (copy_pack wins)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "SHOULD NOT APPEAR", meta_primary_text: "SHOULD NOT APPEAR body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "should-not-appear-variant", primary_text: "should-not-appear-variant-body", description: "" },
+      ],
+      copyPack: {
+        headlines: ["LF8 hook", "Schwartz hook", "Cialdini hook", "Hopkins hook", "Sugarman hook"],
+        primaryTexts: ["LF8 body", "Schwartz body", "Cialdini body", "Hopkins body", "Sugarman body"],
+        description: "Save 15% today",
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["LF8 hook", "Schwartz hook", "Cialdini hook", "Hopkins hook", "Sugarman hook"]);
+  assert.deepEqual(r.primaryTexts, ["LF8 body", "Schwartz body", "Cialdini body", "Hopkins body", "Sugarman body"]);
+  assert.deepEqual(r.descriptions, ["Save 15% today"]);
+  assert.equal(r.reason, null);
+});
+
+test("Phase 1 — copy_pack beyond 5 is capped at MAX_COPY_PACK_ENTRIES (5)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "canonical", meta_primary_text: "canonical body" },
+    {
+      copyPack: {
+        headlines: ["h1", "h2", "h3", "h4", "h5", "h6", "h7"],
+        primaryTexts: ["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.headlines.length, MAX_COPY_PACK_ENTRIES);
+  assert.equal(r.primaryTexts.length, MAX_COPY_PACK_ENTRIES);
+  assert.deepEqual(r.headlines, ["h1", "h2", "h3", "h4", "h5"]);
+  assert.deepEqual(r.primaryTexts, ["p1", "p2", "p3", "p4", "p5"]);
+});
+
+test("Phase 1 — copy_pack with a blank slot at index i drops that pair (paired hygiene, canonical index 0 preserved)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "canonical", meta_primary_text: "canonical body" },
+    {
+      copyPack: {
+        headlines: ["canonical", "", "cialdini", "  ", "sugarman"],
+        primaryTexts: ["canonical body", "schwartz body", "cialdini body", "hopkins body", "sugarman body"],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["canonical", "cialdini", "sugarman"]);
+  assert.deepEqual(r.primaryTexts, ["canonical body", "cialdini body", "sugarman body"]);
+});
+
+test("Phase 1 — copy_pack absent → falls back to variants (dahlia-M3 path unchanged)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "angle-fallback", meta_primary_text: "angle-fallback body" },
+    {
+      variants: [
+        { audience_temperature: "warm", headline: "Warm hook", primary_text: "Warm body", description: "Warm desc" },
+      ],
+      copyPack: null,
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Warm hook"]);
+  assert.deepEqual(r.primaryTexts, ["Warm body"]);
+  assert.deepEqual(r.descriptions, ["Warm desc"]);
+});
+
+test("Phase 1 — copy_pack all-blank (misauthored) → falls THROUGH to variants (per-variant hygiene preserves ok-path chain)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "angle-fallback", meta_primary_text: "angle-fallback body" },
+    {
+      variants: [
+        { audience_temperature: "cold", headline: "Cold hook", primary_text: "Cold body", description: "" },
+      ],
+      copyPack: {
+        headlines: ["", "  ", ""],
+        primaryTexts: ["", "  ", ""],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["Cold hook"]);
+  assert.deepEqual(r.primaryTexts, ["Cold body"]);
+});
+
+test("Phase 1 — copy_pack all-blank AND variants empty → falls to single-angle-caption (legacy shape byte-identical)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "angle-caption", meta_primary_text: "angle-caption body" },
+    {
+      variants: [],
+      copyPack: {
+        headlines: [null as unknown as string, "  "],
+        primaryTexts: ["  ", null as unknown as string],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.headlines, ["angle-caption"]);
+  assert.deepEqual(r.primaryTexts, ["angle-caption body"]);
+  assert.deepEqual(r.descriptions, []);
+});
+
+test("Phase 1 — copy_pack of 3 (a partial pack) still fills 3 entries (never pads with the canonical)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "SHOULD NOT APPEAR", meta_primary_text: "SHOULD NOT APPEAR" },
+    {
+      copyPack: {
+        headlines: ["h1", "h2", "h3"],
+        primaryTexts: ["p1", "p2", "p3"],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.headlines.length, 3);
+  assert.equal(r.primaryTexts.length, 3);
+});
+
+test("Phase 1 — copy_pack.headlines longer than primaryTexts → paired to the SHORTER length (never a headline without a body)", () => {
+  const r = resolveReplenishAdCopy(
+    { meta_headline: "canonical", meta_primary_text: "canonical body" },
+    {
+      copyPack: {
+        headlines: ["h1", "h2", "h3", "h4", "h5"],
+        primaryTexts: ["p1", "p2"],
+      },
+    },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.headlines.length, 2);
+  assert.equal(r.primaryTexts.length, 2);
 });
 
 // Structural test — the publisher's asset_feed_spec construction. A mock createAdCreative-style
