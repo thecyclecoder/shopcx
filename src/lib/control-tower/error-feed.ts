@@ -227,6 +227,47 @@ export function isInngestStepWrappedNonErrorLog(
 }
 
 /**
+ * Inngest FUNCTION-LEVEL terminal-failure mirror stack — the /api/inngest log the SDK's
+ * `LoggerMiddleware.wrapFunctionHandler` emits (`{ err }, 'Inngest function error'`) when
+ * a function's final retry throws. Vercel's drain surfaces the label PLUS the wrapped
+ * `err` (message + stack), so this variant slips past `isBareInngestStepErrorMiddlewareLog`
+ * (bare label only) and `isInngestStepWrappedNonErrorLog` (SDK-only stack, no app frame).
+ * The terminal failure is already authoritatively captured on `source='inngest'` by
+ * [[../inngest/inngest-failure-capture]] with the real function id + error class + trigger
+ * event — minting a second Control Tower incident from the Vercel mirror pages Platform
+ * owners on ONE upstream wobble as if it were two independent problems and sends repair
+ * work down the less-informative Vercel path (Control Tower `vercel:6d4f3f4eee64afcf` —
+ * the meta_500 mirror of `shopcx-media-buyer-test-cadence`'s terminal failure).
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path === '/api/inngest'` (the Inngest webhook route),
+ *   2. the message includes the exact SDK label `Inngest function error`,
+ *   3. the message includes an `Error:` marker (the serialized wrapped `err.message` — the
+ *      variant that carries a real body, not the bare label already dropped upstream),
+ *   4. the stack contains the SDK's `wrapFunctionHandler` frame (the terminal-catch site
+ *      — distinguishes function-level exhaustion from step-level `buildStepErrorOp`), AND
+ *   5. the stack contains at least one frame in OUR Inngest source (`src/lib/inngest/` or
+ *      `app/api/inngest/`) — proves the mirror maps to one of our functions that ALREADY
+ *      has the authoritative `source='inngest'` capture with the real function id.
+ *
+ * A non-Inngest /api/inngest error (e.g. middleware throw outside `wrapFunctionHandler`),
+ * an unrelated Vercel runtime error on a different path, or an Inngest log missing any of
+ * the five markers stays captured / paged on first sighting.
+ */
+export function isInngestTerminalFailureMirrorLog(
+  message: string,
+  path: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.includes("Inngest function error")) return false;
+  if (!text.includes("wrapFunctionHandler")) return false;
+  if (!/(^|\s)Error:/.test(text)) return false;
+  return text.includes("src/lib/inngest/") || text.includes("app/api/inngest/");
+}
+
+/**
  * Inngest TRANSPORT-layer failure noise — the inngest companion to `isBareLifecycle` /
  * `isAbortedStreamNoise`, factored here so the capture path can reuse it
  * ([[../specs/error-feed-drop-inngest-transport-http-unreachable]]).

@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isInngestStepWrappedNonErrorLog,
+  isInngestTerminalFailureMirrorLog,
   isTransientAnthropicOverloadError,
   isTransientAppstleFrequencyUpstreamTimeout,
   isTransientInngestStepRetryThrow,
@@ -103,6 +104,15 @@ function isError(log: VercelLog): boolean {
   // already captured on source='inngest' via inngest/function.failed with the real
   // function id + error class, so the Vercel-side variant is duplicate noise.
   if (isInngestStepWrappedNonErrorLog(message, path)) return false;
+  // Drop the function-level terminal-failure mirror: Inngest's SDK
+  // LoggerMiddleware.wrapFunctionHandler catches the final terminal throw and logs
+  // `{err}, 'Inngest function error'` — Vercel's drain surfaces the label + wrapped err
+  // with a real src/lib/inngest frame, so it slips past the bare-label + SDK-only-stack
+  // filters above. The terminal failure is already authoritatively captured on
+  // source='inngest' with the real function id — mirroring it into a fresh vercel:*
+  // incident makes ONE upstream wobble look like two independent problems (Control Tower
+  // `vercel:6d4f3f4eee64afcf` — the meta_500 mirror of shopcx-media-buyer-test-cadence).
+  if (isInngestTerminalFailureMirrorLog(message, path)) return false;
   return true;
 }
 
