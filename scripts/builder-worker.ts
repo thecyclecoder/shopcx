@@ -21193,7 +21193,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
   let ok = true;
   let detail = "started";
   try {
-    let instr: { product_id?: string; count?: number } = {};
+    let instr: { product_id?: string; count?: number; temperature?: "cold" | "warm" | "hot" } = {};
     try {
       instr = job.instructions ? JSON.parse(job.instructions) : {};
     } catch {
@@ -21295,6 +21295,10 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
       workspaceId: job.workspace_id,
       productId: instr.product_id,
       count: instr.count,
+      // ad-creative-trigger SDK — honour the caller's audience temperature (cold prospecting vs
+      // warm/hot) by threading it as the CreativeIntent so stockProduct scopes winner research +
+      // angle selection to it. Omitted ⇒ stockProduct's default (cold, test-to-find-winner).
+      intent: instr.temperature ? { audience_temperature: instr.temperature, purpose: "test-to-find-winner" } : undefined,
       // Force BOTH the box image-QC path and the copy-author path for THIS manual run — the caller
       // enqueued this kind deliberately, so we always inject both dispatchers regardless of the
       // workspace-level flags. (qcDispatcher must be present or image-QC falls back to the Opus-key
