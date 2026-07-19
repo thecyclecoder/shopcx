@@ -1,0 +1,1 @@
+- **Creative scout falls back to keyword/domain search when winners API returns empty** · verified 2026-07-19 · → [[../inngest/creative-scout]]
