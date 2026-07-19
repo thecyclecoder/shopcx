@@ -125,9 +125,62 @@ export interface WinnerConcept {
 }
 
 /**
+ * Pure parser for the `/api/winners/advertiser/{pageId}` body. Handles BOTH shapes seen live:
+ *   • Cached run: a single JSON body `{ summary, results:[{ad,score}] }`. Pretty-printed cache
+ *     bodies contain `\n{` inside nested objects — the old detector `!trimmed.includes("\n{")`
+ *     mis-routed those to the NDJSON path and returned 0. We now try JSON-first (single parse of
+ *     the whole body) and only fall through to NDJSON when that fails.
+ *   • Fresh run: NDJSON of `{_stage:'score', ad, score}` lines (one per creative).
+ *
+ * The silent 0-yield on Creamer for Obvi/NativePath/Vital Proteins reproduced here (the winners
+ * endpoint returned a cached JSON body whose nested content-arrays contained `\n{`, so the fragile
+ * `!includes("\n{")` guard mis-detected NDJSON and every per-line JSON.parse threw → empty). Exported
+ * so the test can pin the fix without a network stub.
+ */
+export function parseScanWinnersBody(
+  text: string,
+): Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const scored: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> = [];
+
+  // JSON-first: try to parse the whole body. Covers cached bodies whose nested arrays contain `\n{`
+  // (which the previous shape-sniff mis-routed to NDJSON). If a caller ever returns a bare array
+  // shape, accept that too.
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const j = JSON.parse(trimmed) as
+        | { results?: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> }
+        | Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }>;
+      const results = Array.isArray(j) ? j : Array.isArray(j.results) ? j.results : null;
+      if (results) {
+        for (const r of results) if (r?.ad && r?.score) scored.push(r);
+        return scored;
+      }
+    } catch {
+      // Whole-body parse failed → likely NDJSON. Fall through.
+    }
+  }
+
+  // NDJSON stream — one JSON object per line.
+  for (const line of trimmed.split("\n")) {
+    try {
+      const o = JSON.parse(line) as {
+        _stage?: string;
+        ad?: Record<string, unknown>;
+        score?: Record<string, unknown>;
+      };
+      if (o._stage === "score" && o.ad && o.score) scored.push({ ad: o.ad, score: o.score });
+    } catch {
+      /* skip non-JSON line */
+    }
+  }
+  return scored;
+}
+
+/**
  * Scan a Meta advertiser's FULL library for scored, concept-tagged winners (LANE A). Handles BOTH response
- * shapes seen live: a cached run returns `{ summary, results:[{ad,score}] }` JSON; a fresh run streams NDJSON
- * (`{_stage:'score', ad, score}` lines). Filters to `static_image` (we don't do video). 10 credits (cached: 0).
+ * shapes via {@link parseScanWinnersBody}. Filters to `static_image` (we don't do video). 10 credits (cached: 0).
  */
 export async function scanWinners(
   pageId: string,
@@ -144,28 +197,7 @@ export async function scanWinners(
     }),
   });
   if (!res.ok) return [];
-  const text = await res.text();
-  const scored: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> = [];
-  const trimmed = text.trim();
-  if (trimmed.startsWith("{") && trimmed.includes('"results"') && !trimmed.includes("\n{")) {
-    // cached JSON shape
-    try {
-      const j = JSON.parse(trimmed) as { results?: Array<{ ad: Record<string, unknown>; score: Record<string, unknown> }> };
-      for (const r of j.results ?? []) if (r?.ad && r?.score) scored.push(r);
-    } catch {
-      /* ignore */
-    }
-  } else {
-    // NDJSON stream
-    for (const line of trimmed.split("\n")) {
-      try {
-        const o = JSON.parse(line) as { _stage?: string; ad?: Record<string, unknown>; score?: Record<string, unknown> };
-        if (o._stage === "score" && o.ad && o.score) scored.push({ ad: o.ad, score: o.score });
-      } catch {
-        /* skip non-JSON line */
-      }
-    }
-  }
+  const scored = parseScanWinnersBody(await res.text());
   return scored
     .map((r): WinnerConcept => {
       const s = r.score as { tier?: string; composite?: number; variant_count?: number; tags?: WinnerConcept["tags"] };

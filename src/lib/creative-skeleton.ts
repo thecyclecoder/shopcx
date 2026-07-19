@@ -34,6 +34,7 @@ import {
   type Seed,
 } from "@/lib/adlibrary";
 import { resolveAdvertiser, scanWinners } from "@/lib/adlibrary-winners";
+import { normalizeBrand } from "@/lib/competitors";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -734,6 +735,53 @@ export interface LaneResult extends IngestResult {
   /** Longitudinal: existing ads re-observed (persistence bumped, no re-vision) + ads retired (vanished). */
   reobserved: number;
   retired: number;
+  /**
+   * Ads pulled by the sweep but DROPPED at the persist boundary because the ad's advertiser
+   * doesn't map to an approved competitor of this product (the spec's non-mapped-leakage guard).
+   * A LANE-B (domain search) sweep that returns affiliate ads driving to the competitor's
+   * domain is the canonical case ("Healthy Habits" / "A Path to Better Health" on Creamer).
+   */
+  nonMappedDropped: number;
+  /**
+   * Set when the sweep's raw pull returned 0 static ads on a competitor that resolved to a lane
+   * (a resolved-but-yields-0 signal — the spec's "silent per-competitor drop" fingerprint the
+   * operator needs to see). No retire happens in this case (a single empty pull could be a
+   * transient AdLibrary blip and must never wipe existing skeletons for the brand).
+   */
+  transientEmptyPull: boolean;
+}
+
+/**
+ * The persist-time approved-advertiser guard.
+ *
+ * Every persisted skeleton MUST belong to an APPROVED competitor of the product being swept. A
+ * LANE-B (domain search) pull returns every advertiser driving traffic to the competitor's domain
+ * — approved brands AND their affiliates ("Healthy Habits", "A Path to Better Health") — so
+ * without this guard the affiliates persist as if they were a competitor, polluting Dahlia's
+ * imitate shelf. `approved` is the SET of `normalizeBrand`-handles of every approved competitor
+ * for THIS product; an ad whose `normalizeBrand(advertiser)` isn't in the set is dropped and
+ * counted. A null/empty advertiser drops (we cannot verify → cannot admit).
+ *
+ * Pure — no DB, no network. Caller passes the pre-built set (see `creative-scout.ts`).
+ *
+ * When `approved` is empty (no product context / no approved competitors), the guard is a no-op:
+ * we keep every ad and set `dropped = 0`. The scout only ingests when a product has ≥1 approved
+ * competitor, so an empty set at this seam means the caller intentionally opted out (a plain non-
+ * per-product path like the retired workspace-wide sweep).
+ */
+export function filterAdsByApprovedAdvertisers<T extends { advertiser: string | null }>(
+  ads: T[],
+  approved: Set<string>,
+): { kept: T[]; dropped: number } {
+  if (approved.size === 0) return { kept: ads, dropped: 0 };
+  const kept: T[] = [];
+  let dropped = 0;
+  for (const ad of ads) {
+    const handle = normalizeBrand(ad.advertiser || "");
+    if (handle && approved.has(handle)) kept.push(ad);
+    else dropped++;
+  }
+  return { kept, dropped };
 }
 
 /** Which of these ad_keys do we already have? Splits a sweep's statics into NEW (ingest+vision) vs EXISTING
@@ -763,7 +811,12 @@ async function splitNewExisting(
 }
 
 /** The shared longitudinal core: ingest NEW statics (vision, capped), re-observe EXISTING statics (cheap),
- *  then retire this competitor's ads that DIDN'T appear this sweep. Mutates `result` counts. */
+ *  then retire this competitor's ads that DIDN'T appear this sweep. Mutates `result` counts.
+ *
+ *  IMPORTANT — retire semantics: `statics` here is the GUARD-PASSED set (only ads whose advertiser
+ *  belongs to an approved competitor of the product). We retire ads whose competitor_id === seed.competitorId
+ *  and whose dedup_key is NOT in this guard-passed pool — so a genuine LANE-B affiliate hit doesn't
+ *  count as "the competitor's ad is still active" for retire purposes. */
 async function collectAndTrack(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
@@ -772,7 +825,6 @@ async function collectAndTrack(
   cap: number,
   result: LaneResult,
 ): Promise<void> {
-  result.searched = statics.length;
   const { fresh, existing } = await splitNewExisting(admin, workspaceId, statics);
   result.skippedExisting = existing.length;
   result.longRunners = fresh.length;
@@ -796,7 +848,9 @@ async function collectAndTrack(
       console.error(`[creative-scout] reobserve failed for ${ad.ad_key}:`, err);
     }
   }
-  // VANISHED ads (this competitor's active rows not in this sweep) → retired. Needs the competitor link.
+  // VANISHED ads (this competitor's active rows not in this sweep's guard-passed pool) → retired.
+  // Needs the competitor link. The caller's transient-empty defense (upstream) ensures we NEVER reach
+  // this branch with an empty raw pull — so retire only fires on a real, non-empty sweep.
   if (seed.competitorId) {
     try {
       result.retired = await markDisappearedAds(
@@ -812,15 +866,29 @@ async function collectAndTrack(
 }
 
 /** Collect one competitor's STATIC creatives via the two-lane flow + longitudinal tracking. `domain` (the
- *  competitor's registrable domain) enables LANE B when the name doesn't resolve. `visionCap` bounds Opus. */
+ *  competitor's registrable domain) enables LANE B when the name doesn't resolve. `visionCap` bounds Opus.
+ *  `approvedAdvertisers` is the set of `normalizeBrand`-handles of every APPROVED competitor for this
+ *  product — the persist-time guard drops any pulled ad whose advertiser isn't in the set (spec's
+ *  non-mapped-leakage fix; "Healthy Habits" / "A Path to Better Health" on Creamer). Pass `undefined`
+ *  or an empty set to opt out (no guard). */
 export async function sweepCompetitorLanes(
   workspaceId: string,
   seed: Seed,
-  opts: { domain?: string | null; visionCap?: number } = {},
+  opts: { domain?: string | null; visionCap?: number; approvedAdvertisers?: Set<string> } = {},
 ): Promise<LaneResult> {
   const admin = createAdminClient();
-  const result: LaneResult = { ...EMPTY_RESULT(), lane: null, pageId: null, resolvedName: null, reobserved: 0, retired: 0 };
+  const result: LaneResult = {
+    ...EMPTY_RESULT(),
+    lane: null,
+    pageId: null,
+    resolvedName: null,
+    reobserved: 0,
+    retired: 0,
+    nonMappedDropped: 0,
+    transientEmptyPull: false,
+  };
   const cap = opts.visionCap ?? 12;
+  const approved = opts.approvedAdvertisers ?? new Set<string>();
 
   const resolution = await resolveAdvertiser(seed.keyword, { domain: opts.domain });
   result.pageId = resolution.pageId;
@@ -832,12 +900,22 @@ export async function sweepCompetitorLanes(
     const concepts = await scanWinners(resolution.pageId);
     // Normalize each concept's ad → static, keyed. AdLibrary's composite is only used to ORDER which NEW ads
     // we vision first (bounded spend) — it is NOT stored (our winner signal is persistence, tracked below).
-    const statics = concepts
+    const pulled = concepts
       .map((c) => ({ concept: c, ad: normalizeAd(c.ad) }))
       .filter((n) => n.ad.ad_key && n.ad.media_type === "static" && n.ad.creative_url)
       .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0))
       .map((n) => n.ad);
-    await collectAndTrack(admin, workspaceId, seed, statics, cap, result);
+    result.searched = pulled.length;
+    if (pulled.length === 0) {
+      // Silent per-competitor drop — the fingerprint the spec calls out on Obvi/NativePath/Vital
+      // Proteins. Raw pull returned 0 even though the brand resolved — likely a transient AdLibrary
+      // dip or a cached-blank body. NEVER retire existing skeletons on a single empty pull.
+      result.transientEmptyPull = true;
+      return result;
+    }
+    const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
+    result.nonMappedDropped = guarded.dropped;
+    await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
     return result;
   }
 
@@ -850,11 +928,19 @@ export async function sweepCompetitorLanes(
       platform: ["facebook", "instagram"], // Meta-only (no Google)
       pageSize: 50,
     });
-    const statics = ads
+    const pulled = ads
       .filter((a) => a.ad_key && a.media_type === "static" && a.creative_url)
       // Vision the highest-reach/longevity NEW ones first (domain search carries no AdLibrary score).
       .sort((a, b) => winnerScore(b) - winnerScore(a));
-    await collectAndTrack(admin, workspaceId, seed, statics, cap, result);
+    result.searched = pulled.length;
+    if (pulled.length === 0) {
+      // Transient empty pull — a domain search that returns 0 could be an API dip; do NOT retire.
+      result.transientEmptyPull = true;
+      return result;
+    }
+    const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
+    result.nonMappedDropped = guarded.dropped;
+    await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
     return result;
   }
 
