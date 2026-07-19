@@ -54,20 +54,26 @@ export function awarenessStageMatchesTemperature(
 }
 
 /** True iff a competitor ad's FOCAL POINT reads WARM/HOT (retargeting) rather than cold prospecting
- *  (CEO 2026-07-17). A cold audience is a scroll-stopping stranger — an ad whose focus is an OFFER,
- *  a MECHANISM, or a CUSTOMER REVIEW is almost certainly aimed at a warm/hot (already-aware) audience,
- *  so it's the wrong imitation base for a cold creative. Signals (any → true):
+ *  (CEO 2026-07-17; authority/mechanism un-excluded 2026-07-19). A cold audience is a scroll-stopping
+ *  stranger — an ad whose focus is an OFFER, a CUSTOMER REVIEW, or URGENCY is almost certainly aimed
+ *  at a warm/hot (already-aware) audience, so it's the wrong imitation base for a cold creative.
+ *  Signals (any → true):
  *   - an OFFER is present (`angle.offer`) — a discount is the clearest warm/hot tell;
- *   - the Cialdini lever is `social_proof` (review-focal), `scarcity` (offer/urgency), or `authority`
- *     (credential/mechanism-focal);
- *   - the archetype / angle text names an offer / review / mechanism / guarantee / comparison focus. */
+ *   - the Cialdini lever is `social_proof` (review-focal) or `scarcity` (offer/urgency);
+ *   - the archetype / angle text names an offer / review / guarantee / comparison focus.
+ *  NOTE — `authority` (credential/expert-backed: "clinically shown", "nutritionist-formulated") and
+ *  MECHANISM ("how it actually works") are COLD-APPROPRIATE, NOT warm/hot: a stranger trusts
+ *  credibility + education to open awareness. Excluding them emptied the cold shelf for products whose
+ *  entire proven competitor set is authority-framed (Guru Focus: all 8 deeply-proven winners were
+ *  `cialdini=authority` → 0 cold-eligible → own-brand fallback every run). The OFFER check (line
+ *  below) still hard-excludes discount/retargeting ads, so the 2026-07-17 cold_offer_leak stays shut. */
 export function competitorFocalIsWarmHot(angle: Pick<CompetitorAngle, "offer" | "conceptTags">): boolean {
   if (angle.offer && angle.offer.trim().length > 0) return true;
   const ct = angle.conceptTags ?? null;
   const lever = (ct?.cialdini_lever ?? "").toLowerCase();
-  if (lever === "social_proof" || lever === "scarcity" || lever === "authority") return true;
+  if (lever === "social_proof" || lever === "scarcity") return true;
   const text = `${ct?.archetype ?? ""} ${ct?.angle ?? ""}`.toLowerCase();
-  return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|mechanism|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
+  return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
 }
 
 /** True iff a competitor ad's FOCAL POINT reads COLD/prospecting — curiosity or problem→solution, the
