@@ -32,6 +32,7 @@ import {
   loadApprovedCompetitorsForProduct,
   productsWithApprovedCompetitors,
   promoteWhitelistedPages,
+  normalizeBrand,
 } from "@/lib/competitors";
 import {
   sweepCompetitorLanes,
@@ -65,15 +66,36 @@ function addTotals(a: IngestResult, b: IngestResult): IngestResult {
   };
 }
 
-async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult> {
+async function safeSweep(
+  workspaceId: string,
+  seed: Seed,
+  approvedAdvertisers: Set<string>,
+): Promise<IngestResult> {
   try {
     // winners-flow (Phase 2b): two-lane collection — LANE A (name→pageId→winners scan) or LANE B
     // (domain search), routed by resolveAdvertiser. The seed's `expectedDomain` enables LANE B.
-    const r = await sweepCompetitorLanes(workspaceId, seed, { domain: seed.expectedDomain });
+    // `approvedAdvertisers` is the persist-time guard: only ads whose advertiser normalizes to an
+    // approved competitor of THIS product survive (drops LANE-B affiliate leakage like Creamer's
+    // "Healthy Habits" / "A Path to Better Health").
+    const r = await sweepCompetitorLanes(workspaceId, seed, {
+      domain: seed.expectedDomain,
+      approvedAdvertisers,
+    });
     if (!r.lane) {
-      console.warn(`[creative-scout] BAD SEED "${seed.keyword}" — neither name nor domain resolved to a Meta advertiser`);
+      console.warn(
+        `[creative-scout] BAD SEED "${seed.keyword}" — neither name nor domain resolved to a Meta advertiser`,
+      );
+    } else if (r.transientEmptyPull) {
+      // The spec's "silent per-competitor drop" fingerprint: brand resolved to a lane but the
+      // AdLibrary pull returned 0 statics. Surface loudly (an operator needs to see the resolved
+      // name so a truly stopped brand vs a transient dip is distinguishable). No retire happened.
+      console.warn(
+        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: resolved but AdLibrary returned 0 statics — TRANSIENT EMPTY PULL (skipping retire to protect existing skeletons).`,
+      );
     } else {
-      console.log(`[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.inserted} new, ${r.reobserved} re-observed (persistence++), ${r.retired} retired`);
+      console.log(
+        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.searched} pulled, ${r.inserted} new, ${r.reobserved} re-observed (persistence++), ${r.retired} retired, ${r.nonMappedDropped} non-mapped-dropped`,
+      );
     }
     return r;
   } catch (err) {
@@ -82,18 +104,40 @@ async function safeSweep(workspaceId: string, seed: Seed): Promise<IngestResult>
   }
 }
 
+/**
+ * The persist-time approved-advertiser SET for a product: every approved competitor's `search_keyword`
+ * (or fallback `brand`) plus `expectedAdvertiser` (resolved_advertiser fallback), all `normalizeBrand`-
+ * flattened. An ingest ad's `advertiser` must normalize into this set or it's dropped. Built from the
+ * SAME `loadApprovedCompetitorsForProduct` result the sweep iterates, so freshness-skipped seeds still
+ * count as approved advertisers (a competitor searched last week is still a competitor this week).
+ * Exported for tests.
+ */
+export function buildApprovedAdvertiserSet(seeds: Seed[]): Set<string> {
+  const set = new Set<string>();
+  for (const s of seeds) {
+    if (s.keyword) set.add(normalizeBrand(s.keyword));
+    if (s.expectedAdvertiser) set.add(normalizeBrand(s.expectedAdvertiser));
+  }
+  set.delete("");
+  return set;
+}
+
 /** Freshness-gate one product's competitor seeds (unless forced): drop brands pulled inside the window so
- *  re-runs don't burn quota. Returns the kept seeds + how many were skipped. Plain (no step) — the caller
- *  wraps it in a step. */
+ *  re-runs don't burn quota. Returns the kept seeds + how many were skipped + the FULL approved-advertiser
+ *  list (both freshness-passed AND freshness-skipped) — the guard set must cover every approved competitor
+ *  of the product, not just this run's seeds. Plain (no step) — the caller wraps it in a step. */
 async function keptSeedsForProduct(
   workspaceId: string,
   productId: string,
   force: boolean,
-): Promise<{ kept: Seed[]; skipped: number }> {
+): Promise<{ kept: Seed[]; skipped: number; approvedAdvertisers: string[] }> {
   const seeds = await loadApprovedCompetitorsForProduct(workspaceId, productId);
-  if (!seeds.length || force) return { kept: seeds, skipped: 0 };
+  // The approved-advertiser guard set: derived from ALL approved competitors of the product (not just
+  // freshness-passed). Arrays serialize across step.run — the caller rehydrates into a Set.
+  const approvedAdvertisers = Array.from(buildApprovedAdvertiserSet(seeds));
+  if (!seeds.length || force) return { kept: seeds, skipped: 0, approvedAdvertisers };
   const gated = await filterSeedsByFreshness(workspaceId, seeds, adlibraryFreshnessDays());
-  return { kept: gated.kept, skipped: gated.skipped.length };
+  return { kept: gated.kept, skipped: gated.skipped.length, approvedAdvertisers };
 }
 
 type StepTools = GetStepTools<typeof inngest>;
@@ -117,13 +161,17 @@ async function sweepWorkspace(
   let totals = emptyTotals();
   let totalSkipped = 0;
   for (const productId of productIds) {
-    const { kept, skipped } = await step.run(`seeds-${workspaceId}-${productId}`, () =>
-      keptSeedsForProduct(workspaceId, productId, force),
+    const { kept, skipped, approvedAdvertisers } = await step.run(
+      `seeds-${workspaceId}-${productId}`,
+      () => keptSeedsForProduct(workspaceId, productId, force),
     );
     totalSkipped += skipped;
+    const approved = new Set(approvedAdvertisers);
     for (let i = 0; i < kept.length; i++) {
       const seed = kept[i];
-      const r = await step.run(`sweep-${productId}-${seed.keyword}`, () => safeSweep(workspaceId, seed));
+      const r = await step.run(`sweep-${productId}-${seed.keyword}`, () =>
+        safeSweep(workspaceId, seed, approved),
+      );
       totals = addTotals(totals, r);
       if (i < kept.length - 1) await step.sleep(`throttle-${productId}-${i}`, SWEEP_DELAY_MS);
     }

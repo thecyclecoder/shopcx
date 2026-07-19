@@ -59,6 +59,18 @@ An ad a competitor keeps running across our weekly sweeps IS a proven winner (th
 
 Advertiser resolution is STRICT (`nameMatches`: normalized-equal or brand + one corporate suffix) — the loose matcher mis-picked "Bulletproof Automotive"/"Ryze Hendricks"/"…Concrete Beams". Unit-tested in `src/lib/adlibrary-winners.test.ts`. The legacy `adMatchesCompetitor` domain/advertiser relevance filter (`src/lib/adlibrary.test.ts`) still guards the `sweepSeed` fallback path.
 
+## Reliability guarantees (2026-07-19 — Creamer silent-drop / non-mapped-leakage fix)
+
+Three defects reproduced live on Amazing Creamer (5 APPROVED competitors → only 2 yielded skeletons, plus 2 non-mapped advertisers leaked; a forced sweep inserted nothing). Fixed together so every approved competitor's winners land AND no affiliate/lookalike advertiser survives:
+
+- **Approved-advertiser guard at persist time.** [[../libraries/creative-skeleton]] `filterAdsByApprovedAdvertisers(ads, approvedSet)` is invoked in `sweepCompetitorLanes` AFTER each lane's raw pull. `approvedSet` is the `normalizeBrand`-handle set of EVERY approved competitor of the product (built by `buildApprovedAdvertiserSet` in `src/lib/inngest/creative-scout.ts` from the full `loadApprovedCompetitorsForProduct` result, so freshness-skipped seeds still count). An ad whose `normalizeBrand(advertiser)` isn't in the set is DROPPED (`nonMappedDropped++`, never persisted) — this is what stops LANE-B affiliate leakage like Creamer's "Healthy Habits" / "A Path to Better Health". A null/blank advertiser drops (cannot verify → cannot admit). An empty set opts out (no per-product context → no guard).
+- **No retire on a transient empty pull.** `sweepCompetitorLanes` returns early with `transientEmptyPull=true` if the raw pull returns 0 statics after a lane resolved. `markDisappearedAds` is NOT invoked in that case — a single empty pull is likely an AdLibrary dip or a cached blank body and must never wipe a competitor's existing skeletons. The operator sees a distinctive warn line (`resolved but AdLibrary returned 0 statics — TRANSIENT EMPTY PULL`) with the resolved brand name so a truly stopped brand is distinguishable from a transient dip across sweeps.
+- **Silent-drop parser fix in `scanWinners`.** The old shape sniff (`trimmed.startsWith("{") && includes('"results"') && !includes("\n{")`) mis-routed cached JSON bodies whose nested arrays contained `\n{` to the NDJSON path, then every per-line JSON.parse threw and the parser returned `[]` — the Creamer silent-drop fingerprint for Obvi / NativePath / Vital Proteins. `parseScanWinnersBody` in [[../libraries/adlibrary-winners]] now tries JSON-first (single whole-body parse) and only falls through to NDJSON when that fails. Unit-tested against pretty-printed cached bodies + fresh NDJSON streams + blank bodies.
+
+Per-competitor observability (`safeSweep` in `src/lib/inngest/creative-scout.ts`) surfaces `pulled → new + re-observed + retired + non-mapped-dropped` per brand PLUS a distinct WARN for a resolved-but-yielded-0 pull, so a silent drop is loud in the cron logs. Bad seeds (via:null) already logged a BAD SEED line.
+
+Pinned by `src/lib/adlibrary-winners.test.ts` (`parseScanWinnersBody` shapes) + `src/lib/creative-scout.guard.test.ts` (approved-advertiser guard + `buildApprovedAdvertiserSet`).
+
 ## Gotchas
 
 - **A product with zero approved competitors is silently skipped** — the scout does zero pulls for it (no hardcoded fallback). Approve a competitor row (with `product_id` set) to feed it.

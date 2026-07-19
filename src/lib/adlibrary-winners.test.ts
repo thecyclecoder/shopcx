@@ -5,7 +5,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickBestCandidate, nameMatches } from "./adlibrary-winners";
+import { pickBestCandidate, nameMatches, parseScanWinnersBody } from "./adlibrary-winners";
 
 test("exact (punctuation/space-insensitive) matches: MUD\\WTR ~ 'MUD WTR', Obvi ~ Obvi", () => {
   assert.equal(nameMatches("MUD\\WTR", "MUD WTR"), true);
@@ -36,4 +36,54 @@ test("pickBestCandidate: MUD\\WTR picks the real 124K page; the bogus 0-like 'We
 
 test("no strict match → null (routes to domain lane / bad seed)", () => {
   assert.equal(pickBestCandidate("Beam Dream", [{ id: "x", name: "Do Architects Dream of Concrete Beams?", likes: 99999 }]), null);
+});
+
+// ── parseScanWinnersBody — the silent-per-competitor-drop fix (spec Phase 1) ─────────
+// The old shape sniff (`trimmed.startsWith("{") && includes('"results"') && !includes("\n{")`)
+// mis-routed a cached JSON body whose nested arrays contained `\n{` to the NDJSON path — every
+// per-line JSON.parse then threw and the parser returned []. That reproduced the Creamer silent
+// drop (Obvi/NativePath/Vital Proteins yielded 0 skeletons though the endpoint returned ads fine).
+
+test("parseScanWinnersBody: cached JSON with nested newlines still parses (the Creamer/Obvi silent-drop fix)", () => {
+  const body = JSON.stringify(
+    {
+      summary: { total: 2 },
+      results: [
+        { ad: { ad_key: "a1", advertiser: "Obvi", page_id: "2431731276838642" }, score: { tier: "winner", composite: 88 } },
+        { ad: { ad_key: "a2", advertiser: "Obvi" }, score: { tier: "high_confidence_winner", composite: 92 } },
+      ],
+    },
+    null,
+    2, // pretty-print → nested `\n{` inside content-arrays. The old sniff mis-routed this to NDJSON.
+  );
+  const scored = parseScanWinnersBody(body);
+  assert.equal(scored.length, 2);
+  assert.equal((scored[0].ad as { ad_key: string }).ad_key, "a1");
+  assert.equal((scored[1].ad as { ad_key: string }).ad_key, "a2");
+});
+
+test("parseScanWinnersBody: dense JSON with no nested newlines (the original cached shape)", () => {
+  const body = `{"summary":{"total":1},"results":[{"ad":{"ad_key":"x1","advertiser":"MUD\\\\WTR"},"score":{"tier":"winner","composite":80}}]}`;
+  const scored = parseScanWinnersBody(body);
+  assert.equal(scored.length, 1);
+  assert.equal((scored[0].ad as { ad_key: string }).ad_key, "x1");
+});
+
+test("parseScanWinnersBody: NDJSON fresh-run stream still works (the fallback path)", () => {
+  const body = [
+    JSON.stringify({ _stage: "start" }),
+    JSON.stringify({ _stage: "score", ad: { ad_key: "n1", advertiser: "Vital Proteins" }, score: { tier: "winner" } }),
+    "not-json-noise", // must be tolerated
+    JSON.stringify({ _stage: "score", ad: { ad_key: "n2", advertiser: "Vital Proteins" }, score: { tier: "middle" } }),
+    JSON.stringify({ _stage: "done" }),
+  ].join("\n");
+  const scored = parseScanWinnersBody(body);
+  assert.equal(scored.length, 2);
+  assert.equal((scored[0].ad as { ad_key: string }).ad_key, "n1");
+  assert.equal((scored[1].ad as { ad_key: string }).ad_key, "n2");
+});
+
+test("parseScanWinnersBody: empty/blank body returns []", () => {
+  assert.deepEqual(parseScanWinnersBody(""), []);
+  assert.deepEqual(parseScanWinnersBody("   \n   "), []);
 });
