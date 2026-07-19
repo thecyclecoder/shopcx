@@ -12,7 +12,7 @@ The dollar CAC thresholds are **derived each cycle from live LTV**, not hardcode
 
 **Current snapshot (2026-07-12, illustrative — kill recomputes):** LTV ≈ **$330** (64% sub rate, 22.0% monthly churn, $101 new-customer AOV) ⇒ **crown/target CAC = $150 (fixed)**, **kill CAC ≈ $220** (LTV/1.5). The crown number stopped tracking LTV once the CEO pinned it to the lived "$140-150" reality.
 - **Testing optimizes for PURCHASE** (Option A — [[meta-marketing]] `OFFSITE_CONVERSIONS` → `PURCHASE`). Signal matches the goal; we judge creatives **directionally** on a spend floor + CPA-vs-target, NOT on a 50-purchase statistical bar (unaffordable at $150 CPA — 50 purchases = ~$7,500/creative). Full 50-conversion confidence applies only at the **scaling** stage where budget concentrates.
-- **Test audience held constant** = our proven converter (US women 50-65, matches the cold-50+ creative). Broadening to Advantage+ Audience is a *separate* audience experiment, not mixed into creative tests.
+- **Test audience held constant** = **broad, no age cap (defaults to 18+), no detailed targeting** — let Meta's algorithm find the buyer inside the broad audience (the creative is the targeting, per the 2025-26 broad-targeting consensus). Exclude existing customers. Narrowing to explicit/aged audiences is a *separate* audience experiment, not mixed into creative tests. (Superseded the old "US women 50-65" narrow test audience — CEO Dylan.)
 
 ## Account structure (two campaigns, feeder model)
 
@@ -29,7 +29,7 @@ purchase-opt, equal ad-set budgets            purchase-opt
 
 **Live objects (created 2026-07-07, PAUSED):**
 - Testing campaign `120252196683350184` — "MB — Testing (ABO)", `OUTCOME_SALES`, ABO (`is_adset_budget_sharing_enabled=false`).
-- Test ad set `120252196709210184` — "MB — Test 01", $50/day, purchase-opt, F50-65 clone, automatic (Advantage+) placements, `LOWEST_COST_WITHOUT_CAP`.
+- Test ad set `120252196709210184` — "MB — Test 01", $50/day, purchase-opt, broad (no age cap, 18+), automatic (Advantage+) placements, `LOWEST_COST_WITHOUT_CAP`.
 - Scaler = existing `120250561500610184` "Amazing Coffee Grouped Prospecting" (CBO $500/d).
 
 ## The decision tree (CEO Dylan, 2026-07-12 — the media-buyer test-loop verdict bands)
