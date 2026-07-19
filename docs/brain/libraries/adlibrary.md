@@ -7,7 +7,7 @@ Discovery half of the winning-static-creative finder (Phase 2). Searches [[../in
 | Export | Notes |
 |---|---|
 | `hasAdLibraryKey()` | `ADLIBRARY_API_KEY` present? (cron/route gate) |
-| `searchAds({ keyword, appType?, geo?, daysBack?, pageSize? })` | → `NormalizedAd[]`. POST /api/search; throws `adlibrary_search_${status}` on non-2xx |
+| `searchAds({ keyword?, domain?, adsType?, platform?, appType?, geo?, daysBack?, pageSize? })` | → `NormalizedAd[]`. POST /api/search; throws `adlibrary_search_${status}` on non-2xx. Called by the [[creative-skeleton]] winners-empty fallback (2026-07-19) with `{ keyword \| domain, adsType:['1'], platform:['facebook','instagram'], geo:['USA'] }` when `scanWinners` returns 0 for a resolved competitor — so a brand with 0 winners but dozens of live statics (NativePath, Vital Proteins) still populates the skeleton library. |
 | `fetchCreative(url)` | → `{ buffer, contentType }`. Sends the Bearer key (urls 403 without it) |
 | `classifyMedia(ad)` | `'static' \| 'video'` from `video_duration` → `ads_type` → `resource_urls[].type` |
 | `isWinner(ad, {minDays=7, minImpressions=50_000, minSpend=500})` | **the winner heuristic** `sweepSeed` uses: worth analyzing if `days_count ≥ minDays` **OR** `impression ≥ minImpressions` **OR** `estimated_spend ≥ minSpend` — reach/spend, not longevity alone. |

@@ -749,6 +749,19 @@ export interface LaneResult extends IngestResult {
    * transient AdLibrary blip and must never wipe existing skeletons for the brand).
    */
   transientEmptyPull: boolean;
+  /**
+   * The AdLibrary path that ACTUALLY fed the ingest for this competitor:
+   *   - `winners` — LANE A's `scanWinners(pageId)` returned statics (preferred).
+   *   - `keyword` — LANE A's winners scan was empty; the keyword `searchAds` fallback fed the ingest.
+   *   - `domain`  — LANE B's domain `searchAds` (advertiser un-resolvable by name) OR LANE A's
+   *                 winners-empty + keyword-empty fallthrough that DID find ads by domain.
+   *   - `null`    — no ads ingested (bad seed OR every fallback returned 0 → `transientEmptyPull`).
+   *
+   * Distinct from `lane` (which just records how the competitor was routed by `resolveAdvertiser`).
+   * The scout logs this per competitor so the operator can see which brands rely on the fallback
+   * because their winners scan is empty (spec 2026-07-19 — Obvi/NativePath/Vital Proteins).
+   */
+  source: "winners" | "keyword" | "domain" | null;
 }
 
 /**
@@ -871,6 +884,30 @@ async function collectAndTrack(
  *  product — the persist-time guard drops any pulled ad whose advertiser isn't in the set (spec's
  *  non-mapped-leakage fix; "Healthy Habits" / "A Path to Better Health" on Creamer). Pass `undefined`
  *  or an empty set to opt out (no guard). */
+/** The threshold below which LANE A's winners scan is treated as "empty" and we fall back to
+ *  the keyword/domain static searchAds path (spec 2026-07-19). A tiny nonzero threshold is a
+ *  future extension point (thin scans currently pass at 1+); the initial spec ships strict 0. */
+const WINNERS_FALLBACK_THRESHOLD = 1;
+
+/** Pull statics from the keyword/domain search fallback. Shared by LANE A's winners-empty branch
+ *  and by LANE B. Returns the ranked, static-only, non-empty pull — or [] on API empty. */
+async function pullStaticSearchAds(
+  by: { keyword?: string; domain?: string },
+): Promise<NormalizedAd[]> {
+  const ads = await searchAds({
+    ...(by.keyword ? { keyword: by.keyword } : {}),
+    ...(by.domain ? { domain: by.domain } : {}),
+    adsType: ["1"], // image-only
+    platform: ["facebook", "instagram"], // Meta-only (no Google)
+    geo: ["USA"],
+    pageSize: 50,
+  });
+  return ads
+    .filter((a) => a.ad_key && a.media_type === "static" && a.creative_url)
+    // Vision the highest-reach/longevity NEW ones first (search-based pull carries no winners score).
+    .sort((a, b) => winnerScore(b) - winnerScore(a));
+}
+
 export async function sweepCompetitorLanes(
   workspaceId: string,
   seed: Seed,
@@ -886,6 +923,7 @@ export async function sweepCompetitorLanes(
     retired: 0,
     nonMappedDropped: 0,
     transientEmptyPull: false,
+    source: null,
   };
   const cap = opts.visionCap ?? 12;
   const approved = opts.approvedAdvertisers ?? new Set<string>();
@@ -905,39 +943,57 @@ export async function sweepCompetitorLanes(
       .filter((n) => n.ad.ad_key && n.ad.media_type === "static" && n.ad.creative_url)
       .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0))
       .map((n) => n.ad);
-    result.searched = pulled.length;
-    if (pulled.length === 0) {
-      // Silent per-competitor drop — the fingerprint the spec calls out on Obvi/NativePath/Vital
-      // Proteins. Raw pull returned 0 even though the brand resolved — likely a transient AdLibrary
-      // dip or a cached-blank body. NEVER retire existing skeletons on a single empty pull.
-      result.transientEmptyPull = true;
+    if (pulled.length >= WINNERS_FALLBACK_THRESHOLD) {
+      result.source = "winners";
+      result.searched = pulled.length;
+      const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
+      result.nonMappedDropped = guarded.dropped;
+      await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
       return result;
     }
-    const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
-    result.nonMappedDropped = guarded.dropped;
-    await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
+    // Winners-empty fallback (spec 2026-07-19 — Obvi/NativePath/Vital Proteins): the winners
+    // endpoint returns 0 for most competitors while the plain keyword/domain search returns 30-60
+    // live statics. Fall back to searchAds so the skeleton library still populates for the brands
+    // that advertise the most. Preserve the approved-advertiser guard, static-only, and existing
+    // dedup path (collectAndTrack + splitNewExisting) — the same persist boundary as the winners lane.
+    const keywordPulled = seed.keyword ? await pullStaticSearchAds({ keyword: seed.keyword }) : [];
+    if (keywordPulled.length >= WINNERS_FALLBACK_THRESHOLD) {
+      result.source = "keyword";
+      result.searched = keywordPulled.length;
+      const guarded = filterAdsByApprovedAdvertisers(keywordPulled, approved);
+      result.nonMappedDropped = guarded.dropped;
+      await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
+      return result;
+    }
+    // Second-level fallback — keyword empty AND we know the brand's domain → try a domain pull.
+    if (opts.domain) {
+      const domainPulled = await pullStaticSearchAds({ domain: opts.domain });
+      if (domainPulled.length >= WINNERS_FALLBACK_THRESHOLD) {
+        result.source = "domain";
+        result.searched = domainPulled.length;
+        const guarded = filterAdsByApprovedAdvertisers(domainPulled, approved);
+        result.nonMappedDropped = guarded.dropped;
+        await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
+        return result;
+      }
+    }
+    // Winners empty AND both keyword+domain fallbacks empty — likely a transient AdLibrary dip
+    // or a cached-blank body. NEVER retire existing skeletons on a single empty run.
+    result.transientEmptyPull = true;
     return result;
   }
 
   // ── LANE B — domain search (advertiser un-resolvable by name) ───────────────
   if (resolution.via === "domain" && opts.domain) {
     result.lane = "domain";
-    const ads = await searchAds({
-      domain: opts.domain,
-      adsType: ["1"], // image-only
-      platform: ["facebook", "instagram"], // Meta-only (no Google)
-      pageSize: 50,
-    });
-    const pulled = ads
-      .filter((a) => a.ad_key && a.media_type === "static" && a.creative_url)
-      // Vision the highest-reach/longevity NEW ones first (domain search carries no AdLibrary score).
-      .sort((a, b) => winnerScore(b) - winnerScore(a));
+    const pulled = await pullStaticSearchAds({ domain: opts.domain });
     result.searched = pulled.length;
     if (pulled.length === 0) {
       // Transient empty pull — a domain search that returns 0 could be an API dip; do NOT retire.
       result.transientEmptyPull = true;
       return result;
     }
+    result.source = "domain";
     const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
     result.nonMappedDropped = guarded.dropped;
     await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);

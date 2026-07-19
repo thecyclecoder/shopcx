@@ -59,6 +59,23 @@ An ad a competitor keeps running across our weekly sweeps IS a proven winner (th
 
 Advertiser resolution is STRICT (`nameMatches`: normalized-equal or brand + one corporate suffix) — the loose matcher mis-picked "Bulletproof Automotive"/"Ryze Hendricks"/"…Concrete Beams". Unit-tested in `src/lib/adlibrary-winners.test.ts`. The legacy `adMatchesCompetitor` domain/advertiser relevance filter (`src/lib/adlibrary.test.ts`) still guards the `sweepSeed` fallback path.
 
+## LANE A winners-empty fallback (2026-07-19)
+
+Direct-API probes showed the winners endpoint (`/api/winners/advertiser/{pageId}`) returns 0 concepts for MOST approved competitors (NativePath, Vital Proteins — both scans empty) while the plain keyword/domain `searchAds` returns 30-60 live static ads for the same brand. Obvi only squeaked through because its winners count was 3 (of which 1 ingested). So a scout that only consumes winners starved the skeleton library for exactly the brands that advertise the most.
+
+`sweepCompetitorLanes` now falls back when `scanWinners` is empty (spec: `WINNERS_FALLBACK_THRESHOLD=1`):
+
+1. **LANE A resolves + winners populated** (`scanWinners` ≥ 1 static) → `source='winners'` (the preferred path — proven long-runners, ordered by AdLibrary composite). No fallback searchAds fires.
+2. **Winners empty → keyword fallback.** `searchAds({ keyword: seed.keyword, adsType: ['1'], platform: ['facebook','instagram'], geo: ['USA'], pageSize: 50 })`. If ≥ 1 static → `source='keyword'` — the ingest goes through the SAME approved-advertiser-guarded, static-only, dedup path (`collectAndTrack`) as the winners lane.
+3. **Winners empty AND keyword empty AND `opts.domain` is set → domain fallback.** `searchAds({ domain, adsType: ['1'], platform: ['facebook','instagram'], geo: ['USA'], pageSize: 50 })`. If ≥ 1 static → `source='domain'`.
+4. **All three empty (or keyword empty + no domain)** → `transientEmptyPull=true`, `source=null`, no retire. The competitor's existing skeletons stay untouched — a single empty pull could be an AdLibrary dip and must never wipe the library.
+
+**Every fallback preserves the invariants** the winners lane already respects: the approved-advertiser guard drops non-mapped affiliates (Creamer's "Healthy Habits" / "A Path to Better Health"), static-only, dedup by `dedup_key`, existing → `reobserveAd` (persistence++), new → `ingestAd` (vision, capped). Retire only fires when a lane produced a non-empty pull (so a fallback that DID find ads authoritatively retires the competitor's rows not in this pull, same as the winners lane).
+
+`safeSweep` in `src/lib/inngest/creative-scout.ts` logs `source=<winners|keyword|domain|none>` per competitor so the operator can see which brands rely on the fallback. Fingerprint: NativePath / Vital Proteins should now show `LANE WINNERS · source=keyword` (or `domain`) — a resolved winners scan that fell through to searchAds.
+
+Pinned by `src/lib/creative-skeleton.fallback.test.ts` — winners populated → source=winners (no fallback), winners empty → keyword fallback → source=keyword, winners+keyword empty + domain → source=domain, all empty → transientEmptyPull, non-mapped guard still fires under the fallback.
+
 ## Reliability guarantees (2026-07-19 — Creamer silent-drop / non-mapped-leakage fix)
 
 Three defects reproduced live on Amazing Creamer (5 APPROVED competitors → only 2 yielded skeletons, plus 2 non-mapped advertisers leaked; a forced sweep inserted nothing). Fixed together so every approved competitor's winners land AND no affiliate/lookalike advertiser survives:
