@@ -31,6 +31,7 @@ import {
   winnerTierRank,
   awarenessStageMatchesTemperature,
   competitorTemperatureFit,
+  competitorFocalIsWarmHot,
   type CompetitorAngle,
 } from "./creative-sourcing";
 import { buildCreativeBrief, type ScoredAngle } from "./creative-brief";
@@ -478,4 +479,27 @@ test("getProvenCompetitorAngles: a VIDEO skeleton is EXCLUDED — Dahlia imitate
   ]);
   const { angles } = await getProvenCompetitorAngles(admin, WS, { productId: PRODUCT, limit: 10 });
   assert.deepEqual(angles.map((a) => a.hook), ["static winner"], "the video ad must not reach the imitation shelf");
+});
+
+// ── 6. competitorFocalIsWarmHot: authority + mechanism are COLD-appropriate (un-excluded 2026-07-19)
+
+test("competitorFocalIsWarmHot: an authority-framed, offer-less winner is NOT warm/hot (cold-eligible)", () => {
+  // The exact Guru Focus shape: every deeply-proven winner was cialdini='authority', awareness
+  // 'solution_aware', no offer — which used to empty the cold shelf and force an own-brand fallback.
+  const authorityWinner = { offer: null, conceptTags: { cialdini_lever: "authority", awareness_stage: "solution_aware", archetype: "expert-backed", angle: "10 weeks to younger skin" } };
+  assert.equal(competitorFocalIsWarmHot(authorityWinner as never), false);
+  // and it therefore reads cold-eligible (a match/neutral, never a mismatch) for a cold intent
+  assert.notEqual(competitorTemperatureFit(authorityWinner as never, "cold"), "mismatch");
+});
+
+test("competitorFocalIsWarmHot: mechanism-focal (how-it-works) copy is NOT warm/hot", () => {
+  const mechanism = { offer: null, conceptTags: { cialdini_lever: null, archetype: "mechanism", angle: "the mechanism that makes it work" } };
+  assert.equal(competitorFocalIsWarmHot(mechanism as never), false);
+});
+
+test("competitorFocalIsWarmHot: the genuine warm/hot tells STILL exclude (offer / social_proof / scarcity / review)", () => {
+  assert.equal(competitorFocalIsWarmHot({ offer: "30% off", conceptTags: { cialdini_lever: "authority" } } as never), true, "an offer is a hard warm/hot tell even with an authority lever");
+  assert.equal(competitorFocalIsWarmHot({ offer: null, conceptTags: { cialdini_lever: "social_proof" } } as never), true);
+  assert.equal(competitorFocalIsWarmHot({ offer: null, conceptTags: { cialdini_lever: "scarcity" } } as never), true);
+  assert.equal(competitorFocalIsWarmHot({ offer: null, conceptTags: { cialdini_lever: null, archetype: "review", angle: "customer testimonial wall" } } as never), true);
 });
