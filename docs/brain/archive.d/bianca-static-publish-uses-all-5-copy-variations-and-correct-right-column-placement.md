@@ -1,0 +1,1 @@
+- **Bianca's static publish uploads all 5 copy variations + maps the right-column 1:1 asset** · verified 2026-07-19 · → [[../lifecycles/ad-publish]]
