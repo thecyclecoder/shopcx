@@ -2394,14 +2394,31 @@ export interface AngleProvenance {
   lead_benefit: string;
 }
 
-/** Pure — derive the persisted provenance from a scored angle. Kept pure + exported so the
- *  explore/exploit split (and the competitor-only field gating) is unit-testable without a DB. */
-export function buildAngleProvenance(angle: ScoredAngle): AngleProvenance {
+/** Pure — derive the persisted provenance from a scored angle + the crown-gated slot intent.
+ *  Kept pure + exported so the intent → mode mapping (and the competitor-only field gating) is
+ *  unit-testable without a DB.
+ *
+ *  ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit Phase 4
+ *  (2026-07-19) — `mode` is now the crown-gated slot INTENT (`stockProduct`'s plan already
+ *  computes `wantExploit = Math.min(Math.floor(count/2), exploitPool.length)` where
+ *  `exploitPool = eligible.filter(isWon)` — so 0 crowns ⇒ 0 exploit slots), NOT `isCompetitor`.
+ *  Pre-Phase-4 the badge came from `isCompetitor ? 'explore' : 'exploit'`, so every own-brand
+ *  angle was badged EXPLOIT even when there were zero crowned winners anywhere — the badge
+ *  never told the crown-gated truth. Now an own-brand angle in an explore slot badges
+ *  `explore`, and a competitor angle in an exploit slot badges `exploit` (the rare case where
+ *  a previously-crowned competitor imitation is being doubled down on). Competitor-only fields
+ *  (advertiser / ad_image_url / hook) stay gated on `source === 'competitor'` — those are
+ *  genuinely source-specific and NOT intent-derived. `src/lib/ads/ads-read-sdk.ts`
+ *  `deriveExploreExploit` (spec-declared read chokepoint) reads the same crown-gated truth. */
+export function buildAngleProvenance(
+  angle: ScoredAngle,
+  intent: "explore" | "exploit",
+): AngleProvenance {
   const isCompetitor = angle.source === "competitor";
   const raw = (angle.raw ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
   return {
-    mode: isCompetitor ? "explore" : "exploit",
+    mode: intent,
     source: angle.source,
     competitor_advertiser: isCompetitor ? str(raw.advertiser) : null,
     competitor_ad_image_url: isCompetitor ? str(raw.imageUrl) : null,
@@ -2475,6 +2492,15 @@ async function insertReadyCreative(
      *  the scan text so the swap isn't flagged as a cold-audience leak. Absent / null →
      *  today's behavior (no allowance). */
     allowedOffer?: CreativeBrief["offer"];
+    /** ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+     *  Phase 4 (2026-07-19) — the CROWN-GATED slot intent from `stockProduct`'s planner
+     *  (`wantExploit` is capped at `exploitPool.length` where `exploitPool` = eligible with
+     *  a prior win, so 0 crowns ⇒ 0 exploit slots). Threaded into `buildAngleProvenance` so
+     *  the persisted `metadata.provenance.mode` badge tells the crown-gated truth (own-brand
+     *  in an explore slot ⇒ `explore`, NOT `exploit` as the pre-Phase-4 isCompetitor branch
+     *  emitted). Absent → defaults to `"explore"` (the correct default when no crowned
+     *  winner exists, matching the planner's fallback at `!plan.length` → all-explore). */
+    intent?: "explore" | "exploit";
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. The
@@ -2505,7 +2531,14 @@ async function insertReadyCreative(
       meta_headline: copyPack.headlines[0].slice(0, META_CAPS.headline),
       meta_primary_text: copyPack.primaryTexts[0].slice(0, META_CAPS.primary_text),
       meta_description: copyPack.description.slice(0, META_CAPS.description),
-      metadata: { copy_pack: copyPack, provenance: buildAngleProvenance(angle) },
+      metadata: {
+        copy_pack: copyPack,
+        // ad-creative-box-session-only-retire-deterministic-path Phase 4 — provenance.mode
+        // reflects the CROWN-GATED slot intent (default explore when the caller did not
+        // thread one, matching stockProduct's planner fallback when there are zero crowned
+        // winners), not `isCompetitor`. See buildAngleProvenance's docstring for the reason.
+        provenance: buildAngleProvenance(angle, opts?.intent ?? "explore"),
+      },
     })
     .select("id").single();
 
@@ -2998,6 +3031,10 @@ async function stockProduct(
            *  for-offer Phase 1 — OUR real brief.offer threaded through as the cold gate's
            *  allowlist so an offer-for-offer swap that renders it verbatim isn't flagged. */
           allowedOffer?: CreativeBrief["offer"];
+          /** ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+           *  Phase 4 — the CROWN-GATED slot intent from the planner. Threaded so the persisted
+           *  provenance badge tells the crown-gated truth, not `isCompetitor`. */
+          intent?: "explore" | "exploit";
         } | undefined = undefined;
         let authorVerdict: AuthorModeCopy | null = null;
         // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's eligible verdict
@@ -3319,6 +3356,10 @@ async function stockProduct(
                   // gate (an offer-for-offer swap renders it verbatim); a different discount
                   // still trips.
                   allowedOffer: brief.offer,
+                  // ad-creative-box-session-only-retire-deterministic-path Phase 4 — crown-gated
+                  // slot intent from the planner. Threaded through so the provenance badge on
+                  // the always-binned ineligible row tells the same truth as the postable path.
+                  intent,
                 };
                 const binResult = await insertReadyCreative(
                   admin, workspaceId, productId, product.handle, productTitle, angle, ineligibleCopyPack,
@@ -3571,6 +3612,10 @@ async function stockProduct(
             // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
             // offer-for-offer Phase 1 — thread OUR real offer as the cold gate's allowlist.
             allowedOffer: brief.offer,
+            // ad-creative-box-session-only-retire-deterministic-path Phase 4 — crown-gated
+            // slot intent from the planner (`wantExploit` capped at `exploitPool.length` where
+            // exploitPool = eligible with prior win). Threaded so provenance.mode is honest.
+            intent,
           };
         } else {
           // ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
