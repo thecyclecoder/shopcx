@@ -284,6 +284,11 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     // then the video pipeline drains it to `status='analyzed'` with `media_type='video'` — 25 such rows
     // were on the shelf. Filter to `media_type='static'` so the imitation base is always a static ad.
     .eq("media_type", "static")
+    // flag-a-competitor-ad-do-not-use Phase 1: a proven long-runner is NOT automatically a good
+    // imitation base (the Magic Mind display-box packshot vs. the Onnit "Lock in when it matters
+    // most" hook — both proven long-runners, only one worth imitating). The CEO (and Phase 3's
+    // Max grader) flags weak ads via `do_not_use`; the flag must NEVER become an imitation angle.
+    .eq("do_not_use", false)
     .not("hook", "is", null)
     .gte("days_running", q.minDaysRunning)
     .order("days_running", { ascending: false, nullsFirst: false })

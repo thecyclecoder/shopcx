@@ -648,6 +648,12 @@ export async function ingestAd(
   // Idempotent on (workspace_id, source, dedup_key). NOTE: an upsert here would RESET the longitudinal
   // clock (our_first_seen, observed_sweeps) — that's why the sweep only calls ingestAd for genuinely NEW
   // ads and routes re-observations through reobserveAd. The upsert stays for the rare same-run dup.
+  //
+  // flag-a-competitor-ad-do-not-use Phase 1 invariant: `row` MUST NOT include `do_not_use` (or
+  // do_not_use_reason/by/at). PostgREST's `ON CONFLICT DO UPDATE SET` only touches columns present
+  // in the object, so leaving these out preserves the CEO/Max flag when the scout re-observes the
+  // same ad in the rare same-run dup path (and in the normal cross-sweep path via reobserveAd). If
+  // you ADD do_not_use to `row` in a future edit, you are un-flagging every re-observed ad — do not.
   const { error } = await admin
     .from("creative_skeletons")
     .upsert(row, { onConflict: "workspace_id,source,dedup_key" });
@@ -673,6 +679,11 @@ export async function reobserveAd(
   if (!existing) return 0;
   const firstSeen = (existing.our_first_seen as string) ?? nowIso;
   const persistence = daysBetween(firstSeen, nowIso);
+  // flag-a-competitor-ad-do-not-use Phase 1 invariant: the SET clause below MUST NOT touch
+  // `do_not_use` (or do_not_use_reason/by/at). The CEO's/Max's flag lives across the weekly
+  // scout sweep — re-observing an ad is a cheap longitudinal bump, never a re-evaluation of
+  // its imitation quality. Adding do_not_use to this update would silently un-flag a lame ad
+  // the CEO already marked and let it back onto Dahlia's imitation shelf.
   await admin
     .from("creative_skeletons")
     .update({
