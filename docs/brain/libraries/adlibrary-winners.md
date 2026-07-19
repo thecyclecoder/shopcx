@@ -13,6 +13,7 @@ The keyword `searchAds` ([[adlibrary]]) only returns a brand's RECENT ads — ne
 |---|---|
 | `resolveAdvertiser(brand, { domain? })` | → `AdvertiserResolution { pageId, name, likes, via }`. `via:'name'` (a strict name→pageId match, LANE A) · `via:'domain'` (no name match but a domain is known → LANE B, `pageId` null) · `via:null` (neither → bad seed). Never throws (a fetch failure → unresolved). |
 | `scanWinners(pageId, { country?, topEnrich?, maxPages? })` | → `WinnerConcept[]`. Handles BOTH live response shapes: cached `{ results:[{ad,score}] }` JSON and a fresh NDJSON stream (`{_stage:'score', ad, score}`). Filters to `tags.format === 'static_image'` (image-only). |
+| `parseScanWinnersBody(text)` | → `Array<{ ad, score }>`. Parses `scanWinners` response body. Tries JSON-first (covers cached bodies with nested arrays containing `\n{` that mis-route to NDJSON), then falls through to NDJSON line-by-line. Returns scored results or empty array on parse failure. Unit-tested against pretty-printed + fresh + blank bodies. |
 | `pickBestCandidate(brand, candidates)` / `nameMatches(brand, candidateName)` | Pure ranker + STRICT matcher (exported for tests). |
 | `AdvertiserResolution` / `WinnerConcept` | types |
 

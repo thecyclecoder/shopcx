@@ -1,0 +1,1 @@
+- **Creative scout reliably ingests EVERY approved competitor's winning ads — fix the silent per-competitor drops + non-mapped leakage** · verified 2026-07-19 · → [[lifecycles/creative-finder]]

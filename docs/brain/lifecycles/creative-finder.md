@@ -22,7 +22,11 @@ Discovers long-running competitor + category static ads from [[../integrations/a
 ### Phase 2 — Discovery (AdLibrary.com)
 [[../libraries/adlibrary]] — `searchAds({ keyword, appType:'3', geo:['USA'], daysBack, pageSize })` sends Bearer key; `fetchCreative(url)` fetches bytes; `isLongRunner()` filters (days_count + resume flag); `classifyMedia()` routes static vs video.
 
-Seed list: [[../tables/competitors]] (DB-driven approved brands) + `CATEGORY_SEEDS` (hardcoded category keywords: superfood/mushroom/adaptogen coffee, energy, anti-inflammatory, longevity, anti-aging, weight-loss, ashwagandha, greens). One `step.run` per seed with ~7s throttle (10/min AdLibrary cap).
+**Primary seed source (2026-07-12 onwards):** [[../inngest/creative-scout]] — **deliberate per-product** competitor pull with winners-flow (LANE-A pageId + `scanWinners` for full library, LANE-B domain-search). Replaces the retired workspace-wide `creative-finder` sweep + `CATEGORY_SEEDS`.
+
+**Legacy seed list (workspace-wide, deprecated):** [[../tables/competitors]] (DB-driven approved brands) + `CATEGORY_SEEDS` (hardcoded category keywords: superfood/mushroom/adaptogen coffee, energy, anti-inflammatory, longevity, anti-aging, weight-loss, ashwagandha, greens). Still processed by the daily `creative-finder` cron but no longer the primary source.
+
+One `step.run` per seed with ~7s throttle (10/min AdLibrary cap).
 
 Dedup by `ad_key` → never re-vision, never re-spend (re-runs are cheap).
 
@@ -86,4 +90,4 @@ Routed via `status='video_pending'` at ingestion; deferred to [[../specs/creativ
 
 ## Related
 
-[[../specs/winning-static-creative-finder]] · [[../specs/creative-finder-video]] · [[../specs/ad-creative-scout]] · [[../specs/competitor-scout]] · [[../specs/landing-page-scout]] · [[ad-static]] · [[ad-publish]] · [[ad-render]] · [[advertorial-landers]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[../inngest/creative-finder]] · [[../libraries/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/ads__customer-voice-mining]] · [[../libraries/competitors]] · [[../libraries/video-skeleton]] · [[../libraries/ad-gap]] · [[../functions/growth]] · [[../README]]
+[[../specs/winning-static-creative-finder]] · [[../specs/creative-finder-video]] · [[../specs/ad-creative-scout]] · [[../specs/competitor-scout]] · [[../specs/landing-page-scout]] · [[ad-static]] · [[ad-publish]] · [[ad-render]] · [[advertorial-landers]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../integrations/adlibrary]] · [[../integrations/anthropic]] · [[../inngest/creative-finder]] · [[../inngest/creative-scout]] · [[../libraries/adlibrary]] · [[../libraries/creative-skeleton]] · [[../libraries/ads__customer-voice-mining]] · [[../libraries/competitors]] · [[../libraries/video-skeleton]] · [[../libraries/ad-gap]] · [[../functions/growth]] · [[../README]]
