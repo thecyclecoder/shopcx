@@ -2144,6 +2144,18 @@ async function runCopyQcForCreative(
       runTargetTemperature: input.audienceTemperature,
     });
     if (parsed.kind !== "ok") {
+      // DIAGNOSTIC (2026-07-19) — copy-QC has been missing every grade with
+      // `copy_qc_verdict_no_json_block` (Max's session returns no JSON), silently blocking ALL
+      // ad postability. The dispatcher never logged Max's raw output, so the actual failure mode
+      // (prose-only / empty / truncated response) was invisible. Log a bounded snippet of the raw
+      // resultText on any parse miss so the precise cause is diagnosable, then remove once fixed.
+      const raw = outcome.resultText ?? "";
+      console.warn("copy_qc_parse_miss_raw", {
+        reason: parsed.reason,
+        rawLength: raw.length,
+        rawHead: raw.slice(0, 500),
+        rawTail: raw.length > 700 ? raw.slice(-200) : "",
+      });
       return { verdict: null, reason: `copy_qc_parse_error: ${parsed.reason}` };
     }
     return { verdict: parsed.verdict };
