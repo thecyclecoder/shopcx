@@ -105,6 +105,71 @@ export async function resolveTestCadenceTargets(admin: Admin): Promise<TestCaden
   }));
 }
 
+/**
+ * Discriminated result of one target's pull. A Meta 500 (or any thrown error inside the pull) becomes
+ * `{ ok:false, error }` instead of aborting the whole sweep before the heartbeat step — the loop keeps
+ * going, and the summary tells the Control Tower which accounts succeeded vs failed.
+ */
+export type CadencePullResult =
+  | { ok: true; account: string; tz: string | null; window: { since: string; until: string }; campaigns: number; adsets: number; adsetInsightRows: number; adInsightRows: number; scorecardRows: number }
+  | { ok: false; account: string; error: string };
+
+/**
+ * Pull one target's structure + insights + scorecards and fire Bianca's sweep. Result-returning: any
+ * thrown error (or missing token) becomes `{ ok:false, error }` so a Meta blip on ONE account can't
+ * short-circuit the loop before the heartbeat lands.
+ */
+export async function pullOneCadenceTarget(
+  t: TestCadenceTarget,
+  now: Date,
+  scorecardDate: string,
+): Promise<CadencePullResult> {
+  try {
+    const token = await getMetaUserToken(t.workspaceId);
+    if (!token) return { ok: false, account: t.metaAccountId, error: "no_token" };
+    const until = localDayInTz(now, t.timezone); // account-local today
+    const since = localDayInTz(new Date(now.getTime() - (TEST_CADENCE_WINDOW_DAYS - 1) * 86400000), t.timezone);
+    const p = { workspaceId: t.workspaceId, adAccountId: t.adAccountId, metaAccountId: t.metaAccountId, accessToken: token };
+    const struct = await syncMetaStructure(p, { campaignIds: t.campaignIds });
+    const adset = await syncMetaInsightsForLevel(p, "adset", since, until, { campaignIds: t.campaignIds });
+    const ad = await syncMetaInsightsForLevel(p, "ad", since, until, { campaignIds: t.campaignIds });
+    const sc = await refreshScorecards({ workspaceId: t.workspaceId, adAccountId: t.adAccountId }, { snapshotDate: scorecardDate });
+    // Fresh scorecards → fire Bianca's deterministic review for this workspace (part 2 of the loop).
+    await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
+    return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
+  } catch (e) {
+    return { ok: false, account: t.metaAccountId, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Summarize one cadence run into the heartbeat payload + rethrow decision.
+ * - `ok` flips to false if ANY target failed — the Control Tower sees the loop ran but wasn't clean.
+ * - `allFailed` is true only when every attempted target failed → the caller rethrows AFTER the
+ *   heartbeat lands, so a total Meta outage still surfaces on the Inngest failure feed while a
+ *   partial pull stays green on liveness.
+ */
+export function summarizeCadenceRun(results: CadencePullResult[]): {
+  succeededTargets: number;
+  failedTargets: number;
+  ok: boolean;
+  detail: string;
+  allFailed: boolean;
+  firstFailure: { account: string; error: string } | null;
+} {
+  const succeededTargets = results.filter((r) => r.ok).length;
+  const failedTargets = results.length - succeededTargets;
+  const allFailed = results.length > 0 && succeededTargets === 0;
+  const firstFailureRow = results.find((r): r is Extract<CadencePullResult, { ok: false }> => !r.ok) ?? null;
+  const firstFailure = firstFailureRow ? { account: firstFailureRow.account, error: firstFailureRow.error } : null;
+  const detail = failedTargets === 0
+    ? `pulled ${succeededTargets} account(s)`
+    : succeededTargets === 0
+    ? `all ${failedTargets} target(s) failed`
+    : `partial: ${succeededTargets} succeeded, ${failedTargets} failed`;
+  return { succeededTargets, failedTargets, ok: failedTargets === 0, detail, allFailed, firstFailure };
+}
+
 export const mediaBuyerTestCadenceCron = inngest.createFunction(
   {
     id: "media-buyer-test-cadence",
@@ -116,7 +181,7 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
     const targets = await step.run("resolve-targets", async () => resolveTestCadenceTargets(admin));
     if (!targets.length) {
       await step.run("emit-heartbeat", async () => {
-        await emitCronHeartbeat("media-buyer-test-cadence", { ok: true, produced: { targets: 0 }, detail: "no active test cohorts" });
+        await emitCronHeartbeat("media-buyer-test-cadence", { ok: true, produced: { targets: 0, succeededTargets: 0, failedTargets: 0 }, detail: "no active test cohorts" });
       });
       return { targets: 0, note: "no active test cohorts" };
     }
@@ -126,27 +191,24 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
     // is account-local so each account's current ad-day (LA vs Chicago) is always included near the UTC boundary.
     const scorecardDate = dayStr(now);
 
-    const results: unknown[] = [];
+    const results: CadencePullResult[] = [];
     for (const t of targets) {
-      const r = await step.run(`pull-${t.adAccountId}`, async () => {
-        const token = await getMetaUserToken(t.workspaceId);
-        if (!token) return { account: t.metaAccountId, error: "no_token" };
-        const until = localDayInTz(now, t.timezone); // account-local today
-        const since = localDayInTz(new Date(now.getTime() - (TEST_CADENCE_WINDOW_DAYS - 1) * 86400000), t.timezone);
-        const p = { workspaceId: t.workspaceId, adAccountId: t.adAccountId, metaAccountId: t.metaAccountId, accessToken: token };
-        const struct = await syncMetaStructure(p, { campaignIds: t.campaignIds });
-        const adset = await syncMetaInsightsForLevel(p, "adset", since, until, { campaignIds: t.campaignIds });
-        const ad = await syncMetaInsightsForLevel(p, "ad", since, until, { campaignIds: t.campaignIds });
-        const sc = await refreshScorecards({ workspaceId: t.workspaceId, adAccountId: t.adAccountId }, { snapshotDate: scorecardDate });
-        // Fresh scorecards → fire Bianca's deterministic review for this workspace (part 2 of the loop).
-        await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
-        return { account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
-      });
+      const r = await step.run(`pull-${t.adAccountId}`, async () => pullOneCadenceTarget(t, now, scorecardDate));
       results.push(r);
     }
+    const summary = summarizeCadenceRun(results);
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("media-buyer-test-cadence", { ok: true, produced: { targets: targets.length }, detail: `pulled ${targets.length} account(s) for ${scorecardDate}` });
+      await emitCronHeartbeat("media-buyer-test-cadence", {
+        ok: summary.ok,
+        produced: { targets: targets.length, succeededTargets: summary.succeededTargets, failedTargets: summary.failedTargets },
+        detail: `${summary.detail} for ${scorecardDate}`,
+      });
     });
-    return { targets: targets.length, scorecardDate, results };
+    // Only rethrow when NO target succeeded — a total outage stays visible on the Inngest failure feed,
+    // while a partial pull leaves the loop's liveness beat intact (ok:false, but present).
+    if (summary.allFailed) {
+      throw new Error(`media-buyer-test-cadence: all ${summary.failedTargets} target(s) failed (first: ${summary.firstFailure?.account} → ${summary.firstFailure?.error})`);
+    }
+    return { targets: targets.length, scorecardDate, succeededTargets: summary.succeededTargets, failedTargets: summary.failedTargets, results };
   },
 );
