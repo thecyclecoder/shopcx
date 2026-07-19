@@ -394,6 +394,14 @@ const MAX_GAP_GRADE = Number(process.env.AGENT_TODO_MAX_GAP_GRADE || 1);
 // One gap-grade pass: read-only Max session reading a batch (≤ GAP_GRADE_BATCH_CAP=8) of acted-on
 // gaps + their routed outcomes. Similar shape / duration to campaign-grade.
 const GAP_GRADE_TIMEOUT_MS = 20 * 60 * 1000;
+// Imitation-quality-review lane (flag-a-competitor-ad-do-not-use Phase 3): after each scout
+// sweep ingests new competitor ads, ONE Max `claude -p` session reads each new skeleton (image +
+// hook/mechanism/proof) — few-shot-anchored on the CEO's manual do_not_use=true flags — and
+// returns a coarse usable | not_usable verdict. Not-usable rows are auto-flagged via
+// setSkeletonDoNotUse with reason='max_weak_imitation_base', by='max'; the CEO gets ONE review
+// card per sweep to confirm/override (never a silent proxy-optimizer). Concurrency-1 own lane,
+// no ANTHROPIC_API_KEY billed. See docs/brain/libraries/imitation-quality-review.md.
+const IMITATION_QUALITY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 // Research lane (rhea-url-sensor Phase 2): the box-hosted URL-teardown loop for Rhea (Growth
 // research agent). One Max `claude -p` session per workspace reads a batch of unreviewed
 // research_urls, drives the Playwright capture helper (mobile viewport / overlay-kill / DOM-first
@@ -466,6 +474,10 @@ const MAX_CALIBRATE_MEDIA_BUYER_POLICY = Number(process.env.AGENT_TODO_MAX_CALIB
 // + Dahlia (ad-creative). Deterministic-Node lane (Phase 1 stub — Phase 2 fills the pass logic).
 // Concurrency-1 mirrors media-buyer: one supervisory pass per workspace at a time is plenty at 3h.
 const MAX_ADS_SUPERVISOR = Number(process.env.AGENT_TODO_MAX_ADS_SUPERVISOR || 1);
+// flag-a-competitor-ad-do-not-use Phase 3 — Max's per-sweep imitation-quality review. Concurrency-1
+// mirrors ads-supervisor (own supervisory lane, single-workspace at a time so we don't run two Max
+// sessions against the same scout output).
+const MAX_IMITATION_QUALITY_REVIEW = Number(process.env.AGENT_TODO_MAX_IMITATION_QUALITY_REVIEW || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -709,7 +721,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -789,6 +801,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "ad-creative-copy-qc",
   "ad-review-feedback",
   "ads-supervisor",
+  "imitation-quality-review",
   "ticket-analyze",
   "ticket-handle",
   "prompt-review",
@@ -3429,7 +3442,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -21671,6 +21684,194 @@ async function runAdsSupervisorJob(job: Job) {
   }
 }
 
+// ── Imitation-quality-review lane (flag-a-competitor-ad-do-not-use Phase 3) ───────────
+// Enqueued by src/lib/inngest/creative-scout.ts's sweepWorkspace right after each workspace's
+// sweep ingests new competitor ads. Reads instructions {skeletonIds:string[]} — the ids of THIS
+// sweep's newly-inserted rows — fans a coarse Max box session over them (image + hook/mechanism/
+// proof + few-shot ground-truth from the CEO's manual do_not_use=true flags), and hands the
+// parsed verdicts to applyBoxImitationQualityReview which calls setSkeletonDoNotUse for every
+// not_usable verdict (reason='max_weak_imitation_base', by='max') and inserts ONE CEO review card
+// per sweep. Node-completeness trio: OWNER=growth (KIND_OWNER_FALLBACK + BUILDER_WORKER_KINDS +
+// this Job.kind union); KILL-SWITCH via the growth-department ancestor row in kill_switches
+// (cascade in kill-switch-resolver); HEARTBEAT emitted here via emitAgentHeartbeat in a
+// try/finally so a throw still beats ok:false.
+async function runImitationQualityReviewClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "imitation-quality-review", sandbox: "max", timeout: IMITATION_QUALITY_REVIEW_TIMEOUT_MS });
+}
+
+async function runImitationQualityReviewJob(job: Job) {
+  const tag = `[imitation-quality-review:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "";
+  try {
+    let instr: { skeletonIds?: unknown } = {};
+    try { instr = job.instructions ? JSON.parse(job.instructions) : {}; } catch { /* not JSON — degrade */ }
+    const requestedIds = Array.isArray(instr.skeletonIds)
+      ? (instr.skeletonIds as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+      : [];
+    if (requestedIds.length === 0) {
+      detail = "no skeleton ids in instructions — nothing to review";
+      await update(job.id, { status: "completed", log_tail: detail });
+      console.log(`${tag} ${detail}`);
+      return;
+    }
+
+    const a = await admin();
+    const { signCreativeShot } = await import("../src/lib/creative-skeleton");
+    const { applyBoxImitationQualityReview } = await import("../src/lib/ads/imitation-quality-review");
+
+    // Load the batch — only rows in THIS workspace, with a hook (unvisioned ones can't be judged
+    // yet). A batch cap protects the prompt size / turn cost.
+    const BATCH_CAP = 12;
+    const { data: rows } = await a
+      .from("creative_skeletons")
+      .select("id, advertiser, hook, mechanism_claim, proof, offer, format, thumb_path, do_not_use")
+      .eq("workspace_id", job.workspace_id)
+      .in("id", requestedIds.slice(0, BATCH_CAP));
+    const skeletons = ((rows ?? []) as Array<{
+      id: string; advertiser: string | null; hook: string | null; mechanism_claim: string | null;
+      proof: string | null; offer: string | null; format: string | null; thumb_path: string | null;
+      do_not_use: boolean | null;
+    }>).filter((r) => !r.do_not_use); // don't re-judge a row the CEO already flagged
+    if (skeletons.length === 0) {
+      detail = `no reviewable skeletons resolved (${requestedIds.length} requested)`;
+      await update(job.id, { status: "completed", log_tail: detail });
+      console.log(`${tag} ${detail}`);
+      return;
+    }
+
+    // Few-shot ground-truth: the CEO's manual flags = weak exemplars; a small sample of unflagged
+    // strong long-runners = strong exemplars. Max learns from Dylan's taste, per the spec.
+    const { data: weakEx } = await a
+      .from("creative_skeletons")
+      .select("advertiser, hook, mechanism_claim, proof, offer, format")
+      .eq("workspace_id", job.workspace_id)
+      .eq("do_not_use", true)
+      .eq("do_not_use_by", "ceo")
+      .order("do_not_use_at", { ascending: false })
+      .limit(6);
+    const { data: strongEx } = await a
+      .from("creative_skeletons")
+      .select("advertiser, hook, mechanism_claim, proof, offer, format")
+      .eq("workspace_id", job.workspace_id)
+      .eq("do_not_use", false)
+      .eq("media_type", "static")
+      .eq("winner_tier", "proven")
+      .not("hook", "is", null)
+      .order("winner_score", { ascending: false })
+      .limit(6);
+
+    const requestedIdsInBatch = skeletons.map((r) => r.id);
+    const candidatesBlock = await Promise.all(
+      skeletons.map(async (r) => {
+        const thumb = r.thumb_path ? await signCreativeShot(r.thumb_path) : null;
+        return [
+          `SKELETON id=${r.id}`,
+          `  advertiser: ${r.advertiser || "—"}`,
+          `  format:     ${r.format || "—"}`,
+          `  hook:       ${r.hook || "(none)"}`,
+          `  mechanism:  ${r.mechanism_claim || "(none)"}`,
+          `  proof:      ${r.proof || "(none)"}`,
+          `  offer:      ${r.offer || "(none)"}`,
+          `  image:      ${thumb || "(no thumb available)"}`,
+        ].join("\n");
+      }),
+    );
+
+    const fewShot = [
+      "WEAK EXEMPLARS — the CEO has manually marked these as do_not_use (not_usable pattern):",
+      ...((weakEx ?? []) as Array<{ advertiser: string | null; hook: string | null; mechanism_claim: string | null; proof: string | null; offer: string | null; format: string | null }>).map(
+        (r) => `  • ${r.advertiser || "?"} · format=${r.format || "?"} · hook="${r.hook || "(none)"}" · mechanism="${r.mechanism_claim || "(none)"}" · proof="${r.proof || "(none)"}"`,
+      ),
+      "",
+      "STRONG EXEMPLARS — long-running competitor ads the CEO has NOT flagged (usable pattern):",
+      ...((strongEx ?? []) as Array<{ advertiser: string | null; hook: string | null; mechanism_claim: string | null; proof: string | null; offer: string | null; format: string | null }>).map(
+        (r) => `  • ${r.advertiser || "?"} · format=${r.format || "?"} · hook="${r.hook || "(none)"}" · mechanism="${r.mechanism_claim || "(none)"}" · proof="${r.proof || "(none)"}"`,
+      ),
+    ].join("\n");
+
+    const prompt = [
+      `You are Max (Head of Growth of ShopCX) on the box, running the imitation-quality-review skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator (it calls setSkeletonDoNotUse with reason='max_weak_imitation_base', by='max' for every not_usable verdict + inserts ONE CEO review card).`,
+      ``,
+      `TASK: for each NEWLY-INGESTED competitor ad below, return a coarse verdict — usable | not_usable — as an imitation base for Dahlia's next-round static creative.`,
+      ``,
+      `THE BAR IS DELIBERATELY COARSE. flag ONLY the OBVIOUS junk:`,
+      `  • auto-generated Shopify product/packshot ad (a rendered PDP image, no marketing thought)`,
+      `  • bland packshot that conveys no powerful message (no hook, no benefit callouts, no story)`,
+      `KEEP anything that actually says something:`,
+      `  • a hard hook line (e.g. Onnit "Lock in when it matters most")`,
+      `  • benefit callouts / mechanism / proof / a real transformation`,
+      `  • dynamic composition (hands-on demo, lifestyle, before/after)`,
+      `When in doubt → usable. A false NEGATIVE (weak base slips through) is a minor Dahlia miss; a false POSITIVE (strong base wrongly killed) permanently narrows the imitation shelf.`,
+      ``,
+      fewShot,
+      ``,
+      `NEWLY-INGESTED THIS SWEEP — ${skeletons.length} skeleton(s) to review:`,
+      ``,
+      candidatesBlock.join("\n\n"),
+      ``,
+      `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+      `  {"status":"completed","verdicts":[{"skeleton_id":"…","verdict":"usable|not_usable","reason":"<one short sentence — which junk pattern OR why it's usable>"}]}`,
+      `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+      ``,
+      `Every skeleton in the batch MUST appear exactly once in verdicts[]. reason MUST be evidence-based (cite the hook / composition you actually saw).`,
+    ].join("\n");
+
+    const { session, resultText, isError, raw, usage, model, configDir: gradeDir } = await runBoxLane(
+      (cfg, sid) => runImitationQualityReviewClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, gradeDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; verdicts?: Array<{ skeleton_id?: string; verdict?: string; reason?: string }> }>(resultText);
+    if (parsed?.status === "error") {
+      detail = `agent reported error: ${(parsed.error || "").slice(0, 200)}`;
+      await update(job.id, { status: "needs_attention", error: `imitation-quality-review error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.verdicts)) {
+      detail = "no parseable verdicts";
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "imitation-quality-review produced no parseable verdicts", log_tail: raw.slice(-2000) });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+
+    const cleanedVerdicts = parsed.verdicts
+      .filter((v): v is { skeleton_id: string; verdict: string; reason?: string } => !!v && typeof v.skeleton_id === "string" && typeof v.verdict === "string")
+      .map((v) => ({
+        skeleton_id: v.skeleton_id,
+        verdict: (v.verdict === "usable" ? "usable" : v.verdict === "not_usable" ? "not_usable" : "usable") as "usable" | "not_usable",
+        reason: (v.reason ?? "").slice(0, 400),
+      }));
+    const applied = await applyBoxImitationQualityReview({
+      workspaceId: job.workspace_id,
+      jobId: job.id,
+      requestedSkeletonIds: requestedIdsInBatch,
+      verdicts: cleanedVerdicts,
+    });
+    detail = `reviewed=${requestedIdsInBatch.length} flagged=${applied.flagged} kept=${applied.kept} skipped=${applied.skipped} notFound=${applied.notFound} card=${applied.notificationInserted}`;
+    await update(job.id, { status: "completed", log_tail: detail });
+    console.log(`${tag} ${detail}`);
+  } catch (err) {
+    ok = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    detail = `threw: ${msg}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", error: msg.slice(0, 300), log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("imitation-quality-review", {
+      ok,
+      detail,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+}
+
 async function runCampaignGradeJob(job: Job) {
   const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
   let instr: { candidates?: unknown } = {};
@@ -24354,6 +24555,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
   if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
+  if (job.kind === "imitation-quality-review") return runImitationQualityReviewJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -25972,6 +26174,7 @@ async function main() {
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
+  const countImitationQualityReview = () => [...active.values()].filter((v) => v.kind === "imitation-quality-review").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -26623,6 +26826,17 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ads-supervisor ${job.id.slice(0, 8)} → ${countAdsSupervisor() + 1}/${MAX_ADS_SUPERVISOR} ads-supervisor lane`);
+        launch(job);
+      }
+      // Fill the imitation-quality-review lane (flag-a-competitor-ad-do-not-use Phase 3): Max's
+      // per-sweep review of newly-ingested competitor ads — auto-flags the obvious junk via
+      // setSkeletonDoNotUse (reason='max_weak_imitation_base', by='max') + drops a CEO review card.
+      // Concurrency-1 mirrors ads-supervisor.
+      while (laneHasQueued(queuedKinds, ["imitation-quality-review"]) && countImitationQualityReview() < MAX_IMITATION_QUALITY_REVIEW) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["imitation-quality-review"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed imitation-quality-review ${job.id.slice(0, 8)} → ${countImitationQualityReview() + 1}/${MAX_IMITATION_QUALITY_REVIEW} imitation-quality-review lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

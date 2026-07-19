@@ -88,6 +88,10 @@ Per-competitor observability (`safeSweep` in `src/lib/inngest/creative-scout.ts`
 
 Pinned by `src/lib/adlibrary-winners.test.ts` (`parseScanWinnersBody` shapes) + `src/lib/creative-scout.guard.test.ts` (approved-advertiser guard + `buildApprovedAdvertiserSet`).
 
+## Post-sweep imitation-quality review ([[../specs/flag-a-competitor-ad-do-not-use-manual-ceo-then-max-graded]] Phase 3)
+
+`sweepWorkspace` stamps a per-workspace `sweepStartIso` BEFORE product ingestion and, at the end (after `promoteWhitelistedPages` + `syncResearchUrlsFromCreatives`), queries [[../tables/creative_skeletons]] for rows where `status='analyzed' AND media_type='static' AND created_at >= sweepStartIso` and hands the ids to [[../libraries/imitation-quality-review]] `enqueueImitationQualityReview`, which inserts ONE `agent_jobs` row (kind='imitation-quality-review'). The scout NEVER runs the LLM itself — the enqueued job is later claimed by [[../../../scripts/builder-worker.ts]] `runImitationQualityReviewJob` (a Max `claude -p` session on the box) which reads each new skeleton (image + hook/mechanism/proof + few-shot ground-truth from the CEO's manual `do_not_use=true` flags) and returns a coarse `usable | not_usable` verdict per ad. `not_usable` verdicts route to [[../libraries/creative-skeleton]] `setSkeletonDoNotUse` with `reason='max_weak_imitation_base'`, `by='max'`; ONE `dashboard_notifications` review card is inserted per sweep so the CEO can confirm/override (never a silent proxy-optimizer). Enqueue is best-effort — a throw is caught and logged, the sweep never fails on it (the sweep is the load-bearing side-effect). No-op when the sweep ingested nothing new. Cascade kill-switch: a `dept:growth` / `director:growth` row in [[../tables/kill_switches]] silences the review lane without touching the sweep itself.
+
 ## Gotchas
 
 - **A product with zero approved competitors is silently skipped** — the scout does zero pulls for it (no hardcoded fallback). Approve a competitor row (with `product_id` set) to feed it.
@@ -97,4 +101,4 @@ Pinned by `src/lib/adlibrary-winners.test.ts` (`parseScanWinnersBody` shapes) + 
 
 ## Related
 
-[[creative-finder]] · [[competitor-scout]] · [[acquisition-research-cadence]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../libraries/competitors]] · [[../libraries/creative-skeleton]] · [[../libraries/creative-sourcing]] · [[../libraries/creative-agent]] · [[../lifecycles/ad-render]] · [[../operational-rules]]
+[[creative-finder]] · [[competitor-scout]] · [[acquisition-research-cadence]] · [[../tables/creative_skeletons]] · [[../tables/competitors]] · [[../libraries/competitors]] · [[../libraries/creative-skeleton]] · [[../libraries/creative-sourcing]] · [[../libraries/imitation-quality-review]] · [[../libraries/creative-agent]] · [[../lifecycles/ad-render]] · [[../operational-rules]]

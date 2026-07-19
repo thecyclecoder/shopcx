@@ -126,6 +126,7 @@ export const BUILDER_WORKER_KINDS = [
   "sensor-trust-probe",
   "calibrate-media-buyer-policy",
   "ads-supervisor",
+  "imitation-quality-review",
   "build",
 ] as const;
 
@@ -179,6 +180,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "ad-review-feedback": "growth", // Dahlia (Max-supervised) — deterministic-Node router that consumes CEO manual-review feedback packets and re-drives Dahlia / render / Max (ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-max-render Phase 2)
   "media-buyer-grade": "growth", // Bianca / Max grading pass
   "ads-supervisor": "growth", // ads-supervisor-3h-agent — 3h supervisory pass over Bianca + Dahlia (owner: Max)
+  "imitation-quality-review": "growth", // flag-a-competitor-ad-do-not-use Phase 3 — Max reviews each scout sweep's newly-ingested competitor ads and auto-flags the obvious junk (packshot-only / no hook / no benefit) as do_not_use with reason='max_weak_imitation_base'; CEO gets a review card to confirm/override (never a silent proxy-optimizer)
 };
 
 /**
