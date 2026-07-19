@@ -1,0 +1,1 @@
+- **Flag a competitor ad as 'do not use'** · verified 2026-07-19 · → [[../lifecycles/creative-finder]]
