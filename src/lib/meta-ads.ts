@@ -277,6 +277,15 @@ export interface DualAssetCreativeArgs {
   // feed placement = the 4:5 asset; stories/reels = the 9:16 asset.
   feedVideoId?: string; storyVideoId?: string;
   feedImageHash?: string; storyImageHash?: string;
+  /** bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement
+   *  Phase 2 — the right-column 1:1 static. When present, `createDualAssetCreative` adds the
+   *  asset to the images list + an `asset_customization_rule` tagging it to Facebook's
+   *  `right_hand_column` (+ `search`) placement so that placement renders its correct-aspect
+   *  asset instead of falling through to the 9:16 story image via the default rule. Feed 4:5
+   *  becomes the safe default fallback (the priority-4 rule) in this branch — every placement
+   *  Meta may serve resolves to its correct-aspect asset with feed 4:5 as the failsafe. Absent
+   *  (a caller that never opted in) preserves the pre-Phase-2 2-bucket shape byte-identically. */
+  rightColumnImageHash?: string;
 }
 
 /**
@@ -438,25 +447,47 @@ export async function createDualAssetCreative(token: string, a: DualAssetCreativ
   const isVideo = !!(a.feedVideoId && a.storyVideoId);
   const prefix = `cx_${Date.now()}`;
   const lbl = (kind: string, p: string) => ({ name: `${prefix}_${kind}_${p}` });
-  const allBody = [lbl("body", "stories"), lbl("body", "feed"), lbl("body", "default")];
-  const allTitle = [lbl("title", "stories"), lbl("title", "feed"), lbl("title", "default")];
-  const allUrl = [lbl("url", "stories"), lbl("url", "feed"), lbl("url", "default")];
+  // bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement Phase 2 —
+  // when the caller supplies the right-column 1:1 static hash, the creative carries a 3-bucket
+  // customization set (feed 4:5 + stories/reels 9:16 + right_column 1:1 + a default fallback to
+  // feed 4:5). Videos never carry a 1:1 asset — the right-column placement is image-only for
+  // this shape — so the video branch keeps the pre-Phase-2 2-bucket adlabel set unchanged.
+  const hasRightCol = !isVideo && !!a.rightColumnImageHash;
+  const placements: string[] = hasRightCol
+    ? ["stories", "feed", "rightcol", "default"]
+    : ["stories", "feed", "default"];
+  const allBody = placements.map((p) => lbl("body", p));
+  const allTitle = placements.map((p) => lbl("title", p));
+  const allUrl = placements.map((p) => lbl("url", p));
 
   const labeledBodies = a.primaryTexts.filter(Boolean).map((text) => ({ text, adlabels: allBody }));
   const labeledTitles = a.headlines.filter(Boolean).map((text) => ({ text, adlabels: allTitle }));
   const labeledLinkUrls = [{ website_url: a.destinationUrl, adlabels: allUrl }];
 
-  // 9:16 → stories + default; 4:5 → feed. video_label / image_label by media kind.
+  // Video branch — pre-Phase-2 2-bucket adlabel set: 9:16 story video carries stories + default,
+  // 4:5 feed video carries feed. Right-column placement is image-only for this creative shape;
+  // a right-column hash is never passed alongside videos.
+  //
+  // Image branch — Phase 2 promotes feed 4:5 to `default` (the safer failsafe per spec Phase 2:
+  // "with the feed 4:5 as the safe default fallback") when the caller opts into the right-column
+  // shape. When the hash is absent the pre-Phase-2 shape stays byte-identical (story 9:16 keeps
+  // the `default` adlabel) so every existing caller and test path is preserved.
   const assetKey = isVideo ? "videos" : "images";
   const assets = isVideo
     ? [
         { video_id: a.storyVideoId, adlabels: [lbl("vid", "stories"), lbl("vid", "default")] },
         { video_id: a.feedVideoId, adlabels: [lbl("vid", "feed")] },
       ]
-    : [
-        { hash: a.storyImageHash, adlabels: [lbl("img", "stories"), lbl("img", "default")] },
-        { hash: a.feedImageHash, adlabels: [lbl("img", "feed")] },
-      ];
+    : hasRightCol
+      ? [
+          { hash: a.feedImageHash, adlabels: [lbl("img", "feed"), lbl("img", "default")] },
+          { hash: a.storyImageHash, adlabels: [lbl("img", "stories")] },
+          { hash: a.rightColumnImageHash, adlabels: [lbl("img", "rightcol")] },
+        ]
+      : [
+          { hash: a.storyImageHash, adlabels: [lbl("img", "stories"), lbl("img", "default")] },
+          { hash: a.feedImageHash, adlabels: [lbl("img", "feed")] },
+        ];
   const assetLabel = (p: string) => (isVideo ? { video_label: lbl("vid", p) } : { image_label: lbl("img", p) });
 
   const rule = (p: string, priority: number, spec: Record<string, unknown>) => ({
@@ -467,6 +498,45 @@ export async function createDualAssetCreative(token: string, a: DualAssetCreativ
     link_url_label: lbl("url", p),
     priority,
   });
+
+  // Phase 2 — when the right-column 1:1 hash is present, the customization set mirrors
+  // `createPlacementCreative` for the right-column placement (facebook right_hand_column +
+  // search) so Meta serves the 1:1 asset there instead of the 9:16 story via the default rule.
+  // Feed's asset_customization_rule loses `search` from its facebook_positions in that branch
+  // because the rightcol rule now covers it. When no right-column hash is passed, the shape
+  // stays pre-Phase-2 (feed rule includes search, no rightcol rule) so the legacy caller /
+  // video branch is byte-identical.
+  const assetCustomizationRules = hasRightCol
+    ? [
+        rule("feed", 1, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["feed", "profile_feed", "marketplace"],
+          instagram_positions: ["stream", "explore_home", "profile_feed"],
+        }),
+        rule("stories", 2, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["story", "facebook_reels", "video_feeds"],
+          instagram_positions: ["story", "reels"],
+        }),
+        rule("rightcol", 3, {
+          publisher_platforms: ["facebook"],
+          facebook_positions: ["right_hand_column", "search"],
+        }),
+        rule("default", 4, {}),
+      ]
+    : [
+        rule("feed", 1, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["feed", "profile_feed", "marketplace", "search"],
+          instagram_positions: ["stream", "explore_home", "profile_feed"],
+        }),
+        rule("stories", 2, {
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["story", "facebook_reels", "video_feeds"],
+          instagram_positions: ["story", "reels"],
+        }),
+        rule("default", 3, {}),
+      ];
 
   const body: Record<string, unknown> = {
     name: a.name,
@@ -489,19 +559,7 @@ export async function createDualAssetCreative(token: string, a: DualAssetCreativ
       })(),
       call_to_action_types: [a.ctaType],
       link_urls: labeledLinkUrls,
-      asset_customization_rules: [
-        rule("feed", 1, {
-          publisher_platforms: ["facebook", "instagram"],
-          facebook_positions: ["feed", "profile_feed", "marketplace", "search"],
-          instagram_positions: ["stream", "explore_home", "profile_feed"],
-        }),
-        rule("stories", 2, {
-          publisher_platforms: ["facebook", "instagram"],
-          facebook_positions: ["story", "facebook_reels", "video_feeds"],
-          instagram_positions: ["story", "reels"],
-        }),
-        rule("default", 3, {}),
-      ],
+      asset_customization_rules: assetCustomizationRules,
     },
     degrees_of_freedom_spec: { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } },
     ...(a.urlTags ? { url_tags: a.urlTags } : {}),
