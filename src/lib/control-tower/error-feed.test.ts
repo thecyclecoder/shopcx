@@ -18,6 +18,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
+  isInngestTerminalFailureMirrorLog,
   isTransientAnthropicOverloadError,
   isTransientAppstleFrequencyUpstreamTimeout,
   isTransientClientNetworkAbort,
@@ -1198,6 +1199,92 @@ test("isInngestStepWrappedNonErrorLog returns false on empty / nullish message",
   assert.equal(isInngestStepWrappedNonErrorLog("   ", "/api/inngest"), false);
   // No `at …` frame at all — not a stack; not this class.
   assert.equal(isInngestStepWrappedNonErrorLog("Error: [object Object]", "/api/inngest"), false);
+});
+
+// ── isInngestTerminalFailureMirrorLog (vercel-inngest-terminal-failure-mirror-filter) ──
+// Inngest SDK's LoggerMiddleware.wrapFunctionHandler catches the final terminal throw and
+// logs `{err}, 'Inngest function error'`. Vercel's drain surfaces the label PLUS the wrapped
+// err (message + stack), so this variant slips past the bare-label filter
+// (isBareInngestStepErrorMiddlewareLog matches ONLY the exact label with no body) and past
+// isInngestStepWrappedNonErrorLog (which matches SDK-only frames, no app frame). Terminal
+// failures are already authoritatively captured on source='inngest' by
+// inngest-failure-capture.ts with the real function id — the mirror opened Control Tower
+// `vercel:6d4f3f4eee64afcf` on the meta_500 exhaustion of shopcx-media-buyer-test-cadence.
+
+// Regression fixture: the meta_500 mirror stack shape — the SDK label + wrapped err.message
+// (Meta API error 500) + wrapFunctionHandler frame + a real src/lib/inngest/ frame.
+const INNGEST_TERMINAL_FAILURE_META_500_BLOB = `Inngest function error err: Error: Meta API error (500): {"error":{"message":"An unknown error occurred","type":"OAuthException","code":1}}
+    at metaFetchJson (/var/task/.next/server/chunks/8000-meta.js:100:15)
+    at syncMetaInsightsForLevel (/var/task/.next/server/chunks/8000-meta.js:250:22)
+    at handler (/var/task/.next/server/src/lib/inngest/media-buyer-test-cadence.js:132:15)
+    at M.wrapFunctionHandler (/var/task/.next/server/chunks/inngest-abc.js:42:34)
+    at M.tryExecuteHandler (/var/task/.next/server/chunks/inngest-abc.js:88:15)`;
+
+test("isInngestTerminalFailureMirrorLog drops the vercel:6d4f3f4eee64afcf meta_500 mirror on /api/inngest", () => {
+  assert.equal(
+    isInngestTerminalFailureMirrorLog(INNGEST_TERMINAL_FAILURE_META_500_BLOB, "/api/inngest"),
+    true,
+  );
+});
+
+test("isInngestTerminalFailureMirrorLog KEEPS the same blob on a different path (unrelated Vercel error)", () => {
+  assert.equal(
+    isInngestTerminalFailureMirrorLog(INNGEST_TERMINAL_FAILURE_META_500_BLOB, "/api/other"),
+    false,
+  );
+  assert.equal(
+    isInngestTerminalFailureMirrorLog(INNGEST_TERMINAL_FAILURE_META_500_BLOB, null),
+    false,
+  );
+  assert.equal(
+    isInngestTerminalFailureMirrorLog(INNGEST_TERMINAL_FAILURE_META_500_BLOB, undefined),
+    false,
+  );
+});
+
+test("isInngestTerminalFailureMirrorLog KEEPS a bare 'Inngest function error' label (no err body — handled upstream)", () => {
+  // The bare-label case is already dropped by isBareInngestStepErrorMiddlewareLog; this
+  // classifier only targets the mirror-with-body variant that slips past the bare filter.
+  assert.equal(isInngestTerminalFailureMirrorLog("Inngest function error", "/api/inngest"), false);
+});
+
+test("isInngestTerminalFailureMirrorLog KEEPS an /api/inngest error with no SDK wrapper frame", () => {
+  // A middleware throw outside wrapFunctionHandler (e.g. a route-level bug) has no
+  // authoritative source='inngest' capture — stay captured / paged.
+  const withoutSdkFrame = `Error: TypeError: Cannot read properties of undefined (reading 'id')
+    at handler (/var/task/.next/server/src/lib/inngest/media-buyer-test-cadence.js:132:15)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)`;
+  assert.equal(isInngestTerminalFailureMirrorLog(withoutSdkFrame, "/api/inngest"), false);
+});
+
+test("isInngestTerminalFailureMirrorLog KEEPS a wrapFunctionHandler stack with NO frame in our inngest source", () => {
+  // A blob that carries the SDK label + wrapFunctionHandler frame but lacks any frame in
+  // src/lib/inngest/ (or app/api/inngest/) doesn't map to an app function with an
+  // authoritative capture — stay captured / paged.
+  const noAppInngestFrame = `Inngest function error err: Error: some middleware bug
+    at M.wrapFunctionHandler (/var/task/.next/server/chunks/inngest-abc.js:42:34)
+    at M.tryExecuteHandler (/var/task/.next/server/chunks/inngest-abc.js:88:15)`;
+  assert.equal(isInngestTerminalFailureMirrorLog(noAppInngestFrame, "/api/inngest"), false);
+});
+
+test("isInngestTerminalFailureMirrorLog KEEPS an unrelated /api/inngest error with no Inngest label", () => {
+  const unrelated = `Error: something else entirely
+    at handler (/var/task/.next/server/src/lib/inngest/media-buyer-test-cadence.js:132:15)`;
+  assert.equal(isInngestTerminalFailureMirrorLog(unrelated, "/api/inngest"), false);
+});
+
+test("isInngestTerminalFailureMirrorLog matches an app-level api/inngest route frame variant", () => {
+  // The app-router route file (app/api/inngest/route.ts) — the alternate location an
+  // Inngest handler frame can surface from in a compiled Vercel build.
+  const appRouteVariant = `Inngest function error err: Error: Meta API error (500): body
+    at handler (/var/task/.next/server/app/api/inngest/route.js:42:15)
+    at M.wrapFunctionHandler (/var/task/.next/server/chunks/inngest-abc.js:42:34)`;
+  assert.equal(isInngestTerminalFailureMirrorLog(appRouteVariant, "/api/inngest"), true);
+});
+
+test("isInngestTerminalFailureMirrorLog returns false on empty / nullish message", () => {
+  assert.equal(isInngestTerminalFailureMirrorLog("", "/api/inngest"), false);
+  assert.equal(isInngestTerminalFailureMirrorLog("   ", "/api/inngest"), false);
 });
 
 // ── isTransientSupabaseEdgeHtmlBody (error-feed-drop-supabase-edge-html-body-noise-reland) ──
