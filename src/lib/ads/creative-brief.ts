@@ -22,6 +22,7 @@ import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { hasAnyLf8 } from "@/lib/ads/lf8";
 import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
+import { competitorFocalIsWarmHot, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import type { ConceptTags } from "@/lib/creative-skeleton";
 
 type Row = Record<string, unknown>;
@@ -217,6 +218,39 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
     if (!added) break;
   }
   return diversified;
+}
+
+/** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 —
+ *  HARD-EXCLUDE competitor angles whose focal point reads warm/hot (offer/discount/bundle/
+ *  bonus/scarcity/social-proof/retargeting per [[creative-sourcing]] `competitorFocalIsWarmHot`)
+ *  when the target audience temperature is COLD, then fall back to the caller's own-brand
+ *  angles when the filtered competitor pool empties — so a cold prospecting test can NEVER
+ *  lead with a competitor's offer/bundle/cross-category ad. Warm/hot temperatures keep the raw
+ *  competitor pool (the exclusion is temperature-scoped by design — a warm/hot test WANTS the
+ *  offer/mechanism/review angles as its imitation base).
+ *
+ *  The fallback is the CALLER'S own-brand pool at its natural rank — own-brand angles are
+ *  cold-appropriate by construction because `selectAngles`'s scoring favors transformation /
+ *  objection / curiosity hooks (the CEO's `results_first` / `benefit-led` / `problem→solution`
+ *  families). If the caller passes ONLY warm/hot competitor angles, the returned pool is JUST
+ *  the own-brand angles — never a warm/hot competitor ad as the "least-bad" pick.
+ *
+ *  Pure. Both inputs are treated as readonly; the returned array is a fresh concat so callers
+ *  can mutate it (stockProduct filters by learning ledger after this call). */
+export function selectAnglesForTemperature(
+  competitorAngles: readonly ScoredAngle[],
+  ownBrandAngles: readonly ScoredAngle[],
+  temperature: CreativeIntent["audience_temperature"],
+): ScoredAngle[] {
+  if (temperature !== "cold") {
+    return [...competitorAngles, ...ownBrandAngles];
+  }
+  const coldCompetitorPool = competitorAngles.filter((a) => {
+    const raw = (a.raw ?? {}) as { offer?: unknown };
+    const offer = typeof raw.offer === "string" ? raw.offer : null;
+    return !competitorFocalIsWarmHot({ offer, conceptTags: a.conceptTags ?? null });
+  });
+  return [...coldCompetitorPool, ...ownBrandAngles];
 }
 
 // ── Brief ────────────────────────────────────────────────────────────────────

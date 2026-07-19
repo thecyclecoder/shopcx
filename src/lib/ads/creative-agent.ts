@@ -20,11 +20,11 @@ import { join } from "path";
 import sharp from "sharp";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
-import { selectAngles, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
+import { selectAngles, selectAnglesForTemperature, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
 import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
-import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey } from "@/lib/ads/creative-learning";
+import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey, type Treatment } from "@/lib/ads/creative-learning";
 import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { chooseGroundedSubstitute, debrandForOurBrand, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
@@ -2244,12 +2244,38 @@ export interface AdCampaignInsertBody {
   max_qc_eligible: boolean | null;
 }
 
+/** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
+ *  deterministic Treatment → Andromeda concept_tag map. The whole-pack `ad-creative` lane runs
+ *  without an AuthorModeCopy verdict (deterministic buildMetaCopyPack path), so the concept_tag
+ *  comes from the treatment (`before_after` / `testimonial` / `big_claim` / `authority` /
+ *  `advertorial`) — the closest Andromeda tag that names the DR pattern the treatment renders.
+ *  Pure + total (an unknown treatment falls back to `curiosity` so a caller drift never yields
+ *  NULL) so the deterministic whole-pack row is ROUTABLE + CLASSIFIABLE (never NULL) and the
+ *  Phase-2 cold-mismatch classifier has a target concept to compare against. */
+export function mapTreatmentToConceptTag(treatment: Treatment): AndromedaConceptTag {
+  switch (treatment) {
+    case "before_after": return "transformation";
+    case "testimonial": return "social-proof";
+    case "big_claim": return "mechanism";
+    case "authority": return "authority";
+    case "advertorial": return "story";
+    default: {
+      const _exhaustive: never = treatment;
+      void _exhaustive;
+      return "curiosity";
+    }
+  }
+}
+
 /** Pure — construct the `ad_campaigns` row body `insertReadyCreative` writes for one creative. The
- *  concept_tag / author_self_score come straight from the AuthorModeCopy verdict when present, both
- *  NULL otherwise (deterministic-mode path). `maxQcEligible` reflects Max's gate: TRUE = postable,
- *  FALSE = binned-ineligible, NULL = Max never ran (Bianca reads NULL as pass-through, preserving
- *  the pre-Phase-2 behavior for deterministic / kill-switch-off callers). Pure helper so the
- *  row-stamping flow is provable without stubbing the storage / DB chains. */
+ *  `author_self_score` comes straight from the AuthorModeCopy verdict when present, NULL otherwise
+ *  (deterministic-mode path). `concept_tag` prefers an explicit `conceptTag` (the deterministic
+ *  whole-pack lane threads its Treatment-derived tag here — see `mapTreatmentToConceptTag`) and
+ *  falls back to `authorModeCopy.concept_tag`; NULL only when both are absent (a caller with
+ *  neither signal). `maxQcEligible` reflects Max's gate: TRUE = postable, FALSE = binned-
+ *  ineligible, NULL = Max never ran (Bianca reads NULL as pass-through, preserving the pre-Phase-2
+ *  behavior for deterministic / kill-switch-off callers). Pure helper so the row-stamping flow is
+ *  provable without stubbing the storage / DB chains. */
 export function buildAdCampaignInsertBody(args: {
   workspaceId: string;
   productId: string;
@@ -2258,11 +2284,21 @@ export function buildAdCampaignInsertBody(args: {
   status: "ready" | "draft";
   audienceTemperature: "cold" | "warm" | "hot" | null;
   authorModeCopy?: AuthorModeCopy;
+  /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
+   *  the deterministic whole-pack `ad-creative` lane threads its Treatment-derived Andromeda tag
+   *  here (see `mapTreatmentToConceptTag`) so a fresh whole-pack row is never NULL. Author-mode
+   *  callers keep the pre-existing `authorModeCopy.concept_tag` path; this arg supersedes it when
+   *  set, so a caller that passes BOTH (explicit conceptTag + authorModeCopy) still lands the
+   *  explicit tag. */
+  conceptTag?: AndromedaConceptTag | null;
   /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's copy-QC
    *  eligibility. Undefined / null → stamps NULL (deterministic-mode / no dispatcher / legacy);
    *  TRUE → postable; FALSE → binned-but-ineligible. */
   maxQcEligible?: boolean | null;
 }): AdCampaignInsertBody {
+  const explicit = args.conceptTag;
+  const conceptTag: AndromedaConceptTag | null =
+    explicit != null ? explicit : args.authorModeCopy ? args.authorModeCopy.concept_tag : null;
   return {
     workspace_id: args.workspaceId,
     product_id: args.productId,
@@ -2271,7 +2307,7 @@ export function buildAdCampaignInsertBody(args: {
     status: args.status,
     audience_temperature: args.audienceTemperature,
     author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
-    concept_tag: args.authorModeCopy ? args.authorModeCopy.concept_tag : null,
+    concept_tag: conceptTag,
     max_qc_eligible: args.maxQcEligible ?? null,
   };
 }
@@ -2426,6 +2462,12 @@ async function insertReadyCreative(
      *  kill-switch off / legacy) — Bianca's filter treats NULL identically to TRUE, so today's
      *  byte-for-byte behavior is preserved for those callers. */
     maxQcEligible?: boolean | null;
+    /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
+     *  the deterministic whole-pack lane's Treatment-derived Andromeda tag (see
+     *  `mapTreatmentToConceptTag`). Threaded straight into `buildAdCampaignInsertBody`, where it
+     *  supersedes the author-mode `authorModeCopy.concept_tag` fallback. Absent → today's
+     *  behavior (deterministic path lands `concept_tag: NULL`, author-mode uses the verdict tag). */
+    conceptTag?: AndromedaConceptTag | null;
     /** debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-
      *  offer Phase 1 — OUR real brief.offer is an ALLOWED offer for the cold gate. When the
      *  offer-for-offer swap renders it verbatim into the copy (via [[../ads/debrand]]
@@ -2513,6 +2555,11 @@ async function insertReadyCreative(
     workspaceId, productId, name, angleId, status,
     audienceTemperature,
     authorModeCopy: opts?.authorModeCopy,
+    // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
+    // an explicit `conceptTag` from the deterministic whole-pack lane (see
+    // `mapTreatmentToConceptTag`). Supersedes the author-mode `authorModeCopy.concept_tag`
+    // fallback in `buildAdCampaignInsertBody`; absent → today's behavior.
+    conceptTag: opts?.conceptTag ?? null,
     // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max's eligibility
     // verdict, threaded from stockProduct. Absent (deterministic / kill-switch off) → NULL;
     // Bianca's `.not("max_qc_eligible","is",false)` keeps NULL rows postable.
@@ -2752,7 +2799,18 @@ async function stockProduct(
         winnerScore: c.winnerScore,
       } as Record<string, unknown>,
     }));
-  const ranked = [...competitorAngles, ...ownAngles];
+  // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 —
+  // HARD-EXCLUDE warm/hot competitor angles (offer/discount/bundle/bonus/scarcity/social-proof/
+  // retargeting per `competitorFocalIsWarmHot`) when the declared research intent is COLD, then
+  // fall back to own-brand cold angles when the filtered competitor pool empties. Before this
+  // fix the merge was a raw `[...competitorAngles, ...ownAngles]`, so the selector only
+  // DEPRIORITIZED warm/hot competitor ads (they sorted to the tail but stayed eligible) — an
+  // offer-heavy or cross-category competitor set still yielded a retargeting ad as the
+  // "least-bad" pick (the 2026-07-17 Amazing Creamer regression: a Holiday-bundle GLP-1
+  // slimming-probiotic ad — retargeting + wrong category — was selected for a cold creamer
+  // test). Warm/hot intents keep the raw pool (temperature-scoped exclusion — warm/hot tests
+  // WANT the offer/mechanism/review angles as their imitation base).
+  const ranked = selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
 
   // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
   // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
@@ -2928,6 +2986,11 @@ async function stockProduct(
         let insertOpts: {
           audienceTemperature?: "cold" | "warm" | "hot" | null;
           authorModeCopy?: AuthorModeCopy;
+          /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad
+           *  Phase 1 — deterministic whole-pack lane threads its Treatment-derived Andromeda
+           *  concept_tag here (see `mapTreatmentToConceptTag`). Undefined in author-mode inserts
+           *  (the author verdict's `concept_tag` fills the slot via `authorModeCopy` instead). */
+          conceptTag?: AndromedaConceptTag | null;
           /** max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — threaded
            *  into `insertReadyCreative` so Max's eligibility lands on the row Bianca reads. */
           maxQcEligible?: boolean | null;
@@ -3513,10 +3576,27 @@ async function stockProduct(
           // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
           // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
           // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
-          // pack, not just the first pair. Deterministic path is temperature-agnostic — no
-          // audienceTemperature is passed, so insertReadyCreative treats the pack as NULL/untagged and
-          // the Phase-2 cold-offer gate skips.
+          // pack, not just the first pair.
           copyPack = buildMetaCopyPack(brief);
+          // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
+          // stamp `audience_temperature` + a deterministic `concept_tag` on the deterministic
+          // whole-pack insert too, mirroring how the author-mode path stamps them from Dahlia's
+          // verdict. Temperature is resolved from the angle via the same
+          // `resolveAudienceTemperature` predicate the author-mode path uses (line ~2951) so the
+          // two paths never disagree on a given angle — critical because upstream
+          // `imageOfferForAudience` already stripped `brief.offer` on the SAME cold predicate at
+          // line ~2842, so `buildMetaCopyPack` on a cold angle produces offer-free copy and the
+          // Phase-2 cold-offer gate stays clean. Without this stamp the whole-pack row lands
+          // `audience_temperature: NULL` — which disabled the cold-mismatch classifier AND broke
+          // Bianca's temperature routing (the 2026-07-17 Amazing Creamer regression). The
+          // `concept_tag` is derived from the run's `treatment` (`before_after` / `testimonial` /
+          // …) via the pure `mapTreatmentToConceptTag`, so the whole-pack row is CLASSIFIABLE +
+          // ROUTABLE by concept too (never NULL).
+          insertOpts = {
+            audienceTemperature: resolveAudienceTemperature(angle),
+            conceptTag: mapTreatmentToConceptTag(treatment),
+            allowedOffer: brief.offer,
+          };
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
           // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — post-regen
