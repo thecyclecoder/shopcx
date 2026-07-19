@@ -144,6 +144,30 @@ test("reason attribution — the offending ancestor's `reason` bubbles up throug
   }
 });
 
+// ── ad-creative-box-session-only-retire-deterministic-path Phase 3 (2026-07-19) ──
+// Agent-kind bare-slug convenience: a `kill_switches.node_id='ad-creative'` row (the bare
+// slug — the form the CEO cockpit surfaces) must resolve `agent:ad-creative` as OFF.
+// Before Phase 3 the row was ignored because `map.get('agent:ad-creative')` missed the
+// bare-slug entry, letting the daily cadence produce ~2 queued+claimed jobs on 2026-07-19
+// despite the switch being frozen.
+
+test("agent-kind bare-slug — a `kill_switches.node_id='ad-creative'` row resolves `agent:ad-creative` as OFF (Phase 3 gap fix)", () => {
+  const map = mapOf(row("ad-creative", "agent", "ceo", "creative-fatigue freeze"));
+  const byCanonical = resolveEffectiveSwitchFromMap("agent:ad-creative", map);
+  const byBareSlug = resolveEffectiveSwitchFromMap("ad-creative", map);
+  assert.deepEqual(byCanonical, { off: true, offBy: "ad-creative", scope: "agent", reason: "creative-fatigue freeze" });
+  assert.deepEqual(byBareSlug, { off: true, offBy: "ad-creative", scope: "agent", reason: "creative-fatigue freeze" });
+});
+
+test("agent-kind bare-slug — sibling agent-kinds stay ON (no over-broad match)", () => {
+  const map = mapOf(row("ad-creative", "agent"));
+  // Sibling growth-owned agent nodes stay ON — the bare slug is scoped to its own agent-kind.
+  const mediaBuyer = resolveEffectiveSwitchFromMap("agent:media-buyer", map);
+  const adCreativeCopyAuthor = resolveEffectiveSwitchFromMap("agent-kind:ad-creative-copy-author", map);
+  assert.deepEqual(mediaBuyer, { off: false });
+  assert.deepEqual(adCreativeCopyAuthor, { off: false });
+});
+
 // ── Batched resolution ───────────────────────────────────────────────────────────
 
 test("resolveEffectiveSwitchMany — every id sees the SAME snapshot (batched read consistency)", async () => {

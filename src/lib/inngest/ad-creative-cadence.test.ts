@@ -224,3 +224,45 @@ test("dispatchAdCreativeCadence — no products with ad intelligence → no-op",
   assert.equal(r.dispatched, 0);
   assert.equal(tables.agent_jobs.length, 0);
 });
+
+// ── ad-creative-box-session-only-retire-deterministic-path Phase 3 (2026-07-19) ──
+// Freeze = produce nothing. When the resolved effective switch for `ad-creative` is OFF,
+// the cadence enqueues ZERO jobs even for below-floor products — no queued row lands, so
+// the box worker cannot claim (defence-in-depth on the claim RPC's cascade). Injecting
+// the resolver keeps the test pure (no live registry/DB).
+
+test("dispatchAdCreativeCadence — ad-creative kill switch OFF → zero enqueued (freeze = produce nothing)", async () => {
+  const tables: Tables = {
+    product_ad_angles: [
+      { workspace_id: WS, product_id: PRODUCT_A },
+      { workspace_id: WS, product_id: PRODUCT_B },
+    ],
+    ad_campaigns: [], // both products at bin depth 0 — well below the floor
+    agent_jobs: [],
+  };
+  const admin = makeAdmin(tables);
+  const r = await dispatchAdCreativeCadence(admin, WS, 3, NOW, {
+    resolveSwitch: async (nodeId) => {
+      assert.equal(nodeId, "ad-creative", "cadence must consult the ad-creative agent-kind node");
+      return { off: true, offBy: "ad-creative", scope: "agent", reason: "manual e2e freeze" };
+    },
+  });
+  assert.equal(r.evaluated, 0, "no products evaluated when the switch is off");
+  assert.equal(r.dispatched, 0, "no jobs dispatched when the switch is off");
+  assert.deepEqual(r.killSwitchOff, { offBy: "ad-creative", scope: "agent", reason: "manual e2e freeze" });
+  assert.equal(tables.agent_jobs.length, 0, "zero rows landed in agent_jobs");
+});
+
+test("dispatchAdCreativeCadence — ad-creative kill switch ON → dispatches normally (baseline)", async () => {
+  const tables: Tables = {
+    product_ad_angles: [{ workspace_id: WS, product_id: PRODUCT_A }],
+    ad_campaigns: [],
+    agent_jobs: [],
+  };
+  const admin = makeAdmin(tables);
+  const r = await dispatchAdCreativeCadence(admin, WS, 3, NOW, {
+    resolveSwitch: async () => ({ off: false }),
+  });
+  assert.equal(r.dispatched, 1, "switch on ⇒ normal dispatch");
+  assert.equal(r.killSwitchOff, undefined);
+});
