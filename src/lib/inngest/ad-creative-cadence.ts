@@ -24,8 +24,26 @@ import { listReadyToTest } from "@/lib/ads/ready-to-test";
 import { DEFAULT_BIN_FLOOR } from "@/lib/ads/creative-agent";
 import { listAdvertisedProductIds } from "@/lib/advertised-products";
 import { ACTIVE_MEDIA_BUYER_JOB_STATUSES, utcDayStartIso } from "@/lib/inngest/media-buyer-cadence";
+import { resolveEffectiveSwitch, type EffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * ad-creative-box-session-only-retire-deterministic-path Phase 3 (2026-07-19) —
+ * enqueue-side kill-switch gate. The daily fan-out consults
+ * `resolveEffectiveSwitch('ad-creative')` before inserting ANY `agent_jobs` row so a
+ * frozen switch produces nothing (not even a queued row that then sits ineligible).
+ * Freeze = produce nothing. The claim-rpc cascade ([[kill_switches]] + `claim_agent_job`)
+ * is the defence-in-depth downstream; the enqueue gate closes the gap that let a
+ * frozen ad-creative switch produce ~2 queued+claimed jobs on 2026-07-19 despite the
+ * `kill_switches` row.
+ *
+ * Injectable so unit tests can drive both switch states without a live registry / DB.
+ * Default is the real `resolveEffectiveSwitch`.
+ */
+export interface AdCreativeCadenceDeps {
+  resolveSwitch?: (nodeId: string) => Promise<EffectiveSwitch>;
+}
 
 /** Active `agent_jobs.status` values that still hold a product's cadence slot for today — shared with
  *  the media-buyer cadence (same "unfinished job" definition). */
@@ -40,6 +58,10 @@ interface AgentJobRow {
 export interface DispatchAdCreativeCadenceResult {
   evaluated: number;
   dispatched: number;
+  /** ad-creative-box-session-only-retire-deterministic-path Phase 3 — populated when
+   *  the enqueue-side kill-switch gate suppressed the whole sweep so operators can slice
+   *  a switch-off no-op apart from an empty-bin no-op. */
+  killSwitchOff?: { offBy: string; scope: string; reason: string | null };
 }
 
 /**
@@ -73,7 +95,25 @@ export async function dispatchAdCreativeCadence(
   workspaceId: string,
   binFloor: number = DEFAULT_BIN_FLOOR,
   now: Date = new Date(),
+  deps: AdCreativeCadenceDeps = {},
 ): Promise<DispatchAdCreativeCadenceResult> {
+  // ad-creative-box-session-only-retire-deterministic-path Phase 3 — enqueue-side
+  // kill-switch gate. Consult resolveEffectiveSwitch BEFORE any DB write so a frozen
+  // ad-creative node (or an ancestor: growth department / director:growth) enqueues
+  // ZERO jobs. Same fail-open contract as the resolver — an unregistered node treats
+  // as ON (mirrors [[../libraries/kill-switch-resolver]]'s missing-row default).
+  const resolveSwitch = deps.resolveSwitch ?? resolveEffectiveSwitch;
+  const effective = await resolveSwitch("ad-creative");
+  if (effective.off) {
+    console.log(
+      `[ad-creative-cadence] ws=${workspaceId} suppressed by kill_switch — offBy=${effective.offBy} scope=${effective.scope}${effective.reason ? ` reason=${effective.reason}` : ""}`,
+    );
+    return {
+      evaluated: 0,
+      dispatched: 0,
+      killSwitchOff: { offBy: effective.offBy, scope: effective.scope, reason: effective.reason },
+    };
+  }
   // Products that have ad intelligence (≥1 angle row) — the candidates to keep stocked.
   const { data: angleRows, error: angErr } = await admin
     .from("product_ad_angles")

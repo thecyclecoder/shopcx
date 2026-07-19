@@ -119,13 +119,14 @@ function scoredAngle(over: Partial<ScoredAngle>): ScoredAngle {
   };
 }
 
-test("buildAngleProvenance: a competitor angle is EXPLORE — carries the advertiser + ad image + raw hook", () => {
+test("buildAngleProvenance: a competitor angle in an EXPLORE slot badges explore + carries the advertiser / ad image / raw hook", () => {
   const p = buildAngleProvenance(
     scoredAngle({
       source: "competitor",
       hook: "our debranded benefit",
       raw: { advertiser: "MUD\\WTR", imageUrl: "https://competitor.example/winning.jpg", hook: "Ditch coffee for good" },
     }),
+    "explore",
   );
   assert.equal(p.mode, "explore");
   assert.equal(p.source, "competitor");
@@ -135,19 +136,62 @@ test("buildAngleProvenance: a competitor angle is EXPLORE — carries the advert
 });
 
 test("buildAngleProvenance: a competitor angle with no raw hook falls back to the angle's own hook", () => {
-  const p = buildAngleProvenance(scoredAngle({ source: "competitor", hook: "fallback hook", raw: { advertiser: "Ryze" } }));
+  const p = buildAngleProvenance(
+    scoredAngle({ source: "competitor", hook: "fallback hook", raw: { advertiser: "Ryze" } }),
+    "explore",
+  );
   assert.equal(p.competitor_hook, "fallback hook");
   assert.equal(p.competitor_ad_image_url, null);
 });
 
-test("buildAngleProvenance: an own-brand angle is EXPLOIT — no competitor fields leak", () => {
-  const p = buildAngleProvenance(scoredAngle({ source: "transformation", raw: { advertiser: "should-be-ignored", imageUrl: "x" } }));
-  assert.equal(p.mode, "exploit");
+// ── ad-creative-box-session-only-retire-deterministic-path Phase 4 (2026-07-19) ──────────
+// The crown-gated slot intent — NOT `isCompetitor` — drives `provenance.mode`. Before Phase 4
+// every own-brand angle was badged EXPLOIT even when there were zero crowned winners; the
+// planner's own `wantExploit = Math.min(Math.floor(count/2), exploitPool.length)` cap already
+// yielded 0 exploit slots in that case, so the badge silently lied. Phase 4 threads the
+// planner's intent through insertReadyCreative → buildAngleProvenance so the badge tells the
+// same crown-gated truth `src/lib/ads/ads-read-sdk.ts` `deriveExploreExploit` reads.
+
+test("buildAngleProvenance Phase 4: an own-brand angle in an EXPLORE slot badges explore (crown-gated intent, not isCompetitor)", () => {
+  const p = buildAngleProvenance(
+    scoredAngle({ source: "transformation", raw: { advertiser: "should-be-ignored", imageUrl: "x" } }),
+    "explore",
+  );
+  assert.equal(p.mode, "explore", "an own-brand angle in an explore slot badges EXPLORE — the pre-Phase-4 isCompetitor branch would have said EXPLOIT here");
   assert.equal(p.source, "transformation");
-  assert.equal(p.competitor_advertiser, null);
+  assert.equal(p.competitor_advertiser, null, "competitor_advertiser is source-specific — an own-brand angle NEVER carries the competitor's advertiser");
   assert.equal(p.competitor_ad_image_url, null);
   assert.equal(p.competitor_hook, null);
   assert.equal(p.lead_benefit, "clearer focus by week two");
+});
+
+test("buildAngleProvenance Phase 4: an own-brand angle in an EXPLOIT slot badges exploit (rare — requires a prior crowned winner on the same hook)", () => {
+  const p = buildAngleProvenance(
+    scoredAngle({ source: "transformation" }),
+    "exploit",
+  );
+  assert.equal(p.mode, "exploit", "an own-brand angle in an exploit slot badges EXPLOIT — this is only reachable when the planner selected the slot from exploitPool (won >= 1)");
+  assert.equal(p.competitor_advertiser, null);
+  assert.equal(p.competitor_hook, null);
+});
+
+test("buildAngleProvenance Phase 4: a competitor angle in an EXPLOIT slot badges exploit while STILL carrying its source-specific fields", () => {
+  // The rare doubled-down-on competitor imitation: a previously-crowned competitor angle
+  // re-runs as exploit. The badge follows the slot intent (exploit), but the source-specific
+  // fields (advertiser / ad_image_url / hook) STAY populated because they're source-derived,
+  // not intent-derived.
+  const p = buildAngleProvenance(
+    scoredAngle({
+      source: "competitor",
+      hook: "our debranded benefit",
+      raw: { advertiser: "MUD\\WTR", imageUrl: "https://competitor.example/winning.jpg", hook: "Ditch coffee for good" },
+    }),
+    "exploit",
+  );
+  assert.equal(p.mode, "exploit", "the badge follows the crown-gated slot intent — a re-crowned competitor imitation badges exploit even though isCompetitor is true");
+  assert.equal(p.competitor_advertiser, "MUD\\WTR", "advertiser is source-specific — still populated on a competitor exploit slot");
+  assert.equal(p.competitor_ad_image_url, "https://competitor.example/winning.jpg");
+  assert.equal(p.competitor_hook, "Ditch coffee for good");
 });
 
 // ── imageOfferForAudience — cold creatives render NO offer on the image (2026-07-17) ─────────────
