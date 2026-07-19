@@ -3573,30 +3573,50 @@ async function stockProduct(
             allowedOffer: brief.offer,
           };
         } else {
-          // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
-          // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
-          // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
-          // pack, not just the first pair.
-          copyPack = buildMetaCopyPack(brief);
-          // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
-          // stamp `audience_temperature` + a deterministic `concept_tag` on the deterministic
-          // whole-pack insert too, mirroring how the author-mode path stamps them from Dahlia's
-          // verdict. Temperature is resolved from the angle via the same
-          // `resolveAudienceTemperature` predicate the author-mode path uses (line ~2951) so the
-          // two paths never disagree on a given angle — critical because upstream
-          // `imageOfferForAudience` already stripped `brief.offer` on the SAME cold predicate at
-          // line ~2842, so `buildMetaCopyPack` on a cold angle produces offer-free copy and the
-          // Phase-2 cold-offer gate stays clean. Without this stamp the whole-pack row lands
-          // `audience_temperature: NULL` — which disabled the cold-mismatch classifier AND broke
-          // Bianca's temperature routing (the 2026-07-17 Amazing Creamer regression). The
-          // `concept_tag` is derived from the run's `treatment` (`before_after` / `testimonial` /
-          // …) via the pure `mapTreatmentToConceptTag`, so the whole-pack row is CLASSIFIABLE +
-          // ROUTABLE by concept too (never NULL).
-          insertOpts = {
-            audienceTemperature: resolveAudienceTemperature(angle),
-            conceptTag: mapTreatmentToConceptTag(treatment),
-            allowedOffer: brief.offer,
-          };
+          // ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+          // Phase 2 (2026-07-19) — the deterministic `buildMetaCopyPack` fallback is RETIRED.
+          // Phase 1 made the production `runAdCreativeJob` inject the copy-author dispatcher
+          // unconditionally, so this else-branch is dead in production; deleting the
+          // `buildMetaCopyPack` call prevents any future regression from silently re-enabling
+          // the node-path (that was the exact trap the pre-Phase-1 default sprang: workspace
+          // flag unset → the whole cadence produced un-graded exploit ads). When no
+          // copy-author dispatcher is available (test / manual invocation / accidental
+          // regression), stockProduct HOLDS the creative and escalates with the greppable
+          // marker `dahlia_no_session_available` — same shape as the `dahlia_copy_author_exhausted`
+          // ledger row so operators can slice no-session holds apart from session-exhaustion
+          // holds. The rail invariant: every ad-creative in the bin was produced by the
+          // Dahlia/Max ping-pong box session, never the deterministic node path.
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "growth",
+            actionKind: "dahlia_no_session_available",
+            specSlug: "ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit",
+            reason:
+              `dahlia_no_session_available: no copy-author dispatcher for ${productTitle} (${angle.source} angle) — held out of the bin ` +
+              `(box-session-only invariant; deterministic buildMetaCopyPack fallback retired in Phase 2)`,
+            metadata: {
+              product_id: productId,
+              product_title: productTitle,
+              angle_source: angle.source,
+              angle_hook: angle.hook,
+              audience_temperature: resolveAudienceTemperature(angle),
+              intent,
+              autonomous: true,
+            },
+          }).catch((e) => {
+            console.warn("dahlia_no_session_available_activity_failed", {
+              workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+            });
+          });
+          out.push({
+            productId,
+            angleHook: angle.hook,
+            campaignId: null,
+            ok: false,
+            reason: "dahlia_no_session_available",
+          });
+          skipped = true;
+          break;
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
           // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — post-regen
