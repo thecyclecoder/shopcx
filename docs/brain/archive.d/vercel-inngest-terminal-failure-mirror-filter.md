@@ -1,0 +1,1 @@
+- **Stop Vercel from duplicating Inngest terminal failure incidents** · verified 2026-07-19 · → [[lifecycles/control-tower]]
