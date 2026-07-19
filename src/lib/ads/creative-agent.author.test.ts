@@ -38,6 +38,7 @@ import {
   buildMaxQcReviseReason,
   competitorTokensForName,
   isCopyQcEligible,
+  mapTreatmentToConceptTag,
   parseAuthorVerdict,
   resolveAudienceTemperature,
   runCopyAuthorSession,
@@ -46,6 +47,7 @@ import {
   validateAdName,
   type AuthorModeCopy,
 } from "./creative-agent";
+import { TREATMENTS } from "./creative-learning";
 import type { CopyQaVerdict } from "./creative-qa";
 import type { ScoredAngle } from "./creative-brief";
 import type { ClaimMiss } from "./never-fabricate";
@@ -852,6 +854,78 @@ test("buildAdCampaignInsertBody: deterministic mode (no authorModeCopy) → conc
   assert.equal(body.concept_tag, null);
   assert.equal(body.author_self_score, null);
   assert.equal(body.audience_temperature, null);
+});
+
+// ── cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 ─────
+// The deterministic whole-pack `ad-creative` lane now stamps `audience_temperature` (cold for the
+// prospecting test) + a Treatment-derived Andromeda `concept_tag` on the ad_campaigns row —
+// mirroring how the copy-author lane stamps Dahlia's verdict. Without this the row landed
+// `audience_temperature: NULL` / `concept_tag: NULL`, which disabled the cold-mismatch classifier
+// and broke Bianca's temperature routing (the 2026-07-17 Amazing Creamer regression).
+
+test("mapTreatmentToConceptTag: every deterministic Treatment maps to a valid Andromeda concept_tag (whole-pack lane classifiability)", () => {
+  for (const t of TREATMENTS) {
+    const tag = mapTreatmentToConceptTag(t);
+    assert.ok(
+      (ANDROMEDA_CONCEPT_TAGS as readonly string[]).includes(tag),
+      `treatment=${t} → tag=${tag} not in ANDROMEDA_CONCEPT_TAGS`,
+    );
+  }
+});
+
+test("mapTreatmentToConceptTag: fixed per-treatment mapping (regression pin — a silent rewrite would break Bianca's per-concept diversity read)", () => {
+  assert.equal(mapTreatmentToConceptTag("before_after"), "transformation");
+  assert.equal(mapTreatmentToConceptTag("testimonial"), "social-proof");
+  assert.equal(mapTreatmentToConceptTag("big_claim"), "mechanism");
+  assert.equal(mapTreatmentToConceptTag("authority"), "authority");
+  assert.equal(mapTreatmentToConceptTag("advertorial"), "story");
+});
+
+test("buildAdCampaignInsertBody: explicit conceptTag on the deterministic whole-pack lane lands verbatim (whole-pack lane stamps concept_tag, never NULL)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "cold",
+    conceptTag: "transformation",
+  });
+  assert.equal(body.concept_tag, "transformation");
+  assert.equal(body.audience_temperature, "cold");
+  // No authorModeCopy → author_self_score still NULL (Dahlia never ran).
+  assert.equal(body.author_self_score, null);
+});
+
+test("buildAdCampaignInsertBody: whole-pack lane stamps audience_temperature='cold' + treatment-derived concept_tag (spec verification — a whole-pack ad-creative run produces a campaign with audience_temperature='cold' + non-null concept_tag)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "cold",
+    conceptTag: mapTreatmentToConceptTag("before_after"),
+  });
+  assert.equal(body.audience_temperature, "cold");
+  assert.notEqual(body.concept_tag, null);
+  assert.equal(body.concept_tag, "transformation");
+});
+
+test("buildAdCampaignInsertBody: explicit conceptTag SUPERSEDES authorModeCopy.concept_tag when both are passed (author-mode call still works if a caller ever threads both)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "warm",
+    conceptTag: "mechanism",
+    authorModeCopy: authorCopy({ concept_tag: "transformation" }),
+  });
+  assert.equal(body.concept_tag, "mechanism");
+  // authorModeCopy.selfScore still lands on the row.
+  assert.equal(body.author_self_score?.total, 10);
 });
 
 test("insertReadyCreative → ad_campaigns insert: fake admin captures the row body, concept_tag='transformation' lands verbatim (author-mode row-stamping flow, end-to-end)", async () => {
