@@ -87,14 +87,20 @@ async function safeSweep(
       );
     } else if (r.transientEmptyPull) {
       // The spec's "silent per-competitor drop" fingerprint: brand resolved to a lane but the
-      // AdLibrary pull returned 0 statics. Surface loudly (an operator needs to see the resolved
-      // name so a truly stopped brand vs a transient dip is distinguishable). No retire happened.
+      // AdLibrary pull (winners + keyword + domain fallbacks) returned 0 statics. Surface loudly
+      // (an operator needs to see the resolved name so a truly stopped brand vs a transient dip
+      // is distinguishable). No retire happened.
       console.warn(
-        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: resolved but AdLibrary returned 0 statics — TRANSIENT EMPTY PULL (skipping retire to protect existing skeletons).`,
+        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: resolved but AdLibrary returned 0 statics across winners + keyword + domain fallbacks — TRANSIENT EMPTY PULL (skipping retire to protect existing skeletons).`,
       );
     } else {
+      // Source records which AdLibrary path actually fed the ingest: `winners` (LANE A's scan,
+      // preferred), `keyword` (LANE A's winners were empty → keyword searchAds fallback), or
+      // `domain` (either LANE B's domain search, or LANE A's keyword-empty → domain fallback).
+      // The Obvi/NativePath/Vital Proteins fingerprint is a `keyword`- or `domain`-source line
+      // where the winners-preferred brand still ingested via the fallback (spec 2026-07-19).
       console.log(
-        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""}: ${r.searched} pulled, ${r.inserted} new, ${r.reobserved} re-observed (persistence++), ${r.retired} retired, ${r.nonMappedDropped} non-mapped-dropped`,
+        `[creative-scout] "${seed.keyword}" → LANE ${r.lane.toUpperCase()}${r.resolvedName ? ` (${r.resolvedName})` : ""} · source=${r.source ?? "none"}: ${r.searched} pulled, ${r.inserted} new, ${r.reobserved} re-observed (persistence++), ${r.retired} retired, ${r.nonMappedDropped} non-mapped-dropped`,
       );
     }
     return r;
