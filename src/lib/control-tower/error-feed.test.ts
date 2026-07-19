@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
+  isForeignAppstleUnskipUpstream500,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
@@ -976,6 +977,120 @@ test("isTransientAppstleFrequencyUpstreamTimeout returns false on empty / nullis
   assert.equal(isTransientAppstleFrequencyUpstreamTimeout(undefined, undefined), false);
   assert.equal(isTransientAppstleFrequencyUpstreamTimeout("", ""), false);
   assert.equal(isTransientAppstleFrequencyUpstreamTimeout("/api/inngest", ""), false);
+});
+
+// ── isForeignAppstleUnskipUpstream500 (error-feed-scope-appstle-unskip-upstream-500-noise) ──
+// `src/lib/appstle.ts` `appstleUnskipOrder` logs `console.error(\`Appstle unskip order error
+// for ${id}:\`, text)` when Appstle's own `unskip-order` endpoint 500s, then returns a
+// structured `{ success: false }` — the dunning-recovery step continues with the failure
+// result. The log-drain line is a foreign-owned upstream 500 the code already handles; the
+// false positive that opened Control Tower `vercel:5959f3e309a7800c`. Classifying it
+// transient auto-resolves a first sighting (recorded, not paged); a chronic Appstle outage
+// would recur within the window and still surface.
+
+test("isForeignAppstleUnskipUpstream500 matches the captured /api/inngest signature", () => {
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    true,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 matches when the message carries a trailing stack", () => {
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Appstle unskip order error for 1234567890: Internal Server Error\n    at appstleUnskipOrder (src/lib/appstle.ts:589:13)",
+    ),
+    true,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 KEEPS a non-500 Appstle unskip failure (paged)", () => {
+  // A 4xx from Appstle carries a different body — not the `Internal Server Error` marker —
+  // so the first sighting stays captured and paged.
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Appstle unskip order error for 1234567890: Not Found",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Appstle unskip order error for 1234567890: Unauthorized",
+    ),
+    false,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 KEEPS the sibling `Appstle unskip order failed` throw log (paged)", () => {
+  // `appstleUnskipOrder`'s catch branch logs a DIFFERENT prefix — `Appstle unskip order
+  // failed:` — when `loggedAppstleFetch` itself throws (a real infra fault, not an Appstle
+  // 500 body). Different signature, stays captured / paged.
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Appstle unskip order failed: Error: upstream_timeout",
+    ),
+    false,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 KEEPS a non-Appstle Internal Server Error on /api/inngest (paged)", () => {
+  // Any other Inngest error carrying `Internal Server Error` but WITHOUT the Appstle unskip
+  // prefix is a different signature — stays captured / paged.
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Some other job failed: Internal Server Error",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/inngest",
+      "Internal Server Error",
+    ),
+    false,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 KEEPS a non-allowlisted path even with the marker", () => {
+  // Only `/api/inngest` (the dunning recovery function) reaches `appstleUnskipOrder` today.
+  // Any other path carrying the same body is a different caller / signature and stays
+  // captured / paged.
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/webhooks/appstle",
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      "/api/portal",
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      null,
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    false,
+  );
+});
+
+test("isForeignAppstleUnskipUpstream500 returns false on empty / nullish input", () => {
+  assert.equal(isForeignAppstleUnskipUpstream500(null, null), false);
+  assert.equal(isForeignAppstleUnskipUpstream500(undefined, undefined), false);
+  assert.equal(isForeignAppstleUnskipUpstream500("", ""), false);
+  assert.equal(isForeignAppstleUnskipUpstream500("/api/inngest", ""), false);
 });
 
 // ── isTransientClientNetworkAbort (error-feed-drop-safari-load-failed-client-network-abort-noise) ──

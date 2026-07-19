@@ -432,6 +432,52 @@ export function isTransientAppstleFrequencyUpstreamTimeout(
 }
 
 /**
+ * Foreign-app noise — Appstle's `unskip-order` endpoint returning an Internal Server
+ * Error to the dunning recovery path ([[../specs/error-feed-scope-appstle-unskip-upstream-500-noise]]).
+ *
+ * `src/lib/appstle.ts` `appstleUnskipOrder` calls Appstle's
+ * `subscription-billing-attempts/unskip-order/<id>` endpoint through
+ * `loggedAppstleFetch` for the dunning-cycle payday-retry path
+ * (`src/lib/inngest/dunning.ts` → `subscriptionUnskipOrder`). When Appstle's own
+ * service 500s on that call, the wrapper's non-ok branch logs
+ * `console.error(\`Appstle unskip order error for ${id}:\`, text)` and RETURNS a
+ * structured `{ success: false, error }` — the dunning step then continues its
+ * recovery sequence (switch card, retry billing) with the failure result. So the
+ * log-drain line is a sighting of a vendor-owned upstream 500 the code already
+ * handles cleanly; minting a fresh OPEN paged incident + repair fan-out for it
+ * churns Platform owners on a foreign surface we hold no levers on (Control Tower
+ * `vercel:5959f3e309a7800c`).
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/inngest` — the Inngest dunning recovery function is the
+ *      only surface that reaches `appstleUnskipOrder` today; a different caller
+ *      would fire on a different path and stays captured / paged,
+ *   2. the trimmed message begins with the exact `Appstle unskip order error for `
+ *      prefix (the wrapper's console.error label — not any other Appstle log), AND
+ *   3. the message carries the `Internal Server Error` marker (Appstle's 500 body).
+ *
+ * A non-500 Appstle unskip failure (a 4xx from Appstle, a different body class), a
+ * throw from `loggedAppstleFetch` itself (which logs `Appstle unskip order failed:`
+ * with the caught `err`), or any other Appstle log carries a different marker /
+ * prefix and stays captured. Wired in `/api/webhooks/vercel-logs` as the
+ * `transient` flag to `recordError`, which auto-resolves a first sighting
+ * (recorded for visibility, NOT paged, no repair fan-out) and escalates to a real
+ * open+page ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS`
+ * — so a one-off Appstle 500 is dropped while a chronic Appstle outage (would
+ * recur every beat) still surfaces.
+ */
+export function isForeignAppstleUnskipUpstream500(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("Appstle unskip order error for ")) return false;
+  return text.includes("Internal Server Error");
+}
+
+/**
  * Browser network-abort TypeError noise — the CLIENT-feed companion to
  * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored
  * here so `/api/client-errors` can reuse it
