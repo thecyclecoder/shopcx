@@ -21025,17 +21025,18 @@ async function runAdCreativeJob(job: Job) {
     }
   };
   console.log(`${tag} DAHLIA_QC_MODE=${qcMode}${qcMode === "direct" ? " — legacy Opus vision API path (fallback)" : " — claude -p box-session QC (default)"}`);
-  // dahlia-copy-author-box-session Phase 3 — the per-creative copy-author dispatcher factory.
-  // When DAHLIA_COPY_MODE=author, stockProduct hands each QC-passed image to this dispatcher; it
-  // runs Dahlia's `dahlia-copy-author` skill as a top-level `claude -p` on Max via runBoxLane
-  // (mirroring the QC dispatcher above). Same least-privilege sandbox (`sandbox: "qc"`) — the
-  // author child only Reads ONE tmp jpeg + emits ONE JSON envelope, no filesystem/network beyond
-  // that — so we reuse the shared PreToolUse gate + AD_CREATIVE_QC_ALLOWED_IMAGE env pattern.
-  // Fail-closed contract mirrors QC: any spawn error / cap / timeout / gate deny surfaces as
-  // { isError:true } and runCopyAuthorSession converts it to a revise trigger (or exhaustion).
-  // When DAHLIA_COPY_MODE is unset / `deterministic`, the dispatcher is never invoked and the
-  // deterministic buildMetaCopyPack path runs byte-identical to today.
-  const copyAuthorMode = (process.env.DAHLIA_COPY_MODE || "deterministic").toLowerCase() === "author" ? "author" : "deterministic";
+  // ad-creative-box-session-only-retire-deterministic-path Phase 1 (2026-07-19) — the Dahlia
+  // author + Max copy-QC ping-pong box session is now the ONLY way ad creative is made. The
+  // DAHLIA_COPY_MODE=author ternary gate is RETIRED — the dispatcher is injected unconditionally
+  // for every ad-creative job so runAdCreativeLoop can never fall through to the deterministic
+  // buildMetaCopyPack path (that fallback dies in Phase 2 of this spec). Same least-privilege
+  // sandbox (`sandbox: "qc"`) — the author child only Reads ONE tmp jpeg + emits ONE JSON
+  // envelope, no filesystem/network beyond that — so we reuse the shared PreToolUse gate +
+  // AD_CREATIVE_QC_ALLOWED_IMAGE env pattern. Fail-closed contract mirrors QC: any spawn error /
+  // cap / timeout / gate deny surfaces as { isError:true } and runCopyAuthorSession converts it
+  // to a revise trigger (or exhaustion). No workspace-level flag; the ad-creative kill switch
+  // (Phase 3) is the sole rollback lever — freeze means produce nothing, never fall back to
+  // the worse engine.
   let copyAuthorCounter = 0;
   // copy-author-self-heal (2026-07-17) — the dispatcher now honours a `resume` pin so the self-heal
   // loop can RESUME Dahlia's SAME box session (cache-warm) instead of paying the full context again on
@@ -21093,7 +21094,7 @@ async function runAdCreativeJob(job: Job) {
       return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
     }
   };
-  console.log(`${tag} DAHLIA_COPY_MODE=${copyAuthorMode}${copyAuthorMode === "author" ? " — per-creative dahlia-copy-author box session engaged" : " — deterministic buildMetaCopyPack (default)"}`);
+  console.log(`${tag} per-creative dahlia-copy-author box session engaged (box-session-only invariant — DAHLIA_COPY_MODE gate retired)`);
   // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — Max's INDEPENDENT
   // copy-QC dispatcher. Mirrors the copy-author dispatcher above: same runBoxLane spawn on Max
   // (kind='ad-creative-copy-qc', sandbox='qc' — no ANTHROPIC_API_KEY, minimal env), same
@@ -21103,12 +21104,11 @@ async function runAdCreativeJob(job: Job) {
   // runQaCreativeCopyViaBoxSession converts it to a fail-closed bounce so nothing unchecked
   // reaches the persistence step.
   //
-  // Kill-switch: DAHLIA_QC_COPY_MODE=off skips the dispatcher (workspace-level rollback lever).
-  // Default: 'box' (ON) — the CEO's design is that Max grades EVERY author-mode creative
-  // (spec: "enable it by default (not a dormant DAHLIA_QC_COPY_MODE=off)"). Any value other
-  // than 'off' falls through to the default 'box' path (safest default: fail toward the new
-  // path we tested rather than silently regressing).
-  const copyQcMode = (process.env.DAHLIA_QC_COPY_MODE || "box").toLowerCase() === "off" ? "off" : "box";
+  // ad-creative-box-session-only-retire-deterministic-path Phase 1 (2026-07-19) — the
+  // DAHLIA_QC_COPY_MODE=box gate is RETIRED alongside the copy-author gate; Max grades EVERY
+  // ad-creative, unconditionally. The box-session-only invariant is a rail — no per-workspace
+  // rollback lever (the ad-creative kill switch in Phase 3 is the ONLY rollback), so a frozen
+  // switch produces nothing rather than a Max-less creative.
   let copyQcCounter = 0;
   const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
     copyQcCounter++;
@@ -21136,7 +21136,7 @@ async function runAdCreativeJob(job: Job) {
       return { resultText: "", isError: true };
     }
   };
-  console.log(`${tag} DAHLIA_QC_COPY_MODE=${copyQcMode}${copyQcMode === "box" ? " — per-creative max-copy-qc box session engaged (default ON)" : " — Max copy-QC disabled"}`);
+  console.log(`${tag} per-creative max-copy-qc box session engaged (box-session-only invariant — DAHLIA_QC_COPY_MODE gate retired)`);
   try {
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
     const result = await runAdCreativeLoop(a, {
@@ -21146,14 +21146,16 @@ async function runAdCreativeJob(job: Job) {
       // Only inject the dispatcher when mode='box'; mode='direct' leaves it undefined so
       // stockProduct falls through to the legacy qaCreative(...) call unchanged.
       qcDispatcher: qcMode === "box" ? qcDispatcher : undefined,
-      // dahlia-copy-author-box-session Phase 3 — only inject the copy-author dispatcher when
-      // the workspace-level flag is `author`; unset / `deterministic` leaves it undefined and
-      // stockProduct's `authorModeEngaged` guard collapses to false (deterministic path).
-      copyAuthorDispatcher: copyAuthorMode === "author" ? copyAuthorDispatcher : undefined,
-      // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 — inject Max's copy-QC
-      // dispatcher by default (DAHLIA_QC_COPY_MODE=box). Skipped only when the workspace-level
-      // flag is explicitly 'off' — the CEO's design is Max grades EVERY author-mode creative.
-      copyQcDispatcher: copyQcMode === "box" ? copyQcDispatcher : undefined,
+      // ad-creative-box-session-only-retire-deterministic-path Phase 1 (2026-07-19) — the
+      // Dahlia author + Max copy-QC ping-pong box session is the ONLY way ad creative is made.
+      // Both dispatchers are injected UNCONDITIONALLY. The DAHLIA_COPY_MODE / DAHLIA_QC_COPY_MODE
+      // ternaries are retired — a workspace-level flag can no longer degrade a live ad-creative
+      // job to the deterministic buildMetaCopyPack path (that fallback dies in Phase 2 of this
+      // spec, so if a session is unreachable stockProduct HOLDS instead of shipping a node-path
+      // ad). The ad-creative kill switch (Phase 3) is the sole rollback lever — freeze means
+      // produce nothing.
+      copyAuthorDispatcher,
+      copyQcDispatcher,
     });
     console.log(`${tag} produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`);
     await update(job.id, {
