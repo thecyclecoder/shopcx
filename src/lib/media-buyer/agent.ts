@@ -2131,6 +2131,25 @@ export type ReplenishCopyVariant = {
   description: string;
 };
 
+/** bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement Phase 1 —
+ *  the angle's `metadata.copy_pack` shape (the 5 psychological framework variations Dahlia
+ *  authors: lf8 / schwartz / cialdini / hopkins / sugarman). The canonical (default-serving)
+ *  entry is index 0 — the same one persisted on `ad_campaigns.meta_headline` /
+ *  `.meta_primary_text` — so Meta's asset_feed_spec default matches the canonical. Whitespace-
+ *  only entries are dropped in the resolver so a half-authored pack still splats non-empty
+ *  slots (fail-closed extends to per-variant hygiene). Cap = MAX_COPY_PACK_ENTRIES (5). */
+export type ReplenishCopyPack = {
+  headlines?: readonly string[] | null;
+  primaryTexts?: readonly string[] | null;
+  description?: string | null;
+};
+
+/** bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement Phase 1 —
+ *  hard cap on copy_pack entries fed into asset_feed_spec titles[]/bodies[]. The 5 psychological
+ *  framework variations (lf8/schwartz/cialdini/hopkins/sugarman) are the design; a pack that
+ *  somehow exceeds 5 is truncated so Meta's rotation stays focused on the framework set. */
+export const MAX_COPY_PACK_ENTRIES = 5;
+
 /**
  * Resolve the ad copy for a replenish publish job — PURE (unit-testable).
  *
@@ -2141,18 +2160,55 @@ export type ReplenishCopyVariant = {
  * []` / `primary_texts: []`, so EVERY auto-replenish publish failed at Meta. Returns `ok:false` + a reason
  * when the angle yields no usable copy, so the caller skips the job instead of enqueueing an invalid one.
  *
- * `variants` is the M3 temperature-banded pack (dahlia-publisher-asset-feed-spec-upgrade-and-competitor-
- * selection Phase 1). When non-empty, this helper returns 1 entry per variant in the passed order (the
- * SDK sorts warm → cold → hot so Meta's default-serving matches the canonical stamped on `ad_campaigns`).
- * When empty / null (deterministic mode, or a legacy campaign whose variant pack was never authored),
- * the return shape is BYTE-IDENTICAL to the pre-M3 single-angle-caption fallback — headlines /
- * primaryTexts are 1-element arrays, descriptions is empty (no legacy source populates it). This
- * fallback path is what preserves determinism for every studio publish that never touches variants.
+ * PRIORITY ORDER (highest → lowest), each pinned by a test:
+ *   1. `copyPack` — the angle's `metadata.copy_pack` (5 psychological framework variations Dahlia
+ *      authors: lf8 / schwartz / cialdini / hopkins / sugarman). Preferred source when non-empty
+ *      because it's the same set the render + preview use — publishing anything else throws away
+ *      Meta's per-lever rotation test. Bianca-static-publish-uses-all-5-copy-variations-and-correct-
+ *      right-column-placement Phase 1. Capped at `MAX_COPY_PACK_ENTRIES` (5); canonical (index 0)
+ *      stays default-serving.
+ *   2. `variants` — the M3 temperature-banded pack (dahlia-publisher-asset-feed-spec-upgrade-and-
+ *      competitor-selection Phase 1). Legacy path for campaigns whose angle metadata never got a
+ *      copy_pack authored. Warm → cold → hot ordered by the SDK; splatted 1:1.
+ *   3. Angle caption — the single `meta_headline` / `meta_primary_text` pair. The deterministic
+ *      / legacy studio fallback: return shape stays BYTE-IDENTICAL to the pre-Phase-1 world so
+ *      every existing test + prod call site that never opted in stays green.
+ *
+ * A blank/whitespace-only entry in `copyPack.headlines` is dropped (paired 1:1 with the same
+ * position in `copyPack.primaryTexts`) so a half-authored pack still splats its non-empty slots
+ * — fail-closed extends to per-variant hygiene, matching the `variants` branch.
  */
 export function resolveReplenishAdCopy(
   angle: ReplenishAngleCopy,
-  opts?: { variants?: readonly ReplenishCopyVariant[] | null },
+  opts?: {
+    variants?: readonly ReplenishCopyVariant[] | null;
+    copyPack?: ReplenishCopyPack | null;
+  },
 ): { ok: boolean; headlines: string[]; primaryTexts: string[]; descriptions: string[]; reason: string | null } {
+  // 1. Preferred source — the angle's metadata.copy_pack (5 framework variations). Bianca-static-
+  // publish Phase 1: the render + preview + Meta rotation all read this pack; the publish must too
+  // so all 5 variations reach Meta (canonical first) instead of collapsing to one.
+  const pack = opts?.copyPack ?? null;
+  if (pack) {
+    const rawHeadlines = Array.isArray(pack.headlines) ? pack.headlines : [];
+    const rawPrimaryTexts = Array.isArray(pack.primaryTexts) ? pack.primaryTexts : [];
+    const headlines: string[] = [];
+    const primaryTexts: string[] = [];
+    const n = Math.min(rawHeadlines.length, rawPrimaryTexts.length, MAX_COPY_PACK_ENTRIES);
+    for (let i = 0; i < n; i++) {
+      const h = ((rawHeadlines[i] as string | null | undefined) ?? "").trim();
+      const p = ((rawPrimaryTexts[i] as string | null | undefined) ?? "").trim();
+      if (!h || !p) continue;
+      headlines.push(h);
+      primaryTexts.push(p);
+    }
+    if (headlines.length) {
+      const desc = (pack.description ?? "").trim();
+      const descriptions = desc ? [desc] : [];
+      return { ok: true, headlines, primaryTexts, descriptions, reason: null };
+    }
+  }
+  // 2. Legacy fallback — temperature-banded variants read via readCopyVariants (M3 pack).
   const variants = (opts?.variants ?? []).filter((v) => (v.headline ?? "").trim() && (v.primary_text ?? "").trim());
   if (variants.length) {
     const headlines = variants.map((v) => v.headline.trim());
@@ -2160,6 +2216,7 @@ export function resolveReplenishAdCopy(
     const descriptions = variants.map((v) => (v.description ?? "").trim()).filter(Boolean);
     return { ok: true, headlines, primaryTexts, descriptions, reason: null };
   }
+  // 3. Deterministic / legacy fallback — the single-angle-caption pair.
   const headlines = [(angle?.meta_headline || "").trim()].filter(Boolean);
   const primaryTexts = [(angle?.meta_primary_text || "").trim()].filter(Boolean);
   if (!headlines.length || !primaryTexts.length) {
@@ -2472,23 +2529,31 @@ async function enqueueReplenishPublish(
   // no usable copy, instead of enqueueing an invalid job that only surfaces its failure at Meta.
   const angleId = (campaign as { angle_id?: string | null } | null)?.angle_id ?? null;
   let angle: ReplenishAngleCopy = null;
+  // bianca-static-publish-uses-all-5-copy-variations-and-correct-right-column-placement Phase 1 —
+  // also read the angle's `metadata` JSONB so the resolver can prefer the 5-variation `copy_pack`
+  // Dahlia authored (the same set the render + preview use) over the legacy single-headline caption.
+  // Publishing anything less throws away Meta's per-lever rotation test the whole point of the 5 was
+  // to enable. Kept alongside the caption columns so the pre-Phase-1 fallback still fires for a
+  // legacy angle with no copy_pack.
+  let angleMetadataCopyPack: ReplenishCopyPack | null = null;
   if (angleId) {
     const { data } = await admin
       .from("product_ad_angles")
-      .select("meta_headline, meta_primary_text")
+      .select("meta_headline, meta_primary_text, metadata")
       .eq("id", angleId)
       .eq("workspace_id", workspaceId)
       .maybeSingle();
     angle = data as ReplenishAngleCopy;
+    const meta = (data as { metadata?: { copy_pack?: ReplenishCopyPack | null } | null } | null)?.metadata ?? null;
+    angleMetadataCopyPack = meta?.copy_pack ?? null;
   }
   // dahlia-publisher-asset-feed-spec-upgrade-and-competitor-selection Phase 1 — read the
-  // temperature-banded pack via the SDK chokepoint (warm → cold → hot ordered). When non-empty,
-  // resolveReplenishAdCopy splats it 1:1 into the job's headlines / primary_texts / descriptions
-  // arrays so the publisher can build Meta's asset_feed_spec titles[]/bodies[]/descriptions[]
-  // with N entries. When empty (deterministic mode / legacy campaign that never had a variant
-  // pack authored), the single-angle-caption fallback fires — byte-identical to today.
+  // temperature-banded pack via the SDK chokepoint (warm → cold → hot ordered). Now the LEGACY
+  // fallback (bianca-static-publish Phase 1 promoted `angleMetadataCopyPack` above): the resolver
+  // prefers copy_pack when non-empty; variants fire only when the angle carries no copy_pack.
+  // Deterministic-mode compat unchanged (both absent → single-angle-caption fallback fires).
   const variants = await readCopyVariants(admin, action.adCampaignId);
-  const copy = resolveReplenishAdCopy(angle, { variants });
+  const copy = resolveReplenishAdCopy(angle, { variants, copyPack: angleMetadataCopyPack });
   if (!copy.ok) {
     return {
       inserted: false,

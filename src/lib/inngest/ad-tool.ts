@@ -1092,15 +1092,36 @@ export const adToolPublishToMeta = inngest.createFunction(
             rightColumnImageHash,
           });
         } else if (dual && isStatic) {
-          // Both ratios → one placement-customized image ad (4:5 feed, 9:16 stories).
+          // Both ratios → one placement-customized image ad. Base coverage is 4:5 feed +
+          // 9:16 stories. bianca-static-publish-uses-all-5-copy-variations-and-correct-
+          // right-column-placement Phase 2 — when the campaign ALSO carries a
+          // `right_column_1x1` static (`ctx.rightColumnUrl` resolved above) even though the
+          // full placementReady 3-bucket path didn't fire (e.g. the copy-pack pack gate
+          // said `skipped`), still upload the 1:1 hash and pass it to `createDualAssetCreative`
+          // so the right-column placement renders its correct-aspect asset instead of
+          // falling through to the 9:16 story via the default rule. When the 1:1 asset is
+          // absent the shape stays byte-identical to pre-Phase-2 (2-bucket, feed/stories).
           await setStatus("uploading");
-          const [fb, sb] = await Promise.all([fetchBytes(ctx.feedUrl!), fetchBytes(ctx.storyUrl!)]);
-          const [feedImageHash, storyImageHash] = await Promise.all([
-            uploadAdImage(ctx.token!, j.meta_account_id, fb, "feed.jpg"),
-            uploadAdImage(ctx.token!, j.meta_account_id, sb, "story.jpg"),
-          ]);
+          const hasRightColStatic = !!ctx.rightColumnUrl;
+          const uploadTargets: Array<Promise<Buffer>> = [fetchBytes(ctx.feedUrl!), fetchBytes(ctx.storyUrl!)];
+          if (hasRightColStatic) uploadTargets.push(fetchBytes(ctx.rightColumnUrl!));
+          const buffers = await Promise.all(uploadTargets);
+          const uploadHashes: Array<Promise<string>> = [
+            uploadAdImage(ctx.token!, j.meta_account_id, buffers[0]!, "feed.jpg"),
+            uploadAdImage(ctx.token!, j.meta_account_id, buffers[1]!, "story.jpg"),
+          ];
+          if (hasRightColStatic) uploadHashes.push(uploadAdImage(ctx.token!, j.meta_account_id, buffers[2]!, "rightcol.jpg"));
+          const hashes = await Promise.all(uploadHashes);
+          const feedImageHash = hashes[0]!;
+          const storyImageHash = hashes[1]!;
+          const rightColumnImageHash = hasRightColStatic ? hashes[2]! : undefined;
           await setStatus("creating");
-          creativeId = await createDualAssetCreative(ctx.token!, { ...baseCreative, feedImageHash, storyImageHash });
+          creativeId = await createDualAssetCreative(ctx.token!, {
+            ...baseCreative,
+            feedImageHash,
+            storyImageHash,
+            ...(rightColumnImageHash ? { rightColumnImageHash } : {}),
+          });
         } else if (dual && !isStatic) {
           // Both ratios → one placement-customized video ad (4:5 feed, 9:16 reels/stories).
           await setStatus("uploading");
