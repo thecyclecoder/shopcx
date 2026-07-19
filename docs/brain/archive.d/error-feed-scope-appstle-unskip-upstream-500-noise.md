@@ -1,0 +1,1 @@
+- **Scope Appstle unskip upstream 500s out of the Vercel error feed** · verified 2026-07-19 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
