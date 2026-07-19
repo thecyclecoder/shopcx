@@ -22,6 +22,13 @@ interface Ad {
   offer: string | null;
   days_running: number | null;
   seed_kind: string | null;
+  // flag-a-competitor-ad-do-not-use Phase 2 — the CEO's per-AD exclusion flag. When true, this
+  // ad is skipped by `queryProvenAngles` (Phase 1) so Dahlia never picks a lame long-runner
+  // (Magic Mind display-box packshot) over a strong one (Onnit "Lock in when it matters most").
+  do_not_use: boolean;
+  do_not_use_reason: string | null;
+  do_not_use_by: string | null;
+  do_not_use_at: string | null;
 }
 interface ProductRow {
   id: string;
@@ -69,6 +76,43 @@ export default function ResearchAdsPage() {
     if (res.ok) setAds((await res.json()) as Ad[]);
     setLoading(false);
   }, [workspace.id, mediaType, productId]);
+
+  // flag-a-competitor-ad-do-not-use Phase 2 — flip the per-AD flag through the PATCH on
+  // /api/ads/competitors/[id] (under PATCH the id is a skeleton id — verb-scoped by design;
+  // see the route file comment). Optimistically updates the card so the CEO sees the dim +
+  // badge immediately; rolls back if the server rejects (e.g. 403 for a non-owner, 404 for a
+  // stale id) rather than leaving a lie on the screen.
+  const [flipping, setFlipping] = useState<Record<string, boolean>>({});
+  const toggleDoNotUse = useCallback(
+    async (skeletonId: string, next: boolean) => {
+      setFlipping((prev) => ({ ...prev, [skeletonId]: true }));
+      const prevAds = ads;
+      setAds((current) =>
+        current.map((a) =>
+          a.id === skeletonId
+            ? {
+                ...a,
+                do_not_use: next,
+                do_not_use_reason: next ? "ceo_manual" : null,
+                do_not_use_by: next ? "ceo" : null,
+                do_not_use_at: next ? new Date().toISOString() : null,
+              }
+            : a,
+        ),
+      );
+      const res = await fetch(`/api/ads/competitors/${skeletonId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: workspace.id, doNotUse: next }),
+      });
+      if (!res.ok) setAds(prevAds); // rollback — the DB never flipped
+      setFlipping((prev) => {
+        const { [skeletonId]: _drop, ...rest } = prev;
+        return rest;
+      });
+    },
+    [ads, workspace.id],
+  );
 
   useEffect(() => {
     if (workspace.role !== "owner") return;
@@ -139,10 +183,13 @@ export default function ResearchAdsPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {ads.map((s) => {
             const src = s.thumb_url ?? proxy(s.image_url);
+            const busy = !!flipping[s.id];
             return (
               <div
                 key={s.id}
-                className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+                className={`overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 ${
+                  s.do_not_use ? "opacity-50 grayscale" : ""
+                }`}
               >
                 <div className="relative aspect-square w-full bg-zinc-100 dark:bg-zinc-800">
                   {src ? (
@@ -152,6 +199,18 @@ export default function ResearchAdsPage() {
                   {s.media_type === "video" ? (
                     <span className="absolute left-2 top-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">
                       ▶ video
+                    </span>
+                  ) : null}
+                  {s.do_not_use ? (
+                    <span
+                      className="absolute right-2 top-2 rounded bg-red-600/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white"
+                      title={
+                        s.do_not_use_reason
+                          ? `Don't use — ${s.do_not_use_reason} (by ${s.do_not_use_by ?? "?"})`
+                          : "Don't use — flagged"
+                      }
+                    >
+                      don&apos;t use
                     </span>
                   ) : null}
                 </div>
@@ -168,6 +227,23 @@ export default function ResearchAdsPage() {
                   <Slot k="Mechanism" v={s.mechanism_claim} />
                   <Slot k="Proof" v={s.proof} />
                   <Slot k="Offer" v={s.offer} />
+                  <button
+                    type="button"
+                    onClick={() => toggleDoNotUse(s.id, !s.do_not_use)}
+                    disabled={busy}
+                    className={`mt-2 w-full rounded border px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                      s.do_not_use
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                        : "border-zinc-200 bg-white text-zinc-700 hover:bg-red-50 hover:text-red-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                    }`}
+                    title={
+                      s.do_not_use
+                        ? "Un-flag this ad — Dahlia can use it as an imitation angle again."
+                        : "Flag this ad as 'don't use' — Dahlia will never imitate it (queryProvenAngles skips it)."
+                    }
+                  >
+                    {busy ? "…" : s.do_not_use ? "Use again" : "Don't use"}
+                  </button>
                 </div>
               </div>
             );

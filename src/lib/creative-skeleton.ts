@@ -698,6 +698,67 @@ export async function reobserveAd(
   return persistence;
 }
 
+/** flag-a-competitor-ad-do-not-use Phase 2 — the ONLY writer of the `do_not_use` columns on
+ *  `public.creative_skeletons`. Scope-guarded on (workspace_id, id) so the caller can't flip a
+ *  row in another workspace even with a leaked skeleton id, and uses compare-and-set via
+ *  `.select("id")` so exactly one row must transition — bails if zero (stale/cross-workspace
+ *  read, deleted row). Passing `doNotUse=false` clears the flag AND its reason/by/at trio.
+ *
+ *  `by` is 'ceo' for a manual flag from the ad-library page (Phase 2), 'max' for the Phase-3
+ *  imitation-quality grader's auto-flag — never a silent proxy-optimizer; a Max-flagged row is
+ *  surfaced to the CEO for confirm/override. `reason` is a short slug ('ceo_manual' / 'max_weak_imitation_base')
+ *  or a CEO note. The `do_not_use=false` clear path resets reason/by/at to null so the row is
+ *  visibly unflagged (matches how the CEO expects the toggle to look after clicking).
+ *
+ *  Returns `true` when a row transitioned, `false` when the skeleton wasn't found in this
+ *  workspace (the caller renders that as a 404). Throws on the raw Supabase error.
+ *
+ *  Consumers: the PATCH handler on [[../app/api/ads/competitors/[id]/route]] and (Phase 3)
+ *  the Max imitation-quality grader. Read by [[./ads/creative-sourcing]] `queryProvenAngles`
+ *  (skips `do_not_use=true` so a flagged ad never becomes an imitation angle). */
+export async function setSkeletonDoNotUse(input: {
+  workspaceId: string;
+  skeletonId: string;
+  doNotUse: boolean;
+  reason?: string | null;
+  by: string;
+}): Promise<boolean> {
+  const admin = createAdminClient();
+  const nowIso = new Date().toISOString();
+  const patch = input.doNotUse
+    ? {
+        do_not_use: true,
+        do_not_use_reason: input.reason ?? null,
+        do_not_use_by: input.by,
+        do_not_use_at: nowIso,
+        updated_at: nowIso,
+      }
+    : {
+        // Clearing the flag ALSO clears the audit trio so the row is visibly unflagged in the
+        // UI (the toggle reads `do_not_use === true`, but a stale reason/by/at is confusing to
+        // the CEO and would look like "Max flagged it, then someone cleared it" on a card that
+        // is actually clean).
+        do_not_use: false,
+        do_not_use_reason: null,
+        do_not_use_by: null,
+        do_not_use_at: null,
+        updated_at: nowIso,
+      };
+  // Compare-and-set — workspace_id + id together must select exactly one row. If the read the
+  // caller did was stale (row deleted, wrong workspace), .select("id") returns [] and we return
+  // false so the caller renders a 404 rather than a false-positive 200. Same pattern as
+  // approval-inbox.ts and setCompetitorStatus (Coaching #11/#12: never let a session-declared
+  // status bypass the workspace/id guard at the write site).
+  const { data, error } = await admin
+    .from("creative_skeletons")
+    .update(patch)
+    .eq("workspace_id", input.workspaceId)
+    .eq("id", input.skeletonId)
+    .select("id");
+  if (error) throw new Error(error.message);
+  return (data ?? []).length > 0;
+}
+
 /** Mark a competitor's ads that DIDN'T appear in this sweep as retired (winners-flow longitudinal): the
  *  competitor stopped running them → a loser signal we can trust because it's ours. Scoped to ONE competitor
  *  + lane's currently-active rows; leaves already-retired rows alone. Returns how many were retired. */
