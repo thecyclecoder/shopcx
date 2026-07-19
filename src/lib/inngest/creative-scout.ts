@@ -42,6 +42,7 @@ import {
 } from "@/lib/creative-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { syncResearchUrlsFromCreatives } from "@/lib/research-urls";
+import { enqueueImitationQualityReview } from "@/lib/ads/imitation-quality-review";
 
 const SWEEP_DELAY_MS = 7000; // ~8 searches/min — under AdLibrary's 10/min cap
 
@@ -159,10 +160,16 @@ async function sweepWorkspace(
   workspaceId: string,
   force: boolean,
   onlyProductId?: string,
-): Promise<{ totals: IngestResult; products: number; skipped: number }> {
+): Promise<{ totals: IngestResult; products: number; skipped: number; imitationReviewEnqueued: boolean }> {
   const productIds = onlyProductId
     ? [onlyProductId]
     : await step.run(`products-${workspaceId}`, () => productsWithApprovedCompetitors(workspaceId));
+
+  // flag-a-competitor-ad-do-not-use Phase 3: stamp a per-workspace start cutoff BEFORE ingestion so
+  // the post-sweep query for newly-inserted skeleton ids (below) is scoped to THIS sweep's rows —
+  // never a re-review of anything the last sweep already visited (setSkeletonDoNotUse is a compare-
+  // and-set, but re-enqueueing on a duplicate batch would still burn a Max session).
+  const sweepStartIso = await step.run(`sweep-start-${workspaceId}`, () => Promise.resolve(new Date().toISOString()));
 
   let totals = emptyTotals();
   let totalSkipped = 0;
@@ -188,7 +195,40 @@ async function sweepWorkspace(
   await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
   await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
 
-  return { totals, products: productIds.length, skipped: totalSkipped };
+  // flag-a-competitor-ad-do-not-use Phase 3 — enqueue ONE Max imitation-quality-review job over
+  // THIS sweep's newly-inserted skeletons (vision-analyzed statics only; a video_pending row can't
+  // be judged until the video pipeline drains it). No-op when the sweep inserted nothing new. The
+  // worker (scripts/builder-worker.ts runImitationQualityReviewJob) is the sole caller of Max +
+  // applyBoxImitationQualityReview → setSkeletonDoNotUse with reason='max_weak_imitation_base',
+  // by='max' and the CEO's confirm/override card.
+  const imitationReviewEnqueued = await step.run(`enqueue-imitation-review-${workspaceId}`, async () => {
+    if (totals.inserted <= 0) return false;
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const admin = createAdminClient();
+    const { data: freshRows } = await admin
+      .from("creative_skeletons")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "analyzed")
+      .eq("media_type", "static")
+      .gte("created_at", sweepStartIso)
+      .limit(200);
+    const ids = ((freshRows ?? []) as Array<{ id: string }>).map((r) => r.id);
+    if (ids.length === 0) return false;
+    try {
+      const r = await enqueueImitationQualityReview({ workspaceId, skeletonIds: ids });
+      if (r.enqueued) {
+        console.log(`[creative-scout] enqueued imitation-quality-review job ${r.jobId?.slice(0, 8)} for ${ids.length} newly-ingested skeleton(s) in workspace ${workspaceId.slice(0, 8)}`);
+      }
+      return r.enqueued;
+    } catch (err) {
+      // Never fail the sweep on a review-enqueue error — the sweep is the load-bearing side-effect.
+      console.error(`[creative-scout] imitation-quality-review enqueue failed for ${workspaceId}:`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  });
+
+  return { totals, products: productIds.length, skipped: totalSkipped, imitationReviewEnqueued };
 }
 
 export const creativeScoutWeeklyCron = inngest.createFunction(

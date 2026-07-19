@@ -46,7 +46,7 @@ export async function GET(req: Request) {
   let q = auth.admin
     .from("creative_skeletons")
     .select(
-      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at",
+      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at, do_not_use, do_not_use_reason, do_not_use_by, do_not_use_at",
     )
     .eq("workspace_id", workspaceId as string)
     .order("days_running", { ascending: false, nullsFirst: false })

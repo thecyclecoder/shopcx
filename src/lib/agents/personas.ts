@@ -558,6 +558,7 @@ const KIND_PERSONA_ALIAS: Record<string, string> = {
   "ad-creative-copy-author": "ad-creative", // Dahlia's per-creative copy-author box session
   "ad-creative-copy-qc": "growth", // Max's independent per-creative copy-QC box session
   "ad-review-feedback": "ad-creative", // Dahlia is the ACTING persona for the CEO-review re-drive router (ceo-manual-ad-review-inline-per-element-feedback-routed-to-dahlia-max-render Phase 2). Node-registry OWNER is `growth` (Max), but the box card renders Dahlia's face because she's the one acting on the CEO's surgical notes.
+  "imitation-quality-review": "growth", // Max's per-sweep review of newly-ingested competitor ads — flags the obvious junk as do_not_use so Dahlia only imitates strong bases (flag-a-competitor-ad-do-not-use Phase 3). The ACTING persona IS Max — his taste is what the grader is training on.
 };
 
 export function getPersona(slug: string, label?: string): AgentPersona {
