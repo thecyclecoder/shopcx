@@ -184,7 +184,6 @@ const SUMMARIES: Record<string, string> = {
   "shopify-marketing": "Email + SMS marketing consent mutations: `customerEmailMarketingConsentUpdate`, `customerSmsMarketingConsentUpdate`. Used by discount-signup journey + chargeback auto-unsubscribe.",
   "shopify-customer-update": "`customerUpdate` mutation for default address + email + phone updates.",
   "shopify-draft-orders": "Draft order create + complete. Used by replacement-order playbook + storefront cart-bridge legacy path.",
-  "shopify-subscriptions": "Shopify-native subscription draft workflow: `subscriptionContractUpdate` → `subscriptionDraftLineAdd/Remove/Update` → `subscriptionDraftCommit`. Distinct from Appstle path; used for shipping-address updates on subs.",
   "shopify-sync": "Bulk operations + GraphQL helper + paginated sync. `fetchWithRetry` retries 429 + 5xx. `cancelBulkOperation()` clears stuck ops. Drives [[../inngest/sync-shopify]] + [[../inngest/today-sync]].",
   "shopify-webhooks": "Customer + order webhook handlers. Address fallback chain, customers/merge auto-link, orders/create → fraud detection trigger.",
   "shopify-webhook-register": "Registers Shopify webhook subscriptions per workspace on connect.",

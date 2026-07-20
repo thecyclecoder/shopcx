@@ -32,7 +32,7 @@ Built by `src/lib/shipping-address-journey-builder.ts`:
 
 For each selected target:
 
-- **Subscription** — `src/lib/shopify-subscriptions.ts` updates the contract's shipping address via [[../integrations/shopify]] `subscriptionContractUpdate`.
+- **Subscription** — [[../libraries/commerce__subscription]] `subscriptionUpdateShippingAddress` updates the contract's shipping address. Internal-aware like every commerce-SDK mutation: an internal sub short-circuits, everything else goes to Appstle's `subscription-contracts-update-shipping-address` endpoint. It is NEVER written through Shopify — see [[../operational-rules]] § Subscription mutations.
 - **Order** (unfulfilled only) — [[../integrations/shopify]] `orderUpdateShippingAddress` mutation. If the order is in fulfillment / shipped, we can't change it — flagged earlier in Step 1.
 - **Default address** — [[../integrations/shopify]] `customerUpdate` mutation + write to [[../tables/customers]].`default_address`.
 
@@ -61,7 +61,7 @@ Some customers use addresses that EasyPost flags as residential vs commercial mi
 | File | Purpose |
 |---|---|
 | `src/lib/shipping-address-journey-builder.ts` | Builder |
-| `src/lib/shopify-subscriptions.ts` | subscriptionContractUpdate for sub address |
+| `src/lib/commerce/subscription.ts` | `subscriptionUpdateShippingAddress` — internal-aware, Appstle for non-internal |
 | `src/lib/shopify-order-actions.ts` | orderUpdateShippingAddress for in-flight orders |
 | `src/lib/shopify-customer-update.ts` | customerUpdate for default address |
 | `src/lib/easypost.ts` | Address verification |
