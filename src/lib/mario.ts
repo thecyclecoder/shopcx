@@ -494,6 +494,44 @@ async function readReviewFailedBlockerStalls(
  *  healthy. Mirrors `MARIO_REVIEW_VERIFICATION_GRACE_MS`. */
 const MARIO_ELIGIBLE_NEVER_ENQUEUED_GRACE_MS = 60 * 60 * 1000;
 
+/** Batch size for the eligible-never-enqueued source's `.in('spec_slug', …)` build-existence scan.
+ *  A single unchunked `.in()` blows past the PostgREST URL/param length ceiling once a workspace
+ *  has enough auto_build slugs (each slug is a ~40-80 char kebab-case string, so ~200 comfortably
+ *  fits under the 4KB default cap while keeping the round-trip count small). 200 is the same batch
+ *  size the [[./ad-avatar-proposals]] `batchedIn` helper uses for the same PostgREST-URL reason. */
+export const MARIO_BUILD_SCAN_IN_CHUNK = 200;
+
+/** Chunk + fold the eligible-never-enqueued source's build-existence scan into a set of slugs that
+ *  DO have a `kind='build'` row. Two named-invariant properties (pinned by
+ *  `mario.eligible-never-enqueued.test.ts`):
+ *   (1) CHUNKED — the `scan` callback is called with slices of at most `MARIO_BUILD_SCAN_IN_CHUNK`
+ *       so a workspace with hundreds of auto_build slugs never blows past the PostgREST URL/param
+ *       length ceiling.
+ *   (2) FAIL-LOUD — any per-batch `error` is THROWN, never silently treated as "no build exists"
+ *       (the swallow that let every aged auto_build spec workspace-wide look like a never-enqueued
+ *       stall — the three hourly false-fires this spec was authored to end).
+ *  Pure fold — no admin coupling; the caller injects the PostgREST scan (or a stub for testing). */
+export async function foldSlugsWithBuild(
+  scan: (batch: string[]) => Promise<{
+    data: Array<{ spec_slug: string | null }> | null;
+    error: unknown;
+  }>,
+  slugs: string[],
+  chunkSize: number = MARIO_BUILD_SCAN_IN_CHUNK,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (slugs.length === 0) return out;
+  for (let i = 0; i < slugs.length; i += chunkSize) {
+    const slice = slugs.slice(i, i + chunkSize);
+    const { data, error } = await scan(slice);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      if (row.spec_slug && row.spec_slug.length > 0) out.add(row.spec_slug);
+    }
+  }
+  return out;
+}
+
 /**
  * Pure decision predicate — is this spec row the sixth-source's eligible-never-enqueued class?
  * Fanned out of `readEligibleNeverEnqueuedStalls` so the exact "surface?" logic is unit-testable
@@ -557,18 +595,24 @@ async function readEligibleNeverEnqueuedStalls(
   }>;
   if (rows.length === 0) return [];
 
-  // One scan for every build row across the candidate slugs — a single IN() query is much cheaper
-  // than N per-spec probes (a workspace with hundreds of auto_build specs would fan out otherwise).
+  // Scan every build row across the candidate slugs — chunked + fail-loud on any per-batch error
+  // via [[foldSlugsWithBuild]] so a workspace with hundreds of auto_build specs never blows past
+  // the PostgREST URL/param length ceiling (the ceiling that previously errored silently and read
+  // as "no build exists", surfacing every aged auto_build spec workspace-wide as a false-positive
+  // never-enqueued stall — three hourly false-fires on the same spec before this fix).
   const slugs = rows.map((r) => r.slug);
-  const { data: builds } = await admin
-    .from("agent_jobs")
-    .select("spec_slug")
-    .eq("workspace_id", workspace_id)
-    .eq("kind", "build")
-    .in("spec_slug", slugs)
-    .limit(5000);
-  const slugsWithBuild = new Set<string>(
-    ((builds ?? []) as Array<{ spec_slug: string | null }>).map((b) => b.spec_slug ?? "").filter((s) => s.length > 0),
+  const slugsWithBuild = await foldSlugsWithBuild(
+    (batch) =>
+      admin
+        .from("agent_jobs")
+        .select("spec_slug")
+        .eq("workspace_id", workspace_id)
+        .eq("kind", "build")
+        .in("spec_slug", batch) as unknown as Promise<{
+          data: Array<{ spec_slug: string | null }> | null;
+          error: unknown;
+        }>,
+    slugs,
   );
 
   const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
