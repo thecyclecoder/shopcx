@@ -42,7 +42,7 @@ export type DirectorActionKind =
   // spec-review-agent Phase 3 — Vale narrowed to QUALITY ONLY; one verdict per in_review spec.
   | "spec_review_passed" // well-formed (CHECKLIST cleared) → flags.vale_pass=true; spec stays in_review for Ada's disposition lane.
   // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the passed-but-unstamped reconciler
-  // ([[../libraries/agents-spec-review]] `runValeReviewPassReconciler`) healed a legacy spec that had a
+  // (the retired Vale lane's `runValeReviewPassReconciler`) healed a legacy spec that had a
   // `spec_review_passed` activity row from a prior pass but a NULL `specs.vale_review_passed_at` (dropped by
   // the pre-Phase-1 best-effort mirror path). One row per spec healed; metadata:
   // { actor:'reconciler:vale-review-passed-flag', stamped_at, source_activity_id?, autonomous:true }.
@@ -53,7 +53,7 @@ export type DirectorActionKind =
   | "spec_dispose_downgrade" // author suggested `planned`, Ada deferred — autonomous flip + a CEO notification (one-click override to planned).
   | "spec_dispose_upgrade_proposed" // author suggested `deferred`, Ada wants `planned` — GATED, parks a CEO approval card (Planned / Deferred + reason).
   // spec-review-agent Phase 4 — any agent (Vale on re-check, Bo, Ada, repair/regression, the CEO via the
-  // board control) that flips a malformed/off spec BACK to `in_review` so it returns to Vale's queue.
+  // board control) that flips a malformed/off spec BACK to `in_review` so Ada re-disposes it.
   // The `actor` on the row records WHO sent it back; the `reason` records WHAT was off.
   | "spec_sent_back_to_review" // a malformed/off spec was returned to the in_review column; the build pipeline refuses to dispatch it until Vale clears it again.
   // goal-greenlight-button-and-author-writes-db Phase 1 — the CEO's one-click DB-flag actions on a goal

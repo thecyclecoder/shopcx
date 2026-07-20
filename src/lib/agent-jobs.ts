@@ -775,7 +775,7 @@ export async function enqueueSpecTestIfDue(
 
 /**
  * bo-reactive-gated-build-enqueue Phase 1 — the SINGLE chokepoint for enqueueing a `kind='build'`
- * agent_jobs row for a spec. Parallel of Vale's `enqueueSpecReviewIfDue` (src/lib/agents/spec-review.ts)
+ * agent_jobs row for a spec. (Vale's parallel `enqueueSpecReviewIfDue` is retired + deleted.)
  * and Bo's shipped-lane `enqueueSpecTestIfDue` (above): one cheap `getSpec` read, gate on the same
  * BUILD-ELIGIBILITY predicate Ada's front-door lanes apply (`specReviewDone` + not deferred + not
  * shipped + auto_build != false + blockers cleared), plus a one-in-flight guard so a duplicate call
@@ -783,7 +783,7 @@ export async function enqueueSpecTestIfDue(
  *
  * Every reactive/agent-driven enqueue path (autoQueueUnblockedBy, Phase-2 `buildOnEligible` consumer,
  * Ada's own lanes as an optional collapse) MUST route through here so Bo never gets a `queued` row
- * for an un-Vale-passed / deferred / blocked spec. The claim-time backstops (claimHeldForUnreviewedSpec
+ * for a deferred / blocked spec. The claim-time backstops (claimHeldForUnreviewedSpec — a no-op since retire-vale,
  * in builder-worker.ts + evaluateClaimTimeBuildGate) stay in place as the last line of defense — but
  * this stops the premature row from ever appearing on the CEO's board.
  *
@@ -840,7 +840,7 @@ export async function enqueueBuildIfDue(
   if (card.autoBuild === false) return { enqueued: false, reason: "auto-build-off" };
   if (card.blockedBy.some((b) => !b.cleared)) return { enqueued: false, reason: "blocked" };
 
-  // One-in-flight guard — mirrors enqueueSpecReviewIfDue's shape (spec-review.ts:100-107). A build
+  // One-in-flight guard — the shape the retired Vale enqueuer also used. A build
   // already carrying this spec (queued / queued_resume / claimed / building) means a duplicate call
   // is a no-op, never a stack.
   const { data: inflight } = await admin
@@ -3240,7 +3240,7 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
 
     // bo-reactive-gated-build-enqueue Phase 1: route through the gated chokepoint instead of a raw
     // insert. Previously we filtered only `autoBuild!==false` + blockers cleared + dedup, so an
-    // unblocked-but-un-Vale-passed dependent got a `queued` build row that the claim-gate then held
+    // unblocked dependent got a `queued` build row that the claim-gate then held (historical: the Vale leg is retired)
     // — the premature row the CEO saw on the board. enqueueBuildIfDue re-checks the FULL eligibility
     // gate (specReviewDone + not-deferred + not-shipped + auto_build + blockers + in-flight); if the
     // dependent hasn't passed Vale yet the enqueue no-ops here, and Phase 2's reactive
@@ -3273,7 +3273,7 @@ export async function autoQueueUnblockedBy(workspaceId: string, shippedSlug: str
  *     external blocker between the goal ship and the sweep is correctly held.
  *   - Per-spec dedup on `agent_jobs` (any-status match) before enqueue — one auto-queue per spec.
  *   - `enqueueBuildIfDue` re-checks the FULL eligibility gate (specReviewDone + not-deferred +
- *     not-shipped + auto_build + blockers + in-flight) — an un-Vale-passed dependent no-ops here
+ *     not-shipped + auto_build + blockers + in-flight) — an ineligible dependent no-ops here
  *     and the reactive `build/spec-build-eligible` event re-fires when Vale later passes.
  *
  * Best-effort per spec — one dependent's failure never blocks the rest. Never throws. Returns the

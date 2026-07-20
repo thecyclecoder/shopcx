@@ -10,7 +10,7 @@ import type { SpecStatus } from "@/lib/brain-roadmap";
  * and is NEVER user-settable here (the old manual status segmented control was retired with the
  * spec_card_state overlay). What remains are the genuine lifecycle levers:
  *
- *   - Review     → POST /api/roadmap/status  { status: "in_review" }   — send back to Vale's review queue.
+ *   - Review     → POST /api/roadmap/status  { status: "in_review" }   — clears the disposition flags so Ada re-disposes.
  *   - Prioritize → POST /api/roadmap/priority { state: "critical" }     — sets specs.priority = 'critical'.
  *   - Make Active→ POST /api/roadmap/priority { state: "planned" }      — clears specs.deferred (un-defer);
  *                                                                          rendered only when the card IS deferred.

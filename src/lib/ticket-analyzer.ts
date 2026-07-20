@@ -642,7 +642,7 @@ export async function enqueueTicketAnalyzeJob(
   const tags = (t.tags as string[]) || [];
   if (tags.some((tag) => SKIP_TAGS.has(tag))) return { ok: false, reason: "skip_tag" };
 
-  // One-in-flight dedup — same shape enqueueSpecReviewIfDue uses. spec_slug carries the ticket
+  // One-in-flight dedup — same shape enqueueSpecTestIfDue uses. spec_slug carries the ticket
   // id so the box's per-slug queue view surfaces one row per ticket.
   const { data: inflight } = await admin
     .from("agent_jobs")

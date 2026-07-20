@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "bad slug" }, { status: 400 });
   }
   // spec-review-agent Phase 4 — accept `in_review` as a CEO board control (the "send this spec back to
-  // Vale's queue" action for a malformed/off spec). Routed through markSpecCardBackToReview, which
+  // re-disposition" action for a malformed/off spec). Routed through markSpecCardBackToReview, which
   // consumes the prior vale_pass / ada_disposition / intended_status signals so the next Vale + Ada pass
   // start clean.
   if (status !== "planned" && status !== "in_progress" && status !== "shipped" && status !== "rejected" && status !== "in_review") {
@@ -76,7 +76,7 @@ export async function POST(request: Request) {
         directorFunction: "ceo",
         actionKind: "spec_sent_back_to_review",
         specSlug: slug,
-        reason: "CEO sent spec back to in_review via the board control (malformed/off — needs Vale re-check)",
+        reason: "CEO sent spec back to in_review via the board control (malformed/off — needs re-disposition)",
         metadata: { source: "board_control" },
       });
     } catch {

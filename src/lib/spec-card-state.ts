@@ -701,10 +701,11 @@ export async function markSpecCardValePassed(
 
 /**
  * vale-instant-per-spec-review — Vale's quality verdict (needs_fix leg): stamp the DURABLE
- * "reviewed → malformed" marker so the spec LEAVES Vale's queue until it's re-authored. Sets
+ * "reviewed → malformed" marker so the spec is not re-disposed until it's re-authored. Sets
  * `flags.vale_pass=false` (mirrors to `specs.vale_pass=false`), reusing the existing tri-state:
  *
- *   • `null`  — never verdicted → IN Vale's queue (`selectUnreviewedInReviewSpecs` picks it up).
+ *   • `null`  — never verdicted. (The Vale LLM lane is retired and its module DELETED — nothing
+ *     consumes this queue; the flag survives only as history on pre-retirement rows.)
  *   • `false` — reviewed, needs_fix → OUT of the queue (no re-review until the spec is re-authored).
  *   • `true`  — passed → OUT of the queue, parked for Ada's disposition lane.
  *
@@ -811,7 +812,7 @@ export async function markSpecCardPendingUpgrade(
  * spec-review-agent Phase 4 — the SHARED back-to-review writer. Any agent that spots a malformed/off
  * spec (Vale on a re-check, Bo refusing to build on an empty/phaseless body, Ada's `spec-status` action,
  * repair/regression noticing an authored spec doesn't pass the CHECKLIST, the CEO via the board control)
- * flips the card back to `in_review` so it returns to Vale's queue — the build pipeline refuses to
+ * flips the card back to `in_review` so Ada re-disposes it — the build pipeline refuses to
  * dispatch an in_review spec, which is the whole point (don't build around a broken spec).
  *
  * Consumes the prior disposition lane's signals: `vale_pass`, `ada_disposition`, `intended_status` are

@@ -1731,7 +1731,7 @@ export async function setSpecBlockers(
  * DURABLE `specs.vale_review_passed_at` timestamp (build-gate-durable-review-signal). The primary
  * pass path already dual-writes this via [[spec-card-state]] `markSpecCardValePassed` →
  * `dualWriteSpecRow`, but that path is best-effort (a mirror hiccup is silently swallowed). This
- * writer is the INVARIANT GUARD called by [[../agents/spec-review]] `assertDurableReviewPassStamp`
+ * writer is the INVARIANT GUARD once called by the retired Vale lane's `assertDurableReviewPassStamp`
  * after the pass to force the stamp when the mirror write dropped it — errors THROW so the caller
  * refuses to record a `spec_review_passed` `director_activity` row when the durable stamp isn't in
  * place. Returns `true` when the write actually stamped the row (was NULL, now `now()`), `false`
