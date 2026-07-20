@@ -39,7 +39,7 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, getActiveSpecs, listArchivedSpecIndex, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow, type ArchivedSpecIndexRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
@@ -796,7 +796,11 @@ const SPEC_RANK: Record<SpecStatus, number> = { in_progress: 0, in_testing: 0.5,
  *  short-circuit / one-shot-PR flags. This REPLACES the old `readSpecs()` (parseSpec across the .md files).
  *  Sorted by board column then title — the same order callers used to get from the markdown reader. */
 async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
-  const rows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
+  // roadmap-archive-split: `getActiveSpecs` (scope='active') instead of fetching every spec and
+  // dropping folded rows in JS. The board never renders a folded spec, so those 659 rows were pure
+  // wire cost — 5.15 MB fetched to display 4 cards. The isBoardableStatus filter stays as the belt:
+  // it is the one place that defines "boardable", and a future scope change must not silently widen it.
+  const rows = (await getActiveSpecs(workspaceId)).filter((r) => isBoardableStatus(r.status));
   const cards = rows.map(dbRowToSpecCard);
   const bySlug = new Map(cards.map((c) => [c.slug, c]));
   // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — the workspace's
@@ -1368,9 +1372,13 @@ export async function getArchive(workspaceId?: string): Promise<ArchiveEntry[]> 
   // spec-fold-from-db-row Phase 2: the LISTING comes from the DB row — every folded spec is one row
   // with `status='folded'`, title, slug, and an updated_at that's the verified date. Workspace-scoped.
   if (workspaceId) {
-    let folded: SpecRow[];
+    // roadmap-archive-split: the LISTING needs slug + title + date, never a phase — so it reads the
+    // typed archive INDEX (0.10 MB) instead of full SpecRows with their joined phases (5.11 MB
+    // measured across 659 folded specs). See [[specs-table]] `listArchivedSpecIndex` for why this is
+    // a distinct type rather than a phases-less SpecRow.
+    let folded: ArchivedSpecIndexRow[];
     try {
-      folded = await listSpecsFromDb(workspaceId, { status: "folded" });
+      folded = await listArchivedSpecIndex(workspaceId);
     } catch {
       folded = [];
     }
