@@ -32,7 +32,7 @@ Built by `src/lib/shipping-address-journey-builder.ts`:
 
 For each selected target:
 
-- **Subscription** — [[../libraries/commerce__subscription]] `subscriptionUpdateShippingAddress` updates the contract's shipping address. Internal-aware like every commerce-SDK mutation: an internal sub short-circuits, everything else goes to Appstle's `subscription-contracts-update-shipping-address` endpoint. It is NEVER written through Shopify — see [[../operational-rules]] § Subscription mutations.
+- **Subscription** — [[../libraries/commerce__subscription]] `subscriptionUpdateShippingAddress` updates the contract's shipping address. Internal-aware like every commerce-SDK mutation: an internal sub writes `subscriptions.shipping_address` (the SoT the daily renewal cron reads); an Appstle sub hits the vendor's `subscription-contracts-update-shipping-address` endpoint AND mirrors the address onto our row. It is NEVER written through Shopify — see [[../operational-rules]] § Subscription mutations. The journey's completion route (`src/app/api/journey/[token]/complete/route.ts` `POST`) routes through this SDK function rather than a raw vendor PUT, so the internal case actually persists and a genuine vendor failure gets `console.error`'d instead of vanishing into a bare `catch {}` (the defect fixed in Phase 2 of [[../specs/archive.d/internal-sub-write-path-gaps]]).
 - **Order** (unfulfilled only) — [[../integrations/shopify]] `orderUpdateShippingAddress` mutation. If the order is in fulfillment / shipped, we can't change it — flagged earlier in Step 1.
 - **Default address** — [[../integrations/shopify]] `customerUpdate` mutation + write to [[../tables/customers]].`default_address`.
 

@@ -283,48 +283,55 @@ export async function POST(
             }).eq("id", replacementId);
           }
 
-          // Update Appstle subscription address if linked
+          // Push the address to the linked subscription. Routes through the
+          // commerce SDK's subscriptionUpdateShippingAddress so an internal
+          // sub writes the SoT row that renewals read (Phase 1) and an
+          // Appstle sub still hits the vendor. Prior code did a raw vendor
+          // PUT with no internal-vs-Appstle branch and swallowed every
+          // error in a bare `catch {}` — so an internal sub silently kept
+          // shipping to the old address.
           const addrReplacementId = metadata.replacementId as string | null;
           if (addrReplacementId) {
             const { data: rep } = await admin.from("replacements")
               .select("subscription_id").eq("id", addrReplacementId).single();
             if (rep?.subscription_id) {
               const { data: sub } = await admin.from("subscriptions")
-                .select("shopify_contract_id").eq("id", rep.subscription_id).single();
+                .select("shopify_contract_id, customer_id").eq("id", rep.subscription_id).single();
               if (sub?.shopify_contract_id) {
-                try {
-                  // Update Appstle subscription shipping address
-                  const { data: wsCreds } = await admin.from("workspaces")
-                    .select("appstle_api_key_encrypted").eq("id", wsId).single();
-                  if (wsCreds?.appstle_api_key_encrypted) {
-                    const { decrypt } = await import("@/lib/crypto");
-                    const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
-                    const { healOnTouch } = await import("@/lib/appstle-pricing");
-                    await healOnTouch(wsId, String(sub.shopify_contract_id));
-                    // Appstle's GraphQL validator requires countryCode +
-                    // provinceCode (the bare `country`/`province` fields
-                    // alone return a 400 "deliveryMethod.shipping.address.
-                    // countryCode was provided invalid value $UNKNOWN"
-                    // error). See action-executor for the same pattern.
-                    await fetch(
-                      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${sub.shopify_contract_id}`,
-                      {
-                        method: "PUT",
-                        headers: { "X-API-Key": appstleKey, "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          address1: newAddr.street1,
-                          address2: newAddr.street2 || "",
-                          city: newAddr.city,
-                          zip: newAddr.zip,
-                          country: newAddr.country, countryCode: newAddr.country,
-                          province: newAddr.state, provinceCode: newAddr.state,
-                        }),
-                      },
-                    );
-                    actionLog.push("Appstle subscription address updated");
-                  }
-                } catch {
-                  // Non-fatal
+                // Appstle's update-shipping-address requires firstName +
+                // lastName + phone or it 400s. Pull them from the sub's
+                // customer (Dawn McClary bug — see the direct-action branch
+                // above for the same lookup).
+                const custId = (sub.customer_id as string | null) || session.customer_id;
+                const { data: cust } = custId
+                  ? await admin.from("customers")
+                      .select("first_name, last_name, phone").eq("id", custId).maybeSingle()
+                  : { data: null as { first_name?: string | null; last_name?: string | null; phone?: string | null } | null };
+                const { subscriptionUpdateShippingAddress } = await import("@/lib/commerce/subscription");
+                const result = await subscriptionUpdateShippingAddress(
+                  wsId,
+                  String(sub.shopify_contract_id),
+                  {
+                    address1: newAddr.street1,
+                    address2: newAddr.street2 || "",
+                    city: newAddr.city,
+                    zip: newAddr.zip,
+                    country: newAddr.country,
+                    province: newAddr.state,
+                    firstName: cust?.first_name || "",
+                    lastName: cust?.last_name || "",
+                    phone: cust?.phone || "",
+                  },
+                );
+                if (!result.success) {
+                  // Non-fatal for the journey overall, but the prior bare
+                  // `catch {}` hid this for months — log loudly so Vercel
+                  // + Control Tower can see a dropped address change.
+                  console.error(
+                    `[journey/shipping_address] subscriptionUpdateShippingAddress failed for contract ${String(sub.shopify_contract_id)}: ${result.error ?? "unknown"}`,
+                  );
+                } else {
+                  actionLog.push("Subscription address updated");
                 }
               }
             }
