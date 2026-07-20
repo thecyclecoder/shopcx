@@ -16,6 +16,9 @@ Returns refund pipeline: returns/process-delivery (EasyPost delivered → fire i
 - **Trigger:** event `returns/issue-refund`
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 5, key: "event.data.workspace_id" }]`
+- **onFailure:** `returnsIssueRefundOnFailure` — fires ONCE after `retries: 2` exhausts. Reads the return, inserts a single [[../tables/dashboard_notifications]] row (`RETURN_REFUND_EXHAUSTED_TITLE` for money refunds; `RETURN_CREDIT_EXHAUSTED_TITLE` for store credit — routed by `resolution_type`), and emits an `ok:false` reactive heartbeat so the MONITORED_LOOPS `returns-issue-refund` tile picks up the exhaustion in its error-rate signal.
+- **Heartbeat:** end-of-run `emitReactiveHeartbeat("returns-issue-refund", { ok })` in a try/finally — `ok:false` on any thrown step, `ok:true` on success. Registered in `MONITORED_LOOPS` (`src/lib/control-tower/registry.ts`) with `livenessWindowMs = 24 * HOUR`, `errorRateThreshold = 0.5`, `owner = retention`. Node-completeness trio (owner + kill-switch ancestry inherited from the `retention` seat + heartbeat) is satisfied.
+- **Refund/credit failure branches throw** rather than returning `{ success:false }`, so Inngest's `retries: 2` engages. Refunds stay money-moves-once safe under retry via `refundOrder`'s pre-dispatch `order_refunds.request_key` guard.
 
 
 ## Downstream events sent

@@ -36,7 +36,9 @@ Uses the `@easypost/api` npm SDK (no raw HTTP). The SDK targets `https://api.eas
 
 Inbound tracking webhook → handler verifies `easypost_webhook_secret` → matches by `easypost_shipment_id` → updates [[../tables/returns]].`status` / `delivered_at` / `tracking_status`.
 
-**On `delivered` event:** fires Inngest `returns/process-delivery` → [[../inngest/returns]] → instantly fires `returns/issue-refund`. No 24h wait, no inventory dispose.
+**On `delivered` OR `available_for_pickup` event:** fires Inngest `returns/process-delivery` → [[../inngest/returns]] → instantly fires `returns/issue-refund`. No 24h wait, no inventory dispose. Phase 2 fix — `available_for_pickup` (USPS post-office / locker delivery) used to stamp the return as delivered but never fire the event (guaranteed-stuck refund); the dispatch now checks a `DELIVERED_TRACKER_STATUSES` set so both statuses converge on one dispatch site.
+
+**Fail-loud webhook.** The route uses the `inngest` client (not a raw `fetch` to `https://inn.gs/e/<key>` — that gap silently swallowed dispatch failures + returned 200 so EasyPost never retried), checks the returns-update error and returns 500 on failure, and returns 500 on any `inngest.send` throw so EasyPost's own retry policy engages. `src/app/api/webhooks/easypost/route.ts`.
 
 ## Gotchas
 

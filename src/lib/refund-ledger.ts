@@ -160,6 +160,56 @@ export function computeRefundLedger(
   };
 }
 
+/**
+ * Pure branch decider for the Phase-1 self-healing return-refund rail.
+ *
+ * Given the live ledger + the return's stored `net_refund_cents` contract,
+ * returns which branch `returnsIssueRefund` should take BEFORE dispatching
+ * a refund. Extracted from src/lib/inngest/returns.ts so the branching
+ * logic is unit-testable without spinning up Inngest / Supabase / Shopify.
+ *
+ * - `stamp_out_of_band` — the money already moved outside ShopCX
+ *   (refundable is 0 AND enough has been refunded to cover the contract).
+ *   Caller stamps the return with `refund_id='out_of_band_shopify'`
+ *   and issues NO refund. (SC130193.)
+ * - `cap_to_ledger` — the gateway still has room, but less than the
+ *   contract. Caller refunds `refundCents` (the ceiling) and records
+ *   `shortfallCents` on the return row for audit. (SC133086 / SC129432.)
+ * - `refund_full_contract` — refundable meets or exceeds the contract,
+ *   OR the ledger was unreadable (Phase 1 does not add new failure
+ *   modes — an unknown ledger falls through to today's behaviour;
+ *   Phase 2 will make failures loud). Caller refunds `refundCents`
+ *   (== netRefundCents) unchanged.
+ *
+ * Contract vs ceiling: `netRefundCents` is the INTENT (set at return
+ * creation, never raised). This decider only ever LOWERS what the
+ * rail dispatches — the return-creation stored contract stays the
+ * source of intent.
+ */
+export type RefundReconcileDecision =
+  | { branch: "stamp_out_of_band"; refundedCents: number }
+  | { branch: "cap_to_ledger"; refundCents: number; shortfallCents: number }
+  | { branch: "refund_full_contract"; refundCents: number };
+
+export function decideRefundReconcile(
+  ledger: OrderRefundLedger,
+  netRefundCents: number,
+): RefundReconcileDecision {
+  if (ledger.ok) {
+    if (ledger.refundableCents === 0 && ledger.refundedCents >= netRefundCents) {
+      return { branch: "stamp_out_of_band", refundedCents: ledger.refundedCents };
+    }
+    if (ledger.refundableCents > 0 && ledger.refundableCents < netRefundCents) {
+      return {
+        branch: "cap_to_ledger",
+        refundCents: ledger.refundableCents,
+        shortfallCents: netRefundCents - ledger.refundableCents,
+      };
+    }
+  }
+  return { branch: "refund_full_contract", refundCents: netRefundCents };
+}
+
 function amountToCents(amount: string | number | null | undefined): number {
   if (amount == null) return 0;
   const n = typeof amount === "number" ? amount : parseFloat(String(amount));
