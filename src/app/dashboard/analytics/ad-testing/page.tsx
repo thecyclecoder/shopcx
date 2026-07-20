@@ -144,7 +144,7 @@ export default function AdTestingDashboard() {
   const t = data?.thresholds;
 
   return (
-    <div className="mx-auto max-w-6xl p-6">
+    <div className="mx-auto w-full max-w-6xl p-4 sm:p-6">
       <div className="mb-1 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">Ad Testing</h1>
         {data && <span className="text-xs text-slate-400">as of {new Date(data.generatedAt).toLocaleString()}</span>}
