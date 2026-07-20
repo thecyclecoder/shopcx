@@ -13,14 +13,18 @@ alter table public.creative_skeletons
   add column if not exists do_not_use_by     text,  -- 'ceo' | 'max' | actor id
   add column if not exists do_not_use_at     timestamptz;
 
+-- NOTE: `comment on ... is` takes a string LITERAL, not an expression — a `||` here is a parse
+-- error (42601) that leaves the migration version unrecorded, so migration-drift re-runs the file
+-- every tick forever. The newlines below already concatenate these literals (SQL-standard
+-- continuation); no operator is needed. Guarded by scripts/_check-sql-comment-literals.ts.
 comment on column public.creative_skeletons.do_not_use is
-  'flag-a-competitor-ad-do-not-use Phase 1: per-ad exclusion. When true, queryProvenAngles ' ||
-  'in src/lib/ads/creative-sourcing.ts filters this row out of imitation-angle selection so ' ||
-  'Dahlia never riffs on a lame competitor ad. Preserved across scout re-observation ' ||
+  'flag-a-competitor-ad-do-not-use Phase 1: per-ad exclusion. When true, queryProvenAngles '
+  'in src/lib/ads/creative-sourcing.ts filters this row out of imitation-angle selection so '
+  'Dahlia never riffs on a lame competitor ad. Preserved across scout re-observation '
   '(ingestAd upsert + reobserveAd leave the column untouched by design).';
 comment on column public.creative_skeletons.do_not_use_by is
-  'who flagged this ad — ''ceo'' for a manual CEO flag from the competitor library, ''max'' ' ||
-  'for the Phase-3 imitation-quality grader''s auto-flag (still surfaced for CEO review — ' ||
+  'who flagged this ad — ''ceo'' for a manual CEO flag from the competitor library, ''max'' '
+  'for the Phase-3 imitation-quality grader''s auto-flag (still surfaced for CEO review — '
   'never a silent proxy-optimizer).';
 
 -- Partial index so the queryProvenAngles filter (`do_not_use = false`) doesn't have to scan
