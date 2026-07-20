@@ -24,6 +24,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { closeReturn } from "@/lib/shopify-returns";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 
+// Phase 2 escalation copy centralised so the tests can pin it and the
+// onFailure handler + Phase 3 sweep can share the same wording.
+export const RETURN_REFUND_EXHAUSTED_TITLE =
+  "Return refund exhausted retries — manual action needed";
+export const RETURN_CREDIT_EXHAUSTED_TITLE =
+  "Return store credit exhausted retries — manual action needed";
+
 // ── returns/process-delivery ──
 // Triggered by EasyPost webhook when tracker → delivered. Verifies
 // status and instantly fires the refund event. No 24h wait. No
@@ -94,8 +101,21 @@ export const returnsIssueRefund = inngest.createFunction(
     retries: 2,
     concurrency: [{ limit: 5, key: "event.data.workspace_id" }],
     triggers: [{ event: "returns/issue-refund" }],
+    // Phase 2 — on retry exhaustion, escalate as a founder-visible
+    // dashboard notification instead of letting the failed refund sit
+    // silently. See `RETURN_REFUND_EXHAUSTED_TITLE` above (same wording
+    // Phase 3's daily sweep looks for). Also emits an ok:false
+    // heartbeat so the MONITORED_LOOPS `returns-issue-refund` tile
+    // rolls the exhaustion into its error rate.
+    onFailure: returnsIssueRefundOnFailure,
   },
   async ({ event, step }) => {
+    // Control Tower: end-of-run heartbeat (try/finally — ok:false on throw).
+    // A refund-failure branch throws so Inngest `retries: 2` engages; each
+    // in-flight throw also beats ok:false so the error-rate is visible
+    // before onFailure fires.
+    let __ctOk = true;
+    try {
     const { workspace_id, return_id } = event.data as {
       workspace_id: string;
       return_id: string;
@@ -260,15 +280,13 @@ export const returnsIssueRefund = inngest.createFunction(
           updated_at: new Date().toISOString(),
         }).eq("id", return_id);
       } else {
-        await step.run("notify-credit-failed", async () => {
-          await admin.from("dashboard_notifications").insert({
-            workspace_id,
-            type: "system",
-            title: `Store credit issuance failed — manual action needed`,
-            body: `Return ${return_id} (${ret.order_number}) was delivered but storeCreditAccountCredit failed: ${creditResult.error}`,
-            metadata: { type: "return_credit_failed", return_id, error: creditResult.error },
-          });
-        });
+        // Phase 2 — throw so Inngest `retries: 2` engages. The per-attempt
+        // dashboard row was silently spamming on every retry; the
+        // exhaustion escalation lives in onFailure now (single row on
+        // final failure, not one per attempt).
+        throw new Error(
+          `Return store credit failed for return ${return_id} (${ret.order_number}): ${creditResult.error ?? "unknown error"}`,
+        );
       }
     } else {
       const refundResult = await step.run("issue-refund", async () => {
@@ -320,15 +338,15 @@ export const returnsIssueRefund = inngest.createFunction(
           });
         }
       } else {
-        await step.run("notify-refund-failed", async () => {
-          await admin.from("dashboard_notifications").insert({
-            workspace_id,
-            type: "system",
-            title: `Return refund failed — manual action needed`,
-            body: `Return ${return_id} (${ret.order_number}) was delivered but the refund failed: ${refundResult.error}`,
-            metadata: { type: "return_refund_failed", return_id, error: refundResult.error },
-          });
-        });
+        // Phase 2 — throw so Inngest `retries: 2` engages. Per-attempt
+        // dashboard rows are gone; the exhaustion escalation lives in
+        // onFailure (single row on final failure). Refunds are idempotent
+        // (refundOrder pre-dispatch guard on order_refunds request_key)
+        // so a retry can only succeed or return `success:false` again —
+        // it can NEVER double-pay.
+        throw new Error(
+          `Return refund failed for return ${return_id} (${ret.order_number}): ${refundResult.error ?? "unknown error"}`,
+        );
       }
     }
 
@@ -366,5 +384,76 @@ export const returnsIssueRefund = inngest.createFunction(
     }
 
     return { success: valueIssued, return_id, summary: issuedSummary };
+    } catch (e) {
+      __ctOk = false;
+      throw e;
+    } finally {
+      await emitReactiveHeartbeat("returns-issue-refund", { ok: __ctOk });
+    }
   },
 );
+
+// ── Phase 2 onFailure handler ────────────────────────────────────
+// Fires ONCE after `retries: 2` exhausts. Reads the return + escalates
+// as a dashboard notification the operator can act on (fix the underlying
+// gateway condition then re-fire `returns/issue-refund`, or stamp
+// out-of-band if the money has moved). Also emits an ok:false heartbeat
+// so the Control Tower tile rolls the exhaustion into its error-rate
+// signal (a permanently-failing refund shows up in aggregate, not just
+// as a single dashboard row).
+//
+// Exported for the unit test — the Inngest FailureEventArgs type ships
+// the original event under `event.data.event`, so pull the return_id +
+// workspace_id back out from there.
+export async function returnsIssueRefundOnFailure(args: {
+  event: { data: { event?: { data?: { workspace_id?: string; return_id?: string } } } };
+  error: Error;
+}): Promise<void> {
+  const orig = args.event?.data?.event?.data ?? {};
+  const workspace_id = orig.workspace_id ?? "";
+  const return_id = orig.return_id ?? "";
+  if (!workspace_id || !return_id) {
+    // Nothing actionable to escalate without the id pair. Still beat
+    // so a broken payload shape shows up in the loop's error rate.
+    await emitReactiveHeartbeat("returns-issue-refund", { ok: false });
+    return;
+  }
+
+  const admin = createAdminClient();
+  const { data: ret } = await admin
+    .from("returns")
+    .select("id, order_number, net_refund_cents, resolution_type, order_id")
+    .eq("id", return_id)
+    .eq("workspace_id", workspace_id)
+    .maybeSingle();
+
+  const isStoreCredit = String(ret?.resolution_type ?? "").includes("store_credit");
+  const title = isStoreCredit ? RETURN_CREDIT_EXHAUSTED_TITLE : RETURN_REFUND_EXHAUSTED_TITLE;
+  const orderTag = ret?.order_number ?? `id ${return_id}`;
+  const amount =
+    typeof ret?.net_refund_cents === "number"
+      ? `$${(ret.net_refund_cents / 100).toFixed(2)}`
+      : "unknown";
+  const body =
+    `Return ${orderTag} — net_refund_cents ${amount} — failed after Inngest retries. ` +
+    `Error: ${args.error.message}. ` +
+    `Investigate the order's gateway ledger (getOrderRefundLedger in src/lib/refund-ledger.ts) ` +
+    `and either fix the underlying gateway condition + re-fire returns/issue-refund ` +
+    `{ workspace_id: ${workspace_id}, return_id: ${return_id} }, ` +
+    `or stamp the return manually if the money has moved out of band.`;
+
+  await admin.from("dashboard_notifications").insert({
+    workspace_id,
+    type: "system",
+    title,
+    body,
+    metadata: {
+      type: isStoreCredit ? "return_credit_exhausted" : "return_refund_exhausted",
+      return_id,
+      order_number: ret?.order_number,
+      net_refund_cents: ret?.net_refund_cents,
+      error: args.error.message,
+    },
+  });
+  await emitReactiveHeartbeat("returns-issue-refund", { ok: false });
+}

@@ -110,11 +110,11 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
    - Update [[../tables/returns]] `status='refunded'`, `refunded_at=now()`, `refund_id`, `refund_method`.
    - Send confirmation email via `sendReturnConfirmationEmail` ([[../integrations/resend]]).
    - Write [[../tables/customer_events]] event `return.refunded`.
-7. **On failure**:
-   - The most common failure is `Braintree::AuthenticationError` when Shopify-side refund hits a stale gateway connection.
-   - Insert [[../tables/dashboard_notifications]] "Return refund failed — manual action needed" with the error detail and a link to the ticket.
-   - Don't retry blindly — the issue usually needs admin attention (re-auth a gateway, manually refund via Shopify Admin).
-   - Manual fix path: refund via Shopify Admin → set `returns.refund_id='manual-braintree'` → re-fire the email send (or it'll re-fire on next manual return state change).
+7. **On failure (Phase 2 — throw, don't return):**
+   - The refund and store-credit failure branches THROW instead of writing a per-attempt dashboard row, so Inngest's `retries: 2` engages (refunds stay money-moves-once safe via `refundOrder`'s pre-dispatch `order_refunds.request_key` guard).
+   - The `returnsIssueRefund` `onFailure` handler fires ONCE after retries exhaust, inserting a single [[../tables/dashboard_notifications]] row with title `Return refund exhausted retries — manual action needed` (or `Return store credit exhausted retries — manual action needed`, routed by the return's `resolution_type`) with the error detail, and emits an `ok:false` reactive heartbeat so the MONITORED_LOOPS `returns-issue-refund` tile rolls the exhaustion into its error-rate signal.
+   - `MONITORED_LOOPS` now carries a `returns-issue-refund` entry (kind `reactive`, owner `retention`, `livenessWindowMs = 24h`) — before Phase 2, the function that actually moved money had no monitoring at all.
+   - Manual fix path: investigate the order's gateway ledger (`getOrderRefundLedger` in [[../libraries/refund-ledger]]) and either fix the underlying gateway condition + re-fire `returns/issue-refund { workspace_id, return_id }`, or stamp the return manually if the money has moved out of band (Phase 1's `refund_id='out_of_band_shopify'` sentinel).
 
 ## Free-label vs customer-pays-shipping
 
