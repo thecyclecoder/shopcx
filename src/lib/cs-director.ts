@@ -309,6 +309,21 @@ export function planRemedyExecution(
 }
 
 /**
+ * Can `raiseFounderApproval` open a one-tap Approve card for this remedy? True iff
+ * `planRemedyExecution` succeeds — the identical guard `executeApprovedJuneRemedies` would
+ * apply the instant the founder taps Approve. Kept as a THIN wrapper (single delegation, no
+ * additional logic) so the predicate cannot drift from the executor: any new planner rejection
+ * reason automatically propagates, and there is nowhere for a "we think it's fine" branch to
+ * hide. `raiseFounderApproval` calls this BEFORE resolving/arming a cockpit session, because
+ * `armSession` is what sends the founder's "tap in" SMS — a false page for a card that will
+ * never open (observed 2026-07-20: the founder was texted, tapped into an empty cockpit, and
+ * the session recorded zero approval cards). See docs/brain/libraries/june-remedy-approval.
+ */
+export function canOfferOneTapApproval(remedy: Record<string, unknown> | null | undefined): boolean {
+  return planRemedyExecution(remedy).ok;
+}
+
+/**
  * Build the `SonnetDecision` we hand to `executeSonnetDecision`. Always `action_type:'direct_action'`
  * with the plan's FULL ordered `actions[]` (executeSonnetDecision already accepts a batch and runs
  * them in sequence); NEVER carries `response_message` (the customer message is delivered AFTER the
