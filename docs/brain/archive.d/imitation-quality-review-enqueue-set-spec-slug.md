@@ -1,0 +1,1 @@
+- **Stamp origin spec_slug on imitation-quality-review agent_jobs enqueue** · verified 2026-07-20 · → [[../libraries/imitation-quality-review]]
