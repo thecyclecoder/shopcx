@@ -106,7 +106,13 @@ export default function PullToRefresh({ children }: { children: ReactNode }) {
         </div>
       )}
       {/* Content shifted down during pull — key forces full remount on refresh */}
-      <div key={refreshKey} className="flex h-full flex-col" style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
+      {/* [&>*]:w-full [&>*]:min-w-0 — the page content is a flex item on this column's CROSS axis, where
+          `min-width:auto` lets it size to its own min-content (e.g. a data table) instead of the viewport,
+          so it renders WIDER than the phone and the scroll container's `overflow-x-hidden` clips the right
+          edge (invisible on mobile). `min-w-0` does NOT fix a cross-axis item; `w-full` pins every dashboard
+          page to the container width so its content wraps/truncates to fit. See the mobile-dashboard-design
+          skill. Verified at 320/390/1280px with a Playwright overflow probe. */}
+      <div key={refreshKey} className="flex h-full flex-col [&>*]:min-w-0 [&>*]:w-full" style={{ transform: pulling ? `translateY(${pullDistance}px)` : "none", transition: pulling ? "none" : "transform 0.2s ease" }}>
         {children}
       </div>
     </div>
