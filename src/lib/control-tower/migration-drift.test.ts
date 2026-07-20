@@ -16,6 +16,7 @@ import {
   computeDrift,
   computeMergedButUnapplied,
   extractMigrationVersion,
+  detectDuplicateLocalVersions,
   runMigrationDriftCheck,
   applyMergedMigrations,
   anyApplied,
@@ -639,6 +640,7 @@ test("driftSummary — the outcome tail names an already-applied count when the 
       { ...ADDITIVE_INDEX, outcome: "applied", severity: "additive", matches: [] },
     ],
     appliedNotOnMain: [],
+    duplicateVersions: [],
     expectedCount: 0,
     liveCount: 0,
     parsedFiles: 0,
@@ -772,6 +774,7 @@ test("driftSummary — with Phase 2 outcomes populated, the summary tail names t
       { ...DESTRUCTIVE_DROP, outcome: "approval-needed", severity: "irreversible_destructive", matches: ["DROP TABLE"] },
     ],
     appliedNotOnMain: [],
+    duplicateVersions: [],
     expectedCount: 0,
     liveCount: 0,
     parsedFiles: 0,
@@ -780,6 +783,144 @@ test("driftSummary — with Phase 2 outcomes populated, the summary tail names t
   });
   assert.match(summary, /1 applied/);
   assert.match(summary, /1 approval-needed/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// migration-drift-detect-duplicate-14-digit-version-collisions spec Phase 1 —
+// Two supabase/migrations/*.sql files sharing the SAME 14-digit YYYYMMDDNNNNNN prefix silently
+// dedupe on the applied-set axis (schema_migrations.version is unique) and the loser's DDL never
+// runs. detectDuplicateLocalVersions surfaces the collision as drift so the tile red-flags it
+// instead of silently dropping the loser (the media_buyer_cohort_excluded_all_customers_audience
+// regression).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("detectDuplicateLocalVersions — two files sharing a 14-digit prefix are returned as a collision group (media_buyer regression pin)", () => {
+  const files = [
+    "20261026120000_ad_creative_copy_qc_verdicts_scroll_stop.sql",
+    "20261026120000_media_buyer_cohort_excluded_all_customers_audience.sql",
+    "20261026130000_media_buyer_all_customers_refresh_runs.sql", // different prefix — not a collision.
+  ];
+  assert.deepEqual(detectDuplicateLocalVersions(files), [
+    {
+      version: "20261026120000",
+      files: [
+        "20261026120000_ad_creative_copy_qc_verdicts_scroll_stop.sql",
+        "20261026120000_media_buyer_cohort_excluded_all_customers_audience.sql",
+      ],
+    },
+  ]);
+});
+
+test("detectDuplicateLocalVersions — a healthy repo (all unique 14-digit prefixes) returns an empty array", () => {
+  const files = [
+    "20260917120000_create_order_refunds.sql",
+    "20260918120000_order_refunds_mirror.sql",
+    "20260919120000_cs_director_grader_anti_goodhart_clause.sql",
+  ];
+  assert.deepEqual(detectDuplicateLocalVersions(files), []);
+});
+
+test("detectDuplicateLocalVersions — off-format files (no 14-digit prefix) cannot collide via the versioned index and are skipped", () => {
+  const files = [
+    "20260917120000_create_order_refunds.sql",
+    "_PENDING_meta_comments_retire_channel.sql",
+    "_PENDING_other_scratch.sql", // two off-format files — MUST NOT be reported as a "collision"
+  ];
+  assert.deepEqual(detectDuplicateLocalVersions(files), []);
+});
+
+test("detectDuplicateLocalVersions — three files sharing a prefix produce one group with all three files (files-within-group sorted lexically)", () => {
+  const files = [
+    "20261026120000_z_last.sql",
+    "20261026120000_a_first.sql",
+    "20261026120000_m_middle.sql",
+  ];
+  assert.deepEqual(detectDuplicateLocalVersions(files), [
+    {
+      version: "20261026120000",
+      files: [
+        "20261026120000_a_first.sql",
+        "20261026120000_m_middle.sql",
+        "20261026120000_z_last.sql",
+      ],
+    },
+  ]);
+});
+
+test("detectDuplicateLocalVersions — multiple colliding prefixes are returned sorted by version", () => {
+  const files = [
+    "20261026120000_b.sql",
+    "20261026120000_a.sql",
+    "20260101000000_x.sql",
+    "20260101000000_y.sql",
+  ];
+  assert.deepEqual(detectDuplicateLocalVersions(files), [
+    { version: "20260101000000", files: ["20260101000000_x.sql", "20260101000000_y.sql"] },
+    { version: "20261026120000", files: ["20261026120000_a.sql", "20261026120000_b.sql"] },
+  ]);
+});
+
+test("runMigrationDriftCheck — two files sharing a 14-digit prefix flip status to 'drift' via the duplicateVersions axis (even when table-presence + applied-set are clean)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
+  try {
+    writeFileSync(
+      join(dir, "20261026120000_ad_creative_copy_qc_verdicts_scroll_stop.sql"),
+      `alter table public.ad_creative_copy_qc_verdicts add column if not exists scroll_stop text;`,
+    );
+    writeFileSync(
+      join(dir, "20261026120000_media_buyer_cohort_excluded_all_customers_audience.sql"),
+      `alter table public.media_buyer_test_cohorts add column if not exists excluded_all_customers_audience_id text;`,
+    );
+    // Live schema has every expected table AND the applied set knows both a version (which the
+    // reconcile keys on) — but the duplicateVersions axis MUST still surface the collision.
+    const result = await runMigrationDriftCheck({
+      migrationsDir: dir,
+      fetchLiveTables: async () => ["ad_creative_copy_qc_verdicts", "media_buyer_test_cohorts"],
+      fetchAppliedVersions: async () => ["20261026120000"],
+    });
+    assert.equal(result.status, "drift");
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.mergedButUnapplied, []); // applied-set says the version is present — the silent-drop case.
+    assert.deepEqual(result.duplicateVersions, [
+      {
+        version: "20261026120000",
+        files: [
+          "20261026120000_ad_creative_copy_qc_verdicts_scroll_stop.sql",
+          "20261026120000_media_buyer_cohort_excluded_all_customers_audience.sql",
+        ],
+      },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("driftSummary — a duplicateVersions entry produces a 'duplicate version' parts entry (the tile detail text)", () => {
+  const summary = driftSummary({
+    status: "drift",
+    missing: [],
+    allowlistedMissing: [],
+    mergedButUnapplied: [],
+    appliedNotOnMain: [],
+    duplicateVersions: [
+      {
+        version: "20261026120000",
+        files: [
+          "20261026120000_ad_creative_copy_qc_verdicts_scroll_stop.sql",
+          "20261026120000_media_buyer_cohort_excluded_all_customers_audience.sql",
+        ],
+      },
+    ],
+    expectedCount: 0,
+    liveCount: 0,
+    parsedFiles: 2,
+    appliedCount: 1,
+    appliedCheckSkipped: false,
+  });
+  assert.match(summary, /1 duplicate version:/);
+  assert.match(summary, /20261026120000/);
+  assert.match(summary, /ad_creative_copy_qc_verdicts_scroll_stop\.sql/);
+  assert.match(summary, /media_buyer_cohort_excluded_all_customers_audience\.sql/);
 });
 
 // Helper for the tmpdir-fixture reconcile test — the tests use writeFileSync so a sync read is fine.
