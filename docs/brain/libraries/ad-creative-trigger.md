@@ -14,7 +14,7 @@ This SDK **always** enqueues the latter (`AD_CREATIVE_SESSION_KIND`), so a trigg
 
 | Export | What |
 |---|---|
-| `triggerAdGeneration(admin, {workspaceId, productId, temperature?, count?, reason?, competitorSkeletonId?})` | Enqueues one `ad-creative-copy-author` job → returns `{jobId, kind, productId, temperature, count, competitorSkeletonId?}`. **Manual/explicit trigger** — does NOT consult the ad-creative kill switch (a human asking for one ad ≠ the autonomous cadence). |
+| `triggerAdGeneration(admin, {workspaceId, productId, temperature?, count?, reason?, competitorSkeletonId?, notes?})` | Enqueues one `ad-creative-copy-author` job → returns `{jobId, kind, productId, temperature, count, competitorSkeletonId?}`. **Manual/explicit trigger** — does NOT consult the ad-creative kill switch (a human asking for one ad ≠ the autonomous cadence). `notes` = the owner's free-text directions for THIS ad ("remove the free tote badge"), threaded to `brief.authorNotes` (image + copy prompts) so it lands first-pass. |
 | `buildAdGenerationInstructions(input)` | PURE — the instructions payload the runner reads. Unit-tested. Defaults: `temperature: "cold"`, `count: 1`. Emits `competitor_skeleton_id` only when pinned (no null pollution). |
 | `AD_CREATIVE_SESSION_KIND` | `"ad-creative-copy-author"` — the box-session-forcing kind. |
 | `AdAudienceTemperature` | `"cold" \| "warm" \| "hot"`. |

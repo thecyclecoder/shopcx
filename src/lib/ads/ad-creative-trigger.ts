@@ -34,6 +34,10 @@ export interface TriggerAdGenerationInput {
   count?: number;
   /** Optional provenance note stamped on the job instructions (e.g. "ceo-manual-guru-focus"). */
   reason?: string;
+  /** Optional — the owner's free-text directions for THIS ad ("remove the free tote badge", "lead
+   *  with the focus benefit"). Threaded to `stockProduct` → `brief.authorNotes` so both the image
+   *  prompt and the copy-author prompt apply it first-pass, skipping rounds of manual editing. */
+  notes?: string;
   /** Optional — pin a SPECIFIC competitor ad (a `creative_skeletons.id`) as the imitation base.
    *  "Find an ad I like, make one like this." When set, `stockProduct` uses THAT exact skeleton as
    *  the sole competitor angle — bypassing the shelf ranking, the cold/warm temperature exclusion,
@@ -55,6 +59,9 @@ export interface AdGenerationInstructions {
    *  `runAdCreativeCopyAuthorJob` and threaded into `runAdCreativeLoop` → `stockProduct` as
    *  `pinnedCompetitorSkeletonId`. Omitted ⇒ Dahlia ranks the whole shelf. */
   competitor_skeleton_id?: string;
+  /** The owner's free-text directions for THIS ad — threaded into `runAdCreativeLoop`
+   *  (`authorNotes`) → `brief.authorNotes` (image + copy prompts). Omitted ⇒ no note. */
+  notes?: string;
 }
 
 export interface TriggerAdGenerationResult {
@@ -70,7 +77,7 @@ export interface TriggerAdGenerationResult {
 /** PURE — build the instructions payload for a box-session ad-generation job. Exported + unit-tested
  *  so the shape the runner depends on is pinned without a DB. Defaults: temperature `cold`, count 1. */
 export function buildAdGenerationInstructions(
-  input: Pick<TriggerAdGenerationInput, "productId" | "temperature" | "count" | "reason" | "competitorSkeletonId">,
+  input: Pick<TriggerAdGenerationInput, "productId" | "temperature" | "count" | "reason" | "competitorSkeletonId" | "notes">,
 ): AdGenerationInstructions {
   const instr: AdGenerationInstructions = {
     product_id: input.productId,
@@ -79,6 +86,8 @@ export function buildAdGenerationInstructions(
   };
   if (input.reason) instr.trigger_reason = input.reason;
   if (input.competitorSkeletonId) instr.competitor_skeleton_id = input.competitorSkeletonId;
+  const notes = input.notes?.trim();
+  if (notes) instr.notes = notes;
   return instr;
 }
 
