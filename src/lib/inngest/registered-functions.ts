@@ -77,6 +77,7 @@ import { metaCapiDispatchCron } from "@/lib/inngest/meta-capi-dispatch";
 import { popupCouponFallback } from "@/lib/inngest/popup-coupon-fallback";
 import { popupSmsDeliveryFallback } from "@/lib/inngest/popup-sms-delivery-fallback";
 import { returnsProcessDelivery, returnsIssueRefund } from "@/lib/inngest/returns";
+import { returnsReconcileSweep } from "@/lib/inngest/returns-reconcile-sweep";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
 import { unansweredInboundBackstopCron } from "@/lib/inngest/unanswered-inbound-backstop-cron";
@@ -249,6 +250,7 @@ export const registeredInngestFunctions = [
   unifiedTicketHandler,
   returnsProcessDelivery,
   returnsIssueRefund,
+  returnsReconcileSweep,
   deliveryNightlyAudit,
   deliverPendingSends,
   unansweredInboundBackstopCron,

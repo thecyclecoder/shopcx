@@ -1071,6 +1071,28 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     minRunsForErrorRate: 5,
   },
   {
+    // Self-healing return refunds Phase 3 — the daily reconcile sweep
+    // that catches everything the reactive rails missed (a webhook that
+    // never arrived, a gateway blip, a human that flipped a delivery
+    // through a path that fires no event). Cadence + liveness satisfy
+    // the CLAUDE.md monitor-cadence invariant (daily → 30h window).
+    // Node-completeness trio: owner (retention) + kill-switch ancestry
+    // inherited from the retention seat + end-of-run heartbeat via
+    // `emitCronHeartbeat("returns-reconcile-sweep", ...)` in
+    // src/lib/inngest/returns-reconcile-sweep.ts (try/finally,
+    // ok:false on throw).
+    id: "returns-reconcile-sweep",
+    kind: "cron",
+    owner: "retention",
+    label: "Returns — daily reconcile sweep",
+    description:
+      "Finds delivered+unrefunded returns (reconciles vs the live gateway ledger — stamps out-of-band or re-drives returns/issue-refund) AND label_created/in_transit returns aged past 14d (probes EasyPost; promotes to delivered or escalates). Emits { swept, healed, redriven, escalated } counts on its heartbeat so a zero-work run is distinguishable from a broken one.",
+    expectedCadence: "daily (0 6 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 3,
+  },
+  {
     id: "journey-session-completed",
     kind: "reactive",
     owner: "retention",

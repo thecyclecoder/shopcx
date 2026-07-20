@@ -79,6 +79,7 @@ const { data } = await admin.from("returns")
   .eq("status", "delivered")
   .is("refunded_at", null);
 ```
+The Phase-3 [[../inngest/returns-reconcile-sweep]] cron runs this query daily (adding `.not("easypost_shipment_id", "is", null)` to scope to returns we own the refund for) and reconciles each hit against the live gateway ledger.
 
 ### Failed-refund returns needing manual action
 ```ts
