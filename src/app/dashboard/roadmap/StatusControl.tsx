@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
 
-// spec-review-agent Phase 4 — `in_review` is a CEO BOARD CONTROL: send a spec back to Vale's queue when
+// spec-review-agent Phase 4 — `in_review` is a CEO BOARD CONTROL: send a spec back for re-disposition when
 // it's malformed/off, regardless of where it currently sits. The route clears vale_pass / ada_disposition /
 // intended_status so the next Vale + Ada pass start clean. Phases never carry `in_review` — it's a
 // card-level target only.
@@ -23,7 +23,7 @@ const OPTS: { key: StatusKey; label: string; active: string; title?: string }[] 
  * Renders nothing for non-owners.
  *
  * spec-review-agent Phase 4: the **In Review** segment is the CEO board control for sending a
- * malformed/off spec back to Vale's queue (the route fast-paths through markSpecCardBackToReview,
+ * malformed/off spec back for re-disposition (the route fast-paths through markSpecCardBackToReview,
  * which consumes the prior Vale-pass / Ada-disposition signals so the re-review starts clean).
  */
 // `status` may be `deferred` (the Deferred column) — no segment is then active; flipping to a phase status

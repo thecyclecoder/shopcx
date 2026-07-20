@@ -5751,7 +5751,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // partially-built spec Ada drives whose NEXT planned phase has no live build, and REUSE
     // `queueNextChainedPhase` (workspace-correct; picks the lowest planned phase = accumulation order; dedupes
     // on scoped-instruction + in-flight build) to queue it onto `claude/build-{slug}`. Respects the spec-review
-    // gate (never advances an un-Vale-passed spec), one-phase-per-session, and the active-build dedupe.
+    // gate (the Vale leg is retired — see specReviewDone), one-phase-per-session, and the active-build dedupe.
     // Idempotent + best-effort; never throws.
     const prog = await lib.backstopPhaseProgression(db);
     for (const slug of prog.advanced) backstopAdvancedSlugs.add(slug);
@@ -6149,7 +6149,7 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
 //
 // Every check reads DERIVED status via the brain-roadmap rollup (`getSpec` → card.status / card.phases /
 // card.valePass / card.blockedBy[].cleared) — NEVER the stored `specs.status` column — and every PM write
-// goes through the SDK (enqueueSpecReviewIfDue / the requeue `update`), so the _check-pm-sdk-compliance
+// goes through the SDK (the requeue `update`), so the _check-pm-sdk-compliance
 // guard stays green. `reconcileMilestoneSequence` + the director escort remain the backstop that re-releases
 // a held build as its blockers ship; this gate is the front door that stops the premature claim in the
 // first place. Implements docs/brain/specs/claim-time-build-gate.md.
@@ -6284,16 +6284,6 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
 
 // ── no-max-on-unreviewed-specs (BACKSTOP) ── RETIRED.
 // This claim-SELECTION hard-skip used to refuse to LAUNCH a build whose spec hadn't passed the Vale LLM
-// spec-review, to avoid burning a Max session on an un-reviewed spec. The Vale LLM lane is retired
-// (retire-vale-spec-review-becomes-deterministic-authoring-gate): well-formedness is now enforced
-// DETERMINISTICALLY at the AUTHORING chokepoint (`assertSpecReviewGate`), so a spec that exists as a row is
-// already validated and there is no `vale_review_passed_at` to wait on (nothing stamps it anymore). Left as a
-// no-op (returning false = never hold) so the single call site stays harmless; the enclosing gate
-// (evaluateClaimTimeBuildGate) no longer carries a Vale leg either. Retaining the function keeps the diff
-// minimal and preserves the fail-open contract its caller expects.
-async function claimHeldForUnreviewedSpec(_job: Job): Promise<boolean> {
-  return false; // Vale review requirement retired — a well-formed (author-time-gated) spec is build-eligible.
-}
 
 // board-grooming (Phase 1): the director MOVES the project board. For each PARTIALLY-shipped spec (≥1 ✅,
 // remaining ⏳, no active build) it runs a read-only Max investigation that classifies the leftover phases:
@@ -26995,7 +26985,6 @@ async function main() {
           // no-max-on-unreviewed-specs (BACKSTOP): hard-skip an un-Vale-reviewed build BEFORE launch() spins up a
           // Max session. The held job is re-queued with a future claimed_at cooldown (the RPC skips it until then),
           // so we `continue` to claim the NEXT job without re-handing this one — no infinite loop, no session spent.
-          if (await claimHeldForUnreviewedSpec(job)) continue;
           // box-serial-claim-cooldown-wedge-guard Phase 1 — SYNCHRONOUS pre-launch serial-claim
           // decision. The goal-member serializer used to run INSIDE runBuild (async, fire-and-
           // forget from launch), so on a "held" verdict the cooldown write raced the next
