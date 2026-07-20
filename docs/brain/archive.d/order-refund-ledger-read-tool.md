@@ -1,0 +1,1 @@
+- **Give Sol and June a live Shopify refund-ledger read (out-of-band refunds become visible)** · verified 2026-07-20 · → [[libraries/refund-ledger]]
