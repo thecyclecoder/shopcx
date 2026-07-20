@@ -29,7 +29,7 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
-import { listSpecs, type SpecRow } from "@/lib/specs-table";
+import { getAllSpecs, type SpecRow } from "@/lib/specs-table";
 import { listGoals, type GoalRow } from "@/lib/goals-table";
 import { resolveFunctionMandates } from "@/lib/function-mandates";
 
@@ -326,7 +326,10 @@ async function collectMandateRefs(functionSlugs: Iterable<string>): Promise<Set<
 export async function buildSpecReviewGateContext(workspaceId: string): Promise<SpecReviewGateContext> {
   const [functionSlugs, specs, goals] = await Promise.all([
     collectFunctionSlugs(),
-    listSpecs(workspaceId),
+    // spec-read-egress-scope-and-cursor: `blocked_by` may legitimately reference a FOLDED spec, so
+    // narrowing to active would make a valid reference look unknown and reject a good spec at author
+    // time. Stays folded-inclusive, stated explicitly.
+    getAllSpecs(workspaceId),
     listGoals(workspaceId),
   ]);
   const knownSpecSlugs = new Set(specs.map((s: SpecRow) => s.slug));

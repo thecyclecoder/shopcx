@@ -38,7 +38,7 @@ import {
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { emitDeferNotification } from "@/lib/agents/spec-defer-audit";
-import { listSpecs } from "@/lib/specs-table";
+import { getActiveSpecs } from "@/lib/specs-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -95,7 +95,9 @@ export async function selectDispositionCandidates(
   // `ada_disposition`. So Ada's pending cohort = every non-folded, non-deferred spec whose author
   // still has an outstanding intended_status and no ada_disposition yet. `vale_pass` / `vale_disposition`
   // are ignored on the read; adaDispositionFor's back-compat path (no Vale rec) trusts the author.
-  const rows = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: scope='active' — the `status === "folded"` skip below was
+  // discarding folded rows only after paying to ship them.
+  const rows = await getActiveSpecs(workspaceId);
   const out: DispositionCandidate[] = [];
   for (const r of rows) {
     if (r.status === "folded") continue; // archived — never Ada's turn.

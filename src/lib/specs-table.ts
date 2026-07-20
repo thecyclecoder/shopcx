@@ -287,8 +287,42 @@ export interface ListSpecsFilter {
    *  `'active'` = boardable specs (`status IS NULL OR status <> 'folded'`); `'archived'` = folded specs;
    *  `'all'` = every spec. Defaults to `'all'` so pre-RPC listSpecs semantics (folded-inclusive) are
    *  preserved for the callers that need them (director-kpis, spec-dispose audits). Boardable readers
-   *  should prefer the [[getActiveSpecs]] wrapper. */
-  scope?: "active" | "archived" | "all";
+   *  should prefer the [[getActiveSpecs]] wrapper.
+   *
+   *  spec-read-egress-scope-and-cursor: when omitted, a `status` filter NARROWS the default — see
+   *  [[scopeForFilter]]. Passing `scope` explicitly always wins. */
+  scope?: SpecScope;
+}
+
+/** The server-side row sets `list_specs_with_phases(p_scope)` understands. */
+export type SpecScope = "active" | "archived" | "all";
+
+const SPEC_SCOPES = ["active", "archived", "all"] as const;
+
+/**
+ * spec-read-egress-scope-and-cursor — derive the cheapest server-side scope that is PROVABLY
+ * equivalent to the caller's filter, so a `status` filter stops paying for the full board.
+ *
+ * An explicit `scope` always wins — this only narrows the `'all'` default. The equivalence rests on
+ * two facts, both verified against prod rather than assumed:
+ *   1. `specRowFromDb` passes `status` through VERBATIM from the stored column (unlike phase status,
+ *      which is derived at the read boundary), so a `status` filter tests exactly what the RPC's
+ *      `p_scope` predicate tests.
+ *   2. `specs_status_check` is `status IS NULL OR status IN ('deferred','folded')`, so a stored
+ *      status can only ever be one of those three values.
+ * Therefore `status='folded'` ⟺ scope `'archived'`, and `status='deferred'` is strictly inside
+ * scope `'active'` (`status <> 'folded'`) with the in-memory filter narrowing the rest.
+ *
+ * Every OTHER `SpecStatus` ('in_review' | 'planned' | 'in_progress' | 'shipped') is a DERIVED
+ * lifecycle value the CHECK constraint forbids in the column, so it matches nothing either way. We
+ * deliberately do NOT narrow those: if the constraint is ever widened, an un-narrowed `'all'` stays
+ * correct, where a narrowed scope would silently drop rows. Cheapness must never outrank correctness.
+ */
+export function scopeForFilter(filter: ListSpecsFilter): SpecScope {
+  if (filter.scope) return filter.scope;
+  if (filter.status === "folded") return "archived";
+  if (filter.status === "deferred") return "active";
+  return "all";
 }
 
 interface SpecRowDb {
@@ -500,6 +534,10 @@ export function onSpecCacheInvalidate(cb: SpecCacheInvalidator): () => void {
 /** Evict a cached (workspace, slug) entry. Called by every writer in this module on success. */
 export function invalidateSpecCache(workspaceId: string, slug: string): void {
   specCache.delete(specCacheKey(workspaceId, slug));
+  // spec-read-egress-scope-and-cursor — the whole-board snapshot is a function of every spec in the
+  // workspace, so any spec write drops it too. Same chokepoint as the per-slug eviction, which is
+  // why a read-after-write is fresh INSIDE the TTL and no writer path can be missed.
+  invalidateListSpecsCache(workspaceId);
   for (const cb of specCacheInvalidators) {
     try {
       cb(workspaceId, slug);
@@ -523,9 +561,82 @@ export function invalidateSpecCache(workspaceId: string, slug: string): void {
   })();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// spec-read-egress-scope-and-cursor — whole-board read cache.
+//
+// `list_specs_with_phases` is the largest single egress driver on the project: measured 2026-07-20
+// over a 12-day `pg_stat_statements` window, 238,379 calls / 150,011,498 rows — ~19,900 calls/day
+// at 629 rows/call, ≈97 GB/day. A full-board row is ~7.8 KB (68.7% of it the joined `phases`
+// jsonb), so one `scope='all'` call ships 5.14 MB where `scope='active'` ships 0.05 MB. The
+// Phase-5 `p_since` cursor and the `specsMaxUpdatedAt` change-probe were both built end-to-end for
+// exactly this, but `listSpecs` passed neither — every caller re-shipped the whole board every call.
+//
+// This is the same probe-validated wrapper cache [[brain-roadmap]] `getRoadmap` already runs
+// (spec-read-eff-roadmap-cache Phase 3 + p_since Phase 5), lifted DOWN to the SDK so it covers
+// EVERY whole-board reader — board render, roadmap, spec-drift, pulse, review-gate, the box poll
+// loop — not just the roadmap wrapper. On a stale entry we spend one index-only scan
+// (`specs_ws_updated_at_idx`) asking "did anything change?"; when the answer is no, extend the TTL
+// and serve cached rows instead of re-shipping 5.14 MB.
+//
+// Correctness rails, in order of importance:
+//  - Keyed by (workspace, scope) — a narrower scope must never be served from a wider entry.
+//  - Evicted by `invalidateSpecCache`, the SAME chokepoint every writer in this module already
+//    calls, so a read-after-write is fresh INSIDE the TTL. Cross-process writers arrive via the
+//    existing `spec_changed` LISTEN/NOTIFY rail, which routes to that same invalidator.
+//  - Probe unavailable (pool blip) ⇒ full re-fetch. Over-fetching is always safe; serving
+//    genuinely stale specs is not.
+//  - `filter` is applied AFTER the cache and never baked into the entry, so a filtered call can
+//    never poison the entry an unfiltered caller reads.
+type ListSpecsCacheEntry = { rows: SpecRow[]; expiresAt: number; maxUpdatedAt: Date | null };
+const listSpecsCache = new Map<string, ListSpecsCacheEntry>();
+
+function listSpecsCacheKey(workspaceId: string, scope: SpecScope): string {
+  return `${workspaceId}::${scope}`;
+}
+
+/** Drop every cached scope for a workspace — any write can move a row into or out of any scope. */
+function invalidateListSpecsCache(workspaceId: string): void {
+  for (const scope of SPEC_SCOPES) listSpecsCache.delete(listSpecsCacheKey(workspaceId, scope));
+}
+
+/** What [[listSpecsCached]] should do with a cache entry. Pure — see [[decideListSpecsCache]]. */
+export type ListSpecsCacheDecision = "fresh" | "probe" | "fetch";
+
+/**
+ * spec-read-egress-scope-and-cursor — the pure cache decision, extracted so the risky part (TTL
+ * arithmetic + high-water-mark comparison) is unit-testable without a DB.
+ *
+ *   'fresh' — inside the TTL; serve cached rows, no I/O at all.
+ *   'probe' — expired, but we hold a high-water mark, so ONE index-only scan is worth it to ask
+ *             whether anything changed before re-shipping 5.14 MB.
+ *   'fetch' — no entry, or expired with no mark to compare against. Full re-fetch.
+ */
+export function decideListSpecsCache(
+  entry: { expiresAt: number; maxUpdatedAt: Date | null } | undefined,
+  now: number,
+): ListSpecsCacheDecision {
+  if (!entry) return "fetch";
+  if (now < entry.expiresAt) return "fresh";
+  return entry.maxUpdatedAt ? "probe" : "fetch";
+}
+
+/**
+ * True iff a change-probe proves the cached snapshot is still current — i.e. no spec in the
+ * workspace has been written since we cached it.
+ *
+ * A `null` probe (pool blip) is deliberately NOT "unchanged": over-fetching is always safe, serving
+ * genuinely stale specs is not. The comparison is `<=` because `maxUpdatedAt` is captured AFTER the
+ * rows, so an equal timestamp means the same board we already hold.
+ */
+export function probeSaysUnchanged(probe: Date | null, maxUpdatedAt: Date | null): boolean {
+  if (probe === null || maxUpdatedAt === null) return false;
+  return probe.getTime() <= maxUpdatedAt.getTime();
+}
+
 /** Test-only cache reset. Never called by production code paths. */
 export function clearSpecCacheForTests(): void {
   specCache.clear();
+  listSpecsCache.clear();
 }
 
 /**
@@ -594,31 +705,14 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
-  const scope = filter.scope ?? "all";
-  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
-  // Pooled path (box worker + any runtime with pooler creds): one pooled query, no PostgREST
-  // preamble. `null` = pool unavailable / query error → fall through to the supabase-js RPC path
-  // (same fail-open contract as `getSpec` above).
-  let rows: Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }> | null = null;
-  try {
-    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
-    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
-    if (pooled !== null) {
-      rows = pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
-    }
-  } catch {
-    /* fall through to supabase-js RPC */
-  }
-  if (rows === null) {
-    const admin = createAdminClient();
-    const { data, error } = await admin.rpc("list_specs_with_phases", {
-      p_workspace_id: workspaceId,
-      p_scope: scope,
-    });
-    if (error) throw error;
-    rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
-  }
-  let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
+  // spec-read-egress-scope-and-cursor — narrow the server-side row set when the caller's filter
+  // proves a narrower one is equivalent. An explicit `filter.scope` always wins.
+  const scope = scopeForFilter(filter);
+  // The cached entry is already slug-sorted by `listSpecsCached`. Every `.filter` below produces a
+  // FRESH array, but a call with no filters would otherwise hand the caller the cached array itself
+  // — and the old tail called `.sort()`, which mutates in place. Copy so no caller can reorder or
+  // splice another reader's cache entry.
+  let out: SpecRow[] = [...(await listSpecsCached(workspaceId, scope))];
   if (filter.status) out = out.filter((r) => r.status === filter.status);
   if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
   if (filter.milestone_id !== undefined) {
@@ -627,7 +721,82 @@ export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {
       ? out.filter((r) => r.milestone_id === null)
       : out.filter((r) => r.milestone_id === wanted);
   }
-  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+  return out;
+}
+
+/**
+ * spec-read-egress-scope-and-cursor — the cached, probe-validated whole-board fetch behind
+ * [[listSpecs]]. Returns slug-sorted rows for one (workspace, scope).
+ *
+ * Order of attempts, cheapest first:
+ *   1. Fresh cache entry (inside TTL) → 0 bytes.
+ *   2. Stale entry + change-probe says `max(updated_at)` has NOT advanced → one index-only scan,
+ *      extend the TTL, serve cached rows. This is the case that retires the ~97 GB/day: a poller
+ *      re-reading an unchanged board pays a timestamp instead of 5.14 MB.
+ *   3. Otherwise a full fetch (pooled, falling back to the supabase-js RPC).
+ */
+async function listSpecsCached(workspaceId: string, scope: SpecScope): Promise<SpecRow[]> {
+  const key = listSpecsCacheKey(workspaceId, scope);
+  const cached = listSpecsCache.get(key);
+  const decision = decideListSpecsCache(cached, Date.now());
+  if (decision === "fresh") return cached!.rows;
+  // Stale entry + a captured high-water mark: ask Postgres whether anything changed at all. A probe
+  // that hasn't advanced past what we cached proves no spec in the workspace was written since.
+  // Probe unavailable (pool blip) falls through to a full re-fetch — over-fetching is always safe.
+  if (decision === "probe" && cached) {
+    try {
+      const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+      const probe = await specsMaxUpdatedAt(workspaceId);
+      if (probeSaysUnchanged(probe, cached.maxUpdatedAt)) {
+        cached.expiresAt = Date.now() + getSpecCacheTTLMs();
+        return cached.rows;
+      }
+    } catch {
+      /* fall through to a full re-fetch */
+    }
+  }
+  const rows = await fetchSpecsWithPhases(workspaceId, scope);
+  const out = rows
+    .map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]))
+    .sort((a, b) => a.slug.localeCompare(b.slug));
+  // Capture the high-water mark ALONGSIDE the snapshot so the next stale check has something to
+  // compare against. Probe failure ⇒ null ⇒ the next miss simply does a full re-fetch (pre-cache
+  // behavior). Read AFTER the rows so a write landing mid-fetch can only make the mark look older
+  // than the data — which forces an extra re-fetch, never a stale serve.
+  let maxUpdatedAt: Date | null = null;
+  try {
+    const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+    maxUpdatedAt = await specsMaxUpdatedAt(workspaceId);
+  } catch {
+    /* leave null */
+  }
+  listSpecsCache.set(key, { rows: out, expiresAt: Date.now() + getSpecCacheTTLMs(), maxUpdatedAt });
+  return out;
+}
+
+/**
+ * The raw whole-board fetch: pooled path first (box worker + any runtime with pooler creds — one
+ * pooled query, no PostgREST `set_config` preamble), supabase-js RPC as the fail-open fallback.
+ * Unchanged from the pre-cache `listSpecs` body; extracted so the cache above has one seam.
+ */
+async function fetchSpecsWithPhases(
+  workspaceId: string,
+  scope: SpecScope,
+): Promise<Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>> {
+  try {
+    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
+    if (pooled !== null) return pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
+  const admin = createAdminClient();
+  const { data, error } = await admin.rpc("list_specs_with_phases", {
+    p_workspace_id: workspaceId,
+    p_scope: scope,
+  });
+  if (error) throw error;
+  return (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
 }
 
 /** Every BOARDABLE spec — thin wrapper over [[listSpecs]] with `scope='active'`, i.e. `status IS NULL OR
