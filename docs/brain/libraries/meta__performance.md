@@ -17,12 +17,15 @@ async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: number; ad
 ```
 Upserts campaigns/adsets/ads (+ budgets, status) keyed on the Meta object id.
 
-After the [[../tables/meta_adsets]] upsert, runs a **scoped drop-out reconcile**:
-any mirror row for the synced campaigns that Meta didn't return this run and
-isn't already `ARCHIVED` is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'`
-(chunked compare-and-set, workspace + account scoped). Meta excludes archived
-adsets from its default `/adsets` list, so without this an archived adset stays
-stuck ACTIVE in the mirror forever (Superfood Tabs incident).
+After the [[../tables/meta_adsets]] upsert, on the **scoped path only**
+(`opts.campaignIds` provided), runs a drop-out reconcile: any mirror row for
+those campaigns that Meta didn't return this run and isn't already `ARCHIVED`
+is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'` (chunked
+compare-and-set, workspace + account scoped). Meta excludes archived adsets
+from its default `/adsets` list, so without this an archived adset stays stuck
+ACTIVE in the mirror forever (Superfood Tabs incident). Never runs on the
+full-account path — the 2-hourly test-cadence sync scopes to the test
+campaigns, so the surface that needs it self-heals every 2 hours.
 
 ### `reconcileDroppedAdsetIds` — function
 

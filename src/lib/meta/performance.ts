@@ -215,25 +215,26 @@ export async function syncMetaStructure(
 
   // Drop-out reconcile: Meta excludes archived adsets from its default `/adsets`
   // list, so an adset the mirror knows about but Meta didn't return this run for
-  // one of the synced campaigns stays stuck ACTIVE forever (Superfood Tabs
-  // incident). Scoped strictly to the campaigns this run synced — either the
-  // caller's `opts.campaignIds`, or the campaign ids Meta returned when unscoped.
-  const syncedCampaignIds = scoped ?? (campaigns as Array<{ id?: unknown }>).map((c) => String(c.id ?? "")).filter(Boolean);
-  if (syncedCampaignIds.length > 0) {
+  // one of the caller-scoped campaigns stays stuck ACTIVE forever (Superfood
+  // Tabs incident). SCOPED PATH ONLY — never the full-account sync: an unscoped
+  // run could interleave with a scoped run and a partial page from Graph would
+  // wrongly flip live adsets ARCHIVED. The 2-hourly test-cadence sync passes
+  // opts.campaignIds, so this self-heals every 2 hours for the test campaigns.
+  if (scoped && scoped.length > 0) {
     const returnedAdsetIds = (adsets as Array<{ id?: unknown }>).map((a) => String(a.id ?? "")).filter(Boolean);
     const { data: mirrorRows, error: mirrorErr } = await admin
       .from("meta_adsets")
       .select("meta_adset_id, meta_campaign_id, status")
       .eq("workspace_id", p.workspaceId)
       .eq("meta_ad_account_id", p.adAccountId)
-      .in("meta_campaign_id", syncedCampaignIds);
+      .in("meta_campaign_id", scoped);
     if (mirrorErr) {
       await reportDbError(mirrorErr, { op: "meta-structure-dropped-adsets-read", table: "meta_adsets", account: p.adAccountId });
       throw new Error(
         `meta_adsets drop-out read failed: ${(mirrorErr as { code?: string }).code ?? "?"} ${mirrorErr.message}`,
       );
     }
-    const droppedIds = reconcileDroppedAdsetIds(syncedCampaignIds, returnedAdsetIds, (mirrorRows ?? []) as Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>);
+    const droppedIds = reconcileDroppedAdsetIds(scoped, returnedAdsetIds, (mirrorRows ?? []) as Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>);
     if (droppedIds.length > 0) {
       // Chunked compare-and-set: only flip rows in this account/workspace whose
       // status is not already ARCHIVED. This is idempotent and re-scopes the write
