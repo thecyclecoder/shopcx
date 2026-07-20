@@ -62,9 +62,8 @@ Pure computation extracted for unit-testing without hitting the network. Reconci
 
 ## Callers
 
-Phase 1 has no callers yet — this ships the primitive. Phase 2 (see the spec) wires it as:
-- a `get_order_refund_ledger` data tool on [[sonnet-orchestrator-v2]] (alongside `get_returns` / `get_payment_methods`),
-- an order-scoped ledger summary in the cs-director brief built by `scripts/builder-worker.ts` `runCsDirectorCallJob`.
+- **`get_order_refund_ledger`** — Sonnet data tool on [[sonnet-orchestrator-v2]] (alongside `get_returns` / `get_payment_methods`). Takes `order_number`, resolves it to `orders.id` scoped by workspace + linked-customer ids, then formats the ledger for the model. Documented in [[../orchestrator-tools]].
+- **`loadCsDirectorCallBrief`** (`scripts/builder-worker.ts` → `runCsDirectorCallJob`). For each recent Shopify order on the escalated ticket's customer (up to 5), the brief renders one `charged / refunded / REFUNDABLE / OUT-OF-BAND` line so June rules on the real refundable balance instead of hitting a rail.
 
 ## See also
 

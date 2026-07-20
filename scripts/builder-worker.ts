@@ -13872,6 +13872,59 @@ async function loadCsDirectorCallBrief(
     }
   }
 
+  // Phase 2 of order-refund-ledger-read-tool — for each recent order on the escalated ticket's
+  // customer, fetch the LIVE Shopify refund ledger (charged / refunded / refundable / out-of-band)
+  // and surface it in the brief so June rules on the REAL refundable balance instead of hitting a
+  // rail. Motivating case: ticket 5ed394f3 / SC133086 (2026-07-20) — an $89.42 out-of-band Shopify
+  // refund was invisible to the local order_refunds mirror, so the returns tool reported $229.26
+  // still owed while the order was already partially refunded. Best-effort, read-only — a Shopify
+  // call failure renders as "unavailable" per order and never breaks the brief.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { data: orders } = await db
+        .from("orders")
+        .select("id, order_number, shopify_order_id")
+        .eq("workspace_id", workspaceId)
+        .eq("customer_id", ticketRow.customer_id)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      const shopifyOrders = (orders ?? []).filter((o) => !!o.shopify_order_id);
+      if (shopifyOrders.length) {
+        const { getOrderRefundLedger } = await import("../src/lib/refund-ledger");
+        parts.push("");
+        parts.push(
+          `LIVE REFUND LEDGERS (source: Shopify transactions, reconciled against order_refunds mirror) — refundableCents is the ceiling for any new refund on that order; outOfBandCents > 0 means someone refunded outside ShopCX:`,
+        );
+        for (const o of shopifyOrders) {
+          try {
+            const ledger = await getOrderRefundLedger(workspaceId, o.id);
+            if (!ledger.ok) {
+              parts.push(`  - #${o.order_number}: unavailable (${ledger.reason}${ledger.error ? ` — ${ledger.error.slice(0, 120)}` : ""})`);
+              continue;
+            }
+            const d = (c: number) => `$${(c / 100).toFixed(2)}`;
+            const flags: string[] = [];
+            if (ledger.pendingCents > 0) flags.push(`pending ${d(ledger.pendingCents)}`);
+            if (ledger.outOfBandCents > 0) flags.push(`OUT-OF-BAND ${d(ledger.outOfBandCents)}`);
+            parts.push(
+              `  - #${o.order_number}: charged ${d(ledger.saleCents)} · refunded ${d(ledger.refundedCents)} · REFUNDABLE ${d(ledger.refundableCents)}${flags.length ? ` · ${flags.join(" · ")}` : ""}`,
+            );
+          } catch (e) {
+            parts.push(`  - #${o.order_number}: ledger read failed — ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`LIVE REFUND LEDGERS: read failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
   // this ticket. Cited so the CS Director sees what confidence + problem + verified_outcome each turn
   // landed on (surfaces a repeated 'unbacked' / 'drifted' pattern the triage quorum couldn't reach a

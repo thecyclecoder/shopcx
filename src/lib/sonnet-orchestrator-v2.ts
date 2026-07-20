@@ -205,6 +205,20 @@ function buildToolDefinitions() {
       description: "Get the cards/payment methods the customer has on file (both our local Braintree-vaulted cards from storefront checkout AND Shopify Payments cards). Use when the customer asks about which cards we have, wants to change/default/delete a card, or mentions a specific card by last4. Returns brand, last4, expiry, default flag, and revocation status for each.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
+    {
+      name: "get_order_refund_ledger",
+      description: "Get the LIVE refund ledger for ONE order, read directly from Shopify's transaction list (source of truth) and reconciled against our local refund mirror. Returns `saleCents` (what the customer was charged), `refundedCents` (settled refunds), `pendingCents` (gateway-pending refunds still settling), `refundableCents` (the CEILING for any new refund on this order right now — max(0, sale − refunded − pending)), and `outOfBandCents` (settled Shopify refunds NOT in our local mirror — someone refunded outside ShopCX). CALL THIS whenever the customer disputes a refund amount, asks 'how much can I still get refunded', mentions a refund they got outside our system, or you're about to propose/quote a refund — `refundableCents` is the ceiling for any refund on that order, and `outOfBandCents > 0` means someone refunded outside ShopCX (usually a manual refund in the Shopify admin) and our internal refund-owed math will be wrong until you use this reading. Pass the human `order_number` (e.g. 'SC133086') from RECENT ORDERS.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          order_number: {
+            type: "string",
+            description: "The customer-facing order number (e.g. 'SC133086'). Take it from RECENT ORDERS in get_customer_account.",
+          },
+        },
+        required: ["order_number"] as string[],
+      },
+    },
   ];
 }
 
@@ -974,6 +988,8 @@ export async function executeToolCall(
         return await getDunningStatus(admin, workspaceId, customerId);
       case "get_payment_methods":
         return await getPaymentMethods(admin, workspaceId, customerId);
+      case "get_order_refund_ledger":
+        return await getOrderRefundLedgerTool(admin, workspaceId, customerId, String(input?.order_number || ""));
       default:
         return `Unknown tool: ${name}`;
     }
@@ -2101,6 +2117,67 @@ async function getPaymentMethods(admin: Admin, wsId: string, custId: string): Pr
     "Shopify Payments does NOT expose a way to programmatically set the default; the customer must do it from their account portal.",
   );
   return parts.join("\n");
+}
+
+/**
+ * LIVE refund ledger for one order — reconciles Shopify's transaction list against our local
+ * order_refunds mirror so an out-of-band refund (issued directly in the Shopify admin) becomes
+ * visible to Sonnet. Wraps [[refund-ledger]] `getOrderRefundLedger`; the ceiling for any new
+ * refund on this order is `refundableCents`, and `outOfBandCents > 0` is the exact signal that
+ * would have resolved SC133086 at first touch.
+ */
+async function getOrderRefundLedgerTool(
+  admin: Admin,
+  wsId: string,
+  custId: string,
+  orderNumber: string,
+): Promise<string> {
+  const trimmed = orderNumber.trim();
+  if (!trimmed) return "No order_number provided. Pass the customer-facing order number from RECENT ORDERS (e.g. 'SC133086').";
+
+  const allCustIds = await resolveLinkedCustomerIds(admin, custId);
+  const { data: order } = await admin
+    .from("orders")
+    .select("id, order_number, shopify_order_id, total_cents")
+    .eq("workspace_id", wsId)
+    .in("customer_id", allCustIds)
+    .eq("order_number", trimmed)
+    .maybeSingle();
+  if (!order) return `Order ${trimmed} not found on this customer (or any linked account).`;
+  if (!order.shopify_order_id) return `Order ${trimmed} has no Shopify order id — refund ledger unavailable (likely an internal-only order).`;
+
+  const { getOrderRefundLedger } = await import("@/lib/refund-ledger");
+  const ledger = await getOrderRefundLedger(wsId, order.id);
+  if (!ledger.ok) {
+    return `Order ${trimmed}: refund ledger unavailable (${ledger.reason}${ledger.error ? ` — ${ledger.error}` : ""}).`;
+  }
+
+  const dollars = (c: number) => `$${(c / 100).toFixed(2)}`;
+  const lines: string[] = [];
+  lines.push(`ORDER ${order.order_number} — LIVE REFUND LEDGER (source: Shopify transactions)`);
+  lines.push(`  charged:     ${dollars(ledger.saleCents)}`);
+  lines.push(`  refunded:    ${dollars(ledger.refundedCents)} (settled)`);
+  if (ledger.pendingCents > 0) {
+    lines.push(`  pending:     ${dollars(ledger.pendingCents)} (gateway settling — NOT available as headroom)`);
+  }
+  lines.push(`  REFUNDABLE:  ${dollars(ledger.refundableCents)}  ← CEILING for any new refund on this order`);
+  if (ledger.outOfBandCents > 0) {
+    lines.push(
+      `  OUT-OF-BAND: ${dollars(ledger.outOfBandCents)}  ← someone refunded outside ShopCX (usually a manual refund in the Shopify admin). Our internal refund-owed math will be wrong until you use THIS reading.`,
+    );
+  }
+  if (ledger.refunds.length) {
+    lines.push(`  Refund transactions on this order:`);
+    for (const r of ledger.refunds) {
+      const when = r.processedAt ? new Date(r.processedAt).toISOString().slice(0, 10) : "?";
+      const gw = r.gateway || "?";
+      const mirror = r.status === "success" ? (r.mirroredLocally ? "mirrored" : "OUT-OF-BAND") : "n/a";
+      lines.push(`    - ${when} · ${dollars(r.amountCents)} · ${gw} · ${r.status} · ${mirror}`);
+    }
+  } else {
+    lines.push(`  (no refund transactions on this order yet)`);
+  }
+  return lines.join("\n");
 }
 
 // ── Main Orchestrator ──
