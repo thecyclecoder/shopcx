@@ -59,6 +59,7 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 - **Do NOT collapse the two branches into a single local write with no vendor call.** That would silently downgrade every Appstle address change to a stale-column write, converting a working path into the same defect the internal branch fixes. Pinned by `src/lib/commerce/subscription.updateShippingAddress.test.ts` (regression guard asserting the Appstle branch still issues the vendor PUT carrying the address fields).
 - **Column shape** (`buildShippingAddressRow` in [[internal-subscription]]): `{ first_name, last_name, phone|null, address1, address2|null, city, province_code, zip, country_code }` — mirrors the shape the portal address handler + checkout write so the internal-renewal cron's fallback chain (`subscriptions.shipping_address` → latest order → customer default) reads a consistent key set.
 - The optional `deps` param is dependency-injection for the test — prod callers omit it. `defaultUpdateShippingAddressDeps()` supplies the real `isInternalSubscription`, workspaces-key read + `decrypt`, `loggedCommerceFetch`, and `internalSubUpdateShippingAddress`.
+- Folded from [[../specs/archive.d/internal-sub-write-path-gaps]] (Phases 1–2: closes two silent vendor-call defects on internal subs via unified SDK branching).
 
 ### Payment method mutations
 
