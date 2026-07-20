@@ -84,6 +84,7 @@ export async function enqueueImitationQualityReview(input: {
     .from("agent_jobs")
     .insert({
       workspace_id: input.workspaceId,
+      spec_slug: "flag-a-competitor-ad-do-not-use-manual-ceo-then-max-graded",
       kind: IMITATION_QUALITY_KIND,
       status: "queued",
       instructions: JSON.stringify({ skeletonIds: ids }),
