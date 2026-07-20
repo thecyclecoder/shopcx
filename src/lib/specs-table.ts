@@ -790,6 +790,42 @@ export async function getAllSpecs(workspaceId: string): Promise<SpecRow[]> {
   return listSpecs(workspaceId, { scope: "all" });
 }
 
+/** One archived spec as the archive LISTING needs it — a title, a date, and a slug to link to. */
+export interface ArchivedSpecIndexRow {
+  slug: string;
+  title: string;
+  updated_at: string;
+}
+
+/**
+ * roadmap-archive-split — the folded-spec INDEX: slug + title + updated_at, nothing else.
+ *
+ * This is deliberately NOT a `SpecRow`. The archive listing renders a title, a date and a link; it
+ * never reads a phase. Pulling `SpecRow[]` for it meant shipping all 659 folded specs WITH their
+ * joined `phases` jsonb — 5.11 MB measured — to render a list of titles.
+ *
+ * The separate TYPE is the point, not an accident. `SpecRow.phases` is non-optional, and per the CEO
+ * invariant (2026-07-20, [[../../docs/brain/operational-rules.md]]) a spec CANNOT exist without
+ * phases: zero phases ⇒ zero machine checks ⇒ a spec that can be BUILT but never MERGED. A `SpecRow`
+ * carrying `phases: []` would be indistinguishable from that pathological state to every consumer
+ * that checks — including the build gate — so a caller that doesn't need phases gets a DIFFERENT
+ * type, never a degraded spec. Read [[listSpecs]] when you need specs; read this when you need a list.
+ *
+ * Sorted newest-first by `updated_at` (the fold date). Returns `[]` on read error: the archive is a
+ * browsing surface, so an empty list renders a visibly-empty page rather than a wrong one.
+ */
+export async function listArchivedSpecIndex(workspaceId: string): Promise<ArchivedSpecIndexRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("specs")
+    .select("slug, title, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "folded")
+    .order("updated_at", { ascending: false });
+  if (error) return [];
+  return (data ?? []) as ArchivedSpecIndexRow[];
+}
+
 /**
  * UPSERT the parent `specs` row + REPLACE its `spec_phases` by (spec_id, position):
  *   - matching positions are UPDATED in place (preserving id + pr/merge_sha unless explicitly overridden)
