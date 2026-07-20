@@ -1,5 +1,5 @@
 /**
- * Unit tests for the customer-list exclusion composition + weekly refresh watermark —
+ * Unit tests for the customer-list exclusion composition + daily refresh watermark —
  * bianca-full-order-history-customer-list-exclusion-audience Fix 1 verification.
  *
  * Pins:
@@ -9,7 +9,7 @@
  *   - `buildReplenishJobInsert` emits BOTH ids in `create_adset_spec.targeting.excluded_custom_audiences`
  *     when the cohort declares both (the exact shape the publish-gate demands).
  *   - `pickRefreshWatermarkIso` returns the last-run ISO when present, and falls back to
- *     `now - lookback` (default 8d, 24h grace over the 7d cron cadence) on first run — the
+ *     `now - lookback` (default 2d, 24h grace over the 1d daily cron cadence) on first run — the
  *     "refresh selects only customers since the last-refresh watermark" contract.
  *
  * Run:  npx tsx --test src/lib/media-buyer/all-customers-exclusion.test.ts
@@ -198,11 +198,11 @@ test("pickRefreshWatermarkIso — returns the last-run ISO when present", () => 
   assert.equal(pickRefreshWatermarkIso({ lastRunAtIso: last, nowIso: now }), last);
 });
 
-test("pickRefreshWatermarkIso — first run falls back to now - 8d (24h grace over 7d cadence)", () => {
+test("pickRefreshWatermarkIso — first run falls back to now - 2d (24h grace over 1d daily cadence)", () => {
   const now = "2026-07-15T12:00:00.000Z";
   const wm = pickRefreshWatermarkIso({ lastRunAtIso: null, nowIso: now });
   const diffMs = Date.parse(now) - Date.parse(wm);
-  assert.equal(diffMs, 8 * 24 * 60 * 60 * 1000);
+  assert.equal(diffMs, 2 * 24 * 60 * 60 * 1000);
 });
 
 test("pickRefreshWatermarkIso — honors a caller-supplied lookback", () => {
