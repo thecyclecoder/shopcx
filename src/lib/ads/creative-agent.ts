@@ -25,7 +25,7 @@ import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey, type Treatment } from "@/lib/ads/creative-learning";
-import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower, type CreativeIntent } from "@/lib/ads/creative-sourcing";
+import { getProvenCompetitorAngles, getCompetitorAngleBySkeletonId, scoreCompetitorAcquisitionPower, type CreativeIntent, type CompetitorAngle } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { chooseGroundedSubstitute, debrandForOurBrand, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -2712,6 +2712,11 @@ async function stockProduct(
    *  adds the sub-7 bounce-back-to-Dahlia self-heal). When undefined (a caller without a
    *  spawn context / a bench test), the QC step is skipped byte-identical to today. */
   copyQcDispatcher?: CopyQcSessionDispatcher,
+  /** Research › Ads "Generate ad" pin — a `creative_skeletons.id` the owner chose as the EXACT
+   *  imitation base ("make one like this ad"). When set + it resolves, it becomes the SOLE
+   *  competitor angle, bypassing the shelf ranking, the cold/warm exclusion, and the retired
+   *  filter. Undefined ⇒ the shelf is ranked normally (every pre-existing caller). */
+  pinnedCompetitorSkeletonId?: string,
 ): Promise<StockedCreative[]> {
   // dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope.
   // Every downstream research read (getProvenCompetitorAngles) is SCOPED to this intent so a
@@ -2720,6 +2725,17 @@ async function stockProduct(
   // reason to exist per the spec.
   const researchIntent = resolveResearchIntent(intentOverride);
   const out: StockedCreative[] = [];
+  // Pinned-ad imitation base (Research › Ads "Generate ad"). Resolve the exact skeleton the owner
+  // picked; if it loads with a hook, it REPLACES the shelf as the competitor pool (see below). A
+  // missing/hook-less id falls back to normal sourcing + warns (never a silent wrong-ad substitute).
+  let pinnedAngle: CompetitorAngle | null = null;
+  if (pinnedCompetitorSkeletonId) {
+    pinnedAngle = await getCompetitorAngleBySkeletonId(admin, workspaceId, pinnedCompetitorSkeletonId).catch(() => null);
+    if (!pinnedAngle?.hook) {
+      console.warn("dahlia_pinned_skeleton_unusable", { workspaceId, productId, pinnedCompetitorSkeletonId, found: !!pinnedAngle });
+      pinnedAngle = null;
+    }
+  }
   // DAHLIA_COPY_MODE kill switch. Phase 1 landed the env-var READ + a default `deterministic`
   // short-circuit; Phase 3 wires the actual branch — when the flag is `author` AND a caller-
   // supplied `copyAuthorDispatcher` is available, EACH QC-passed image is handed to Dahlia's
@@ -2774,18 +2790,22 @@ async function stockProduct(
   // 60d+ AND resume_advertising=true (a still-running, deeply-proven angle is a far stronger imitate base
   // than a 30d one that may already be dead). Empty deeply-proven pool falls back visibly to the shallow
   // 30d pool + emits a `dahlia_deeply_proven_fallback` director_activity row.
-  const { angles: sourced, usedFallback: sourcedUsedFallback } = await getProvenCompetitorAngles(
-    admin,
-    workspaceId,
-    // dahlia-researches-from-winners-flow-ad-library Phase 1 — pass the declared intent so
-    // the returned angles rank temperature-appropriate winners first (concept_tags.awareness_stage
-    // matching the intent's audience_temperature). Off-temperature angles still fill the tail —
-    // never starve the batch. `getProvenCompetitorAngles` also now selects `winner_tier`,
-    // `winner_score`, and `concept_tags` and re-orders by winner-tier rank → winner_score →
-    // days_running, so the imitation shelf is ranked by OUR longitudinal winner signal first.
-    { productId, preferDeeplyProven: true, limit: 6, intent: researchIntent },
-  ).catch(() => ({ angles: [], usedFallback: false }));
-  if (sourcedUsedFallback) {
+  const { angles: sourced, usedFallback: sourcedUsedFallback } = pinnedAngle
+    ? { angles: [pinnedAngle], usedFallback: false } // PIN: the owner's exact ad IS the pool (no shelf read)
+    : await getProvenCompetitorAngles(
+        admin,
+        workspaceId,
+        // dahlia-researches-from-winners-flow-ad-library Phase 1 — pass the declared intent so
+        // the returned angles rank temperature-appropriate winners first (concept_tags.awareness_stage
+        // matching the intent's audience_temperature). Off-temperature angles still fill the tail —
+        // never starve the batch. `getProvenCompetitorAngles` also now selects `winner_tier`,
+        // `winner_score`, and `concept_tags` and re-orders by winner-tier rank → winner_score →
+        // days_running, so the imitation shelf is ranked by OUR longitudinal winner signal first.
+        { productId, preferDeeplyProven: true, limit: 6, intent: researchIntent },
+      ).catch(() => ({ angles: [], usedFallback: false }));
+  if (pinnedAngle) {
+    console.info("dahlia_pinned_imitation_base", { workspaceId, productId, pinnedCompetitorSkeletonId, advertiser: pinnedAngle.advertiser, hook: pinnedAngle.hook?.slice(0, 60) });
+  } else if (sourcedUsedFallback) {
     console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
   }
   // dahlia-market-sophistication-escalation Phase 1 — read the product's own
@@ -2855,14 +2875,23 @@ async function stockProduct(
   // slimming-probiotic ad — retargeting + wrong category — was selected for a cold creamer
   // test). Warm/hot intents keep the raw pool (temperature-scoped exclusion — warm/hot tests
   // WANT the offer/mechanism/review angles as their imitation base).
-  const ranked = selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
+  // PIN bypasses the temperature exclusion: an explicit human "make one like THIS ad" overrides the
+  // cold/warm auto-filter (selectAnglesForTemperature would otherwise drop a warm/hot pinned ad on a
+  // cold run). Temperature still shapes the COPY downstream (offer stripping etc.).
+  const ranked = pinnedAngle
+    ? competitorAngles
+    : selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
 
   // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
   // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
   // RETIRED concepts, and for each surviving concept pick a FRESH combination (an untried treatment,
   // biased toward historically-winning treatments). The learning ledger makes each cycle smarter.
   const learning = await loadCreativeLearning(admin, workspaceId, productId);
-  const eligible = ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
+  // PIN also bypasses the retired filter — the owner explicitly chose this ad, so honour it even if a
+  // prior test of the same hook was retired.
+  const eligible = pinnedAngle
+    ? ranked
+    : ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
 
   // ── Explore/exploit slot allocation (CEO 2026-07-10) ──────────────────────────────────────────────
   // Keep the bin a MIX so Bianca always has both to launch:
@@ -3843,9 +3872,13 @@ export async function runAdCreativeLoop(
      *  research is scoped to the intent's temperature. Omit to accept the default
      *  (`cold + test-to-find-winner`) — today's every-caller behavior. */
     intent?: CreativeIntent;
+    /** Research › Ads "Generate ad" pin — a `creative_skeletons.id` to imitate EXACTLY. Threaded to
+     *  `stockProduct` as `pinnedCompetitorSkeletonId`; only meaningful on the single-product path
+     *  (a pin is one ad for one product). Omit ⇒ the shelf is ranked normally. */
+    pinnedCompetitorSkeletonId?: string;
   },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent } = opts;
+  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
@@ -3876,7 +3909,11 @@ export async function runAdCreativeLoop(
   }
 
   for (const t of targets) {
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher);
+    // The pin is one ad for one product — only apply it on the explicit single-product path
+    // (opts.productId set). A workspace-wide cadence top-up must never pin the same competitor ad
+    // across every product.
+    const pinForTarget = opts.productId && t.productId === opts.productId ? pinnedCompetitorSkeletonId : undefined;
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget);
     stocked.push(...results);
   }
 

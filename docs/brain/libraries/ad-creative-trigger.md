@@ -14,10 +14,14 @@ This SDK **always** enqueues the latter (`AD_CREATIVE_SESSION_KIND`), so a trigg
 
 | Export | What |
 |---|---|
-| `triggerAdGeneration(admin, {workspaceId, productId, temperature?, count?, reason?})` | Enqueues one `ad-creative-copy-author` job → returns `{jobId, kind, productId, temperature, count}`. **Manual/explicit trigger** — does NOT consult the ad-creative kill switch (a human asking for one ad ≠ the autonomous cadence). |
-| `buildAdGenerationInstructions(input)` | PURE — the instructions payload the runner reads. Unit-tested. Defaults: `temperature: "cold"`, `count: 1`. |
+| `triggerAdGeneration(admin, {workspaceId, productId, temperature?, count?, reason?, competitorSkeletonId?})` | Enqueues one `ad-creative-copy-author` job → returns `{jobId, kind, productId, temperature, count, competitorSkeletonId?}`. **Manual/explicit trigger** — does NOT consult the ad-creative kill switch (a human asking for one ad ≠ the autonomous cadence). |
+| `buildAdGenerationInstructions(input)` | PURE — the instructions payload the runner reads. Unit-tested. Defaults: `temperature: "cold"`, `count: 1`. Emits `competitor_skeleton_id` only when pinned (no null pollution). |
 | `AD_CREATIVE_SESSION_KIND` | `"ad-creative-copy-author"` — the box-session-forcing kind. |
 | `AdAudienceTemperature` | `"cold" \| "warm" \| "hot"`. |
+
+## Pin flow — "make one like THIS ad"
+
+`competitorSkeletonId` (a `creative_skeletons.id`) pins a SPECIFIC competitor ad as the EXACT imitation base. It's written onto the instructions as `competitor_skeleton_id` → `runAdCreativeCopyAuthorJob` threads it into `runAdCreativeLoop` (`pinnedCompetitorSkeletonId`) → [[creative-agent.md]] `stockProduct` loads it via [[creative-sourcing.md]] `getCompetitorAngleBySkeletonId` and makes it the SOLE competitor angle — **bypassing** the shelf ranking, the cold/warm temperature exclusion, and the `do_not_use`/retired filters (an explicit human pick overrides the auto-selection guards). Temperature still shapes the COPY (offer stripping etc.). Omitted ⇒ Dahlia ranks the product's whole shelf herself. A pin only applies on the single-product path (one ad, one product); a cadence top-up never pins.
 
 ## Temperature flow (how the input actually drives the run)
 
