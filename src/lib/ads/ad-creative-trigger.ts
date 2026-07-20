@@ -34,6 +34,14 @@ export interface TriggerAdGenerationInput {
   count?: number;
   /** Optional provenance note stamped on the job instructions (e.g. "ceo-manual-guru-focus"). */
   reason?: string;
+  /** Optional — pin a SPECIFIC competitor ad (a `creative_skeletons.id`) as the imitation base.
+   *  "Find an ad I like, make one like this." When set, `stockProduct` uses THAT exact skeleton as
+   *  the sole competitor angle — bypassing the shelf ranking, the cold/warm temperature exclusion,
+   *  and the do_not_use/retired filters (an explicit human pick overrides the auto-selection). The
+   *  downstream composition-transfer + riff pipeline is unchanged, so the authored ad reuses that
+   *  ad's layout and riffs its hook with our product's lead benefit. Omitted ⇒ Dahlia ranks the
+   *  product's whole shelf herself (today's behavior). */
+  competitorSkeletonId?: string;
 }
 
 /** The instructions JSON the box-session runner consumes. `temperature` is the field
@@ -43,6 +51,10 @@ export interface AdGenerationInstructions {
   count: number;
   temperature: AdAudienceTemperature;
   trigger_reason?: string;
+  /** Pin a specific competitor ad (`creative_skeletons.id`) as the imitation base — read by
+   *  `runAdCreativeCopyAuthorJob` and threaded into `runAdCreativeLoop` → `stockProduct` as
+   *  `pinnedCompetitorSkeletonId`. Omitted ⇒ Dahlia ranks the whole shelf. */
+  competitor_skeleton_id?: string;
 }
 
 export interface TriggerAdGenerationResult {
@@ -51,12 +63,14 @@ export interface TriggerAdGenerationResult {
   productId: string;
   temperature: AdAudienceTemperature;
   count: number;
+  /** The pinned competitor ad (`creative_skeletons.id`), when the caller pinned one. */
+  competitorSkeletonId?: string;
 }
 
 /** PURE — build the instructions payload for a box-session ad-generation job. Exported + unit-tested
  *  so the shape the runner depends on is pinned without a DB. Defaults: temperature `cold`, count 1. */
 export function buildAdGenerationInstructions(
-  input: Pick<TriggerAdGenerationInput, "productId" | "temperature" | "count" | "reason">,
+  input: Pick<TriggerAdGenerationInput, "productId" | "temperature" | "count" | "reason" | "competitorSkeletonId">,
 ): AdGenerationInstructions {
   const instr: AdGenerationInstructions = {
     product_id: input.productId,
@@ -64,6 +78,7 @@ export function buildAdGenerationInstructions(
     temperature: input.temperature ?? "cold",
   };
   if (input.reason) instr.trigger_reason = input.reason;
+  if (input.competitorSkeletonId) instr.competitor_skeleton_id = input.competitorSkeletonId;
   return instr;
 }
 
@@ -100,5 +115,6 @@ export async function triggerAdGeneration(
     productId: input.productId,
     temperature: instr.temperature,
     count: instr.count,
+    ...(instr.competitor_skeleton_id ? { competitorSkeletonId: instr.competitor_skeleton_id } : {}),
   };
 }

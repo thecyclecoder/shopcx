@@ -297,7 +297,15 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   if (q.productId) query = query.eq("product_id", q.productId);
   else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
   const { data } = await query;
-  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map(mapRowToCompetitorAngle);
+  return rankByWinnerSignalAndIntent(mapped, q.intent);
+}
+
+/** PURE — map ONE `creative_skeletons` row (the shared select column set) to a `CompetitorAngle`.
+ *  Single source of truth for the mapping so `queryProvenAngles` (the shelf reader) and
+ *  `getCompetitorAngleBySkeletonId` (the pinned-ad reader) can never drift. */
+export function mapRowToCompetitorAngle(r: Record<string, unknown>): CompetitorAngle {
+  return {
     advertiser: (r.advertiser as string | null) ?? null,
     hook: (r.hook as string | null) ?? null,
     framework: (r.framework as string | null) ?? null,
@@ -312,8 +320,29 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     winnerTier: (r.winner_tier as string | null) ?? null,
     winnerScore: r.winner_score == null ? null : Number(r.winner_score),
     conceptTags: coerceConceptTags(r.concept_tags),
-  }));
-  return rankByWinnerSignalAndIntent(mapped, q.intent);
+  };
+}
+
+/** Load ONE competitor ad by `creative_skeletons.id` as a `CompetitorAngle` — the imitation base
+ *  when the owner PINS a specific ad from the Research › Ads "Generate ad" panel. Deliberately does
+ *  NOT apply the shelf filters (`status`/`media_type`/`do_not_use`/`days_running`) — an explicit
+ *  human pick overrides the auto-selection guards. Scoped to the workspace. Returns null when the
+ *  id doesn't resolve (→ `stockProduct` falls back to normal shelf ranking + warns). */
+export async function getCompetitorAngleBySkeletonId(
+  admin: Admin,
+  workspaceId: string,
+  skeletonId: string,
+): Promise<CompetitorAngle | null> {
+  const { data } = await admin
+    .from("creative_skeletons")
+    .select(
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("id", skeletonId)
+    .maybeSingle();
+  if (!data) return null;
+  return mapRowToCompetitorAngle(data as Record<string, unknown>);
 }
 
 /** Winner-tier-first ranking + optional intent-scoped partition. Pure so a unit test can pin

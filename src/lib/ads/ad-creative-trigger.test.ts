@@ -25,3 +25,13 @@ test("reason is omitted from the payload when not provided (no null pollution)",
   const instr = buildAdGenerationInstructions({ productId: "p1" });
   assert.equal("trigger_reason" in instr, false);
 });
+
+test("pins a specific competitor ad (competitor_skeleton_id) when provided", () => {
+  const instr = buildAdGenerationInstructions({ productId: "p1", competitorSkeletonId: "sk-123" });
+  assert.equal(instr.competitor_skeleton_id, "sk-123");
+});
+
+test("competitor_skeleton_id is omitted when not pinned (no null pollution → shelf-ranked)", () => {
+  const instr = buildAdGenerationInstructions({ productId: "p1", temperature: "cold" });
+  assert.equal("competitor_skeleton_id" in instr, false);
+});

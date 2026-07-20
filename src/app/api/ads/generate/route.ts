@@ -19,6 +19,7 @@ export async function POST(req: Request) {
     workspaceId?: string;
     productId?: string;
     temperature?: string;
+    competitorSkeletonId?: string;
   };
   const workspaceId = body.workspaceId;
   if (!workspaceId) return NextResponse.json({ error: "workspaceId required" }, { status: 400 });
@@ -51,11 +52,25 @@ export async function POST(req: Request) {
     ? (body.temperature as AdAudienceTemperature)
     : "cold";
 
+  // Optional pin — "make one like THIS ad." Validate the skeleton exists in THIS workspace so a bad
+  // id fails loudly here (400) instead of silently falling back to shelf-ranking inside stockProduct.
+  const competitorSkeletonId = body.competitorSkeletonId?.trim() || undefined;
+  if (competitorSkeletonId) {
+    const { data: skel } = await admin
+      .from("creative_skeletons")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", competitorSkeletonId)
+      .maybeSingle();
+    if (!skel) return NextResponse.json({ error: "competitor ad not found in this workspace" }, { status: 400 });
+  }
+
   const result = await triggerAdGeneration(admin, {
     workspaceId,
     productId,
     temperature,
-    reason: "ceo-manual-research-ads-generate",
+    competitorSkeletonId,
+    reason: competitorSkeletonId ? "ceo-manual-research-ads-generate-pinned" : "ceo-manual-research-ads-generate",
   });
-  return NextResponse.json({ ok: true, jobId: result.jobId, productId, temperature });
+  return NextResponse.json({ ok: true, jobId: result.jobId, productId, temperature, competitorSkeletonId: competitorSkeletonId ?? null });
 }
