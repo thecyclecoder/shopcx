@@ -35,3 +35,13 @@ test("competitor_skeleton_id is omitted when not pinned (no null pollution → s
   const instr = buildAdGenerationInstructions({ productId: "p1", temperature: "cold" });
   assert.equal("competitor_skeleton_id" in instr, false);
 });
+
+test("carries owner notes (trimmed) when provided", () => {
+  const instr = buildAdGenerationInstructions({ productId: "p1", notes: "  remove the free tote badge  " });
+  assert.equal(instr.notes, "remove the free tote badge");
+});
+
+test("notes is omitted when blank/whitespace (no null pollution)", () => {
+  assert.equal("notes" in buildAdGenerationInstructions({ productId: "p1" }), false);
+  assert.equal("notes" in buildAdGenerationInstructions({ productId: "p1", notes: "   " }), false);
+});

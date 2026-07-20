@@ -1265,6 +1265,13 @@ export function buildCopyAuthorPrompt(
 ): string {
   const briefJson = sanitizeAuthorField(JSON.stringify(inputs.brief));
   const rubric = sanitizeAuthorField(inputs.rubricText);
+  // Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS ad
+  // ("remove the free tote badge"). Owner-authenticated ⇒ TRUSTED (rendered in the preamble beside
+  // AUDIENCE_TEMPERATURE, not inside the untrusted DATA block) — but still `sanitizeAuthorField`'d so
+  // free text can never break the copy-QC / author fence markers. Null when no note was given.
+  const ownerDirections = inputs.brief.authorNotes?.trim()
+    ? sanitizeAuthorField(inputs.brief.authorNotes.trim())
+    : null;
   // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — emit the six-slot debranded shape
   // (`hook / framework / mechanism_claim / proof / offer / competitor_advertiser`) the SKILL's
   // IMITATE-DEBRANDED rule reads. Snake-case keys inside the payload mirror the spec's session
@@ -1305,6 +1312,11 @@ export function buildCopyAuthorPrompt(
     // was empty. Dahlia may cite this in her verdict rationale (and MUST when she drops
     // to shelfModal per the never-fabricate firewall's target-1-fallback rule).
     `MARKET_SOPHISTICATION_EVIDENCE: ${sanitizeAuthorField(JSON.stringify(inputs.marketSophisticationEvidence))}`,
+    // Owner's up-front "Generate ad like this" directions — a TRUSTED worker input (the owner asked
+    // for this ad). Apply exactly; overrides the brief on any conflict. Absent → not emitted.
+    ...(ownerDirections
+      ? ["", `OWNER_DIRECTIONS (apply these EXACTLY — the owner asked for this ad and left specific directions; they override the brief on any conflict): ${ownerDirections}`]
+      : []),
     "",
     COPY_AUTHOR_INJECTION_GUARDRAIL,
     "",
@@ -2717,6 +2729,10 @@ async function stockProduct(
    *  competitor angle, bypassing the shelf ranking, the cold/warm exclusion, and the retired
    *  filter. Undefined ⇒ the shelf is ranked normally (every pre-existing caller). */
   pinnedCompetitorSkeletonId?: string,
+  /** Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS
+   *  generation ("remove the free tote badge"). Threaded onto `brief.authorNotes` so both the image
+   *  prompt and the copy-author prompt apply it first-pass. Undefined ⇒ no note. */
+  authorNotes?: string,
 ): Promise<StockedCreative[]> {
   // dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope.
   // Every downstream research read (getProvenCompetitorAngles) is SCOPED to this intent so a
@@ -2963,7 +2979,7 @@ async function stockProduct(
         // Phase 2 riff: pass `pureCompetitor` through so a competitor-source brief carries the
         // product's role='lead' benefit UNLESS this slot is the batch's minority pure-competitor
         // explore. Own-brand angles are untouched by the flag.
-        const brief = await buildCreativeBrief(pi, angle, stories, { pureCompetitor: !!pureCompetitor });
+        const brief = await buildCreativeBrief(pi, angle, stories, { pureCompetitor: !!pureCompetitor, authorNotes });
         // Cold-audience creatives lead with the hook, NEVER a discount (CEO: a cold ad doesn't need to
         // lead with an offer). The cold-offer gate (`hasColdOfferLeak`) already enforces this on the
         // COPY, but the IMAGE prompt renders `brief.offer` regardless of temperature — so a cold
@@ -3876,9 +3892,13 @@ export async function runAdCreativeLoop(
      *  `stockProduct` as `pinnedCompetitorSkeletonId`; only meaningful on the single-product path
      *  (a pin is one ad for one product). Omit ⇒ the shelf is ranked normally. */
     pinnedCompetitorSkeletonId?: string;
+    /** Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS ad
+     *  ("remove the free tote badge"). Threaded to `stockProduct` → `brief.authorNotes` (image +
+     *  copy prompts). Only applied on the single-product path. Omit ⇒ no note. */
+    authorNotes?: string;
   },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId } = opts;
+  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId, authorNotes } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
@@ -3913,7 +3933,9 @@ export async function runAdCreativeLoop(
     // (opts.productId set). A workspace-wide cadence top-up must never pin the same competitor ad
     // across every product.
     const pinForTarget = opts.productId && t.productId === opts.productId ? pinnedCompetitorSkeletonId : undefined;
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget);
+    // Owner notes ride the same single-product-only rule as the pin (a cadence top-up carries none).
+    const notesForTarget = opts.productId && t.productId === opts.productId ? authorNotes : undefined;
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget, notesForTarget);
     stocked.push(...results);
   }
 

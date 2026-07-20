@@ -21260,7 +21260,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
   let ok = true;
   let detail = "started";
   try {
-    let instr: { product_id?: string; count?: number; temperature?: "cold" | "warm" | "hot"; competitor_skeleton_id?: string } = {};
+    let instr: { product_id?: string; count?: number; temperature?: "cold" | "warm" | "hot"; competitor_skeleton_id?: string; notes?: string } = {};
     try {
       instr = job.instructions ? JSON.parse(job.instructions) : {};
     } catch {
@@ -21370,6 +21370,10 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
       // competitor ad (Research › Ads "Generate ad"), stockProduct uses that exact skeleton as the
       // sole imitation base (bypassing the shelf ranking + cold/warm exclusion). Omitted ⇒ shelf-ranked.
       pinnedCompetitorSkeletonId: instr.competitor_skeleton_id,
+      // ad-creative-trigger SDK notes — the owner's free-text directions for THIS ad ("remove the
+      // free tote badge"). Threaded to stockProduct → brief.authorNotes (image + copy prompts) so
+      // it lands first-pass and skips a manual revise round.
+      authorNotes: instr.notes,
       // Force BOTH the box image-QC path and the copy-author path for THIS manual run — the caller
       // enqueued this kind deliberately, so we always inject both dispatchers regardless of the
       // workspace-level flags. (qcDispatcher must be present or image-QC falls back to the Opus-key

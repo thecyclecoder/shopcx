@@ -20,6 +20,7 @@ export async function POST(req: Request) {
     productId?: string;
     temperature?: string;
     competitorSkeletonId?: string;
+    notes?: string;
   };
   const workspaceId = body.workspaceId;
   if (!workspaceId) return NextResponse.json({ error: "workspaceId required" }, { status: 400 });
@@ -65,12 +66,17 @@ export async function POST(req: Request) {
     if (!skel) return NextResponse.json({ error: "competitor ad not found in this workspace" }, { status: 400 });
   }
 
+  // Free-text owner directions for THIS ad ("remove the free tote badge"). Capped so a runaway
+  // paste can't bloat the box prompt; trimmed empty → undefined.
+  const notes = body.notes?.trim().slice(0, 500) || undefined;
+
   const result = await triggerAdGeneration(admin, {
     workspaceId,
     productId,
     temperature,
     competitorSkeletonId,
+    notes,
     reason: competitorSkeletonId ? "ceo-manual-research-ads-generate-pinned" : "ceo-manual-research-ads-generate",
   });
-  return NextResponse.json({ ok: true, jobId: result.jobId, productId, temperature, competitorSkeletonId: competitorSkeletonId ?? null });
+  return NextResponse.json({ ok: true, jobId: result.jobId, productId, temperature, competitorSkeletonId: competitorSkeletonId ?? null, notes: notes ?? null });
 }

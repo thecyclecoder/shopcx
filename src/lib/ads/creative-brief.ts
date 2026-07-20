@@ -277,6 +277,10 @@ export function selectAnglesForTemperature(
 export interface CreativeBrief {
   productTitle: string;
   angle: ScoredAngle;
+  /** Owner's free-text directions for THIS generation (Research › Ads "Generate ad like this"),
+   *  e.g. "remove the free tote badge". Applied as an explicit instruction in BOTH the image prompt
+   *  and the copy-author prompt so it lands first-pass. Null/absent when no note was given. */
+  authorNotes?: string | null;
   /** The proof behind the LEAD claim — a real review quote or an ingredient-research citation. */
   leadProof: { kind: "review" | "ingredient" | "cluster"; text: string; attribution?: string } | null;
   /** A real customer transformation to anchor the creative (weight-loss angles), with its photo if any. */
@@ -369,6 +373,11 @@ export interface BuildCreativeBriefOpts {
    *  role='lead' benefit onto the brief. The riff is the STRONG DEFAULT (`false`); the
    *  minority pure-competitor slot is opt-in for learning. Ignored for own-brand angles. */
   pureCompetitor?: boolean;
+  /** Research › Ads "Generate ad like this" free-text notes — the owner's targeted directions for
+   *  THIS generation ("remove the free tote badge", "lead with the focus benefit"). Surfaced onto
+   *  `brief.authorNotes` so both the image prompt (`buildPrompt`) and the copy-author prompt
+   *  (`buildCopyAuthorPrompt`) apply it first-pass — skipping rounds of manual editing. */
+  authorNotes?: string;
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -606,7 +615,7 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
+  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
 }
 
 /**

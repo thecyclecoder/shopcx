@@ -80,6 +80,7 @@ export default function ResearchAdDetailPage() {
   const [genTemp, setGenTemp] = useState<AdTemperature>("cold");
   const [genProduct, setGenProduct] = useState<string>(""); // "" ⇒ use the derived default below
   const [genPin, setGenPin] = useState(true); // imitate THIS exact ad — the reason you're on this page
+  const [genNotes, setGenNotes] = useState(""); // free-text directions ("remove the free tote badge")
   const [genBusy, setGenBusy] = useState(false);
   const [genResult, setGenResult] = useState<string | null>(null);
 
@@ -102,17 +103,19 @@ export default function ResearchAdDetailPage() {
         productId: effectiveProduct,
         temperature: genTemp,
         ...(genPin ? { competitorSkeletonId: skeletonId } : {}),
+        ...(genNotes.trim() ? { notes: genNotes.trim() } : {}),
       }),
     });
     const j = (await res.json().catch(() => ({}))) as { jobId?: string; error?: string };
     setGenBusy(false);
     if (res.ok && j.jobId) {
       const base = genPin ? "imitating this ad" : "shelf-ranked";
-      setGenResult(`✓ Launched Dahlia/Max · ${genTemp} · ${base} · job ${j.jobId.slice(0, 8)}`);
+      const withNotes = genNotes.trim() ? " · with notes" : "";
+      setGenResult(`✓ Launched Dahlia/Max · ${genTemp} · ${base}${withNotes} · job ${j.jobId.slice(0, 8)}`);
     } else {
       setGenResult(`⚠️ ${j.error ?? "failed"}`);
     }
-  }, [effectiveProduct, genTemp, genPin, skeletonId, workspace.id]);
+  }, [effectiveProduct, genTemp, genPin, genNotes, skeletonId, workspace.id]);
 
   // ── "Don't use" flag ────────────────────────────────────────────────────────────────────────────
   const [flipping, setFlipping] = useState(false);
@@ -252,6 +255,23 @@ export default function ResearchAdDetailPage() {
                   ⓘ
                 </span>
               </label>
+
+              {/* Free-text directions — applied first-pass to skip edit rounds */}
+              <div>
+                <label className="mb-1 block text-xs text-zinc-500">
+                  Directions <span className="text-zinc-400">(optional)</span>
+                </label>
+                <textarea
+                  value={genNotes}
+                  onChange={(e) => setGenNotes(e.target.value.slice(0, 500))}
+                  rows={2}
+                  placeholder="e.g. remove the free tote badge; lead with the focus benefit"
+                  className="w-full resize-y rounded border border-zinc-200 bg-white px-2 py-1.5 text-sm placeholder:text-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+                />
+                <p className="mt-0.5 text-[11px] text-zinc-400">
+                  Dahlia applies these when building the ad (image + copy), so you skip a round of edits. {genNotes.length}/500
+                </p>
+              </div>
 
               <button
                 type="button"

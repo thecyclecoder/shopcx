@@ -120,6 +120,9 @@ export interface GenerateCreativeOpts {
  *  prompt (Nano Banana's instruction-following weighs the earliest lines heaviest). Same-file
  *  constant so buildPrompt + tests never drift. */
 export const CEO_EDIT_HEADER = "CEO EDIT (apply exactly to this format):";
+/** Sentinel header for the owner's up-front "Generate ad like this" free-text directions (Research ›
+ *  Ads). A test greps for it; distinct from CEO_EDIT_HEADER (a post-review surgical edit). */
+export const AUTHOR_NOTES_HEADER = "OWNER DIRECTIONS (apply exactly to this ad):";
 
 const TREATMENT_STEER: Record<NonNullable<GenerateCreativeOpts["treatment"]>, string> = {
   before_after: "TREATMENT: before/after transformation-led — the two-photo transformation is the hero.",
@@ -207,7 +210,16 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? `\n\n${CEO_EDIT_HEADER} the CEO reviewed this exact ad and left a targeted instruction. Apply it EXACTLY — this is a surgical edit to THIS format's existing render, not a redesign. Keep every other element (headline, proof, reviewer, product) unchanged from the composition below unless the note explicitly says otherwise. THE NOTE: "${ceoNote.replace(/"/g, "'")}".`
     : "";
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}
+  // Research › Ads "Generate ad like this" free-text notes — the owner's up-front directions for THIS
+  // fresh generation ("remove the free tote badge"). Unlike ceoEditClause (a surgical edit to an
+  // EXISTING render), this steers the design as it's built. Emitted early (Nano Banana weighs earliest
+  // instructions heaviest) so it lands first-pass and skips a manual revise round. Absent → "".
+  const briefNote = brief.authorNotes?.trim();
+  const authorNotesClause = briefNote
+    ? `\n\n${AUTHOR_NOTES_HEADER} the owner asked for this ad and left specific directions. Apply them EXACTLY when designing this ad (they override the generic composition below on any conflict). THE DIRECTIONS: "${briefNote.replace(/"/g, "'")}".`
+    : "";
+
+  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}${authorNotesClause}
 
 ${headlineClause}
 
