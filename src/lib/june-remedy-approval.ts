@@ -518,15 +518,6 @@ export async function raiseFounderApproval(
   const amountCents = remedyMoneyAmountCents(input.remedy);
   const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
 
-  let session: { id: string; cockpit_token: string | null } | null = null;
-  try {
-    const { getActiveSession, armSession } = await import("@/lib/god-mode");
-    session = await getActiveSession(admin, input.workspaceId);
-    if (!session && ownerId) session = await armSession(admin, { workspaceId: input.workspaceId, createdBy: ownerId });
-  } catch (e) {
-    console.warn("[june-remedy-approval] founder-escalation cockpit resolution failed:", e instanceof Error ? e.message : e);
-  }
-
   const now = new Date().toISOString();
   try {
     await admin
@@ -545,16 +536,32 @@ export async function raiseFounderApproval(
   // posts "the parked remedy was malformed — Needs a human" the INSTANT the founder taps Approve
   // (ticket db8b3d66). Don't offer a one-tap approval for something nothing can fire: keep the ticket
   // escalated-to-owner (already parked above) + the runner's CEO dashboard card, and note the
-  // recommendation for a manual ruling. Uses the SAME `planRemedyExecution` the sweep would, so the
-  // guard matches the executor exactly — it skips iff Approve would have malformed.
-  const { planRemedyExecution } = await import("@/lib/cs-director");
-  if (!planRemedyExecution(input.remedy).ok) {
+  // recommendation for a manual ruling. Uses the SAME `planRemedyExecution` the sweep would (via the
+  // exported `canOfferOneTapApproval` predicate), so the guard matches the executor exactly.
+  //
+  // ORDERING (Phase 2 of founder-escalations-reach-the-founder). The guard MUST run BEFORE the
+  // cockpit session is resolved/armed below, because `armSession` is what sends the founder's "tap
+  // in" SMS. Running the guard second meant a non-executable recommendation still paged the founder
+  // and then returned `escalated_recommendation_only` without ever opening a card — the founder
+  // walked into an empty cockpit and the session expired untouched (2026-07-20 incident). The
+  // decision keys ONLY on the remedy shape, so nothing forces it to happen after arming.
+  const { canOfferOneTapApproval } = await import("@/lib/cs-director");
+  if (!canOfferOneTapApproval(input.remedy)) {
     await postInternalNote(
       admin,
       input.ticketId,
       `[cs-director] June escalated to the founder with a RECOMMENDATION (not an auto-executable action) — left escalated to owner for a manual ruling; no one-tap approval card (nothing to auto-fire). ${preview.split("\n")[0]}`,
     );
     return { raised: true, via: "escalated_recommendation_only" };
+  }
+
+  let session: { id: string; cockpit_token: string | null } | null = null;
+  try {
+    const { getActiveSession, armSession } = await import("@/lib/god-mode");
+    session = await getActiveSession(admin, input.workspaceId);
+    if (!session && ownerId) session = await armSession(admin, { workspaceId: input.workspaceId, createdBy: ownerId });
+  } catch (e) {
+    console.warn("[june-remedy-approval] founder-escalation cockpit resolution failed:", e instanceof Error ? e.message : e);
   }
 
   if (!session) {
