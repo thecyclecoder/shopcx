@@ -1012,6 +1012,15 @@ export async function reconcileApprovalInbox(admin: Admin): Promise<{ created: n
 
   let dismissed = 0;
   for (const n of notifs) {
+    // Escalation cards are NOT routed Approval Requests keyed on a job's approval state — their
+    // originating job (e.g. cs-director-call) is `completed` by construction at the moment the card
+    // is minted, so this job-keyed loop would read every escalation as stale and dismiss it within
+    // a tick (observed 2026-07-20: all eight founder-escalation cards ever minted are dismissed,
+    // the most recent one dismissed unread). Reason-keyed cards have their own dedicated reconciler
+    // (`reconcileStaleParkCards`, called below), which is the correct pattern; skip them here so this
+    // loop stays scoped to the routed cards it actually owns.
+    const escKind = n.metadata?.["escalation_kind"];
+    if (typeof escKind === "string" && escKind.length > 0) continue;
     const jid = n.metadata?.["agent_job_id"];
     if (typeof jid === "string" && !openJobIds.has(jid)) {
       const { error } = await admin.from("dashboard_notifications").update({ dismissed: true }).eq("id", n.id);
