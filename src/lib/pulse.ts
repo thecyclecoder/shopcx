@@ -20,7 +20,7 @@
  * Phase 2 of that spec.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { listSpecs, type SpecRow, type SpecStatus } from "@/lib/specs-table";
+import { getAllSpecs, type SpecRow, type SpecStatus } from "@/lib/specs-table";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SESSION_AUTHORED_MODEL, type DigestThread, type DigestRef, type DigestDecision } from "@/lib/pulse-digest";
@@ -666,7 +666,10 @@ export async function buildPulse(opts: {
       .eq("workspace_id", opts.workspaceId)
       .order("last_activity_at", { ascending: false })
       .limit(40),
-    listSpecs(opts.workspaceId),
+    // spec-read-egress-scope-and-cursor: a session thread routinely references a spec that just
+    // FOLDED (that's what "shipped" looks like), and matchThreadsToSpecs resolves those to DONE —
+    // so this must stay folded-inclusive. Stated explicitly rather than riding the default.
+    getAllSpecs(opts.workspaceId),
     admin
       .from("agent_jobs")
       .select("id, spec_slug, status, pr_number, pr_url, updated_at")
