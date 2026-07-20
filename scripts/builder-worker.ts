@@ -21348,10 +21348,23 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
       }
     };
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
+    // dahlia-max-live-timeline: stream the ping-pong onto agent_jobs.session_note so the Dahlia→Max
+    // session card stops being a black box. The copy-author lane has no TodoWrite (so session_checklist
+    // stays empty) — the WORKER, which orchestrates the ping-pong, narrates it instead. Best-effort +
+    // deduped; a failed write never breaks the run.
+    let lastNote = "";
+    const reportProgress = (n: string) => {
+      const s = String(n).slice(0, 500);
+      if (s === lastNote) return;
+      lastNote = s;
+      void a.from("agent_jobs").update({ session_note: s }).eq("id", job.id).then(() => {}, () => {});
+    };
+    reportProgress("Dahlia is reading the reference ad…");
     const result = await runAdCreativeLoop(a, {
       workspaceId: job.workspace_id,
       productId: instr.product_id,
       count: instr.count,
+      reportProgress,
       // ad-creative-trigger SDK — honour the caller's audience temperature (cold prospecting vs
       // warm/hot) by threading it as the CreativeIntent so stockProduct scopes winner research +
       // angle selection to it. Omitted ⇒ stockProduct's default (cold, test-to-find-winner).
@@ -21374,6 +21387,9 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     });
     detail = `produced=${result.produced} failed=${result.failed} across ${result.stocked.length} attempt(s)`;
     console.log(`${tag} ${detail}`);
+    reportProgress(result.produced > 0
+      ? `✓ Produced ${result.produced} ad${result.produced === 1 ? "" : "s"} — saved to the bin`
+      : `✗ No ad produced — ${String((result.stocked.find((s) => !s.ok) as { reason?: string } | undefined)?.reason ?? "see log").slice(0, 120)}`);
     await update(job.id, {
       status: result.produced > 0 || result.stocked.length === 0 ? "completed" : "failed",
       log_tail: JSON.stringify(result.stocked).slice(-4000),

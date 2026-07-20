@@ -818,6 +818,11 @@ export interface CopyAuthorSessionInputs {
     | { ok: true; maxVerdict: CopyQaVerdict }
     | { ok: false; reason: string; maxVerdict: CopyQaVerdict | null }
   >;
+  /** dahlia-max-live-timeline — best-effort live progress narration for the Dahlia→Max ping-pong.
+   *  The caller (the runner) writes each note to `agent_jobs.session_note` so the box/session card
+   *  stops being a black box (it shows "Dahlia authoring… → Max scoring… → single_promise, revising…
+   *  → exhausted", instead of a silent 10-min run). MUST NOT throw. Omit ⇒ no narration (tests). */
+  reportProgress?: (note: string) => void;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -1579,6 +1584,34 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
  * Pure w.r.t. Supabase — takes a dispatcher callable + the injected firewall closure; the caller
  * (stockProduct) is responsible for writing the tmp jpeg + calling insertReadyCreative on ok.
  */
+/** PURE — turn an internal revise `lastReason` into a short human phrase for the live session card
+ *  (dahlia-max-live-timeline). Keeps the ping-pong narration readable ("single promise (pick one
+ *  benefit)") instead of leaking raw rail codes. Exported for the unit test. */
+export function humanizeReviseReason(reason: string): string {
+  const r = (reason || "").trim();
+  if (!r) return "revising";
+  if (r.startsWith("validator_failed:")) {
+    const rails = r.slice("validator_failed:".length).trim();
+    if (/single_promise/.test(rails)) return "single promise (pick one benefit)";
+    if (/no_competitor_leak/.test(rails)) return "competitor brand leaked in";
+    if (/cold_offer_gate/.test(rails)) return "offer leaked into cold copy";
+    if (/no_msrp/.test(rails)) return "bare price shown";
+    if (/lf8/.test(rails)) return "weak core desire";
+    if (/meta_caps/.test(rails)) return "over Meta length caps";
+    return `failed ${rails}`;
+  }
+  if (r.startsWith("parse_failed")) return "unparseable output";
+  if (r.startsWith("self_score")) return "self-score too low";
+  if (r === "cold_offer_leak") return "offer leaked into cold copy";
+  if (r.startsWith("ad_name_invalid")) return "invalid ad name";
+  if (r.startsWith("paragraph_structure")) return "wrong paragraph shape";
+  if (r.startsWith("human_voice")) return "AI-tell phrasing (em-dash)";
+  if (r.startsWith("max_qc_below_floor")) return "Max scored below 7/10";
+  if (/claim|firewall/i.test(r)) return "unverified claim";
+  if (r.startsWith("dispatch_threw") || r === "session_error" || r.startsWith("session_lost")) return "session error";
+  return r.slice(0, 60);
+}
+
 export async function runCopyAuthorSession(
   inputs: CopyAuthorSessionInputs,
   dispatch: CopyAuthorSessionDispatcher,
@@ -1606,7 +1639,13 @@ export async function runCopyAuthorSession(
   let resumeSessionId: string | null = null;
   let resumeConfigDir: string | null = null;
   const cap = MAX_COPY_AUTHOR_REVISE_ATTEMPTS;
+  const note = (s: string) => { try { inputs.reportProgress?.(s); } catch { /* best-effort */ } };
   for (let attempt = 0; attempt <= cap; attempt++) {
+    // dahlia-max-live-timeline — narrate each ping-pong beat onto the session card. On a revise, name
+    // WHY (the prior gate) so a 10-min run reads "Dahlia revising (single_promise)…" instead of blank.
+    note(attempt === 0
+      ? "Dahlia is authoring the copy…"
+      : `Dahlia is revising — ${humanizeReviseReason(lastReason)} (try ${attempt + 1}/${cap + 1})…`);
     // Resume the SAME session with a short revise turn when we hold a live session id; otherwise send
     // the full context (attempt 0, or a fresh session after the lost-session failsafe fired).
     const resumePin = resumeSessionId
@@ -1828,6 +1867,7 @@ export async function runCopyAuthorSession(
     // without ever showing her the critique. Skipped when the caller injected no closure (the
     // bench / deterministic callers stay Phase-1/2 behavior byte-identical).
     if (inputs.verifyMaxCopyQc) {
+      note("Max is grading the copy…");
       const maxCheck = await inputs.verifyMaxCopyQc(verdict);
       if (!maxCheck.ok) {
         lastReason = maxCheck.reason;
@@ -1846,10 +1886,13 @@ export async function runCopyAuthorSession(
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = maxCheck.maxVerdict;
       lastAuthorVerdict = null;
+      note(`Max approved (${maxCheck.maxVerdict.persuasion_score}/10) — rendering the final ad…`);
       return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: maxCheck.maxVerdict };
     }
+    note("Copy cleared all checks — rendering the final ad…");
     return { kind: "ok", verdict, attempts: attempt + 1 };
   }
+  note(`Gave up after ${cap + 1} tries — ${humanizeReviseReason(lastReason)}`);
   return {
     kind: "exhausted",
     reason: lastReason || "exhausted",
@@ -1893,6 +1936,8 @@ async function runCopyAuthorSessionForImage(
      *  hold). Passed straight through to `runCopyAuthorSession`. Optional so pre-existing
      *  callers keep compiling. */
     verifyMaxCopyQc?: CopyAuthorSessionInputs["verifyMaxCopyQc"];
+    /** dahlia-max-live-timeline — live ping-pong narration passthrough to the session card. */
+    reportProgress?: CopyAuthorSessionInputs["reportProgress"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -1929,6 +1974,7 @@ async function runCopyAuthorSessionForImage(
         ourBrand: input.ourBrand,
         verifyClaimTrace: input.verifyClaimTrace,
         verifyMaxCopyQc: input.verifyMaxCopyQc,
+        reportProgress: input.reportProgress,
       },
       dispatch,
     );
@@ -2733,7 +2779,11 @@ async function stockProduct(
    *  generation ("remove the free tote badge"). Threaded onto `brief.authorNotes` so both the image
    *  prompt and the copy-author prompt apply it first-pass. Undefined ⇒ no note. */
   authorNotes?: string,
+  /** dahlia-max-live-timeline — best-effort live progress narration written to the job's
+   *  `session_note` by the runner. Undefined ⇒ no narration (cadence / tests). */
+  reportProgress?: (note: string) => void,
 ): Promise<StockedCreative[]> {
+  const progress = (s: string) => { try { reportProgress?.(s); } catch { /* best-effort */ } };
   // dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope.
   // Every downstream research read (getProvenCompetitorAngles) is SCOPED to this intent so a
   // cold-audience task prefers cold-appropriate winner concepts (concept_tags.awareness_stage
@@ -3016,6 +3066,7 @@ async function stockProduct(
         // this creative rather than persist a half-pack.
         // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
         const packPlan = placementPackPlan();
+        progress(`Generating the ad image (${treatment}${attempt > 0 ? `, retry ${attempt + 1}` : ""})…`);
         const gen = await generateCreative(workspaceId, brief, {
           treatment,
           designReferenceUrl: plan.designReferenceUrl,
@@ -3039,6 +3090,7 @@ async function stockProduct(
           ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
           : null;
         const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
+        progress("Checking the image quality…");
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
           : await qaCreative(workspaceId, qaInput);
@@ -3295,6 +3347,7 @@ async function stockProduct(
               ourBrand,
               verifyClaimTrace: verifyClaimTraceForVerdict,
               verifyMaxCopyQc: verifyMaxCopyQcForVerdict,
+              reportProgress,
             },
             copyAuthorDispatcher,
           );
@@ -3896,9 +3949,12 @@ export async function runAdCreativeLoop(
      *  ("remove the free tote badge"). Threaded to `stockProduct` → `brief.authorNotes` (image +
      *  copy prompts). Only applied on the single-product path. Omit ⇒ no note. */
     authorNotes?: string;
+    /** dahlia-max-live-timeline — best-effort live progress narration; the runner writes each note to
+     *  the job's `session_note` so the Dahlia→Max session card shows the ping-pong live. Omit ⇒ none. */
+    reportProgress?: (note: string) => void;
   },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId, authorNotes } = opts;
+  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId, authorNotes, reportProgress } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
@@ -3935,7 +3991,7 @@ export async function runAdCreativeLoop(
     const pinForTarget = opts.productId && t.productId === opts.productId ? pinnedCompetitorSkeletonId : undefined;
     // Owner notes ride the same single-product-only rule as the pin (a cadence top-up carries none).
     const notesForTarget = opts.productId && t.productId === opts.productId ? authorNotes : undefined;
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget, notesForTarget);
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget, notesForTarget, reportProgress);
     stocked.push(...results);
   }
 
