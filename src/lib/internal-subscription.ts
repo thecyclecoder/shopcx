@@ -505,6 +505,87 @@ export async function internalSubRemoveDiscount(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Shipping address — writes the SoT column the daily internal-subscription
+// renewal cron reads (see [[../inngest/internal-subscription-renewals]] the
+// resolvedShipping fallback chain). Shared by both branches of the
+// commerce SDK's `subscriptionUpdateShippingAddress`: internal subs write
+// ONLY here (no vendor call), Appstle subs write here AFTER a successful
+// vendor PUT so `subscriptions.shipping_address` mirrors the vendor state
+// for every dashboard/portal read.
+// ────────────────────────────────────────────────────────────────────
+
+export interface ShippingAddressInput {
+  address1: string;
+  address2?: string | null;
+  city: string;
+  zip: string;
+  /** Country CODE (e.g. "US"). The SDK caller and portal both send codes. */
+  country: string;
+  /** Province CODE (e.g. "CA"). */
+  province: string;
+  firstName: string;
+  lastName: string;
+  phone: string;
+}
+
+export interface StoredShippingAddress {
+  first_name: string;
+  last_name: string;
+  phone: string | null;
+  address1: string;
+  address2: string | null;
+  city: string;
+  province_code: string;
+  zip: string;
+  country_code: string;
+}
+
+/**
+ * Pure: normalize a caller's ShippingAddressInput into the on-row JSON
+ * shape stored at `subscriptions.shipping_address`. Matches the shape
+ * written by the portal address handler and checkout — the two existing
+ * writers whose column keys the internal renewal cron reads back off.
+ * Extracted as a pure helper so tests can pin the invariant without I/O.
+ */
+export function buildShippingAddressRow(a: ShippingAddressInput): StoredShippingAddress {
+  return {
+    first_name: a.firstName,
+    last_name: a.lastName,
+    phone: a.phone || null,
+    address1: a.address1,
+    address2: a.address2 || null,
+    city: a.city,
+    province_code: a.province,
+    zip: a.zip,
+    country_code: a.country,
+  };
+}
+
+/**
+ * Write a subscription's shipping_address onto `public.subscriptions` for
+ * the row matching (workspace_id, shopify_contract_id). Returns success:
+ * false with the DB error on a failed write so callers can surface a
+ * dropped write instead of pretending it landed.
+ */
+export async function internalSubUpdateShippingAddress(
+  workspaceId: string,
+  contractId: string,
+  address: ShippingAddressInput,
+): Promise<ActionResult> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("subscriptions")
+    .update({
+      shipping_address: buildShippingAddressRow(address),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Stubs — these wrap Appstle endpoints whose internal-mode equivalent
 // hasn't been wired yet. They return success=false with a clear error
 // so callers know to surface a "manual operator action needed" note

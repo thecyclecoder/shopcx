@@ -50,6 +50,16 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 - Date format: YYYY-MM-DD or full ISO datetime.
 - Replaces `appstleUpdateNextBillingDate`.
 
+### Shipping address
+
+**`subscriptionUpdateShippingAddress`** — `async (workspaceId, contractId, address, deps?) → OpResult`
+- Both branches now write `public.subscriptions.shipping_address` (the SoT the daily [[../inngest/internal-subscription-renewals]] cron reads back off). The two branches do OPPOSITE additional work and neither substitutes for the other:
+  - **Internal sub:** the row IS the source of truth its renewal reads, so this branch writes ONLY the column — via [[internal-subscription]]'s `internalSubUpdateShippingAddress`. Returns `{ success: false, error }` on a DB write failure so callers can tell a dropped write from a completed one. (Closes the prior silent `return { success: true }` no-op that reported success while writing nothing — the defect that left every SDK-going caller's internal address change stranded.)
+  - **Appstle sub:** Appstle owns the vendor contract's fulfillment, so the address MUST reach the vendor first (otherwise the next order ships to the old address). Order matters: vendor PUT first, then mirror to `subscriptions.shipping_address` via the SAME internal helper so every dashboard/portal/renewal-fallback read reflects the current address. A local-write failure AFTER a successful vendor PUT does NOT flip the result to failure (the customer's address DID change where it ships from) — `console.error`'d loudly instead, the same shape as the compensating-write rail. The vendor's REST body still carries `country`/`countryCode` + `province`/`provinceCode` duplicates for the GraphQL validator.
+- **Do NOT collapse the two branches into a single local write with no vendor call.** That would silently downgrade every Appstle address change to a stale-column write, converting a working path into the same defect the internal branch fixes. Pinned by `src/lib/commerce/subscription.updateShippingAddress.test.ts` (regression guard asserting the Appstle branch still issues the vendor PUT carrying the address fields).
+- **Column shape** (`buildShippingAddressRow` in [[internal-subscription]]): `{ first_name, last_name, phone|null, address1, address2|null, city, province_code, zip, country_code }` — mirrors the shape the portal address handler + checkout write so the internal-renewal cron's fallback chain (`subscriptions.shipping_address` → latest order → customer default) reads a consistent key set.
+- The optional `deps` param is dependency-injection for the test — prod callers omit it. `defaultUpdateShippingAddressDeps()` supplies the real `isInternalSubscription`, workspaces-key read + `decrypt`, `loggedCommerceFetch`, and `internalSubUpdateShippingAddress`.
+
 ### Payment method mutations
 
 **`subscriptionSwitchPaymentMethod`** — `async (workspaceId, contractId, paymentMethodId) → OpResult`

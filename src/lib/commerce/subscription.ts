@@ -44,6 +44,8 @@ import {
   internalSubSkipNextOrder,
   internalSubUpdateBillingInterval,
   internalSubUpdateNextBillingDate,
+  internalSubUpdateShippingAddress,
+  type ShippingAddressInput,
 } from "@/lib/internal-subscription";
 import {
   appstleSubscriptionAction,
@@ -606,42 +608,79 @@ export async function subscriptionGetLiveContract(
 }
 
 /**
- * Push a shipping-address update through the upstream vendor. Called
- * by action-executor's update_shipping_address direct-action handler.
- * Bounces on internal contracts (their shipping-address lives on the
- * `subscriptions.shipping_address` jsonb column and is updated there
- * directly by the same handler).
+ * Update the shipping address a subscription bills/ships to. Called by
+ * the action-executor's `update_shipping_address` direct-action handler,
+ * by the address-change journey completion route, and by any other SDK
+ * consumer that changes a customer's address.
+ *
+ * Both branches write `subscriptions.shipping_address` (the SoT column
+ * the internal renewal cron and every dashboard/portal read consumes),
+ * but they do OPPOSITE additional work:
+ *
+ * - **Internal branch:** ONLY writes the column — the row IS the source
+ *   of truth its renewal reads. Returns `{ success: false, error }` on a
+ *   DB write failure so a caller can tell a dropped write from a
+ *   completed one (the exact defect this closes: the prior implementation
+ *   returned `{ success: true }` without writing anything).
+ * - **Appstle branch:** issues the vendor PUT first (Appstle owns the
+ *   contract's fulfillment — without this, the next order ships to the
+ *   old address), then mirrors the address onto our column. A local-write
+ *   failure AFTER a successful vendor PUT does NOT flip the result to
+ *   failure — the customer's address DID change where it ships from —
+ *   it's logged loudly instead, the same shape as the compensating-write
+ *   rail. The two branches must NEVER be collapsed into a single local
+ *   write with no vendor call: that would silently drop every Appstle
+ *   address change.
  */
+export interface UpdateShippingAddressDeps {
+  isInternal(workspaceId: string, contractId: string): Promise<boolean>;
+  getVendorApiKey(workspaceId: string): Promise<string | null>;
+  vendorFetch(url: string, init: RequestInit): Promise<Response>;
+  writeLocal(
+    workspaceId: string,
+    contractId: string,
+    address: ShippingAddressInput,
+  ): Promise<{ success: boolean; error?: string }>;
+}
+
+/** Real deps for prod. Extracted so tests can inject fakes. */
+export function defaultUpdateShippingAddressDeps(): UpdateShippingAddressDeps {
+  return {
+    isInternal: isInternalSubscription,
+    async getVendorApiKey(workspaceId: string) {
+      const admin = createAdminClient();
+      const { data: ws } = await admin
+        .from("workspaces")
+        .select("appstle_api_key_encrypted")
+        .eq("id", workspaceId)
+        .single();
+      const enc = (ws as { appstle_api_key_encrypted?: string | null } | null)?.appstle_api_key_encrypted;
+      if (!enc) return null;
+      const { decrypt } = await import("@/lib/crypto");
+      return decrypt(enc);
+    },
+    async vendorFetch(url, init) {
+      const { loggedCommerceFetch } = await import("@/lib/commerce/call-log");
+      return loggedCommerceFetch(url, init, "update-shipping-address");
+    },
+    writeLocal: internalSubUpdateShippingAddress,
+  };
+}
+
 export async function subscriptionUpdateShippingAddress(
   workspaceId: string,
   contractId: string,
-  address: {
-    address1: string;
-    address2?: string | null;
-    city: string;
-    zip: string;
-    country: string;
-    province: string;
-    firstName: string;
-    lastName: string;
-    phone: string;
-  },
+  address: ShippingAddressInput,
+  deps: UpdateShippingAddressDeps = defaultUpdateShippingAddressDeps(),
 ): Promise<OpResult> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  if (await deps.isInternal(workspaceId, contractId)) {
+    const w = await deps.writeLocal(workspaceId, contractId, address);
+    if (!w.success) return { success: false, error: w.error };
     return { success: true };
   }
-  const admin = createAdminClient();
-  const { data: ws } = await admin
-    .from("workspaces")
-    .select("appstle_api_key_encrypted")
-    .eq("id", workspaceId)
-    .single();
-  const enc = (ws as { appstle_api_key_encrypted?: string | null } | null)?.appstle_api_key_encrypted;
-  if (!enc) return { success: false, error: "Subscription vendor not configured" };
-  const { decrypt } = await import("@/lib/crypto");
-  const apiKey = decrypt(enc);
-  const { loggedCommerceFetch } = await import("@/lib/commerce/call-log");
-  const res = await loggedCommerceFetch(
+  const apiKey = await deps.getVendorApiKey(workspaceId);
+  if (!apiKey) return { success: false, error: "Subscription vendor not configured" };
+  const res = await deps.vendorFetch(
     `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-shipping-address?contractId=${contractId}`,
     {
       method: "PUT",
@@ -660,10 +699,21 @@ export async function subscriptionUpdateShippingAddress(
         phone: address.phone,
       }),
     },
-    "update-shipping-address",
   );
   if (!res.ok) {
+    // Vendor rejected — do NOT mirror an address the vendor never accepted.
     return { success: false, error: `Vendor ${res.status}` };
+  }
+  // Vendor accepted → mirror onto our row so every internal reader
+  // (dashboard, portal, renewal fallback chain) reflects the current
+  // address. A DB failure AFTER a successful vendor PUT does NOT flip
+  // the caller's result — the customer's address DID change where it
+  // ships from — it's logged loudly instead.
+  const local = await deps.writeLocal(workspaceId, contractId, address);
+  if (!local.success) {
+    console.error(
+      `[subscriptionUpdateShippingAddress] Appstle vendor PUT succeeded but local row write failed for contract ${contractId}: ${local.error ?? "unknown"}`,
+    );
   }
   return { success: true };
 }
