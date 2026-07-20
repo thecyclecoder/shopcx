@@ -47,28 +47,38 @@ export async function materializeSpec(
 }
 
 /**
- * DB-row buildability check — "the database is the spec." A spec ROW is buildable iff it carries REAL
- * content on the rows themselves (NOT a magic markdown heading):
- *   - ≥1 `spec_phases` row with a non-empty title OR body (a multi-phase spec), OR
- *   - a non-empty `summary` (a one-shot spec — the whole thing ships in one PR).
- * Only a genuinely-empty spec (no phase carries any title/body AND no summary) is refused. This is the
- * exact safety the old `/^#{2,3}\s+Phase/` markdown regex provided (never build a 0-content spec → never
- * open an empty PR), re-keyed onto the ROWS so a valid spec whose phase titles don't literally start with
- * "Phase" still builds. The existence of the row means it exists — no magic phrases or markdown needed.
+ * DB-row buildability check — "the database is the spec." A spec ROW is buildable iff at least one
+ * `spec_phases` row carries real content (a non-empty title OR body).
+ *
+ * spec-cannot-exist-without-phases Phase 3 removed the summary-only fallback that used to let a
+ * zero-phase spec with only a `summary` count as buildable. A spec's `spec_phase_checks` live under its
+ * phases, so a spec with no phases has zero checks and the promote-on-green tests gate can never go
+ * green: the build succeeds, opens a PR, and sits unmergeable (2026-07-20 — three such specs landed
+ * from three different author paths and sat stuck for up to 4.5h; two were byte-identical duplicates).
+ * The build gate and the merge gate were disagreeing about what "a complete spec" was, and every
+ * disagreement cost a full build plus an hourly stall-detector session.
+ *
+ * A genuine one-shot spec should carry a single phase whose body IS the work — that's what every
+ * healthy spec in the table already does (654 folded specs, every one with ≥1 phase). The
+ * `## Phase N — title` heading in the materialized markdown is still just READABILITY; the gate keys
+ * on the ROW.
  */
 export function specHasBuildableContent(row: SpecRow): boolean {
-  const hasPhaseContent = row.phases.some(
+  return row.phases.some(
     (p) => (p.title || "").trim().length > 0 || (p.body || "").trim().length > 0,
   );
-  const hasSummary = !!(row.summary && row.summary.trim().length > 0);
-  return hasPhaseContent || hasSummary;
 }
 
 /** Human-readable reason a row is NOT buildable — for the gate's failure message. "" = buildable. */
 export function unbuildableReason(row: SpecRow): string {
   if (specHasBuildableContent(row)) return "";
-  if (row.phases.length === 0) return "has no spec_phases rows and an empty summary";
-  return "has spec_phases rows but every one is empty (no title, no body) and the summary is empty";
+  // spec-cannot-exist-without-phases Phase 3 — name the REAL consequence the merge gate hits, not just
+  // the shape defect. `spec_phase_checks` live under `spec_phases`; no phases → no checks → the
+  // promote-on-green tests gate can never go green → the build would produce an unmergeable PR.
+  if (row.phases.length === 0) {
+    return "has no spec_phases rows — no spec_phase_checks would exist, so the promote-on-green tests gate can never go green and the build would produce an unmergeable PR";
+  }
+  return "has spec_phases rows but every one is empty (no title, no body)";
 }
 
 /**
