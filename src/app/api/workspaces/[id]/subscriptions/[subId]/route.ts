@@ -5,8 +5,8 @@ import {
   subscriptionAction,
   subscriptionSkipUpcomingOrder,
   subscriptionUpdateBillingInterval,
+  subscriptionUpdateNextBillingDate,
 } from "@/lib/commerce/subscription";
-import { changeNextBillingDate } from "@/lib/shopify-subscriptions";
 import { logCustomerEvent } from "@/lib/customer-events";
 
 // GET: Full subscription detail with dunning, orders, events
@@ -183,7 +183,13 @@ export async function PATCH(
       // 2026-05-28).
       const nextBillingDate = body.nextBillingDate || body.next_billing_date;
       if (!nextBillingDate) return NextResponse.json({ error: "nextBillingDate / next_billing_date required" }, { status: 400 });
-      result = await changeNextBillingDate(workspaceId, sub.shopify_contract_id, nextBillingDate);
+      // Route through the internal-aware commerce SDK — `subscriptionUpdateNextBillingDate`
+      // checks `isInternalSubscription` and either updates our own DB (internal subs) or
+      // calls Appstle's update-billing-date endpoint. The old `changeNextBillingDate()`
+      // fired a raw Shopify `subscriptionDraftUpdate` mutation, which does the wrong thing
+      // for an internal sub and diverged from the AI path (action-executor.ts). Every
+      // sibling case in this route already goes through the SDK; this one was missed.
+      result = await subscriptionUpdateNextBillingDate(workspaceId, sub.shopify_contract_id, nextBillingDate);
       // Update local record
       if (result.success) {
         await admin.from("subscriptions").update({ next_billing_date: nextBillingDate, updated_at: new Date().toISOString() }).eq("id", subId);

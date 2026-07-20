@@ -43,7 +43,7 @@ Common mutations used:
 - `orderCreate` / `orderUpdate` / `refundCreate`
 - `returnCreate` / `reverseFulfillmentOrderCreate` — see `src/lib/shopify-returns.ts`
 - `tagsAdd` / `tagsRemove` — for fraud holds
-- `subscriptionContractUpdate` + `subscriptionDraftLineAdd/Remove/Update` + `subscriptionDraftCommit` — see `src/lib/shopify-subscriptions.ts`
+- ~~`subscriptionContractUpdate` + `subscriptionDraftLineAdd/Remove/Update` + `subscriptionDraftCommit`~~ — **RETIRED 2026-07-20.** We never mutate a subscription in Shopify; every subscription write goes through [[../libraries/commerce__subscription]] (Appstle path or internal path). `src/lib/shopify-subscriptions.ts` was deleted once its last caller was removed, and `npm run check:no-shopify-sub-mutations` (chained into `predeploy`) fails the build on any new raw Shopify subscription mutation. See [[../operational-rules]] § Subscription mutations.
 - `storeCreditAccountCredit` — see `src/lib/store-credit.ts`
 
 ## Rate limits + retry
@@ -84,7 +84,6 @@ Webhook HMAC verified with Client Secret.
 - `src/lib/shopify-order-actions.ts` — Refunds, cancellations, address updates
 - `src/lib/shopify-order-tags.ts` — `tagsAdd` / `tagsRemove`
 - `src/lib/shopify-returns.ts` — Return creation + label + refund
-- `src/lib/shopify-subscriptions.ts` — Subscription draft workflow
 - `src/lib/shopify-draft-orders.ts` — Draft order creation
 - `src/lib/shopify-customer-update.ts` — Customer mutations
 - `src/lib/multipass.ts` — Multipass SSO
