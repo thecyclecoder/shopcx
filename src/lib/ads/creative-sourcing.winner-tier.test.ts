@@ -63,6 +63,9 @@ interface SkeletonRow {
   winner_score: number | null;
   media_type: string | null;
   concept_tags: ConceptTags | null;
+  // flag-a-competitor-ad-do-not-use Phase 1 — queryProvenAngles filters `.eq('do_not_use', false)`,
+  // so a mock row MUST carry the flag or it's excluded from the shelf.
+  do_not_use: boolean | null;
 }
 
 function skel(over: Partial<SkeletonRow>): SkeletonRow {
@@ -85,6 +88,7 @@ function skel(over: Partial<SkeletonRow>): SkeletonRow {
     winner_score: 0,
     media_type: "static",
     concept_tags: null,
+    do_not_use: false,
     ...over,
   };
 }
@@ -389,6 +393,9 @@ test("buildCreativeBrief: surfaces conceptTags on the brief for a competitor ang
     reviews: { byClaim: async () => [] } as unknown as ProductIntelligence["reviews"],
     reviewAnalysis: null,
     adAngles: [],
+    // selectAngles seeds the role='lead' benefit as a top hook candidate (dahlia-hooks-riff Phase 1);
+    // an empty benefits array exercises the graceful-degrade path without crashing.
+    benefits: [],
     ingredientResearch: [],
     store: { brandProofPoints: [] } as unknown as ProductIntelligence["store"],
     offer: null,
@@ -418,6 +425,9 @@ test("buildCreativeBrief: leaves conceptTags null for an own-brand angle (never 
     reviews: { byClaim: async () => [] } as unknown as ProductIntelligence["reviews"],
     reviewAnalysis: null,
     adAngles: [],
+    // selectAngles seeds the role='lead' benefit as a top hook candidate (dahlia-hooks-riff Phase 1);
+    // an empty benefits array exercises the graceful-degrade path without crashing.
+    benefits: [],
     ingredientResearch: [],
     store: { brandProofPoints: [] } as unknown as ProductIntelligence["store"],
     offer: null,
