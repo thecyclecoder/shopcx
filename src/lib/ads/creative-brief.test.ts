@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCreativeBrief, buildMetaCopy, sanitizeCompetitorHook, selectAngles, selectAnglesForTemperature, type CreativeBrief, type ScoredAngle } from "./creative-brief";
+import { buildCreativeBrief, buildMetaCopy, isInternalAngleLabel, sanitizeCompetitorHook, selectAngles, selectAnglesForTemperature, type CreativeBrief, type ScoredAngle } from "./creative-brief";
 import type { ProductIntelligence, PIReview } from "@/lib/product-intelligence";
 import { hasAnyLf8 } from "./lf8";
 
@@ -606,4 +606,15 @@ test("buildCreativeBrief — brief.productFeatures is populated from pi.ingredie
   };
   const brief = await buildCreativeBrief(pi, angle);
   assert.deepEqual(brief.productFeatures, ["3 superfoods per serving"]);
+});
+
+// ── internal angle-category labels must never render as ad copy (Ingredient / mechanism leak fix)
+
+test("isInternalAngleLabel: flags the internal category labels, passes real benefit copy", () => {
+  assert.equal(isInternalAngleLabel("Ingredient / mechanism"), true);
+  assert.equal(isInternalAngleLabel("Weight loss (real customer transformation)"), true);
+  assert.equal(isInternalAngleLabel("  Ingredient / mechanism  "), true, "trimmed");
+  assert.equal(isInternalAngleLabel("Calm, steady energy with no crash"), false, "a real benefit passes");
+  assert.equal(isInternalAngleLabel(""), false);
+  assert.equal(isInternalAngleLabel(null), false);
 });
