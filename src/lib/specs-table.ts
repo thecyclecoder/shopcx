@@ -58,6 +58,29 @@ export class UngatedSpecAuthorError extends Error {
   }
 }
 
+/**
+ * Thrown UNCONDITIONALLY by `upsertSpec` when the phase list is empty — the last rail against a phase-less
+ * spec landing in `public.specs`. A spec's `spec_phase_checks` live under its phases, so a spec with zero
+ * phases has zero checks and the promote-on-green tests gate can never go green: the build succeeds, opens
+ * a PR, and sits unmergeable until a human intervenes (2026-07-20 — three such specs shipped in one day
+ * from three different author paths; two were byte-identical duplicates). Sibling to
+ * `UngatedSpecAuthorError` — same "fail-loud-at-the-writer" pattern; distinct class so callers can
+ * `instanceof EmptySpecPhasesError` and treat it specifically (an empty phase list is a shape defect,
+ * not a per-field authoring gap). Applies to insert AND update: no legitimate re-author reduces a spec
+ * to zero phases; both author chokepoints already reject one upstream.
+ */
+export class EmptySpecPhasesError extends Error {
+  constructor(slug: string) {
+    super(
+      `upsertSpec refused to write spec \`${slug}\`: phase list is empty. A spec's \`spec_phase_checks\` ` +
+        `live under its phases, so a spec with no phases has no checks — the promote-on-green tests gate ` +
+        `can never go green, and the build would produce an unmergeable PR. Author through ` +
+        `\`authorSpecRowStructured\` / \`submitSpec\` (the submit-spec skill), which requires >=1 phase.`,
+    );
+    this.name = "EmptySpecPhasesError";
+  }
+}
+
 /** The full enum the `specs.status` column accepts (CHECK-constrained in migration). */
 export type SpecStatus = "in_review" | "planned" | "in_progress" | "shipped" | "deferred" | "folded";
 
@@ -737,6 +760,14 @@ export async function upsertSpec(
   row: SpecRowInput,
   phases: SpecPhaseInput[],
 ): Promise<UpsertSpecResult> {
+  // spec-cannot-exist-without-phases Phase 1 — refuse an empty phase list BEFORE any DB write, and BEFORE
+  // the field-level `assertUpsertFullyAuthored` gate, so the caller gets a specific `EmptySpecPhasesError`
+  // (not a bundled `UngatedSpecAuthorError`) for the shape defect. UNCONDITIONAL — applies to insert AND
+  // update; no legitimate re-author reduces a spec to zero phases. Both author chokepoints
+  // (`authorSpecRowStructured`, `authorSpecRowFromMarkdown`) already reject one upstream — this is the
+  // shared-writer floor that no path (present or future, structured, markdown, or a throwaway script) can
+  // bypass. Without it, a phase-less spec landed silently: the phase loop below simply never ran.
+  if (phases.length === 0) throw new EmptySpecPhasesError(row.slug);
   const admin = createAdminClient();
   // harden-spec-submission — self-gating floor. Throws `UngatedSpecAuthorError` before any write if a phase
   // would land with empty verification/why/what (or the spec with empty why/what). The [[author-spec]]
