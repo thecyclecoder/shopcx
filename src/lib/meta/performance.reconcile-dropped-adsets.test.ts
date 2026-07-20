@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { reconcileDroppedAdsetIds } from "./performance";
+import { reconcileDroppedAdIds, reconcileDroppedAdsetIds } from "./performance";
 
 test("mirrored adset in a synced campaign that Meta didn't return → dropped", () => {
   const dropped = reconcileDroppedAdsetIds(
@@ -74,4 +74,63 @@ test("null meta_campaign_id on a mirror row is skipped (unscoped orphan)", () =>
     ],
   );
   assert.deepEqual(dropped, ["a-scoped"]);
+});
+
+// ── reconcileDroppedAdIds (Phase 2) ──────────────────────────────────────────
+// Same shape as the adset helper: Meta's default `/ads` list also excludes
+// archived/deleted ads, so a dropped ad leaves a stuck-ACTIVE ghost the Ad
+// Testing creative view + ad-level signals read against.
+
+test("ads: mirrored ad in a synced campaign that Meta didn't return → dropped", () => {
+  const dropped = reconcileDroppedAdIds(
+    ["c1"],
+    ["ad-live"],
+    [
+      { meta_ad_id: "ad-live", meta_campaign_id: "c1", status: "ACTIVE" },
+      { meta_ad_id: "ad-gone", meta_campaign_id: "c1", status: "ACTIVE" },
+    ],
+  );
+  assert.deepEqual(dropped, ["ad-gone"]);
+});
+
+test("ads: ad in a NON-synced campaign is left alone (scope guard)", () => {
+  const dropped = reconcileDroppedAdIds(
+    ["c1"],
+    ["ad-live"],
+    [
+      { meta_ad_id: "ad-live", meta_campaign_id: "c1", status: "ACTIVE" },
+      { meta_ad_id: "ad-other", meta_campaign_id: "c-other", status: "ACTIVE" },
+    ],
+  );
+  assert.deepEqual(dropped, []);
+});
+
+test("ads: already-ARCHIVED ad is not re-flipped (idempotent)", () => {
+  const dropped = reconcileDroppedAdIds(
+    ["c1"],
+    [],
+    [{ meta_ad_id: "ad-already-archived", meta_campaign_id: "c1", status: "ARCHIVED" }],
+  );
+  assert.deepEqual(dropped, []);
+});
+
+test("ads: empty synced-campaigns list → no reconcile (nothing to scope over)", () => {
+  const dropped = reconcileDroppedAdIds(
+    [],
+    [],
+    [{ meta_ad_id: "ad-live", meta_campaign_id: "c1", status: "ACTIVE" }],
+  );
+  assert.deepEqual(dropped, []);
+});
+
+test("ads: null meta_campaign_id on a mirror row is skipped (unscoped orphan)", () => {
+  const dropped = reconcileDroppedAdIds(
+    ["c1"],
+    [],
+    [
+      { meta_ad_id: "ad-orphan", meta_campaign_id: null, status: "ACTIVE" },
+      { meta_ad_id: "ad-scoped", meta_campaign_id: "c1", status: "ACTIVE" },
+    ],
+  );
+  assert.deepEqual(dropped, ["ad-scoped"]);
 });

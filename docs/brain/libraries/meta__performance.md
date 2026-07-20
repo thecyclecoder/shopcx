@@ -41,6 +41,24 @@ the mirrored adset ids that belong to a synced campaign but Meta didn't return
 and aren't already ARCHIVED. Kept pure so the Superfood-Tabs case is unit-tested
 without touching Graph or Supabase — see `performance.reconcile-dropped-adsets.test.ts`.
 
+After the [[../tables/meta_ads]] upsert, the same scoped-only drop-out reconcile
+is applied to `meta_ads` via `reconcileDroppedAdIds` — a dropped AD leaves the
+same ghost the Ad Testing creative view + ad-level signals read against.
+Campaign-level drop-out is out of scope (campaigns are long-lived).
+
+### `reconcileDroppedAdIds` — function
+
+```ts
+function reconcileDroppedAdIds(
+  syncedCampaignIds: string[],
+  returnedAdIds: string[],
+  mirroredAds: Array<{ meta_ad_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[]
+```
+Meta-ads mirror of `reconcileDroppedAdsetIds`. Same shape, same scope guard,
+same idempotency; consumed by `syncMetaStructure` after the meta_ads upsert to
+flip dropped ads to ARCHIVED. Kept pure and covered by the same test file.
+
 ### `syncMetaInsightsForLevel` — function
 
 ```ts

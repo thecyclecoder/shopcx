@@ -53,6 +53,13 @@ cleanly with Meta's computed `effective_status` / `meta_created_time`.
   the pure `reconcileDroppedAdsetIds` helper in [[../libraries/meta__performance]], and any
   drop-out is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'` — scoped to the
   synced campaigns, never account-wide.
+- **Same reconcile on [[meta_ads]]:** the identical scoped drop-out reconcile is applied to
+  `meta_ads` after its upsert via the pure `reconcileDroppedAdIds` helper in
+  [[../libraries/meta__performance]] — a dropped AD (not just an adset) leaves the same
+  ghost the Ad Testing creative view + ad-level signals read. Scoped to the synced
+  campaigns, never account-wide. **Campaign-level drop-out is intentionally out of scope**
+  (campaigns are long-lived; archiving a whole campaign is a manual, high-consequence
+  action a reconciler shouldn't take).
 
 ---
 
