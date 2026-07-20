@@ -99,6 +99,21 @@ export interface ScoredAngle {
   conceptTags?: ConceptTags | null;
 }
 
+/** Internal angle-CATEGORY labels used as an angle's `leadBenefit` for grouping (never real ad copy).
+ *  They must never render on a creative — `supportingBenefits` maps angle leadBenefits into the
+ *  on-image subhead, so a category label like "Ingredient / mechanism" leaked into the pixels and
+ *  Max's QC rejected it (2026-07-19/20). Defense-in-depth alongside the ingredient-angle source fix:
+ *  filter these out wherever leadBenefit becomes rendered copy. */
+export const INTERNAL_ANGLE_LABELS: ReadonlySet<string> = new Set([
+  "Ingredient / mechanism",
+  "Weight loss (real customer transformation)",
+]);
+
+/** True iff a string is an internal angle-category label that must never render as ad copy. */
+export function isInternalAngleLabel(s: string | null | undefined): boolean {
+  return !!s && INTERNAL_ANGLE_LABELS.has(s.trim());
+}
+
 function scoreAngle(hook: string, leadBenefit: string, source: ScoredAngle["source"], retentionSignal: number, raw?: Row): ScoredAngle {
   const text = `${hook} ${leadBenefit}`;
   const reasons: string[] = [];
@@ -172,9 +187,14 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
   }
   // Ingredient / mechanism angles — "the ingredient that does X / how it actually works". A DIFFERENT
   // concept from a transformation story (the ingredient-breakdown creative is a real winner for us).
+  // leadBenefit MUST be a REAL benefit string, never the internal category label: it feeds
+  // `supportingBenefits` (the rendered subhead), so the literal "Ingredient / mechanism" leaked onto
+  // the on-image copy and Max's QC rejected it (2026-07-19/20). Use the ingredient's real
+  // mechanism/benefit as the supporting truth instead.
   for (const ir of (pi.ingredientResearch as Row[]).slice(0, 4)) {
     const hook = str(ir.benefit_headline) || str(ir.mechanism_explanation).slice(0, 80);
-    if (hook) out.push(scoreAngle(hook, "Ingredient / mechanism", "ingredient", 5, ir));
+    const leadBen = str(ir.mechanism_explanation).slice(0, 100) || str(ir.benefit_headline) || hook;
+    if (hook) out.push(scoreAngle(hook, leadBen, "ingredient", 5, ir));
   }
   // Authority / proof angles — nutritionist / 3rd-party-tested / award / guarantee credibility.
   const p = pi.product as Row | null;
@@ -424,8 +444,10 @@ export async function buildCreativeBrief(
   // Supporting retention truths — the loved-but-commodity benefits (energy-no-crash, taste) go in the body.
   const supportingBenefits = selectAngles(pi, transformationStories)
     .filter((a) => a.commodity || a.retentionTruth >= 8)
-    .slice(0, 3)
-    .map((a) => a.leadBenefit);
+    .map((a) => a.leadBenefit)
+    // never let an internal angle-category label reach the rendered subhead (defense-in-depth)
+    .filter((b) => b && !isInternalAngleLabel(b))
+    .slice(0, 3);
 
   // Verified proof stack — product certs/awards + store selling points.
   const p = pi.product as Row | null;
