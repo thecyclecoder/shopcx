@@ -70,10 +70,16 @@ export default async function RoadmapArchivePage() {
           <ArchiveSearch total={archive.length} />
           <ul className="space-y-2 rounded-lg border border-zinc-200 bg-white/60 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/40">
             {archive.map((e, i) => (
-              <li key={i} data-spec-search={`${e.title} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-col gap-1 rounded-md px-1 py-1.5 text-xs">
+              <li key={i} data-spec-search={`${e.title} ${e.specSlug ?? ""} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-col gap-1 rounded-md px-1 py-1.5 text-xs">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
-                  <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
+                  {/* Title → the read-only archived-spec detail page (its phases are fetched there,
+                      one spec at a time). Entries from the filesystem fallback have no specs row, so
+                      they keep pointing at the brain page. */}
+                  <Link
+                    href={e.specSlug ? `/dashboard/roadmap/archive/${e.specSlug}` : `/dashboard/brain/${e.link}`}
+                    className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400"
+                  >
                     {e.title}
                   </Link>
                   {e.date && <span className="text-zinc-400">verified {e.date}</span>}

@@ -1291,6 +1291,10 @@ export interface ArchiveEntry {
   date: string; // verified date, "YYYY-MM-DD" (or "" if unparseable)
   link: string; // brain-relative slug the entry points at, e.g. "lifecycles/roadmap-build-console"
   label: string; // display label for the link (last path segment, humanized)
+  /** roadmap-archive-split — the `public.specs.slug`, so the listing can link to the read-only
+   *  archived-spec detail page (/dashboard/roadmap/archive/{slug}). Null for entries that came from
+   *  the filesystem fallback path, which has no DB row behind it. */
+  specSlug: string | null;
 }
 
 /** Parse one archive entry list item ("- **Title** · verified YYYY-MM-DD · → [[link]]") → entry, or null. */
@@ -1304,7 +1308,9 @@ function parseArchiveLine(line: string): ArchiveEntry | null {
   const titleM = t.match(/\*\*(.+?)\*\*/);
   const title = titleM ? cleanInline(titleM[1]) : cleanInline(t.slice(2).split("·")[0]);
   const label = functionLabel(target.replace(/^.*\//, "")); // humanize last segment
-  return { title, date, link: target, label };
+  // roadmap-archive-split: the filesystem fallback has no `public.specs` row behind it, so there is
+  // no spec to link to — the listing falls back to the brain page for these.
+  return { title, date, link: target, label, specSlug: null };
 }
 
 /**
@@ -1389,10 +1395,10 @@ export async function getArchive(workspaceId?: string): Promise<ArchiveEntry[]> 
     const entries: ArchiveEntry[] = folded.map((row) => {
       const enriched = enrichment.get(row.slug);
       if (enriched) {
-        return { title: enriched.title || row.title, date: enriched.date || isoDate(row.updated_at), link: enriched.link, label: enriched.label };
+        return { title: enriched.title || row.title, date: enriched.date || isoDate(row.updated_at), link: enriched.link, label: enriched.label, specSlug: row.slug };
       }
       const link = `lifecycles/${row.slug}`;
-      return { title: row.title, date: isoDate(row.updated_at), link, label: functionLabel(row.slug) };
+      return { title: row.title, date: isoDate(row.updated_at), link, label: functionLabel(row.slug), specSlug: row.slug };
     });
     entries.sort((a, b) => b.date.localeCompare(a.date) || a.link.localeCompare(b.link));
     if (entries.length) return entries;
