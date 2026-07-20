@@ -46,6 +46,13 @@ cleanly with Meta's computed `effective_status` / `meta_created_time`.
 - Budgets in **cents** (Meta returns minor units already — no ×100).
 - `meta_campaign_id` links to [[meta_campaigns]] by **text Meta id**, not uuid FK.
 - Either `daily_budget_cents` (here, ABO) or [[meta_campaigns]]`.daily_budget_cents` (CBO) is set, not both.
+- **Drop-out reconcile:** Meta's default `/adsets` list EXCLUDES archived adsets, so an
+  archived adset would keep its stale ACTIVE mirror row forever (Superfood Tabs incident:
+  two adsets stuck ACTIVE until reconciled by hand). After each `syncMetaStructure` upsert,
+  the mirror rows for the synced campaigns are diffed against Meta's returned adset ids by
+  the pure `reconcileDroppedAdsetIds` helper in [[../libraries/meta__performance]], and any
+  drop-out is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'` — scoped to the
+  synced campaigns, never account-wide.
 
 ---
 

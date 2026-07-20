@@ -17,6 +17,27 @@ async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: number; ad
 ```
 Upserts campaigns/adsets/ads (+ budgets, status) keyed on the Meta object id.
 
+After the [[../tables/meta_adsets]] upsert, runs a **scoped drop-out reconcile**:
+any mirror row for the synced campaigns that Meta didn't return this run and
+isn't already `ARCHIVED` is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'`
+(chunked compare-and-set, workspace + account scoped). Meta excludes archived
+adsets from its default `/adsets` list, so without this an archived adset stays
+stuck ACTIVE in the mirror forever (Superfood Tabs incident).
+
+### `reconcileDroppedAdsetIds` — function
+
+```ts
+function reconcileDroppedAdsetIds(
+  syncedCampaignIds: string[],
+  returnedAdsetIds: string[],
+  mirroredAdsets: Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[]
+```
+Pure set-difference used by `syncMetaStructure`'s drop-out reconcile: returns
+the mirrored adset ids that belong to a synced campaign but Meta didn't return
+and aren't already ARCHIVED. Kept pure so the Superfood-Tabs case is unit-tested
+without touching Graph or Supabase — see `performance.reconcile-dropped-adsets.test.ts`.
+
 ### `syncMetaInsightsForLevel` — function
 
 ```ts
