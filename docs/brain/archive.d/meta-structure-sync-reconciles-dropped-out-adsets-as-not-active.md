@@ -1,0 +1,1 @@
+- **Meta structure sync marks a no-longer-returned adset (archived/deleted on Meta) as not-active in the mirror** · verified 2026-07-20 · → [[../lifecycles/iteration-engine-phase-1]]
