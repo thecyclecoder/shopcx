@@ -3894,6 +3894,7 @@ async function runMigrationDriftJob(): Promise<void> {
         allowlistedMissing: result.allowlistedMissing,
         mergedButUnapplied: result.mergedButUnapplied,
         appliedNotOnMain: result.appliedNotOnMain,
+        duplicateVersions: result.duplicateVersions,
         expectedCount: result.expectedCount,
         liveCount: result.liveCount,
         parsedFiles: result.parsedFiles,
