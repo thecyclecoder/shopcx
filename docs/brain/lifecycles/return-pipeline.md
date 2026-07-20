@@ -91,6 +91,12 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
 2. **Read `net_refund_cents`.** If missing or zero:
    - Insert [[../tables/dashboard_notifications]] "Return needs manual review — no refund amount stored."
    - Stop. Don't refund.
+2b. **Reconcile against the live gateway ledger (money-refund path only).** Before dispatching the refund, `returnsIssueRefund` calls `getOrderRefundLedger(workspace_id, order_id)` from [[../libraries/refund-ledger]] and branches:
+   - **Null `returns.order_id`** — resolve it from `returns.shopify_order_gid` (trailing numeric id → `orders.shopify_order_id`, workspace-scoped), persist via a compare-and-set on `.is('order_id', null)`, then continue. (SC131156.)
+   - **`refundableCents === 0` AND `refundedCents ≥ net_refund_cents`** — money already moved out of band. STAMP the return `status='refunded'`, `refund_id='out_of_band_shopify'`, `refunded_at=now()` with a compare-and-set on `.is('refunded_at', null)`. Fire NO refund. (SC130193.)
+   - **`0 < refundableCents < net_refund_cents`** — refund `refundableCents` (the CAP) and record `refund_shortfall_cents = net_refund_cents - refundableCents` on the return row for audit. (SC133086 / SC129432.)
+   - **`refundableCents ≥ net_refund_cents`** — refund the full contract (unchanged behaviour).
+   > **Contract vs ceiling.** `net_refund_cents` remains the intent (set at return creation; the pipeline never re-derives it — see § "Why this design" #3). The live ledger is only ever the CEILING — the reconcile lowers what the rail dispatches, never raises it. Store-credit issuance does not touch the gateway and skips this branch.
 3. **Branch on `resolution_type`**:
    - `refund_return` → `partialRefundByAmount(orderId, net_refund_cents)`.
    - `store_credit_return` → `issueStoreCredit(customerId, net_refund_cents)`.

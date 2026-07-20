@@ -108,6 +108,7 @@ export const returnsIssueRefund = inngest.createFunction(
         .from("returns")
         .select(`
           id, status, resolution_type, order_number, order_id,
+          shopify_order_gid,
           net_refund_cents, refund_id, customer_id,
           customers(email, first_name)
         `)
@@ -145,6 +146,93 @@ export const returnsIssueRefund = inngest.createFunction(
     const isStoreCredit = (ret.resolution_type || "").includes("store_credit");
     let valueIssued = false;
     let issuedSummary = "";
+
+    // ── Phase 1 reconcile (money-refund path only) ────────────────
+    // Read the live gateway ledger BEFORE dispatching the refund so we
+    // never fire a stale stored number the gateway has since reduced
+    // (SC133086 / SC129432 cap), never re-refund a return whose money
+    // already moved out of band (SC130193), and never die on a null
+    // order id we could have repaired from shopify_order_gid (SC131156).
+    //
+    // `net_refund_cents` remains the CONTRACT (set at return creation,
+    // never raised) — the live ledger is only ever the CEILING. See
+    // docs/brain/tables/returns.md § "contract vs ceiling".
+    //
+    // Store-credit issuance never touches the gateway, so this branch
+    // is scoped to the money-refund path.
+    let orderIdForRefund: string | null = (ret.order_id as string | null) ?? null;
+    let refundCapCents = amountCents;
+    let refundShortfallCents = 0;
+    let outOfBandRefundedCents = 0;
+    let stampedOutOfBand = false;
+
+    if (!isStoreCredit) {
+      if (!orderIdForRefund && ret.shopify_order_gid) {
+        orderIdForRefund = await step.run("repair-null-order-id", async (): Promise<string | null> => {
+          const match = String(ret.shopify_order_gid).match(/(\d+)\s*$/);
+          if (!match) return null;
+          const shopifyOrderId = match[1];
+          const { data: linked } = await admin
+            .from("orders")
+            .select("id")
+            .eq("workspace_id", workspace_id)
+            .eq("shopify_order_id", shopifyOrderId)
+            .maybeSingle();
+          if (!linked?.id) return null;
+          await admin
+            .from("returns")
+            .update({ order_id: linked.id, updated_at: new Date().toISOString() })
+            .eq("id", return_id)
+            .eq("workspace_id", workspace_id)
+            .is("order_id", null);
+          return linked.id as string;
+        });
+      }
+
+      if (orderIdForRefund) {
+        const decision = await step.run("read-refund-ledger", async () => {
+          const { getOrderRefundLedger, decideRefundReconcile } = await import("@/lib/refund-ledger");
+          const ledger = await getOrderRefundLedger(workspace_id, orderIdForRefund!);
+          return decideRefundReconcile(ledger, amountCents);
+        });
+        if (decision.branch === "stamp_out_of_band") {
+          stampedOutOfBand = true;
+          outOfBandRefundedCents = decision.refundedCents;
+        } else if (decision.branch === "cap_to_ledger") {
+          refundCapCents = decision.refundCents;
+          refundShortfallCents = decision.shortfallCents;
+        }
+        // "refund_full_contract" (ledger ok+enough, OR ledger unreadable)
+        // is the no-op case. Phase 2 will make the underlying failure
+        // loud when the ledger call fails; Phase 1 only refuses to fire
+        // a KNOWN-BAD amount, not one we can't verify.
+      }
+    }
+
+    if (stampedOutOfBand) {
+      const stamp = await step.run("stamp-out-of-band-refund", async () => {
+        const { data, error } = await admin
+          .from("returns")
+          .update({
+            status: "refunded",
+            refund_id: "out_of_band_shopify",
+            refunded_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", return_id)
+          .eq("workspace_id", workspace_id)
+          .is("refunded_at", null)
+          .select("id");
+        return { stamped: (data ?? []).length === 1, error: error?.message ?? null };
+      });
+      return {
+        success: true,
+        return_id,
+        reason: "already_refunded_out_of_band",
+        refunded_cents: outOfBandRefundedCents,
+        stamped: stamp.stamped,
+      };
+    }
 
     if (isStoreCredit) {
       const creditResult = await step.run("issue-store-credit", async (): Promise<{ ok: boolean; balance: number; transactionId: string | null; error?: string }> => {
@@ -193,18 +281,44 @@ export const returnsIssueRefund = inngest.createFunction(
         // step retry (this function is `retries: 2` above) reuses the
         // same key and short-circuits at refundOrder's pre-dispatch
         // guard — the money can only move once even under retry.
+        // `refundCapCents` == `amountCents` in the common case; the
+        // Phase 1 reconcile lowers it to the live gateway ceiling on
+        // the cap branch. `orderIdForRefund` is either ret.order_id or
+        // the value the null-order-id repair branch persisted.
         const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
         const refundReason = `Return ${ret.order_number} delivered`;
-        const requestKey = hashActionRefundKey("return", return_id, ret.order_id, amountCents, refundReason);
-        return refundOrder(workspace_id, ret.order_id, amountCents, refundReason, {
+        // orderIdForRefund is null only when ret.order_id was null AND the
+        // shopify_order_gid → orders lookup could not find a match. Pass an
+        // empty string so refundOrder's own `!orderId` guard returns
+        // `{ success: false, error: "orderId is required" }` and the code
+        // flows into today's notify-refund-failed branch (Phase 2 makes
+        // that failure loud). No refund can be dispatched at that point.
+        const oid = orderIdForRefund ?? "";
+        const requestKey = hashActionRefundKey("return", return_id, oid, refundCapCents, refundReason);
+        return refundOrder(workspace_id, oid, refundCapCents, refundReason, {
           source: "inngest",
-          eventProperties: { return_id, resolution_type: ret.resolution_type },
+          eventProperties: { return_id, resolution_type: ret.resolution_type, refund_shortfall_cents: refundShortfallCents || undefined },
           requestKey,
         });
       });
       if (refundResult.success) {
         valueIssued = true;
-        issuedSummary = `Refund $${(amountCents / 100).toFixed(2)} issued via ${refundResult.method === "braintree" ? "Braintree" : "Shopify"}`;
+        const gateway = refundResult.method === "braintree" ? "Braintree" : "Shopify";
+        issuedSummary = refundShortfallCents > 0
+          ? `Refund $${(refundCapCents / 100).toFixed(2)} of $${(amountCents / 100).toFixed(2)} issued via ${gateway} (capped to live refundable balance; $${(refundShortfallCents / 100).toFixed(2)} short)`
+          : `Refund $${(refundCapCents / 100).toFixed(2)} issued via ${gateway}`;
+        if (refundShortfallCents > 0) {
+          await step.run("record-refund-shortfall", async () => {
+            await admin
+              .from("returns")
+              .update({
+                refund_shortfall_cents: refundShortfallCents,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", return_id)
+              .eq("workspace_id", workspace_id);
+          });
+        }
       } else {
         await step.run("notify-refund-failed", async () => {
           await admin.from("dashboard_notifications").insert({
