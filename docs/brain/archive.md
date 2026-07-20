@@ -12,10 +12,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **All ad creative goes through the Dahlia/Max box session — retire the deterministic node path; explore/exploit badge tells the crown-gated truth** · verified 2026-07-19 · → [[../lifecycles/ad-creative]]
 - **Bianca's static publish uploads all 5 copy variations + maps the right-column 1:1 asset** · verified 2026-07-19 · → [[../lifecycles/ad-publish]]
 - **Cold prospecting never imitates a warm/hot offer/retargeting (or cross-category) competitor ad — stamp a cold temperature + hard-exclude offer mismatches** · verified 2026-07-19 · → [[lifecycles/ad-creative]]
 - **Creative scout falls back to keyword/domain search when winners API returns empty** · verified 2026-07-19 · → [[../inngest/creative-scout]]
 - **Creative scout reliably ingests EVERY approved competitor's winning ads — fix the silent per-competitor drops + non-mapped leakage** · verified 2026-07-19 · → [[lifecycles/creative-finder]]
+- **Scope Appstle unskip upstream 500s out of the Vercel error feed** · verified 2026-07-19 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Flag a competitor ad as 'do not use'** · verified 2026-07-19 · → [[../lifecycles/creative-finder]]
+- **Keep media-buyer test cadence heartbeat honest on Meta pull failures** · verified 2026-07-19 · → [[inngest/media-buyer-test-cadence]]
 - **Stop Vercel from duplicating Inngest terminal failure incidents** · verified 2026-07-19 · → [[lifecycles/control-tower]]
 - **A Max copy-QC miss still bins the ad as HELD (never drops it) — so nothing Dahlia produces vanishes before the CEO can review or override** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
 - **All product ads ALWAYS publish under the single Superfoods Company FB page + Instagram** · verified 2026-07-18 · → [[../libraries/media-buyer-publish-identity]]
