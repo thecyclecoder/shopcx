@@ -906,10 +906,13 @@ export async function getOrCreateRecentPurchaserAudience(
     `${actId(accountId)}/customaudiences`,
     {
       name,
-      subtype: "WEBSITE",
-      pixel_id: pixelId,
-      retention_days: retentionDays,
+      // Graph v21: a rule-based WEBSITE audience is created from `rule` ALONE. A top-level
+      // `subtype: "WEBSITE"` + `pixel_id` are rejected ("parameter 'subtype' is not supported
+      // in the current API version") — the pixel + retention live inside
+      // rule.inclusions.rules[].event_sources / retention_seconds. `prefill: 1` backfills the
+      // audience from the pixel's existing history. Verified live 2026-07-20.
       rule,
+      prefill: 1,
     },
     token,
   );
@@ -959,7 +962,10 @@ export async function getOrCreateAllCustomersAudience(
     `${actId(accountId)}/customaudiences`,
     {
       name,
-      subtype: "CUSTOMER_LIST",
+      // Graph v21: "CUSTOMER_LIST" is no longer an accepted subtype (the valid set is
+      // {CUSTOM, WEBSITE, APP, OFFLINE_CONVERSION, ...}). An upload-based (hashed customer list)
+      // audience is `subtype: "CUSTOM"` + `customer_file_source`. Verified live 2026-07-20.
+      subtype: "CUSTOM",
       customer_file_source: "USER_PROVIDED_ONLY",
       description,
     },
