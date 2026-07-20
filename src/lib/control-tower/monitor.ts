@@ -1184,7 +1184,8 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     monitor-false-positive on a healthy system (the correct handler ran, the
             //     ticket closed, the human never should have paged).
             //
-            // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass):
+            // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass,
+            // extended by control-tower-ticket-decision-workprobe-defer-messages-on-fresh-parent-ticket):
             //     Even with (5) in place, the pre-orchestrator race remains: the classifier bucket
             //     is stamped over ~seconds AFTER the inbound row is inserted (`step.run(...)`
             //     boundaries + async Inngest fanout), so a monitor tick sampling in that gap sees
@@ -1195,6 +1196,24 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     mirrors the backstop reconciler's INTENT_SETTLE_MS. A message older than the
             //     window with none of the bypass classes matching is genuine orchestrator work
             //     and still counts.
+            //
+            //     The settle grace is applied to `MAX(msg.created_at, ticket.created_at)`, not
+            //     just `msg.created_at`. Ticket auto-merge (unified-ticket-handler.ts § 1a) picks
+            //     the newest ticket as the target and remaps messages from the customer's older
+            //     tickets onto it via `.update({ ticket_id: target.id })` while keeping their
+            //     original `created_at`, so a 16-minute-old inbound can end up parented to a
+            //     13-second-old ticket. Without the ticket-side cutoff that remapped message
+            //     reads as "past the settle boundary" on its own timestamp alone and counts as
+            //     orchestrator demand before the classifier + first-touch dispatch have had a
+            //     chance to run on the FRESH parent ticket — a healthy remapped inbound races
+            //     the same pre-orchestrator gates as a raw inbound on a brand-new ticket.
+            //     Filtering EVERY count on `tickets.created_at <= decisionSettleCutoffIso` (via
+            //     `tickets!inner(id)` on the queries that don't already join it) implements the
+            //     MAX(): a message counts only when BOTH its own timestamp AND its current parent
+            //     ticket's timestamp are older than the settle cutoff. Symmetric across allRes /
+            //     excludedRes / the two Sol first-touch subtractions, so the fresh-ticket filter
+            //     never leaks into a false negative (a genuine outage that dispatches a real
+            //     inbound onto an older ticket still counts and still fires idle_while_work).
             //
             // The first three exclusions are expressed as a single positive-match on the
             // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
@@ -1214,11 +1233,12 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             const [allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchJobsRes] = await Promise.all([
               admin
                 .from("ticket_messages")
-                .select("id", { count: "exact", head: true })
+                .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
-                .lte("created_at", decisionSettleCutoffIso),
+                .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso),
               admin
                 .from("ticket_messages")
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
@@ -1226,6 +1246,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .or(
                   "status.eq.closed,tags.cs.{csat:reopened},tags.cs.{outreach},tags.cs.{cls:outreach},active_playbook_id.not.is.null",
                   { referencedTable: "tickets" },
@@ -1237,6 +1258,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
               // agent_jobs has no ticket_id column (see enqueueSolFirstTouchForPortalError.ts) —
               // the ticket_id lives in the JSON-encoded `instructions` string. Prefilter on the
@@ -1260,11 +1282,12 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             if (dispatchTicketIds.length > 0) {
               const { count } = await admin
                 .from("ticket_messages")
-                .select("id", { count: "exact", head: true })
+                .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .in("ticket_id", dispatchTicketIds);
               solFirstTouchDispatchExcluded = count ?? 0;
             }

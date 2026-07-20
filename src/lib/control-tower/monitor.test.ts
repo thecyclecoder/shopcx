@@ -1027,6 +1027,68 @@ test("evalInlineAgent still flips RED on a settled real inbound with no ai:orche
   assert.equal(result.violation?.reason, "idle_while_work");
 });
 
+// ── tickets-awaiting-decision defer messages on fresh parent ticket ───────────
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// unified-ticket-handler.ts § 1a auto-merge picks the NEWEST ticket as the merge target and
+// remaps messages from the customer's older tickets via `.update({ ticket_id: target.id })` —
+// the message keeps its original `created_at`. A 16-minute-old inbound remapped onto a
+// 13-second-old ticket is past the message-side TICKET_DECISION_SETTLE_MS boundary on its own
+// timestamp but the FRESH parent ticket's pre-orchestrator race (classifier / first-touch
+// dispatch / active-playbook check) has not run yet — the tile flips red on healthy traffic.
+// Spec: control-tower-ticket-decision-workprobe-defer-messages-on-fresh-parent-ticket.
+//
+// Fix pinned by source-inspection tests (matches the shape of the sibling `settle-window +
+// outreach bypass` tests above): every count query in the case block must apply the settle
+// cutoff symmetrically to `tickets.created_at` (via the `tickets!inner` join) alongside the
+// existing `.lte("created_at", cutoff)` on the message. Implements MAX(msg.created_at,
+// ticket.created_at) — a message counts only when BOTH timestamps have aged past the boundary.
+
+test("tickets-awaiting-decision — every count query gates on tickets.created_at settle cutoff (MAX with msg.created_at)", () => {
+  // The message-side cutoff alone lets a remapped-by-merge inbound through: msg.created_at
+  // is old but tickets.created_at is fresh. Adding the same TICKET_DECISION_SETTLE_MS bound
+  // to tickets.created_at on every count query closes the false-positive by requiring BOTH
+  // sides to have settled before the message enters the orchestrator-demand count.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const ticketCutoffMatches = block.match(/\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  assert.equal(
+    ticketCutoffMatches.length,
+    4,
+    "`tickets-awaiting-decision` case must apply `.lte(\"tickets.created_at\", decisionSettleCutoffIso)` on ALL FOUR count queries (allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchExcluded) — a message counts only when its parent ticket has ALSO settled past the boundary. Dropping this filter re-opens the auto-merge remapped-inbound false-fire (fresh target ticket, old remapped msg.created_at) that this spec closes.",
+  );
+});
+
+test("tickets-awaiting-decision — msg-side and ticket-side settle cutoffs are symmetric across every count query", () => {
+  // The two-sided cutoff only implements MAX() if both filters are applied to the SAME count
+  // queries. Counting msg-side cutoffs and ticket-side cutoffs and asserting equality catches
+  // a future refactor that drops one side on a subset of queries (which would silently
+  // re-open the race the spec is designed to close).
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const msgCutoffMatches = block.match(/\.lte\(\s*"created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  const ticketCutoffMatches = block.match(/\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  assert.equal(
+    msgCutoffMatches.length,
+    ticketCutoffMatches.length,
+    "`tickets-awaiting-decision` case must apply the msg-side and ticket-side settle cutoffs SYMMETRICALLY — every query that bounds msg.created_at must also bound tickets.created_at, or MAX(msg.created_at, ticket.created_at) degrades to msg.created_at on the un-guarded query and re-opens the fresh-parent-ticket false-fire.",
+  );
+});
+
+test("tickets-awaiting-decision — allRes query joins tickets!inner so the ticket-side cutoff can bind", () => {
+  // The nested-column filter `.lte("tickets.created_at", …)` requires the query to join the
+  // tickets table via `tickets!inner(id)`. The three legacy queries (excludedRes,
+  // solFirstTouchAckRes, solFirstTouchDispatchExcluded) already joined it for their own
+  // reasons; allRes did not. Pinning the join here catches a future refactor that drops the
+  // join and silently breaks the ticket-side cutoff on the primary count query.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const allResBlock = block.match(/allRes[\s\S]{0,50}?admin[\s\S]*?\.lte\(\s*"tickets\.created_at"/);
+  assert.ok(
+    /admin\s*\n\s*\.from\(\s*"ticket_messages"\s*\)\s*\n\s*\.select\(\s*"id,\s*tickets!inner\(id\)"/.test(block),
+    "`tickets-awaiting-decision` allRes count query must select `id, tickets!inner(id)` — the tickets!inner join is what lets `.lte(\"tickets.created_at\", cutoff)` bind on the nested column. Without it the ticket-side cutoff becomes dead code and the fresh-parent-ticket false-fire re-opens.",
+  );
+  // Sanity: the assertion above proves at least one allRes-shaped select carries the join;
+  // if the shape ever regresses the tsc/regex will fail loudly rather than silently.
+  void allResBlock;
+});
+
 // ── countRenewalIntegrityOverdueSubs — dunning-aware renewal-integrity helper ──
 // (build-control-tower-renewal-integrity-exclude-active-dunning P1) — an overdue internal sub
 // already owned by an active dunning cycle is HEALTHY retention state, not a renewal-cron miss.
