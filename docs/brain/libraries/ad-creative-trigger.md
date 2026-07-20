@@ -33,6 +33,11 @@ const { jobId } = await triggerAdGeneration(admin, { workspaceId, productId: GUR
 import { traceAdOrigin } from "@/lib/ads/ads-read-sdk";
 ```
 
+## Callers
+
+- **`POST /api/ads/generate`** (owner/admin + hero-product gated) — the self-service **"Generate ad"** button on each [[../dashboard/research__ads]] competitor card. Body `{workspaceId, productId, temperature}` → `triggerAdGeneration`. The owner picks temperature (cold/warm/hot) + a target hero product (defaults to the card's product); the SDK's box-session-only guarantee is what lets the button promise "5 psychological treatments + Max copy-QC" without a way to bypass into the node path. (CEO 2026-07-20 — "instead of me having to come to the CLI to ask for ads.")
+- Manual CLI / `scripts/_*.ts` one-offs (bench a temperature before flipping the workspace flag).
+
 ## Related
 
-[[ads-read-sdk.md]] (read/verify side — `traceAdOrigin`) · [[creative-agent.md]] (`runAdCreativeLoop` / `stockProduct` / `CreativeIntent`) · [[../inngest/ad-creative-cadence.md]] (the autonomous cadence — kill-switch-gated) · [[../functions/growth.md]]
+[[ads-read-sdk.md]] (read/verify side — `traceAdOrigin`) · [[../dashboard/research__ads]] (the "Generate ad" UI caller) · [[creative-agent.md]] (`runAdCreativeLoop` / `stockProduct` / `CreativeIntent`) · [[../inngest/ad-creative-cadence.md]] (the autonomous cadence — kill-switch-gated) · [[../functions/growth.md]]
