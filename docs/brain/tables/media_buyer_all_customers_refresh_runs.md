@@ -1,6 +1,6 @@
 # media_buyer_all_customers_refresh_runs
 
-One row per successful weekly refresh of the CUSTOMER_LIST (all-customers, hashed) exclusion audience per `(workspace, ad_account, audience)`. Carries the watermark the NEXT run reads so the incremental upload never re-sends the whole customer base. Written by [[../inngest/media-buyer-all-customers-refresh]] at end of each successful group.
+One row per successful daily refresh of the CUSTOMER_LIST (all-customers, hashed) exclusion audience per `(workspace, ad_account, audience)`. Carries the watermark the NEXT run reads so the incremental upload never re-sends the whole customer base. Written by [[../inngest/media-buyer-all-customers-refresh]] at end of each successful group.
 
 **Primary key:** `id`
 
@@ -29,7 +29,7 @@ One row per successful weekly refresh of the CUSTOMER_LIST (all-customers, hashe
 
 ## Writer / reader
 
-- **Writer:** [[../inngest/media-buyer-all-customers-refresh]] `media-buyer-all-customers-refresh-weekly` (INSERT at end of each successful group).
+- **Writer:** [[../inngest/media-buyer-all-customers-refresh]] `media-buyer-all-customers-refresh-daily` (INSERT at end of each successful group).
 - **Reader:** the same cron on the following run (looks up the most recent `completed_at` per `(workspace_id, audience_id)` to pick the watermark).
 
 ## Migration

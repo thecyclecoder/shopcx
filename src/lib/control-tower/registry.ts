@@ -926,20 +926,20 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 30 * HOUR },
-  // ─ Weekly crons (window ~8 days) ─
-  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
-  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
   {
-    id: "media-buyer-all-customers-refresh-weekly",
+    id: "media-buyer-all-customers-refresh-daily",
     kind: "cron",
     owner: "growth",
     label: "Media buyer all-customers exclusion refresh",
     description:
-      "Weekly incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience — uploads customers with first_order_at ≥ last-run watermark. Hashed email+phone only; no plaintext PII. Keeps the cold-test exclusion current so newly-acquired customers stop seeing cold-prospecting adsets (bianca-full-order-history-customer-list-exclusion-audience Fix 1).",
-    expectedCadence: "weekly Mon (0 12 * * 1)",
-    livenessWindowMs: 9 * DAY,
+      "Daily incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience — uploads customers with first_order_at ≥ last-run watermark. Hashed email+phone only; no plaintext PII. Keeps the cold-test exclusion current so newly-acquired customers stop seeing cold-prospecting adsets within ~1d (bianca-full-order-history-customer-list-exclusion-audience Fix 1; daily cadence CEO 2026-07-20).",
+    expectedCadence: "daily (0 12 * * *)",
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-16T12:00:00Z",
   },
+  // ─ Weekly crons (window ~8 days) ─
+  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
+  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 9 * DAY },
   {
     id: "playbook-compiler",

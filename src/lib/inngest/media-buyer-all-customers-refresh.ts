@@ -1,20 +1,22 @@
 /**
- * Weekly cron: incremental refresh of the all-customers (CUSTOMER_LIST, hashed) exclusion audience
+ * Daily cron: incremental refresh of the all-customers (CUSTOMER_LIST, hashed) exclusion audience
  * per (workspace, meta_ad_account) — bianca-full-order-history-customer-list-exclusion-audience Fix 1.
  *
  * A CUSTOMER_LIST custom audience does NOT auto-update — newly-acquired customers are NOT excluded
- * until we upload them. A weekly top-up keeps the exclusion current so the cold-test rail's
- * complete-existing-customer coverage doesn't silently narrow as the business grows.
+ * until we upload them. A daily top-up keeps the exclusion current so the cold-test rail's
+ * complete-existing-customer coverage doesn't silently narrow as the business grows. (Daily, not
+ * weekly: the upload is incremental + append-only so it's cheap to run every day, and daily
+ * shrinks the window before a brand-new customer is excluded from ~7d to ~1d — CEO 2026-07-20.)
  *
  * Incremental via watermark: for each active per-test cohort carrying `excluded_all_customers_audience_id`,
- * we upload customers whose `first_order_at >= last_run_at_iso` (defaulted to 8d ago on first run —
- * a 24h grace over the 7d cadence so a paused/delayed run picks up the missed window). Only
+ * we upload customers whose `first_order_at >= last_run_at_iso` (defaulted to 2d ago on first run —
+ * a 24h grace over the 1d cadence so a paused/delayed run picks up the missed window). Only
  * hashed email + hashed phone leave the box (via `addUsersToCustomAudience`); plaintext PII is
  * never persisted or logged. Ships the node-completeness trio: OWNER in the node registry (Growth),
  * kill_switches ancestry inherited from Growth's `director:growth` seat, and an end-of-run
  * `emitCronHeartbeat` — required by the CLAUDE.md node-completeness rule.
  *
- * Runs Mondays 12:00 UTC. MONITORED_LOOPS `livenessWindowMs` is 9d (weekly + jitter grace per the
+ * Runs daily 12:00 UTC. MONITORED_LOOPS `livenessWindowMs` is 30h (daily + jitter grace per the
  * monitor-cadence invariant). No sub-5-min cadence.
  */
 import { inngest } from "./client";
@@ -26,11 +28,11 @@ import {
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 const CUSTOMER_CHUNK = 10_000;
-const DEFAULT_WATERMARK_LOOKBACK_DAYS = 8;
+const DEFAULT_WATERMARK_LOOKBACK_DAYS = 2;
 
 /**
  * PURE — pick the ISO watermark for THIS run: the last run's completion timestamp if we have one,
- * else `now - lookbackDays * 86400s`. The lookback default (8d) is one 24h grace beyond the 7d
+ * else `now - lookbackDays * 86400s`. The lookback default (2d) is one 24h grace beyond the 1d
  * cron cadence so a paused/delayed run doesn't silently skip a customer that ordered in the miss
  * window. Exported for the unit test that pins the "only new customers since the watermark" contract.
  */
@@ -46,12 +48,12 @@ export function pickRefreshWatermarkIso(input: {
   return new Date(nowMs - lookbackMs).toISOString();
 }
 
-export const mediaBuyerAllCustomersRefreshWeeklyCron = inngest.createFunction(
+export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
   {
-    id: "media-buyer-all-customers-refresh-weekly",
+    id: "media-buyer-all-customers-refresh-daily",
     retries: 1,
     concurrency: [{ limit: 1 }],
-    triggers: [{ cron: "0 12 * * 1" }], // Mondays 12:00 UTC
+    triggers: [{ cron: "0 12 * * *" }], // daily 12:00 UTC
   },
   async ({ step }) => {
     const admin = createAdminClient();
@@ -188,7 +190,7 @@ export const mediaBuyerAllCustomersRefreshWeeklyCron = inngest.createFunction(
     }
 
     await step.run("emit-heartbeat", async () => {
-      await emitCronHeartbeat("media-buyer-all-customers-refresh-weekly", {
+      await emitCronHeartbeat("media-buyer-all-customers-refresh-daily", {
         ok: true,
         produced: summary,
         detail: `refreshed ${summary.length} audience(s), ${summary.reduce((s, r) => s + r.uploaded_rows, 0)} row(s)`,
