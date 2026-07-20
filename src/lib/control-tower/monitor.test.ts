@@ -1008,6 +1008,74 @@ test("Flippa-style outreach close race — tickets-awaiting-decision probe appli
   );
 });
 
+// ── tickets-awaiting-decision auto-merge remap grace ──────────────────────────
+// Spec: ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t.
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// ticket auto-merge (unified-ticket-handler.ts § 1a, mergeTickets → newest as target) remaps
+// inbound `ticket_messages` rows from older tickets onto a brand-new ticket while keeping
+// their ORIGINAL `created_at`. A 16-minute-old inbound whose parent ticket is now 13 seconds
+// old ages past `TICKET_DECISION_SETTLE_MS` on its own timestamp before the classifier /
+// first-touch dispatch have had a chance to run on the FRESH parent ticket, so it counts as
+// orchestrator demand with 0 beats and flips the tile red on healthy traffic. Fix: extend the
+// settle cutoff to `MAX(msg.created_at, ticket.created_at)` — a message counts only when
+// BOTH its own timestamp AND its current parent ticket's timestamp are older than the cutoff.
+// Source-inspection tests here (the case body is inline in the switch statement rather than a
+// pure helper — matches the sibling settle-window + outreach-bypass tests just above).
+
+test("Auto-merge remap race — tickets-awaiting-decision probe applies the settle cutoff to tickets.created_at as well", () => {
+  // The joined-ticket cutoff (`.lte("tickets.created_at", cutoff)`) is what implements the
+  // MAX(msg.created_at, ticket.created_at) settle grace. Without it, a message whose OWN
+  // created_at is already past the cutoff (because auto-merge remapped it from an older ticket)
+  // counts as demand even though its CURRENT parent ticket was created seconds ago and the
+  // classifier + first-touch dispatch haven't had a chance to run yet — the exact false page
+  // the spec closes.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/,
+    "`tickets-awaiting-decision` case must apply `.lte(\"tickets.created_at\", decisionSettleCutoffIso)` on the joined tickets row — this is the ticket-side half of the MAX(msg.created_at, ticket.created_at) settle grace and the sole gate that prevents an auto-merged old inbound from counting as demand before the classifier + first-touch dispatch have run on the fresh parent ticket.",
+  );
+});
+
+test("Auto-merge remap race — every count query gates on BOTH msg.created_at AND tickets.created_at (symmetric filter)", () => {
+  // If any of the four count queries (allRes, excludedRes, solFirstTouchAckRes, and the
+  // solFirstTouchDispatchExcluded follow-up) applies the ticket-side cutoff without the
+  // others, the subtraction is asymmetric and the Math.max floor no longer covers the
+  // auto-merge case: e.g. allRes drops the fresh-ticket message but excludedRes does not,
+  // so the message stays in the total-count residual even though its counterpart was pruned
+  // upstream. The four queries must all filter identically on both `created_at` and
+  // `tickets.created_at` for the settle boundary to hold across the whole computation.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const msgCutoffMatches = block.match(/\.lte\(\s*"created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  const ticketCutoffMatches = block.match(/\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  assert.equal(
+    ticketCutoffMatches.length,
+    msgCutoffMatches.length,
+    `every ticket_messages count query in the tickets-awaiting-decision case must gate on both msg.created_at AND tickets.created_at — found ${msgCutoffMatches.length} msg-side cutoffs and ${ticketCutoffMatches.length} ticket-side cutoffs. An asymmetric filter re-opens the auto-merge remap race the ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t spec is designed to close.`,
+  );
+  // Sanity floor: at least one of each (all four queries share the ticket_messages shape today —
+  // if this drops to zero, the case body was refactored and this whole file needs a re-look).
+  assert.ok(msgCutoffMatches.length >= 4, `expected ≥4 msg-side settle cutoffs in the tickets-awaiting-decision case (one per ticket_messages count query), found ${msgCutoffMatches.length}. Did the case body shape change?`);
+});
+
+test("Auto-merge remap race — the `all` (unbypassed) count query joins tickets!inner so the ticket-side cutoff can apply", () => {
+  // Before this spec, `allRes` selected only from `ticket_messages` with no join — there was
+  // no `tickets` row on the query for a `.lte("tickets.created_at", ...)` filter to bind to.
+  // The fix must add `tickets!inner(id)` to the `allRes` select so PostgREST parses the
+  // nested-column filter as a scope-qualified predicate rather than dropping it silently.
+  // Guard: the count block must include at least TWO `tickets!inner` join specs — one for
+  // `allRes` (added by this spec) and one for `excludedRes` (pre-existing). The
+  // `solFirstTouchAckRes` uses `tickets!inner(id, ticket_resolution_events!inner(id))` which
+  // this regex intentionally does NOT match — keeps the assertion pinned on the two plain
+  // `tickets!inner(id)` joins the spec is directly responsible for.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const plainInnerJoins = block.match(/tickets!inner\(id\)/g) ?? [];
+  assert.ok(
+    plainInnerJoins.length >= 2,
+    `expected ≥2 \`tickets!inner(id)\` joins in the tickets-awaiting-decision case (allRes + excludedRes; solFirstTouchDispatchExcluded adds a 3rd) to bind the \`tickets.created_at\` settle cutoff onto every count query — found ${plainInnerJoins.length}. Without the join the nested-column filter is silently ignored and the auto-merge remap race re-opens.`,
+  );
+});
+
 test("evalInlineAgent still flips RED on a settled real inbound with no ai:orchestrator beat (no false negative)", () => {
   // No-false-negative guard for the settle-window + outreach exclusion. The probe now waits
   // through TICKET_DECISION_SETTLE_MS AND subtracts outreach-tagged messages, but a settled
