@@ -41,6 +41,7 @@ ShopCX-built ads map to these rows via the existing
 
 - Parent links (`meta_adset_id`/`meta_campaign_id`) are **text Meta ids**, not uuid FKs.
 - ShopCX-published ads join back to [[ad_campaigns]] via [[ad_publish_jobs]]`.meta_ad_id` (Phase 2 attribution / Phase 3 per-angle scorecards).
+- **Drop-out reconcile:** Meta's default `/ads` list excludes deleted ads, so a deleted ad keeps its stale ACTIVE mirror row forever. After each `syncMetaStructure` upsert, the mirror rows for the synced campaigns are diffed against Meta's returned ad ids by the pure `reconcileDroppedAdIds` helper in [[../libraries/meta__performance]], and any drop-out is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'` — scoped to the synced campaigns, never account-wide. A dropped AD leaves the same ghost the Ad Testing creative view + ad-level signals read.
 
 ---
 
