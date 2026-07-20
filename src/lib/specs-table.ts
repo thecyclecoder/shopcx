@@ -58,6 +58,29 @@ export class UngatedSpecAuthorError extends Error {
   }
 }
 
+/**
+ * Thrown UNCONDITIONALLY by `upsertSpec` when the phase list is empty — the last rail against a phase-less
+ * spec landing in `public.specs`. A spec's `spec_phase_checks` live under its phases, so a spec with zero
+ * phases has zero checks and the promote-on-green tests gate can never go green: the build succeeds, opens
+ * a PR, and sits unmergeable until a human intervenes (2026-07-20 — three such specs shipped in one day
+ * from three different author paths; two were byte-identical duplicates). Sibling to
+ * `UngatedSpecAuthorError` — same "fail-loud-at-the-writer" pattern; distinct class so callers can
+ * `instanceof EmptySpecPhasesError` and treat it specifically (an empty phase list is a shape defect,
+ * not a per-field authoring gap). Applies to insert AND update: no legitimate re-author reduces a spec
+ * to zero phases; both author chokepoints already reject one upstream.
+ */
+export class EmptySpecPhasesError extends Error {
+  constructor(slug: string) {
+    super(
+      `upsertSpec refused to write spec \`${slug}\`: phase list is empty. A spec's \`spec_phase_checks\` ` +
+        `live under its phases, so a spec with no phases has no checks — the promote-on-green tests gate ` +
+        `can never go green, and the build would produce an unmergeable PR. Author through ` +
+        `\`authorSpecRowStructured\` / \`submitSpec\` (the submit-spec skill), which requires >=1 phase.`,
+    );
+    this.name = "EmptySpecPhasesError";
+  }
+}
+
 /** The full enum the `specs.status` column accepts (CHECK-constrained in migration). */
 export type SpecStatus = "in_review" | "planned" | "in_progress" | "shipped" | "deferred" | "folded";
 
@@ -941,8 +964,20 @@ export async function upsertSpec(
   workspaceId: string,
   row: SpecRowInput,
   phases: SpecPhaseInput[],
+  // Test seam only — swap in a fake admin to unit-test the compensating-write path
+  // (spec-cannot-exist-without-phases Phase 2). Real callers omit; every production path uses
+  // `createAdminClient()` (service-role).
+  opts?: { admin?: ReturnType<typeof createAdminClient> },
 ): Promise<UpsertSpecResult> {
-  const admin = createAdminClient();
+  // spec-cannot-exist-without-phases Phase 1 — refuse an empty phase list BEFORE any DB write, and BEFORE
+  // the field-level `assertUpsertFullyAuthored` gate, so the caller gets a specific `EmptySpecPhasesError`
+  // (not a bundled `UngatedSpecAuthorError`) for the shape defect. UNCONDITIONAL — applies to insert AND
+  // update; no legitimate re-author reduces a spec to zero phases. Both author chokepoints
+  // (`authorSpecRowStructured`, `authorSpecRowFromMarkdown`) already reject one upstream — this is the
+  // shared-writer floor that no path (present or future, structured, markdown, or a throwaway script) can
+  // bypass. Without it, a phase-less spec landed silently: the phase loop below simply never ran.
+  if (phases.length === 0) throw new EmptySpecPhasesError(row.slug);
+  const admin = opts?.admin ?? createAdminClient();
   // harden-spec-submission — self-gating floor. Throws `UngatedSpecAuthorError` before any write if a phase
   // would land with empty verification/why/what (or the spec with empty why/what). The [[author-spec]]
   // chokepoint already asserts this and passes complete data, so this is a no-op for the sanctioned path and
@@ -1003,16 +1038,30 @@ export async function upsertSpec(
   // `setSpecStatus(slug, null)` by the CEO — a re-author is never an implicit un-fold. (Belt-and-suspenders:
   // an omitted `status` is already preserved by the upsert, but a derived `status` would clobber it; this
   // re-asserts `folded` in both cases.)
-  {
-    const { data: existing } = await admin
-      .from("specs")
-      .select("status")
-      .eq("workspace_id", workspaceId)
-      .eq("slug", row.slug)
-      .maybeSingle();
-    if ((existing as { status: string | null } | null)?.status === "folded" && upsertRow.status !== "folded") {
-      upsertRow.status = "folded";
-    }
+  // spec-cannot-exist-without-phases Phase 2 — determine whether the specs upsert below will INSERT a new row
+  // or UPDATE an existing one. This SAME pre-upsert read also feeds the folded-status preservation below,
+  // so we do it once. If the row already exists → it's an update; if it doesn't → the upsert will INSERT
+  // and the compensating catch further down owns cleaning up a partial write.
+  const { data: preExisting } = await admin
+    .from("specs")
+    .select("id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", row.slug)
+    .maybeSingle();
+  const preExistingRow = preExisting as { id: string; status: string | null } | null;
+  const wasNewInsert = !preExistingRow;
+
+  // folded-spec-must-stay-folded: `folded` is TERMINAL. A re-author must NEVER silently clear that override
+  // back to NULL/active — that is the db-reduce-calls split (archive.d/ markdown present, but a later
+  // re-author normalized a derived status to NULL → the rollup re-DERIVES `planned`/`in_progress` → the
+  // archived spec re-appears on the active board AND `cancelJobsForArchivedSpecs` auto-cancels its builds
+  // as "spec archived"). Read the existing override; if it's already `folded`, PRESERVE it unless the caller
+  // is EXPLICITLY re-folding (`row.status === 'folded'`). The only sanctioned un-fold is an explicit
+  // `setSpecStatus(slug, null)` by the CEO — a re-author is never an implicit un-fold. (Belt-and-suspenders:
+  // an omitted `status` is already preserved by the upsert, but a derived `status` would clobber it; this
+  // re-asserts `folded` in both cases.)
+  if (preExistingRow?.status === "folded" && upsertRow.status !== "folded") {
+    upsertRow.status = "folded";
   }
 
   const { data: upserted, error: upErr } = await admin
@@ -1023,71 +1072,98 @@ export async function upsertSpec(
   if (upErr || !upserted) throw upErr ?? new Error("upsert specs returned no row");
   const specId = (upserted as { id: string }).id;
 
-  const { data: existingPhases, error: exErr } = await admin
-    .from("spec_phases")
-    .select("id, position, pr, merge_sha")
-    .eq("spec_id", specId);
-  if (exErr) throw exErr;
-  const byPosition = new Map<number, { id: string; pr: number | null; merge_sha: string | null }>();
-  for (const p of (existingPhases ?? []) as { id: string; position: number; pr: number | null; merge_sha: string | null }[]) {
-    byPosition.set(p.position, { id: p.id, pr: p.pr, merge_sha: p.merge_sha });
-  }
-
-  const inputPositions = new Set(phases.map((p) => p.position));
-  const positionsToDelete: number[] = [];
-  for (const pos of byPosition.keys()) if (!inputPositions.has(pos)) positionsToDelete.push(pos);
-  if (positionsToDelete.length) {
-    const { error: dErr } = await admin
-      .from("spec_phases")
-      .delete()
-      .eq("spec_id", specId)
-      .in("position", positionsToDelete);
-    if (dErr) throw dErr;
-  }
-
+  // spec-cannot-exist-without-phases Phase 2 — compensating-write: `upsertSpec` writes through PostgREST
+  // (no cross-statement transaction available), so if any phase read/delete/update/insert throws AFTER the
+  // parent `specs` row committed, we're left with a phase-less spec — exactly the shape that produced the
+  // three stuck specs on 2026-07-20. Wrap the phase block; on any throw, if THIS call was the one that
+  // INSERTED the parent row (not an update of an already-existing spec), delete it before re-throwing.
+  // The `spec_phases_spec_id_fkey` FK is ON DELETE CASCADE, so any partially-written children go with it.
+  // An EXISTING spec is NEVER deleted here — a failed re-author must not destroy real work. The ORIGINAL
+  // error is re-thrown unchanged so downstream `instanceof` checks (EmptySpecPhasesError, PostgrestError,
+  // etc.) still work.
   const phaseIds: Record<number, string> = {};
-  for (const phase of phases) {
-    const existing = byPosition.get(phase.position);
-    if (existing) {
-      const updateRow: Record<string, unknown> = {
-        title: phase.title,
-        body: phase.body,
-        status: phase.status,
-        updated_at: new Date().toISOString(),
-      };
-      if (phase.pr !== undefined) updateRow.pr = phase.pr;
-      if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
-      if (phase.verification !== undefined) updateRow.verification = phase.verification;
-      if (phase.why !== undefined) updateRow.why = phase.why;
-      if (phase.what !== undefined) updateRow.what = phase.what;
-      if (phase.kind !== undefined) updateRow.kind = phase.kind;
-      if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
-      const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
-      if (uErr) throw uErr;
-      phaseIds[phase.position] = existing.id;
-    } else {
-      const insertRow: Record<string, unknown> = {
-        spec_id: specId,
-        position: phase.position,
-        title: phase.title,
-        body: phase.body,
-        status: phase.status,
-        pr: phase.pr ?? null,
-        merge_sha: phase.merge_sha ?? null,
-        verification: phase.verification ?? null,
-        why: phase.why ?? null,
-        what: phase.what ?? null,
-        kind: phase.kind ?? "phase",
-        origin_check_keys: phase.origin_check_keys ?? [],
-      };
-      const { data: inserted, error: iErr } = await admin
-        .from("spec_phases")
-        .insert(insertRow)
-        .select("id")
-        .single();
-      if (iErr || !inserted) throw iErr ?? new Error("insert spec_phases returned no row");
-      phaseIds[phase.position] = (inserted as { id: string }).id;
+  try {
+    const { data: existingPhases, error: exErr } = await admin
+      .from("spec_phases")
+      .select("id, position, pr, merge_sha")
+      .eq("spec_id", specId);
+    if (exErr) throw exErr;
+    const byPosition = new Map<number, { id: string; pr: number | null; merge_sha: string | null }>();
+    for (const p of (existingPhases ?? []) as { id: string; position: number; pr: number | null; merge_sha: string | null }[]) {
+      byPosition.set(p.position, { id: p.id, pr: p.pr, merge_sha: p.merge_sha });
     }
+
+    const inputPositions = new Set(phases.map((p) => p.position));
+    const positionsToDelete: number[] = [];
+    for (const pos of byPosition.keys()) if (!inputPositions.has(pos)) positionsToDelete.push(pos);
+    if (positionsToDelete.length) {
+      const { error: dErr } = await admin
+        .from("spec_phases")
+        .delete()
+        .eq("spec_id", specId)
+        .in("position", positionsToDelete);
+      if (dErr) throw dErr;
+    }
+
+    for (const phase of phases) {
+      const existing = byPosition.get(phase.position);
+      if (existing) {
+        const updateRow: Record<string, unknown> = {
+          title: phase.title,
+          body: phase.body,
+          status: phase.status,
+          updated_at: new Date().toISOString(),
+        };
+        if (phase.pr !== undefined) updateRow.pr = phase.pr;
+        if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
+        if (phase.verification !== undefined) updateRow.verification = phase.verification;
+        if (phase.why !== undefined) updateRow.why = phase.why;
+        if (phase.what !== undefined) updateRow.what = phase.what;
+        if (phase.kind !== undefined) updateRow.kind = phase.kind;
+        if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
+        const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
+        if (uErr) throw uErr;
+        phaseIds[phase.position] = existing.id;
+      } else {
+        const insertRow: Record<string, unknown> = {
+          spec_id: specId,
+          position: phase.position,
+          title: phase.title,
+          body: phase.body,
+          status: phase.status,
+          pr: phase.pr ?? null,
+          merge_sha: phase.merge_sha ?? null,
+          verification: phase.verification ?? null,
+          why: phase.why ?? null,
+          what: phase.what ?? null,
+          kind: phase.kind ?? "phase",
+          origin_check_keys: phase.origin_check_keys ?? [],
+        };
+        const { data: inserted, error: iErr } = await admin
+          .from("spec_phases")
+          .insert(insertRow)
+          .select("id")
+          .single();
+        if (iErr || !inserted) throw iErr ?? new Error("insert spec_phases returned no row");
+        phaseIds[phase.position] = (inserted as { id: string }).id;
+      }
+    }
+  } catch (phaseErr) {
+    // Only compensate a spec THIS call created. Scope the delete by workspace_id + id for defense-in-depth
+    // (a compare-and-set — the write can only fire against the row we intended to write, never a stray
+    // cross-workspace collision). Swallow a compensating-delete failure with a console warning rather than
+    // masking the ORIGINAL error the caller cares about.
+    if (wasNewInsert) {
+      try {
+        await admin.from("specs").delete().eq("workspace_id", workspaceId).eq("id", specId);
+      } catch (compErr) {
+        console.warn(
+          `[upsertSpec] compensating delete of newly-inserted spec ${row.slug} (id ${specId}) failed after a phase-write throw:`,
+          compErr,
+        );
+      }
+    }
+    throw phaseErr;
   }
 
   invalidateSpecCache(workspaceId, row.slug);
