@@ -57,12 +57,33 @@ const NEGATIVE_PROMPT_MARKER = "OFFER FIDELITY (hard rule)";
  */
 export function renderPromptHasCompetitorOffer(prompt: string): boolean {
   const idx = prompt.indexOf(NEGATIVE_PROMPT_MARKER);
-  const scanRegion = idx >= 0 ? prompt.slice(0, idx) : prompt;
+  let scanRegion = idx >= 0 ? prompt.slice(0, idx) : prompt;
+  // Exclude the TRUSTED human-instruction clauses (CEO edit / owner "Generate ad like this"
+  // directions). A human may legitimately say "remove the free tote badge" — the guard exists to
+  // catch a competitor freebie that LEAKED into the machine-composed content, not to reject the
+  // owner telling us to strip one. Without this, "Remove the free tote badge" false-tripped the guard
+  // and failed the whole generation (the 2026-07-20 Bloom→Amazing Creamer pinned run). Each clause
+  // runs from its sentinel header to the next blank line.
+  scanRegion = stripHumanInstructionClauses(scanRegion);
   for (const re of RENDER_COMPETITOR_OFFER_PATTERNS) {
     re.lastIndex = 0;
     if (re.test(scanRegion)) return true;
   }
   return false;
+}
+
+/** PURE — remove the CEO-edit + owner-directions clauses (each a `${HEADER} … up to the next blank
+ *  line`) from a scan region, so the competitor-offer guard never false-positives on a human's
+ *  instruction that NAMES an artifact to remove. */
+function stripHumanInstructionClauses(region: string): string {
+  let out = region;
+  for (const header of [CEO_EDIT_HEADER, AUTHOR_NOTES_HEADER]) {
+    const h = out.indexOf(header);
+    if (h < 0) continue;
+    const end = out.indexOf("\n\n", h);
+    out = out.slice(0, h) + (end >= 0 ? out.slice(end) : "");
+  }
+  return out;
 }
 
 /**

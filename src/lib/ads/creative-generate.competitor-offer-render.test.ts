@@ -14,7 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
-import { buildPrompt, renderPromptHasCompetitorOffer, stripCompetitorOfferArtifacts } from "./creative-generate";
+import { AUTHOR_NOTES_HEADER, buildPrompt, renderPromptHasCompetitorOffer, stripCompetitorOfferArtifacts } from "./creative-generate";
 
 function competitorImitationBrief(hook: string): CreativeBrief {
   return {
@@ -46,6 +46,26 @@ test("renderPromptHasCompetitorOffer flags every catalogued freebie artifact tok
 
 test("renderPromptHasCompetitorOffer passes a clean prompt (no false positives on ordinary product prose)", () => {
   assert.equal(renderPromptHasCompetitorOffer("Design a 4:5 static ad for Amazing Coffee. Clean, premium direct-response e-commerce static."), false);
+});
+
+test("renderPromptHasCompetitorOffer: an OWNER DIRECTIONS clause telling us to REMOVE a freebie does NOT false-trip (2026-07-20 Bloom→Amazing Creamer pinned run)", () => {
+  const brief = competitorImitationBrief("Your skin doesn't need more serums");
+  (brief as { authorNotes?: string | null }).authorNotes =
+    "Remove the free tote badge and show a scoop of Amazing Creamer going into a hot latte";
+  const { prompt } = buildPrompt(brief, true, undefined, true);
+  // The owner's directions ARE composed into the prompt (so the model actually removes the tote)…
+  assert.ok(/remove the free tote badge/i.test(prompt), "owner directions present in the composed prompt");
+  // …but the guard excludes the trusted human clause, so it does not reject the whole generation.
+  assert.equal(
+    renderPromptHasCompetitorOffer(prompt),
+    false,
+    "an owner instruction that NAMES a freebie to remove must not trip the competitor-offer guard",
+  );
+});
+
+test("renderPromptHasCompetitorOffer: a real freebie leak in the machine content STILL trips even with an owner clause present", () => {
+  const p = `Design a 4:5 static ad. Get a free tote with every order.\n\n${AUTHOR_NOTES_HEADER} the owner asked for this ad. THE DIRECTIONS: "make it pop".\n\nOFFER FIDELITY (hard rule): only our real offer.`;
+  assert.equal(renderPromptHasCompetitorOffer(p), true, "excluding the owner clause must not mask a genuine leak in the scanned content");
 });
 
 test("stripCompetitorOfferArtifacts scrubs the offending tokens and returns clean prose", () => {
