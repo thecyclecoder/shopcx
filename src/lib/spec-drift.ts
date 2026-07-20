@@ -34,11 +34,12 @@ import { listArchivedSlugs, phaseEmoji, type Phase, type SpecStatus } from "@/li
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
 import {
   getSpec,
-  listSpecs,
   listSpecPhaseAnomalies,
   setSpecStatus,
   stampPhaseShipped,
   type SpecPhaseRow,
+  getActiveSpecs,
+  getAllSpecs,
 } from "@/lib/specs-table";
 import { listGoals, type GoalRow } from "@/lib/goals-table";
 
@@ -719,7 +720,9 @@ export async function healBuiltUnstampedPhases(workspaceId: string): Promise<{ s
 
   // (a) Candidate specs: any with ≥1 phase NOT IN ('shipped','rejected'). Read the specs (phases joined)
   //     through the specs-table SDK (no raw PM SQL — pm-db-agent-toolkit) and filter in memory.
-  const specs = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: `getActiveSpecs` (scope='active') instead of the folded-
+  // inclusive default — the `status === "folded"` skip below made the folded rows pure wire cost.
+  const specs = await getActiveSpecs(workspaceId);
   const unstampedBySlug = new Map<string, number[]>();
   for (const spec of specs) {
     if (spec.status === "folded") continue; // folded specs are archived — don't re-heal their phases
@@ -1050,7 +1053,8 @@ export async function reconcileMergedBuildBranchPrs(
   // per-phase build_sha + body forward: the P1 filter below (pickPhasesBuiltInMerge) needs both to
   // decide "was this phase actually in the merged PR?" so we don't over-stamp unbuilt phases from a
   // partial manual squash-merge (the generalize-director-coach-backend #1712 incident).
-  const specs = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: scope='active' — the folded skip below is now server-side.
+  const specs = await getActiveSpecs(workspaceId);
   const unstampedBySlug = new Map<string, PhaseBuiltCandidate[]>();
   for (const spec of specs) {
     if (spec.status === "folded") continue;
@@ -1275,7 +1279,8 @@ export async function runSpecDriftReconciler(workspaceId: string): Promise<Drift
   //     retire-md-reads-from-pm-flow Phase 2: no `docs/brain/specs/*.md` fetch + parse for the path
   //     verification, we read the typed body straight from the canonical row. Through the specs-table SDK
   //     (no raw PM SQL — pm-db-agent-toolkit); filter to shipped phases of non-folded specs in memory.
-  const specRows = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: scope='active' — the folded skip below is now server-side.
+  const specRows = await getActiveSpecs(workspaceId);
   // Goal-aware guard (reese-goal-aware-drift Phase 1) — load the goal list once + skip specs whose
   // owning goal has not promoted to main yet. A goal-member's shipped phase's code lives on the
   // goal branch until the goal atomically promotes; scanning it against main would false-flag a
@@ -1375,7 +1380,10 @@ export async function detectSpecPhaseAnomalies(workspaceId: string): Promise<{ o
   // dropped. Read the workspace's specs through the SDK (no raw PM SQL); a duplicate surfaces as two
   // `spec.phases` entries sharing a position. Surface, never auto-dedupe (which row carries the truth?).
   try {
-    const specRows = await listSpecs(workspaceId);
+    // spec-read-egress-scope-and-cursor: this sweep is an INTEGRITY check over every row — a
+    // duplicate (spec_id, position) on a folded spec is still a broken unique index, so it keeps
+    // the folded-inclusive set deliberately. `getAllSpecs` states that intent explicitly.
+    const specRows = await getAllSpecs(workspaceId);
     for (const spec of specRows) {
       const byPos = new Map<number, SpecPhaseRow[]>();
       for (const p of spec.phases) {

@@ -19,7 +19,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getGoals } from "@/lib/brain-roadmap";
-import { listSpecs } from "@/lib/specs-table";
+import { getAllSpecs } from "@/lib/specs-table";
 
 /** Half-open trailing window in ISO timestamps — `.gte(startIso).lt(endIso)` (the standard
  *  agent_jobs.updated_at window used by director-recap; platform-scorecard's inclusive-end callers
@@ -55,7 +55,9 @@ export async function shippedSpecsByOwner(
 ): Promise<ShippedSpecsByOwnerResult> {
   const admin = createAdminClient();
 
-  const specs = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: owner attribution MUST see folded specs (a shipped spec is
+  // folded) — `getAllSpecs` makes that requirement explicit rather than relying on the default.
+  const specs = await getAllSpecs(workspaceId);
   const { data, error } = await admin
     .from("agent_jobs")
     .select("spec_slug")
