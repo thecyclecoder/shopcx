@@ -20,6 +20,7 @@
  * [[../../../docs/brain/reference/meta-scaling-methodology]] (price-on-static + fabrication rules).
  */
 import { randomUUID } from "crypto";
+import { errText } from "@/lib/error-text";
 import { writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -131,7 +132,7 @@ async function loadReferencePackshot(url: string | null | undefined): Promise<Bu
     const arrayBuffer = await res.arrayBuffer();
     return await normalizeForVision(Buffer.from(arrayBuffer));
   } catch (err) {
-    console.warn(`[creative-qa] qa_packshot_fetch_failed err=${err instanceof Error ? err.message : String(err)} url=${url}`);
+    console.warn(`[creative-qa] qa_packshot_fetch_failed err=${errText(err)} url=${url}`);
     return null;
   }
 }
@@ -215,7 +216,7 @@ export async function qaCreative(
     const text: string = body?.content?.[0]?.text ?? "{}";
     json = JSON.parse(text.replace(/^```json\s*|\s*```$/g, "").trim());
   } catch (err) {
-    return failClosed(`qa_vision_error: ${err instanceof Error ? err.message : String(err)}`);
+    return failClosed(`qa_vision_error: ${errText(err)}`);
   }
 
   const checks = {
@@ -328,7 +329,7 @@ export async function qaCreativeViaBoxSession(
   try {
     await writeFile(imagePath, normalized);
   } catch (err) {
-    return failClosed(`qa_tmpfile_error: ${err instanceof Error ? err.message : String(err)}`);
+    return failClosed(`qa_tmpfile_error: ${errText(err)}`);
   }
 
   // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — the reference packshot
@@ -344,7 +345,7 @@ export async function qaCreativeViaBoxSession(
     try {
       await writeFile(packshotPath, packshotBuffer);
     } catch (err) {
-      console.warn(`[creative-qa] qa_packshot_tmpfile_error err=${err instanceof Error ? err.message : String(err)} — skipping packagingFaithful for this render`);
+      console.warn(`[creative-qa] qa_packshot_tmpfile_error err=${errText(err)} — skipping packagingFaithful for this render`);
       packshotPath = null;
     }
   }
@@ -381,7 +382,7 @@ export async function qaCreativeViaBoxSession(
     try {
       dispatchResult = await dispatch(prompt, allowedImagePath);
     } catch (err) {
-      return failClosed(`qa_session_dispatch_error: ${err instanceof Error ? err.message : String(err)}`);
+      return failClosed(`qa_session_dispatch_error: ${errText(err)}`);
     }
     if (dispatchResult.isError) return failClosed("qa_session_error");
 
@@ -572,7 +573,7 @@ export async function runQaCreativeCopyViaBoxSession(
     return {
       kind: "dispatch_error",
       validator: preCheck.validator,
-      reason: `qa_copy_session_dispatch_error: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `qa_copy_session_dispatch_error: ${errText(err)}`,
     };
   }
   if (dispatchResult.isError) {

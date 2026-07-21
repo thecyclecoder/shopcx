@@ -42,6 +42,7 @@
  *   npx tsx scripts/reconcile-blameless-grade-poison.ts --window-days 14                    # narrower window
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { reconcileBlamelessGradePoison, type ReconcileBlamelessResult } from "../src/lib/agents/agent-grader";
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -100,7 +101,7 @@ async function main() {
       totalMatched += res.matched;
       totalApplied += res.applied;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       console.error(`  ! ws=${workspaceId} failed: ${msg}`);
       failures.push({ workspaceId, error: msg });
     }

@@ -21,6 +21,7 @@
  * degrades gracefully — gray image box, no strikethrough).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { OrderForEmail, OrderLineLike, AddressLike } from "@/lib/email-storefront";
 
 interface OrderRow {
@@ -177,7 +178,7 @@ async function fetchShopifyOrder(
   } catch (err) {
     console.warn(
       "[order-confirmation-data] shopify order() GraphQL fetch failed",
-      { workspaceId, shopifyOrderId, err: err instanceof Error ? err.message : String(err) },
+      { workspaceId, shopifyOrderId, err: errText(err) },
     );
     return null;
   }

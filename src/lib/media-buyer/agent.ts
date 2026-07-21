@@ -41,6 +41,7 @@
  * the decision engine returns a non-empty action set …").
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
@@ -322,7 +323,7 @@ export async function executeDecidedActionAgainstMeta(args: {
       .eq("status", "decided");
     return { success: true, external_result };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errText(err);
     const external_result: Record<string, unknown> = {
       meta_object_id: args.action.targetObjectId,
       attempted_action: args.action.actionType,
@@ -2073,7 +2074,7 @@ export async function runMediaBuyerLoopForAccount(
       const result = await runMediaBuyerLoop(admin, { ...opts, productId });
       passes.push({ productId, result });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       passes.push({
         productId,
         result: {
@@ -2508,7 +2509,7 @@ async function enqueueReplenishPublish(
       inserted: false,
       jobId: null,
       reason: `no canonical publish identity registered for workspace ${workspaceId}: ${
-        e instanceof Error ? e.message : String(e)
+        errText(e)
       }`,
     };
   }

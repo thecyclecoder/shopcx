@@ -23,6 +23,7 @@
  *     (resolved / superseded / pending-deploy) — never a generic "deferred this".
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { markSpecCardDeferred } from "@/lib/spec-card-state";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
@@ -80,7 +81,7 @@ export async function auditedProgrammaticDefer(input: AuditedDeferInput): Promis
   try {
     await markSpecCardDeferred(workspaceId, slug, true, { actor, reason });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     console.warn(`[spec-defer-audit] markSpecCardDeferred failed for ${slug}:`, msg);
     return { ok: false, audited: false, surfaced: false, reason: msg };
   }
@@ -159,7 +160,7 @@ export async function emitDeferNotification(
     }
     return { ok: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     console.warn(`[spec-defer-audit] emitDeferNotification threw for ${slug}:`, msg);
     return { ok: false, reason: msg };
   }

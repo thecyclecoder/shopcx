@@ -19,6 +19,7 @@
  * See docs/brain/specs/storefront-mvp.md § 1c.
  */
 import { randomUUID } from "node:crypto";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { subscriptionAction } from "@/lib/commerce/subscription";
@@ -370,7 +371,7 @@ export async function migrateContractToInternalComp(
 
     return { ok: true, subId: String(sub.id), internalContractId };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: errText(e) };
   }
 }
 
@@ -560,7 +561,7 @@ export async function migrateCustomerAppstleSubsToInternal(
         }
       }
     } catch (e) {
-      result.failed.push({ contractId, error: e instanceof Error ? e.message : String(e) });
+      result.failed.push({ contractId, error: errText(e) });
     }
   }
 

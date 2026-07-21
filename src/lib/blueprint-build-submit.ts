@@ -38,6 +38,7 @@ import {
   type LanderBlueprintBlock,
   type LanderContentGapAssetRole,
 } from "@/lib/lander-blueprints";
+import { errText } from "@/lib/error-text";
 import { authorSpecRowStructured, type StructuredPhaseInput, type StructuredSpecInput } from "@/lib/author-spec";
 import { listBlueprints } from "@/lib/lander-blueprints";
 
@@ -388,7 +389,7 @@ export async function runBlueprintBuildSubmitSweep(
     try {
       out.push(await verifyAndSubmitBlueprint(workspaceId, b.id));
     } catch (e) {
-      out.push({ status: "error", blueprint_id: b.id, reason: e instanceof Error ? e.message : String(e) });
+      out.push({ status: "error", blueprint_id: b.id, reason: errText(e) });
     }
   }
   return out;

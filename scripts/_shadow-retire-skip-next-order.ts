@@ -26,6 +26,7 @@
  * Read-only; NO mutation.
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { SONNET_MODEL } from "../src/lib/ai-models";
 
 type ShadowAction = "change_next_date" | "bill_now" | "escalate" | "other";
@@ -204,7 +205,7 @@ async function main() {
     } catch (err) {
       shadow = {
         action_type: "other",
-        reasoning: `error: ${err instanceof Error ? err.message : String(err)}`,
+        reasoning: `error: ${errText(err)}`,
       };
     }
 

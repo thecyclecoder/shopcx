@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { useParams, useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
@@ -499,7 +500,7 @@ export default function FraudCaseDetailPage() {
                         });
                       }
                     } catch (err) {
-                      setResellerResult({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+                      setResellerResult({ ok: false, msg: errText(err) });
                     } finally {
                       setResellerAdding(false);
                     }

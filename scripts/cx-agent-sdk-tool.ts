@@ -16,6 +16,7 @@
  * June). See src/lib/cx-agent-sdk.ts for the underlying getters.
  */
 import { readFileSync, existsSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "path";
 
 // Bootstrap env from .env.local when present (the box worker unsets ANTHROPIC_API_KEY
@@ -83,6 +84,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : String(e));
+  console.error(errText(e));
   process.exit(1);
 });

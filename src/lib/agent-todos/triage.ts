@@ -15,6 +15,7 @@
  * triage_runs for a human. See docs/brain/specs/box-escalation-triage.md.
  */
 import { randomUUID } from "node:crypto";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildPreExecContext } from "./execute";
 import type { AgentTodoActionType, AgentTodoUrgency } from "./constants";
@@ -524,7 +525,7 @@ export async function materializeTriageOutcome(
         parts.push(`spec author failed for ${slug}`);
       }
     } catch (e) {
-      parts.push(`spec author failed: ${e instanceof Error ? e.message : String(e)}`);
+      parts.push(`spec author failed: ${errText(e)}`);
     }
   }
 

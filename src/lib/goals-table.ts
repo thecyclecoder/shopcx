@@ -27,6 +27,7 @@
  * through `createAdminClient()`.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 /** The full enum the `goals.status` column accepts (CHECK-constrained in migration). */
 export type GoalRowStatus = "proposed" | "greenlit" | "complete" | "folded";
@@ -609,6 +610,6 @@ export async function isGoalParentExempt(workspaceId: string, slug: string): Pro
     if (buildable === 0) return { exempt: true, reason: "no buildable member specs" };
     return { exempt: false, reason: "leaf goal with buildable specs — promotable" };
   } catch (e) {
-    return { exempt: true, reason: `parent-exemption read failed (treated exempt): ${e instanceof Error ? e.message : String(e)}` };
+    return { exempt: true, reason: `parent-exemption read failed (treated exempt): ${errText(e)}` };
   }
 }

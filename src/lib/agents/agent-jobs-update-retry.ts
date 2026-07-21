@@ -1,3 +1,4 @@
+import { errText } from "@/lib/error-text";
 /**
  * agent-jobs-update-retry-and-error-surface Phase 1 — the retry + surface helper for the
  * box worker's shared `agent_jobs` update chokepoint (`scripts/builder-worker.ts:update`).
@@ -249,7 +250,7 @@ export async function writeAgentJobsUpdateWithRetry(
           `[agent-jobs-update-retry] job=${opts.jobId} attemptedStatus=${
             opts.attemptedStatus ?? "?"
           } attempt=${attempt}/${attempts} transient thrown="${
-            err instanceof Error ? err.message : String(err)
+            errText(err)
           }" — retrying in ${baseDelayMs * 2 ** (attempt - 1)}ms`,
         );
         await sleep(baseDelayMs * 2 ** (attempt - 1));

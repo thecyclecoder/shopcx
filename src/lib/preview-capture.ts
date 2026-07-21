@@ -24,6 +24,7 @@
  * per-build PREVIEW deployments, never prod.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import {
   getLatestReadyDeploymentForBranch,
   previewHttpsUrl,
@@ -81,7 +82,7 @@ export async function capturePreviewUrlForJob(opts: CaptureOptions): Promise<Pre
       updated: false,
       previewUrl: null,
       previewState: null,
-      reason: `vercel lookup failed: ${e instanceof Error ? e.message : String(e)}`,
+      reason: `vercel lookup failed: ${errText(e)}`,
     };
   }
 
@@ -180,7 +181,7 @@ export async function pollCapturePreviewUrl(
     }
     log(`preview-capture: ${opts.jobId} timeout after ${Math.round(timeoutMs / 1000)}s — last state=${last.previewState ?? "null"}`);
   } catch (e) {
-    log(`preview-capture: ${opts.jobId} poll error: ${e instanceof Error ? e.message : String(e)}`);
+    log(`preview-capture: ${opts.jobId} poll error: ${errText(e)}`);
   }
   return last;
 }

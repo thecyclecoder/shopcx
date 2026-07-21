@@ -25,6 +25,7 @@
  * env GOD_MODE_SESSION_ID; stdout = {hookSpecificOutput:{permissionDecision}}; exit 0.
  */
 import "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "./_bootstrap";
 import { openApproval, getApproval, isSessionArmed, type GodModeApprovalRisk } from "../src/lib/god-mode";
 
@@ -142,7 +143,7 @@ async function main() {
 
 main().catch((err) => {
   try {
-    emit("deny", `god-mode gate error: ${err instanceof Error ? err.message : String(err)}`);
+    emit("deny", `god-mode gate error: ${errText(err)}`);
   } catch {
     process.exit(0);
   }

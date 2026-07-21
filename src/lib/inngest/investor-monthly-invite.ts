@@ -4,6 +4,7 @@
 // manual re-send. See docs/brain/lifecycles/investors-area.md.
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { generateInvestorMagicLink, isInvestorRole } from "@/lib/investors/auth";
@@ -58,7 +59,7 @@ export const investorMonthlyInvite = inngest.createFunction(
             await backfillPnlSnapshots(ws.id, QB_REFRESH_MONTHS, admin);
             return { ok: true };
           } catch (e) {
-            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            return { ok: false, error: errText(e) };
           }
         });
       }

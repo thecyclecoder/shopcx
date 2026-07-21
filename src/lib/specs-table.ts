@@ -34,6 +34,7 @@
  * through `createAdminClient()`.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { Phase } from "@/lib/brain-roadmap";
 
 export type { Phase } from "@/lib/brain-roadmap";
@@ -1249,7 +1250,7 @@ export async function stampPhaseShipped(
       },
     });
   } catch (e) {
-    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${errText(e)}`);
   }
 }
 

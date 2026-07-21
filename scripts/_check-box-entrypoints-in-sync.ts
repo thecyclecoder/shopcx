@@ -23,6 +23,7 @@
  * cannot merge silently.
  */
 import { readFileSync, existsSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "path";
 
 const REPO_ROOT = resolve(__dirname, "..");
@@ -79,7 +80,7 @@ function readBoxEntrypointsFromTsconfig(): string[] {
   try {
     parsed = JSON.parse(src) as { include?: unknown };
   } catch (e) {
-    fail(`tsconfig.box.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    fail(`tsconfig.box.json is not valid JSON: ${errText(e)}`);
   }
   const inc = parsed.include;
   if (!Array.isArray(inc) || inc.length === 0) {

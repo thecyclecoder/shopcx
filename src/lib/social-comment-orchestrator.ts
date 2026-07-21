@@ -30,6 +30,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { retrieveContext } from "@/lib/rag";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 
@@ -470,7 +471,7 @@ function parsePass2Output(text: string, sentiment: ModerationSentiment, sources:
       model: OPUS_MODEL,
     };
   } catch (err) {
-    return { ...FALLBACK_DECISION, model: OPUS_MODEL, sentiment, reasoning: `Opus parse fail: ${err instanceof Error ? err.message : String(err)}. "${snippet}"` };
+    return { ...FALLBACK_DECISION, model: OPUS_MODEL, sentiment, reasoning: `Opus parse fail: ${errText(err)}. "${snippet}"` };
   }
 }
 

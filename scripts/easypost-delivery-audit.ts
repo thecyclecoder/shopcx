@@ -18,6 +18,7 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
+import { errText } from "../src/lib/error-text";
 import EasyPostClient from "@easypost/api";
 
 // ── Config ──
@@ -308,7 +309,7 @@ async function main() {
 
     } catch (err) {
       stats.error++;
-      console.log(`ERROR: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`ERROR: ${errText(err)}`);
     }
   }
 

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
@@ -143,6 +144,6 @@ export async function POST(
       original: macro.body_text,
     });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: errText(err) }, { status: 500 });
   }
 }

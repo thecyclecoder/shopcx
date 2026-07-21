@@ -20,6 +20,7 @@
  * Keep titles/steps/notes free of the shell metacharacters ; & | ` $ < > .
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { startChecklist, checklistStep, finishChecklist, appendNote } from "../src/lib/god-mode";
 
 async function main() {
@@ -76,6 +77,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`god-mode-progress error: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`god-mode-progress error: ${errText(err)}`);
   process.exit(1);
 });

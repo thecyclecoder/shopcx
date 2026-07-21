@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCompetitor, setCompetitorStatus } from "@/lib/competitors";
@@ -60,7 +61,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: errText(err) },
       { status: 500 },
     );
   }
@@ -116,7 +117,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: errText(err) },
       { status: 500 },
     );
   }

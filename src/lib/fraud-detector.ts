@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { inngest } from "@/lib/inngest/client";
 import { addOrderTags } from "@/lib/shopify-order-tags";
 import { zipDistance, extractZip } from "@/lib/geo-distance";
@@ -535,7 +536,7 @@ export async function checkOrderForFraud(
     await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.fraudDetector, {
       ok: !threw,
       produced: threw ? { error: "exception", order: orderId } : { order: orderId, flagged: flagged === true },
-      detail: threw ? `threw: ${threw instanceof Error ? threw.message : String(threw)}` : flagged ? "flagged" : "clean",
+      detail: threw ? `threw: ${errText(threw)}` : flagged ? "flagged" : "clean",
       durationMs: Date.now() - startedAt,
     });
   }

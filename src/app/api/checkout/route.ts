@@ -40,6 +40,7 @@
  *   }
  */
 import { NextResponse, type NextRequest } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import {
@@ -292,7 +293,7 @@ export async function POST(request: NextRequest) {
           severity: "critical",
           lines: [
             `Order \`${orderNumber}\` committed with *$0 tax* — the Avalara call threw.`,
-            `Error: ${err instanceof Error ? err.message : String(err)}`,
+            `Error: ${errText(err)}`,
           ],
         }).catch(() => undefined),
       );
@@ -445,7 +446,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (err) {
     return NextResponse.json(
-      { error: "braintree_customer_resolve_failed", details: err instanceof Error ? err.message : String(err) },
+      { error: "braintree_customer_resolve_failed", details: errText(err) },
       { status: 500 },
     );
   }
@@ -501,7 +502,7 @@ export async function POST(request: NextRequest) {
       );
     } catch (err) {
       return NextResponse.json(
-        { error: "card_verification_failed", details: err instanceof Error ? err.message : String(err) },
+        { error: "card_verification_failed", details: errText(err) },
         { status: 402 },
       );
     }
@@ -532,7 +533,7 @@ export async function POST(request: NextRequest) {
     gateway = await getBraintreeGateway(cart.workspace_id);
   } catch (err) {
     return NextResponse.json(
-      { error: "braintree_not_configured", details: err instanceof Error ? err.message : String(err) },
+      { error: "braintree_not_configured", details: errText(err) },
       { status: 500 },
     );
   }
@@ -733,7 +734,7 @@ export async function POST(request: NextRequest) {
         if (offerId) offerIdByProduct.set(productId, offerId);
       }
     } catch (e) {
-      console.warn(`[checkout] persist-to-renewal offer lookup failed for cart ${cart.token}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[checkout] persist-to-renewal offer lookup failed for cart ${cart.token}: ${errText(e)}`);
     }
   }
 

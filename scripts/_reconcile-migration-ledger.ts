@@ -48,6 +48,7 @@
  * Read the write-a-migration-apply-script recipe for the pooler/SQL invariants this follows.
  */
 import { readFileSync, readdirSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { resolve, join } from "path";
 import { poolerConnectionString } from "./_bootstrap";
 import {
@@ -213,7 +214,7 @@ async function classifyOne(
         }
         // Genuine error — drop the whole file. Roll back everything the file did (fresh DDL from
         // earlier statements never commits) and record NOTHING for this version.
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errText(err);
         const sqlstate = (err as { code?: string })?.code;
         await c.query(`ROLLBACK TO SAVEPOINT ${containerSp}`);
         await c.query(`RELEASE SAVEPOINT ${containerSp}`);
@@ -248,7 +249,7 @@ async function classifyOne(
       await c.query(`ROLLBACK TO SAVEPOINT ${containerSp}`);
       await c.query(`RELEASE SAVEPOINT ${containerSp}`);
     } catch {}
-    const detail = unexpected instanceof Error ? unexpected.message : String(unexpected);
+    const detail = errText(unexpected);
     return {
       outcome: "skipped-broken",
       detail: `container-savepoint failure: ${detail}`,

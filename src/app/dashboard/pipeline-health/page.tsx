@@ -5,6 +5,7 @@
 // approvals inbox when accuracy_pct drops below MARIO_ACCURACY_ALARM_PCT (default 60).
 
 import { useEffect, useState, useCallback } from "react";
+import { errText } from "@/lib/error-text";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface MarioAccuracyStats {
@@ -58,7 +59,7 @@ export default function PipelineHealthPage() {
       const json = (await res.json()) as AccuracyResponse;
       setData(json);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errText(e));
     } finally {
       setLoading(false);
     }
@@ -83,7 +84,7 @@ export default function PipelineHealthPage() {
       if (!res.ok) throw new Error(`revert failed: ${res.status}`);
       await fetchAccuracy();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errText(e));
     } finally {
       setBusyRow(null);
     }

@@ -14,6 +14,7 @@
  * per product whose bin is below the floor. See [[../../../docs/brain/lifecycles/ad-creative.md]].
  */
 import { randomUUID } from "crypto";
+import { errText } from "@/lib/error-text";
 import { writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1669,7 +1670,7 @@ export async function runCopyAuthorSession(
     try {
       dispatchResult = await dispatch(prompt, inputs.imagePath, resumePin);
     } catch (err) {
-      lastReason = `dispatch_threw: ${err instanceof Error ? err.message : String(err)}`;
+      lastReason = `dispatch_threw: ${errText(err)}`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
@@ -1970,13 +1971,13 @@ async function runCopyAuthorSessionForImage(
       .jpeg({ quality: 82 })
       .toBuffer();
   } catch (err) {
-    return { kind: "exhausted", reason: `image_undecodable: ${err instanceof Error ? err.message : String(err)}`, attempts: 0 };
+    return { kind: "exhausted", reason: `image_undecodable: ${errText(err)}`, attempts: 0 };
   }
   const imagePath = join(tmpdir(), `creative-author-${randomUUID()}.jpg`);
   try {
     await writeFile(imagePath, normalized);
   } catch (err) {
-    return { kind: "exhausted", reason: `tmpfile_write_failed: ${err instanceof Error ? err.message : String(err)}`, attempts: 0 };
+    return { kind: "exhausted", reason: `tmpfile_write_failed: ${errText(err)}`, attempts: 0 };
   }
   try {
     return await runCopyAuthorSession(
@@ -2170,13 +2171,13 @@ async function runCopyQcForCreative(
           .jpeg({ quality: 82 })
           .toBuffer();
       } catch (err) {
-        return { verdict: null, reason: `image_undecodable_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+        return { verdict: null, reason: `image_undecodable_${render.format}: ${errText(err)}` };
       }
       const imagePath = join(tmpdir(), `creative-copy-qc-${runId}-${render.format}.jpg`);
       try {
         await writeFile(imagePath, normalized);
       } catch (err) {
-        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${errText(err)}` };
       }
       tmpFiles.push({ format: render.format, path: imagePath });
     }
@@ -3083,7 +3084,7 @@ async function stockProduct(
           if (!escalatedForPackshot.has(productId)) {
             escalatedForPackshot.add(productId);
             await escalatePackshotMissing(admin, workspaceId, productId, productTitle).catch((e) => {
-              console.warn("dahlia_packshot_escalation_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+              console.warn("dahlia_packshot_escalation_failed", { workspaceId, productId, err: errText(e) });
             });
           }
           out.push({
@@ -3352,7 +3353,7 @@ async function stockProduct(
                   copyQcDispatcher,
                 ).catch((err) => ({
                   verdict: null as null,
-                  reason: `max_copy_qc_threw: ${err instanceof Error ? err.message : String(err)}`,
+                  reason: `max_copy_qc_threw: ${errText(err)}`,
                 }));
                 if (!qcRun.verdict) {
                   console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
@@ -3476,7 +3477,7 @@ async function stockProduct(
                   : exhaustionKind === "max_qc_below_floor"
                     ? "max_qc_below_floor_exhausted_activity_failed"
                     : "dahlia_copy_author_exhausted_activity_failed";
-              console.warn(failKey, { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+              console.warn(failKey, { workspaceId, productId, err: errText(e) });
             });
             // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max-QC
             // exhaustion class ALWAYS bins the last-attempted caption at
@@ -3539,7 +3540,7 @@ async function stockProduct(
                   }).catch((err) => {
                     console.warn("max_copy_qc_verdict_insert_failed_on_ineligible", {
                       workspaceId, productId, campaignId: binCampaignId,
-                      err: err instanceof Error ? err.message : String(err),
+                      err: errText(err),
                     });
                     return null;
                   });
@@ -3555,7 +3556,7 @@ async function stockProduct(
                   },
                 }).catch((e) => {
                   console.warn("combination_record_failed_on_ineligible_bin", {
-                    workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+                    workspaceId, productId, err: errText(e),
                   });
                 });
                 out.push({
@@ -3580,7 +3581,7 @@ async function stockProduct(
                 // the discard-and-escalate default below with the driver reason recorded.
                 console.warn("bin_held_creative_threw", {
                   workspaceId, productId, exhaustionKind,
-                  err: err instanceof Error ? err.message : String(err),
+                  err: errText(err),
                 });
               }
             }
@@ -3656,7 +3657,7 @@ async function stockProduct(
                   }
                 } catch (err) {
                   console.warn("max_creative_qc_regen_gen_failed", {
-                    workspaceId, productId, format: fmt, err: err instanceof Error ? err.message : String(err),
+                    workspaceId, productId, format: fmt, err: errText(err),
                   });
                   regenOk = false;
                   break;
@@ -3745,7 +3746,7 @@ async function stockProduct(
               },
             }).catch((e) => {
               console.warn("max_creative_qc_exhausted_activity_failed", {
-                workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+                workspaceId, productId, err: errText(e),
               });
             });
             out.push({
@@ -3811,7 +3812,7 @@ async function stockProduct(
             },
           }).catch((e) => {
             console.warn("dahlia_no_session_available_activity_failed", {
-              workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+              workspaceId, productId, err: errText(e),
             });
           });
           out.push({
@@ -3867,7 +3868,7 @@ async function stockProduct(
               workspaceId,
               productId,
               campaignId,
-              err: err instanceof Error ? err.message : String(err),
+              err: errText(err),
             });
             return null;
           });
@@ -3881,7 +3882,7 @@ async function stockProduct(
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;
       } catch (err) {
-        lastIssues = [err instanceof Error ? err.message : String(err)];
+        lastIssues = [errText(err)];
       }
     }
     if (!landed && !skipped) out.push({ productId, angleHook: angle.hook, campaignId: null, ok: false, reason: "qa_or_gen_failed", qaIssues: lastIssues });
@@ -3947,7 +3948,7 @@ async function escalatePackshotMissing(
     },
   }).catch((e) => {
     // Best-effort — a director_activity write failure must not fail the ad-creative loop.
-    console.warn("dahlia_packshot_activity_write_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+    console.warn("dahlia_packshot_activity_write_failed", { workspaceId, productId, err: errText(e) });
   });
 }
 

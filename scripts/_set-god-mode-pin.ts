@@ -17,6 +17,7 @@
  * detect it.
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { hashPin } from "../src/lib/god-mode";
 
 async function main() {
@@ -49,6 +50,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  console.error(errText(err));
   process.exit(1);
 });

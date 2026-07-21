@@ -30,6 +30,7 @@
  *   - Heartbeat: `emitReactiveHeartbeat` in a try/finally so a thrown run still beats with ok:false.
  */
 import { inngest } from "@/lib/inngest/client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildOrgChartGraph, loadAutonomyMap } from "@/lib/agents/approval-router";
 import { reactiveEnqueuePlatformDirectorForTarget } from "@/lib/agents/platform-director";
@@ -78,7 +79,7 @@ export const approvalEnqueueDirector = inngest.createFunction(
       return { status: "complete", ...result };
     } catch (e) {
       ok = false;
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       console.error(
         `[approval-enqueue-director] ws=${workspace_id} target=${target_job_id} failed: ${msg}`,
       );

@@ -28,6 +28,7 @@
  * bet) until M3 has calibrated the proxy once.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { compressToWebp } from "@/lib/blog/generate-images";
 import {
@@ -627,7 +628,7 @@ export async function generateCampaignHero(opts: {
     if (error) return null;
     return admin.storage.from(OPTIMIZER_HERO_BUCKET).getPublicUrl(path).data.publicUrl;
   } catch (e) {
-    console.warn(`[storefront-optimizer] hero generation failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[storefront-optimizer] hero generation failed: ${errText(e)}`);
     return null;
   }
 }
@@ -957,7 +958,7 @@ export async function pairPromotedLanderWithAd(
 
     return { ok: true, ad_campaign_id: adCampaignId, angle_id: angle.id, archetype };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+    return { ok: false, reason: errText(err).slice(0, 200) };
   }
 }
 
@@ -1440,7 +1441,7 @@ export async function resolveSubscriptionOfferId(opts: {
     }
     return null;
   } catch (e) {
-    console.warn(`[storefront-optimizer] resolveSubscriptionOfferId failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[storefront-optimizer] resolveSubscriptionOfferId failed: ${errText(e)}`);
     return null;
   }
 }

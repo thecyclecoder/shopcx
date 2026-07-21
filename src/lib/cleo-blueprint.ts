@@ -22,6 +22,7 @@
  * `createAdminClient()` (unchanged).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { listAdvertisedProductIds } from "@/lib/advertised-products";
 import {
   createBlueprint,
@@ -595,7 +596,7 @@ export async function runCleoBlueprintSweep(
       entries.push({
         research_url_id: teardown.id,
         decision: "skip",
-        rationale: `error during decision: ${e instanceof Error ? e.message : String(e)}`,
+        rationale: `error during decision: ${errText(e)}`,
       });
       result.skipped++;
       // Do NOT mark reviewed on error — a next sweep can retry.

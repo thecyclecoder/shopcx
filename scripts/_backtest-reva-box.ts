@@ -28,6 +28,7 @@
  * resume, no multi-account failover, no heartbeat plumbing) — it's a one-shot verification, not a lane.
  */
 import { execSync, spawnSync } from "child_process";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "path";
 // _bootstrap loads .env.local (locally) and provides admin-client access — not needed here (harness is
 // git + LLM only), but importing keeps the script consistent with the scripts/_*.ts convention.
@@ -183,7 +184,7 @@ function fetchDiffSummary(mergeSha: string | null): { files: string[]; unavailab
     const files = out.split("\n").map((l) => (l.match(/^\s(\S+)\s*\|/) || [])[1]).filter((f): f is string => !!f);
     return { files };
   } catch (e) {
-    return { files: [], unavailable: `git show failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { files: [], unavailable: `git show failed: ${errText(e)}` };
   }
 }
 

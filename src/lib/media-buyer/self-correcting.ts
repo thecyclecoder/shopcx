@@ -46,6 +46,7 @@
  * log-and-continue over the next cohort instead of aborting the whole pass.
  */
 import type { PostgrestError } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
@@ -309,7 +310,7 @@ export async function checkMediaBuyerRegressionAndDisarm(
       escalated: escalation.emitted,
     };
   } catch (err) {
-    return { disarmed: false, reason: "error", error: err instanceof Error ? err.message : String(err) };
+    return { disarmed: false, reason: "error", error: errText(err) };
   }
 }
 

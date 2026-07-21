@@ -17,6 +17,7 @@
  * Build card on a finding, a healthy beat on a clean tree.
  */
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enqueueDepWatchJob, enqueueSecurityDiffIfDue } from "@/lib/security-agent";
@@ -42,7 +43,7 @@ export const securityDepWatch = inngest.createFunction(
         const admin = createAdminClient();
         return await enqueueSecurityDiffIfDue(admin);
       } catch (err) {
-        return { enqueued: [], scanned: 0, resolved: 0, error: err instanceof Error ? err.message : String(err) };
+        return { enqueued: [], scanned: 0, resolved: 0, error: errText(err) };
       }
     });
 

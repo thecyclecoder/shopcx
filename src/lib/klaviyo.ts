@@ -12,6 +12,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 import { HAIKU_MODEL } from "@/lib/ai-models";
@@ -392,7 +393,7 @@ export async function updateReviewStatus(
     return { success: true };
   } catch (err) {
     console.error("Klaviyo review update error:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -436,7 +437,7 @@ export async function updateReviewType(
     return { success: true };
   } catch (err) {
     console.error("Klaviyo review type update error:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 

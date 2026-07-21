@@ -1,6 +1,7 @@
 // Inngest cron: keep today's Amazon + Meta snapshots fresh (every 5 min)
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { requestReport, pollReportStatus, downloadReport, processOrderReport } from "@/lib/amazon/sync-orders";
@@ -59,7 +60,7 @@ export const todaySyncCron = inngest.createFunction(
         // to the Control Tower error feed. Real failures (auth revoked,
         // connection disabled, permissions) still hit console.error and
         // surface. Mirrors the Meta-side classifier below.
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errText(err);
         const isTransient =
           /InternalFailure|ServiceUnavailable|RequestThrottled|InternalError|TooManyRequests/i.test(msg) ||
           /Report request failed:.*\b5\d\d\b/.test(msg) ||

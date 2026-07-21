@@ -16,6 +16,7 @@
  * the discount because the storefront also auto-applies it on-page.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 export type PopupCouponEmailResult =
   | { emailed: true }
@@ -95,6 +96,6 @@ ${cta}
       .update({ fallback_emailed_at: null })
       .eq("workspace_id", workspaceId).eq("customer_id", customerId).eq("fallback_emailed_at", claimAt)
       .then(() => undefined, () => undefined);
-    return { error: e instanceof Error ? e.message : String(e) };
+    return { error: errText(e) };
   }
 }

@@ -35,6 +35,7 @@
  * encoded in the spec's verification grep).
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
 import { inngest } from "@/lib/inngest/client";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -692,7 +693,7 @@ export async function amplifyWinner(
       deps,
     });
   } catch (e) {
-    pairResult = { ok: false, reason: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200) };
+    pairResult = { ok: false, reason: errText(e).slice(0, 200) };
   }
 
   return {
@@ -861,6 +862,6 @@ export async function pairAmplifiedWinnerWithLander(
 
     return { ok: true, experiment_id: materialize.experiment_id, lander_type: landerType, patch };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+    return { ok: false, reason: errText(err).slice(0, 200) };
   }
 }

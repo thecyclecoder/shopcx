@@ -28,6 +28,7 @@
  * connected account and rewrites the last 90 days of attribution rows.
  */
 import type { createAdminClient as _createAdminClient } from "../src/lib/supabase/admin";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "./_bootstrap";
 import { refreshVariantAttribution, UNRESOLVED_VARIANT } from "../src/lib/meta/attribution";
 import { detectWinners } from "../src/lib/ads/winning-creative-detect";
@@ -105,7 +106,7 @@ async function probeDetectWinners(admin: Admin, workspaceId: string, adAccountId
       rowsWithRevenue: 0,
       winnersReturned: 0,
       passed: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: errText(err),
     };
   }
 }
@@ -191,7 +192,7 @@ async function main() {
         `  detectWinners: rowsWithRevenue=${r.detectWinners.rowsWithRevenue} · winnersReturned=${r.detectWinners.winnersReturned} · PASSED=${r.detectWinners.passed}${r.detectWinners.error ? ` · error=${r.detectWinners.error}` : ""}`,
       );
     } catch (err) {
-      console.error(`  FATAL: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`  FATAL: ${errText(err)}`);
     }
     console.log("");
   }

@@ -37,6 +37,7 @@
  */
 
 import { spawn } from "child_process";
+import { errText } from "@/lib/error-text";
 import { resolve, isAbsolute } from "path";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isBackfillScriptPath } from "@/lib/ship-time-backfill-detector";
@@ -136,7 +137,7 @@ export async function executeShipTimeBackfillsForSpec(
     return summary;
   } catch (e) {
     console.warn(
-      `[ship-time-backfill-executor] execute failed for spec=${args.specSlug}: ${e instanceof Error ? e.message : String(e)}`,
+      `[ship-time-backfill-executor] execute failed for spec=${args.specSlug}: ${errText(e)}`,
     );
     return summary;
   }

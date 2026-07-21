@@ -29,6 +29,7 @@
  * See docs/brain/specs/storefront-iteration-engine.md (Phase 6a).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
 import type { AutonomousActionType } from "@/lib/meta/decision-engine";
 import { isEffectivelyEnabled } from "@/lib/control-tower/legacy-switch-compat";
@@ -136,7 +137,7 @@ export async function executeAutonomousActions(
         .eq("status", "decided"); // guard: only flip if still decided (re-run safety)
       bump(a.action_type, "executed");
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errText(err);
       await admin
         .from("iteration_actions")
         .update({

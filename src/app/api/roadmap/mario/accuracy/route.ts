@@ -4,6 +4,7 @@
  * mario-reactive-box-agent Phase 4.
  */
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { cookies } from "next/headers";
 import { createClient, getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -40,7 +41,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ stats, widened, alarm_pct: readMarioAccuracyAlarmPct() });
   } catch (e) {
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : String(e) },
+      { error: errText(e) },
       { status: 500 },
     );
   }

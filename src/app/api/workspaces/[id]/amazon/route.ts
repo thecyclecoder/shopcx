@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { encrypt, decrypt } from "@/lib/crypto";
@@ -54,7 +55,7 @@ export async function POST(
       if (!res.ok) throw new Error(`SP-API returned ${res.status}`);
       return NextResponse.json({ ok: true, message: "Connection successful" });
     } catch (err) {
-      return NextResponse.json({ ok: false, error: String(err) }, { status: 400 });
+      return NextResponse.json({ ok: false, error: errText(err) }, { status: 400 });
     }
   }
 

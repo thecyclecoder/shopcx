@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useParams } from "next/navigation";
 import Link from "next/link";
@@ -218,7 +219,7 @@ function AutoPopulateButton({
       setQueued(true);
       onQueued();
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
     }
     setBusy(false);
   };
@@ -500,7 +501,7 @@ function OverviewStage({
       if (!res.ok) throw new Error("Failed to save");
       onChange();
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
     }
     setSaving(false);
   };
@@ -624,7 +625,7 @@ function IngredientsStage({
         fetch(`/api/workspaces/${workspaceId}/products/${productId}/analyze-reviews`, { method: "POST" }),
       ]);
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
     }
     setBusy(false);
     onChange();
@@ -1100,7 +1101,7 @@ function BenefitsStage({
         setError("Reconciliation failed");
       }
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
     }
     setReconciling(false);
   };
@@ -1123,7 +1124,7 @@ function BenefitsStage({
         setGapSearching(null);
       }, 15000);
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
       setGapSearching(null);
     }
   };
@@ -2079,7 +2080,7 @@ function SEOStage({
       }, 5000);
       setTimeout(() => { clearInterval(poll); setResearching(false); }, 120000);
     } catch (err) {
-      setError(String(err));
+      setError(errText(err));
       setResearching(false);
     }
   };

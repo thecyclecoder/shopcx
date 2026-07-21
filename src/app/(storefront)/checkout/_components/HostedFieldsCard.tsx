@@ -36,6 +36,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { errText } from "@/lib/error-text";
 import Script from "next/script";
 
 // Pinned to a recent stable braintree-web version. Hosted Fields +
@@ -221,7 +222,7 @@ export const HostedFieldsCard = forwardRef<HostedFieldsCardHandle, Props>(functi
         setReady(true);
         onReady?.();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errText(err);
         onError?.(msg);
       }
     })();

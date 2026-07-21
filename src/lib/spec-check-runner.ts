@@ -26,6 +26,7 @@
  * imports the runner + defaults from here without change.
  */
 import { spawn } from "node:child_process";
+import { errText } from "@/lib/error-text";
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -173,7 +174,7 @@ async function runOneCheck(row: LoadedCheck, deps: RunSpecChecksDeps): Promise<C
   } catch (e) {
     // A thrown executor is a HARNESS error too (spawn failure, network unreachable, DB blip) — not
     // an assertion `fail`. Preserving the raw message keeps the harness signature matchable.
-    const msg = (e as Error).message ?? String(e);
+    const msg = errText(e);
     executed = { ok: false, evidence: `executor error: ${msg}` };
   }
 

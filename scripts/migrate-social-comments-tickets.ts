@@ -33,6 +33,7 @@
  */
 
 import { readFileSync } from "fs";
+import { errText } from "../src/lib/error-text";
 
 const envPath = "/Users/admin/Projects/shopcx/.env.local";
 try {
@@ -215,7 +216,7 @@ async function main() {
       }
       migrated += 1;
     } catch (err) {
-      console.log(`  ! exception ${t.id}: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`  ! exception ${t.id}: ${errText(err)}`);
       failed += 1;
     }
   }

@@ -15,6 +15,7 @@
  *      winners; CTR + engagement are TRAPS (losers click/react MORE). See [[meta-cpa-signal]] · [[creative-brief]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import type { ConceptTags } from "@/lib/creative-skeleton";
@@ -477,7 +478,7 @@ export async function getProvenCompetitorAngles(
       console.warn("dahlia_deeply_proven_fallback_activity_failed", {
         workspaceId,
         productId: opts.productId ?? null,
-        err: e instanceof Error ? e.message : String(e),
+        err: errText(e),
       });
     });
     return { angles: fallback, usedFallback: true };

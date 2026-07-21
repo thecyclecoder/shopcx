@@ -14,6 +14,7 @@
  */
 
 import braintree from "braintree";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
@@ -151,7 +152,7 @@ export async function refundBraintreeTransaction(
     }
     return { success: true, refundId: result.transaction?.id };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -220,7 +221,7 @@ export async function verifyBraintreeCredentials(
     }
     return { ok: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     return { ok: false, error: msg };
   }
 }

@@ -11,6 +11,7 @@
  *   GOD_MODE_SMS=8583349198 WORKSPACE_ID=<uuid> npx tsx scripts/_set-god-mode-phone.ts
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 
 async function main() {
   const raw = process.env.GOD_MODE_SMS;
@@ -39,6 +40,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  console.error(errText(err));
   process.exit(1);
 });

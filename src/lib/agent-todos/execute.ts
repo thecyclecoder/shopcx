@@ -15,6 +15,7 @@
  * See docs/brain/lifecycles/agent-todo-system.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { sendTicketReply } from "@/lib/email";
 import {
   directActionHandlers,
@@ -253,7 +254,7 @@ async function executeCustomerAction(admin: Admin, todo: AgentTodo): Promise<Exe
       results.push({ type: action.type, success: r.success, error: r.error, summary: r.summary });
       await sysNote(admin, tid, r.success ? `[System] Action completed: ${r.summary || action.type}` : `[System] Action failed: ${action.type} — ${r.error}`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       results.push({ type: action.type, success: false, error: msg });
       await sysNote(admin, tid, `[System] Action errored: ${action.type} — ${msg}`);
     }

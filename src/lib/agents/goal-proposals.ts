@@ -31,6 +31,7 @@
  * · docs/brain/libraries/goal-proposals.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { upsertGoal, getGoal, type GoalMilestoneInput } from "@/lib/goals-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -303,7 +304,7 @@ export async function proposeGoal(
       extractDecompositionMilestones(artifact),
     );
   } catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
+    const why = errText(e);
     console.error(`[goal-proposals] proposeGoal row write failed for ${input.slug}:`, why);
     return { ok: false, error: `could not write goal row for ${input.slug}: ${why}` };
   }

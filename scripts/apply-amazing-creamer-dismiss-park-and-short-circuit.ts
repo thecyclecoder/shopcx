@@ -16,6 +16,7 @@
  * Run: `npx tsx scripts/apply-amazing-creamer-dismiss-park-and-short-circuit.ts`
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906"; // Superfoods Company workspace
 const DIRECTOR_FUNCTION = "platform";
@@ -207,12 +208,12 @@ async function main() {
   try {
     await applyDismissPark(admin);
   } catch (e) {
-    console.error("[dismiss-park] failed:", e instanceof Error ? e.stack ?? e.message : String(e));
+    console.error("[dismiss-park] failed:", errText(e));
   }
   try {
     await applyShortCircuit(admin);
   } catch (e) {
-    console.error("[spec-status short-circuit] failed:", e instanceof Error ? e.stack ?? e.message : String(e));
+    console.error("[spec-status short-circuit] failed:", errText(e));
   }
   console.log("\n✓ apply complete");
 }

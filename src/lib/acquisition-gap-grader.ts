@@ -27,6 +27,7 @@
  * Idempotent per (gap × mode): a re-run UPDATEs the grade row in place, never duplicates.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL, OPUS_MODEL } from "@/lib/ai-models";
 
@@ -369,7 +370,7 @@ export async function gradeGap(opts: {
       gradeRevised: grade,
       revisedReasoning: g.reasoning,
       gapType: gap.gap_type,
-    }).catch((e) => console.warn(`[acquisition-gap-grader] gap-rule proposal failed gap=${gap.id}: ${e instanceof Error ? e.message : String(e)}`));
+    }).catch((e) => console.warn(`[acquisition-gap-grader] gap-rule proposal failed gap=${gap.id}: ${errText(e)}`));
   }
 
   return { ok: true, grade_id: existingRow!.id, mode, grade, gap_quality: gapQuality, outcome_quality: outcomeQuality, outcome_state: outcome.state };
@@ -508,7 +509,7 @@ export async function pickGapGradeBatch(opts: {
       }
     }
   } catch (e) {
-    console.warn(`[acquisition-gap-grader] pickGapGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[acquisition-gap-grader] pickGapGradeBatch failed ws=${opts.workspaceId}: ${errText(e)}`);
   }
   return out;
 }
@@ -628,7 +629,7 @@ export async function applyBoxGapGrade(opts: {
       gradeRevised: grade,
       revisedReasoning: opts.reasoning,
       gapType: gap.gap_type,
-    }).catch((e) => console.warn(`[acquisition-gap-grader] gap-rule proposal failed gap=${gap.id}: ${e instanceof Error ? e.message : String(e)}`));
+    }).catch((e) => console.warn(`[acquisition-gap-grader] gap-rule proposal failed gap=${gap.id}: ${errText(e)}`));
   }
 
   return { ok: true, grade_id: existingRow.id, mode, grade, gap_quality: gapQuality, outcome_quality: outcomeQuality, outcome_state: outcome.state };
@@ -683,7 +684,7 @@ export async function gradeActedGaps(opts: { workspaceId: string; admin?: Admin 
       }
     }
   } catch (e) {
-    console.warn(`[acquisition-gap-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[acquisition-gap-grader] sweep failed ws=${opts.workspaceId}: ${errText(e)}`);
   }
   return { considered, initial, revised };
 }

@@ -38,6 +38,7 @@
  * Spec: docs/brain/specs/bianca-full-order-history-customer-list-exclusion-audience Fix 1.
  */
 import "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import {
   addUsersToCustomAudience,
@@ -198,7 +199,7 @@ function withExclusionAppended(
           audienceId = await getOrCreateAllCustomersAudience(token, acct.meta_ad_account_id);
         } catch (e) {
           console.log(
-            `  audience-error cohort=${row.id} workspace=${row.workspace_id} — ${e instanceof Error ? e.message : String(e)} (skipped)`,
+            `  audience-error cohort=${row.id} workspace=${row.workspace_id} — ${errText(e)} (skipped)`,
           );
           continue;
         }

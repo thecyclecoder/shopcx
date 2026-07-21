@@ -36,6 +36,7 @@
  * the raw-SQL schema read. See docs/brain/libraries/control-tower.md.
  */
 import { readdirSync, readFileSync } from "fs";
+import { errText } from "@/lib/error-text";
 import { join } from "path";
 import { MIGRATION_DRIFT_LOOP_ID } from "@/lib/control-tower/registry";
 import { classifyMigrationSql, type MigrationSeverity } from "@/lib/migration-safety";
@@ -402,7 +403,7 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
     try {
       applied = await opts.fetchAppliedVersions();
     } catch (e) {
-      appliedReason = `applied-versions read failed: ${e instanceof Error ? e.message : String(e)}`;
+      appliedReason = `applied-versions read failed: ${errText(e)}`;
     }
     if (applied == null && !appliedReason) {
       appliedReason = "applied versions unavailable (no DB connection on this host)";
@@ -432,7 +433,7 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
       liveCount: 0,
       parsedFiles,
       appliedCount,
-      reason: `live schema read failed: ${e instanceof Error ? e.message : String(e)}`,
+      reason: `live schema read failed: ${errText(e)}`,
       appliedCheckSkipped,
     };
   }
@@ -808,7 +809,7 @@ export async function applyMergedMigrations(
       out.push({
         ...m,
         outcome: "apply-failed",
-        error: `read failed: ${(e as Error)?.message ?? String(e)}`,
+        error: `read failed: ${(e as Error)?.message ?? errText(e)}`,
       });
       continue;
     }
@@ -835,7 +836,7 @@ export async function applyMergedMigrations(
             severity: cls.severity,
             matches: cls.matches,
             outcome: "apply-failed",
-            error: (e as Error)?.message ?? String(e),
+            error: (e as Error)?.message ?? errText(e),
           });
         }
       }
@@ -853,7 +854,7 @@ export async function applyMergedMigrations(
       } catch (e) {
         console.error(
           `[migration-drift] onApprovalNeeded hook threw for ${m.file}:`,
-          (e as Error)?.message ?? String(e),
+          (e as Error)?.message ?? errText(e),
         );
       }
     }

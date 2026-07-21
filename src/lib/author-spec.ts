@@ -25,6 +25,7 @@
  * "silent author-write fallout" fallback.
  */
 import { parseAuthoredSpecMarkdown, type Phase, type SpecStatus } from "@/lib/brain-roadmap";
+import { errText } from "@/lib/error-text";
 import { suggestBrainRefs, hasBrainRefsLine, hasBrainRefsSkip, deriveSuggestedBrainRefs, formatBrainRefsLine } from "@/lib/brain-ref-suggest";
 import { getSpec, upsertSpec, type SpecPhaseInput, type SpecStatus as DbSpecStatus, type SpecRow } from "@/lib/specs-table";
 import { replaceSpecBrainRefs, parseBrainRefsLineToSlugs, type SpecBrainRefInput } from "@/lib/spec-brain-refs-table";
@@ -1440,7 +1441,7 @@ export async function authorSpecRowStructured(
     // route, agent-grader, triage) survives because we re-throw as-is; only a non-Error is wrapped
     // in `AuthorWriteFailedError` to still surface the message.
     const name = e instanceof Error ? e.name : "Error";
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     console.warn(`[author-spec] authorSpecRowStructured ${slug} failed: ${name}: ${msg}`);
     if (e instanceof Error) throw e;
     throw new AuthorWriteFailedError(`authorSpecRowStructured ${slug} failed: ${name}: ${msg}`);
@@ -1773,7 +1774,7 @@ export async function authorSpecRowFromMarkdown(
     // operator (and Ada's supervision lane) reads the REAL cause instead of the fallback string.
     // console.warn stays for the box operator's tail; the throw is the load-bearing signal.
     const name = e instanceof Error ? e.name : "Error";
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     console.warn(`[author-spec] authorSpecRowFromMarkdown ${slug} failed: ${name}: ${msg}`);
     // If it was already an Error, re-throw AS-IS so downstream `instanceof MissingVerificationError`
     // / `instanceof MissingIntentError` etc. checks (e.g. request-fix/route.ts) still discriminate.

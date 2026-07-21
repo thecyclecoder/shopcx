@@ -4,6 +4,7 @@
  * See docs/brain/specs/roadmap-build-console.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
 import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
@@ -211,7 +212,7 @@ async function emitJobQueued(
     });
   } catch (e) {
     console.warn(
-      `[timecards] job_queued emit failed spec=${input.spec_slug} kind=${input.kind}: ${e instanceof Error ? e.message : String(e)}`,
+      `[timecards] job_queued emit failed spec=${input.spec_slug} kind=${input.kind}: ${errText(e)}`,
     );
   }
 }
@@ -1082,7 +1083,7 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
     }
     return await enqueuePreMergeSpecTest(workspaceId, slug, branch, origin, forceForFix ? { force: true } : undefined);
   } catch (e) {
-    return { enqueued: false, reason: `trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+    return { enqueued: false, reason: `trigger errored: ${errText(e)}` };
   }
 }
 
@@ -1140,7 +1141,7 @@ export async function enqueuePreMergeFromDeploymentReady(args: {
     });
     return { ...r, branch, slug: job.spec_slug as string };
   } catch (e) {
-    return { enqueued: false, reason: `deployment-ready trigger errored: ${e instanceof Error ? e.message : String(e)}` };
+    return { enqueued: false, reason: `deployment-ready trigger errored: ${errText(e)}` };
   }
 }
 
@@ -1467,14 +1468,14 @@ export async function isSpecPromoteEligible(
     out.specTestGreen = await isSpecTestGreenForBranch(workspaceId, slug, branch);
   } catch (e) {
     out.specTestGreen = false;
-    out.reason = `spec-test green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+    out.reason = `spec-test green read failed (treated not-green): ${errText(e)}`;
   }
   try {
     const { isSecurityGreenForBranch } = await import("@/lib/security-agent");
     out.securityGreen = await isSecurityGreenForBranch(admin, branch);
   } catch (e) {
     out.securityGreen = false;
-    out.reason = out.reason || `security green read failed (treated not-green): ${e instanceof Error ? e.message : String(e)}`;
+    out.reason = out.reason || `security green read failed (treated not-green): ${errText(e)}`;
   }
   out.eligible = out.accumulationComplete && out.specTestGreen && out.securityGreen;
   if (!out.reason) {
@@ -2879,7 +2880,7 @@ export async function finalizePromotedGoal(
     return out;
   } catch (e) {
     console.warn(`[goal-finalize] ${goalSlug} finalize failed (continuing):`, e instanceof Error ? e.message : e);
-    return { ...out, reason: e instanceof Error ? e.message : String(e) };
+    return { ...out, reason: errText(e) };
   }
 }
 

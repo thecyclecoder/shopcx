@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { useWorkspace } from "@/lib/workspace-context";
 import Link from "next/link";
 
@@ -64,7 +65,7 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ slug: s
       parsedRules = JSON.parse(rulesJson);
       if (!Array.isArray(parsedRules)) throw new Error("rules must be an array");
     } catch (e) {
-      setRulesError(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+      setRulesError(`Invalid JSON: ${errText(e)}`);
       setSaving(false);
       return;
     }
