@@ -459,12 +459,16 @@ export function isTransientAppstleFrequencyUpstreamTimeout(
  * A non-500 Appstle unskip failure (a 4xx from Appstle, a different body class), a
  * throw from `loggedAppstleFetch` itself (which logs `Appstle unskip order failed:`
  * with the caught `err`), or any other Appstle log carries a different marker /
- * prefix and stays captured. Wired in `/api/webhooks/vercel-logs` as the
- * `transient` flag to `recordError`, which auto-resolves a first sighting
- * (recorded for visibility, NOT paged, no repair fan-out) and escalates to a real
- * open+page ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS`
- * — so a one-off Appstle 500 is dropped while a chronic Appstle outage (would
- * recur every beat) still surfaces.
+ * prefix and stays captured. Wired in `/api/webhooks/vercel-logs` `isError` as a
+ * CAPTURE-TIME DROP — the log is skipped before it becomes a group, so `recordError`
+ * never sees it and a chronic Appstle outage cannot reopen the vendor-owned incident
+ * on the transient-recurrence window. Previously this rode the transient OR-chain
+ * (auto-resolve first sighting, escalate to open+page on recurrence within
+ * `TRANSIENT_RECUR_WINDOW_MS`), but the same 500 signature repeats in-window during
+ * a real Appstle outage — reopening Control Tower `vercel:5959f3e309a7800c` on a
+ * surface we hold no levers on. Dropping at capture time matches the shape of the
+ * other foreign / bare-noise filters in `isError` (bare lifecycle, aborted-stream,
+ * Inngest wrapped-non-error, terminal-failure mirror).
  */
 export function isForeignAppstleUnskipUpstream500(
   path: string | null | undefined,
