@@ -1,0 +1,1 @@
+- **Widen Anthropic overload classifier to catch the fraud-detection.ts "Anthropic API error: 5NN" throw shape** · verified 2026-07-21 · → [[../libraries/control-tower]]
