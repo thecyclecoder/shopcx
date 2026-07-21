@@ -1,8 +1,8 @@
 /**
  * dahlia-max-live-timeline — the Dahlia→Max ping-pong narration onto agent_jobs.session_note.
  * Pins `humanizeReviseReason`, the pure mapper that turns an internal revise `lastReason` into the
- * short human phrase the session card shows (so a 10-min run reads "Dahlia revising (single promise
- * (pick one benefit))…" instead of a raw rail code or a blank card).
+ * short human phrase the session card shows (so a 10-min run reads "Dahlia revising (competitor brand
+ * leaked in)…" instead of a raw rail code or a blank card).
  *
  *   npx tsx --test src/lib/ads/creative-agent.timeline.test.ts
  */
@@ -10,10 +10,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { humanizeReviseReason } from "./creative-agent";
 
-test("single_promise validator fail → the plain-English 'pick one benefit' phrase (the Bloom→Creamer case)", () => {
-  assert.equal(humanizeReviseReason("validator_failed: single_promise"), "single promise (pick one benefit)");
-  // even when stacked with other rails, single_promise wins the phrasing
-  assert.equal(humanizeReviseReason("validator_failed: single_promise, lf8"), "single promise (pick one benefit)");
+test("a validator rail fail → the plain-English phrase", () => {
+  assert.equal(humanizeReviseReason("validator_failed: no_competitor_leak"), "competitor brand leaked in");
+  assert.equal(humanizeReviseReason("validator_failed: lf8"), "weak core desire");
 });
 
 test("each internal reason maps to a readable phrase", () => {

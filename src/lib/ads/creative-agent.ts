@@ -820,7 +820,7 @@ export interface CopyAuthorSessionInputs {
   >;
   /** dahlia-max-live-timeline — best-effort live progress narration for the Dahlia→Max ping-pong.
    *  The caller (the runner) writes each note to `agent_jobs.session_note` so the box/session card
-   *  stops being a black box (it shows "Dahlia authoring… → Max scoring… → single_promise, revising…
+   *  stops being a black box (it shows "Dahlia authoring… → Max scoring… → competitor leak, revising…
    *  → exhausted", instead of a silent 10-min run). MUST NOT throw. Omit ⇒ no narration (tests). */
   reportProgress?: (note: string) => void;
 }
@@ -1585,14 +1585,13 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
  * (stockProduct) is responsible for writing the tmp jpeg + calling insertReadyCreative on ok.
  */
 /** PURE — turn an internal revise `lastReason` into a short human phrase for the live session card
- *  (dahlia-max-live-timeline). Keeps the ping-pong narration readable ("single promise (pick one
- *  benefit)") instead of leaking raw rail codes. Exported for the unit test. */
+ *  (dahlia-max-live-timeline). Keeps the ping-pong narration readable ("competitor brand leaked in")
+ *  instead of leaking raw rail codes. Exported for the unit test. */
 export function humanizeReviseReason(reason: string): string {
   const r = (reason || "").trim();
   if (!r) return "revising";
   if (r.startsWith("validator_failed:")) {
     const rails = r.slice("validator_failed:".length).trim();
-    if (/single_promise/.test(rails)) return "single promise (pick one benefit)";
     if (/no_competitor_leak/.test(rails)) return "competitor brand leaked in";
     if (/cold_offer_gate/.test(rails)) return "offer leaked into cold copy";
     if (/no_msrp/.test(rails)) return "bare price shown";
@@ -1642,7 +1641,7 @@ export async function runCopyAuthorSession(
   const note = (s: string) => { try { inputs.reportProgress?.(s); } catch { /* best-effort */ } };
   for (let attempt = 0; attempt <= cap; attempt++) {
     // dahlia-max-live-timeline — narrate each ping-pong beat onto the session card. On a revise, name
-    // WHY (the prior gate) so a 10-min run reads "Dahlia revising (single_promise)…" instead of blank.
+    // WHY (the prior gate) so a 10-min run reads "Dahlia revising (competitor brand leaked in)…" instead of blank.
     note(attempt === 0
       ? "Dahlia is authoring the copy…"
       : `Dahlia is revising — ${humanizeReviseReason(lastReason)} (try ${attempt + 1}/${cap + 1})…`);

@@ -36,7 +36,6 @@ function verdict(overrides: Partial<StoredCopyQaVerdict> = {}): StoredCopyQaVerd
       no_fabrication: true,
       no_cold_offer: true,
       no_competitor_leak: true,
-      single_promise: true,
       render_ok: true,
     },
     persuasion_score: 7,
@@ -98,7 +97,6 @@ test("classifyMaxCopyQcAtPublish — hard-gate FAIL at 10/10 → refuse 'hard_ga
         no_fabrication: true,
         no_cold_offer: true,
         no_competitor_leak: true,
-        single_promise: true,
         render_ok: false,
       },
       persuasion_score: 10,
@@ -237,7 +235,6 @@ test("evaluateMaxCopyQcAtPublish — hard-gate fail at 10/10 → gate refuses ('
         no_fabrication: true,
         no_cold_offer: false,
         no_competitor_leak: true,
-        single_promise: true,
         render_ok: true,
       },
       persuasion_score: 10,
@@ -298,7 +295,7 @@ test("Phase 2 (pure): isPostable — Max score 9/10 + no override → POSTABLE (
 test("Phase 2 (pure): isPostable — override on a hard-gate-fail verdict still wins (CEO's judgment is final during tuning)", () => {
   const v = verdict({
     hard_gate_pass: false,
-    hard_gates: { no_fabrication: true, no_cold_offer: false, no_competitor_leak: true, single_promise: true, render_ok: true },
+    hard_gates: { no_fabrication: true, no_cold_offer: false, no_competitor_leak: true, render_ok: true },
     persuasion_score: null,
   });
   assert.equal(isPostable(v, activeOverride), true);

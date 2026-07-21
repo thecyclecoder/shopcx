@@ -1,5 +1,5 @@
 /**
- * copy-validator — the single source of truth for the six deterministic safety rails Dahlia's
+ * copy-validator — the single source of truth for the five deterministic safety rails Dahlia's
  * author box-session and Max's independent copy-QC both check before a Meta caption ships. This
  * module is pure, side-effect-free, and typed: given a candidate copy triple + the brief context,
  * it returns `{pass, checks[]}` where each check reports one rail's verdict + a short reason and
@@ -7,7 +7,7 @@
  *
  * Rolls up rails already SSOT'd elsewhere (LF8 keyword membership, META Ads caption caps, the
  * cold-audience offer gate) plus the three that were previously reimplemented on call sites
- * (MSRP guard, competitor-brand leak scan, single-promise counter). Kept in ONE place so the
+ * (MSRP guard, competitor-brand leak scan). Kept in ONE place so the
  * author's self-check and the QC's pre-check cannot drift — a divergence would let Dahlia
  * publish copy Max immediately re-flags as unsafe, or (worse) let a safety miss slip past both.
  *
@@ -31,8 +31,12 @@ export type ValidatorRail =
   | "meta_caps"
   | "no_msrp"
   | "no_competitor_leak"
-  | "cold_offer_gate"
-  | "single_promise";
+  | "cold_offer_gate";
+// NB: the `single_promise` rail was REMOVED (CEO 2026-07-21). It hard-capped the ad to one benefit
+// promise, but our hero products are legitimately multi-benefit — multiple promises are fine as long as
+// each is a REAL product benefit, which the never-fabricate claim-trace firewall already enforces
+// (every claim must trace to real evidence). The count-limit was an un-sanctioned overreach that
+// slipped in with dahlia-shared-deterministic-copy-validator Phase 1.
 
 export interface ValidatorCheck {
   rail: ValidatorRail;
@@ -83,23 +87,6 @@ const STRIKETHROUGH_RE = /~~/;
  * it reads as value framing rather than raw MSRP.
  */
 const PER_UNIT_RE = /\bper\s+(serving|cup|pouch|sachet|scoop|day|week|month)\b/i;
-
-/**
- * Promise-shaped substring list — deterministic; each match is one "unique benefit claim". The
- * validator asserts headline+primaryText together carry AT MOST ONE unique promise, per the M2
- * spec's single-promise rail. Two distinct matches (e.g. "lose 40 lbs" + "boost energy") means
- * the copy is stacking benefits, which historically tanks CTR under Advantage+.
- *
- * Kept intentionally small — the point is to catch obvious multi-claim stacks, not to enumerate
- * every benefit shape. False negatives are fine; false positives on a single-claim caption are
- * not.
- */
-const PROMISE_PATTERNS: ReadonlyArray<{ slug: string; re: RegExp }> = [
-  { slug: "lose_lbs", re: /\blose\s+\d+\+?\s*(?:lbs|pounds)\b/gi },
-  { slug: "boosts_x", re: /\bboost(?:s|ed|ing)?\s+[a-z][a-z\-]{2,}/gi },
-  { slug: "more_x", re: /\bmore\s+[a-z][a-z\-]{2,}/gi },
-  { slug: "fixes_x", re: /\bfix(?:es|ed|ing)?\s+[a-z][a-z\-]{2,}/gi },
-];
 
 /** Word-char probe — matches JS `\w` (0-9, A-Z, a-z, `_`). Position outside the string is a
  *  boundary (non-word). Used for the same manual left/right boundary check debrand.ts uses so a
@@ -253,26 +240,6 @@ function checkColdOfferGate(
   };
 }
 
-function checkSinglePromise(copy: ValidatorCopy): ValidatorCheck {
-  const scan = `${copy.headline} ${copy.primaryText}`;
-  const matches = new Set<string>();
-  for (const { re } of PROMISE_PATTERNS) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(scan)) !== null) {
-      matches.add(m[0].toLowerCase().replace(/\s+/g, " ").trim());
-    }
-  }
-  if (matches.size <= 1) return { rail: "single_promise", pass: true };
-  const list = [...matches];
-  return {
-    rail: "single_promise",
-    pass: false,
-    reason: `${matches.size} distinct promises stacked in headline + primary text — pick one`,
-    evidence: list.slice(0, 3).join(" | "),
-  };
-}
-
 /**
  * Pure deterministic validator — runs six rails in a fixed order and returns typed results.
  * See file header for consumer contract.
@@ -296,7 +263,6 @@ export function validateGeneratedCopy(
     checkNoMsrp(copy),
     checkNoCompetitorLeak(copy, context.competitorAdvertisers),
     checkColdOfferGate(copy, context.audience_temperature, brief.offer),
-    checkSinglePromise(copy),
   ];
   return { pass: checks.every((c) => c.pass), checks };
 }

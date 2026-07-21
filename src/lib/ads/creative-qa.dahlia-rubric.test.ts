@@ -47,7 +47,6 @@ const passVerdictWithIntentAndRubric = {
     no_fabrication: true,
     no_cold_offer: true,
     no_competitor_leak: true,
-    single_promise: true,
     render_ok: true,
   },
   persuasion_score: 8,
