@@ -21,6 +21,17 @@ test("hasColdOfferLeak: clean cold COFFEE copy is NOT a leak (the 'off' inside '
   assert.equal(hasColdOfferLeak(c("todays focus formula")), false); // "todays" contains "today"
 });
 
+test("hasColdOfferLeak: a trust / risk-reversal element is ALLOWED on cold (CEO 2026-07-21 — swap the offer slot, don't kill the ad)", () => {
+  // When imitating an offer-led ad on cold, the offer slot is swapped for one of these — they reduce
+  // purchase risk without training a cold viewer to chase deals, so they must NOT trip the gate.
+  assert.equal(hasColdOfferLeak(c("Free shipping on every order")), false); // trust, not a deal-chase
+  assert.equal(hasColdOfferLeak(c("Backed by a 30-day money-back guarantee")), false);
+  assert.equal(hasColdOfferLeak(c("Try it risk-free")), false);
+  assert.equal(hasColdOfferLeak(c("Third-party tested, trusted by 700K+ customers")), false);
+  // …but a genuine discount in the same slot STILL trips:
+  assert.equal(hasColdOfferLeak(c("Free shipping AND 20% off")), true); // the "off" discount still leaks
+});
+
 test("hasColdOfferLeak: a benefit / social-proof STAT is allowed (not a discount)", () => {
   assert.equal(hasColdOfferLeak(c("Feel 40% more focused by week two")), false);
   assert.equal(hasColdOfferLeak(c("95% of drinkers report steadier energy")), false);
@@ -30,7 +41,6 @@ test("hasColdOfferLeak: a real DISCOUNT / offer is caught", () => {
   assert.equal(hasColdOfferLeak(c("50% off today only")), true); // off + today
   assert.equal(hasColdOfferLeak(c("Save $10 on your first bag")), true); // save
   assert.equal(hasColdOfferLeak(c("Get 20% discount")), true); // % discount
-  assert.equal(hasColdOfferLeak(c("Free shipping on all orders")), true);
   assert.equal(hasColdOfferLeak(c("Just $29 a bag")), true); // bare currency (a price shown to cold)
   assert.equal(hasColdOfferLeak(c("Grab this deal")), true);
 });
@@ -77,7 +87,9 @@ test("LF8_KEYWORDS: contains an immunity/digestion, mood/wellness, and offer/urg
     "expected LF8_KEYWORDS to include at least one mood/wellness term",
   );
   assert.ok(
-    ["save", "off", "free shipping", "deal", "today"].some((kw) => LF8_KEYWORDS.includes(kw)),
+    ["save", "off", "deal", "today"].some((kw) => LF8_KEYWORDS.includes(kw)),
     "expected LF8_KEYWORDS to include at least one offer/urgency term",
   );
+  // free shipping is NO LONGER an offer/urgency token (CEO 2026-07-21 — it's a cold-allowed trust element)
+  assert.ok(!LF8_KEYWORDS.includes("free shipping"), "free shipping was removed from the offer/urgency cluster");
 });

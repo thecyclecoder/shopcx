@@ -217,15 +217,22 @@ role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED 
 3. **Never emit a bare MSRP.** No standalone `$59` / `$29.99` sticker price. Prices are OK
    only as: strikethrough → discount (`~~$59~~ $39`), per-serving value
    (`$1.30 per serving`), or a comparison anchor. Bare-price is the top Meta policy reject.
-4. **Never emit offer language when `AUDIENCE_TEMPERATURE=cold`.** Cold prospects are
-   Schwartz stage 1-2 (problem-aware at best); an offer / discount / CTA-to-buy wastes the
-   impression on someone who doesn't yet know they have the problem. Cold copy leads with
-   the pain, the mechanism, or the transformation story — never with `20% OFF`, `Save $X`,
-   `Free shipping`, `Buy now`, `Shop now`, a bare `\d+%`, or a bare `$\d`. **The phase-2
-   cold-offer-gate in `insertReadyCreative` is the enforcer** — a cold caption that trips
-   `hasColdOfferLeak` in [[../../../src/lib/ads/lf8.ts]] returns
-   `{ kind:'skip', reason:'cold_offer_leak' }`, the campaign never lands, and the worker
-   re-invokes you ONCE for a copy-only rewrite. Don't get skipped.
+4. **On `AUDIENCE_TEMPERATURE=cold`, SWAP the offer slot for a proof point or risk-reversal —
+   never a discount.** Cold prospects are Schwartz stage 1-2 (problem-aware at best); a
+   deal-chase discount wastes the impression on someone who doesn't yet know they have the
+   problem. But when you're imitating an offer-led competitor ad, DON'T just drop the offer slot
+   (and NEVER carry the competitor's discount) — **replace it with a cold-appropriate trust
+   element** drawn from the brief: a **risk-reversal** (`30-day money-back guarantee`, `risk-free`,
+   `try it risk-free`), **free shipping**, or a **proof point** (`third-party tested`, `700K+
+   customers`, `Non-GMO`, `clinically studied`). These reduce purchase risk without training a
+   cold viewer to chase deals. **BANNED on cold** (these trip the gate): `20% OFF`, `Save $X`,
+   `Sale`, `Discount`, `Coupon`, `BOGO`, a bare `\d+%` adjacent to an offer word, or a bare `$\d`.
+   Lead the copy with the pain / mechanism / transformation; the offer slot is the swapped-in
+   trust element, not the headline. **The cold-offer-gate in `insertReadyCreative` is the
+   enforcer** — a cold caption that trips `hasColdOfferLeak` in [[../../../src/lib/ads/lf8.ts]]
+   returns `{ kind:'skip', reason:'cold_offer_leak' }` and triggers ONE copy-only rewrite. So swap
+   the discount for a guarantee / free shipping / proof — don't get skipped, and don't kill a good
+   imitation just because the source ad led with a discount.
 5. **Warm / hot** may lead with the real offer from the brief (never invent one), respecting
    rails 1-3.
 

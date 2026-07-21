@@ -43,6 +43,9 @@ interface SkeletonRow {
   // Dahlia imitates STATIC competitor ads only (#2020) — getProvenCompetitorAngles filters
   // `.eq("media_type","static")`, so the fixtures must carry it or every row is (correctly) dropped.
   media_type: string | null;
+  // flag-a-competitor-ad-do-not-use Phase 1 — queryProvenAngles filters `.eq("do_not_use", false)`,
+  // so a fixture MUST carry the flag or it's excluded from the shelf.
+  do_not_use: boolean | null;
 }
 
 interface ActivityRow {
@@ -75,6 +78,7 @@ function skel(over: Partial<SkeletonRow>): SkeletonRow {
     image_url: "https://cdn.example/x.jpg",
     resume_advertising: true,
     media_type: "static",
+    do_not_use: false,
     ...over,
   };
 }
