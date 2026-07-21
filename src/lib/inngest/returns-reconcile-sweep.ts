@@ -72,6 +72,8 @@ export const RETURN_SWEEP_UPSTREAM_STALE_TITLE =
   "Return stranded in transit — sweep escalated";
 export const RETURN_SWEEP_UPSTREAM_FAILURE_TITLE =
   "Return delivery failed — sweep escalated";
+export const RETURN_SWEEP_UPSTREAM_MISSING_CARRIER_TITLE =
+  "Return carrier not attached in EasyPost — sweep escalated";
 
 // Any label_created / in_transit return older than this and still
 // upstream is a webhook-missed case worth probing EasyPost for. Kept
@@ -90,6 +92,19 @@ const UPSTREAM_MAX_AGE_DAYS = 30;
 export function isEasyPostRateLimitError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.toLowerCase().includes("temporarily rate-limited");
+}
+
+// EasyPost returns this error string when a workspace has EasyPost
+// credentials but the specific carrier account (USPS, UPS, …) is not
+// attached in the EasyPost dashboard — a permanent configuration gap
+// the operator must fix, not a transient blip that self-heals. Every
+// daily sweep will hit it until the carrier is attached, so we escalate
+// once per stranded return and let the operator resolve it.
+export function isEasyPostMissingCarrierError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg
+    .toLowerCase()
+    .includes("credentials not found for the specified carrier");
 }
 
 // ── Pure deciders ─────────────────────────────────────────────────
@@ -402,12 +417,34 @@ async function sweepOneUpstream(
       console.warn(
         `[returns-reconcile-sweep] lookupTracking rate-limited for return ${ret.id} (tracking ${ret.tracking_number}) — skipping, next daily run will retry`,
       );
-    } else {
-      console.error(
-        `[returns-reconcile-sweep] lookupTracking failed for return ${ret.id} (tracking ${ret.tracking_number}):`,
-        err,
-      );
+      return;
     }
+    if (isEasyPostMissingCarrierError(err)) {
+      await escalate(admin, {
+        workspace_id: ret.workspace_id,
+        title: RETURN_SWEEP_UPSTREAM_MISSING_CARRIER_TITLE,
+        body:
+          `Return ${ret.order_number} — EasyPost has no ${ret.carrier ?? "unknown"} carrier account attached ` +
+          `(tracking ${ret.tracking_number}). Attach the ${ret.carrier ?? "carrier"} account in the EasyPost dashboard ` +
+          `so the daily returns sweep can resume tracker lookups for this workspace.`,
+        metadata: {
+          type: "return_sweep_upstream_missing_carrier",
+          return_id: ret.id,
+          order_number: ret.order_number,
+          carrier: ret.carrier,
+          tracking_number: ret.tracking_number,
+        },
+      });
+      counts.escalated++;
+      return;
+    }
+    // Anything else — a transient EasyPost blip that self-heals on the
+    // next daily tick. Log at warn (not error) so the Vercel error feed
+    // stops fingerprinting a routinely-retried failure as an incident.
+    console.warn(
+      `[returns-reconcile-sweep] lookupTracking failed for return ${ret.id} (tracking ${ret.tracking_number}):`,
+      err,
+    );
     return;
   }
 
