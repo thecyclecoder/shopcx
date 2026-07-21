@@ -60,9 +60,15 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     saved = { id: result.paymentMethodId };
     migratedCount = result.migratedCount;
   } catch (e) {
+    // Full lossless diagnostic stays in the server log; the public 502 body carries the stable
+    // error code only (Fix 1 of lossless-error-diagnostics-no-object-object — errText's
+    // PostgREST code/details/hint output would leak DB internals to a customer-authenticated
+    // portal caller). `no_braintree_customer` is a stable throw-key from the vault helper — a
+    // control-flow signal — so it is safe to surface as an error code.
     const msg = errText(e);
+    console.error(`[portal/payment-method-update] vault failed: ${msg}`);
     if (msg === "no_braintree_customer") return jsonErr({ error: "no_braintree_customer" }, 400);
-    return jsonErr({ error: "vault_failed", message: msg }, 502);
+    return jsonErr({ error: "vault_failed" }, 502);
   }
 
   // Recovery flow: pin the new card to every active internal sub across the link

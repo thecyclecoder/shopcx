@@ -39,6 +39,10 @@ export const braintreeClientToken: RouteHandler = async ({ auth, route }) => {
     if (!result.success) return jsonErr({ error: "braintree_error", message: result.message }, 502);
     return jsonOk({ ok: true, route, client_token: result.clientToken });
   } catch (err) {
-    return jsonErr({ error: "braintree_error", message: errText(err) }, 500);
+    // Full lossless diagnostic stays in the server log; the public 500 body carries the stable
+    // error code only (Fix 1 of lossless-error-diagnostics-no-object-object — errText's
+    // PostgREST code/details/hint output would leak DB internals to a portal caller).
+    console.error(`[portal/braintreeClientToken] gateway threw: ${errText(err)}`);
+    return jsonErr({ error: "braintree_error" }, 500);
   }
 };
