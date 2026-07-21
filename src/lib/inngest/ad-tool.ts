@@ -1195,6 +1195,14 @@ export const adToolPublishToMeta = inngest.createFunction(
             productId: ctx.productId ?? null,
             metaAdsetId: gateAdsetId,
             projectedDailyCents: gateProjected,
+            // Hand the gate the SAME per-test targeting the publisher will POST to Meta, so the
+            // purchaser/customer-exclusion rail inspects the real `excluded_custom_audiences` list
+            // instead of a null spec. Omitting this made the rail read `null` targeting and refuse
+            // `missing_purchaser_exclusion` on EVERY per-test publish once a cohort declared an
+            // exclusion audience — silently pausing Bianca's fleet-wide test launches. The spec
+            // carries the exclusion ids (inherited from the cohort's adset template); passing it is
+            // what lets the gate confirm them. See publish-gate.ts `evaluateMediaBuyerTestPublish`.
+            createAdsetSpec: perTestSpec,
           });
           if (!gate.allowed) {
             effectivePublishActive = false;
