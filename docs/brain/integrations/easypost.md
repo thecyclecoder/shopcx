@@ -49,6 +49,7 @@ Inbound tracking webhook → handler verifies `easypost_webhook_secret` → matc
 - **Refund fires on EasyPost `delivered`, not carrier first-scan.** See feedback_return_refund_trigger.
 - **Imported returns** (not created by us — `easypost_shipment_id IS NULL`) should never be auto-refunded. Always filter `.not("easypost_shipment_id", "is", null)`.
 - **Test mode keys** can buy labels against the USPS sandbox — but the labels are NOT usable. Production cutover requires flipping `easypost_test_mode = false`.
+- **Webhook log-level for tracker statuses.** The webhook handler logs `return_to_sender`, `failure`, `error`, and `cancelled` tracker statuses at `console.warn` (not error), because these are normal business signals (USPS bouncing a package back, delivery failures due to address issues, etc.), not code faults. Logging at warn avoids creating false Control Tower error incidents for fully-handled business events; the workspace still receives the dashboard notification and the webhook returns 200 OK. See src/app/api/webhooks/easypost/route.ts lines 186–205.
 
 ## Files
 
