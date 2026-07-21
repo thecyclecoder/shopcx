@@ -451,12 +451,28 @@ export async function buildCreativeBrief(
   }
 
   // Supporting retention truths — the loved-but-commodity benefits (energy-no-crash, taste) go in the body.
-  const supportingBenefits = selectAngles(pi, transformationStories)
+  const supportingBenefitsBase = selectAngles(pi, transformationStories)
     .filter((a) => a.commodity || a.retentionTruth >= 8)
     .map((a) => a.leadBenefit)
     // never let an internal angle-category label reach the rendered subhead (defense-in-depth)
     .filter((b) => b && !isInternalAngleLabel(b))
     .slice(0, 3);
+  // dahlia-converts-competitor-benefits-to-ours — surface OUR product's REAL listed benefits
+  // (`product_benefit_selections` role in {lead, supporting}) so when Dahlia imitates a competitor she
+  // can CONVERT their benefit claims into OURS instead of carrying a benefit our product lacks (the
+  // Bloom "gut / immunity / hair / nails" → Amazing Creamer "skin / focus / weight" case — Dahlia kept
+  // carrying Bloom's benefits and the never-fabricate firewall correctly rejected them). These are ALSO
+  // firewall-groundable: `verifyClaimTrace` grounds a `supportingBenefit` claim against
+  // `brief.supportingBenefits`, so a claim about one of OUR listed benefits now passes the gate.
+  // Appended AFTER the retention-truth benefits so the image subhead (`.slice(0,2)`) is unchanged.
+  const ourListedBenefits = ((pi.benefits as Row[]) ?? [])
+    .filter((b) => { const r = str(b.role); return r === "lead" || r === "supporting"; })
+    .map((b) => str(b.benefit_name).trim())
+    .filter((n) => n && !isInternalAngleLabel(n));
+  const supportingBenefits = [
+    ...supportingBenefitsBase,
+    ...ourListedBenefits.filter((n) => !supportingBenefitsBase.some((b) => b.toLowerCase() === n.toLowerCase())),
+  ].slice(0, 8);
 
   // Verified proof stack — product certs/awards + store selling points.
   const p = pi.product as Row | null;
