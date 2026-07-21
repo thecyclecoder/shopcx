@@ -40,6 +40,10 @@ This generalises `scripts/returns-spot-check.ts` (single-workspace hardcoded) to
 
 Both are covered in `src/lib/inngest/returns-reconcile-sweep.decider.test.ts`.
 
+## Error handling: rate-limit downgrade
+
+When the `lookupTracking` call on Scope 2 fails with an EasyPost rate-limit error, the sweep gracefully skips that return and continues — the next daily run will retry it. To avoid noisy Control Tower error signatures on this expected, self-healing case, an exported helper `isEasyPostRateLimitError(err: unknown): boolean` classifies the caught error by checking if its lowercased message contains `'temporarily rate-limited'`. The catch block branches on this: rate-limited errors log at `console.warn` with the message `[returns-reconcile-sweep] lookupTracking rate-limited for return ${ret.id} (tracking ${ret.tracking_number}) — skipping, next daily run will retry`; all other EasyPost failures (auth broken, SDK exception, unknown 5xx) continue logging at `console.error` so real outages still page. Control flow (skip the return, continue the loop) is unchanged — the cron is self-healing by design. Two test cases in `src/lib/inngest/returns-reconcile-sweep.decider.test.ts` assert the classifier returns true on the EasyPost rate-limit substring and false on an arbitrary 5xx.
+
 ## Produced counts
 
 Every heartbeat carries `{ delivered: { swept, healed, redriven, escalated }, upstream: { swept, healed, redriven, escalated } }` so a silent zero-work run is distinguishable from a broken one (a zero-swept sweep with `ok:true` is idle; ok:false is a real fault).
