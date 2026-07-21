@@ -908,7 +908,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // control_tower_loop_beats RPC stays fast. registeredAt claims the registered_not_firing grace
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
   { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
-  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, outputAssertion: "segment-coverage" },
+  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 30 * HOUR, outputAssertion: "segment-coverage" },
   {
     id: "refund-settlement-reconcile",
     kind: "cron",
