@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignEasyPostReturnsSweepRateLimit,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
   isTransientAnthropicOverloadError,
@@ -211,6 +212,7 @@ export async function POST(request: Request) {
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
         isTransientAppstleFrequencyUpstreamTimeout(g.path, g.message) ||
         isForeignAppstleUnskipUpstream500(g.path, g.message) ||
+        isForeignEasyPostReturnsSweepRateLimit(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
         isTransientSupabaseEdgeHtmlBody(g.message) ||
         isTransientUndiciHeadersTimeout(g.message) ||

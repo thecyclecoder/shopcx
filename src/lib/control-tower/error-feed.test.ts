@@ -16,6 +16,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
@@ -1091,6 +1092,52 @@ test("isForeignAppstleUnskipUpstream500 returns false on empty / nullish input",
   assert.equal(isForeignAppstleUnskipUpstream500(undefined, undefined), false);
   assert.equal(isForeignAppstleUnskipUpstream500("", ""), false);
   assert.equal(isForeignAppstleUnskipUpstream500("/api/inngest", ""), false);
+});
+
+// ── isForeignEasyPostReturnsSweepRateLimit (error-feed-scope-easypost-returns-sweep-rate-limit-noise) ──
+// `src/lib/inngest/returns-reconcile-sweep.ts` logs `[returns-reconcile-sweep] lookupTracking
+// failed for return <id> (tracking <n>): <err>` when EasyPost's account-level throttle throws
+// on the per-row `lookupTracking` call, then returns from the row-worker — the row is skipped
+// and re-picked on the next daily sweep. The log-drain line is a foreign-vendor rate-limit
+// burst the code already handles; the false positive that opened Control Tower
+// `vercel:53af50d6c3a578ec` (39 identical lines in ~15s). Classifying it transient
+// auto-resolves a first sighting (recorded, not paged); a chronic EasyPost outage would
+// recur within the window and still surface.
+
+test("isForeignEasyPostReturnsSweepRateLimit matches the captured /api/inngest signature", () => {
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: You are being temporarily rate-limited due to excessive resource consumption. Contact support@easypost.com if this problem persists.",
+    ),
+    true,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepRateLimit KEEPS a non-rate-limit EasyPost failure (paged)", () => {
+  // A real EasyPost bug on the same sweep — bad tracking number, carrier not recognized,
+  // etc. — carries a different marker and stays captured / paged so a genuine outage still
+  // surfaces on first sighting.
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: bad tracking number",
+    ),
+    false,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepRateLimit KEEPS the same rate-limit message on a non-/api/inngest path (paged)", () => {
+  // Only the returns-reconcile-sweep Inngest function reaches this call site today. If some
+  // other caller starts emitting the same body from a different path, that's a NEW surface
+  // and stays captured / paged — a re-scope would land in this same classifier.
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/portal",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: You are being temporarily rate-limited due to excessive resource consumption.",
+    ),
+    false,
+  );
 });
 
 // ── isTransientClientNetworkAbort (error-feed-drop-safari-load-failed-client-network-abort-noise) ──

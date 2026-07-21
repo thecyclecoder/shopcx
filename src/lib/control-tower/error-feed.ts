@@ -478,6 +478,57 @@ export function isForeignAppstleUnskipUpstream500(
 }
 
 /**
+ * Foreign-app noise — EasyPost's account-level rate limit surfacing on the
+ * returns-reconcile-sweep's `lookupTracking` call
+ * ([[../specs/error-feed-scope-easypost-returns-sweep-rate-limit-noise]]).
+ *
+ * `src/lib/inngest/returns-reconcile-sweep.ts` calls `lookupTracking` (which
+ * hits EasyPost's `/trackers` endpoint) for each in-flight return; when
+ * EasyPost's account-level throttle kicks in the client throws with the exact
+ * `... temporarily rate-limited due to excessive resource consumption` body,
+ * and the sweep's catch branch logs
+ * `console.error(\`[returns-reconcile-sweep] lookupTracking failed for return ${id} (tracking ${n}):\`, err)`
+ * and `return`s from the per-row worker — the row is skipped and re-picked on
+ * the next daily sweep, no state to repair on our side. So a burst of ~39 of
+ * these in ~15 seconds (Control Tower `vercel:53af50d6c3a578ec`) is a foreign
+ * vendor's throttle hitting a code path that already self-heals; minting a
+ * fresh OPEN paged incident + repair fan-out for it churns Platform owners on
+ * a surface we hold no levers on (EasyPost's own error text says to contact
+ * their Support if it recurs).
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/inngest` — the returns-reconcile-sweep Inngest
+ *      function is the only surface that reaches this call site today; a
+ *      different caller would fire on a different path and stays captured /
+ *      paged,
+ *   2. the trimmed message begins with the exact
+ *      `[returns-reconcile-sweep] lookupTracking failed for return ` prefix
+ *      (the sweep's own console.error label — not any other EasyPost log), AND
+ *   3. the message carries the `temporarily rate-limited` marker (EasyPost's
+ *      account-level throttle body).
+ *
+ * A different `lookupTracking` failure on the same sweep — a bad tracking
+ * number, a genuine EasyPost outage carrying a different body class, a throw
+ * from our own client — carries a different marker and stays captured /
+ * paged. Wired in `/api/webhooks/vercel-logs` as the `transient` flag to
+ * `recordError`, which auto-resolves a first sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and escalates to a real open+page
+ * ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a
+ * one-off EasyPost throttle burst is dropped while a chronic EasyPost outage
+ * (would recur every daily sweep) still surfaces.
+ */
+export function isForeignEasyPostReturnsSweepRateLimit(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("[returns-reconcile-sweep] lookupTracking failed for return ")) return false;
+  return text.includes("temporarily rate-limited");
+}
+
+/**
  * Browser network-abort TypeError noise — the CLIENT-feed companion to
  * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored
  * here so `/api/client-errors` can reuse it
