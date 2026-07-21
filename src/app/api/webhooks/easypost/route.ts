@@ -188,7 +188,7 @@ export async function POST(request: Request) {
     case "cancelled":
     case "return_to_sender":
       // Create a dashboard notification for these
-      console.error(
+      console.warn(
         `[easypost-webhook] Tracking issue for return ${returnRecord.id}: ${trackerStatus}`,
       );
       await admin.from("dashboard_notifications").insert({
