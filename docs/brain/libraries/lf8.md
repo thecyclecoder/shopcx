@@ -30,14 +30,14 @@ The original vocabulary was coffee/energy-centric and omitted whole Life-Force-8
 - **Beauty / appearance** (#1 / #8) — skin, hair, nails, glow, collagen, youthful, radiant
 - **Immunity / digestion** (#1 / #3) — immune, immunity, gut, digestion, bloat, gut health
 - **Mood / wellness** (#1 / #3) — mood, happy, balance, wellness, thrive
-- **Offer / urgency** (#5 / #6) — save, off, free shipping, deal, today
+- **Offer / urgency** (#5 / #6) — save, off, deal, today  *(`free shipping` removed CEO 2026-07-21 — it's a cold-allowed trust/risk-reversal element, not a deal-chase; also removed from `COLD_OFFER_TOKENS`)*
 
 Pinned by `src/lib/ads/lf8.test.ts` (`npm run test:ads-lf8`), which asserts `hasAnyLf8` returns true for each of the four previously false-flagged creatives.
 
 ## API
 
 - `hasAnyLf8(copyLower: string): boolean` — returns true if the lowercase copy contains **any** LF8 keyword as a substring. Used by ads-supervisor to detect drift and by `buildMetaCopy` to prefer LF8-carrying supporting benefits in the generated ad text.
-- `hasColdOfferLeak(copy, allowedOffer?): boolean` — DETERMINISTIC gate the persister chokepoint (`insertReadyCreative`) runs before writing a status='ready' row. True iff the joined copy carries any `COLD_OFFER_TOKENS` whole-word hit, a discount-percent hit (`%` adjacent to an offer word), or a bare-currency hit. The optional `allowedOffer: { headline?, disclaimer? }` — OUR real `brief.offer` — allowlists our own store offer: those exact phrases are stripped from the scan text BEFORE the predicate runs, so an offer-for-offer swap (see [[debrand]] `chooseGroundedSubstitute`) that renders our real offer verbatim isn't flagged. A DIFFERENT discount (`50% off today`) still trips the gate. Absent / null → today's byte-for-byte behavior (no allowance). Pin: `src/lib/ads/cold-offer-gate.test.ts`.
+- `hasColdOfferLeak(copy, allowedOffer?): boolean` — DETERMINISTIC gate the persister chokepoint (`insertReadyCreative`) runs before writing a status='ready' row. True iff the joined copy carries any `COLD_OFFER_TOKENS` whole-word hit, a discount-percent hit (`%` adjacent to an offer word), or a bare-currency hit. The optional `allowedOffer: { headline?, disclaimer? }` — OUR real `brief.offer` — allowlists our own store offer: those exact phrases are stripped from the scan text BEFORE the predicate runs, so an offer-for-offer swap (see [[debrand]] `chooseGroundedSubstitute`) that renders our real offer verbatim isn't flagged. A DIFFERENT discount (`50% off today`) still trips the gate. Absent / null → today's byte-for-byte behavior (no allowance). **Trust / risk-reversal elements are allowed on cold** (CEO 2026-07-21): `free shipping`, `money-back guarantee`, `risk-free`, and proof points never trip the gate — when Dahlia imitates an offer-led ad on cold, the [[../../../.claude/skills/dahlia-copy-author/SKILL]] rule #4 tells her to SWAP the offer slot for one of these rather than kill the ad; only a deal-chase discount (% off / $ off / save / sale / coupon / BOGO) leaks. Pin: `src/lib/ads/cold-offer-gate.test.ts`.
 
 ## Related
 

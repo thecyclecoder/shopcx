@@ -38,8 +38,10 @@ export const LF8_KEYWORDS: readonly string[] = [
   "immune", "immunity", "gut", "digestion", "bloat", "gut health",
   // mood / wellness (#1/#3)
   "mood", "happy", "balance", "wellness", "thrive",
-  // offer / urgency (#5/#6)
-  "save", "off", "free shipping", "deal", "today",
+  // offer / urgency (#5/#6). NB: `free shipping` was removed from the offer/urgency cluster
+  // (CEO 2026-07-21) — it's a trust / risk-reversal element (like a money-back guarantee), NOT a
+  // deal-chase discount, so it's allowed in cold copy. Kept in lockstep with COLD_OFFER_TOKENS.
+  "save", "off", "deal", "today",
 ];
 
 export function hasAnyLf8(copyLower: string): boolean {
@@ -58,8 +60,14 @@ export function hasAnyLf8(copyLower: string): boolean {
  * offer/price language is the #1 DTC creative error: it retargets warm-shopper language at a
  * cold viewer who's never heard of the brand.
  */
+// NB: `free shipping` was REMOVED from this list (CEO 2026-07-21). When Dahlia imitates an offer-led
+// competitor ad at a COLD temperature, the offer slot must be SWAPPED for a trust / risk-reversal
+// element (money-back guarantee, risk-free trial, free shipping, third-party tested) rather than
+// killing the ad — free shipping / risk-reversal reduce purchase risk and are cold-appropriate; only
+// a DEAL-CHASE discount (% off / $ off / save / sale / coupon / BOGO) retargets warm-shopper vocab at a
+// cold viewer. Kept in lockstep with the LF8 offer/urgency cluster above.
 export const COLD_OFFER_TOKENS: readonly string[] = [
-  "save", "off", "free shipping", "deal", "today", "sale", "discount", "coupon", "promo", "clearance", "bogo",
+  "save", "off", "deal", "today", "sale", "discount", "coupon", "promo", "clearance", "bogo",
 ];
 
 /** Each cold-offer token, WORD-BOUNDARY anchored + case-insensitive. Substring matching was a real
