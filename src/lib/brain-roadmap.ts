@@ -574,15 +574,50 @@ async function buildGoalMembershipMap(
  * getRoadmap/getSpec/listSpecSlugs caller needs a workspaceId. No-arg callers (org-chart at startup, the
  * legacy scripts/agents that haven't been retargeted yet) use this shim to pick the single-tenant workspace.
  */
+// agent-jobs-read-amplification — memoize the resolved id.
+//
+// This shim was the single largest reader of `agent_jobs`: 391,101 calls, and each one read the ENTIRE
+// table to return one value. `ORDER BY created_at DESC LIMIT 1` has no matching index (the only
+// created_at index is `agent_jobs_ws_status_idx`, whose leading columns are workspace_id + status), so
+// the plan was an index-only scan of all 22,160 rows feeding a top-N heapsort — 2,019 buffers, ~7.9 ms
+// per call. 22,160 rows × 391,101 calls ≈ 8.7 BILLION tuples, essentially the whole 8.9 B `seq_tup_read`
+// Supabase's health check flagged on this table (2026-07-21).
+//
+// Indexing `created_at` would fix the plan but not the waste: the value is effectively CONSTANT (the doc
+// above says as much — a single-tenant build console), so the right fix is to stop asking. A TTL memo
+// collapses it to ~1 query per process per window, and costs `agent_jobs` no extra write overhead.
+//
+// TTL rather than permanent: the rule is "ride the LATEST agent_jobs row", which could legitimately move
+// if a second workspace ever starts building. 5 minutes bounds that staleness while still retiring
+// >99.9% of the reads.
+//
+// Only a NON-NULL result is cached. A null means the lookup failed (transient DB error) or the DB is
+// genuinely empty; caching that would strand every no-arg caller for the whole window, so we retry on
+// the next call — same fail-open posture as the rest of this module.
+const DEFAULT_WORKSPACE_TTL_MS = 5 * 60_000;
+let defaultWorkspaceMemo: { id: string; expiresAt: number } | null = null;
+
+/** Test-only reset for the default-workspace memo. Never called by production code paths. */
+export function clearDefaultWorkspaceMemoForTests(): void {
+  defaultWorkspaceMemo = null;
+}
+
 async function resolveDefaultWorkspaceId(): Promise<string | null> {
+  const memo = defaultWorkspaceMemo;
+  if (memo && Date.now() < memo.expiresAt) return memo.id;
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
     const admin = createAdminClient();
     const { data: job } = await admin.from("agent_jobs").select("workspace_id").order("created_at", { ascending: false }).limit(1).maybeSingle();
     const fromJob = (job as { workspace_id?: string } | null)?.workspace_id;
-    if (fromJob) return fromJob;
+    if (fromJob) {
+      defaultWorkspaceMemo = { id: fromJob, expiresAt: Date.now() + DEFAULT_WORKSPACE_TTL_MS };
+      return fromJob;
+    }
     const { data: ws } = await admin.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
-    return (ws as { id?: string } | null)?.id ?? null;
+    const fromWs = (ws as { id?: string } | null)?.id ?? null;
+    if (fromWs) defaultWorkspaceMemo = { id: fromWs, expiresAt: Date.now() + DEFAULT_WORKSPACE_TTL_MS };
+    return fromWs;
   } catch {
     return null;
   }
