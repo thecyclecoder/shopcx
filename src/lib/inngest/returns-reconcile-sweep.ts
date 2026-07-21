@@ -82,6 +82,16 @@ const UPSTREAM_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 // certainly been lost by the carrier — escalate, don't wait forever.
 const UPSTREAM_MAX_AGE_DAYS = 30;
 
+// EasyPost briefly rate-limits us — the sweep is already self-healing
+// (skip this return, next daily run retries) so log at warn, not error,
+// to keep the Vercel error feed / Control Tower focused on real bugs.
+// Mirrors the portal mutation-guard's classifier for the same class of
+// gracefully-handled EasyPost failure.
+export function isEasyPostRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.toLowerCase().includes("temporarily rate-limited");
+}
+
 // ── Pure deciders ─────────────────────────────────────────────────
 
 export type DeliveredSweepAction =
@@ -388,10 +398,16 @@ async function sweepOneUpstream(
     );
     trackerStatus = tracker.status;
   } catch (err) {
-    console.error(
-      `[returns-reconcile-sweep] lookupTracking failed for return ${ret.id} (tracking ${ret.tracking_number}):`,
-      err,
-    );
+    if (isEasyPostRateLimitError(err)) {
+      console.warn(
+        `[returns-reconcile-sweep] lookupTracking rate-limited for return ${ret.id} (tracking ${ret.tracking_number}) — skipping, next daily run will retry`,
+      );
+    } else {
+      console.error(
+        `[returns-reconcile-sweep] lookupTracking failed for return ${ret.id} (tracking ${ret.tracking_number}):`,
+        err,
+      );
+    }
     return;
   }
 
