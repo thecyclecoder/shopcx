@@ -44,7 +44,32 @@ A `spec-test` row whose `claude_session_id IS NULL` (the deterministic-only path
 ### Runs — read + normalize
 - `normalizeRun(row)` → `SpecTestRun` — coerce a raw DB row (summary always re-derived from `checks[]`, so an
   empty `checks[]` can never read as a clean pass).
-- `getLatestSpecTestRuns(workspaceId)` → `Record<slug, SpecTestRun>` — latest run per spec (the board/page read).
+- `getLatestSpecTestRuns(workspaceId, opts?)` → `Record<slug, SpecTestRun>` — latest run per spec (the board/page read).
+- `getPreMergeRuns(workspaceId, opts?)` → `SpecTestRun[]` — latest run per `(slug, spec_branch)`, any verdict.
+
+#### Column projection — `transcript` is opt-in
+
+Both whole-table readers above pull `limit(1000)` against a ~1,378-row table: they ship the ENTIRE table
+and discard all but the newest row per key in JS. `transcript` alone is **59% of the table by bytes**
+(4,957 kB of 8,420 kB, measured 2026-07-21) and exactly ONE surface renders it —
+`/dashboard/developer/spec-tests`. Every other caller (roadmap board, [[brain-roadmap]] fold gate,
+[[pipeline-doctor]], [[spec-green-writeback]], the roadmap chat + spec-test/request-fix APIs) reads
+verdict/summary/checks and never touches it.
+
+So the **default projection omits `transcript`**; the Spec Tests page passes `{ includeTranscript: true }`.
+Before the change this read measured **150 ms mean/call** — the single most expensive query left on the
+instance after the whole-board spec read was retired (#2151, [[../specs/spec-read-egress-scope-and-cursor]]).
+
+⚠️ On the light projection `normalizeRun` yields `transcript: null` — the column **was not selected**, NOT
+proven empty. A new caller that needs the transcript must pass `{ includeTranscript: true }` rather than
+reading `null` as "no transcript".
+
+Implementation note: the two projections are spelled out as separate literal strings, and the rows are
+cast `as unknown as Record<string, unknown>[]`. supabase-js resolves the row type from the select string
+at the TYPE level, so a runtime-chosen projection (a union of two literals) yields
+`ParserError<"Unexpected input: …">`. Nothing is lost — `normalizeRun` has always taken
+`Record<string, unknown>` because the spec-test agent writes these jsonb fields and they are validated
+defensively at runtime.
 - `getPreMergeErrorRuns(workspaceId)` → `SpecTestRun[]` — the latest per-`(slug, spec_branch)` row whose
   `agent_verdict='error'`; drives the **Pre-merge / errored** surface on `/dashboard/developer/spec-tests`
   ([[../specs/spectest-error-visible-and-rerunnable]] Phase 2). The shipped list filters to `status='shipped'`,

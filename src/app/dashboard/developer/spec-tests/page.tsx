@@ -70,14 +70,21 @@ export default async function SpecTestsPage() {
   const shipped: SpecCard[] = specs
     .filter((s) => s.status === "shipped" && !archivedSet.has(s.slug))
     .sort((a, b) => a.title.localeCompare(b.title));
-  const runs: Record<string, SpecTestRun> = workspaceId ? await getLatestSpecTestRuns(workspaceId) : {};
+  // `includeTranscript` — this page is the ONLY surface that renders `run.transcript` (the collapsed
+  // transcript blocks below). Every other reader takes the light projection that omits it; see the
+  // column-projection note in [[spec-test-runs]].
+  const runs: Record<string, SpecTestRun> = workspaceId
+    ? await getLatestSpecTestRuns(workspaceId, { includeTranscript: true })
+    : {};
   // premerge-spectest-rerun-and-visibility Phase 3 — the "Pre-merge" surface. Branch-scoped
   // spec_test_runs (spec_branch not null) are otherwise invisible: the shipped list above filters to
   // status='shipped', so an in-progress spec's pre-merge run had no UI slot at all — this is that slot.
   // Lists the latest run per (slug, branch) regardless of verdict (approved / needs_human / issues /
   // error), so a stuck `issues` verdict on a fixed branch is visible + re-runnable. Rendered below the
   // shipped list; excludes any run whose spec is ALREADY listed above (its verdict is surfaced there).
-  const preMergeRuns: SpecTestRun[] = workspaceId ? await getPreMergeRuns(workspaceId) : [];
+  const preMergeRuns: SpecTestRun[] = workspaceId
+    ? await getPreMergeRuns(workspaceId, { includeTranscript: true })
+    : [];
   const shippedSlugs = new Set(shipped.map((s) => s.slug));
   const preMergeList = preMergeRuns.filter((r) => !shippedSlugs.has(r.spec_slug));
   const specTitleBySlug = new Map(specs.map((s) => [s.slug, s.title] as const));
