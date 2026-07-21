@@ -150,6 +150,15 @@ benefit throws that evidence away. Concretely:
   your primary text should mirror.
 - `mechanism_claim` — the *why-it-works* line to reuse in the body (respecting rail 1's
   ingredient-name / dose citation gates when you attach a specific number).
+  **⚠️ CONVERT THE BENEFIT TO OURS.** The competitor's benefit / mechanism may be about a benefit
+  OUR product does NOT have — a collagen brand sells `gut · immunity · hair · nails`, but our creamer's
+  real benefits are `skin · focus · weight` (see `brief.supportingBenefits` + `brief.leadBenefitWeave`
+  — those ARE our product's listed benefits). **Keep the competitor's HOOK SHAPE + FRAMEWORK, but SWAP
+  their benefit for OUR real benefit.** Never carry a benefit our product lacks: if the source ad sells
+  gut health and ours is a focus-and-skin creamer, the ad is about focus and skin, NOT gut. Map their
+  claim to the closest of OUR listed benefits; a benefit you carry from the competitor that isn't in OUR
+  brief is a `firewall_claim_miss` and gets your session bounced. This is the benefit twin of the
+  offer-slot swap (rail 4): imitate the STRUCTURE, ground every claim in OUR product.
 - `proof` — the type of proof to lead with (a customer quote, a clinical study, a satisfaction
   stat). Substitute an equivalent proof point from OUR brief (a real reviewer, a real ingredient
   study) — never quote the competitor's proof text verbatim as if it were ours.

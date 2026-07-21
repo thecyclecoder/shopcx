@@ -396,6 +396,20 @@ test("buildCreativeBrief — RIFF: competitor angle brief carries leadBenefitWea
   );
 });
 
+test("buildCreativeBrief — supportingBenefits surfaces OUR listed product benefits (the conversion palette, firewall-groundable) — dahlia-converts-competitor-benefits-to-ours", async () => {
+  // When Dahlia imitates a competitor whose benefits our product does NOT have, she must convert to
+  // OURS. The palette she converts INTO — and the firewall's grounding source for a supportingBenefit
+  // claim — is brief.supportingBenefits, which must carry our product's real listed benefit names.
+  const pi = AMAZING_COFFEE_PI(); // benefits: lead "Weight loss", supporting "No jitters"
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  const low = brief.supportingBenefits.map((b) => b.toLowerCase());
+  assert.ok(low.some((b) => b.includes("weight loss")), `expected the listed LEAD benefit in supportingBenefits; got ${JSON.stringify(brief.supportingBenefits)}`);
+  assert.ok(low.some((b) => b.includes("no jitters")), `expected the listed SUPPORTING benefit in supportingBenefits; got ${JSON.stringify(brief.supportingBenefits)}`);
+  // A benefit our product does NOT list (a competitor's) is absent — so a claim carried from the
+  // competitor can't ground, which is exactly what forces the conversion.
+  assert.ok(!low.some((b) => b.includes("immunity") || b.includes("gut")), "a non-listed (competitor) benefit must NOT appear");
+});
+
 test("buildCreativeBrief — minority pure-competitor explore slot ({ pureCompetitor: true }) skips the weave", async () => {
   const pi = AMAZING_COFFEE_PI();
   const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE(), [], { pureCompetitor: true });
