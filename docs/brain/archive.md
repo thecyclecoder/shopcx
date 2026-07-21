@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Downgrade the EasyPost tracker business-signal log from console.error to console.warn** · verified 2026-07-21 · → [[../integrations/easypost]]
+- **Scope EasyPost account-level rate-limit noise out of the returns-reconcile-sweep error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Downgrade EasyPost rate-limit log in returns-reconcile-sweep from error to warn** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
+- **Returns-reconcile sweep: escalate on missing-carrier config; downgrade transient tracker errors** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
+- **Founder escalations must actually reach the founder** · verified 2026-07-20 · → [[../libraries/approval-inbox]] · [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]
+- **Stamp origin spec_slug on imitation-quality-review agent_jobs enqueue** · verified 2026-07-20 · → [[../libraries/imitation-quality-review]]
+- **Close the internal-subscription write-path gaps the commerce-SDK sweep found** · verified 2026-07-20 · → [[../lifecycles/dunning]], [[../journeys/shipping-address]], [[../libraries/commerce__subscription]], [[../operational-rules]]
+- **Rerun the excluded_all_customers_audience_id migration under a fresh version so it actually lands** · verified 2026-07-20 · → [[../tables/media_buyer_test_cohorts]]
+- **Meta structure sync marks a no-longer-returned adset (archived/deleted on Meta) as not-active in the mirror** · verified 2026-07-20 · → [[../lifecycles/iteration-engine-phase-1]]
+- **Detect duplicate 14-digit migration version prefixes as drift** · verified 2026-07-20 · → [[../libraries/control-tower]]
+- **Give Sol and June a live Shopify refund-ledger read (out-of-band refunds become visible)** · verified 2026-07-20 · → [[libraries/refund-ledger]]
+- **Self-healing return refunds — cap against the live ledger, fail loud, and sweep the stuck ones** · verified 2026-07-20 · → [[../lifecycles/return-pipeline]]
+- **A spec cannot exist without phases — enforce the invariant at the SDK writer and the build gate** · verified 2026-07-20 · → [[operational-rules]] · [[libraries/specs-table]] · [[libraries/build-spec-materializer]]
+- **Unique migration version guard + collision-cluster audit** · verified 2026-07-20 · → [[../libraries/control-tower]]
 - **All ad creative goes through the Dahlia/Max box session — retire the deterministic node path; explore/exploit badge tells the crown-gated truth** · verified 2026-07-19 · → [[../lifecycles/ad-creative]]
 - **Bianca's static publish uploads all 5 copy variations + maps the right-column 1:1 asset** · verified 2026-07-19 · → [[../lifecycles/ad-publish]]
 - **Cold prospecting never imitates a warm/hot offer/retargeting (or cross-category) competitor ad — stamp a cold temperature + hard-exclude offer mismatches** · verified 2026-07-19 · → [[lifecycles/ad-creative]]
