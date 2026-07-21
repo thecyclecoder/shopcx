@@ -990,16 +990,19 @@ export function isTransientSupabaseEdgeHtmlBody(message: string | null | undefin
  * `AnthropicDependencyError` with `OUTAGE_SPANNING_RETRIES`, and `claude-health` folds it
  * into the outage-aware breaker). Best-effort callers that catch-and-log the throw (e.g.
  * `src/lib/fraud-detector.ts` `[fraud] AI screen error:` around the AI screen fetch —
- * `throw new Error(`AI API error: ${aiRes.status}`)` at `fraud-detector.ts:704`) surface the
- * caught error to `console.error`, which Vercel drains to `/api/webhooks/vercel-logs`. A
- * single such 529 leak therefore mints a fresh OPEN paged incident on a loop that already
- * gracefully handled the failure — the classic monitor-false-positive that the existing
- * transient-classifier chain was built to catch (Control Tower
- * `vercel:ca4ae59dcd07707a`).
+ * `throw new Error(`AI API error: ${aiRes.status}`)` at `fraud-detector.ts:704`, and the
+ * `throw new Error(`Anthropic API error: ${response.status}`)` at
+ * `src/lib/inngest/fraud-detection.ts:174`) surface the caught error to `console.error`,
+ * which Vercel drains to `/api/webhooks/vercel-logs`. A single such 529 leak therefore mints
+ * a fresh OPEN paged incident on a loop that already gracefully handled the failure — the
+ * classic monitor-false-positive that the existing transient-classifier chain was built to
+ * catch (Control Tower `vercel:ca4ae59dcd07707a`, and the sibling
+ * `Anthropic API error: 5NN` widening from `vercel:752bb49488e5aa72`).
  *
  * `true` when the message carries an unambiguous Anthropic-5xx/overload marker:
- *   - `AI API error: 5NN` — the fraud-detector's exact throw shape (and any other caller that
- *      copies the pattern).
+ *   - `AI API error: 5NN` / `Anthropic API error: 5NN` — the two sibling caught-throw shapes
+ *      (`src/lib/fraud-detector.ts:704` and `src/lib/inngest/fraud-detection.ts:174`,
+ *      respectively), and any other caller that copies either pattern.
  *   - `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from
  *     [[anthropic-retry]], including the 529-overloaded case.
  *   - `AnthropicDependencyError` — the class name Node's `util.inspect` writes for a caught
@@ -1022,10 +1025,13 @@ export function isTransientAnthropicOverloadError(message: string | null | undef
   const text = (message ?? "").trim();
   if (!text) return false;
 
-  // `AI API error: 5NN` — the fraud-detector's caught throw shape (and any other caller that
-  // copies the pattern). 529 is the specific overload signal we care about; the full 5xx band
-  // is retryable per `isRetryableAnthropicStatus`.
-  if (/AI API error:\s*5\d{2}\b/.test(text)) return true;
+  // `AI API error: 5NN` / `Anthropic API error: 5NN` — the two sibling caught-throw shapes,
+  // from `src/lib/fraud-detector.ts:704` and `src/lib/inngest/fraud-detection.ts:174`
+  // respectively (and any other caller that copies either pattern). 529 is the specific
+  // overload signal we care about; the full 5xx band is retryable per
+  // `isRetryableAnthropicStatus`. The `Anthropic API error:` prefix was folded in for the
+  // `fraud-generate-summary` false positive at Control Tower `vercel:752bb49488e5aa72`.
+  if (/(?:AI|Anthropic) API error:\s*5\d{2}\b/.test(text)) return true;
 
   // `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from anthropic-retry
   // (e.g. "Anthropic messages returned 529").
