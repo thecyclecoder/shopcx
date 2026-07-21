@@ -29,6 +29,7 @@ import assert from "node:assert/strict";
 import {
   decideDeliveredSweep,
   decideUpstreamSweep,
+  isEasyPostRateLimitError,
 } from "./returns-reconcile-sweep";
 import type { OrderRefundLedger } from "@/lib/refund-ledger";
 
@@ -153,4 +154,18 @@ test("decideUpstreamSweep: still in_transit at 45d → escalate_stale", () => {
 test("decideUpstreamSweep: null trackerStatus at 45d → escalate_stale", () => {
   const action = decideUpstreamSweep({ trackerStatus: null, ageDays: 45 });
   assert.equal(action.kind, "escalate_stale");
+});
+
+// ── isEasyPostRateLimitError ─────────────────────────────────────
+
+test("isEasyPostRateLimitError: EasyPost rate-limit error message → true (log at warn, sweep skips + retries next daily run)", () => {
+  const err = new Error(
+    "Your account has been temporarily rate-limited due to excessive resource consumption",
+  );
+  assert.equal(isEasyPostRateLimitError(err), true);
+});
+
+test("isEasyPostRateLimitError: arbitrary EasyPost 500 → false (keep at error, real outage still pages)", () => {
+  const err = new Error("EasyPost 500 Internal Server Error");
+  assert.equal(isEasyPostRateLimitError(err), false);
 });
