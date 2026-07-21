@@ -20,6 +20,7 @@
  * READ-ONLY. See [[../../../docs/brain/reference/meta-scaling-methodology.md]] · [[./meta-insights]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { metaGraphRequest } from "@/lib/meta/api";
 import { getMonthlyChurn, blendedLifetimeOrders } from "@/lib/ltv";
 
@@ -107,7 +108,7 @@ export async function fetchMetaAdInsights(
           : await metaGraphRequest(token, path)) as { data?: unknown[]; paging?: { next?: string } };
         break;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         const rateLimited = /request limit reached|\(#(4|17|80004|613)\)|"code":(4|17|80004|613)/.test(msg);
         if (rateLimited && attempt < META_GRAPH_MAX_RETRIES) {
           const waitMs = 2000 * 2 ** attempt; // 2s, 4s, 8s, 16s

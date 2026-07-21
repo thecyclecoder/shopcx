@@ -26,6 +26,7 @@
  * See docs/brain/libraries/platform-scorecard.md · docs/brain/tables/platform_scorecard_snapshots.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { reportDbError } from "@/lib/control-tower/error-feed";
 import { MONITORED_LOOPS } from "@/lib/control-tower/registry";
 import { getFunctions, getRoadmap } from "@/lib/brain-roadmap";
@@ -1191,7 +1192,7 @@ export async function computeScorecardValuesOnly(
     } catch (e) {
       // A single metric's read failing must not drop the rest — write a zero row + log.
       console.error(`[platform-scorecard] metric ${metric.key} compute failed:`, e instanceof Error ? e.message : e);
-      result = { value: 0, priorValue: null, detail: { error: e instanceof Error ? e.message : String(e) } };
+      result = { value: 0, priorValue: null, detail: { error: errText(e) } };
     }
     const precision = metric.unit === "count" ? 0 : metric.unit === "hours" || metric.unit === "grade" ? 2 : 4;
     const value = round(result.value, precision);

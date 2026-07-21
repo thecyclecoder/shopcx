@@ -9,6 +9,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { retrieveContext } from "@/lib/rag";
 import { getShopifyOnHandByVariant } from "@/lib/inventory/read";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
@@ -994,7 +995,7 @@ export async function executeToolCall(
         return `Unknown tool: ${name}`;
     }
   } catch (err) {
-    return `Error fetching data: ${err instanceof Error ? err.message : String(err)}`;
+    return `Error fetching data: ${errText(err)}`;
   }
 }
 
@@ -2234,7 +2235,7 @@ export async function callSonnetOrchestratorV2(
         ? { action_type: decision.action_type, handler_name: decision.handler_name ?? null, model: modelChoice?.model ?? "sonnet" }
         : null,
       detail: threw
-        ? `threw: ${threw instanceof Error ? threw.message : String(threw)}`
+        ? `threw: ${errText(threw)}`
         : degraded
           ? `degraded: ${(decision?.reasoning ?? "").slice(0, 160)}`
           : `decided: ${decision?.action_type}`,
@@ -2553,7 +2554,7 @@ async function runOrchestratorDecision(
       // propagates them and Inngest retries — don't swallow a transient outage
       // into the fallback. Genuine logic errors still degrade gracefully.
       if (isRetryableThrownError(err)) throw err;
-      forceStatus = `throw: ${err instanceof Error ? err.message : String(err)}`;
+      forceStatus = `throw: ${errText(err)}`;
     }
     return fallbackWithCancelRoute(message, `Max ${MAX_ROUNDS} tool rounds exceeded; force-decision retry: ${forceStatus}`);
   } catch (err) {
@@ -2564,7 +2565,7 @@ async function runOrchestratorDecision(
     // (agent-outage-resilience Phase 1.)
     if (isRetryableThrownError(err)) throw err;
     console.error(`Orchestrator (${modelKey}) error:`, err);
-    return fallbackWithCancelRoute(message, `${modelKey} error: ${err instanceof Error ? err.message : String(err)}`);
+    return fallbackWithCancelRoute(message, `${modelKey} error: ${errText(err)}`);
   }
 }
 
@@ -2623,7 +2624,7 @@ function parseSonnetDecision(text: string, inboundMessage: string = ""): SonnetD
     return decision;
   } catch (err) {
     console.warn("Sonnet v2: JSON parse error:", err, "text:", snippet);
-    return fallbackWithCancelRoute(inboundMessage, `Parse fail: ${err instanceof Error ? err.message : String(err)}. Got: "${snippet}"`);
+    return fallbackWithCancelRoute(inboundMessage, `Parse fail: ${errText(err)}. Got: "${snippet}"`);
   }
 }
 

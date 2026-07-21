@@ -13,6 +13,7 @@
  * STRICTLY READ-ONLY. This module issues no refunds and writes no rows.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { findPendingRefundTxn, type ShopifyTxnLite } from "@/lib/shopify-order-actions";
@@ -277,7 +278,7 @@ export async function getOrderRefundLedger(
     return {
       ok: false,
       reason: "shopify_call_failed",
-      error: e instanceof Error ? e.message : String(e),
+      error: errText(e),
     };
   }
 

@@ -30,6 +30,7 @@
  * See docs/brain/tables/director_decision_grades.md · docs/brain/libraries/director-grader.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { PLATFORM } from "@/lib/agents/platform-director";
@@ -1022,7 +1023,7 @@ async function concludedEscortedMilestones(
       }
     }
   } catch (e) {
-    console.warn(`[director-grader] escort-candidate resolve failed ws=${workspaceId} fn=${directorFunction}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-grader] escort-candidate resolve failed ws=${workspaceId} fn=${directorFunction}: ${errText(e)}`);
   }
   return out;
 }
@@ -1090,7 +1091,7 @@ export async function gradeConcludedDirectorCalls(opts: { workspaceId: string; a
       }
     }
   } catch (e) {
-    console.warn(`[director-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-grader] sweep failed ws=${opts.workspaceId}: ${errText(e)}`);
   }
   return state;
 }
@@ -1266,7 +1267,7 @@ export async function pickDirectorGradeBatch(opts: {
       }
     }
   } catch (e) {
-    console.warn(`[director-grader] pickDirectorGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-grader] pickDirectorGradeBatch failed ws=${opts.workspaceId}: ${errText(e)}`);
   }
   return out;
 }

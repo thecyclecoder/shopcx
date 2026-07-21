@@ -7,6 +7,7 @@
 // docs/brain/lifecycles/investors-area.md + docs/brain/tables/qb_pnl_snapshots.md.
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { backfillPnlSnapshots } from "@/lib/quickbooks";
@@ -48,7 +49,7 @@ export const qbSnapshotRefresh = inngest.createFunction(
           const rows = await backfillPnlSnapshots(ws.id, months, admin);
           return { months: rows.length };
         } catch (e) {
-          return { months: 0, error: e instanceof Error ? e.message : String(e) };
+          return { months: 0, error: errText(e) };
         }
       });
       if (res.error) errors.push(`${ws.id}: ${res.error}`);

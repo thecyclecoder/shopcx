@@ -29,6 +29,7 @@
  * unknown when ratio is null.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import {
   blendedCacLtvFromTotals,
@@ -418,7 +419,7 @@ async function computeScalerLtvNumeratorCents(
     for (const f of blended.flags) args.flags.push(`ltv: ${f}`);
     return blended.blendedLtvCents;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     console.warn(`[cold-scaler-cac-ltv-sensor] computeBlendedCacLtv threw: ${msg}`);
     args.flags.push(`ltv: composer threw — ${msg}`);
     return 0;

@@ -23,6 +23,7 @@
  * nonTestWorkspaceFingerprint}) proves a sandbox run made ZERO writes to non-test-workspace rows.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 import { createChunks, stringToBase64URL } from "@supabase/ssr";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -243,7 +244,7 @@ export async function nonTestWorkspaceFingerprint(
       const r = rows[0] || {};
       fp[table] = { count: Number(r.n ?? 0), maxUpdated: r.ts ? String(r.ts) : null };
     } catch (e) {
-      fp[table] = { count: -1, maxUpdated: `error: ${e instanceof Error ? e.message : String(e)}` };
+      fp[table] = { count: -1, maxUpdated: `error: ${errText(e)}` };
     }
   }
   return fp;

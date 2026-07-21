@@ -28,6 +28,7 @@
  * The cron in [[./inngest/mario-stall-cron]] wires these into the once-per-minute tick.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpec, getSpecBlockers, getRoadmap, type SpecCard } from "@/lib/brain-roadmap";
@@ -2675,7 +2676,7 @@ export async function applyBoxMario(
             fixReason = `unknown action: ${lf.action}`;
         }
       } catch (e) {
-        fixReason = e instanceof Error ? e.message : String(e);
+        fixReason = errText(e);
       }
     } else if (loopGuardTriggered) {
       try {
@@ -2711,7 +2712,7 @@ export async function applyBoxMario(
         // LOUD, not silent: capture the failure so it surfaces on the mario_fired audit row (and Ada's
         // feed) instead of vanishing into a console.warn nobody reads. A swallowed author-write is what
         // let the same fix-spec be re-proposed every sweep with durable_spec_authored=false forever.
-        durableSpecAuthorError = e instanceof Error ? e.message : String(e);
+        durableSpecAuthorError = errText(e);
         console.warn(`[mario] fix-spec author FAILED (${verdict.durable_fix_spec.slug}): ${durableSpecAuthorError}`);
       }
     }
@@ -2723,7 +2724,7 @@ export async function applyBoxMario(
       try {
         verificationRepaired = await repairSpecVerification(admin, row.workspace_id, verdict.verification_repair);
       } catch (e) {
-        verificationRepairError = e instanceof Error ? e.message : String(e);
+        verificationRepairError = errText(e);
         console.warn(`[mario] verification repair FAILED (${verdict.verification_repair.spec_slug}): ${verificationRepairError}`);
       }
     }
@@ -2765,7 +2766,7 @@ export async function applyBoxMario(
           // (scope-mario-blocked-by-repair-target Phase 1).
           blockedByRepaired = await repairSpecBlockedBy(admin, row.workspace_id, row.spec_slug, verdict.blocked_by_repair);
         } catch (e) {
-          blockedByRepairError = e instanceof Error ? e.message : String(e);
+          blockedByRepairError = errText(e);
           console.warn(`[mario] blocked_by_repair FAILED (${verdict.blocked_by_repair.spec_slug}): ${blockedByRepairError}`);
         }
       }
@@ -2917,7 +2918,7 @@ export async function applyBoxMario(
       mode,
     };
   } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: errText(e) };
   }
 }
 
@@ -2997,7 +2998,7 @@ export async function revertMarioThreshold(
     }
     return { reverted, reason: reverted ? undefined : "no widened row to revert" };
   } catch (e) {
-    return { reverted: false, reason: e instanceof Error ? e.message : String(e) };
+    return { reverted: false, reason: errText(e) };
   }
 }
 
@@ -3143,6 +3144,6 @@ export async function failsafeStampMarioUnsure(
     }
     return { stamped, reason: stamped ? undefined : "not_in_flight" };
   } catch (e) {
-    return { stamped: false, reason: e instanceof Error ? e.message : String(e) };
+    return { stamped: false, reason: errText(e) };
   }
 }

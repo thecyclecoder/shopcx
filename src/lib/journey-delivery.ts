@@ -13,6 +13,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { sendJourneyCTA } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
@@ -88,7 +89,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
       ok: !threw && (delivered === true || intentionalSkip),
       produced: threw ? { error: "exception" } : { delivered: delivered === true, journey: params.journeyName, ticket: params.ticketId, channel: params.channel },
       detail: threw
-        ? `threw: ${threw instanceof Error ? threw.message : String(threw)}`
+        ? `threw: ${errText(threw)}`
         : delivered
         ? `launched ${params.journeyName} via ${params.channel}`
         : intentionalSkip

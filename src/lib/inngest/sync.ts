@@ -1,3 +1,4 @@
+import { errText } from "@/lib/error-text";
 /**
  * Force Inngest to (re-)register this app's served functions — the deploy-time re-sync
  * (control-tower-complete-coverage spec, Phase 2). PUTting the serve endpoint is Inngest's
@@ -34,6 +35,6 @@ export async function syncInngestRegistration(serveUrl?: string): Promise<SyncRe
       detail: res.ok ? `Inngest sync ok (PUT ${url} → ${res.status})` : `Inngest sync PUT ${url} → ${res.status}`,
     };
   } catch (e) {
-    return { ok: false, status: null, url, detail: `Inngest sync PUT ${url} failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, status: null, url, detail: `Inngest sync PUT ${url} failed: ${errText(e)}` };
   }
 }

@@ -14,6 +14,7 @@
  * effects. See docs/brain (Sol cheap-execution) + the agent_action_requests migration.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -247,7 +248,7 @@ export async function executeActionRequest(admin: Admin, req: AgentActionRequest
     // so she adapts (retry / journey / honest "couldn't do that" reply) instead of promising it.
     await completeRequest(admin, req.id, result);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await recordOutcomeRows(admin, req, false, msg);
     await failRequest(admin, req.id, msg);
   }

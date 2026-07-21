@@ -35,6 +35,7 @@
  * See docs/brain/specs/platform-director-agent.md · docs/brain/libraries/platform-director.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import {
   CEO,
   resolveApprover,
@@ -4751,7 +4752,7 @@ export async function applyDirectorAuthorFollowup(
         intendedStatusSetBy: `director:${PLATFORM}`,
       });
     } catch (e) {
-      return { ok: false, error: `followup spec DB author failed: ${e instanceof Error ? e.message : String(e)}`, authoredSlug: slug, existed: false };
+      return { ok: false, error: `followup spec DB author failed: ${errText(e)}`, authoredSlug: slug, existed: false };
     }
     // spec-review-agent Phase 3 — a director-authored followup is a freshly-created spec; mark its card
     // `in_review` with `flags.intended_status='planned'`. Best-effort: a mirror-write failure is swallowed
@@ -4852,7 +4853,7 @@ export async function applyDirectorFoldSuperseded(
   try {
     await setSpecStatus(workspaceId, candidate.slug, "folded", `director:${PLATFORM}`);
   } catch (e) {
-    return { ok: false, error: `fold_superseded setSpecStatus failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `fold_superseded setSpecStatus failed: ${errText(e)}` };
   }
   const foldNote = `Superseded by ${supersedingRef} — work already shipped elsewhere; folded off the board. ${reason}`.slice(0, 4000);
   return applyDirectorDismissCandidate(admin, workspaceId, "init", { slug: candidate.slug, owner: candidate.owner ?? null }, foldNote, {

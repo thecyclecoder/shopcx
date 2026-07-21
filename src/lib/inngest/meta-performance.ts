@@ -4,6 +4,7 @@
 // against the existing daily_meta_ad_spend account rollup.
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { ingestMetaPerformance } from "@/lib/meta/performance";
@@ -379,7 +380,7 @@ export const metaIterationRun = inngest.createFunction(
             activity_recorded: false,
             escalated: false,
             escalation_kind: null as string | null,
-            error: e instanceof Error ? e.message : String(e),
+            error: errText(e),
           };
         }
       });
@@ -471,7 +472,7 @@ export const metaIterationRun = inngest.createFunction(
 
       return { status: "complete", runId, snapshotDate, ...counts };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errText(err);
       // Record the failure on the run row + alert the owners, then rethrow so
       // Inngest marks the run failed (and retries per the function config).
       await finishRun(runId, { status: "failed", stages, error: message });

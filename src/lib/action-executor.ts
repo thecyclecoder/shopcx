@@ -7,6 +7,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
 import { assertCtaBackedByLaunch } from "@/lib/sol-cta-reference-guard";
@@ -572,7 +573,7 @@ async function executeActionsInline(
     } catch (err) {
       results.push({
         action: substituted,
-        result: { success: false, error: err instanceof Error ? err.message : String(err) },
+        result: { success: false, error: errText(err) },
       });
     }
   }
@@ -1522,7 +1523,7 @@ export const directActionHandlers: Record<
       }
       return { success: false, error: `Regenerated coupon also failed: ${r2.error}` };
     } catch (e) {
-      return { success: false, error: `Coupon regeneration failed: ${e instanceof Error ? e.message : String(e)}` };
+      return { success: false, error: `Coupon regeneration failed: ${errText(e)}` };
     }
   },
 
@@ -2404,7 +2405,7 @@ export const directActionHandlers: Record<
           return { success: false, error: upd.error };
         }
       } catch (err) {
-        return { success: false, error: `Subscription update failed: ${err instanceof Error ? err.message : String(err)}` };
+        return { success: false, error: `Subscription update failed: ${errText(err)}` };
       }
     }
 
@@ -3323,7 +3324,7 @@ async function handleDirectAction(
     } catch (err) {
       results.push({
         action: substituted,
-        result: { success: false, error: err instanceof Error ? err.message : String(err) },
+        result: { success: false, error: errText(err) },
       });
     }
   }
@@ -3397,7 +3398,7 @@ async function handleDirectAction(
               verifyFailures.push(`${s.action.type}: retry failed — ${retryResult.error}`);
             }
           } catch (err) {
-            verifyFailures.push(`${s.action.type}: retry threw — ${err instanceof Error ? err.message : String(err)}`);
+            verifyFailures.push(`${s.action.type}: retry threw — ${errText(err)}`);
           }
         } else {
           verifyFailures.push(`${s.action.type}: verification failed, no handler for retry`);
@@ -3469,7 +3470,7 @@ async function handleDirectAction(
     await rollbackLoyaltyRedemptionOnApplyFailure(ctx, results, verifyFailures, sysNote);
   } catch (err) {
     await sysNote(
-      `[Rollback] loyalty redemption rollback threw — ${err instanceof Error ? err.message : String(err)}`,
+      `[Rollback] loyalty redemption rollback threw — ${errText(err)}`,
     );
   }
 }

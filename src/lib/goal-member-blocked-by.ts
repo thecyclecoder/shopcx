@@ -36,6 +36,7 @@
  */
 
 import { normalizePlannerBlockedBySlug } from "@/lib/agents/goal-proposals";
+import { errText } from "@/lib/error-text";
 import { getGoal } from "@/lib/goals-table";
 import { specsForMilestone, setSpecBlockers, getSpec, type SpecRow } from "@/lib/specs-table";
 
@@ -168,7 +169,7 @@ export async function scanGoalBlockedByDrift(workspaceId: string, goalSlug: stri
       const rows = await specsForMilestone(workspaceId, m.id);
       memberRows.push(...rows);
     } catch (e) {
-      console.warn(`[goal-member-blocked-by] specsForMilestone(${m.id}) failed for goal ${goalSlug}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[goal-member-blocked-by] specsForMilestone(${m.id}) failed for goal ${goalSlug}: ${errText(e)}`);
     }
   }
   const memberSlugs = new Set(memberRows.map((r) => r.slug));
@@ -243,7 +244,7 @@ export async function repairGoalBlockedByDrift(workspaceId: string, goalSlug: st
       await setSpecBlockers(workspaceId, d.slug, nextList);
       outcomes.push({ slug: d.slug, action: "repaired", from: freshList, to: nextList });
     } catch (e) {
-      outcomes.push({ slug: d.slug, action: "failed", error: e instanceof Error ? e.message : String(e) });
+      outcomes.push({ slug: d.slug, action: "failed", error: errText(e) });
     }
   }
   return { goalSlug, memberSlugs: scan.memberSlugs, outcomes };

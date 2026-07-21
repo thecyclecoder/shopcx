@@ -16,6 +16,7 @@
  * appstle-vs-internal dispatch.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { OrderView, OrderLineView } from "./types";
 
 export type { OrderView, OrderLineView } from "./types";
@@ -335,7 +336,7 @@ export async function createOrder(
     } catch (err) {
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: errText(err),
       };
     }
     const row = buildCreateOrderRow(workspaceId, input, {

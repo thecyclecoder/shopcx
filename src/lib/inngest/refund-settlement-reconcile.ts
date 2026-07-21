@@ -35,6 +35,7 @@
  * spec docs/brain/specs/refund-integrity-order-refunds-mirror-verify-by-id-settlement-reconcile.md.
  */
 import { inngest } from "@/lib/inngest/client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
@@ -110,7 +111,7 @@ async function reconcileBraintree(
   } catch (e) {
     // A single-row lookup failure isn't drift — surface it in the
     // reason but don't flip settled and don't open a drift ticket.
-    return { settled: false, drift: false, vendor_amount_cents: null, reason: `Braintree lookup error: ${e instanceof Error ? e.message : String(e)}` };
+    return { settled: false, drift: false, vendor_amount_cents: null, reason: `Braintree lookup error: ${errText(e)}` };
   }
 }
 
@@ -179,7 +180,7 @@ async function reconcileShopify(
     // pending — still in-flight
     return { settled: false, drift: false, vendor_amount_cents: vendorAmountCents, reason: `Shopify refund tx.status=${tx.status}` };
   } catch (e) {
-    return { settled: false, drift: false, vendor_amount_cents: null, reason: `Shopify lookup error: ${e instanceof Error ? e.message : String(e)}` };
+    return { settled: false, drift: false, vendor_amount_cents: null, reason: `Shopify lookup error: ${errText(e)}` };
   }
 }
 

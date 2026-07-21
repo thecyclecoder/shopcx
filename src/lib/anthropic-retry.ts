@@ -23,6 +23,7 @@
  */
 
 import { NonRetriableError } from "inngest";
+import { errText } from "@/lib/error-text";
 
 /**
  * Inngest caps a function at 20 retries. We use the ceiling for customer-facing
@@ -76,7 +77,7 @@ export function throwForAnthropicStatus(status: number, where: string): never {
  * timeout) is always a transient dependency failure → retry. Returns `never`.
  */
 export function throwForAnthropicNetworkError(err: unknown, where: string): never {
-  const detail = err instanceof Error ? err.message : String(err);
+  const detail = errText(err);
   throw new AnthropicDependencyError(`Anthropic ${where} network failure: ${detail}`);
 }
 

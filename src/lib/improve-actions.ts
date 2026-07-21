@@ -12,6 +12,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, ActionResult } from "@/lib/action-executor";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
@@ -544,7 +545,7 @@ export async function runImproveActions(
           results.push(`Unknown action: ${action.type}`);
       }
     } catch (err) {
-      results.push(`Action ${action.type} error: ${err instanceof Error ? err.message : String(err)}`);
+      results.push(`Action ${action.type} error: ${errText(err)}`);
     }
   }
 

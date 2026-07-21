@@ -38,6 +38,7 @@
  * functions/archive markdown into the roadmap routes (the specs + goals markdown is no longer read).
  */
 import { promises as fs } from "fs";
+import { errText } from "@/lib/error-text";
 import path from "path";
 import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, getActiveSpecs, listArchivedSpecIndex, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow, type ArchivedSpecIndexRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
@@ -560,7 +561,7 @@ async function buildGoalMembershipMap(
     return out;
   } catch (e) {
     console.warn(
-      `[blocker-goal-normalize] buildGoalMembershipMap failed — falling back to empty (spec-slug blockers only): ${e instanceof Error ? e.message : String(e)}`,
+      `[blocker-goal-normalize] buildGoalMembershipMap failed — falling back to empty (spec-slug blockers only): ${errText(e)}`,
     );
     return new Map<string, GoalMembership>();
   }

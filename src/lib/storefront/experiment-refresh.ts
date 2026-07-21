@@ -16,6 +16,7 @@
  * invoked (north-star supervisability). Driven by [[../inngest/storefront-experiments]].
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { isProxyCalibrated } from "@/lib/storefront/calibration";
 import { refreshExperimentAttribution, type VariantRollupResult } from "@/lib/storefront/experiment-attribution";
 import { decideExperiment, type BanditDecision } from "@/lib/storefront/bandit";
@@ -131,7 +132,7 @@ export async function refreshStorefrontExperiments(opts: {
         admin,
       });
     } catch (e) {
-      console.warn(`[storefront-experiments] lever-memory commit failed exp=${exp.id}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[storefront-experiments] lever-memory commit failed exp=${exp.id}: ${errText(e)}`);
     }
   };
 
@@ -158,7 +159,7 @@ export async function refreshStorefrontExperiments(opts: {
         console.log(`[storefront-experiments] auto-expired ${swept.expired} renewal offer(s); unlinked ${swept.subscriptions_unlinked} sub(s)`);
       }
     } catch (e) {
-      console.warn(`[storefront-experiments] renewal-offer auto-expire sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[storefront-experiments] renewal-offer auto-expire sweep failed: ${errText(e)}`);
     }
 
     // 1. Attribution (idempotent recompute).
@@ -295,7 +296,7 @@ export async function refreshStorefrontExperiments(opts: {
           }
         } catch (e) {
           console.warn(
-            `[storefront-experiments] renewal-offer rollback sweep failed for exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+            `[storefront-experiments] renewal-offer rollback sweep failed for exp=${experimentId}: ${errText(e)}`,
           );
         }
         // Re-publish the edge manifest + purge the PDP render so a rolled-back PDP
@@ -347,7 +348,7 @@ export async function refreshStorefrontExperiments(opts: {
           }
         } catch (e) {
           console.warn(
-            `[storefront-experiments] renewal-offer kill sweep failed for exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+            `[storefront-experiments] renewal-offer kill sweep failed for exp=${experimentId}: ${errText(e)}`,
           );
         }
       } else {
@@ -383,7 +384,7 @@ export async function refreshStorefrontExperiments(opts: {
             });
           } catch (e) {
             console.warn(
-              `[storefront-experiments] paired_winner_lander pair-on-promote failed exp=${experimentId}: ${e instanceof Error ? e.message : String(e)}`,
+              `[storefront-experiments] paired_winner_lander pair-on-promote failed exp=${experimentId}: ${errText(e)}`,
             );
           }
         }
@@ -427,7 +428,7 @@ export async function refreshStorefrontExperiments(opts: {
           }
         }
       } catch (e) {
-        console.warn(`[storefront-experiments] campaign-grade pick/enqueue failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`[storefront-experiments] campaign-grade pick/enqueue failed ws=${opts.workspaceId}: ${errText(e)}`);
       }
     }
 
@@ -460,7 +461,7 @@ export async function refreshStorefrontExperiments(opts: {
 
     return { run_id: runId, experiments_evaluated: byExperiment.size, conservative, counts, escalations };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errText(err);
     await admin
       .from("storefront_experiment_runs")
       .update({ status: "failed", error: message, finished_at: new Date().toISOString() })

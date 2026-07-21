@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "crypto";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
@@ -363,7 +364,7 @@ export async function closeArchivedSpecPr(
     if (!r.ok) return { ok: false, reason: `pr fetch failed (${r.status})` };
     pr = r.json as { state?: string; merged?: boolean; head?: { ref?: string; sha?: string } };
   } catch (e) {
-    return { ok: false, reason: `pr fetch threw: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, reason: `pr fetch threw: ${errText(e)}` };
   }
   // Idempotent: already closed/merged → no-op (a human, closeDuplicatePr, or a merge-into-main path
   // beat us to it). Same-shape return as `ok=true` so the caller doesn't error-log a normal race.

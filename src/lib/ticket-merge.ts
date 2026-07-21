@@ -12,6 +12,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 
@@ -91,7 +92,7 @@ export async function repointTicketRefs(
       }
       if ((count || 0) > 0) results.push({ table, updated: count || 0 });
     } catch (err) {
-      results.push({ table, updated: 0, error: err instanceof Error ? err.message : String(err) });
+      results.push({ table, updated: 0, error: errText(err) });
     }
   }
   return results;

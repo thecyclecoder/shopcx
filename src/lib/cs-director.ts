@@ -57,6 +57,7 @@
  * [[../../docs/brain/tables/director_activity]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 
@@ -709,7 +710,7 @@ async function handleApproveRemedy(
     try {
       executorResult = await deps.runExecutor(ctx, decision, suppressedSend, sysNote);
     } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
+      const errMsg = errText(e);
       const error = `approve_remedy: executor threw (${errMsg}) — no customer message sent`;
       console.warn(`${tag} ${error}`);
       return {
@@ -763,7 +764,7 @@ async function handleApproveRemedy(
         console.log(`${tag} approve_remedy: ${batchLabel} ok · customer message delivered`);
         return { ok: true, handler: "approve_remedy", message_delivered: true };
       } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
+        const errMsg = errText(e);
         const error = `approve_remedy: ${batchLabel} succeeded but delivery threw (${errMsg})`;
         console.warn(`${tag} ${error}`);
         // The batch DID fire; the delivery race is a real failure (customer didn't hear back) so
@@ -781,7 +782,7 @@ async function handleApproveRemedy(
     console.log(`${tag} approve_remedy: ${batchLabel} ok · no customer message on remedy (skipped delivery)`);
     return { ok: true, handler: "approve_remedy", message_delivered: false };
   } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e);
+    const errMsg = errText(e);
     console.error(`${tag} handleApproveRemedy threw:`, errMsg);
     return {
       ok: false,
@@ -1059,7 +1060,7 @@ async function handleAuthorSpec(
         intendedStatusSetBy: "box:cs-director-call",
       });
     } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
+      const errMsg = errText(e);
       const error = `author_spec: SDK threw (${errMsg}) — no spec written`;
       console.warn(`${tag} ${error}`);
       return {
@@ -1084,7 +1085,7 @@ async function handleAuthorSpec(
     console.log(`${tag} author_spec: SDK wrote slug=${planned.plan.slug} (derived-from ticket=${linkage.ticketId.slice(0, 8)})`);
     return { ok: true, handler: "author_spec", spec_slug: planned.plan.slug };
   } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e);
+    const errMsg = errText(e);
     console.error(`${tag} handleAuthorSpec threw:`, errMsg);
     return {
       ok: false,
@@ -1158,7 +1159,7 @@ async function handleEscalateFounder(
       linkage_triage_run_id: linkage.triageRunId,
     };
   } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e);
+    const errMsg = errText(e);
     console.error(`${tag} handleEscalateFounder threw:`, errMsg);
     // Non-fatal — the runner is the sole card writer; a linkage-resolve blip doesn't roll back the
     // runner's audit row + card mint. Surface as ok:true with a null linkage.
@@ -1257,6 +1258,6 @@ export async function applyBoxCsDirectorCall(
     return { ok: true, handler: "noop" };
   } catch (e) {
     console.error(`[cs-director] applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: errText(e) };
   }
 }

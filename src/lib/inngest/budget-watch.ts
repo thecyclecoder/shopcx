@@ -6,6 +6,7 @@
  * [[../libraries/budget-alerts]].
  */
 import { inngest } from "@/lib/inngest/client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { checkAndAlertAccountBudget } from "@/lib/meta/budget-alerts";
@@ -43,7 +44,7 @@ export const budgetWatchCron = inngest.createFunction(
         try {
           return await checkAndAlertAccountBudget(admin, account);
         } catch (e) {
-          return { accountName: account.meta_account_name, totalCents: 0, prevCents: account.last_notified_daily_budget_cents, increased: false, smsSent: false, smsError: e instanceof Error ? e.message : String(e) };
+          return { accountName: account.meta_account_name, totalCents: 0, prevCents: account.last_notified_daily_budget_cents, increased: false, smsSent: false, smsError: errText(e) };
         }
       });
       checked++;

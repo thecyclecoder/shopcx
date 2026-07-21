@@ -30,6 +30,7 @@
  * failure leaves no ledger row, so the next attempt retries.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 
 import { resolveFounderPhone } from "@/lib/god-mode";
 import { sendSMS } from "@/lib/twilio";
@@ -173,6 +174,6 @@ export async function sendFounderCancelAmplifierSMS(
     return { sent: true, order_number: orderNumber, message_sid: r.messageSid ?? null };
   } catch (e) {
     // Never throws — best-effort, matches [[../god-mode]] `sendGodModeSMS`.
-    return { sent: false, reason: e instanceof Error ? e.message : String(e) };
+    return { sent: false, reason: errText(e) };
   }
 }

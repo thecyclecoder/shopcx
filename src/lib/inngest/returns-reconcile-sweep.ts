@@ -56,6 +56,7 @@
  * run is distinguishable from a broken one.
  */
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import {
@@ -90,7 +91,7 @@ const UPSTREAM_MAX_AGE_DAYS = 30;
 // Mirrors the portal mutation-guard's classifier for the same class of
 // gracefully-handled EasyPost failure.
 export function isEasyPostRateLimitError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
+  const msg = errText(err);
   return msg.toLowerCase().includes("temporarily rate-limited");
 }
 
@@ -101,7 +102,7 @@ export function isEasyPostRateLimitError(err: unknown): boolean {
 // daily sweep will hit it until the carrier is attached, so we escalate
 // once per stranded return and let the operator resolve it.
 export function isEasyPostMissingCarrierError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
+  const msg = errText(err);
   return msg
     .toLowerCase()
     .includes("credentials not found for the specified carrier");

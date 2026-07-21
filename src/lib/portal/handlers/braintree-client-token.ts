@@ -1,4 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
+import { errText } from "@/lib/error-text";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 
 /**
@@ -38,6 +39,6 @@ export const braintreeClientToken: RouteHandler = async ({ auth, route }) => {
     if (!result.success) return jsonErr({ error: "braintree_error", message: result.message }, 502);
     return jsonOk({ ok: true, route, client_token: result.clientToken });
   } catch (err) {
-    return jsonErr({ error: "braintree_error", message: err instanceof Error ? err.message : String(err) }, 500);
+    return jsonErr({ error: "braintree_error", message: errText(err) }, 500);
   }
 };

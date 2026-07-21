@@ -33,6 +33,7 @@
  * docs/brain/libraries/agent-grader.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { PLATFORM, PLATFORM_DIRECTOR_LOOP_GUARD_MAX } from "@/lib/agents/platform-director";
@@ -1029,7 +1030,7 @@ export async function agentGradingBatchReady(
     const ready = hasFailure || ungraded.length >= BATCH_MIN || oldestAgeMs >= BATCH_FALLBACK_MS;
     return { ready, ungraded: ungraded.length };
   } catch (e) {
-    console.warn(`[worker-grader] batch-ready check failed ws=${workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[worker-grader] batch-ready check failed ws=${workspaceId}: ${errText(e)}`);
     return { ready: false, ungraded: 0 };
   }
 }
@@ -1055,7 +1056,7 @@ export async function pickAgentGradeBatch(opts: { workspaceId: string; admin?: A
     }
     return selectGradingBatch(pool, opts.cap ?? GRADE_BATCH_CAP, rollupByKind);
   } catch (e) {
-    console.warn(`[worker-grader] pickAgentGradeBatch failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[worker-grader] pickAgentGradeBatch failed ws=${opts.workspaceId}: ${errText(e)}`);
     return [];
   }
 }
@@ -1111,7 +1112,7 @@ export async function gradeConcludedAgentActions(opts: { workspaceId: string; ad
       }
     }
   } catch (e) {
-    console.warn(`[worker-grader] sweep failed ws=${opts.workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[worker-grader] sweep failed ws=${opts.workspaceId}: ${errText(e)}`);
   }
   return { considered, graded, gradedKinds: Array.from(gradedKinds) };
 }
@@ -1249,7 +1250,7 @@ export async function rollCoachingIntoFixSpec(
       { intendedStatusSetBy: "director:platform" },
     );
   } catch (err) {
-    return { ok: false, reason: `author failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: `author failed: ${errText(err)}` };
   }
   if (!authored) return { ok: false, reason: "author write failed" };
   // Archive the open coachings as "rolled into mandates" so they stop counting toward the loop-guard + are retired.
@@ -1529,6 +1530,6 @@ export async function applyBoxCoaching(opts: {
     );
     return { ok: true, coached: true, attempt: result.attempt, instructionId: result.instruction.id };
   } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: errText(e) };
   }
 }

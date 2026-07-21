@@ -1,4 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
+import { errText } from "@/lib/error-text";
 import { jsonOk, jsonErr, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
@@ -59,7 +60,7 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     saved = { id: result.paymentMethodId };
     migratedCount = result.migratedCount;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     if (msg === "no_braintree_customer") return jsonErr({ error: "no_braintree_customer" }, 400);
     return jsonErr({ error: "vault_failed", message: msg }, 502);
   }

@@ -16,6 +16,7 @@
  * via scripts/_set-god-mode-pin.ts (never in source, never in a migration).
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
+import { errText } from "@/lib/error-text";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendSMS } from "@/lib/twilio";
 
@@ -998,7 +999,7 @@ export async function sendGodModeSMS(
     const r = await sendSMS(args.workspaceId, to, body);
     return { sent: r.success, reason: r.error };
   } catch (e) {
-    return { sent: false, reason: e instanceof Error ? e.message : String(e) };
+    return { sent: false, reason: errText(e) };
   }
 }
 

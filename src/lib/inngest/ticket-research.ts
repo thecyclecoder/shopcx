@@ -6,6 +6,7 @@
  */
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { runRecipe, getRecipe } from "@/lib/research";
 import type { Gap, ProposedHeal } from "@/lib/research/types";
@@ -248,7 +249,7 @@ async function executeActionByName(
   try {
     return await handler(ctx, params as unknown as ActionParams);
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) } as ActionResult;
+    return { success: false, error: errText(err) } as ActionResult;
   }
 }
 

@@ -15,6 +15,7 @@
  *   - `applyMigrationFix` — runs ONE owner-approved typed fix action against prod. Idempotent.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -249,7 +250,7 @@ export async function applyMigrationFix(
         ? { ok: true, detail: `appstle_cancel: cancelled lingering contract ${contractId}` }
         : { ok: false, detail: `appstle_cancel: ${r.error || "cancel failed"}` };
     } catch (e) {
-      return { ok: false, detail: `appstle_cancel: threw — ${e instanceof Error ? e.message : String(e)}` };
+      return { ok: false, detail: `appstle_cancel: threw — ${errText(e)}` };
     }
   }
 

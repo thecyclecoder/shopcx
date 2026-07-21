@@ -19,6 +19,7 @@
  */
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listCompilableWorkspaces } from "@/lib/playbook-compiler";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -97,7 +98,7 @@ export const playbookCompilerCron = inngest.createFunction(
           if (error) return { enqueued: false, reason: `insert_failed: ${error.message}` as string };
           return { enqueued: true, reason: "enqueued" as const, job_id: (inserted as { id?: string })?.id ?? null };
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errText(err);
           console.error("[playbook-compiler-cron] error for", scope.workspaceId, msg);
           return { enqueued: false, reason: `exception: ${msg}` };
         }

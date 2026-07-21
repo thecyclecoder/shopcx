@@ -9,6 +9,7 @@
  * Returns { success, error?, shopifyErrors? }.
  */
 import { decrypt } from "@/lib/crypto";
+import { errText } from "@/lib/error-text";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -89,7 +90,7 @@ export async function updateShopifyCustomer(input: ShopifyCustomerUpdateInput): 
     }
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 

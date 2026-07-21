@@ -20,6 +20,13 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
+// lossless-error-diagnostics-no-object-object Phase 2 — the shared lossless error renderer every
+// diagnostic-persisting catch site funnels through. Kills `[object Object]` on a supabase-js
+// PostgREST plain-object error (`{code, details, hint, message}` — NOT an Error instance) that the
+// old `instanceof Error ? .message : String()` ternary silently destroyed. Originating incident:
+// Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
+// ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
+import { errText } from "../src/lib/error-text";
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
@@ -552,7 +559,7 @@ async function ensureClaimAgentJobCooldownVerified(): Promise<ClaimCooldownVerif
     cachedClaimCooldownVerdict = {
       ok: true,
       probed: false,
-      reason: `verifyClaimAgentJobCooldown threw (failing open): ${e instanceof Error ? e.message : String(e)}`,
+      reason: `verifyClaimAgentJobCooldown threw (failing open): ${errText(e)}`,
     };
   }
   if (!cachedClaimCooldownVerdict.ok) {
@@ -2549,7 +2556,7 @@ async function markReady(prNumber: number): Promise<boolean> {
     }
     return r.ok;
   } catch (e) {
-    console.error(`[markReady] PR#${prNumber} threw: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[markReady] PR#${prNumber} threw: ${errText(e)}`);
     return false;
   }
 }
@@ -2576,7 +2583,7 @@ async function emitTimecard(input: {
     await recordTimecardEvent(db, input);
   } catch (e) {
     console.warn(
-      `[timecards] emit failed spec=${input.spec_slug} kind=${input.event_kind}: ${e instanceof Error ? e.message : String(e)}`,
+      `[timecards] emit failed spec=${input.spec_slug} kind=${input.event_kind}: ${errText(e)}`,
     );
   }
 }
@@ -2814,7 +2821,7 @@ async function resolvePendingWaitTransition(
       spec_slug: row.spec_slug,
     };
   } catch (e) {
-    console.warn(`[timecards] wait-transition preread failed for job ${jobId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[timecards] wait-transition preread failed for job ${jobId}: ${errText(e)}`);
     return null;
   }
 }
@@ -2991,7 +2998,7 @@ async function isOriginMainTscClean(tag: string): Promise<boolean> {
     console.log(`${tag} base-poison main-check: origin/main tsc ${r.code === 0 ? "CLEAN" : "BROKEN"}`);
     return r.code === 0;
   } catch (e) {
-    console.warn(`${tag} base-poison main-check threw → fail-open (treat main as clean): ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`${tag} base-poison main-check threw → fail-open (treat main as clean): ${errText(e)}`);
     return true;
   } finally {
     removeWorktreeDir(mainWt);
@@ -3246,7 +3253,7 @@ async function reapOrphans() {
   try {
     await reapOrphanWorktrees();
   } catch (e) {
-    console.error("[reaper] worktree sweep failed (continuing):", e instanceof Error ? e.message : String(e));
+    console.error("[reaper] worktree sweep failed (continuing):", errText(e));
   }
 }
 
@@ -3363,7 +3370,7 @@ async function reapArchivedSpecJobs() {
     if (cancelled > 0) console.log(`[reaper] cancelled ${cancelled} orphaned job(s) for archived spec(s): ${slugs.join(", ")}`);
     else console.log("[reaper] 0 archived-spec orphans — no non-terminal job points at an archived spec");
   } catch (e) {
-    console.error("[reaper] archived-spec reap failed (non-fatal):", e instanceof Error ? e.message : String(e));
+    console.error("[reaper] archived-spec reap failed (non-fatal):", errText(e));
   }
 }
 
@@ -3483,7 +3490,7 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
       updated_at: new Date().toISOString(),
     });
   } catch (e) {
-    console.error("[heartbeat] write failed:", e instanceof Error ? e.message : String(e));
+    console.error("[heartbeat] write failed:", errText(e));
   }
 }
 
@@ -3623,7 +3630,7 @@ async function writeLoopHeartbeat(loopId: string, ok: boolean, produced: unknown
       ran_at: new Date().toISOString(),
     });
   } catch (e) {
-    console.error("[loop-heartbeat] write failed:", e instanceof Error ? e.message : String(e));
+    console.error("[loop-heartbeat] write failed:", errText(e));
   }
 }
 
@@ -3641,7 +3648,7 @@ async function writeCronHeartbeat(loopId: string, ok: boolean, produced: unknown
       ran_at: new Date().toISOString(),
     });
   } catch (e) {
-    console.error("[loop-heartbeat] cron write failed:", e instanceof Error ? e.message : String(e));
+    console.error("[loop-heartbeat] cron write failed:", errText(e));
   }
 }
 
@@ -3908,7 +3915,7 @@ async function runMigrationDriftJob(): Promise<void> {
     if (result.status === "drift") console.warn(`[migration-drift] ${summary}`);
     else console.log(`[migration-drift] ${summary}`);
   } catch (e) {
-    console.error("[migration-drift] check failed:", e instanceof Error ? e.message : String(e));
+    console.error("[migration-drift] check failed:", errText(e));
   }
 }
 
@@ -3989,7 +3996,7 @@ async function resolveDbHealthSpecBody(
       if (isNonEmpty(rederived)) return { body: rederived };
       return { error: "re-rendered spec body from the carried finding was still empty" };
     } catch (e) {
-      return { error: `re-derive from carried finding threw: ${e instanceof Error ? e.message : String(e)}` };
+      return { error: `re-derive from carried finding threw: ${errText(e)}` };
     }
   }
   return { error: "spec body empty and no carried finding to re-derive from" };
@@ -4076,7 +4083,7 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       }));
     } catch (e) {
       // pg_stat_statements not installed / not granted — honest skip, not a false "healthy".
-      await writeCronHeartbeat(mod.DB_HEALTH_SLOWQ_LOOP_ID, false, { status: "skipped", reason: `pg_stat_statements read failed: ${e instanceof Error ? e.message : String(e)}` }, Date.now() - startedAt, "db-health slow-query skipped — no pg_stat_statements");
+      await writeCronHeartbeat(mod.DB_HEALTH_SLOWQ_LOOP_ID, false, { status: "skipped", reason: `pg_stat_statements read failed: ${errText(e)}` }, Date.now() - startedAt, "db-health slow-query skipped — no pg_stat_statements");
       return;
     }
 
@@ -4120,7 +4127,7 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
         if (ageMs > 0) priorReadingAgeHours = ageMs / 3_600_000;
       }
     } catch (e) {
-      console.warn("[db-health] prior slow-query beat lookup failed (cumulative fallback):", e instanceof Error ? e.message : String(e));
+      console.warn("[db-health] prior slow-query beat lookup failed (cumulative fallback):", errText(e));
     }
 
     const findings: import("../src/lib/control-tower/db-health").DbHealthFinding[] = [];
@@ -4153,7 +4160,7 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       });
       if (rvFinding) findings.push(rvFinding);
     } catch (e) {
-      console.warn("[db-health] request-volume escalation failed:", e instanceof Error ? e.message : String(e));
+      console.warn("[db-health] request-volume escalation failed:", errText(e));
     }
 
     const proposed = await surfaceDbHealthFindings(findings);
@@ -4178,7 +4185,7 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
     );
     console.log(`[db-health] slow-query pass — ${rows.length} scanned, ${findings.length} findings, ${proposed} proposed`);
   } catch (e) {
-    console.error("[db-health] slow-query pass failed:", e instanceof Error ? e.message : String(e));
+    console.error("[db-health] slow-query pass failed:", errText(e));
   } finally {
     if (c) await c.end().catch(() => {});
   }
@@ -4347,7 +4354,7 @@ async function runDbHealthSizeJob(): Promise<void> {
     );
     console.log(`[db-health] size sweep — ${tables.length} tables snapshotted, ${findings.length} findings, ${proposed} proposed`);
   } catch (e) {
-    console.error("[db-health] size sweep failed:", e instanceof Error ? e.message : String(e));
+    console.error("[db-health] size sweep failed:", errText(e));
   } finally {
     if (c) await c.end().catch(() => {});
   }
@@ -4399,7 +4406,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
         blksRead: Number(r.blks_read ?? 0),
       };
     } catch (e) {
-      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: `pg_stat_database read failed: ${e instanceof Error ? e.message : String(e)}` }, Date.now() - startedAt, "db-health instance pass skipped — pg_stat_database unavailable");
+      await writeCronHeartbeat(mod.DB_HEALTH_INSTANCE_LOOP_ID, false, { status: "skipped", reason: `pg_stat_database read failed: ${errText(e)}` }, Date.now() - startedAt, "db-health instance pass skipped — pg_stat_database unavailable");
       return;
     }
 
@@ -4607,7 +4614,7 @@ async function runDbHealthInstanceJob(): Promise<void> {
     );
     console.log(`[db-health] instance pass — ${findings.length} findings, ${proposed} proposed (${summary})`);
   } catch (e) {
-    console.error("[db-health] instance pass failed:", e instanceof Error ? e.message : String(e));
+    console.error("[db-health] instance pass failed:", errText(e));
   } finally {
     if (c) await c.end().catch(() => {});
   }
@@ -4821,13 +4828,13 @@ async function runCoverageRegisterJob(job: Job) {
             return { ok: false, step: "author", error: `authorSpecRowStructured(${specSlug}) returned false — the row did not land (silent no-op write)` };
           }
         } catch (e) {
-          return { ok: false, step: "author", error: e instanceof Error ? e.message : String(e) };
+          return { ok: false, step: "author", error: errText(e) };
         }
         try {
           const row = await getSpecFromDb(job.workspace_id, specSlug);
           if (!row) return { ok: false, step: "verify", error: `getSpec(${specSlug}) returned null after authorSpecRowStructured — the row did not land in public.specs (silent no-op)` };
         } catch (e) {
-          return { ok: false, step: "verify", error: e instanceof Error ? e.message : String(e) };
+          return { ok: false, step: "verify", error: errText(e) };
         }
         return { ok: true };
       };
@@ -4933,7 +4940,7 @@ async function runAuditSpecShippedStateJob(job: Job) {
       }
     }
   } catch (e) {
-    console.warn(`${tag} git log lookup failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`${tag} git log lookup failed (non-fatal): ${errText(e)}`);
   }
 
   try {
@@ -4985,7 +4992,7 @@ async function runAuditSpecShippedStateJob(job: Job) {
         },
       });
     } catch (e) {
-      console.warn(`${tag} activity write failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`${tag} activity write failed (non-fatal): ${errText(e)}`);
     }
     await update(job.id, {
       status: "completed",
@@ -4993,7 +5000,7 @@ async function runAuditSpecShippedStateJob(job: Job) {
     });
     console.log(`${tag} ✓ ${verdictLine}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -5533,7 +5540,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const seq = await reconcileMilestoneSequence(job, tag);
     notes.push(seq);
   } catch (e) {
-    notes.push(`sequence reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`sequence reconcile failed: ${errText(e)}`);
     console.error(`${tag} standing sequence reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5557,7 +5564,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       );
     }
   } catch (e) {
-    notes.push(`auto-merge backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`auto-merge backstop failed: ${errText(e)}`);
     console.error(`${tag} standing auto-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5580,7 +5587,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`dirty-pr backstop → ${dp.enqueued} pr-resolve enqueued, ${dp.closedDuplicate} duplicate(s) closed (of ${dp.conflicting} conflicting / ${dp.checked} claude PRs)`);
     }
   } catch (e) {
-    notes.push(`dirty-pr backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`dirty-pr backstop failed: ${errText(e)}`);
     console.error(`${tag} standing dirty-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5598,7 +5605,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`goal-member re-drive → ${gm.redriven} pr-resolve enqueued, ${gm.readFailed} read-failed (of ${gm.checked} goal-member PR(s) checked)`);
     }
   } catch (e) {
-    notes.push(`goal-member re-drive failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`goal-member re-drive failed: ${errText(e)}`);
     console.error(`${tag} standing goal-member re-drive failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5614,7 +5621,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`merged-phase reconcile → back-filled ${mp.phasesStamped} phase(s) across ${mp.reconciled.length} spec(s): ${mp.reconciled.join(", ")}`);
     }
   } catch (e) {
-    notes.push(`merged-phase reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`merged-phase reconcile failed: ${errText(e)}`);
     console.error(`${tag} standing merged-phase reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5640,7 +5647,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`built-not-stamped heal → stamped ${healed.reduce((n, h) => n + h.phases.length, 0)} phase(s) shipped across ${healed.length} spec(s): ${healed.map((h) => h.slug).join(", ")}`);
     }
   } catch (e) {
-    notes.push(`built-not-stamped heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`built-not-stamped heal failed: ${errText(e)}`);
     console.error(`${tag} standing built-not-stamped heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5659,7 +5666,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`archived-not-folded heal → re-folded ${refolded.length} spec(s): ${refolded.map((r) => r.slug).join(", ")}`);
     }
   } catch (e) {
-    notes.push(`archived-not-folded heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`archived-not-folded heal failed: ${errText(e)}`);
     console.error(`${tag} standing archived-not-folded heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5676,7 +5683,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`manual-squash-merge heal → stamped ${manuallyMerged.reduce((n, h) => n + h.phases.length, 0)} phase(s) shipped across ${manuallyMerged.length} spec(s): ${manuallyMerged.map((h) => `${h.slug} (#${h.pr})`).join(", ")}`);
     }
   } catch (e) {
-    notes.push(`manual-squash-merge heal failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`manual-squash-merge heal failed: ${errText(e)}`);
     console.error(`${tag} standing manual-squash-merge heal failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5697,7 +5704,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       );
     }
   } catch (e) {
-    notes.push(`pre-merge backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`pre-merge backstop failed: ${errText(e)}`);
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5716,7 +5723,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`post-merge diff backstop → security-review (re-)enqueued for ${sd.enqueued.length} SHA(s) of ${sd.scanned} scanned`);
     }
   } catch (e) {
-    notes.push(`post-merge diff backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`post-merge diff backstop failed: ${errText(e)}`);
     console.error(`${tag} standing post-merge diff backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5731,7 +5738,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`ada disposition backstop → disposed ${dispo.scanned}: =${dispo.same} ↓${dispo.downgraded} ↑${dispo.upgrade_proposed}${dispo.failed ? ` · ${dispo.failed} failed` : ""}`);
     }
   } catch (e) {
-    notes.push(`ada disposition backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`ada disposition backstop failed: ${errText(e)}`);
     console.error(`${tag} standing ada disposition backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   // ada-standing-pass-reasoning-gate Phase 2 — captures the slugs the phase-progression backstop advanced this
@@ -5759,7 +5766,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`phase-progression backstop → advanced next phase for ${prog.advanced.length} spec(s): ${prog.advanced.join(", ")}`);
     }
   } catch (e) {
-    notes.push(`phase-progression backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`phase-progression backstop failed: ${errText(e)}`);
     console.error(`${tag} standing phase-progression backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5786,7 +5793,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       console.warn(`${tag} standing stuck-accumulation backstop aborted (${stuck.scanned} candidate(s), GitHub read failed — retry next pass)`);
     }
   } catch (e) {
-    notes.push(`stuck-accumulation backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`stuck-accumulation backstop failed: ${errText(e)}`);
     console.error(`${tag} standing stuck-accumulation backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5800,7 +5807,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (promo.goalBranchesCreated.length) notes.push(`goal-promote → seeded goal branch(es): ${promo.goalBranchesCreated.join(", ")}`);
     if (promo.conflicts.length) notes.push(`⚠️ goal-promote CONFLICT (surfaced, not dropped): ${promo.conflicts.join(", ")}`);
   } catch (e) {
-    notes.push(`goal-promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`goal-promote failed: ${errText(e)}`);
     console.error(`${tag} standing goal-promote failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5823,7 +5830,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     }
     if (g2m.conflicts.length) notes.push(`⚠️ goal→main CONFLICT (HELD, not stamped): ${g2m.conflicts.join(", ")}`);
   } catch (e) {
-    notes.push(`goal→main promote failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`goal→main promote failed: ${errText(e)}`);
     console.error(`${tag} standing goal→main promote failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5844,7 +5851,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`completed-goal self-archive → folded ${cg.folded.length} goal(s): ${cg.folded.map((g) => g.slug).join(", ")}`);
     }
   } catch (e) {
-    notes.push(`completed-goal self-archive failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`completed-goal self-archive failed: ${errText(e)}`);
     console.error(`${tag} standing completed-goal self-archive failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5864,7 +5871,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`escort-sweep: ${sweep.scanned} scanned, all healthy`);
     }
   } catch (e) {
-    notes.push(`escort-sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`escort-sweep failed: ${errText(e)}`);
     console.error(`${tag} standing escort-sweep failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5873,7 +5880,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (escort.escalated.length) notes.push(`loop-guard → escalated ${escort.escalated.length}: ${escort.escalated.join(", ")}`);
     if (!escort.queued.length && !escort.escalated.length) notes.push("escort: nothing to advance");
   } catch (e) {
-    notes.push(`escort failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`escort failed: ${errText(e)}`);
     console.error(`${tag} standing escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5892,7 +5899,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
       notes.push(`escort-backstop: ${backstop.scanned} member(s) scanned, no misses`);
     }
   } catch (e) {
-    notes.push(`escort-backstop failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`escort-backstop failed: ${errText(e)}`);
     console.error(`${tag} standing escort-backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5902,7 +5909,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const recon = await lib.reconcileSwallowedEscalations(db);
     if (recon.reEmitted.length) notes.push(`reconciled → re-emitted ${recon.reEmitted.length} swallowed escalation(s): ${recon.reEmitted.join(", ")}`);
   } catch (e) {
-    notes.push(`reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`reconcile failed: ${errText(e)}`);
     console.error(`${tag} standing escalation reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5915,7 +5922,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (recon.cooled) notes.push(`backlog cooldown → skipped ${recon.cooled} signature(s) recently reconciled`);
     if (recon.scanned && !recon.enqueued.length && !recon.escalated.length) notes.push(`backlog: ${recon.scanned} open, all covered`);
   } catch (e) {
-    notes.push(`backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`backlog reconcile failed: ${errText(e)}`);
     console.error(`${tag} standing backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5928,7 +5935,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (cov.queued.length) notes.push(`re-verify → queued ${cov.queued.length} spec-test re-run(s): ${cov.queued.join(", ")}`);
     else if (cov.scanned) notes.push(`re-verify: ${cov.scanned} shipped, all fresh (${cov.skippedFresh} within window)`);
   } catch (e) {
-    notes.push(`re-verify sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`re-verify sweep failed: ${errText(e)}`);
     console.error(`${tag} standing re-verify sweep failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5941,7 +5948,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (rgn.escalated.length) notes.push(`regression loop-guard → escalated ${rgn.escalated.length}: ${rgn.escalated.join(", ")}`);
     if (rgn.scanned && !rgn.enqueued.length && !rgn.escalated.length) notes.push(`regression backlog: ${rgn.scanned} unresolved, all covered`);
   } catch (e) {
-    notes.push(`regression backlog reconcile failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`regression backlog reconcile failed: ${errText(e)}`);
     console.error(`${tag} standing regression backlog reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5954,7 +5961,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (triage.escalated.length) notes.push(`needs-attention → escalated ${triage.escalated.length} to you: ${triage.escalated.join(", ")}`);
     if (triage.scanned && !triage.rerun.length && !triage.escalated.length) notes.push(`needs-attention: ${triage.scanned} parked, all triaged`);
   } catch (e) {
-    notes.push(`needs-attention triage failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`needs-attention triage failed: ${errText(e)}`);
     console.error(`${tag} standing needs-attention triage failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5974,7 +5981,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (route.backstopped.length) notes.push(`park route → backstop escalated ${route.backstopped.length}: ${route.backstopped.join(", ")}`);
     if (route.alarmed.length) notes.push(`park route → ALARM (>70 min) on ${route.alarmed.length}: ${route.alarmed.join(", ")}`);
   } catch (e) {
-    notes.push(`park route failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`park route failed: ${errText(e)}`);
     console.error(`${tag} standing park route failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5983,7 +5990,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     if (fixes.fixQueued.length) notes.push(`fix-escort → queued ${fixes.fixQueued.length}: ${fixes.fixQueued.join(", ")}`);
     if (fixes.escalated.length) notes.push(`fix loop-guard → escalated ${fixes.escalated.length}: ${fixes.escalated.join(", ")}`);
   } catch (e) {
-    notes.push(`fix-escort failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`fix-escort failed: ${errText(e)}`);
     console.error(`${tag} standing fix-escort failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -5993,7 +6000,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const init = await initiatePlatformSpecs(job, tag);
     notes.push(init);
   } catch (e) {
-    notes.push(`init failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`init failed: ${errText(e)}`);
     console.error(`${tag} standing init failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -6003,7 +6010,7 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const supervise = await superviseRepairDismissals(job, tag);
     notes.push(supervise);
   } catch (e) {
-    notes.push(`repair-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`repair-supervise failed: ${errText(e)}`);
     console.error(`${tag} standing repair-supervise failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
@@ -6013,21 +6020,21 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     const groom = await groomBoard(job, tag, backstopAdvancedSlugs);
     notes.push(groom);
   } catch (e) {
-    notes.push(`groom failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`groom failed: ${errText(e)}`);
     console.error(`${tag} standing groom failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // #10 — supervise Reese's open spec-drift findings: confirm + flip ✅ the genuinely-shipped phases.
     notes.push(await runSpecDriftSupervision(job, tag));
   } catch (e) {
-    notes.push(`drift-supervise failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`drift-supervise failed: ${errText(e)}`);
     console.error(`${tag} standing drift-supervise failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     const watch = await lib.postPlatformWatchUpdate(db);
     notes.push(watch.posted ? "posted board watch update" : `no board post (${watch.reason})`);
   } catch (e) {
-    notes.push(`watch failed: ${e instanceof Error ? e.message : String(e)}`);
+    notes.push(`watch failed: ${errText(e)}`);
     console.error(`${tag} standing watch failed (continuing):`, e instanceof Error ? e.message : e);
   }
   // Post a human-readable recap of THIS standing pass to #directors — what Ada set up — so the board reflects
@@ -6106,7 +6113,7 @@ async function reconcileMilestoneSequence(job: Job, tag: string): Promise<string
           const { setSpecBlockers } = await import("../src/lib/specs-table");
           await setSpecBlockers(job.workspace_id, v.slug, merged);
         } catch (blkErr) {
-          console.error(`${tag} sequence: failed to persist Blocked-by for ${v.slug} (skipping hold): ${blkErr instanceof Error ? blkErr.message : String(blkErr)}`);
+          console.error(`${tag} sequence: failed to persist Blocked-by for ${v.slug} (skipping hold): ${errText(blkErr)}`);
           continue;
         }
       }
@@ -6173,7 +6180,7 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
     card = got?.card ?? null;
   } catch (e) {
     // A transient read failure must not fail/park the build — requeue and re-evaluate next tick.
-    return { ok: false, disposition: "requeue", reason: `claim-gate: getSpec(${slug}) threw — ${e instanceof Error ? e.message : String(e)}; requeued to re-evaluate` };
+    return { ok: false, disposition: "requeue", reason: `claim-gate: getSpec(${slug}) threw — ${errText(e)}; requeued to re-evaluate` };
   }
 
   // ── 1) AUTHORED ── the spec has a live public.specs row with phases (defense-in-depth; the flow-fix
@@ -6451,7 +6458,7 @@ async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<s
             authored.push(slug);
           } catch (e) {
             failed = true;
-            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${errText(e)}`);
             break;
           }
         }
@@ -6584,7 +6591,7 @@ async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<s
             authoredSplits.push(slug);
           } catch (e) {
             splitFailed = true;
-            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
+            console.warn(`${tag} groom ${c.slug} → split card ${slug} DB author failed: ${errText(e)}`);
             break;
           }
         }
@@ -7269,7 +7276,7 @@ async function runPlatformDirectorJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: `escalate → routed ${t.kind} to CEO inbox: ${reason}`.slice(-2000) });
     console.log(`${tag} escalate → ${verdict || "no verdict"} (routed to CEO)`);
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   } finally {
     if (investWt) sh("git", ["worktree", "remove", "--force", investWt]); // clean up the branch-review worktree
@@ -7594,7 +7601,7 @@ async function runGrowthDirectorJob(job: Job) {
             }
             activations.push(`v${authored.version} (${authored.policyId.slice(0, 8)})`);
           } catch (e) {
-            const err = e instanceof Error ? e.message : String(e);
+            const err = errText(e);
             await update(job.id, { status: "needs_attention", error: `iteration_policies activation failed: ${err}`, log_tail: `auto-approve OK but activation FAILED: ${err}`.slice(-2000) });
             console.warn(`${tag} iteration_policies activation FAILED: ${err}`);
             return;
@@ -7705,7 +7712,7 @@ async function runGrowthDirectorJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: `escalate → routed ${t.kind} to CEO inbox: ${reason}`.slice(-2000) });
     console.log(`${tag} escalate → ${verdict || "no verdict"} (routed to CEO)`);
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -7908,7 +7915,7 @@ async function runDirectorBounceBackJob(job: Job) {
             await markNewSpecInReview(job.workspace_id, sslug, "planned", "director:platform", `bounce-back split — from ${slug}`, String(s.markdown));
             authoredSplits.push(sslug);
           } catch (e) {
-            console.warn(`${tag} groom bounce-back ${slug} → split card ${sslug} DB author failed: ${e instanceof Error ? e.message : String(e)}`);
+            console.warn(`${tag} groom bounce-back ${slug} → split card ${sslug} DB author failed: ${errText(e)}`);
           }
         }
         const closed = await closeOutSpecForFold(job.workspace_id, slug);
@@ -8153,7 +8160,7 @@ async function runDirectorBounceBackJob(job: Job) {
 
     await update(job.id, { status: "failed", error: `bounce-back: unknown lane "${lane}"` });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -8479,14 +8486,14 @@ async function applyPendingSupabaseMigrationsViaPgClient(
   try {
     cs = poolerConnectionString();
   } catch (e) {
-    return { code: 1, out: "", err: `pooler connection string unavailable: ${e instanceof Error ? e.message : String(e)}` };
+    return { code: 1, out: "", err: `pooler connection string unavailable: ${errText(e)}` };
   }
   const client = new Client({ connectionString: cs });
   const lines: string[] = [];
   try {
     await client.connect();
   } catch (e) {
-    return { code: 1, out: "", err: `pgClient connect failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { code: 1, out: "", err: `pgClient connect failed: ${errText(e)}` };
   }
   try {
     await client.query(`create schema if not exists supabase_migrations`);
@@ -8534,14 +8541,14 @@ async function applyPendingSupabaseMigrationsViaPgClient(
           }
           lines.push(probe.ran > 0 ? `✓ ${f} (probe: ${probe.ran} object(s))` : `✓ ${f} (data-only — no DDL probe)`);
         } catch (e) {
-          const msg = `post-apply probe error: ${e instanceof Error ? e.message : String(e)}`;
+          const msg = `post-apply probe error: ${errText(e)}`;
           lines.push(`✗ ${f}: ${msg}`);
           return { code: 1, out: lines.join("\n"), err: msg };
         }
         n++;
       } catch (e) {
         try { await client.query("rollback"); } catch { /* connection may already be aborted */ }
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         lines.push(`✗ ${f}: ${msg}`);
         return { code: 1, out: lines.join("\n"), err: msg };
       }
@@ -8594,7 +8601,7 @@ async function executeApprovedActions(job: Job, cwd: string): Promise<{ actions:
       }
     } catch (e) {
       a.status = "failed";
-      a.result = e instanceof Error ? e.message : String(e);
+      a.result = errText(e);
     }
     done.push(`${a.summary} → ${a.status}`);
   }
@@ -8672,7 +8679,7 @@ async function closeOutSpecForFold(workspaceId: string, slug: string): Promise<{
     const { markRemainingPhasesShipped } = await import("../src/lib/specs-table");
     flipped = await markRemainingPhasesShipped(workspaceId, slug);
   } catch (e) {
-    return { ok: false, error: `markRemainingPhasesShipped failed: ${e instanceof Error ? e.message : String(e)}`, flipped };
+    return { ok: false, error: `markRemainingPhasesShipped failed: ${errText(e)}`, flipped };
   }
   const { error } = await db.rpc("enqueue_fold", { p_workspace: workspaceId, p_slug: slug, p_user: null });
   if (error) return { ok: false, error: `enqueue_fold failed: ${error.message}`, flipped };
@@ -8810,7 +8817,7 @@ async function runPlanJob(job: Job) {
     materializedGoalPath = abs.startsWith(`${wt}/`) ? abs.slice(wt.length + 1) : abs; // worktree-relative for the prompt
     console.log(`${tag} materialized goal ${goalSlug} → ${materializedGoalPath} for grounding`);
   } catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
+    const why = errText(e);
     await update(job.id, {
       status: "failed",
       error: `materializeGoal failed for ${goalSlug}: ${why}`,
@@ -8986,7 +8993,7 @@ async function runPlanJob(job: Job) {
           rebuildMilestoneMap();
           console.log(`${tag} materialized ${toCreate.size} missing milestone(s) from the approved decomposition: ${[...toCreate.keys()].map((p) => `M${p}`).join(", ")}`);
         } catch (e) {
-          console.error(`${tag} milestone materialization failed (specs will fail the unresolved-milestone gate): ${e instanceof Error ? e.message : String(e)}`);
+          console.error(`${tag} milestone materialization failed (specs will fail the unresolved-milestone gate): ${errText(e)}`);
         }
       }
     }
@@ -9329,7 +9336,7 @@ async function runPlanJob(job: Job) {
       } catch (e) {
         // Treat a getSpec failure as missing — refusing to queue is the safe default; the planner-gate
         // failure line names the slug, the owner can re-plan once the underlying DB hiccup clears.
-        console.error(`${tag} getSpec(${s.slug}) threw: ${e instanceof Error ? e.message : String(e)} — treating as missing`);
+        console.error(`${tag} getSpec(${s.slug}) threw: ${errText(e)} — treating as missing`);
         missingSlugs.push(s.slug);
       }
     }
@@ -9463,7 +9470,7 @@ async function reEnqueueFoldIfPending(workspaceId: string, tag: string): Promise
     });
     console.log(`${tag} ↻ re-enqueued a fold-batch — pending_folds rows arrived during this job (snapshot-race sweep)`);
   } catch (e) {
-    console.warn(`${tag} re-enqueue fold errored: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`${tag} re-enqueue fold errored: ${errText(e)}`);
   }
 }
 
@@ -9601,17 +9608,17 @@ async function runFoldQueueReaperJob(): Promise<void> {
       for (const workspaceId of workspaceIds) {
         await sweepStrandedFolds(workspaceId).catch((e) => {
           console.warn(
-            `[fold-reaper:${workspaceId.slice(0, 8)}] stranded-fold pass errored (continuing): ${e instanceof Error ? e.message : String(e)}`,
+            `[fold-reaper:${workspaceId.slice(0, 8)}] stranded-fold pass errored (continuing): ${errText(e)}`,
           );
         });
       }
     } catch (e) {
       console.warn(
-        `[fold-reaper] stranded-fold workspace enumeration failed (continuing): ${e instanceof Error ? e.message : String(e)}`,
+        `[fold-reaper] stranded-fold workspace enumeration failed (continuing): ${errText(e)}`,
       );
     }
   } catch (e) {
-    console.error("[fold-reaper] sweep errored (continuing):", e instanceof Error ? e.message : String(e));
+    console.error("[fold-reaper] sweep errored (continuing):", errText(e));
   }
 }
 
@@ -9968,7 +9975,7 @@ async function runFoldJob(job: Job) {
       try {
         await materializeSpec(job.workspace_id, slug, join(wt, ".box"));
       } catch (e) {
-        const why = e instanceof Error ? e.message : String(e);
+        const why = errText(e);
         await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
         // planner-gates-build-queue-on-authored-specs Phase 2 — a missing public.specs row is the
         // silent author-write fallout, not a materializer bug. Park (not fail) with class
@@ -10194,7 +10201,7 @@ async function runGoalFoldJob(job: Job) {
     try {
       goalRow = await getGoal(job.workspace_id, slug);
     } catch (e) {
-      await update(job.id, { status: "failed", error: `goal-fold: getGoal failed for ${slug}: ${e instanceof Error ? e.message : String(e)}` });
+      await update(job.id, { status: "failed", error: `goal-fold: getGoal failed for ${slug}: ${errText(e)}` });
       return;
     }
     if (!goalRow) {
@@ -10239,7 +10246,7 @@ async function runGoalFoldJob(job: Job) {
     try {
       await materializeGoal(job.workspace_id, slug, join(wt, ".box"));
     } catch (e) {
-      const why = e instanceof Error ? e.message : String(e);
+      const why = errText(e);
       await update(job.id, {
         status: "failed",
         error: `materializeGoal failed for ${slug}: ${why}`,
@@ -10453,7 +10460,7 @@ async function runProductSeedJob(job: Job) {
     }
     console.log(`${tag} ✓ ${parsed?.status ?? "(no status)"}`);
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -10535,7 +10542,7 @@ async function postBoardAnswer(
       metadata: { thread_id: threadId, source },
     });
   } catch (e) {
-    console.error(`[board-answer] post-back failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[board-answer] post-back failed: ${errText(e)}`);
   }
 }
 
@@ -10606,7 +10613,7 @@ async function runSpecChatJob(job: Job) {
         console.log(`${tag} materialized existing spec ${groundSlug} for grounding`);
       }
     } catch (e) {
-      console.warn(`${tag} materialize ${groundSlug} for grounding failed (proceeding): ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`${tag} materialize ${groundSlug} for grounding failed (proceeding): ${errText(e)}`);
     }
   }
 
@@ -10722,7 +10729,7 @@ async function runSpecChatJob(job: Job) {
         const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
         await authorSpecRowFromMarkdown(job.workspace_id, slug, content, "planned", { intendedStatusSetBy: "spec-chat" });
       } catch (e) {
-        await failTurn(`DB re-author failed: ${e instanceof Error ? e.message : String(e)}`, logTail);
+        await failTurn(`DB re-author failed: ${errText(e)}`, logTail);
         return;
       }
       await update(job.id, { status: "completed", log_tail: `authored ## Verification to public.specs for ${slug}` });
@@ -10773,7 +10780,7 @@ async function runSpecChatJob(job: Job) {
         await authorSpecRowFromMarkdown(job.workspace_id, slug, content, "planned", { intendedStatusSetBy: "spec-chat" });
       }
     } catch (e) {
-      await failTurn(`DB author failed: ${e instanceof Error ? e.message : String(e)}`, logTail);
+      await failTurn(`DB author failed: ${errText(e)}`, logTail);
       return;
     }
     // Finalize VALIDATION — the authored output is the DB row, so success is confirmed by READING it back:
@@ -10791,7 +10798,7 @@ async function runSpecChatJob(job: Job) {
         return;
       }
     } catch (e) {
-      await failTurn(`DB read-back failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`, logTail);
+      await failTurn(`DB read-back failed for ${slug}: ${errText(e)}`, logTail);
       return;
     }
     // Flip the thread finalized + link the slug, store the session, clear thinking.
@@ -11136,8 +11143,8 @@ async function runTicketImproveJob(job: Job) {
     await setSession({ turn_status: "error", last_error: "The session hit an error before finishing. Try again, or have the owner action this ticket directly." });
     await update(job.id, { status: "failed", error: "improve turn errored with no reply/plan", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await setSession({ turn_status: "error", last_error: e instanceof Error ? e.message : String(e) });
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await setSession({ turn_status: "error", last_error: errText(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -11320,7 +11327,7 @@ async function stampAgentSessionNote(ticketId: string, body: string): Promise<vo
     });
     if (error) console.warn(`[agent-note] insert failed for ${ticketId}: ${error.message}`);
   } catch (e) {
-    console.warn(`[agent-note] insert threw for ${ticketId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[agent-note] insert threw for ${ticketId}: ${errText(e)}`);
   }
 }
 
@@ -11473,7 +11480,7 @@ async function runTicketHandleJob(job: Job) {
       } catch (e) {
         // Never wedge the job on an escalate failure — surface the error for grep-ability. The ticket
         // stays escalatable and the note below still records what happened.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         escalationLine = `Sol rail-hit escalate failed: ${msg}\n`;
         console.warn(`${tag} rail-hit escalate failed for ticket ${ticketId}: ${msg}`);
       }
@@ -11534,7 +11541,7 @@ async function runTicketHandleJob(job: Job) {
         // invariant — a re-dispatched job on the same ticket that already has a live Direction fails
         // here (23505). Fail the job with the DB error so the CS director sees the collision instead
         // of quietly forking two live rows.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: could not persist the direction (${msg}).`);
         await update(job.id, { status: "failed", error: `writeDirection failed: ${msg}`, log_tail: raw.slice(-2000) });
         return;
@@ -11593,7 +11600,7 @@ async function runTicketHandleJob(job: Job) {
             items: outcomeItems,
           });
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = errText(e);
           honorBlockLine = `Sol reply BLOCKED by required-outcomes insert failure: ${msg}. Direction authored; escalated to June (the CS final call).`;
           console.warn(`${tag} ${honorBlockLine}`);
           await update(job.id, {
@@ -11659,7 +11666,7 @@ async function runTicketHandleJob(job: Job) {
           } catch (e) {
             // Validator blew up — fail closed. The message-is-last invariant treats any
             // uncertainty as unverified.
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = errText(e);
             honorBlockLine = `Sol reply BLOCKED by required-outcomes validator: validator threw (${msg}). Direction authored; escalated to June (the CS final call).`;
             console.warn(`${tag} ${honorBlockLine}`);
             await update(job.id, {
@@ -11696,7 +11703,7 @@ async function runTicketHandleJob(job: Job) {
             // Honor step blew up — block the send. A message-is-last invariant is that we NEVER
             // ship a claim we couldn't verify; erroring is the same as unverified from the send
             // gate's perspective.
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = errText(e);
             honorBlockLine = `Sol reply BLOCKED by honor step: honor threw (${msg}). Direction authored; escalated to June (the CS final call).`;
             console.warn(`${tag} ${honorBlockLine}`);
             await update(job.id, {
@@ -11760,7 +11767,7 @@ async function runTicketHandleJob(job: Job) {
           // Fail-open: a probe error means the move guard degrades to no-op; the bait guard
           // still fires. Better than blocking a legitimate reply because a diagnostic read
           // hiccupped.
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = errText(e);
           console.warn(`${tag} move-dead-end guard subscription probe failed (guard falls through): ${msg}`);
         }
         const { assessSolMoveDeadEndRisk } = await import("../src/lib/sol-move-dead-end-guard");
@@ -11872,7 +11879,7 @@ async function runTicketHandleJob(job: Job) {
                   // A failed link does NOT unwind the Direction — the remedy still dispatches on
                   // the ticket's own customer (surface-level fallback), and a human can retry via
                   // June's approve_remedy lane. Surface for grep.
-                  const msg = linkErr instanceof Error ? linkErr.message : String(linkErr);
+                  const msg = errText(linkErr);
                   console.warn(`${tag} sol link_proposal application failed: ${msg}`);
                 }
               }
@@ -11948,7 +11955,7 @@ async function runTicketHandleJob(job: Job) {
               // A failed delivery does NOT unwind the Direction — the direction is durable, the
               // reply/mechanism is the customer-facing side-effect. Surface for grep and complete
               // the job (a human can retry from the Improve tab).
-              const msg = e instanceof Error ? e.message : String(e);
+              const msg = errText(e);
               console.warn(`${tag} first-touch delivery failed (chosen_path=${chosenPath}; Direction still authored): ${msg}`);
             }
             // The journey/workflow is now live on the ticket (its CTA / steps drive subsequent turns
@@ -11963,7 +11970,7 @@ async function runTicketHandleJob(job: Job) {
                 const { superseDirection } = await import("../src/lib/ticket-directions");
                 await superseDirection(db, ticketId, { workspace_id: workspaceId });
               } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
+                const msg = errText(e);
                 console.warn(`${tag} superseDirection after ${chosenPath} launch failed: ${msg}`);
               }
             }
@@ -11991,7 +11998,7 @@ async function runTicketHandleJob(job: Job) {
                 await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
                 console.log(`${tag} journey delivered → ticket closed (reply reopens; journey token carries state)`);
               } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
+                const msg = errText(e);
                 console.warn(`${tag} journey close failed (journey already delivered): ${msg}`);
               }
             }
@@ -12030,7 +12037,7 @@ async function runTicketHandleJob(job: Job) {
                 // Arm failure does NOT unwind the send — Sol's reply already shipped, Direction is
                 // durable. Surface for grep; the customer's reply still reopens the ticket and the
                 // legacy applySolDirection path re-arms it as a fallback.
-                const msg = e instanceof Error ? e.message : String(e);
+                const msg = errText(e);
                 console.warn(`${tag} playbook arm failed (reply already shipped): ${msg}`);
               }
             }
@@ -12048,7 +12055,7 @@ async function runTicketHandleJob(job: Job) {
                   await closeTicketOnResolvingReply(db, { workspace_id: workspaceId, ticket_id: ticketId });
                 } catch (e) {
                   // Close failure does NOT unwind the send — the reply already shipped. Surface for grep.
-                  const msg = e instanceof Error ? e.message : String(e);
+                  const msg = errText(e);
                   console.warn(`${tag} close-on-resolving-reply failed (reply already shipped): ${msg}`);
                 }
               }
@@ -12091,7 +12098,7 @@ async function runTicketHandleJob(job: Job) {
             // A failed spec author does NOT unwind the Direction or the customer reply — the
             // spec is an ADDITIONAL output on top of the customer fix. Surface the error in
             // log_tail so it's grep-able but complete the job.
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = errText(e);
             console.warn(`${tag} portal-error dual-output: spec author failed (customer fix already delivered): ${msg}`);
           }
         }
@@ -12114,7 +12121,7 @@ async function runTicketHandleJob(job: Job) {
             rail: params.reason === "portal_error" ? "portal" : "first_touch",
           });
         } catch (e) {
-          console.warn(`${tag} blocked-reply escalate to June failed: ${e instanceof Error ? e.message : String(e)}`);
+          console.warn(`${tag} blocked-reply escalate to June failed: ${errText(e)}`);
         }
         await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} is complete — reply blocked, escalated to June (the CS final call). ${honorBlockLine}`);
         await update(job.id, {
@@ -12146,7 +12153,7 @@ async function runTicketHandleJob(job: Job) {
           console.warn(`${tag} sol_handled_at stamp failed: ${stampErr.message}`);
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         console.warn(`${tag} sol_handled_at stamp threw: ${msg}`);
       }
 
@@ -12169,8 +12176,8 @@ async function runTicketHandleJob(job: Job) {
     await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: the box session errored with no direction.`);
     await update(job.id, { status: "failed", error: "Sol first-touch errored with no direction", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: ${errText(e)}`);
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -12365,7 +12372,7 @@ async function runEscalationTriageJob(job: Job) {
         console.log(`${tag} ${ticketId.slice(0, 8)} NO-QUORUM (${finalVerdict}) — stays escalated`);
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       try {
         await recordTriageRun(db, {
           id: triageRunId, workspaceId: wsId, jobId: job.id, ticketId, decision: null, verdict: "no_quorum",
@@ -12476,7 +12483,7 @@ async function runSpecTestJob(job: Job) {
           await update(job.id, { status: "needs_attention", needs_attention_class: "spec_row_missing", error: why, log_tail: why.slice(-2000) });
           console.warn(`${tag} parked needs_attention (spec_row_missing) — ${slug} has no public.specs row — aborting before Vera`);
         } else {
-          const why = `materializeSpec failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`;
+          const why = `materializeSpec failed for ${slug}: ${errText(e)}`;
           await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
           console.error(`${tag} ${why} — aborting before Vera (she would read a stale path)`);
         }
@@ -12534,7 +12541,7 @@ async function runSpecTestJob(job: Job) {
             specCheckRepoRoot = branchWt;
           }
         } catch (e) {
-          console.warn(`${tag} branch worktree setup threw → checks against main: ${e instanceof Error ? e.message : String(e)}`);
+          console.warn(`${tag} branch worktree setup threw → checks against main: ${errText(e)}`);
           if (branchWt) removeWorktreeDir(branchWt);
           branchWt = null;
         }
@@ -12575,7 +12582,7 @@ async function runSpecTestJob(job: Job) {
         // re-runnable `error` run (the pre-merge backstop / spec-test cron re-fires, loop-capped) — never a
         // false `fail` that would spawn an unfixable Bo phase. Free the branch worktree first.
         if (branchWt) removeWorktreeDir(branchWt);
-        const why = `deterministic spec-check-runner threw: ${e instanceof Error ? e.message : String(e)}`;
+        const why = `deterministic spec-check-runner threw: ${errText(e)}`;
         console.error(`${tag} ${why}`);
         try {
           const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
@@ -12624,7 +12631,7 @@ async function runSpecTestJob(job: Job) {
       const g = await reflectSpecGreenChecks(job.workspace_id, slug);
       if (g.changed) console.log(`${tag} reflected ${g.greenCount}/${g.total} green checks onto ${slug}.md${g.allGreen ? " (all green)" : ""}`);
     } catch (e) {
-      console.error(`${tag} green-check writeback failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`${tag} green-check writeback failed (non-fatal): ${errText(e)}`);
     }
     // ── SOLO VAULT SECURITY (graduate-vera) — security is its OWN session, no longer fused into spec-test.
     // The spec-test is now deterministic (no Max session), so the pre-merge security review runs as a
@@ -12645,7 +12652,7 @@ async function runSpecTestJob(job: Job) {
         });
         console.log(`${tag} solo Vault security-review: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`);
       } catch (e) {
-        console.error(`${tag} solo-Vault security enqueue failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} solo-Vault security enqueue failed (non-fatal): ${errText(e)}`);
       }
     }
     // Mark THIS spec-test job terminal BEFORE the auto-fold gate runs. fold-guard-live-build (Phase 1)
@@ -12665,7 +12672,7 @@ async function runSpecTestJob(job: Job) {
       const f = await autoFoldVerifiedSpecs(job.workspace_id, db);
       if (f.folded > 0) console.log(`${tag} auto-folded ${f.folded} machine-tested-green spec(s): ${f.foldedSlugs.join(", ")}`);
     } catch (e) {
-      console.error(`${tag} auto-fold gate failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`${tag} auto-fold gate failed (non-fatal): ${errText(e)}`);
     }
     // Regression detector (regression-agent Phase 1): an `issues` run on a SHIPPED spec means a ✅
     // verification no longer holds — a regression (false-✅ / drift). Enqueue a regression review (the
@@ -12689,7 +12696,7 @@ async function runSpecTestJob(job: Job) {
           console.log(`${tag} regression on ${slug} → ${r.enqueued ? `enqueued review (${r.reason})` : `not enqueued (${r.reason})`}`);
         }
       } catch (e) {
-        console.error(`${tag} regression detector failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} regression detector failed (non-fatal): ${errText(e)}`);
       }
     }
     // promote-on-green-merge-gate Phase 2 — Hold-or-fix on red + loop-guard. The auto-merge gate's
@@ -12722,7 +12729,7 @@ async function runSpecTestJob(job: Job) {
             });
           }
         } catch (e) {
-          console.warn(`${tag} could not load spec_phase_checks for external-regression classifier (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+          console.warn(`${tag} could not load spec_phase_checks for external-regression classifier (best-effort): ${errText(e)}`);
         }
         const failingChecks = checks
           .filter((c) => c.verdict === "fail" && c.text)
@@ -12772,12 +12779,12 @@ async function runSpecTestJob(job: Job) {
           }
         }
       } catch (e) {
-        console.error(`${tag} pre-merge fix-spawn failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} pre-merge fix-spawn failed (non-fatal): ${errText(e)}`);
       }
     }
     console.log(`${tag} ✓ ${agent_verdict} — ✅${summary.auto_pass} ✗${summary.auto_fail} 👤${summary.needs_human} ?${summary.inconclusive}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     try {
       // Pre-merge Phase 2: even on a worker-side throw, carry the branch + preview origin from the
       // job row so the run is still attributable to this (slug, branch) for M3's read.
@@ -12836,7 +12843,7 @@ async function fetchAppstleContractForBrief(workspaceId: string, appstleContract
     if (!r.ok) return { status: r.status === 404 ? "NOT_FOUND" : `http_${r.status}` };
     return await r.json().catch(() => null);
   } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    return { error: errText(e) };
   }
 }
 
@@ -13034,11 +13041,11 @@ async function authorMigrationGapSpec(raw: unknown, auditId: string, subId: stri
     try {
       await markNewSpecInReview(workspaceId, slug, "planned", "migration-fix", `code-gap fix spec authored (audit ${auditId})`, markdown);
     } catch (e) {
-      return `gap spec DB author failed: ${e instanceof Error ? e.message : String(e)}`;
+      return `gap spec DB author failed: ${errText(e)}`;
     }
     return `gap spec authored: ${slug} (owner=retention) — commission on Roadmap`;
   } catch (e) {
-    return `gap spec author failed: ${e instanceof Error ? e.message : String(e)}`;
+    return `gap spec author failed: ${errText(e)}`;
   }
 }
 
@@ -13091,7 +13098,7 @@ async function runMigrationFixJob(job: Job) {
           results.push(`${act.summary} → ${act.status}: ${r.detail}`);
         } catch (e) {
           act.status = "failed";
-          act.result = e instanceof Error ? e.message : String(e);
+          act.result = errText(e);
           results.push(`${act.summary} → failed: ${act.result}`);
         }
       }
@@ -13204,7 +13211,7 @@ async function runMigrationFixJob(job: Job) {
     // No recognizable status — surface rather than assume fixed.
     await update(job.id, { status: "needs_attention", error: "migration-fix ended without propose/human_needed", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -13478,11 +13485,11 @@ async function runDeployReviewJob(job: Job) {
     // watch doesn't stay stuck at `in_review` (which would evade the cron's re-evaluation).
     try {
       const { failsafeStampWatchUnsure } = await import("../src/lib/deploy-guardian");
-      await failsafeStampWatchUnsure(db, { jobId: job.id, watchId: inst.watch_id ?? null, workspaceId: job.workspace_id, slug: inst.slug ?? job.spec_slug, reason: `runner threw: ${e instanceof Error ? e.message : String(e)}` });
+      await failsafeStampWatchUnsure(db, { jobId: job.id, watchId: inst.watch_id ?? null, workspaceId: job.workspace_id, slug: inst.slug ?? job.spec_slug, reason: `runner threw: ${errText(e)}` });
     } catch (fsErr) {
       console.error(`${tag} fail-safe on runner catch threw:`, fsErr instanceof Error ? fsErr.message : fsErr);
     }
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -13682,11 +13689,11 @@ async function runMarioJob(job: Job) {
     // applyBoxMario could fire. Fire the fail-safe to guarantee the job doesn't stay stuck in a
     // claimed/building state (which would starve the concurrency-1 lane forever).
     try {
-      await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: `runner threw: ${e instanceof Error ? e.message : String(e)}` });
+      await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: `runner threw: ${errText(e)}` });
     } catch (fsErr) {
       console.error(`${tag} fail-safe on runner catch threw:`, fsErr instanceof Error ? fsErr.message : fsErr);
     }
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -13829,7 +13836,7 @@ async function loadCsDirectorCallBrief(
     parts.push(formatPlaybookTierBrief(evaluations, stats));
   } catch (e) {
     parts.push("");
-    parts.push(`PLAYBOOK EXCEPTION-TIER ELIGIBILITY: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    parts.push(`PLAYBOOK EXCEPTION-TIER ELIGIBILITY: read failed — ${errText(e)}`);
   }
 
   // Phase 2 second-opinion — a supervisor asked for a fresh second look at a prior June review.
@@ -13858,7 +13865,7 @@ async function loadCsDirectorCallBrief(
         parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: not found (may have been deleted).`);
       }
     } catch (e) {
-      parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: read failed — ${e instanceof Error ? e.message : String(e)}`);
+      parts.push(`FIRST JUNE REVIEW ${secondOpinionOfRunId}: read failed — ${errText(e)}`);
     }
   }
 
@@ -13905,14 +13912,14 @@ async function loadCsDirectorCallBrief(
               `  - #${o.order_number}: charged ${d(ledger.saleCents)} · refunded ${d(ledger.refundedCents)} · REFUNDABLE ${d(ledger.refundableCents)}${flags.length ? ` · ${flags.join(" · ")}` : ""}`,
             );
           } catch (e) {
-            parts.push(`  - #${o.order_number}: ledger read failed — ${e instanceof Error ? e.message : String(e)}`);
+            parts.push(`  - #${o.order_number}: ledger read failed — ${errText(e)}`);
           }
         }
       }
     }
   } catch (e) {
     parts.push("");
-    parts.push(`LIVE REFUND LEDGERS: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    parts.push(`LIVE REFUND LEDGERS: read failed — ${errText(e)}`);
   }
 
   // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
@@ -13940,7 +13947,7 @@ async function loadCsDirectorCallBrief(
     }
   } catch (e) {
     parts.push("");
-    parts.push(`RESOLUTION EVENTS LEDGER: read failed — ${e instanceof Error ? e.message : String(e)}`);
+    parts.push(`RESOLUTION EVENTS LEDGER: read failed — ${errText(e)}`);
   }
 
   // Triage_runs row — the solver→skeptic transcripts + no-quorum outcome that produced this call.
@@ -13964,7 +13971,7 @@ async function loadCsDirectorCallBrief(
         parts.push(`TRIAGE RUN ${triageRunId}: not found (may have been deleted).`);
       }
     } catch (e) {
-      parts.push(`TRIAGE RUN ${triageRunId}: read failed — ${e instanceof Error ? e.message : String(e)}`);
+      parts.push(`TRIAGE RUN ${triageRunId}: read failed — ${errText(e)}`);
     }
   }
 
@@ -14146,7 +14153,7 @@ async function runCsDirectorCallJob(job: Job) {
       // failure or a truly unexpected re-throw. The audit row above is the primary trail; a stub-
       // routing failure never rolls back the completed job.
       console.warn(`${tag} applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
-      applyResult = { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      applyResult = { ok: false, reason: errText(e) };
     }
 
     // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
@@ -14502,8 +14509,8 @@ async function runCsDirectorCallJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} verdict=${verdict.decision}`);
   } catch (e) {
-    await stampAgentSessionNote(ticketId, `June's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await stampAgentSessionNote(ticketId, `June's session ${sessShort} failed: ${errText(e)}`);
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -14619,7 +14626,7 @@ async function runPlaybookCompileJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} ${summary.replace(/\n/g, " · ")}`);
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -14866,8 +14873,8 @@ async function runTicketAnalyzeJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} score=${applied.analysis.score}`);
   } catch (e) {
-    await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} failed: ${e instanceof Error ? e.message : String(e)}`);
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await stampAgentSessionNote(ticketId, `Cora's session ${sessShort} failed: ${errText(e)}`);
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -15127,7 +15134,7 @@ async function runPromptReviewJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: summary.slice(-2000) });
     console.log(`${tag} final=${applied.finalDecision}${escalated ? " (safety downgrade — escalated)" : ""}`);
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -15316,7 +15323,7 @@ async function runDeveloperMessageJob(job: Job) {
             try {
               await markNewSpecInReview(job.workspace_id, slug, "planned", "developer-message-center", `authored via developer message center`, content);
             } catch (e) {
-              a.status = "failed"; a.result = `DB author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
+              a.status = "failed"; a.result = `DB author failed: ${errText(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
             }
             let queued = false;
             const wantBuild = !!(a.payload && (a.payload as { queueBuild?: boolean }).queueBuild);
@@ -15350,7 +15357,7 @@ async function runDeveloperMessageJob(job: Job) {
           }
         } catch (e) {
           a.status = "failed";
-          a.result = e instanceof Error ? e.message : String(e);
+          a.result = errText(e);
           notes.push(`${a.summary} → failed: ${a.result}`);
         }
       }
@@ -15541,7 +15548,7 @@ async function runGodModeJob(job: Job) {
       await update(job.id, { status: "completed", log_tail: `god-mode session ${sessionId.slice(0, 8)} disarmed via kill` });
       console.log(`${tag} killed session ${sessionId.slice(0, 8)}`);
     } catch (e) {
-      await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+      await update(job.id, { status: "failed", error: errText(e) });
       console.error(`${tag} kill failed:`, e instanceof Error ? e.message : e);
     }
     return;
@@ -15879,7 +15886,7 @@ async function applySpecStatusActionInline(
         metadata: { auto_applied: true, source: "director-spec-status" },
       });
     } catch (e) {
-      return logInvalid(`back-to-review write failed: ${e instanceof Error ? e.message : String(e)}`);
+      return logInvalid(`back-to-review write failed: ${errText(e)}`);
     }
     return { summary: `Sent ${slug} back to in_review: ${reason}` };
   }
@@ -16041,7 +16048,7 @@ async function applySpecStatusActionInline(
       did.push(`short-circuit=false (cleared)`);
     }
   } catch (e) {
-    return logInvalid(`write failed: ${e instanceof Error ? e.message : String(e)}`);
+    return logInvalid(`write failed: ${errText(e)}`);
   }
   try {
     const { recordDirectorActivity } = await import("../src/lib/director-activity");
@@ -17068,7 +17075,7 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
       ok = r.code === 0;
       resultText = (r.out + r.err).slice(-500);
     } catch (e) {
-      resultText = e instanceof Error ? e.message : String(e);
+      resultText = errText(e);
     }
     a.status = ok ? "done" : "failed";
     a.result = ok ? resultText || "executed" : resultText || "cmd failed";
@@ -17274,7 +17281,7 @@ async function runDirectorCoachJob(job: Job) {
             try {
               await markNewSpecInReview(job.workspace_id, slug, "planned", "director-coach", `authored via director coaching (${thread.director_function})`, String(a.content));
             } catch (e) {
-              a.status = "failed"; a.result = `DB author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
+              a.status = "failed"; a.result = `DB author failed: ${errText(e)}`; notes.push(`${a.summary} → DB author failed`); continue;
             }
             let queued = false;
             if (a.queueBuild === true) {
@@ -17328,7 +17335,7 @@ async function runDirectorCoachJob(job: Job) {
               const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
               await authorSpecRowFromMarkdown(job.workspace_id, slug, String(a.content), "planned", { intendedStatusSetBy: `director:${thread.director_function}` });
             } catch (e) {
-              a.status = "failed"; a.result = `DB re-author failed: ${e instanceof Error ? e.message : String(e)}`; notes.push(`${a.summary} → DB re-author failed`); continue;
+              a.status = "failed"; a.result = `DB re-author failed: ${errText(e)}`; notes.push(`${a.summary} → DB re-author failed`); continue;
             }
             a.status = "done";
             a.result = `updated spec ${slug} in public.specs`;
@@ -17470,7 +17477,7 @@ async function runDirectorCoachJob(job: Job) {
                   notes.push(`Reallocation → ${r.decision.kind}`);
                 } catch (err) {
                   a.status = "failed";
-                  a.result = `allocation pass failed: ${err instanceof Error ? err.message : String(err)}`;
+                  a.result = `allocation pass failed: ${errText(err)}`;
                   notes.push(`${a.summary ?? "Reallocate"} → ${a.result}`);
                 }
               }
@@ -17875,7 +17882,7 @@ async function runDirectorCoachJob(job: Job) {
                       });
                     } catch (e) {
                       a.status = "failed";
-                      a.result = `setStorefrontAvailability failed: ${e instanceof Error ? e.message : String(e)}`;
+                      a.result = `setStorefrontAvailability failed: ${errText(e)}`;
                       notes.push(`${a.summary ?? "Storefront availability"} → ${a.result}`);
                       await rda("availability_toggle_within_crisis_lever_failed", a.result, {
                         rejection: "executor_error",
@@ -17930,7 +17937,7 @@ async function runDirectorCoachJob(job: Job) {
                   }
                 } catch (e) {
                   a.status = "failed";
-                  a.result = `auto_readd flip threw: ${e instanceof Error ? e.message : String(e)}`;
+                  a.result = `auto_readd flip threw: ${errText(e)}`;
                   notes.push(`${a.summary ?? rawType} → ${a.result}`);
                   await rda("auto_readd_swapped_subscribers_within_crisis_cohort_failed", a.result, {
                     rejection: "executor_error",
@@ -17951,7 +17958,7 @@ async function runDirectorCoachJob(job: Job) {
           }
         } catch (e) {
           a.status = "failed";
-          a.result = e instanceof Error ? e.message : String(e);
+          a.result = errText(e);
           notes.push(`${a.summary} → failed: ${a.result}`);
         }
       }
@@ -18249,7 +18256,7 @@ async function surfacePrToOwner(workspaceId: string, prNumber: number, prUrl: st
       lines: [why, prUrl],
     });
   } catch (e) {
-    console.error(`[pr-resolve] surface PR #${prNumber} failed:`, e instanceof Error ? e.message : String(e));
+    console.error(`[pr-resolve] surface PR #${prNumber} failed:`, errText(e));
   }
 }
 
@@ -18637,7 +18644,7 @@ async function loadRepairBrief(instr: { source?: string; signature?: string; tit
       }
     }
   } catch (e) {
-    lines.push(`(brief load degraded: ${e instanceof Error ? e.message : String(e)})`);
+    lines.push(`(brief load degraded: ${errText(e)})`);
   }
   return lines.join("\n");
 }
@@ -18831,7 +18838,7 @@ async function reapStaleSiblingBuildsForSlug(
     }
     return { reaped };
   } catch (e) {
-    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`${tag} slug-scoped sibling reap failed (continuing): ${errText(e)}`);
     return { reaped: 0 };
   }
 }
@@ -18913,7 +18920,7 @@ async function appendSignatureToSpec(slug: string, body: string, signature: stri
     await authorSpecRowFromMarkdown(workspaceId, slug, next, "planned", { intendedStatusSetBy: "repair-agent" });
     return true;
   } catch (e) {
-    console.warn(`[repair] append-signature DB re-author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[repair] append-signature DB re-author failed for ${slug}: ${errText(e)}`);
     return false;
   }
 }
@@ -19046,7 +19053,7 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
       // MissingMachineCheckError case is the specific "Rafa emitted no valid machine check" trigger
       // the runRepairJob retry-once path detects.
       const name = e instanceof Error ? e.name : "Error";
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       console.warn(`[repair] spec DB structured author failed for ${slug}: ${name} — ${msg}`);
       return { authorError: `${name}: ${msg}`, slug };
     }
@@ -19055,7 +19062,7 @@ async function groupOrAuthorRepairSpec(raw: unknown, signature: string, verdict:
     // A non-author path threw (e.g. the sibling-lookup / signature-append leg). Same Phase-3
     // discipline: preserve the message instead of collapsing to null.
     const name = e instanceof Error ? e.name : "Error";
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     console.warn(`[repair] spec author failed: ${name} — ${msg}`);
     return { authorError: `${name}: ${msg}`, slug };
   }
@@ -19102,7 +19109,7 @@ async function resolveRepairErrorRow(
     if (instr.error_event_id) await db.from("error_events").update(patch).eq("id", instr.error_event_id);
     else if (instr.signature) await db.from("error_events").update(patch).eq("signature", instr.signature);
   } catch (e) {
-    console.warn(`[repair] resolve error row failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[repair] resolve error row failed: ${errText(e)}`);
   }
 }
 
@@ -19280,7 +19287,7 @@ async function runRepairJob(job: Job) {
             console.warn(`${tag} retry after MissingMachineCheckError produced no recognized verdict — keeping first failure`);
           }
         } catch (e) {
-          console.warn(`${tag} retry after MissingMachineCheckError threw: ${e instanceof Error ? e.message : String(e)} — keeping first failure`);
+          console.warn(`${tag} retry after MissingMachineCheckError threw: ${errText(e)} — keeping first failure`);
         }
       }
 
@@ -19338,7 +19345,7 @@ async function runRepairJob(job: Job) {
         const got = await getSpecCard(authored.slug, job.workspace_id);
         persistedCard = got?.card ?? null;
       } catch (e) {
-        console.warn(`${tag} verify-after-author: getSpec(${authored.slug}) threw — ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`${tag} verify-after-author: getSpec(${authored.slug}) threw — ${errText(e)}`);
       }
       if (!persistedCard) {
         const authorErr = `authored fix spec [[${authored.slug}]] did not persist to public.specs — silent author-write fallout; do NOT enqueue repair_build (would phantom-complete)`;
@@ -19446,7 +19453,7 @@ async function runRepairJob(job: Job) {
     await resolveRepairErrorRow(instr, `no parseable repair verdict after 2 attempts — parked for human review on the repair feed`);
     await update(job.id, { status: "needs_attention", error: fallbackReason ?? "repair produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -19588,12 +19595,12 @@ async function authorRegressionFixSpec(raw: unknown, regressedSlug: string, sign
     try {
       await markNewSpecInReview(workspaceId, slug, "planned", "regression-agent", `regression-agent fix spec for ${regressedSlug} (signature ${signature})`, markdown);
     } catch (e) {
-      console.warn(`[regression] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[regression] spec DB author failed for ${slug}: ${errText(e)}`);
       return null;
     }
     return { slug, alreadyExists: false };
   } catch (e) {
-    console.warn(`[regression] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[regression] spec author failed: ${errText(e)}`);
     return null;
   }
 }
@@ -19723,7 +19730,7 @@ async function runRegressionJob(job: Job) {
         const { materializeSpec } = await import("../src/lib/build-spec-materializer");
         await materializeSpec(job.workspace_id, regressedSlug, join(REPO_DIR, ".box"));
       } catch (e) {
-        console.warn(`${tag} materializeSpec ${regressedSlug} failed (proceeding — agent will surface needs-human on read): ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`${tag} materializeSpec ${regressedSlug} failed (proceeding — agent will surface needs-human on read): ${errText(e)}`);
       }
     }
     // worker-coaching-loop: append the director's coaching guidance (learnings) to the base prompt.
@@ -19770,7 +19777,7 @@ async function runRegressionJob(job: Job) {
           console.log(`${tag} cleared ${n} check(s) off the human-test queue (dismissed)`);
         }
       } catch (e) {
-        console.error(`${tag} clear-on-dismiss failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} clear-on-dismiss failed (non-fatal): ${errText(e)}`);
       }
       console.log(`${tag} dismissed (${verdict}) → no spec, no re-surface`);
       return;
@@ -19803,7 +19810,7 @@ async function runRegressionJob(job: Job) {
         const { resolveApproverLive } = await import("../src/lib/agents/approval-router");
         approver = await resolveApproverLive(REGRESSION_DIRECTOR_FUNCTION);
       } catch (e) {
-        console.warn(`${tag} approver resolve degraded → CEO: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`${tag} approver resolve degraded → CEO: ${errText(e)}`);
       }
       const autoQueue = approver !== "ceo";
 
@@ -19875,7 +19882,7 @@ async function runRegressionJob(job: Job) {
     // No recognizable verdict after a retry — surface an ACTIONABLE reason (never a bare flag), never assume resolved.
     await update(job.id, { status: "needs_attention", error: fallbackReason ?? "regression review produced no parseable verdict — re-run or review manually", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -20149,7 +20156,7 @@ async function runAgentCoachJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -20419,7 +20426,7 @@ async function runAgentGradeJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -20784,7 +20791,7 @@ async function runDirectorGradeJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -20881,7 +20888,7 @@ async function runMediaBuyerJob(job: Job) {
         cohortTargetCount: instr.cohort_target_count,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       perAccount.push({ account: accountId, productId: null, plan: null, writes: null, error: msg });
       console.error(`${tag} account=${accountId} dispatch threw: ${msg}`);
       continue;
@@ -21022,7 +21029,7 @@ async function runAdCreativeJob(job: Job) {
         });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       console.error(`${tag} in-place regen threw: ${msg}`);
       await update(job.id, { status: "failed", log_tail: msg.slice(-4000) });
     }
@@ -21077,7 +21084,7 @@ async function runAdCreativeJob(job: Job) {
       if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
       return { resultText: run.resultText || "", isError: run.isError };
     } catch (err) {
-      console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`${qcTag} QC dispatch threw: ${errText(err)}`);
       return { resultText: "", isError: true };
     }
   };
@@ -21147,7 +21154,7 @@ async function runAdCreativeJob(job: Job) {
       if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
       return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
     } catch (err) {
-      console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`${authorTag} copy-author dispatch threw: ${errText(err)}`);
       return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
     }
   };
@@ -21189,7 +21196,7 @@ async function runAdCreativeJob(job: Job) {
       if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
       return { resultText: run.resultText || "", isError: run.isError };
     } catch (err) {
-      console.error(`${qcTag} copy-QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
       return { resultText: "", isError: true };
     }
   };
@@ -21220,7 +21227,7 @@ async function runAdCreativeJob(job: Job) {
       log_tail: JSON.stringify(result.stocked).slice(-4000),
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     console.error(`${tag} threw: ${msg}`);
     await update(job.id, { status: "failed", log_tail: msg.slice(-4000) });
   }
@@ -21283,7 +21290,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
         if (run.isError) console.warn(`${qcTag} QC session errored — fail-closed to pass:false`);
         return { resultText: run.resultText || "", isError: run.isError };
       } catch (err) {
-        console.error(`${qcTag} QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`${qcTag} QC dispatch threw: ${errText(err)}`);
         return { resultText: "", isError: true };
       }
     };
@@ -21317,7 +21324,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
         if (run.isError) console.warn(`${authorTag} copy-author session errored — fail-closed to revise trigger`);
         return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
       } catch (err) {
-        console.error(`${authorTag} copy-author dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`${authorTag} copy-author dispatch threw: ${errText(err)}`);
         return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
       }
     };
@@ -21343,7 +21350,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
         if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
         return { resultText: run.resultText || "", isError: run.isError };
       } catch (err) {
-        console.error(`${qcTag} copy-QC dispatch threw: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
         return { resultText: "", isError: true };
       }
     };
@@ -21396,7 +21403,7 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     });
   } catch (err) {
     ok = false;
-    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    detail = `threw: ${errText(err)}`;
     console.error(`${tag} ${detail}`);
     await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
   } finally {
@@ -21449,7 +21456,7 @@ async function runAdCreativeCopyQcJob(job: Job) {
     });
   } catch (err) {
     ok = false;
-    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    detail = `threw: ${errText(err)}`;
     console.error(`${tag} ${detail}`);
     await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
   } finally {
@@ -21514,7 +21521,7 @@ async function runAdReviewFeedbackJob(job: Job) {
     });
   } catch (err) {
     ok = false;
-    detail = `threw: ${err instanceof Error ? err.message : String(err)}`;
+    detail = `threw: ${errText(err)}`;
     console.error(`${tag} ${detail}`);
     await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
   } finally {
@@ -21560,7 +21567,7 @@ async function runMediaBuyerGradeJob(job: Job) {
     });
     console.log(`${tag} ${tail}`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     await update(job.id, { status: "failed", error: `media-buyer-grade threw: ${msg.slice(0, 300)}` });
     console.error(`${tag} threw: ${msg}`);
   }
@@ -21617,7 +21624,7 @@ async function runSensorTrustProbeJob(job: Job) {
         `${tag} ${scopeTag} → band=${result.band} reasons=[${result.reasons.join(",")}] coverage=${result.coverageRatio ?? "n/a"} sample_orders=${result.sampleOrders} persisted=${result.persisted}`,
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       perScope.push({ scope: scopeTag, error: msg });
       console.error(`${tag} ${scopeTag} threw: ${msg}`);
     }
@@ -21690,7 +21697,7 @@ async function runCalibrateMediaBuyerPolicyJob(job: Job) {
         console.log(`${tag} ${scopeTag} → deferred reason=${result.reason} (${result.reasonDetails.join(" | ")})`);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       perScope.push({ scope: scopeTag, error: msg });
       console.error(`${tag} ${scopeTag} threw: ${msg}`);
     }
@@ -21739,7 +21746,7 @@ async function runAdsSupervisorJob(job: Job) {
     console.log(`${tag} ${detail}`);
   } catch (err) {
     ok = false;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     detail = `threw: ${msg}`;
     console.error(`${tag} ${detail}`);
     await update(job.id, { status: "failed", log_tail: detail.slice(-2000) });
@@ -21927,7 +21934,7 @@ async function runImitationQualityReviewJob(job: Job) {
     console.log(`${tag} ${detail}`);
   } catch (err) {
     ok = false;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     detail = `threw: ${msg}`;
     console.error(`${tag} ${detail}`);
     await update(job.id, { status: "failed", error: msg.slice(0, 300), log_tail: detail.slice(-2000) });
@@ -22186,7 +22193,7 @@ async function runCampaignGradeJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -22424,7 +22431,7 @@ async function runGapGradeJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -22525,7 +22532,7 @@ async function runResearchJob(job: Job) {
       (done, total, url) => { void noteJob({ session_note: `Researching (${done + 1}/${total}) ${host(url)} — rendering + chaptering` }); },
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: `capture failed: ${msg}` });
     console.error(`${tag} capture failed: ${msg}`);
     return;
@@ -22657,7 +22664,7 @@ async function runResearchJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -23057,7 +23064,7 @@ async function runDrContentJob(job: Job) {
     await update(job.id, { status: "completed", log_tail: tail.slice(-2000) });
     console.log(`${tag} ✓ ${tail}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     await update(job.id, { status: "failed", error: msg });
     console.error(`${tag} failed: ${msg}`);
   }
@@ -23291,12 +23298,12 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
         return null;
       }
     } catch (e) {
-      console.warn(`[security] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[security] spec DB author failed for ${slug}: ${errText(e)}`);
       return null;
     }
     return { slug, alreadyExists: false };
   } catch (e) {
-    console.warn(`[security] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[security] spec author failed: ${errText(e)}`);
     return null;
   }
 }
@@ -23395,7 +23402,7 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
         const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
         await authorSpecRowFromMarkdown(workspaceId, slug, markdown, "planned", { intendedStatusSetBy: "security-agent" });
       } catch (e) {
-        console.warn(`[security] dep-upgrade spec DB refresh failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`[security] dep-upgrade spec DB refresh failed for ${slug}: ${errText(e)}`);
         return null;
       }
     } else {
@@ -23403,13 +23410,13 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
       try {
         await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`, markdown);
       } catch (e) {
-        console.warn(`[security] dep-upgrade spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`[security] dep-upgrade spec DB author failed for ${slug}: ${errText(e)}`);
         return null;
       }
     }
     return { slug, alreadyExists: !!existing };
   } catch (e) {
-    console.warn(`[security] dep-upgrade spec author failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[security] dep-upgrade spec author failed: ${errText(e)}`);
     return null;
   }
 }
@@ -23433,7 +23440,7 @@ async function routeSecurityFix(
     const { resolveApproverLive } = await import("../src/lib/agents/approval-router");
     approver = await resolveApproverLive(SECURITY_DIRECTOR_FUNCTION);
   } catch (e) {
-    console.warn(`${tag} approver resolve degraded → CEO: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`${tag} approver resolve degraded → CEO: ${errText(e)}`);
   }
   const autoQueue = approver !== "ceo";
 
@@ -23600,7 +23607,7 @@ async function applySecurityVerdictToJob(
         const { reactiveFoldOnGateComplete } = await import("../src/lib/spec-test-runs");
         await reactiveFoldOnGateComplete(job.workspace_id, parentSlug, { reason: `security ${verdict}`, admin: db });
       } catch (e) {
-        console.error(`${tag} reactive fold trigger failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`${tag} reactive fold trigger failed (non-fatal): ${errText(e)}`);
       }
     }
     return;
@@ -23821,7 +23828,7 @@ async function runSecurityReviewJob(job: Job) {
       emittedThisSession,
     });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -23920,12 +23927,12 @@ async function authorOptimizerSpec(raw: unknown, surface: OptimizerSurfaceLite, 
     try {
       await markNewSpecInReview(workspaceId, slug, "planned", "storefront-optimizer", `storefront-optimizer build-or-request for surface ${surface.product_id}:${surface.lander_type}:${surface.audience}`, md);
     } catch (e) {
-      console.warn(`[storefront-optimizer] spec DB author failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[storefront-optimizer] spec DB author failed for ${slug}: ${errText(e)}`);
       return null;
     }
     return { slug, note: `spec authored: ${slug} (owner=growth) — commission on Roadmap` };
   } catch (e) {
-    console.warn(`[storefront-optimizer] spec author failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[storefront-optimizer] spec author failed: ${errText(e)}`);
     return null;
   }
 }
@@ -23975,7 +23982,7 @@ async function runStorefrontOptimizerJob(job: Job) {
       }
     }
   } catch (e) {
-    console.warn(`${tag} blueprint-sweep failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`${tag} blueprint-sweep failed (non-fatal): ${errText(e)}`);
   }
 
   const opt = await import("../src/lib/storefront/optimizer-agent");
@@ -24015,7 +24022,7 @@ async function runStorefrontOptimizerJob(job: Job) {
             act.result = `regenerated candidate #${attempts.length + 1} from ${allNotes.length} note(s)`;
             results.push(`campaign → ${act.result} (re-surfaced for preview)`);
           } catch (e) {
-            act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+            act.status = "failed"; act.result = errText(e);
             results.push(`campaign → regen errored: ${act.result}`);
           }
           continue;
@@ -24067,7 +24074,7 @@ async function runStorefrontOptimizerJob(job: Job) {
           act.result = r.detail;
           results.push(`campaign → ${act.status}: ${r.detail}`);
         } catch (e) {
-          act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+          act.status = "failed"; act.result = errText(e);
           results.push(`campaign → failed: ${act.result}`);
         }
       } else if (act.type === "storefront_offer") {
@@ -24089,7 +24096,7 @@ async function runStorefrontOptimizerJob(job: Job) {
                   .eq("status", "draft");
               }
             } catch (e) {
-              console.warn(`${tag} offer-decline cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+              console.warn(`${tag} offer-decline cleanup failed: ${errText(e)}`);
             }
           }
           act.result = "declined by owner — offer expired, draft experiment removed";
@@ -24123,7 +24130,7 @@ async function runStorefrontOptimizerJob(job: Job) {
           act.result = r.detail;
           results.push(`offer → ${act.status}: ${r.detail}`);
         } catch (e) {
-          act.status = "failed"; act.result = e instanceof Error ? e.message : String(e);
+          act.status = "failed"; act.result = errText(e);
           results.push(`offer → failed: ${act.result}`);
         }
       } else if (act.type === "storefront_build") {
@@ -24303,7 +24310,7 @@ async function runStorefrontOptimizerJob(job: Job) {
                 },
               });
             } catch (e) {
-              console.warn(`${tag} margin-breach escalation insert failed: ${e instanceof Error ? e.message : String(e)}`);
+              console.warn(`${tag} margin-breach escalation insert failed: ${errText(e)}`);
             }
             await update(job.id, { status: "needs_attention", error: "margin floor breach — escalated to Growth + CFO", log_tail: r.detail.slice(-2000) });
             console.warn(`${tag} ESCALATION margin breach — ${r.detail}`);
@@ -24370,7 +24377,7 @@ async function runStorefrontOptimizerJob(job: Job) {
     }
     await update(job.id, { status: "needs_attention", error: "storefront-optimizer ended without a recognizable status", log_tail: raw.slice(-2000) });
   } catch (e) {
-    await update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
   }
 }
@@ -24555,7 +24562,7 @@ async function preCommitSelfVerify(input: {
   } catch (e) {
     // No safety regression: a runner blip (import failure, DB load blip, etc.) falls through to
     // today's behavior — commit proceeds; the existing fix-phase self-heal remains the backstop.
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     return {
       blocked: false,
       ran: false,
@@ -25175,7 +25182,7 @@ async function dispatchJob(job: Job) {
         });
         console.warn(`${tag} parked needs_attention (spec_row_missing) — ${slug} has no public.specs row`);
       } else {
-        const why = `materializeSpec failed: ${e instanceof Error ? e.message : String(e)}`;
+        const why = `materializeSpec failed: ${errText(e)}`;
         await update(job.id, {
           status: "failed",
           error: `cannot materialize spec ${slug} from DB — ${why}`,
@@ -26294,7 +26301,7 @@ async function main() {
       .catch(async (e) => {
         errored = true;
         console.error(`[${job.spec_slug}] failed:`, e);
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         // Local breaker signal (agent-outage-resilience Phase 2): a `claude -p` job that died on a
         // 529/overloaded/timeout is evidence Claude is down — feed the consecutive-failure counter
         // (auto-expires; the status poll is the authoritative external signal). Best-effort.

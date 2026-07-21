@@ -31,6 +31,7 @@
  * double-applies.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import {
   applyAdaDisposition,
   markSpecCardPendingUpgrade,
@@ -281,7 +282,7 @@ export async function applyAdaDispositionDecision(
     });
     return { applied: "upgrade_proposed", ok: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     console.warn(`[spec-dispose] applyAdaDispositionDecision failed for ${candidate.slug}:`, msg);
     return { applied: decision.kind === "upgrade" ? "upgrade_proposed" : decision.kind, ok: false, reason: msg };
   }
