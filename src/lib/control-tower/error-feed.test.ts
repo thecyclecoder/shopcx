@@ -1561,6 +1561,28 @@ test("isTransientAnthropicOverloadError matches AI API error across the 5xx band
   }
 });
 
+// `fraud-generate-summary` (`src/lib/inngest/fraud-detection.ts:174`) throws
+// `Anthropic API error: ${response.status}` — the sibling of the `AI API error:` shape from
+// `src/lib/fraud-detector.ts:704`. Vercel drained an Anthropic 529 as a first-sighting OPEN
+// paged incident (`vercel:752bb49488e5aa72`) because the classifier only matched the older
+// `AI` prefix. The widened alternation covers both.
+test("isTransientAnthropicOverloadError matches the fraud-generate-summary 529 throw shape", () => {
+  assert.equal(
+    isTransientAnthropicOverloadError("Error: Anthropic API error: 529"),
+    true,
+  );
+});
+
+test("isTransientAnthropicOverloadError matches Anthropic API error across the 5xx band", () => {
+  for (const status of ["500", "502", "503", "504", "520", "529"]) {
+    assert.equal(
+      isTransientAnthropicOverloadError(`Error: Anthropic API error: ${status}`),
+      true,
+      `status=${status}`,
+    );
+  }
+});
+
 test("isTransientAnthropicOverloadError matches the throwForAnthropicStatus 'returned 5NN' shape", () => {
   assert.equal(
     isTransientAnthropicOverloadError("AnthropicDependencyError: Anthropic messages returned 529"),
