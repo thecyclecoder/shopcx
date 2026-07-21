@@ -162,6 +162,16 @@ benefit throws that evidence away. Concretely:
 - `proof` — the type of proof to lead with (a customer quote, a clinical study, a satisfaction
   stat). Substitute an equivalent proof point from OUR brief (a real reviewer, a real ingredient
   study) — never quote the competitor's proof text verbatim as if it were ours.
+  **⚠️ CONVERT THE PROOF, NEVER INVENT A NUMBER.** If the competitor's `proof` is a STAT (a `%`, a
+  count, a timeframe, a `4.7-star` rating, `8 out of 10`), do NOT carry their number and do NOT
+  invent a matching one just to keep the proof's punch. Two grounded options only: (a) cite one of
+  OUR REAL `proofStack` numbers — `700,000+ customers`, `15,000+ reviews`, the `30-day money-back
+  guarantee`, or a real award/cert — with `source='proofStack'`; or (b) make the proof QUALITATIVE
+  and drop the number (`a favorite of thousands of coffee lovers`, not `loved by 89%`). Any number
+  that doesn't literally trace to OUR brief (`proofStack` / a real `reviews.byClaim` body / an
+  `ingredients` dosage row) is a `fabricated_number` firewall miss — the exact failure that bounced
+  the Bloom→Amazing Creamer imitation. This is the PROOF twin of the benefit-convert + offer-swap
+  rules: imitate the STRUCTURE, ground every stat in OUR real data or drop it.
 - `offer` — informational context (how the winner framed the ask); the actual offer text you
   write comes from OUR brief's `offer` field per rail 3 / rail 4 rules.
 
