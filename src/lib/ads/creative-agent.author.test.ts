@@ -1220,7 +1220,6 @@ function copyQcVerdict(overrides: Partial<CopyQaVerdict> = {}): CopyQaVerdict {
       no_fabrication: true,
       no_cold_offer: true,
       no_competitor_leak: true,
-      single_promise: true,
       render_ok: true,
     },
     persuasion_score: 7,
@@ -1274,7 +1273,6 @@ test("Phase 1 gate: hard-gate FAIL is NOT eligible even at persuasion_score=10 (
           no_fabrication: true,
           no_cold_offer: true,
           no_competitor_leak: true,
-          single_promise: true,
           render_ok: false,
         },
         persuasion_score: 10,
@@ -1327,7 +1325,6 @@ function copyQcVerdictP3(score: number | null, opts: { hard_gate_pass?: boolean 
       no_fabrication: hardGatePass,
       no_cold_offer: hardGatePass,
       no_competitor_leak: hardGatePass,
-      single_promise: hardGatePass,
       render_ok: hardGatePass,
     },
     persuasion_score: score,
@@ -1380,7 +1377,7 @@ test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gat
   const verdict = copyQcVerdictP3(null, { hard_gate_pass: false });
   const reason = buildMaxQcReviseReason(verdict);
   assert.match(reason, /hard_gates_failed=/);
-  assert.match(reason, /no_fabrication|no_cold_offer|no_competitor_leak|single_promise|render_ok/);
+  assert.match(reason, /no_fabrication|no_cold_offer|no_competitor_leak|render_ok/);
 });
 
 test("Phase 3 loop: Max grades 9/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed; 9 is the new floor)", async () => {

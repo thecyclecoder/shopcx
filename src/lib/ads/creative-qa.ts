@@ -439,8 +439,8 @@ export async function qaCreativeViaBoxSession(
 // Max still forms HIS OWN persuasion judgment; the shared validator only feeds him the SAFETY-rail
 // truth (persuasion stays in the rubric, safety stays deterministic). When Max decides to bounce
 // for a safety reason his hard-gates output MUST cite the same rail names the validator surfaced,
-// so a validator miss and a Max hard-gate fail always talk about the same six categories:
-// `lf8` / `meta_caps` / `no_msrp` / `no_competitor_leak` / `cold_offer_gate` / `single_promise`.
+// so a validator miss and a Max hard-gate fail always talk about the same categories:
+// `lf8` / `meta_caps` / `no_msrp` / `no_competitor_leak` / `cold_offer_gate`.
 //
 // The M1 keystone Node dispatcher (`runAdCreativeCopyQcJob` in scripts/builder-worker.ts) is still
 // being wired up separately — this seam exists so both call sites can pre-compute the validator
@@ -777,7 +777,6 @@ export interface CopyQaVerdict {
     no_fabrication: boolean;
     no_cold_offer: boolean;
     no_competitor_leak: boolean;
-    single_promise: boolean;
     render_ok: boolean;
   };
   /** Advisory 0-10; NULL on a hard-gate fail. */
@@ -828,11 +827,13 @@ export type ParseCopyQaVerdictResult =
   | { kind: "ok"; verdict: CopyQaVerdict }
   | { kind: "parse_error"; reason: string };
 
+// NB: `single_promise` was REMOVED as a hard gate (CEO 2026-07-21) — our hero products are legitimately
+// multi-benefit, so multiple promises are fine as long as each is a REAL product benefit (enforced by the
+// `no_fabrication` claim-trace gate, not a benefit-count cap). See copy-validator.ts for the matching removal.
 const HARD_GATE_KEYS = [
   "no_fabrication",
   "no_cold_offer",
   "no_competitor_leak",
-  "single_promise",
   "render_ok",
 ] as const;
 
@@ -1228,7 +1229,6 @@ export function parseCopyQaVerdict(
         no_fabrication: gateBooleans.no_fabrication,
         no_cold_offer: gateBooleans.no_cold_offer,
         no_competitor_leak: gateBooleans.no_competitor_leak,
-        single_promise: gateBooleans.single_promise,
         render_ok: gateBooleans.render_ok,
       },
       persuasion_score: persuasionScore,
