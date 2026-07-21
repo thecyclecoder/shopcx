@@ -58,9 +58,13 @@ export const refreshCustomerSegmentsCron = inngest.createFunction(
     name: "Refresh customer.segments daily (fan out per workspace)",
     concurrency: [{ limit: 1 }],
     retries: 2,
-    // 11:00 UTC = 6 AM Central daily. Runs before the marketing-text send-tick
-    // and the sms-marketing agent (12:00 UTC) resolve the day's audiences.
-    triggers: [{ cron: "0 11 * * *" }],
+    // 07:00 UTC = 1 AM CST / 2 AM CDT daily — moved earlier into the deep off-peak
+    // window (was 11:00 UTC / 6 AM Central) so this heavy set-based refresh (the
+    // `refresh_customer_segments` RPC — up to ~30s/workspace) lands when DB load is
+    // lowest. Cron is fixed-UTC (no DST shift); 07:00 UTC still resolves the day's
+    // audiences well before the marketing-text send-tick + sms-marketing agent at
+    // 12:00 UTC, so the ordering guarantee is preserved.
+    triggers: [{ cron: "0 7 * * *" }],
   },
   async ({ step }) => {
     const sb = createAdminClient();

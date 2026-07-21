@@ -9,7 +9,7 @@ Recomputes `customers.segments` array for archetype-driven SMS targeting. See PE
 Two functions, fan-out architecture (the cron only dispatches; the per-workspace function does the work):
 
 ### `refresh-customer-segments-cron`
-- **Trigger:** cron `0 11 * * *` (11:00 UTC = 6 AM Central, before the marketing-text send-tick + the sms-marketing agent resolve the day's audiences)
+- **Trigger:** cron `0 7 * * *` (07:00 UTC = 1 AM CST / 2 AM CDT — deep off-peak; moved earlier from 11:00 UTC on 2026-07-21 so this ~56s set-based refresh lands at lowest DB load. Still resolves the day's audiences before the marketing-text send-tick + the sms-marketing agent at 12:00 UTC)
 - **Retries:** 2 · **Concurrency:** `[{ limit: 1 }]`
 - Sends one `segments/refresh-workspace` event per workspace, then probes coverage + heartbeats. That's all — trivial + fast.
 
