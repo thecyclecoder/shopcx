@@ -29,6 +29,7 @@ Daily reconcile sweep that makes the return-refund rail self-healing — rescues
 | `promote_delivered` | tracker says `delivered` or `available_for_pickup` | Compare-and-set the row to `status='delivered'` + `delivered_at`, then fire `returns/process-delivery` — the webhook-missed case (see [[../integrations/easypost]] § Webhooks). **Redriven.** |
 | `escalate_failure` | tracker says `failure` / `error` / `return_to_sender` | Insert `RETURN_SWEEP_UPSTREAM_FAILURE_TITLE` dashboard notification with the tracker detail. **Escalated.** |
 | `escalate_stale` | age ≥ 30d and still in transit | Insert `RETURN_SWEEP_UPSTREAM_STALE_TITLE` — likely carrier-lost. **Escalated.** |
+| `escalate_missing_carrier` | EasyPost call fails with missing-carrier config error | Insert `RETURN_SWEEP_UPSTREAM_MISSING_CARRIER_TITLE` dashboard notification asking the operator to attach the carrier account in the EasyPost dashboard — a permanent configuration gap that blocks every daily sweep until fixed. **Escalated.** |
 | `no_action` | still in transit, age < 30d | Skip until the next sweep. |
 
 This generalises `scripts/returns-spot-check.ts` (single-workspace hardcoded) to every workspace via `lookupTracking(workspaceId, ...)`.
@@ -40,9 +41,17 @@ This generalises `scripts/returns-spot-check.ts` (single-workspace hardcoded) to
 
 Both are covered in `src/lib/inngest/returns-reconcile-sweep.decider.test.ts`.
 
-## Error handling: rate-limit downgrade
+## Error handling: missing-carrier escalation + transient downgrade
 
-When the `lookupTracking` call on Scope 2 fails with an EasyPost rate-limit error, the sweep gracefully skips that return and continues — the next daily run will retry it. To avoid noisy Control Tower error signatures on this expected, self-healing case, an exported helper `isEasyPostRateLimitError(err: unknown): boolean` classifies the caught error by checking if its lowercased message contains `'temporarily rate-limited'`. The catch block branches on this: rate-limited errors log at `console.warn` with the message `[returns-reconcile-sweep] lookupTracking rate-limited for return ${ret.id} (tracking ${ret.tracking_number}) — skipping, next daily run will retry`; all other EasyPost failures (auth broken, SDK exception, unknown 5xx) continue logging at `console.error` so real outages still page. Control flow (skip the return, continue the loop) is unchanged — the cron is self-healing by design. Two test cases in `src/lib/inngest/returns-reconcile-sweep.decider.test.ts` assert the classifier returns true on the EasyPost rate-limit substring and false on an arbitrary 5xx.
+When the `lookupTracking` call on Scope 2 fails, the catch block branches on two error classes:
+
+**Missing-carrier configuration error** (permanent): When EasyPost returns a message containing `'Credentials not found for the specified carrier'` (case-insensitive), the workspace has EasyPost credentials configured but the specific carrier (USPS, UPS, etc.) account is not attached in the EasyPost dashboard. This is a workspace-configuration gap the operator must fix. The sweep detects this via exported helper `isEasyPostMissingCarrierError(err: unknown): boolean`, then escalates ONE dashboard notification per stranded return — naming the order_number, carrier, and tracking_number, and asking the operator to attach that carrier account in the dashboard. Escalation matches the shape of the existing `escalate_stale` and `escalate_failure` paths, so the operator resolves each return once the carrier is attached. Control flow: return (skip that return, continue the loop). The daily sweep will retry it once the operator fixes the configuration.
+
+**Transient failures** (self-healing): When the `lookupTracking` call fails for any other reason (rate-limit, gateway blip, SDK exception, unknown 5xx), the sweep skips that return and continues — the next daily run will retry it. To avoid noisy Control Tower error signatures on these expected, self-healing cases, transient errors log at `console.warn` (not `console.error`) with a message naming the return and reason. The two specific self-healing classes are:
+- Rate-limit errors (EasyPost briefly rate-limits us): classifies via exported helper `isEasyPostRateLimitError(err: unknown): boolean` (checks if lowercased message contains `'temporarily rate-limited'`), logs at warn with the message `[returns-reconcile-sweep] lookupTracking rate-limited for return ${ret.id} (tracking ${ret.tracking_number}) — skipping, next daily run will retry`.
+- All other EasyPost failures: log at warn with the error, skipping the return without paging real outages (the missing-carrier case above is the only EasyPost failure that escalates).
+
+Control flow is identical across both transient classes: skip the return, continue the loop. The cron is self-healing by design. Test cases in `src/lib/inngest/returns-reconcile-sweep.decider.test.ts` cover both classifiers.
 
 ## Produced counts
 
