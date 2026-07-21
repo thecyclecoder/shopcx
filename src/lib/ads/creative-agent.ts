@@ -879,6 +879,12 @@ export type CopyAuthorSessionOutcome =
        *  `max_qc_eligible=false` instead of discarding the whole session — the CEO's rule: never
        *  waste a produced creative. */
       lastAuthorVerdict?: AuthorModeCopy | null;
+      /** always-bin-held-creative-with-flags — the LAST authored caption for ANY exhaustion class
+       *  (unlike `lastAuthorVerdict`, which is Max-safe only). Set after every successful parse and
+       *  never cleared, so stockProduct can bin the creative HELD + flagged for CEO review on a
+       *  firewall / validator / self-score / Max exhaustion alike — never discard a produced creative.
+       *  The `reason` field names what failed (the red flag). Absent only if no attempt ever parsed. */
+      heldCaption?: AuthorModeCopy | null;
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -1630,6 +1636,12 @@ export async function runCopyAuthorSession(
   // exhaustion only surfaces a caption when Max was the block AND the caption is otherwise safe
   // to bin.
   let lastAuthorVerdict: AuthorModeCopy | null = null;
+  // always-bin-held-creative-with-flags — the LAST successfully-parsed caption regardless of which
+  // gate it then failed. Unlike `lastAuthorVerdict` (Max-safe only), this is set after EVERY parse and
+  // NEVER cleared, so on exhaustion of ANY class stockProduct can still bin the creative HELD (flagged,
+  // non-postable) for CEO review instead of discarding 10+ minutes of work. Null only if not one
+  // attempt ever parsed.
+  let lastParsedVerdict: AuthorModeCopy | null = null;
   // copy-author-self-heal (2026-07-17) — the box session to RESUME on the next revise turn. Set from
   // each healthy dispatch's returned sessionId/configDir; cleared to null whenever we must go fresh (a
   // lost session, a dispatch that threw, or one that never established a session). null ⇒ the next turn
@@ -1704,6 +1716,9 @@ export async function runCopyAuthorSession(
       continue;
     }
     const verdict = parsed.verdict;
+    // always-bin-held-creative-with-flags — remember the last authored caption regardless of which gate
+    // it fails below, so exhaustion of ANY class still has a caption to bin HELD for CEO review.
+    lastParsedVerdict = verdict;
     if (verdict.selfScore.total < AUTHOR_SELF_SCORE_FLOOR) {
       lastReason = `self_score_below_floor (total=${verdict.selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR})`;
       lastValidatorMisses = undefined;
@@ -1901,6 +1916,10 @@ export async function runCopyAuthorSession(
     ...(lastMaxCopyQcMissed
       ? { maxCopyQcMissed: true, lastMaxCopyQcVerdict, lastAuthorVerdict }
       : {}),
+    // always-bin-held-creative-with-flags — the last authored caption for ANY exhaustion class, so
+    // stockProduct can bin it HELD + flagged (not just the Max-QC class). Undefined only if no attempt
+    // ever parsed a caption.
+    ...(lastParsedVerdict ? { heldCaption: lastParsedVerdict } : {}),
   };
 }
 
@@ -2311,6 +2330,11 @@ export interface AdCampaignInsertBody {
    *  ran (deterministic mode / kill-switch off / legacy). Bianca's `listReadyToTest` filters
    *  `.not("max_qc_eligible","is",false)` so NULL and TRUE both surface. */
   max_qc_eligible: boolean | null;
+  /** always-bin-held-creative-with-flags — the red-flag payload for a HELD creative (binned after
+   *  exhaustion of any class): `{ gate, reason, human, attempts }`. NULL on a normal (postable)
+   *  insert. Rendered as the "⚠ Held — <human>" banner on the ad detail page. Migration adds the
+   *  `hold_flag jsonb` column. */
+  hold_flag: { gate: string; reason: string; human: string; attempts: number } | null;
 }
 
 /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
@@ -2364,6 +2388,9 @@ export function buildAdCampaignInsertBody(args: {
    *  eligibility. Undefined / null → stamps NULL (deterministic-mode / no dispatcher / legacy);
    *  TRUE → postable; FALSE → binned-but-ineligible. */
   maxQcEligible?: boolean | null;
+  /** always-bin-held-creative-with-flags — the red-flag payload for a HELD creative. Absent on a
+   *  normal insert → stamps NULL. */
+  holdReason?: { gate: string; reason: string; human: string; attempts: number };
 }): AdCampaignInsertBody {
   const explicit = args.conceptTag;
   const conceptTag: AndromedaConceptTag | null =
@@ -2378,6 +2405,7 @@ export function buildAdCampaignInsertBody(args: {
     author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
     concept_tag: conceptTag,
     max_qc_eligible: args.maxQcEligible ?? null,
+    hold_flag: args.holdReason ?? null,
   };
 }
 
@@ -2548,6 +2576,11 @@ async function insertReadyCreative(
      *  kill-switch off / legacy) — Bianca's filter treats NULL identically to TRUE, so today's
      *  byte-for-byte behavior is preserved for those callers. */
     maxQcEligible?: boolean | null;
+    /** always-bin-held-creative-with-flags (CEO 2026-07-21) — when a creative is binned HELD after
+     *  exhaustion (any class), the red-flag payload the detail page renders so the CEO knows which line
+     *  to fix: `{ gate, reason, human, attempts }`. Stored on the campaign `metadata.hold_flag`.
+     *  Absent on a normal (postable) insert. */
+    holdReason?: { gate: string; reason: string; human: string; attempts: number };
     /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
      *  the deterministic whole-pack lane's Treatment-derived Andromeda tag (see
      *  `mapTreatmentToConceptTag`). Threaded straight into `buildAdCampaignInsertBody`, where it
@@ -2666,6 +2699,8 @@ async function insertReadyCreative(
     // verdict, threaded from stockProduct. Absent (deterministic / kill-switch off) → NULL;
     // Bianca's `.not("max_qc_eligible","is",false)` keeps NULL rows postable.
     maxQcEligible: opts?.maxQcEligible ?? null,
+    // always-bin-held-creative-with-flags — the red-flag payload for a HELD creative → metadata.hold_flag.
+    holdReason: opts?.holdReason,
   });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
@@ -3452,14 +3487,31 @@ async function stockProduct(
             // postable list. `outcome.lastAuthorVerdict` is populated by the loop at the
             // Max-fail branch (never populated on firewall / author-self exhaustion — those
             // paths keep discard-and-escalate because the caption isn't claim-safe).
-            const lastAuthorVerdict = isMaxQcExhaustion ? outcome.lastAuthorVerdict ?? null : null;
-            if (isMaxQcExhaustion && lastAuthorVerdict) {
+            // always-bin-held-creative-with-flags (CEO 2026-07-21) — bin the last-authored caption HELD
+            // + FLAGGED for EVERY exhaustion class (firewall / validator / self-score / Max), not just
+            // Max. Discarding 10+ minutes of work because one line has an ungrounded claim is the wrong
+            // outcome: the CEO wants to SEE the near-miss, read what tripped (the red flag), fix that one
+            // line, and approve (`override_postable`). `max_qc_eligible=false` keeps it strictly
+            // non-postable so Bianca can never auto-publish an unsafe caption; the hold flag rides on the
+            // campaign metadata for the detail page. `heldCaption` is populated for ANY class that ever
+            // parsed a caption; the only fallthrough-discard case now is "no attempt ever parsed".
+            const heldCaption = outcome.heldCaption ?? outcome.lastAuthorVerdict ?? null;
+            const heldFlag = {
+              gate: exhaustionKind, // "firewall" | "max_qc_below_floor" | "author"
+              reason: outcome.reason,
+              human: humanizeReviseReason(outcome.reason),
+              attempts: outcome.attempts,
+            };
+            if (heldCaption) {
               try {
-                const ineligibleCopyPack = authorCopyPack(lastAuthorVerdict);
+                const ineligibleCopyPack = authorCopyPack(heldCaption);
                 const ineligibleInsertOpts = {
-                  audienceTemperature: lastAuthorVerdict.audience_temperature,
-                  authorModeCopy: lastAuthorVerdict,
+                  audienceTemperature: heldCaption.audience_temperature,
+                  authorModeCopy: heldCaption,
                   maxQcEligible: false,
+                  // always-bin-held-creative-with-flags — the red-flag payload the detail page renders
+                  // ("⚠ Held — <human> (<reason>)") so the CEO knows exactly which line to fix.
+                  holdReason: heldFlag,
                   // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
                   // offer-for-offer Phase 1 — OUR real offer is an allowed offer on the cold
                   // gate (an offer-for-offer swap renders it verbatim); a different discount
@@ -3517,17 +3569,17 @@ async function stockProduct(
                   // the "0 produced" the pre-Phase-2 discard reported.
                   ok: !!binCampaignId,
                   reason: binCampaignId
-                    ? `binned_ineligible_max_qc_below_floor: ${outcome.reason}`
-                    : `bin_ineligible_insert_failed: ${outcome.reason}`,
+                    ? `binned_held_${exhaustionKind}: ${outcome.reason}`
+                    : `bin_held_insert_failed: ${outcome.reason}`,
                 });
                 landed = !!binCampaignId;
                 skipped = true;
                 break;
               } catch (err) {
-                // A throw from the ineligible-bin path must not crash the batch — fall through to
+                // A throw from the held-bin path must not crash the batch — fall through to
                 // the discard-and-escalate default below with the driver reason recorded.
-                console.warn("max_qc_below_floor_bin_ineligible_threw", {
-                  workspaceId, productId,
+                console.warn("bin_held_creative_threw", {
+                  workspaceId, productId, exhaustionKind,
                   err: err instanceof Error ? err.message : String(err),
                 });
               }
