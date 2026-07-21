@@ -980,14 +980,17 @@ test("isTransientAppstleFrequencyUpstreamTimeout returns false on empty / nullis
   assert.equal(isTransientAppstleFrequencyUpstreamTimeout("/api/inngest", ""), false);
 });
 
-// ── isForeignAppstleUnskipUpstream500 (error-feed-scope-appstle-unskip-upstream-500-noise) ──
+// ── isForeignAppstleUnskipUpstream500 (error-feed-drop-appstle-unskip-upstream-500-noise) ──
 // `src/lib/appstle.ts` `appstleUnskipOrder` logs `console.error(\`Appstle unskip order error
 // for ${id}:\`, text)` when Appstle's own `unskip-order` endpoint 500s, then returns a
 // structured `{ success: false }` — the dunning-recovery step continues with the failure
 // result. The log-drain line is a foreign-owned upstream 500 the code already handles; the
-// false positive that opened Control Tower `vercel:5959f3e309a7800c`. Classifying it
-// transient auto-resolves a first sighting (recorded, not paged); a chronic Appstle outage
-// would recur within the window and still surface.
+// false positive that repeatedly reopened Control Tower `vercel:5959f3e309a7800c`. Wired
+// in `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP — the log is skipped
+// before it becomes a group so `recordError` never sees it and repeats cannot reopen the
+// vendor-owned incident on the transient-recurrence window (previous behavior). Non-500
+// Appstle unskip failures (Not Found, Unauthorized) and the sibling `Appstle unskip order
+// failed` catch-branch throw carry different markers and stay captured / paged.
 
 test("isForeignAppstleUnskipUpstream500 matches the captured /api/inngest signature", () => {
   assert.equal(
@@ -1092,6 +1095,40 @@ test("isForeignAppstleUnskipUpstream500 returns false on empty / nullish input",
   assert.equal(isForeignAppstleUnskipUpstream500(undefined, undefined), false);
   assert.equal(isForeignAppstleUnskipUpstream500("", ""), false);
   assert.equal(isForeignAppstleUnskipUpstream500("/api/inngest", ""), false);
+});
+
+test("capture-time drop keeps adjacent Appstle unskip failures (Not Found / Unauthorized / unskip order failed)", () => {
+  // The route's `isError` calls this predicate to drop the log BEFORE it becomes a group,
+  // so the same acceptance shape decides what recordError sees. Prove the drop-path intent:
+  // the exact `/api/inngest` Appstle Internal Server Error body is dropped; the three
+  // adjacent messages named in the spec's verification stay kept and reach recordError.
+  const path = "/api/inngest";
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      path,
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    true,
+    "dropped: the exact vendor 500 body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(path, "Appstle unskip order error for 1234567890: Not Found"),
+    false,
+    "kept: 4xx Not Found body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      path,
+      "Appstle unskip order error for 1234567890: Unauthorized",
+    ),
+    false,
+    "kept: 4xx Unauthorized body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(path, "Appstle unskip order failed: Error: upstream_timeout"),
+    false,
+    "kept: sibling catch-branch throw log (different prefix)",
+  );
 });
 
 // ── isForeignEasyPostReturnsSweepRateLimit (error-feed-scope-easypost-returns-sweep-rate-limit-noise) ──
