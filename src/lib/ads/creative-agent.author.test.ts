@@ -854,6 +854,24 @@ test("buildAdCampaignInsertBody: deterministic mode (no authorModeCopy) → conc
   assert.equal(body.concept_tag, null);
   assert.equal(body.author_self_score, null);
   assert.equal(body.audience_temperature, null);
+  // always-bin-held-creative-with-flags — a normal (postable) insert carries NO hold flag.
+  assert.equal(body.hold_flag, null);
+});
+
+test("buildAdCampaignInsertBody: a HELD creative carries the hold_flag red-flag payload (always-bin-held-creative-with-flags)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "cold",
+    maxQcEligible: false,
+    holdReason: { gate: "firewall", reason: "firewall_claim_miss: supportingBenefit:fabricated_number", human: "unverified claim", attempts: 4 },
+  });
+  // Non-postable AND flagged — the CEO sees the red banner and fixes the one line.
+  assert.equal(body.max_qc_eligible, false);
+  assert.deepEqual(body.hold_flag, { gate: "firewall", reason: "firewall_claim_miss: supportingBenefit:fabricated_number", human: "unverified claim", attempts: 4 });
 });
 
 // ── cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 ─────

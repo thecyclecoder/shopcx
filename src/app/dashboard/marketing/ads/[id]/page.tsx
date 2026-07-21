@@ -30,6 +30,9 @@ interface Campaign {
   audience_temperature: "cold" | "warm" | "hot" | null;
   concept_tag: string | null;
   author_self_score: AuthorSelfScore | null;
+  // always-bin-held-creative-with-flags — set when the creative was binned HELD after the copy-author
+  // loop exhausted on any gate. Rendered as the red "⚠ Held" banner so the CEO knows what to fix.
+  hold_flag: { gate: string; reason: string; human: string; attempts: number } | null;
   products?: { title: string } | null;
 }
 
@@ -369,6 +372,24 @@ export default function AdDetailPage() {
 
   return (
     <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
+      {/* always-bin-held-creative-with-flags — the red flag for a HELD (binned-ineligible) creative.
+          The ad is saved but non-postable; the CEO fixes the flagged line + approves (postability override). */}
+      {campaign.hold_flag && (
+        <div className="mb-4 rounded-lg border border-rose-300 bg-rose-50 p-3 dark:border-rose-800 dark:bg-rose-950/40">
+          <div className="flex items-start gap-2">
+            <span className="text-lg leading-none">⚠️</span>
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold text-rose-800 dark:text-rose-200">
+                Held — Max flagged this as non-compliant ({campaign.hold_flag.human})
+              </p>
+              <p className="mt-0.5 break-words text-xs text-rose-700 dark:text-rose-300">{campaign.hold_flag.reason}</p>
+              <p className="mt-1 text-[11px] text-rose-600/80 dark:text-rose-400/80">
+                Saved for review — it won&apos;t publish until you fix the flagged line and approve it below.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="mb-6">
         <Link href="/dashboard/marketing/ads" className="text-xs text-indigo-600 hover:underline">
