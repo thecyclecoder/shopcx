@@ -28,7 +28,25 @@ const DEFAULT_HOST = "aws-1-us-east-1.pooler.supabase.com";
 // Sane defaults for a worker sharing the transaction pooler with the rest of the
 // app: keep the pool small (idle conns cost pool slots) and bound idle + lifetime
 // so a stale connection can't linger past a DB failover.
-const DEFAULT_MAX = 4;
+//
+// The pool is a PER-PROCESS singleton, so the real cost is `max × process count` —
+// and the two runtimes that reach this module scale their process count very
+// differently:
+//
+//   Box worker — a bounded, long-lived process set (MAX_CONCURRENT builds + the
+//     concurrency-1 lanes). 4 is right: the poll loop wants a few warm connections
+//     and the process count can't run away.
+//   Vercel — Fluid instances scale OUT with traffic, each opening its own pool that
+//     shares nothing with its siblings. At max=4 a burst multiplies straight into
+//     the Supavisor queue (pool size 15 at the time of writing, project default 20
+//     for XL compute), which is exactly the "connections stacking up in the pooler
+//     queue during a traffic burst" Supabase alerted on 2026-07-21. A serverless
+//     instance serving a handful of concurrent requests needs ~1 connection, not 4;
+//     capping at 1 turns the burst term from `4 × instances` into `1 × instances`.
+//
+// `VERCEL` is set to "1" on every Vercel runtime (build + all function invocations)
+// and is unset on the box, so this needs no new configuration to stay correct.
+const DEFAULT_MAX = process.env.VERCEL ? 1 : 4;
 const IDLE_TIMEOUT_MS = 10_000;
 const CONN_TIMEOUT_MS = 5_000;
 const MAX_LIFETIME_SECONDS = 300;

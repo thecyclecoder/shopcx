@@ -92,17 +92,60 @@ export function normalizeRun(row: Record<string, unknown>): SpecTestRun {
   };
 }
 
-/** Latest spec-test run per spec slug for a workspace (newest wins) — drives the page + board chip. */
-export async function getLatestSpecTestRuns(workspaceId: string): Promise<Record<string, SpecTestRun>> {
+// ─────────────────────────────────────────────────────────────────────────────
+// Column projection — `transcript` is opt-in.
+//
+// Both whole-table readers below pull `limit(1000)` against a table that holds
+// ~1,378 rows, i.e. they ship the ENTIRE table and then discard all but the newest
+// row per key in JS. That is tolerable only because the table is small — but
+// `transcript` alone is 59% of it by bytes (4,957 kB of 8,420 kB, measured
+// 2026-07-21), and exactly ONE surface renders it: the Developer → Spec Tests page.
+// Every other caller (roadmap board, [[brain-roadmap]] fold gate, pipeline-doctor,
+// spec-green-writeback, the chat + request-fix APIs) reads verdict/summary/checks
+// and never touches the transcript.
+//
+// So the default projection omits it and the one surface that needs it opts in.
+// Measured before this change: 150 ms mean per call, the single most expensive
+// query left on the instance after the whole-board spec read was retired (#2151).
+//
+// ⚠️ On the light projection `normalizeRun` yields `transcript: null` — the column
+// was not selected, NOT proven empty. A new caller that needs the transcript must
+// pass `{ includeTranscript: true }` rather than reading null as "no transcript".
+//
+// Both lists are spelled out in full: supabase-js parses the select string at the
+// TYPE level, so a template literal (`${LIGHT},transcript`) yields a ParserError
+// instead of a row type. Keep them literal — FULL is LIGHT plus `transcript`.
+const RUN_COLUMNS_LIGHT =
+  "id,workspace_id,spec_slug,agent_job_id,agent_verdict,summary,checks,error,run_at,created_at,updated_at,spec_branch,preview_url";
+const RUN_COLUMNS_FULL =
+  "id,workspace_id,spec_slug,agent_job_id,agent_verdict,summary,checks,error,run_at,created_at,updated_at,spec_branch,preview_url,transcript";
+
+/** Opt into the heavy `transcript` column. Omit for every caller that only needs the verdict. */
+export type SpecTestRunReadOpts = { includeTranscript?: boolean };
+
+// NOTE on the `as unknown as Record<string, unknown>[]` casts below: supabase-js resolves the row
+// type from the select string at the TYPE level, and a runtime-chosen projection is necessarily a
+// UNION of two literals — which its parser cannot resolve (it yields `ParserError<"Unexpected
+// input: …">`). Nothing is lost here: both readers immediately hand rows to `normalizeRun`, whose
+// parameter has always been `Record<string, unknown>` precisely because the spec-test agent writes
+// these jsonb fields and they are validated defensively at runtime. `normalizeRun` is the real
+// contract; the inferred row type was never load-bearing on this path.
+
+/** Latest spec-test run per spec slug for a workspace (newest wins) — drives the page + board chip.
+ *  `transcript` is omitted unless `opts.includeTranscript` — see the projection note above. */
+export async function getLatestSpecTestRuns(
+  workspaceId: string,
+  opts?: SpecTestRunReadOpts,
+): Promise<Record<string, SpecTestRun>> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("spec_test_runs")
-    .select("*")
+    .select(opts?.includeTranscript ? RUN_COLUMNS_FULL : RUN_COLUMNS_LIGHT)
     .eq("workspace_id", workspaceId)
     .order("run_at", { ascending: false })
     .limit(1000);
   const map: Record<string, SpecTestRun> = {};
-  for (const raw of (data ?? []) as Record<string, unknown>[]) {
+  for (const raw of (data ?? []) as unknown as Record<string, unknown>[]) {
     const slug = String(raw.spec_slug);
     if (!map[slug]) map[slug] = normalizeRun(raw);
   }
@@ -122,18 +165,21 @@ export async function getLatestSpecTestRuns(workspaceId: string): Promise<Record
  * [[enqueuePreMergeSpecTest]] with `force: true`), so a stuck `issues` verdict on a fixed branch can be
  * kicked from the dashboard without waiting for the standing-pass backstop.
  */
-export async function getPreMergeRuns(workspaceId: string): Promise<SpecTestRun[]> {
+export async function getPreMergeRuns(
+  workspaceId: string,
+  opts?: SpecTestRunReadOpts,
+): Promise<SpecTestRun[]> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("spec_test_runs")
-    .select("*")
+    .select(opts?.includeTranscript ? RUN_COLUMNS_FULL : RUN_COLUMNS_LIGHT)
     .eq("workspace_id", workspaceId)
     .not("spec_branch", "is", null)
     .order("run_at", { ascending: false })
     .limit(1000);
   const seen = new Set<string>();
   const out: SpecTestRun[] = [];
-  for (const raw of (data ?? []) as Record<string, unknown>[]) {
+  for (const raw of (data ?? []) as unknown as Record<string, unknown>[]) {
     const branch = (raw.spec_branch as string) ?? "";
     if (!branch) continue;
     const key = `${String(raw.spec_slug)}::${branch}`;
