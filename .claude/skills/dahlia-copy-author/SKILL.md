@@ -146,19 +146,37 @@ lines.** The point of imitate-then-innovate is that these four slots are what th
 benefit throws that evidence away. Concretely:
 
 - `hook` — the seed for your headline (a stopping-scroll opener the market already validated).
+  **⚠️ PRESERVE THE INTRIGUE — the hook is what stops the scroll, and its CURIOSITY GAP is the proven
+  part.** The winning hook usually runs a "you'd expect X, but you actually need Y" contrarian pattern
+  (`"Your skin doesn't need more serums. It needs collagen."`) — the gap ("not serums? then WHAT?") is
+  the intrigue. Keep that mechanism. **Two hard rules:**
+  (1) **When the competitor's hook is built on a benefit OUR product ALSO delivers (an OVERLAP — check
+  `brief.supportingBenefits` / `brief.leadBenefitWeave`), keep the hook NEARLY VERBATIM.** It's already
+  proven AND already grounded in our product — do NOT needlessly rewrite it. Amazing Creamer literally
+  contains collagen + hyaluronic acid (Skin Health is a listed lead benefit), so `"Your skin doesn't
+  need more serums, it needs collagen"` transfers as-is. Only the CONVERT rule below applies when our
+  product genuinely LACKS the competitor's benefit.
+  (2) **Never flatten a curiosity hook into a literal, obvious product statement.** `"Your skin doesn't
+  need more serums, it needs collagen"` → `"Your coffee doesn't need more sugar, it needs Amazing
+  Creamer"` is a REGRESSION: the second has zero curiosity gap (of course creamer, not sugar) and
+  anchors on the product category instead of the intriguing benefit. **Anchor the hook on the surprising
+  BENEFIT (skin / collagen), not the product category (coffee / creamer)** — the product reveal belongs
+  in the body + the packshot, not the scroll-stopping headline.
 - `framework` — the structural shape (before/after, objection→answer, mechanism→proof, story arc)
   your primary text should mirror.
 - `mechanism_claim` — the *why-it-works* line to reuse in the body (respecting rail 1's
   ingredient-name / dose citation gates when you attach a specific number).
-  **⚠️ CONVERT THE BENEFIT TO OURS.** The competitor's benefit / mechanism may be about a benefit
-  OUR product does NOT have — a collagen brand sells `gut · immunity · hair · nails`, but our creamer's
-  real benefits are `skin · focus · weight` (see `brief.supportingBenefits` + `brief.leadBenefitWeave`
-  — those ARE our product's listed benefits). **Keep the competitor's HOOK SHAPE + FRAMEWORK, but SWAP
-  their benefit for OUR real benefit.** Never carry a benefit our product lacks: if the source ad sells
-  gut health and ours is a focus-and-skin creamer, the ad is about focus and skin, NOT gut. Map their
-  claim to the closest of OUR listed benefits; a benefit you carry from the competitor that isn't in OUR
-  brief is a `firewall_claim_miss` and gets your session bounced. This is the benefit twin of the
-  offer-slot swap (rail 4): imitate the STRUCTURE, ground every claim in OUR product.
+  **⚠️ CONVERT THE BENEFIT TO OURS — but ONLY the benefits we actually LACK.** First check the OVERLAP:
+  is the competitor's benefit ALSO one of OUR listed benefits (`brief.supportingBenefits` /
+  `brief.leadBenefitWeave`)? **If it OVERLAPS, KEEP it** — collagen/skin is Amazing Creamer's own benefit,
+  so keep the collagen/skin claim (and its hook, per the PRESERVE-THE-INTRIGUE rule above). **Only SWAP a
+  benefit our product genuinely does NOT have.** A collagen brand also sells `gut · immunity · hair ·
+  nails` — Amazing Creamer has NONE of those, so those get converted to our real ones (`skin · focus ·
+  weight`), while the shared `collagen/skin` stays. Never carry a benefit our product lacks (a carried
+  `gut`/`immunity` claim is a `firewall_claim_miss` that bounces your session); never needlessly rewrite
+  a benefit we DO share (that discards a proven, grounded angle for a weaker one). This is the benefit
+  twin of the offer-slot swap (rail 4): imitate the STRUCTURE, keep the shared claims, convert only the
+  non-ours ones — ground every claim in OUR product.
 - `proof` — the type of proof to lead with (a customer quote, a clinical study, a satisfaction
   stat). Substitute an equivalent proof point from OUR brief (a real reviewer, a real ingredient
   study) — never quote the competitor's proof text verbatim as if it were ours.
