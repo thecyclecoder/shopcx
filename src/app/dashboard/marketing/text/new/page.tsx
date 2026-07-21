@@ -22,6 +22,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
 import { SmsPhonePreview } from "@/components/sms-phone-preview";
@@ -182,7 +183,7 @@ export default function NewTextCampaignPage() {
       }
       router.push(`/dashboard/marketing/text/${draft.id}`);
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
       setBusy(false);
     }
   }

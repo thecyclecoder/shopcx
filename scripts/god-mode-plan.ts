@@ -25,6 +25,7 @@
  * back-compat; the CEO-grade model uses `decide`.)
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import {
   openDecision,
   getApproval,
@@ -120,6 +121,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`god-mode-plan error: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`god-mode-plan error: ${errText(err)}`);
   process.exit(1);
 });

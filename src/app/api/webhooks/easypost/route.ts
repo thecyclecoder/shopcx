@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import crypto from "crypto";
@@ -255,7 +256,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error: "inngest dispatch failed",
-          detail: err instanceof Error ? err.message : String(err),
+          detail: errText(err),
         },
         { status: 500 },
       );

@@ -8,6 +8,7 @@
 //
 // Prints the rows as JSON to stdout. NEVER mutates — see docs/brain/specs/spec-test-agent.md guardrails.
 import { pgClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 
 // Reject any statement that isn't a lone read. A trailing semicolon is fine; a second statement is not.
 function assertReadOnly(sql: string): string {
@@ -41,4 +42,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); });
+main().catch((e) => { console.error(errText(e)); process.exit(1); });

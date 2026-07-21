@@ -50,6 +50,7 @@
 // Idempotent on (workspace_id, session_id): re-running /recap in the SAME
 // session overwrites the row in place — one row per session.
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
 import { createAdminClient } from "./_bootstrap";
@@ -367,7 +368,7 @@ async function main() {
     filepath = resolved.filepath;
     via = resolved.via;
   } catch (err) {
-    console.error(`[pulse-recap] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[pulse-recap] ${errText(err)}`);
     process.exit(1);
   }
 
@@ -429,7 +430,7 @@ async function main() {
 // the six spec-test regressions on the branch preview.
 if (require.main === module) {
   main().catch((e) => {
-    console.error(`[pulse-recap] ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[pulse-recap] ${errText(e)}`);
     process.exit(1);
   });
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
@@ -108,7 +109,7 @@ export async function POST(
 
     return NextResponse.json({ success: true, theme: activeTheme.name });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: errText(err) }, { status: 500 });
   }
 }
 
@@ -170,6 +171,6 @@ export async function DELETE(
 
     return NextResponse.json({ success: true, removed: true });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: errText(err) }, { status: 500 });
   }
 }

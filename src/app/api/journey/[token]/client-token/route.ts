@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
@@ -62,7 +63,7 @@ export async function GET(
     return NextResponse.json({ ok: true, client_token: result.clientToken });
   } catch (err) {
     return NextResponse.json(
-      { error: "braintree_error", message: err instanceof Error ? err.message : String(err) },
+      { error: "braintree_error", message: errText(err) },
       { status: 500 },
     );
   }

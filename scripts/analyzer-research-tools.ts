@@ -33,6 +33,7 @@
  * Prints the tool's text result to stdout. See docs/brain/specs/cora-gets-readonly-research-power-to-verify-claims-before-grading.md.
  */
 import { readFileSync, writeFileSync, existsSync, statSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "path";
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -164,6 +165,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : String(e));
+  console.error(errText(e));
   process.exit(1);
 });

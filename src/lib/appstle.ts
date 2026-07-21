@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
 import { healOnTouch } from "@/lib/appstle-pricing";
@@ -152,7 +153,7 @@ export async function appstleSubscriptionAction(
     return { success: true };
   } catch (err) {
     console.error(`Appstle ${action} failed:`, err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -297,7 +298,7 @@ export async function appstleUpdateBillingInterval(
         .eq("shopify_contract_id", contractId);
       return { success: true };
     }
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -362,7 +363,7 @@ export async function appstleUpdateNextBillingDate(
     return { success: true };
   } catch (err) {
     console.error("Appstle next billing date update failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -420,7 +421,7 @@ export async function appstleGetUpcomingOrders(
     return { success: true, orders };
   } catch (err) {
     console.error("Appstle get upcoming orders failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -478,7 +479,7 @@ export async function appstleAttemptBilling(
     return { success: true };
   } catch (err) {
     console.error("Appstle attempt billing failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -567,7 +568,7 @@ export async function appstleSkipUpcomingOrder(
     return { success: true };
   } catch (err) {
     console.error("Appstle skip upcoming order failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -593,7 +594,7 @@ export async function appstleUnskipOrder(
     return { success: true };
   } catch (err) {
     console.error("Appstle unskip order failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -672,7 +673,7 @@ export async function appstleSwitchPaymentMethod(
     return { success: true };
   } catch (err) {
     console.error("Appstle switch payment method failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -704,7 +705,7 @@ export async function appstleSendPaymentUpdateEmail(
     return { success: true };
   } catch (err) {
     console.error("Appstle send payment update email failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -761,7 +762,7 @@ export async function appstleAddFreeProduct(
     return { success: true };
   } catch (err) {
     console.error("Appstle add free product failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -794,6 +795,6 @@ export async function appstleSwapProduct(
     return { success: true };
   } catch (err) {
     console.error("Appstle swap failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }

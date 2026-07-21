@@ -34,6 +34,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { initPixel, track } from "@/lib/storefront-pixel";
 import { HeroFeaturedReviews } from "../../_components/HeroFeaturedReviews";
 import type { Review } from "../../_lib/page-data";
@@ -272,7 +273,7 @@ export function CheckoutClient({
         if (cancelled) return;
         setClientToken(client_token);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errText(err);
         setCardError(msg);
         logBlock("client_token", "client_token_failed", msg);
       }
@@ -707,7 +708,7 @@ export function CheckoutClient({
       setSwitchBusy(false);
     } catch (e) {
       setSubmitError("Couldn't switch to Subscribe & Save. Please try again.");
-      logBlock("submit", "subscribe_switch_exception", e instanceof Error ? e.message : String(e));
+      logBlock("submit", "subscribe_switch_exception", errText(e));
       setSwitchBusy(false);
     }
   }
@@ -821,7 +822,7 @@ export function CheckoutClient({
       }, data.order_placed_event_id);
       window.location.href = `/thank-you?order=${data.order_id}`;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
       setSubmitError(msg);
       logBlock("submit", "submit_exception", msg);
       setSubmitting(false);

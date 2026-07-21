@@ -17,6 +17,7 @@
 // fixtures at the end. Run:
 //   npx tsx scripts/_probe-ticket-directions.ts
 import "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "./_bootstrap";
 import { writeDirection, superseDirection, getLiveDirection } from "../src/lib/ticket-directions";
 
@@ -76,7 +77,7 @@ async function main() {
         chosen_path: "stateless",
       });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       raced = /duplicate key value|23505|unique/i.test(msg);
       console.log(`✓ second writeDirection rejected by the partial UNIQUE: ${msg.slice(0, 120)}`);
     }

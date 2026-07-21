@@ -809,7 +809,7 @@ export async function applyMergedMigrations(
       out.push({
         ...m,
         outcome: "apply-failed",
-        error: `read failed: ${(e as Error)?.message ?? String(e)}`,
+        error: `read failed: ${(e as Error)?.message ?? errText(e)}`,
       });
       continue;
     }
@@ -836,7 +836,7 @@ export async function applyMergedMigrations(
             severity: cls.severity,
             matches: cls.matches,
             outcome: "apply-failed",
-            error: (e as Error)?.message ?? String(e),
+            error: (e as Error)?.message ?? errText(e),
           });
         }
       }
@@ -854,7 +854,7 @@ export async function applyMergedMigrations(
       } catch (e) {
         console.error(
           `[migration-drift] onApprovalNeeded hook threw for ${m.file}:`,
-          (e as Error)?.message ?? String(e),
+          (e as Error)?.message ?? errText(e),
         );
       }
     }

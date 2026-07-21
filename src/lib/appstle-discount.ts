@@ -7,6 +7,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 const APPSTLE_BASE = "https://subscription-admin.appstle.com";
 
@@ -53,7 +54,7 @@ export async function removeExistingDiscounts(
       } catch (err) {
         await logAppstleCall({
           url, method: "PUT", body: { contractId, discountId: disc.id }, endpoint: "remove-discount",
-          status: 0, responseBody: String(err), success: false, durationMs: Date.now() - t0,
+          status: 0, responseBody: errText(err), success: false, durationMs: Date.now() - t0,
         });
       }
     }

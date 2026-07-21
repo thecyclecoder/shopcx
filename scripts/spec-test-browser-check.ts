@@ -24,6 +24,7 @@
 //
 // Prints: { pass, role, url, httpStatus, title, assertions:[...], consoleErrors, screenshot, error }
 import { chromium, type Cookie, type ConsoleMessage } from "playwright";
+import { errText } from "../src/lib/error-text";
 import { createClient } from "@supabase/supabase-js";
 import { createChunks, stringToBase64URL } from "@supabase/ssr";
 import { createAdminClient } from "./_bootstrap";
@@ -242,11 +243,11 @@ async function main() {
         if (!error) screenshotPath = path;
         else consoleErrors.push(`screenshot upload failed: ${error.message}`);
       } catch (e) {
-        consoleErrors.push(`screenshot upload threw: ${e instanceof Error ? e.message : String(e)}`);
+        consoleErrors.push(`screenshot upload threw: ${errText(e)}`);
       }
     }
   } catch (e) {
-    runError = e instanceof Error ? e.message : String(e);
+    runError = errText(e);
     pass = false;
   } finally {
     await browser.close().catch(() => {});
@@ -273,6 +274,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(JSON.stringify({ pass: false, error: e instanceof Error ? e.message : String(e) }));
+  console.error(JSON.stringify({ pass: false, error: errText(e) }));
   process.exit(1);
 });

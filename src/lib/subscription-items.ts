@@ -2,6 +2,7 @@
 // All subscription item changes (add, remove, swap, quantity) go through this single module.
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch } from "@/lib/appstle-pricing";
@@ -252,7 +253,7 @@ export async function appstleRemoveLineItem(
     return { success: true };
   } catch (err) {
     console.error("[appstleRemoveLineItem] failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -310,10 +311,10 @@ async function callReplaceVariants(
     console.error("Appstle replaceVariants failed:", err);
     await logAppstleCall({
       url, method: "POST", body, endpoint: "replace-variants-v3",
-      status: 0, responseBody: String(err), success: false,
+      status: 0, responseBody: errText(err), success: false,
       durationMs: Date.now() - t0,
     });
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -679,7 +680,7 @@ export async function subUpdateLineItemPrice(
     return { success: true };
   } catch (err) {
     console.error("Appstle updateLineItemPrice failed:", err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 

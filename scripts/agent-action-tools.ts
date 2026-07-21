@@ -14,6 +14,7 @@
  * See src/lib/agent-action-queue.ts + the agent_action_requests migration.
  */
 import { readFileSync, existsSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "path";
 
 const envPath = resolve(__dirname, "../.env.local");
@@ -104,4 +105,4 @@ async function main() {
   process.exit(2);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); });
+main().catch((e) => { console.error(errText(e)); process.exit(1); });

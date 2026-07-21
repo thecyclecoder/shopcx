@@ -403,7 +403,7 @@ export const metaIterationRun = inngest.createFunction(
           return {
             ms: Date.now() - t0,
             status: "error" as const,
-            error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+            error: errText(err).slice(0, 200),
             attributed: 0,
             skipped_immature: 0,
             skipped_not_published: 0,

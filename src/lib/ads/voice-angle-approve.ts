@@ -26,6 +26,7 @@
  * is handed in.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { inngest } from "@/lib/inngest/client";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { loadAutonomyMap, isAutoApprover } from "@/lib/agents/approval-router";
@@ -252,7 +253,7 @@ export async function executeApproveVoiceAngle(
 
     return { ok: true, ad_campaign_id: adCampaignId };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+    return { ok: false, reason: errText(err).slice(0, 200) };
   }
 }
 

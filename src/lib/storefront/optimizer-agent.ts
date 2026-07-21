@@ -958,7 +958,7 @@ export async function pairPromotedLanderWithAd(
 
     return { ok: true, ad_campaign_id: adCampaignId, angle_id: angle.id, archetype };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+    return { ok: false, reason: errText(err).slice(0, 200) };
   }
 }
 

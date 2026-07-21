@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import { errText } from "@/lib/error-text";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -100,7 +101,7 @@ function SessionDetail() {
         if (alive) setData(d);
       })
       .catch((e) => {
-        if (alive) setErr(e instanceof Error ? e.message : String(e));
+        if (alive) setErr(errText(e));
       })
       .finally(() => {
         if (alive) setLoading(false);

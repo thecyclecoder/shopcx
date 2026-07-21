@@ -35,6 +35,7 @@
  * Spec: docs/brain/specs/bianca-cold-test-recent-purchaser-exclusion Phase 3.
  */
 import "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { getMetaUserToken, getOrCreateRecentPurchaserAudience } from "../src/lib/meta-ads";
 
@@ -206,7 +207,7 @@ function withExclusion(t: Record<string, unknown>, audienceId: string): Record<s
           });
         } catch (e) {
           console.log(
-            `  audience-error cohort=${row.id} workspace=${row.workspace_id} — ${e instanceof Error ? e.message : String(e)} (skipped)`,
+            `  audience-error cohort=${row.id} workspace=${row.workspace_id} — ${errText(e)} (skipped)`,
           );
           continue;
         }

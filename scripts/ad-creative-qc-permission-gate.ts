@@ -26,6 +26,7 @@
  * least-privilege stance of the child it gates.
  */
 import { evaluateQcPermission } from "../src/lib/ads/creative-qc-sandbox";
+import { errText } from "../src/lib/error-text";
 
 function emit(decision: "allow" | "deny", reason: string): never {
   process.stdout.write(
@@ -69,7 +70,7 @@ async function main() {
 
 main().catch((err) => {
   try {
-    emit("deny", `ad-creative-qc gate error: ${err instanceof Error ? err.message : String(err)}`);
+    emit("deny", `ad-creative-qc gate error: ${errText(err)}`);
   } catch {
     process.exit(0);
   }

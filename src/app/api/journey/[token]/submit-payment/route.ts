@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
 import { inngest } from "@/lib/inngest/client";
@@ -85,7 +86,7 @@ export async function POST(
       migrate: true,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errText(e);
     if (session.ticket_id) {
       await admin.from("ticket_messages").insert({
         ticket_id: session.ticket_id,
