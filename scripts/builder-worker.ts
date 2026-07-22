@@ -5616,9 +5616,36 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // This re-runnable standing pass back-fills any such spec's remaining phases to shipped (stamped with the
     // recovered merge SHA), so an already-merged 2-phase spec reaches fully-shipped → fold. Idempotent.
     const { reconcileMergedSpecPhases } = await import("../src/lib/agent-jobs");
-    const mp = await reconcileMergedSpecPhases(db);
+    // merge-gate-verifies-real-phase-checks Phase 2 — inject the box-side verifier: check out the merge SHA
+    // + run the spec's machine checks against it, so the reconciler back-fills ONLY when the merged code is
+    // genuinely present (never a blanket phantom-stamp). Bounded: only specs WITH un-shipped phases reach it.
+    const verifyPhaseAccumulated = async (wsId: string, slug: string, mergeSha: string): Promise<{ ok: boolean; reason: string }> => {
+      const wt = join(BUILDS_DIR, `reconcile-verify-${slug}`);
+      try {
+        removeWorktreeDir(wt);
+        sh("git", ["fetch", "origin"]);
+        const add = sh("git", ["worktree", "add", "--detach", wt, mergeSha]);
+        if (add.code !== 0) return { ok: false, reason: `worktree add failed for ${mergeSha.slice(0, 8)}` };
+        sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
+        const { verifyPhaseAccumulatedOnBranch, defaultLoadChecks, defaultExecutors } = await import("../src/lib/spec-check-runner");
+        const pkg = JSON.parse(readFileSync(resolve(wt, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+        const res = await verifyPhaseAccumulatedOnBranch({
+          workspaceId: wsId, slug,
+          deps: { loadChecks: defaultLoadChecks, executors: defaultExecutors, packageScripts: new Set(Object.keys(pkg.scripts ?? {})), repoRoot: wt },
+        });
+        return { ok: res.accumulated, reason: res.reason };
+      } catch (e) {
+        return { ok: false, reason: `verify threw: ${errText(e)}` };
+      } finally {
+        removeWorktreeDir(wt);
+      }
+    };
+    const mp = await reconcileMergedSpecPhases(db, { verifyPhaseAccumulated });
     if (mp.reconciled.length) {
       notes.push(`merged-phase reconcile → back-filled ${mp.phasesStamped} phase(s) across ${mp.reconciled.length} spec(s): ${mp.reconciled.join(", ")}`);
+    }
+    if (mp.skipped.length) {
+      notes.push(`merged-phase reconcile → REFUSED ${mp.skipped.length} blanket back-fill(s) (phantom-ship guard): ${mp.skipped.slice(0, 3).join(" | ")}`);
     }
   } catch (e) {
     notes.push(`merged-phase reconcile failed: ${errText(e)}`);
@@ -12541,10 +12568,36 @@ async function runSpecTestJob(job: Job) {
             specCheckRepoRoot = branchWt;
           }
         } catch (e) {
-          console.warn(`${tag} branch worktree setup threw → checks against main: ${errText(e)}`);
+          console.warn(`${tag} branch worktree setup threw: ${errText(e)}`);
           if (branchWt) removeWorktreeDir(branchWt);
           branchWt = null;
         }
+      }
+      // merge-gate-verifies-real-phase-checks-not-status-flags Phase 1 — FAIL CLOSED when a PRE-MERGE run
+      // cannot check out its own branch. Verifying a branch-flow spec against `main` (REPO_DIR) under-sees
+      // the branch's code and can GREEN-LIGHT a spec that was never verified on its own branch — the exact
+      // fail-open class behind the phantom-ship (a spec merges spec→goal with un-built phases). No branch
+      // checkout ⇒ NO verdict: record a re-runnable `error` (the pre-merge backstop / spec-test cron re-fires)
+      // instead of a main-based pass. NEVER let an unverifiable branch produce a green promote signal.
+      if (isPreMerge && specCheckRepoRoot === REPO_DIR) {
+        const why = `pre-merge spec-test for ${slug}: could not check out branch ${branch} (worktree setup failed) — refusing to verify against main (would under-verify + could green-light an unbuilt spec). Recording error for re-run.`;
+        console.warn(`${tag} ${why}`);
+        try {
+          const { emitReactiveHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+          const { DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID } = await import("../src/lib/control-tower/registry");
+          await emitReactiveHeartbeat(DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID, { ok: false });
+        } catch { /* best-effort */ }
+        await db.from("spec_test_runs").insert({
+          workspace_id: job.workspace_id, spec_slug: slug, agent_job_id: job.id,
+          agent_verdict: "error", summary: {}, checks: [], transcript: why.slice(-8000), error: why,
+          spec_branch: branch, preview_url: previewOrigin,
+        });
+        await emitTimecardOnceInSession(emittedThisSession, {
+          workspace_id: job.workspace_id, spec_slug: slug, phase_index: null,
+          event_kind: "spec_test_verdict", actor: "vera", metadata: { job_id: job.id, agent_verdict: "error", reason: why },
+        });
+        await update(job.id, { status: "needs_attention", error: why, log_tail: why.slice(-2000) });
+        return;
       }
       try {
         const { runSpecChecks, defaultLoadChecks, defaultExecutors, classifyDeterministicRun } = await import(

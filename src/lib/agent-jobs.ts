@@ -3814,7 +3814,19 @@ export interface MergedSpecPhaseReconcileResult {
   reconciled: string[];
   /** total phases flipped to shipped across all reconciled specs this pass. */
   phasesStamped: number;
+  /** merge-gate-verifies-real-phase-checks Phase 2 — specs whose blanket back-fill was REFUSED (no verifier,
+   *  or the merged code failed the spec's machine checks) so a phantom-ship can never be minted here. */
+  skipped: string[];
 }
+
+/** merge-gate-verifies-real-phase-checks Phase 2 — a box-side verifier (checks out the merge SHA + runs the
+ *  spec's machine checks against it). Injected so the reconciler NEVER stamps a phase shipped it can't prove. */
+export type VerifyPhaseAccumulatedFn = (
+  workspaceId: string,
+  slug: string,
+  mergeSha: string,
+  phasePosition?: number,
+) => Promise<{ ok: boolean; reason: string }>;
 
 /**
  * STANDING-PASS RECOVERY for ship-all-phases-on-squash-merge (post-merge-ships-only-one-phase fix). The
@@ -3857,11 +3869,16 @@ export function partitionPhasesByVerifyVerdict<P extends { position: number }>(
   return { verified, refused };
 }
 
+function isVerifyPhaseDeps(deps: unknown): deps is VerifyPhaseDeps {
+  const d = deps as Partial<VerifyPhaseDeps> | null | undefined;
+  return !!d && typeof d.loadPhaseFlags === "function" && typeof d.loadPhaseGrepChecks === "function" && typeof d.runGitGrepOnBranch === "function";
+}
+
 export async function reconcileMergedSpecPhases(
   adminClient?: Admin,
-  verifyOnBranchOverride?: VerifyPhaseDeps,
+  deps?: { verifyPhaseAccumulated?: VerifyPhaseAccumulatedFn; verifyOnBranchOverride?: VerifyPhaseDeps } | VerifyPhaseDeps,
 ): Promise<MergedSpecPhaseReconcileResult> {
-  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0 };
+  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0, skipped: [] };
   const admin = adminClient || createAdminClient();
   try {
     const { data: jobs } = await admin
@@ -3899,15 +3916,29 @@ export async function reconcileMergedSpecPhases(
         // phase whose verifier reports NOT accumulated is LEFT unshipped (Phase 3's phantom-ship detector
         // will surface it), never blanket-stamped. Best-effort per phase; a verify error reads as NOT
         // accumulated (fail closed).
+        const verifyDeps = isVerifyPhaseDeps(deps) ? deps : deps?.verifyOnBranchOverride;
+        const injectedVerify = !isVerifyPhaseDeps(deps) ? deps?.verifyPhaseAccumulated : undefined;
+        if (!injectedVerify && !verifyDeps) {
+          out.skipped.push(`${slug}: back-fill REFUSED — no branch verifier (fail-closed phantom-ship guard)`);
+          continue;
+        }
         const verdicts = await Promise.all(
-          unshipped.map((p) =>
-            verifyOnBranchOverride
-              ? verifyPhaseAccumulatedOnBranch(j.workspace_id, slug, p.position, mergeSha, verifyOnBranchOverride)
-              : verifyPhaseAccumulatedOnBranch(j.workspace_id, slug, p.position, mergeSha),
-          ),
+          unshipped.map(async (p) => {
+            if (injectedVerify) {
+              const v = await injectedVerify(j.workspace_id, slug, mergeSha, p.position).catch((e) => ({
+                ok: false,
+                reason: `verify threw: ${errText(e)}`,
+              }));
+              return { accumulated: v.ok, reason: v.reason };
+            }
+            return verifyPhaseAccumulatedOnBranch(j.workspace_id, slug, p.position, mergeSha, verifyDeps!);
+          }),
         );
         const { verified, refused } = partitionPhasesByVerifyVerdict(unshipped, verdicts);
         if (refused.length) {
+          out.skipped.push(
+            `${slug}: back-fill REFUSED ${refused.length} un-verified phase(s) (${refused.map((r) => `pos ${r.position}: ${r.reason}`).join("; ")})`,
+          );
           console.warn(
             `[merged-phase-reconcile] ${slug}: refusing to blanket-stamp ${refused.length} un-verified phase(s) — ${refused.map((r) => `pos ${r.position} (${r.reason})`).join("; ")} — Phase-3 phantom-ship detector will surface`,
           );
