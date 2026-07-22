@@ -42,6 +42,7 @@ Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner
 - [[video-skeleton]] (`visionDeconstructFrames` — the video pipeline).
 - `src/app/api/ads/creative-finder/patterns` (`buildPatternMatrix`).
 - `scripts/backfill-concept-tags.ts` — one-time re-vision of legacy library statics to fill `concept_tags` (winners-flow Phase 2c; reads the stored `creative-shots` thumb, idempotent on `concept_tags IS NULL`).
+- `scripts/_backfill-creative-skeletons-wireframe.ts` — ship-time backfill (creative-skeleton-wireframe-extractor-and-backfill-actually-built Phase 3): re-visions legacy rows via `signCreativeShot` + `visionDeconstruct` (PATH A) to populate `elements` / `product_presentation` / `punchiness`, falling back to slot-mapping from `hook`/`mechanism_claim`/`proof`/`offer` when `thumb_path` is missing (PATH B). Idempotent: selector filters on `elements IS NULL` AND every UPDATE re-asserts `.is("elements", null)` (compare-and-set) so a concurrent Phase-2 ingest can never be clobbered. Auto-ledgered by [[ship-time-backfill-detector]] via the `scripts/_backfill-*.ts` regex and drained on the box after merge. Dry-run by default; `--apply` writes.
 - `src/app/api/ads/competitors/[id]/route.ts` PATCH (`setSkeletonDoNotUse` — the CEO's per-AD manual flag from [[../dashboard/research__ads]], flag-a-competitor-ad-do-not-use Phase 2).
 
 ## Related
