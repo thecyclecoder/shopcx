@@ -25401,6 +25401,21 @@ async function dispatchJob(job: Job) {
           log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${acc.reason}`.slice(-2000),
         });
         await chain();
+        // build-completed-with-deferred-pr-must-auto-redrive Phase 1 — a `completed` row + a DEFERRED PR is
+        // a silent dead-end when the chain-continuation has nothing to queue (every `planned` phase is
+        // already stamped built even though its real code isn't on the branch — the phantom-shipped class
+        // the factor-scores-reweight-selection-engine 35-min stall exhibited). The redrive path here
+        // enqueues a fresh build via the sanctioned `queueRoadmapBuild` (owner/blocker/active-build gates
+        // hold; capped at BUILDER_DEFERRED_REDRIVE_MAX/24h so a genuinely-unbuildable spec escalates to Ada
+        // instead of looping). De-duped internally: if the `chain()` above just queued a phase (or any
+        // other build is in-flight), the redrive skips. Never throws.
+        try {
+          const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
+          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, acc.reason, job.id);
+          console.log(`${tag} deferred-redrive: ${outcome.action} — ${outcome.reason}`);
+        } catch (e) {
+          console.error(`${tag} deferred-redrive threw (non-fatal, deferred build remains completed):`, e instanceof Error ? e.message : e);
+        }
         return;
       }
       // ACCUMULATION COMPLETE (last phase / one-shot) → open the (non-draft) PR; the PR + squash-merge action

@@ -9,6 +9,7 @@
  * this is the security boundary. See docs/brain/specs/slack-roadmap-console-run-the-build-console-from-slack.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { inngest } from "@/lib/inngest/client";
 import {
   ACTIVE_STATUSES,
@@ -203,6 +204,183 @@ export async function queueRoadmapBuild(
     .single();
   if (error) return { ok: false, status: 500, error: error.message };
   return { ok: true, job: job as AgentJob, chainPhases: chainPhases || undefined };
+}
+
+// ── Auto-redrive a completed-with-deferred build (build-completed-with-deferred-pr-must-auto-redrive) ──
+
+/** Env override for the deferred-PR redrive cap — a spec that fails accumulation N+ times in 24h escalates
+ * to Ada instead of looping. Mirrors [[../lib/mario.ts]] `MARIO_LOOP_GUARD_MAX_ENV` in shape. */
+export const DEFERRED_REDRIVE_MAX_ENV = "BUILDER_DEFERRED_REDRIVE_MAX";
+const DEFERRED_REDRIVE_DEFAULT_MAX = 3;
+
+/** Read the redrive-count cap — env-overridable, mirrors `readMarioLoopGuardMax`. */
+export function readDeferredRedriveMax(): number {
+  const raw = process.env[DEFERRED_REDRIVE_MAX_ENV];
+  const n = raw != null ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFERRED_REDRIVE_DEFAULT_MAX;
+}
+
+/** Actor slug written to `director_activity.director_function` for redrive rows — mirrors Mario's
+ *  `platform` routing (build reliability is a platform mandate; Ada owns the escalation). */
+const DEFERRED_REDRIVE_DIRECTOR_FUNCTION = "platform";
+
+export interface DeferredRedriveOutcome {
+  action: "redrive" | "escalate" | "skip";
+  reason: string;
+}
+
+/**
+ * `redriveDeferredBuildOrEscalate` — the single decision point invoked at the "PR DEFERRED" completion
+ * of a build lane in `scripts/builder-worker.ts`. A DEFERRED PR means `isSpecAccumulationComplete` (the
+ * merge gate's per-phase real-checks verifier) reported `complete:false`: 1+ phases were stamped built
+ * (build_sha present) but the branch's real files don't carry the phase's code (the phantom-shipped
+ * class the factor-scores-reweight-selection-engine 35-min stall exhibited). A `status='completed'`
+ * row with no follow-up work is a silent dead-end — the chain-continuation (`queueNextChainedPhase`)
+ * only fires when a `planned` phase remains, so a spec whose failing phase is already stamped built
+ * stalls until Mario/M3 happens to catch it.
+ *
+ * Decision:
+ *   - blockers all cleared AND redrive count < cap ⇒ enqueue a fresh build via `queueRoadmapBuild`
+ *     (owner-gated, blocker-gated, active-build-gated — every safety rail already in force).
+ *   - else ⇒ escalate to Ada with a `reclaim_stuck_build` `needs_approval` `build` job naming the
+ *     specific unverified phases so she can investigate.
+ *
+ * Records a `redrive_deferred_build` (or `redrive_deferred_build_escalated`) `director_activity` row
+ * per outcome — this is the durable counter the next invocation reads for the loop-guard. Mirrors
+ * Mario's `mario_fixed` shape.
+ *
+ * De-duped: if a build is already in-flight/queued/awaiting-approval for this spec (another surface
+ * already redrove, or the resume path itself is still active), returns `{action:'skip'}` — never
+ * stacks a redundant redrive.
+ *
+ * Never throws — the caller (a completed build lane) must never fail on an audit blip.
+ */
+export async function redriveDeferredBuildOrEscalate(
+  workspaceId: string,
+  slug: string,
+  unverifiedReason: string,
+  sourceJobId: string,
+): Promise<DeferredRedriveOutcome> {
+  try {
+    const admin = createAdminClient();
+
+    // Dedupe: another surface may already have redriven this spec (e.g. a manual Rebuild tap between
+    // our completion and this call, or a Mario reclaim), or the current resume path opened a fresh
+    // build row. Stacking a redrive on an already-active build would silently double-work.
+    const { data: activeBuild } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .in("status", ["queued", "queued_resume", "claimed", "building", "needs_approval", "needs_input"])
+      .limit(1);
+    if (activeBuild && activeBuild.length) {
+      return { action: "skip", reason: "another build already in-flight for this spec" };
+    }
+
+    // Blocker check — mirrors queueRoadmapBuild's own predicate so the escalate REASON is precise
+    // (blockers-uncleared vs cap-exhausted). Fail closed on a read blip: escalate rather than a
+    // silent loop.
+    let unclearedBlockers: string[] = [];
+    try {
+      const blockers = await getSpecBlockers(slug);
+      unclearedBlockers = blockers
+        .filter((b) => !b.cleared)
+        .map((b) => `${b.slug} (${phaseEmoji(b.status)})`);
+    } catch (e) {
+      unclearedBlockers = [`blocker read failed: ${errText(e)}`];
+    }
+
+    // Redrive-count guard — count prior `redrive_deferred_build` director_activity rows for THIS
+    // spec_slug in the last 24h. At ≥ cap the redrive is SKIPPED and an escalation row is written
+    // instead (mirrors [[../lib/mario.ts]] `readMarioLoopGuardMax` shape).
+    const cap = readDeferredRedriveMax();
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: priorRedrives } = await admin
+      .from("director_activity")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("action_kind", "redrive_deferred_build")
+      .eq("spec_slug", slug)
+      .gte("created_at", since);
+    const priorCount = priorRedrives ?? 0;
+
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+
+    const shouldEscalate = unclearedBlockers.length > 0 || priorCount >= cap;
+    if (shouldEscalate) {
+      const reason = unclearedBlockers.length > 0
+        ? `blockers still uncleared: ${unclearedBlockers.join(", ")}. Unverified phases: ${unverifiedReason}`
+        : `redrive-count guard fired: ${priorCount} prior redrive(s) in 24h ≥ BUILDER_DEFERRED_REDRIVE_MAX=${cap}. Unverified phases: ${unverifiedReason}`;
+      const actionId = `deferred-redrive-escalate-${Date.now()}`;
+      const summary =
+        `Reclaim spec ${slug} — build completed with a DEFERRED PR because phase-accumulation checks failed. ${reason}`.slice(0, 500);
+      const { error: insErr } = await admin.from("agent_jobs").insert({
+        workspace_id: workspaceId,
+        spec_slug: slug,
+        kind: "build",
+        status: "needs_approval",
+        created_by: null,
+        instructions:
+          `Deferred-PR escalation (from build job ${sourceJobId}): the build completed with unverified phases and no auto-redrive path. ${reason}`.slice(0, 4000),
+        pending_actions: [
+          { id: actionId, type: "reclaim_stuck_build", status: "pending", spec_slug: slug, summary },
+        ],
+      });
+      if (insErr) {
+        return { action: "skip", reason: `escalate insert failed: ${insErr.message}` };
+      }
+      await recordDirectorActivity(admin, {
+        workspaceId,
+        directorFunction: DEFERRED_REDRIVE_DIRECTOR_FUNCTION,
+        actionKind: "redrive_deferred_build_escalated",
+        specSlug: slug,
+        reason,
+        metadata: {
+          source_job_id: sourceJobId,
+          unverified_reason: unverifiedReason,
+          uncleared_blockers: unclearedBlockers,
+          prior_count: priorCount,
+          cap,
+        },
+      });
+      return { action: "escalate", reason };
+    }
+
+    // Redrive via the sanctioned enqueue chokepoint — owner-gated, blocker-gated, active-build-gated.
+    // Same owner-lookup shape Mario's `reclaimAndRedrive` uses.
+    const { data: owner, error: ownerErr } = await admin
+      .from("workspace_members")
+      .select("user_id")
+      .eq("workspace_id", workspaceId)
+      .eq("role", "owner")
+      .maybeSingle();
+    if (ownerErr || !owner) {
+      return { action: "skip", reason: `redrive owner lookup failed: ${ownerErr?.message ?? "no workspace owner"}` };
+    }
+    const res = await queueRoadmapBuild(workspaceId, (owner as { user_id: string }).user_id, { slug });
+    if (!res.ok) {
+      return { action: "skip", reason: `queueRoadmapBuild refused: ${res.error}` };
+    }
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: DEFERRED_REDRIVE_DIRECTOR_FUNCTION,
+      actionKind: "redrive_deferred_build",
+      specSlug: slug,
+      reason: `Auto-redrove a build that completed with a DEFERRED PR (attempt ${priorCount + 1}/${cap}). ${unverifiedReason}`,
+      metadata: {
+        source_job_id: sourceJobId,
+        redriven_job_id: res.job?.id ?? null,
+        unverified_reason: unverifiedReason,
+        prior_count: priorCount + 1,
+        cap,
+      },
+    });
+    return { action: "redrive", reason: `redrove build for ${slug} (attempt ${priorCount + 1}/${cap})` };
+  } catch (e) {
+    return { action: "skip", reason: `redriveDeferredBuildOrEscalate threw: ${errText(e)}` };
+  }
 }
 
 // ── Create PR for a build whose branch pushed but `gh pr create` failed (build-recover-pr-create) ──
