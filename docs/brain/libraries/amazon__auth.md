@@ -40,7 +40,12 @@ async function spApiRequest(connectionId: string, marketplaceId: string, method:
 
 ## Gotchas
 
-_None documented._
+- `spApiRequest` is a **generic** SP-API caller (any method/path) — not read-only. It's the write path behind [[../recipes/amazon-listing-copy-update]] (Listings Items API PATCH). Writes need the app's LWA token to carry the relevant SP-API role (e.g. **Product Listing** for listing edits) or the call returns 403.
+- The Listings Items API keys on **seller SKU**, not ASIN — resolve via [[../tables/amazon_asins]] first.
+
+## Recipes
+
+- [[../recipes/amazon-listing-copy-update]] — rewrite a listing's title/bullets/description (prohibited-claim cleanup).
 
 ---
 
