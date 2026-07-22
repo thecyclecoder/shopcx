@@ -1,0 +1,1 @@
+- **A held/bounced creative persists its authored copy + v3 provenance to the draft — not just the score + hold flag** · verified 2026-07-22 · → [[lifecycles/ad-render]] + [[tables/ad_campaigns]]
