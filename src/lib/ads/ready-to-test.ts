@@ -126,9 +126,27 @@ export async function listReadyToTest(
     workspaceId: string;
     productId?: string | null;
     temperature?: "cold" | "warm" | "hot" | null;
+    /**
+     * [[../../../docs/brain/specs/retarget-campaign-warm-hot-mixed-content]]
+     * Phase 2 — a WHITELIST of `audience_temperature` values the read may return.
+     * The retarget rail passes `['warm','hot']` so its replenish sibling can pick
+     * every non-cold ready creative in one call. Precedence: a non-empty
+     * `temperatures` wins; else falls back to the single-value `temperature`
+     * path so the pre-Phase-2 shape is BYTE-IDENTICAL for every existing caller
+     * (Bianca's cold replenish, direct-search route). Values outside the DB
+     * check constraint are ignored, and an empty array is treated as "unset"
+     * (falls back to `temperature`) so a caller can't accidentally read zero
+     * rows by passing `[]`.
+     */
+    temperatures?: ReadonlyArray<"cold" | "warm" | "hot"> | null;
   },
 ): Promise<ListReadyToTestResult> {
-  const { workspaceId, productId = null, temperature = null } = opts;
+  const { workspaceId, productId = null, temperature = null, temperatures = null } = opts;
+  const temperatureWhitelist = Array.isArray(temperatures)
+    ? temperatures.filter(
+        (t): t is "cold" | "warm" | "hot" => t === "cold" || t === "warm" || t === "hot",
+      )
+    : [];
 
   const { data: videoData } = await admin
     .from("ad_videos")
@@ -177,7 +195,17 @@ export async function listReadyToTest(
   // Phase 1 (bianca-route-ready-creatives-by-dahlia-temperature-tag) — when the caller pins a
   // temperature band, restrict at the DB. The null-default preserves the pre-Phase-1 shape byte-
   // identically so untagged / unfiltered reads keep working.
-  if (temperature) campaignsQuery = campaignsQuery.eq("audience_temperature", temperature);
+  //
+  // Phase 2 (retarget-campaign-warm-hot-mixed-content) — when the caller passes a NON-EMPTY
+  // `temperatures` whitelist, restrict via `.in(...)` (the retarget rail passes ['warm','hot']).
+  // A whitelist wins over a single-value `temperature` so a caller doesn't need to null one out
+  // to use the other. An EMPTY / omitted whitelist falls back to the single-value path so every
+  // pre-Phase-2 caller stays byte-identical.
+  if (temperatureWhitelist.length > 0) {
+    campaignsQuery = campaignsQuery.in("audience_temperature", temperatureWhitelist);
+  } else if (temperature) {
+    campaignsQuery = campaignsQuery.eq("audience_temperature", temperature);
+  }
   const { data: campaignData } = await campaignsQuery;
   const campaigns = (campaignData || []) as AdCampaignRow[];
   if (campaigns.length === 0) return { readyToTest: [] };
