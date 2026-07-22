@@ -302,6 +302,60 @@ export async function listAds(
   return (data ?? []).map((r) => mapSummary(r as Record<string, unknown>));
 }
 
+/** Compact ad row for the product creative panel: adds the four v3 factor stamps + hero_image_url so
+ *  the panel can render "which combination made this ad" + a preview thumbnail without a second query.
+ *  Keeps the raw `.from("ad_campaigns")` inside this SDK per the "no raw .from() with no SDK" rail. */
+export interface AdCreativePanelRow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  audienceTemperature: "cold" | "warm" | "hot" | null;
+  creativeTheme: string | null;
+  anglePaletteId: string | null;
+  headlinePatternId: string | null;
+  creativeCombinationId: string | null;
+  heroImageUrl: string | null;
+  createdAt: string | null;
+}
+
+const AD_PANEL_SELECT =
+  "id, name, status, audience_temperature, creative_theme, angle_palette_id, headline_pattern_id, creative_combination_id, hero_image_url, created_at";
+
+function mapPanelRow(row: Record<string, unknown>): AdCreativePanelRow {
+  return {
+    id: row.id as string,
+    name: (row.name as string | null) ?? null,
+    status: (row.status as string | null) ?? null,
+    audienceTemperature: (row.audience_temperature as AdCreativePanelRow["audienceTemperature"]) ?? null,
+    creativeTheme: (row.creative_theme as string | null) ?? null,
+    anglePaletteId: (row.angle_palette_id as string | null) ?? null,
+    headlinePatternId: (row.headline_pattern_id as string | null) ?? null,
+    creativeCombinationId: (row.creative_combination_id as string | null) ?? null,
+    heroImageUrl: (row.hero_image_url as string | null) ?? null,
+    createdAt: (row.created_at as string | null) ?? null,
+  };
+}
+
+/** List a product's ads with the v3 factor stamps + hero_image_url, filtered by an optional status
+ *  set (default: active + ready). Ordered newest first, capped at `limit` (default 25). Used by
+ *  /api/products/[id]/creative-panel to render active tests + latest previews. */
+export async function listAdsForCreativePanel(
+  admin: Admin,
+  opts: { workspaceId: string; productId: string; statuses?: string[]; limit?: number },
+): Promise<AdCreativePanelRow[]> {
+  const statuses = opts.statuses && opts.statuses.length > 0 ? opts.statuses : ["active", "ready"];
+  const { data, error } = await admin
+    .from("ad_campaigns")
+    .select(AD_PANEL_SELECT)
+    .eq("workspace_id", opts.workspaceId)
+    .eq("product_id", opts.productId)
+    .in("status", statuses)
+    .order("created_at", { ascending: false })
+    .limit(opts.limit ?? 25);
+  if (error) throw new Error(`listAdsForCreativePanel: ${error.message}`);
+  return (data ?? []).map((r) => mapPanelRow(r as Record<string, unknown>));
+}
+
 /** The canonical single-ad read — mirrors the dashboard's `/api/ads/campaigns/[id]` composition, plus
  *  the two derivations (execution path, explore/exploit badge-vs-truth). */
 export async function getAd(
