@@ -47,6 +47,25 @@ export const SECURITY_DEP_WATCH_SLUG = "security-dep-watch";
 /** A fix authored within this window is "pending deploy" — don't re-surface the same dep finding. */
 export const SECURITY_RECENT_FIX_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
 
+/**
+ * security-escalation-carries-fix-spec-or-one-click-author-action Fix 1 — a `real-vuln` verdict on
+ * a completed security-review row MUST NOT satisfy `completedClean`. Persistent state (the parsed
+ * `instructions.verdict`) — not just `agent_jobs.status` — is the security-gate signal. Reason:
+ * both fix routes for a real-vuln finding land the security-review row at `status='completed'`
+ * (the director-auto-queue path in [[routeSecurityFix]] flips completed the moment the fix is
+ * queued; likewise the CEO Approve on a Phase-1 `author_fix_spec` action re-enters the same
+ * routeSecurityFix fan-out). Reading only `status` therefore turns a known-vulnerable branch/spec
+ * green while its fix is still un-shipped — the M4 promote gate could auto-merge a vulnerable
+ * branch, and the fold gate could archive a spec whose vulnerability hasn't landed. The verdict
+ * is written on the SAME `update()` that flips to `completed`, so the two are consistent by
+ * construction; a legacy pre-verdict row (no `verdict` field on instructions) is conservative-
+ * clean, matching prior behavior. Shared by all three security rollup helpers so the pre-merge
+ * gate + post-ship fold gate can never disagree on what "security green" means.
+ */
+export function isRealVulnVerdict(verdict: string | null | undefined): boolean {
+  return String(verdict || "").trim().toLowerCase() === "real-vuln";
+}
+
 /** Statuses that mean a security-review job is still "live" — being worked or surfaced (awaiting owner). */
 export const LIVE_SECURITY_STATUSES = [
   "queued",
@@ -636,16 +655,19 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
     // Exclude infra dep-watch jobs by IDENTITY: the sentinel slug OR the dep-watch mode. A real
     // `diff`/`branch` review of the `security-dep-upgrades` fix spec is NOT infra — it rolls up.
     let mode = "";
+    let verdict = "";
     try {
-      mode = String(JSON.parse(String(row.instructions || "{}")).mode || "");
+      const parsed = JSON.parse(String(row.instructions || "{}")) as { mode?: string; verdict?: string };
+      mode = String(parsed.mode || "");
+      verdict = String(parsed.verdict || "");
     } catch {
-      /* not JSON — treat as a non-dep-watch (diff) review */
+      /* not JSON — treat as a non-dep-watch (diff) review, unknown verdict */
     }
     if (!slug || slug === SECURITY_DEP_WATCH_SLUG || mode === "dep-watch") continue;
     const cur = (map[slug] ||= { live: false, surfaced: false, completedClean: false });
     if (runningSet.has(row.status)) cur.live = true;
     else if (surfacedSet.has(row.status)) cur.surfaced = true;
-    else if (row.status === "completed") cur.completedClean = true;
+    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) cur.completedClean = true;
   }
   // `completedClean` is the CLEAN terminal state — a live/surfaced job for the same slug overrides it
   // (the Security node can never read "done" while a routed fix or running review is still open).
@@ -681,15 +703,18 @@ export async function getSecurityStateForSlug(
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
   for (const row of (data ?? []) as Array<{ status: string; instructions?: string }>) {
     let mode = "";
+    let verdict = "";
     try {
-      mode = String(JSON.parse(String(row.instructions || "{}")).mode || "");
+      const parsed = JSON.parse(String(row.instructions || "{}")) as { mode?: string; verdict?: string };
+      mode = String(parsed.mode || "");
+      verdict = String(parsed.verdict || "");
     } catch {
-      /* not JSON — a diff review */
+      /* not JSON — a diff review, unknown verdict */
     }
     if (mode === "dep-watch") continue; // infra scan, not a per-spec gate
     if (runningSet.has(row.status)) state.live = true;
     else if (surfacedSet.has(row.status)) state.surfaced = true;
-    else if (row.status === "completed") state.completedClean = true;
+    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) state.completedClean = true;
   }
   if (state.live || state.surfaced) state.completedClean = false;
   return state;
@@ -723,17 +748,23 @@ export async function getSecurityStateForBranch(admin: Admin, branch: string): P
   if (!b) return state;
   const { data } = await admin
     .from("agent_jobs")
-    .select("status")
+    .select("status, instructions")
     .eq("kind", "security-review")
     .eq("spec_branch", b)
     .order("created_at", { ascending: false })
     .limit(200);
   const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
-  for (const row of (data ?? []) as Array<{ status: string }>) {
+  for (const row of (data ?? []) as Array<{ status: string; instructions?: string }>) {
+    let verdict = "";
+    try {
+      verdict = String((JSON.parse(String(row.instructions || "{}")) as { verdict?: string }).verdict || "");
+    } catch {
+      /* not JSON — unknown verdict; treat conservatively (not real-vuln → allow if completed) */
+    }
     if (runningSet.has(row.status)) state.live = true;
     else if (surfacedSet.has(row.status)) state.surfaced = true;
-    else if (row.status === "completed") state.completedClean = true;
+    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) state.completedClean = true;
   }
   // Mirrors getSecurityStateBySlug: a live/surfaced sibling for the same branch overrides the clean
   // terminal — the gate can never read "green" while a routed fix or running review is still open.
