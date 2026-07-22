@@ -1,6 +1,6 @@
 # inngest/angle-demand-sweep-cadence
 
-The **daily palette-refresh loop** — grounds [[../tables/product_angle_palette]]`.search_demand` in real search-volume evidence instead of the seed author's judgement, and surfaces is_active=false drafts for previously-uncovered high-tier ingredient×problem lanes so Dahlia can auto-fan-out without an owner hand-authoring every angle. Phase 3 of the demand-sourced-angle-sweep spec; M2 of [[../goals/v3-ad-creative-engine]] "wire the engine into Dahlia + seed all 6 products."
+The **daily palette-refresh loop** — grounds [[../tables/product_angle_palette]]`.search_demand` in real search-volume evidence instead of the seed author's judgement, and surfaces is_active=false drafts for previously-uncovered high-tier ingredient×problem lanes so Dahlia can auto-fan-out without an owner hand-authoring every angle. Phase 3 of the demand-sourced-angle-sweep spec; M2 of the [[../lifecycles/quant-desk-reweight-loop|v3 Ad Creative Engine goal]] "wire the engine into Dahlia + seed all 6 products."
 
 **File:** `src/lib/inngest/angle-demand-sweep-cadence.ts`
 

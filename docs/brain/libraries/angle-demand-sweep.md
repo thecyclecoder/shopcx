@@ -2,7 +2,7 @@
 
 The **search-demand feeder** behind [[../tables/product_angle_palette]]`.search_demand` — turns an (ingredient, problem-lane) pair into a demand tier grounded in real search-volume evidence, and drives the daily sweep executor that either REFRESHES existing palette rows or SURFACES is_active=false drafts for previously-uncovered high-tier lanes.
 
-Without this feeder, `search_demand` is set by the seed author's judgement and every downstream selector (compose-engine, seed-remaining-5-products, Dahlia auto-fan-out when the palette starves) inherits that lie. Implements the demand-sourced-angle-sweep spec (M2 of [[../goals/v3-ad-creative-engine]]).
+Without this feeder, `search_demand` is set by the seed author's judgement and every downstream selector (compose-engine, seed-remaining-5-products, Dahlia auto-fan-out when the palette starves) inherits that lie. Implements the demand-sourced-angle-sweep spec (M2 of the [[../lifecycles/quant-desk-reweight-loop|v3 Ad Creative Engine goal]]).
 
 ## Design principles
 

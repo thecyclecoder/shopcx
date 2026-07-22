@@ -13,7 +13,7 @@ The QC gate has two paths (dahlia-creative-qc-via-box-session): the DEFAULT is `
 
 ## V3 wired flow (selector → composer → stamped insert → coverage bump)
 
-Every author-mode creative now flows through the shared M1 SDKs so the ad_campaigns row it lands on carries the four factor stamps — `creative_theme`, `angle_palette_id`, `headline_pattern_id`, `creative_combination_id` — and the coverage ledger advances on both sides. This is the foundation of the [[../goals/v3-ad-creative-engine|v3 goal]]'s success metric: no factor rollup, no coverage ledger, no theme-spread variety and no re-weighting loop can be measured until this stamp flow starts writing real rows ([[../specs/wire-engine-into-dahlia-author-path]]).
+Every author-mode creative now flows through the shared M1 SDKs so the ad_campaigns row it lands on carries the four factor stamps — `creative_theme`, `angle_palette_id`, `headline_pattern_id`, `creative_combination_id` — and the coverage ledger advances on both sides. This is the foundation of the [[../lifecycles/quant-desk-reweight-loop|v3 Ad Creative Engine goal]]'s success metric: no factor rollup, no coverage ledger, no theme-spread variety and no re-weighting loop can be measured until this stamp flow starts writing real rows ([[../specs/wire-engine-into-dahlia-author-path]]).
 
 The sequence, per creative:
 
