@@ -1,0 +1,1 @@
+- **Seed product_angle_palette for the remaining 5 hero SKUs** · verified 2026-07-22 · → [[../tables/product_angle_palette]]

@@ -1,0 +1,1 @@
+- **Wire M1 engine (angle-palette + compose-headline + patterns) into Dahlia's author path** · verified 2026-07-22 · → [[../lifecycles/ad-creative]]

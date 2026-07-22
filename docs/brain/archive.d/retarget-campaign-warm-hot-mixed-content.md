@@ -1,0 +1,1 @@
+- **Retarget campaign live: one lean adset, warm+hot mixed content, on its own kill-switch + heartbeat** · verified 2026-07-22 · → [[../inngest/media-buyer-retarget-cadence]]

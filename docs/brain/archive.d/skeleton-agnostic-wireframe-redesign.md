@@ -1,0 +1,1 @@
+- **Skeleton redesign: agnostic wireframe (element × zone × role × prominence) + author-time reuse verdict** · verified 2026-07-22 · → [[../tables/creative_skeletons]]
