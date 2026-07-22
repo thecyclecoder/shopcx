@@ -2905,6 +2905,30 @@ async function resolveBuildConsoleWorkspace(admin: Admin): Promise<string | null
   return (ws as { id?: string } | null)?.id ?? null;
 }
 
+/**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 1 — the on-branch fast-path
+ * predicate the M5 member-eligibility loop reads to SKIP a stale per-member accumulation re-check on a member
+ * that already merged onto the goal branch.
+ *
+ * A member with `onGoalBranch=true` ALREADY passed the accumulation gate at spec→goal merge time — M4's
+ * `promoteEligibleSpecsToGoalBranch` gates on the SAME `isSpecAccumulationComplete` /
+ * `verifyPhaseAccumulatedOnBranch` predicate before landing the spec on `goal/{slug}`. Re-running that grep
+ * against the member's now-stale `claude/build-{slug}` branch at M5 catches OVER-PRECISE / drifted patterns
+ * as FALSE-NEGATIVES even when the goal-branch artifact is deploy-clean (live: v3-ad-creative-engine held on
+ * 8/10 members' stale-grep false-negatives despite the goal branch passing tsc + every predeploy gate and a
+ * 0-conflict merge — a human had to hand-merge and the manual path then SKIPPED `finalizePromotedGoal`,
+ * stranding all 10 member folds).
+ *
+ * Phantom-protection stays at spec→goal merge (where a member FIRST accumulates); at goal→main the artifact
+ * that ships is the GOAL BRANCH itself (Phase 2 gates the goal-branch HEAD's CI positively), not the
+ * per-member build branch. Pure predicate — testable without DB or GitHub. `isSpecPromoteEligible` keeps its
+ * current behavior for the spec→goal promote (where accumulation MUST be verified for a not-yet-merged
+ * member); only the goal→main member loop takes this fast-path.
+ */
+export function memberAccumulationSatisfiedOnGoalBranch(member: { onGoalBranch: boolean }): boolean {
+  return member.onGoalBranch === true;
+}
+
 export interface PromoteGoalsToMainResult {
   /** goal slugs atomically merged to main this pass + had all member phases stamped shipped. */
   promoted: string[];
@@ -2981,9 +3005,48 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         }
         // (3) GREEN (option b) — every member spec individually promote-eligible on its own branch. (The atomic
         //     merge below is the final combination check.) A member that isn't promote-eligible HOLDS the goal.
+        //
+        // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 1 — an on-branch member
+        // (`memberAccumulationSatisfiedOnGoalBranch`) takes the FAST-PATH: skip the stale per-member
+        // `verifyPhaseAccumulatedOnBranch` accumulation re-check (already passed at spec→goal merge, and its
+        // build branch is now stale — see the helper's docstring for the v3-ad-creative-engine incident) and
+        // gate ONLY on the cheap DB-read green legs (`isSpecTestGreenForBranch` + `isSecurityGreenForBranch`).
+        // A member that ISN'T on the goal branch keeps the full `isSpecPromoteEligible` gate (the pre-Phase-1
+        // path). Fails CLOSED on a green-check throw (mirrors `isSpecPromoteEligible`'s fail-closed shape).
         let allEligible = true;
         for (const memberSpec of state.specs) {
           const branch = `claude/build-${memberSpec.slug}`;
+          if (memberAccumulationSatisfiedOnGoalBranch(memberSpec)) {
+            let specTestGreen = false;
+            let securityGreen = false;
+            let greenReadReason: string | null = null;
+            try {
+              const { isSpecTestGreenForBranch } = await import("@/lib/spec-test-runs");
+              specTestGreen = await isSpecTestGreenForBranch(workspaceId, memberSpec.slug, branch);
+            } catch (e) {
+              greenReadReason = `spec-test green read failed (treated not-green): ${errText(e)}`;
+            }
+            try {
+              const { isSecurityGreenForBranch } = await import("@/lib/security-agent");
+              securityGreen = await isSecurityGreenForBranch(admin, branch);
+            } catch (e) {
+              greenReadReason = greenReadReason || `security green read failed (treated not-green): ${errText(e)}`;
+            }
+            if (specTestGreen && securityGreen) continue;
+            allEligible = false;
+            const reason =
+              greenReadReason ||
+              [
+                specTestGreen ? null : "spec-test not green on branch preview",
+                securityGreen ? null : "security not green on branch",
+              ]
+                .filter(Boolean)
+                .join("; ");
+            console.warn(
+              `[goal-main-promote] ${goalSlug}: on-branch member ${memberSpec.slug} not promote-eligible (${reason}) — holding goal`,
+            );
+            break;
+          }
           const elig = await isSpecPromoteEligible(workspaceId, memberSpec.slug, branch);
           if (!elig.eligible) {
             allEligible = false;
