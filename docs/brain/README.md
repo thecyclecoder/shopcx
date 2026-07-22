@@ -9,7 +9,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 283 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 113 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
-| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 513 |
+| [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 516 |
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 45 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 10 + README |
 | [playbooks/](playbooks/) | One page per active row in `playbooks` — steps, policies, exceptions, files | 2 + README |
@@ -439,6 +439,8 @@ Tickets + comms: [[recipes/escalate-ticket]] · [[recipes/send-email-reply]] · 
 Social: [[recipes/ban-meta-user]] · [[recipes/hide-comment]] · [[recipes/link-meta-sender-to-customer]]
 
 Infra: [[recipes/fire-an-inngest-event]] · [[recipes/write-a-migration-apply-script]]
+
+Amazon: [[recipes/amazon-listing-copy-update]]
 
 ## Dashboard (`dashboard/`)
 

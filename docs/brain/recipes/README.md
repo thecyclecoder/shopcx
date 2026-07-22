@@ -66,6 +66,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[next16-metadata-boundary-csr-bail]] — why /store, /widget, /portal, /help bail to CSR under cacheComponents (Next's `botType && isRoutePPREnabled` metadata short-circuit) + the `src/proxy.ts` bot-UA-neutralization fix
 - [[next16-empty-generate-static-params-preview-build]] — why spec-build PREVIEW deploys fail with `EmptyGenerateStaticParamsError` while prod builds clean (empty build-time DB query + cacheComponents PPR), and the `__placeholder__`-sentinel fix in the storefront `generateStaticParams` helpers (NOT an env-var issue — preview & prod share the same DB)
 - [[founder-pulse-capture]] — the local-Mac session capture wiring (launchd timer + SessionEnd hook) that feeds the `founder-pulse` Pulse: the digest chain, the `scripts/pulse-digest.ts` path contract the build must honor, and how to disable/uninstall on the local machine
+- [[amazon-listing-copy-update]] — rewrite an Amazon listing's title/bullets/description via the SP-API Listings Items API (PATCH), resolving connection+SKU+productType through [[../tables/amazon_connections]]/[[../tables/amazon_asins]] and [[../libraries/amazon__auth]] `spApiRequest`. The path behind the July 2026 prohibited-claim (detox/cleanse/weight-loss) catalog cleanup; includes the audit-scan + reinstatement `submissionId` flow
 
 ## Build & ops skills (committed Claude Code skills)
 
