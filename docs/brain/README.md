@@ -440,6 +440,8 @@ Social: [[recipes/ban-meta-user]] · [[recipes/hide-comment]] · [[recipes/link-
 
 Infra: [[recipes/fire-an-inngest-event]] · [[recipes/write-a-migration-apply-script]]
 
+Amazon: [[recipes/amazon-listing-copy-update]]
+
 ## Dashboard (`dashboard/`)
 
 One page per route family under `src/app/dashboard/*` (top-level operational pages) and one per `src/app/dashboard/settings/*` (workspace configuration). Each page covers purpose, visible features (filters + buttons), API endpoints called (extracted from `fetch()`), sub-routes, permissions, and files touched.
