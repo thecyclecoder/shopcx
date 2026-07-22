@@ -2976,7 +2976,7 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
   try {
     const { listGoals, isGoalParentExempt, stampGoalPromotedToMain, stampGoalPromotionHeld } = await import("@/lib/goals-table");
     const { goalBranchState } = await import("@/lib/specs-table");
-    const { mergeGoalBranchIntoMain } = await import("@/lib/github-pr-resolve");
+    const { mergeGoalBranchIntoMain, goalBranchCiGreen } = await import("@/lib/github-pr-resolve");
 
     // Resolve the build-console workspace (the one that runs builds = owns the goals/specs we promote). One
     // workspace per build console; the newest agent_jobs row's workspace, falling back to the first workspace
@@ -3056,6 +3056,25 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         }
         if (!allEligible) {
           result.notReady.push(goalSlug);
+          continue;
+        }
+        // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 2 — POSITIVE
+        // VERIFICATION on the ARTIFACT that ships. Phase 1 dropped the stale per-member accumulation
+        // grep on the member's `claude/build-{slug}` branch (source of the v3-ad-creative-engine
+        // false-negative); the bar-lowering compensator is this: require the goal branch HEAD's own
+        // check-runs to be all-green before the atomic merge. Fails CLOSED — an unreadable CI state,
+        // empty check-run list, in-flight run, or any red conclusion HOLDS the promote via `notReady`
+        // (surfaced like every other not-ready path, never a silent skip). See
+        // `classifyCheckRunsForCiGreen` for the exact predicate.
+        let ciVerdict: { green: boolean; reason: string };
+        try {
+          ciVerdict = await goalBranchCiGreen(goalSlug);
+        } catch (e) {
+          ciVerdict = { green: false, reason: `ci-status read threw (fail-closed): ${errText(e)}` };
+        }
+        if (!ciVerdict.green) {
+          result.notReady.push(goalSlug);
+          console.warn(`[goal-main-promote] ${goalSlug}: goal-branch CI not green — holding goal (${ciVerdict.reason})`);
           continue;
         }
         // (4) ATOMIC promote: merge goal/{slug} → main in ONE merge.
