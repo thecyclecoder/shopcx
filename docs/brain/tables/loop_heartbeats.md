@@ -1,6 +1,6 @@
 # loop_heartbeats
 
-The Control Tower's per-run liveness log ([[../specs/control-tower]] Phase 1). Every monitored **cron** and box **agent-kind** runner writes **one row at the END of each run** so the [[../inngest/control-tower-monitor]] cron (and the [[../dashboard/control-tower]] dashboard) can answer "did this loop actually run, and did it do its job?". The box build worker itself is the exception — its ~5s poll beat lives in [[worker_heartbeats]], not here (one row every 5s would be enormous); this table is for loops whose "run" is a discrete event.
+The Control Tower's per-run liveness log ([[../specs/control-tower]] Phase 1). Every monitored **cron** and box **agent-kind** runner writes **one row at the END of each run** so the [[../inngest/control-tower-monitor]] cron (and the [[../dashboard/control-tower]] dashboard) can answer "did this loop actually run, and did it do its job?". The box build worker itself is the exception — its ~30s poll beat lives in [[worker_heartbeats]], not here (one row per poll tick would be enormous); this table is for loops whose "run" is a discrete event.
 
 **Global infra, not workspace-scoped** — the box + crons are one shared fleet (same model as [[worker_heartbeats]]). RLS: any authenticated user reads; the service role does all writes.
 

@@ -85,7 +85,13 @@ const REPO_DIR = resolve(__dirname, "..");
 const BUILDS_DIR = resolve(REPO_DIR, "../builds"); // each build gets its own worktree here
 const REPO = process.env.AGENT_TODO_REPO || "thecyclecoder/shopcx";
 const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN || "";
-const POLL_MS = 5000;
+// Box claim-loop cadence. Widened 5s → 30s (2026-07-22, box-loop-30s-db-load) — nothing this loop
+// drives is customer-facing or needs sub-30s freshness, and every per-tick read (the queued-kind +
+// claimable probes) was already cut to sub-millisecond by the agent-jobs partial index, so the tick
+// COST is tiny but the FREQUENCY was the always-on DB-request floor. At 30s the worker still bumps its
+// heartbeat every tick (well inside the 5-min worker liveness window) and a claimable build starts at
+// most ~30s later — negligible against multi-minute builds. Takes effect on the next box restart.
+const POLL_MS = 30000;
 // build-gate-durable-review-signal: when the claim-time build gate HOLDS a build (requeue — e.g. a blocker
 // not yet shipped, or Vale hasn't passed the spec), it re-queues with `claimed_at` stamped this far into the
 // FUTURE so the claim RPC (which now skips queued jobs with a future claimed_at) backs off instead of
