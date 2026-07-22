@@ -13,7 +13,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Downgrade the EasyPost tracker business-signal log from console.error to console.warn** · verified 2026-07-21 · → [[../integrations/easypost]]
+- **Drop recurring Appstle unskip upstream 500s from the Vercel error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
 - **Scope EasyPost account-level rate-limit noise out of the returns-reconcile-sweep error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Widen Anthropic overload classifier to catch the fraud-detection.ts "Anthropic API error: 5NN" throw shape** · verified 2026-07-21 · → [[../libraries/control-tower]]
+- **Lossless error diagnostics — kill the `[object Object]` blackhole** · verified 2026-07-21 · → [[../libraries/error-text]]
 - **Downgrade EasyPost rate-limit log in returns-reconcile-sweep from error to warn** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
 - **Returns-reconcile sweep: escalate on missing-carrier config; downgrade transient tracker errors** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
 - **Founder escalations must actually reach the founder** · verified 2026-07-20 · → [[../libraries/approval-inbox]] · [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]

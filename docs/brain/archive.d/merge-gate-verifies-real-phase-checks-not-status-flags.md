@@ -1,0 +1,1 @@
+- **Merge gate verifies REAL per-phase checks against the branch (fail closed)** · verified 2026-07-22 · → [[../libraries/agent-jobs]]
