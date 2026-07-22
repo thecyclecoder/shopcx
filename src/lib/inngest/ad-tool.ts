@@ -55,6 +55,11 @@ import {
   escalateMediaBuyerTestPublishRefusal,
   type CreateAdsetSpec,
 } from "@/lib/media-buyer/publish-gate";
+import {
+  MEDIA_BUYER_RETARGET_ORIGIN,
+  evaluateMediaBuyerRetargetPublish,
+  escalateMediaBuyerRetargetPublishRefusal,
+} from "@/lib/media-buyer/retarget-publish-gate";
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -1217,6 +1222,44 @@ export const adToolPublishToMeta = inngest.createFunction(
               ceilingCents: gate.ceilingCents,
               jobId: job_id,
               campaignId: (j.campaign_id as string) ?? null,
+            });
+            await admin.from("ad_publish_jobs").update({ publish_active: false }).eq("id", job_id);
+          }
+        }
+
+        // Media-Buyer RETARGET-cohort gate — belt-and-suspenders re-check
+        // (retarget-campaign-warm-hot-mixed-content Phase 2). Sibling of the
+        // test-cohort gate above: the runner ran the same gate BEFORE inserting
+        // the job, but the cohort could have been retired between insert and
+        // publisher execution. On refusal we DOWNGRADE the ad to PAUSED and
+        // escalate to the CEO (never silently spend). Escalation is dedup-safe:
+        // `escalateMediaBuyerRetargetPublishRefusal`'s `escalateDiagnosisToCeo`
+        // dedupes on the same key the runner used.
+        if (effectivePublishActive && j.origin === MEDIA_BUYER_RETARGET_ORIGIN) {
+          const gateProjected = Number.isFinite(Number(j.projected_daily_cents))
+            ? Math.round(Number(j.projected_daily_cents))
+            : 0;
+          const rgate = await evaluateMediaBuyerRetargetPublish(admin, {
+            workspaceId: workspace_id,
+            metaAdAccountId: ctx.metaAdAccountRowId ?? (j.meta_ad_account_row_id as string | null) ?? null,
+            productId: ctx.productId ?? null,
+            metaAdsetId: String(j.meta_adset_id),
+            projectedDailyCents: gateProjected,
+            adCampaignId: (j.campaign_id as string) ?? "",
+          });
+          if (!rgate.allowed) {
+            effectivePublishActive = false;
+            await escalateMediaBuyerRetargetPublishRefusal(admin, {
+              workspaceId: workspace_id,
+              metaAdsetId: String(j.meta_adset_id),
+              metaAdAccountId: ctx.metaAdAccountRowId ?? (j.meta_ad_account_row_id as string | null) ?? null,
+              projectedDailyCents: rgate.projectedDailyCents,
+              reason: rgate.reason,
+              diagnosis: rgate.diagnosis,
+              ceilingCents: rgate.ceilingCents,
+              jobId: job_id,
+              campaignId: (j.campaign_id as string) ?? null,
+              cohortId: rgate.cohort?.id ?? null,
             });
             await admin.from("ad_publish_jobs").update({ publish_active: false }).eq("id", job_id);
           }
