@@ -10,7 +10,7 @@ shipped [[iteration_policies]] + [[../libraries/testing-results-sdk]]
 (unset ⇒ fall through to code-owned defaults). Migration
 `20261125120000_factor_rollup_policies.sql`. RLS: workspace-member SELECT,
 service-role full. See [[../specs/factor-rollup-sdk-with-significance-gate]]
-Phase 1 + [[../goals/v3-ad-creative-engine]] M5 (the attribution / learning loop).
+Phase 1 + the [[../lifecycles/quant-desk-reweight-loop|v3 Ad Creative Engine goal]] M5 (the attribution / learning loop).
 
 **Primary key:** `id`
 

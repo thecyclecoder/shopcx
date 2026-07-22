@@ -1,0 +1,1 @@
+- **v3 Ad Creative Engine** · folded 2026-07-22 · → [[lifecycles/quant-desk-reweight-loop]]
