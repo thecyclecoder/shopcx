@@ -2,7 +2,7 @@
 
 The [[../goals/v3-ad-creative-engine]] goal's M5 "attribution + learning loop (the 'quant desk')" milestone closes the loop from the CREATIVE the author-mode session stamped, through the ROLLUP that measures its ROAS/CPA/CTR at significance, to the PICKER that re-weights the next pick on those numbers, back out to the AUDIT ROW that lets the CEO retrace the decision.
 
-This page traces the full end-to-end so a future reader knows where every piece sits without hunting through six specs.
+This page traces the full `quant-desk` reweight loop end-to-end so a future reader knows where every piece sits without hunting through six specs.
 
 ## Cast
 
