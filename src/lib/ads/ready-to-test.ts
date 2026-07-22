@@ -119,6 +119,13 @@ function isReadyCreative(v: AdVideoRow): boolean {
  * into the cold rail's deficit fill. Omitting the filter (or passing null) preserves the
  * pre-Phase-1 workspace/product read verbatim — nothing regresses when the column is missing
  * or the caller doesn't care about the band.
+ *
+ * retarget-campaign-warm-hot-mixed-content Phase 2 — an optional `temperatures` WHITELIST
+ * narrows the read to a SET of bands (`ad_campaigns.audience_temperature IN (...)`). The
+ * retarget rail passes its cohort's `['warm','hot']` mix so ONE read surfaces both bands for
+ * the consolidated retarget adset. `temperature` (single) takes precedence when BOTH are
+ * passed; an empty/omitted whitelist is inert, so the single-`temperature` and no-band paths
+ * stay BYTE-IDENTICAL for every pre-existing caller.
  */
 export async function listReadyToTest(
   admin: Admin,
@@ -126,9 +133,10 @@ export async function listReadyToTest(
     workspaceId: string;
     productId?: string | null;
     temperature?: "cold" | "warm" | "hot" | null;
+    temperatures?: Array<"cold" | "warm" | "hot"> | null;
   },
 ): Promise<ListReadyToTestResult> {
-  const { workspaceId, productId = null, temperature = null } = opts;
+  const { workspaceId, productId = null, temperature = null, temperatures = null } = opts;
 
   const { data: videoData } = await admin
     .from("ad_videos")
@@ -178,6 +186,12 @@ export async function listReadyToTest(
   // temperature band, restrict at the DB. The null-default preserves the pre-Phase-1 shape byte-
   // identically so untagged / unfiltered reads keep working.
   if (temperature) campaignsQuery = campaignsQuery.eq("audience_temperature", temperature);
+  // retarget-campaign-warm-hot-mixed-content Phase 2 — the retarget rail passes a band WHITELIST
+  // (its cohort's warm+hot mix). Applied only when the single `temperature` was NOT pinned and the
+  // whitelist is non-empty, so every pre-existing call site (no whitelist) stays byte-identical.
+  else if (temperatures && temperatures.length) {
+    campaignsQuery = campaignsQuery.in("audience_temperature", temperatures);
+  }
   const { data: campaignData } = await campaignsQuery;
   const campaigns = (campaignData || []) as AdCampaignRow[];
   if (campaigns.length === 0) return { readyToTest: [] };

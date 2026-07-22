@@ -735,6 +735,21 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     registeredAt: "2026-06-25T14:30:03.155Z",
     personaKind: "research", // Rhea — the acquisition-research crons merge into one Rhea worker under Max/Growth
   },
+  // demand-sourced-angle-sweep spec, Phase 3: the daily palette-refresh loop. Enumerates ad-tool
+  // workspaces × active products, calls runSweepForProduct per product (search_demand refresh +
+  // is_active=false dahlia_fanned drafts on high-tier no-match lanes). newcron-grace: registeredAt
+  // starts the first-tick window so the tile doesn't RED on cut-over. Owner Growth so the CEO can
+  // kill it via the ancestor `growth` node in one write (kill_switches cascades down).
+  {
+    id: "angle-demand-sweep-cadence-cron",
+    kind: "cron",
+    owner: "growth",
+    label: "Angle demand sweep cadence",
+    description: "Daily sweep: refresh product_angle_palette.search_demand from real search-volume evidence + surface is_active=false drafts for previously-uncovered high-tier ingredient×problem lanes. Draft rows stay owner-gated (never auto-active).",
+    expectedCadence: "daily (30 10 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    registeredAt: "2026-07-22T00:00:00Z",
+  },
   {
     // rhea-research-automation spec, Phase 1: the paced hourly claim of the top-spend unreviewed
     // research URL. Per ad-tool workspace: sync research_urls → pick top ad_count unreviewed →
@@ -856,6 +871,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // the goals/autonomous-media-buyer-supervision M2 policy → no Meta writes.
   { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
   { id: "ad-creative-cadence-cron", kind: "cron", owner: "growth", label: "Ad creative daily cadence", description: "Daily fan-out: enqueues one kind='ad-creative' agent_jobs row per intelligence-backed product whose ready-to-test bin is below the floor, so Dahlia keeps Bianca's bin stocked.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-10T11:00:00Z" },
+  { id: "media-buyer-retarget-cadence", kind: "cron", owner: "growth", label: "Media buyer retarget daily cadence", description: "Daily: iterates active meta_ad_accounts → runRetargetReplenishLoopForAccount → publishes warm+hot creatives into the ONE consolidated retarget adset via the retarget publish gate (retarget-campaign-warm-hot-mixed-content). Cold-only invariant of the test rail untouched; moves no scale/kill dollars.", expectedCadence: "daily (30 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-11-27T00:00:00Z" },
   // ads-supervisor-3h-agent Phase 1: the persistent every-3h supervisory pass over Bianca (media-buyer)
   // + Dahlia (ad-creative). Fans out one `kind='ads-supervisor'` agent_jobs row per workspace with an
   // active media_buyer_test_cohorts mapping (unbounded dedup — a not-yet-terminal prior pass covers the

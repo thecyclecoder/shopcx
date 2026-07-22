@@ -134,6 +134,7 @@ import { creativeScoutWeeklyCron, creativeScoutManualSweep } from "@/lib/inngest
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
+import { angleDemandSweepCadenceCron, angleDemandSweepCadenceManual } from "@/lib/inngest/angle-demand-sweep-cadence";
 import { researchSensorCron } from "@/lib/inngest/research-sensor";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { nodeAncestrySyncCron } from "@/lib/inngest/node-ancestry-sync-cron";
@@ -141,6 +142,7 @@ import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
 import { growthAdSpendGovernorCron, growthAdSpendGovernorSweep } from "@/lib/inngest/growth-ad-spend-governor";
 import { mediaBuyerCadenceCron, mediaBuyerCadenceSweep } from "@/lib/inngest/media-buyer-cadence";
+import { mediaBuyerRetargetCadenceCron } from "@/lib/inngest/media-buyer-retarget-cadence";
 import { mediaBuyerTestCadenceCron } from "@/lib/inngest/media-buyer-test-cadence";
 import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-creative-cadence";
 import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/inngest/ads-supervisor-cadence";
@@ -314,6 +316,8 @@ export const registeredInngestFunctions = [
   landingPageScoutAnalyze,
   acquisitionResearchCadenceCron,
   acquisitionResearchCadenceManual,
+  angleDemandSweepCadenceCron,
+  angleDemandSweepCadenceManual,
   researchSensorCron,
   controlTowerMonitor,
   nodeAncestrySyncCron,
@@ -323,6 +327,7 @@ export const registeredInngestFunctions = [
   growthAdSpendGovernorSweep,
   mediaBuyerCadenceCron,
   mediaBuyerCadenceSweep,
+  mediaBuyerRetargetCadenceCron,
   mediaBuyerTestCadenceCron,
   adCreativeCadenceCron,
   adCreativeCadenceSweep,
