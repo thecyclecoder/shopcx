@@ -674,7 +674,7 @@ interface ProposedSpec {
 }
 interface PendingAction {
   id: string;
-  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "apply_model_tier" | "propose_policy_activation" | "reclaim_stuck_build";
+  type: "apply_migration" | "run_prod_script" | "merge_pr" | "spec" | "migration_fix" | "repair_build" | "regression_build" | "storefront_campaign" | "storefront_offer" | "storefront_build" | "db_health_build" | "coverage_register" | "greenlight_goal" | "security_build" | "author_fix_spec" | "apply_model_tier" | "propose_policy_activation" | "reclaim_stuck_build";
   summary: string;
   cmd?: string;
   preview?: string;
@@ -23396,6 +23396,102 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
   }
 }
 
+/**
+ * security-escalation-carries-fix-spec-or-one-click-author-action Phase 1 — the payload persisted
+ * on an `author_fix_spec` pending action when auto-author FAILS. Captures the finding so the CEO
+ * card is actionable ("Author the fix →") instead of dead-end, AND so the resume path can seed
+ * `authorSecurityFixSpec` with a valid slug/title even when the LLM's spec-seed was malformed.
+ *
+ * `seed` — the LLM's original proposal (may be incomplete — that IS why the auto-author failed).
+ * `finding` — a synthesized human-readable summary distilled from the fused security envelope
+ *   (file:line/severity/description) so the surfaced card is legible AND the resume authoring lane
+ *   can generate a sensible fix spec even from a weak seed.
+ */
+export interface SecurityAuthorFixSpecPayload {
+  parent_slug: string;
+  seed: SecurityFixProposal | null;
+  finding: {
+    file: string | null;
+    lines: string | null;
+    description: string;
+    severity: string | null;
+    review: string;
+  };
+}
+
+function seedAuthorFixSpecPayload(
+  parsed: Record<string, unknown> | null,
+  parentSlug: string,
+  source: SecurityFixSource,
+  review: string,
+): SecurityAuthorFixSpecPayload {
+  const rawSeed =
+    parsed && typeof parsed === "object" && parsed.spec && typeof parsed.spec === "object" && !Array.isArray(parsed.spec)
+      ? (parsed.spec as SecurityFixProposal)
+      : null;
+  const seed = rawSeed && (rawSeed.slug || rawSeed.title || rawSeed.fix || rawSeed.intent) ? rawSeed : null;
+
+  // Pull the highest-severity `finding` entry from the envelope's checks[] (Vault's structured
+  // per-check verdicts — see src/lib/security-envelope.ts). This is the file:line/severity source
+  // the CEO card + the resume-authoring lane both key off.
+  const checks =
+    parsed && Array.isArray((parsed as { checks?: unknown }).checks)
+      ? ((parsed as { checks: unknown[] }).checks as Array<Record<string, unknown>>)
+      : [];
+  const findings = checks.filter((c) => c && typeof c === "object" && String(c.verdict) === "finding");
+  const rank: Record<string, number> = { critical: 0, high: 1, medium: 2, moderate: 2, low: 3 };
+  findings.sort((a, b) => (rank[String(a.severity ?? "").toLowerCase()] ?? 9) - (rank[String(b.severity ?? "").toLowerCase()] ?? 9));
+  const primary = findings[0] ?? null;
+  const location = primary ? String(primary.location ?? "").trim() : "";
+  const [file, lines] = location ? [location.split(":")[0] || null, location.slice((location.split(":")[0] ?? "").length + 1) || null] : [null, null];
+  const severity = primary ? (String(primary.severity ?? "").trim() || null) : null;
+  const evidence = primary ? String(primary.evidence ?? "").trim() : "";
+  const check = primary ? String(primary.check ?? "").trim() : "";
+
+  const where = source.kind === "diff" ? `merged diff ${source.mergeSha.slice(0, 12)}` : `unmerged branch ${source.branch}`;
+  const description = (evidence
+    || (seed?.intent ?? "").trim()
+    || (review || "").trim()
+    || `Security finding on ${where} for ${parentSlug}${check ? ` (${check}${severity ? ` · ${severity}` : ""})` : ""}`).slice(0, 800);
+
+  return {
+    parent_slug: parentSlug,
+    seed,
+    finding: {
+      file,
+      lines,
+      description,
+      severity,
+      review: (review || "").slice(0, 4000),
+    },
+  };
+}
+
+/**
+ * Synthesize a SecurityFixProposal from the persisted seed payload — the resume path
+ * (author_fix_spec approved) calls this to feed `authorSecurityFixSpec`. If the LLM's original
+ * seed carried enough (slug + title), we prefer it. Otherwise we synthesize a valid slug/title
+ * from the parent + finding so the authoring lane can always complete on approval.
+ */
+function proposalFromAuthorFixSpecPayload(payload: SecurityAuthorFixSpecPayload): SecurityFixProposal {
+  const seed = payload.seed ?? {};
+  const parent = payload.parent_slug || "spec";
+  const shortSlug = (payload.finding.file ?? "vuln").replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 20) || "vuln";
+  const slug = seed.slug || `fix-${parent}-${shortSlug}`.slice(0, 60);
+  const title = seed.title || `Fix: ${payload.finding.description.split(/[.:\n]/)[0].slice(0, 100)}`;
+  const fix = seed.fix || payload.finding.review || payload.finding.description;
+  const intent = seed.intent || `Close the security finding on ${parent}${payload.finding.file ? ` at ${payload.finding.file}${payload.finding.lines ? `:${payload.finding.lines}` : ""}` : ""}${payload.finding.severity ? ` (${payload.finding.severity})` : ""}.`;
+  return {
+    slug,
+    title,
+    owner: seed.owner || "platform",
+    parent: seed.parent,
+    intent,
+    fix,
+    verification: Array.isArray(seed.verification) ? seed.verification : undefined,
+  };
+}
+
 // ── Phase 2: npm-audit dep-watch ─────────────────────────────────────────────
 interface NpmAuditVuln {
   name?: string;
@@ -23719,9 +23815,38 @@ async function applySecurityVerdictToJob(
     const review = String(parsed?.review || "");
     const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
     if (!authored) {
-      await update(job.id, { status: "needs_attention", error: "no valid fix spec authored", log_tail: review.slice(-2000) || "real vulnerability but no valid fix spec" });
+      // security-escalation-carries-fix-spec-or-one-click-author-action Phase 1 — the auto-author
+      // FAILED (the LLM's `spec` seed lacked a slug/title, or authorSpecRowStructured refused it). The
+      // OLD behavior parked a dead-end `needs_attention` with error="no valid fix spec authored" — the
+      // CEO could only dismiss, never act. Instead, surface an actionable `author_fix_spec` action
+      // seeded with the finding envelope. Approving the action re-runs the authoring lane from the
+      // seed (see runSecurityReviewJob's resume path). The card copy shifts from "no valid fix spec
+      // authored" to "Author the fix →".
+      const seed = seedAuthorFixSpecPayload(parsed, parentSlug, source, review);
+      const action: PendingAction = {
+        id: `secauth${job.id.slice(0, 6)}`,
+        type: "author_fix_spec",
+        summary: `Author the fix spec for ${specLabel} → seed a scoped fix from the finding`,
+        preview: seed.finding.description.slice(0, 400),
+        status: "pending",
+        payload: seed,
+      };
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: SECURITY_DIRECTOR_FUNCTION,
+        actionKind: "escalated",
+        specSlug: parentSlug,
+        reason: activityReason("real-vuln (author-failed)", `${review}\n\nauto-author failed — seed captured; approve to author the fix spec`),
+        metadata: { ...activityMetadata, seed_author_fix_spec: true },
+      });
+      await update(job.id, {
+        status: "needs_approval",
+        error: null,
+        pending_actions: [action],
+        log_tail: `real finding → auto-author failed. Author the fix → tap Approve to author the fix spec from the finding.\n\n${review}`.slice(-2000),
+      });
       await emitVerdict();
-      console.log(`${tag} real-vuln but no valid spec → surfaced needs-human`);
+      console.log(`${tag} real-vuln but auto-author failed → surfaced author_fix_spec action`);
       return;
     }
     const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
@@ -23766,6 +23891,60 @@ async function runSecurityReviewJob(job: Job) {
     /* not JSON — degrade */
   }
   const mode = instr.mode === "dep-watch" ? "dep-watch" : instr.mode === "branch" ? "branch" : "diff";
+
+  // ── Disposer action resume — an author_fix_spec was approved (author + route) or declined (dismiss). ──
+  // security-escalation-carries-fix-spec-or-one-click-author-action Phase 1 — the one-click seed-author
+  // path. When auto-author FAILED at review time (applySecurityVerdictToJob), we parked a seeded
+  // author_fix_spec action instead of a dead-end needs_attention. This resume runs the authoring lane
+  // from that seed (so the CEO tap directly produces the fix spec + routes it), OR closes on decline.
+  const authorAction = (job.pending_actions || []).find((a) => a.type === "author_fix_spec");
+  if (authorAction && (authorAction.status === "approved" || authorAction.status === "declined")) {
+    if (authorAction.status === "declined") {
+      authorAction.result = "declined by disposer";
+      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `disposer declined the seeded author_fix_spec for ${instr.spec_slug || job.spec_slug || ""}`.slice(-2000) });
+      console.log(`${tag} author_fix_spec declined`);
+      return;
+    }
+    const payload = (authorAction.payload || null) as SecurityAuthorFixSpecPayload | null;
+    if (!payload) {
+      authorAction.status = "failed";
+      authorAction.result = "no seed payload on the action";
+      await update(job.id, { status: "needs_attention", pending_actions: job.pending_actions, error: "author_fix_spec resume: no seed payload", log_tail: `author_fix_spec resume failed — no seed payload on the action`.slice(-2000) });
+      console.log(`${tag} author_fix_spec resume: no seed`);
+      return;
+    }
+    // Re-derive the source (diff | branch) from the job's persisted instr — same shape the review pass used.
+    const source: SecurityFixSource = instr.mode === "branch"
+      ? { kind: "branch", branch: String(instr.branch || job.spec_branch || ""), previewOrigin: String(instr.preview_origin || "") }
+      : { kind: "diff", mergeSha: String(instr.merge_sha || "") };
+    const parentSlug = payload.parent_slug || instr.spec_slug || job.spec_slug;
+    const proposal = proposalFromAuthorFixSpecPayload(payload);
+    const authored = await authorSecurityFixSpec(proposal, parentSlug, source, job.workspace_id);
+    if (!authored) {
+      authorAction.status = "failed";
+      authorAction.result = "authoring failed on the synthesized seed";
+      await update(job.id, { status: "needs_attention", pending_actions: job.pending_actions, error: "author_fix_spec resume: authoring failed", log_tail: `author_fix_spec resume: seed authoring failed for ${parentSlug}`.slice(-2000) });
+      console.log(`${tag} author_fix_spec resume: seed authoring failed`);
+      return;
+    }
+    authorAction.status = "done";
+    authorAction.spec_slug = authored.slug;
+    authorAction.result = `authored fix spec ${authored.slug}${authored.alreadyExists ? " (converged)" : ""}`;
+    const ledger = JSON.stringify({ ...instr, verdict: "real-vuln", authored_slug: authored.slug });
+    const specLabel = source.kind === "diff"
+      ? `merged ${parentSlug}`
+      : `unmerged ${parentSlug} (${source.branch})`;
+    await routeSecurityFix(job, authored, {
+      tag,
+      specLabel,
+      review: payload.finding.review || payload.finding.description,
+      ledger,
+      recordDirectorActivity,
+      SECURITY_DIRECTOR_FUNCTION,
+    });
+    console.log(`${tag} author_fix_spec approved → authored ${authored.slug} → routed`);
+    return;
+  }
 
   // ── Disposer action resume — a routed security_build was approved (queue) or declined (dismiss). ──
   const buildAction = (job.pending_actions || []).find((a) => a.type === "security_build");
