@@ -1,0 +1,1 @@
+- **Selection engine: theme-spread + coverage ledger + freshness cooldown + explore/exploit blend** · verified 2026-07-22 · → [[../libraries/selection-engine]]

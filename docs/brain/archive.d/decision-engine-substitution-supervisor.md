@@ -1,0 +1,1 @@
+- **Decision engine: temperature-keyed function-preserving substitution + Max as substitution supervisor** · verified 2026-07-22 · → [[../libraries/decision-engine]]

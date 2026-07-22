@@ -1,0 +1,1 @@
+- **Close the loop: factor-rollup scores re-weight the selection engine** · verified 2026-07-22 · → [[../lifecycles/quant-desk-reweight-loop]]

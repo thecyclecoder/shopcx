@@ -1,0 +1,1 @@
+- **Products UI: creative panel on product page + factor-rollup dashboard** · verified 2026-07-22 · → [[../dashboard/product-creative-panel]]
