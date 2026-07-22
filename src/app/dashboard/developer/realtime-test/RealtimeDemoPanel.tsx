@@ -40,14 +40,16 @@ export default function RealtimeDemoPanel() {
   useEffect(() => {
     const supabase = createClient();
 
-    // Initial snapshot (RLS-scoped to the viewer's workspace) so the panel isn't empty before the
-    // first live event. After this, we never poll again — updates arrive over the subscription.
-    void supabase
-      .from("realtime_demo")
-      .select("*")
-      .order("updated_at", { ascending: false })
-      .then(({ data }) => {
-        if (data) setRows(data as DemoRow[]);
+    // Initial snapshot via the server route (session-authed) — the app reads data through /api/*,
+    // not a browser-side PostgREST call; the browser client here is Realtime-only. After this ONE
+    // fetch we never poll again — updates arrive over the subscription below.
+    void fetch("/api/developer/realtime-demo")
+      .then((r) => (r.ok ? r.json() : { rows: [] }))
+      .then((d: { rows?: DemoRow[] }) => {
+        if (d.rows) setRows(d.rows);
+      })
+      .catch(() => {
+        /* transient — the subscription still delivers live changes */
       });
 
     const pushLog = (kind: string, detail: string) =>
@@ -65,7 +67,14 @@ export default function RealtimeDemoPanel() {
             setRows((prev) => [next as DemoRow, ...prev.filter((r) => r.id !== (next as DemoRow).id)]);
             pushLog("INSERT", `${(next as DemoRow).label} tick=${(next as DemoRow).tick}`);
           } else if (payload.eventType === "UPDATE") {
-            setRows((prev) => prev.map((r) => (r.id === (next as DemoRow).id ? (next as DemoRow) : r)));
+            // Upsert: if the initial snapshot missed this row (or it was inserted while we were
+            // connecting), an UPDATE event should still surface it rather than be dropped.
+            setRows((prev) => {
+              const nr = next as DemoRow;
+              return prev.some((r) => r.id === nr.id)
+                ? prev.map((r) => (r.id === nr.id ? nr : r))
+                : [nr, ...prev];
+            });
             pushLog("UPDATE", `${(next as DemoRow).label} tick=${(next as DemoRow).tick} · ${(next as DemoRow).note ?? ""}`);
           } else if (payload.eventType === "DELETE") {
             const goneId = (old as DemoRow).id;
