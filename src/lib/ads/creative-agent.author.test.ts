@@ -874,6 +874,109 @@ test("buildAdCampaignInsertBody: a HELD creative carries the hold_flag red-flag 
   assert.deepEqual(body.hold_flag, { gate: "firewall", reason: "firewall_claim_miss: supportingBenefit:fabricated_number", human: "unverified claim", attempts: 4 });
 });
 
+// ── held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 ─────
+// A HELD (max_qc_eligible=false) creative must carry the SAME authored copy payload +
+// v3 provenance stamps as an eligible one — the CEO's rule: a held draft is a
+// complete, inspectable, re-renderable creative, not an empty shell that forces a
+// full re-author for a render-only defect. Observed 2026-07-22 (ad_campaigns
+// 102a218f — Ashwavana Guru Focus): a strong caption was authored, Max graded 10/10,
+// and asked for a right_column re-render only — yet the saved draft had NO copy for
+// the CEO to see or re-render from (empty headline / metadata absent / v3 stamps
+// null). These pins assert the builder now broadcasts the copyPack strings + jsonb
+// envelope + v3 stamps onto the row body itself.
+
+test("buildAdCampaignInsertBody: a HELD creative persists the copyPack strings + metadata.copy_pack directly on the row (held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — a render-only bounce keeps its caption)", () => {
+  const copyPack = {
+    headlines: ["Guru focus — mushroom-adaptogen brew", "Focus without the crash"],
+    primaryTexts: [
+      "Steady focus for four hours — no spike, no crash — a mushroom-adaptogen brew 700,000 customers reach for every morning.",
+      "One warm cup and the afternoon dip stops showing up.",
+    ],
+    description: "Six functional mushrooms + grass-fed collagen. See a different cup.",
+    frameworks: ["mechanism", "objection"],
+  };
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "draft",
+    audienceTemperature: "cold",
+    maxQcEligible: false,
+    holdReason: { gate: "max_qc_below_floor", reason: "score:6 below floor:9", human: "off-key claim tone", attempts: 3 },
+    copyPack,
+  });
+  // The held draft carries the SAME creative payload the eligible path would — the
+  // strong caption Max graded lands on the campaign row itself, not just via the
+  // (possibly-missed) product_ad_angles sibling.
+  assert.equal(body.headline, "Guru focus — mushroom-adaptogen brew");
+  assert.equal(body.primary_text, "Steady focus for four hours — no spike, no crash — a mushroom-adaptogen brew 700,000 customers reach for every morning.");
+  assert.equal(body.description, "Six functional mushrooms + grass-fed collagen. See a different cup.");
+  // The full framework-labelled pack lives on the row's `metadata.copy_pack` envelope
+  // so the ad detail page renders every variation without needing the angle join.
+  assert.ok(body.metadata, "metadata envelope must be present on a copyPack-supplied held insert");
+  assert.deepEqual(body.metadata!.copy_pack, copyPack);
+  // Still non-postable + flagged — the hold semantics survive the payload widening.
+  assert.equal(body.max_qc_eligible, false);
+  assert.equal(body.hold_flag?.gate, "max_qc_below_floor");
+});
+
+test("buildAdCampaignInsertBody: a HELD creative persists the v3 attribution stamps threaded by the caller (held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — creative_theme / angle_palette_id / headline_pattern_id / creative_combination_id land on the row)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "draft",
+    audienceTemperature: "cold",
+    maxQcEligible: false,
+    holdReason: { gate: "firewall", reason: "firewall_claim_miss", human: "unverified claim", attempts: 4 },
+    v3Stamps: {
+      creative_theme: "energy_performance",
+      angle_palette_id: "angle-palette-abc",
+      headline_pattern_id: "pattern-def",
+      creative_combination_id: "combo-ghi",
+    },
+  });
+  // Both paths stamp v3 identically — the held draft is fully attributable to the
+  // (theme, angle, pattern, combination) tuple the selector chose, so the M5 factor
+  // rollup can count the held bounce alongside eligible + posted rows.
+  assert.equal(body.creative_theme, "energy_performance");
+  assert.equal(body.angle_palette_id, "angle-palette-abc");
+  assert.equal(body.headline_pattern_id, "pattern-def");
+  assert.equal(body.creative_combination_id, "combo-ghi");
+});
+
+test("buildAdCampaignInsertBody: v3 stamps absent (caller did not thread them) → all four columns NULL (pre-Phase-3 / deterministic-mode byte-identical)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "warm",
+  });
+  assert.equal(body.creative_theme, null);
+  assert.equal(body.angle_palette_id, null);
+  assert.equal(body.headline_pattern_id, null);
+  assert.equal(body.creative_combination_id, null);
+});
+
+test("buildAdCampaignInsertBody: copyPack absent (deterministic legacy caller) → headline / primary_text / description / metadata all NULL (byte-identical to pre-Phase shape)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: null,
+  });
+  assert.equal(body.headline, null);
+  assert.equal(body.primary_text, null);
+  assert.equal(body.description, null);
+  assert.equal(body.metadata, null);
+});
+
 // ── cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 ─────
 // The deterministic whole-pack `ad-creative` lane now stamps `audience_temperature` (cold for the
 // prospecting test) + a Treatment-derived Andromeda `concept_tag` on the ad_campaigns row —

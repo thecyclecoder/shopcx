@@ -2336,6 +2336,45 @@ export interface AdCampaignInsertBody {
    *  insert. Rendered as the "⚠ Held — <human>" banner on the ad detail page. Migration adds the
    *  `hold_flag jsonb` column. */
   hold_flag: { gate: string; reason: string; human: string; attempts: number } | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — the authored
+   *  headline string persisted DIRECTLY on the campaign row (== `copyPack.headlines[0]`) so a
+   *  HELD draft renders its caption on the ad detail page even when the sibling
+   *  `product_ad_angles` insert missed (angle_id=null). NULL when no `copyPack` was supplied
+   *  (should not happen on any wired caller — insertReadyCreative always has one). Migration
+   *  `20261130120000` adds the `headline text` column. */
+  headline: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — authored primary
+   *  text persisted directly on the campaign row (== `copyPack.primaryTexts[0]`). NULL when no
+   *  `copyPack` was supplied. Migration `20261130120000` adds the `primary_text text` column. */
+  primary_text: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — authored
+   *  description persisted directly on the campaign row (== `copyPack.description`). NULL when
+   *  no `copyPack` was supplied. Migration `20261130120000` adds the `description text` column. */
+  description: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — jsonb envelope
+   *  carrying `{ copy_pack: MetaCopyPack }` so the detail page reads the framework-labelled
+   *  variations without needing the angle_id join. NULL when no `copyPack` was supplied.
+   *  Migration `20261130120000` adds the `metadata jsonb` column. */
+  metadata: { copy_pack: MetaCopyPack } | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3 attribution
+   *  stamp: the angle theme (`beauty` / `energy_performance` / `longevity` / …). Read by the
+   *  factor rollup + coverage ledger + theme-spread selector. NULL when the caller did not
+   *  thread `v3Stamps` (pre-Phase / deterministic-mode). Column added by migration
+   *  `20261123120000` (v3 M1). */
+  creative_theme: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3 attribution
+   *  stamp: `product_angle_palette.id`. NULL when the caller did not thread `v3Stamps`. Column
+   *  added by migration `20261123120000`. */
+  angle_palette_id: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3 attribution
+   *  stamp: `ad_headline_patterns.id`. NULL when the caller did not thread `v3Stamps`. Column
+   *  added by migration `20261123120000`. */
+  headline_pattern_id: string | null;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3 attribution
+   *  stamp: `ad_creative_combinations.id` (upserted by the caller BEFORE the campaign insert so
+   *  the FK is real, per the wire-engine-into-dahlia-author-path lifecycle). NULL when the
+   *  caller did not thread `v3Stamps`. Column added by migration `20261123120000`. */
+  creative_combination_id: string | null;
 }
 
 /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
@@ -2392,10 +2431,38 @@ export function buildAdCampaignInsertBody(args: {
   /** always-bin-held-creative-with-flags — the red-flag payload for a HELD creative. Absent on a
    *  normal insert → stamps NULL. */
   holdReason?: { gate: string; reason: string; human: string; attempts: number };
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — the finished
+   *  MetaCopyPack the caller composed for this creative. Broadcast onto the row as:
+   *    • `headline`     = copyPack.headlines[0]
+   *    • `primary_text` = copyPack.primaryTexts[0]
+   *    • `description`  = copyPack.description
+   *    • `metadata`     = { copy_pack: copyPack }   (framework-labelled variations preserved)
+   *  So a HELD (`max_qc_eligible=false`) draft is inspectable + re-renderable on the ad detail
+   *  page WITHOUT needing to join through `angle_id` (which can be NULL when the sibling
+   *  `product_ad_angles` insert missed — the observed 102a218f bug). Undefined → all four
+   *  columns stamp NULL, matching the pre-Phase byte-identical shape a legacy caller expects. */
+  copyPack?: MetaCopyPack;
+  /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3 attribution
+   *  stamps threaded by the wire-engine caller. When absent, all four v3 stamp columns land
+   *  NULL (pre-Phase-3 / deterministic-mode / no palette-pattern pair found). The M5 factor
+   *  rollup uses `IS NOT NULL` on `creative_theme` as the "stamped" predicate, so a NULL row
+   *  correctly falls through the rollup rather than being counted as an untagged theme. */
+  v3Stamps?: {
+    creative_theme: string | null;
+    angle_palette_id: string | null;
+    headline_pattern_id: string | null;
+    creative_combination_id: string | null;
+  };
 }): AdCampaignInsertBody {
   const explicit = args.conceptTag;
   const conceptTag: AndromedaConceptTag | null =
     explicit != null ? explicit : args.authorModeCopy ? args.authorModeCopy.concept_tag : null;
+  const cp = args.copyPack;
+  const headline = cp && cp.headlines.length > 0 ? cp.headlines[0] : null;
+  const primaryText = cp && cp.primaryTexts.length > 0 ? cp.primaryTexts[0] : null;
+  const description = cp ? cp.description : null;
+  const metadata = cp ? { copy_pack: cp } : null;
+  const v3 = args.v3Stamps;
   return {
     workspace_id: args.workspaceId,
     product_id: args.productId,
@@ -2407,6 +2474,14 @@ export function buildAdCampaignInsertBody(args: {
     concept_tag: conceptTag,
     max_qc_eligible: args.maxQcEligible ?? null,
     hold_flag: args.holdReason ?? null,
+    headline,
+    primary_text: primaryText,
+    description,
+    metadata,
+    creative_theme: v3?.creative_theme ?? null,
+    angle_palette_id: v3?.angle_palette_id ?? null,
+    headline_pattern_id: v3?.headline_pattern_id ?? null,
+    creative_combination_id: v3?.creative_combination_id ?? null,
   };
 }
 
@@ -2604,6 +2679,19 @@ async function insertReadyCreative(
      *  emitted). Absent → defaults to `"explore"` (the correct default when no crowned
      *  winner exists, matching the planner's fallback at `!plan.length` → all-explore). */
     intent?: "explore" | "exploit";
+    /** held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3
+     *  attribution stamps (`creative_theme` / `angle_palette_id` / `headline_pattern_id` /
+     *  `creative_combination_id`). Threaded straight into `buildAdCampaignInsertBody` so BOTH
+     *  the eligible AND the held (`max_qc_eligible=false`) inserts stamp the row identically
+     *  — the CEO's rule: a HELD draft is a complete, inspectable, re-renderable creative, not
+     *  an empty shell. Absent → all four columns land NULL (pre-Phase-3 / deterministic-mode
+     *  / no palette-pattern pair found via [[./select-angle-pattern]]). */
+    v3Stamps?: {
+      creative_theme: string | null;
+      angle_palette_id: string | null;
+      headline_pattern_id: string | null;
+      creative_combination_id: string | null;
+    };
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. The
@@ -2702,6 +2790,20 @@ async function insertReadyCreative(
     maxQcEligible: opts?.maxQcEligible ?? null,
     // always-bin-held-creative-with-flags — the red-flag payload for a HELD creative → metadata.hold_flag.
     holdReason: opts?.holdReason,
+    // held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — thread the
+    // full MetaCopyPack onto the campaign row so a HELD draft (or one whose sibling
+    // product_ad_angles insert missed) still renders its authored caption on the ad detail
+    // page. Broadcasts headline / primary_text / description strings + a jsonb metadata
+    // envelope carrying `copy_pack` — the exact shape the ad detail page reads from
+    // `angle.copy_pack` today, so the fallback surface is identical.
+    copyPack,
+    // held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — v3
+    // attribution stamps threaded through unchanged so BOTH the eligible AND the held path
+    // land the same (creative_theme / angle_palette_id / headline_pattern_id /
+    // creative_combination_id) tuple on the campaign row. Absent → NULL on all four (the
+    // wire-engine selector call is not yet plumbed on either path in this spec, so caller
+    // supplies NULL until wire-engine-into-dahlia-author-path Phase 2/3 lights up).
+    v3Stamps: opts?.v3Stamps,
   });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")

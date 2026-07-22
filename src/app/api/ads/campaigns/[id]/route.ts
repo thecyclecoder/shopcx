@@ -136,6 +136,33 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         provenance: ((angleRow.metadata as any)?.provenance as any) ?? null,
       };
   }
+  // held-creatives-persist-authored-copy-and-v3-stamps-to-the-draft Phase 1 — fallback synth
+  // for the CEO's inspect-and-fix loop over the bin. When the sibling product_ad_angles
+  // insert missed (angle_id=null — the observed 102a218f Ashwavana case) BUT the campaign
+  // row carries an authored `metadata.copy_pack` (Phase 1 broadcasts it into the row on
+  // every HELD or eligible insert via buildAdCampaignInsertBody), assemble an angle-shaped
+  // envelope from the campaign columns so the detail page's existing copy-render code path
+  // does not change. Provenance is null in this fallback — provenance is intrinsically a
+  // per-angle concept, not a per-campaign one, and a lost sibling insert means we truly
+  // don't have it. This is READ-only synth; nothing is written.
+  if (!angle) {
+    const campaignMeta = (campaign as any).metadata as { copy_pack?: unknown } | null;
+    const fallbackCopyPack = (campaignMeta && (campaignMeta.copy_pack as
+      | { headlines?: string[]; primaryTexts?: string[]; description?: string; frameworks?: string[] }
+      | undefined)) ?? null;
+    const headline = ((campaign as any).headline as string | null) ?? null;
+    const primaryText = ((campaign as any).primary_text as string | null) ?? null;
+    const description = ((campaign as any).description as string | null) ?? null;
+    if (fallbackCopyPack || headline || primaryText || description) {
+      angle = {
+        meta_headline: headline,
+        meta_primary_text: primaryText,
+        meta_description: description,
+        copy_pack: fallbackCopyPack,
+        provenance: null,
+      };
+    }
+  }
 
   // Max's latest copy-QC verdict (hard gates + persuasion + scroll-stop + suggestion). Null until
   // Max has run — the UI shows an "awaiting Max" state.
