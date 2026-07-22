@@ -51,7 +51,7 @@ import {
 import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { inngest } from "@/lib/inngest/client";
 import { generateOrderNumber } from "@/lib/order-number";
-import { logCheckoutError } from "@/lib/checkout-error-log";
+import { logCheckoutError, type CheckoutErrorStage } from "@/lib/checkout-error-log";
 import { toE164US } from "@/lib/phone";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
@@ -101,6 +101,42 @@ interface PostBody {
   //                    so they ship + bill at next renewal then drop
   sub_mode?: "new_sub" | "add_to_sub" | "renewal_only";
   existing_sub_id?: string;
+}
+
+// Info-disclosure guard for the payment path. Every error response that USED to
+// return raw `err.message` / `String(err)` to the client (gateway config text,
+// Postgres error strings, stack shapes) now goes through this: the FULL error
+// is captured server-side via logCheckoutError (lossless — see
+// [[lossless-error-diagnostics]]) and the client gets ONLY a stable machine
+// -readable `error` code (plus explicitly-safe reference ids via extraBody).
+interface SanitizedCheckoutErrorArgs {
+  workspaceId: string;
+  stage: CheckoutErrorStage;
+  errorCode: string;
+  status: number;
+  error: unknown;
+  cartToken?: string | null;
+  customerId?: string | null;
+  logContext?: Record<string, unknown>;
+  extraBody?: Record<string, unknown>;
+}
+
+async function sanitizedCheckoutErrorResponse(
+  args: SanitizedCheckoutErrorArgs,
+): Promise<NextResponse> {
+  await logCheckoutError({
+    workspaceId: args.workspaceId,
+    stage: args.stage,
+    cartToken: args.cartToken ?? null,
+    customerId: args.customerId ?? null,
+    errorCode: args.errorCode,
+    errorMessage: errText(args.error),
+    context: args.logContext ?? {},
+  });
+  return NextResponse.json(
+    { error: args.errorCode, ...(args.extraBody ?? {}) },
+    { status: args.status },
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -351,7 +387,14 @@ export async function POST(request: NextRequest) {
       .select("id, shopify_customer_id, first_name, last_name")
       .maybeSingle();
     if (createErr) {
-      return NextResponse.json({ error: "customer_create_failed", details: createErr.message }, { status: 500 });
+      return sanitizedCheckoutErrorResponse({
+        workspaceId: cart.workspace_id as string,
+        stage: "identify",
+        errorCode: "customer_create_failed",
+        status: 500,
+        error: createErr,
+        cartToken: cart.token as string,
+      });
     }
     if (createdRow) {
       customer = createdRow;
@@ -365,7 +408,15 @@ export async function POST(request: NextRequest) {
         .eq("email", email)
         .maybeSingle();
       if (reselectErr || !existing) {
-        return NextResponse.json({ error: "customer_create_failed", details: reselectErr?.message }, { status: 500 });
+        return sanitizedCheckoutErrorResponse({
+          workspaceId: cart.workspace_id as string,
+          stage: "identify",
+          errorCode: "customer_create_failed",
+          status: 500,
+          error: reselectErr ?? new Error("customer row missing after upsert race"),
+          cartToken: cart.token as string,
+          logContext: { reason: reselectErr ? "reselect_failed" : "row_missing_after_race" },
+        });
       }
       customer = existing;
     }
@@ -445,10 +496,15 @@ export async function POST(request: NextRequest) {
       phone: phoneE164 || undefined,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: "braintree_customer_resolve_failed", details: errText(err) },
-      { status: 500 },
-    );
+    return sanitizedCheckoutErrorResponse({
+      workspaceId: cart.workspace_id as string,
+      stage: "submit",
+      errorCode: "braintree_customer_resolve_failed",
+      status: 500,
+      error: err,
+      cartToken: cart.token as string,
+      customerId: customer.id as string,
+    });
   }
 
   // 4. Resolve the vault token to charge.
@@ -501,10 +557,15 @@ export async function POST(request: NextRequest) {
         body.device_data,
       );
     } catch (err) {
-      return NextResponse.json(
-        { error: "card_verification_failed", details: errText(err) },
-        { status: 402 },
-      );
+      return sanitizedCheckoutErrorResponse({
+        workspaceId: cart.workspace_id as string,
+        stage: "tokenize",
+        errorCode: "card_verification_failed",
+        status: 402,
+        error: err,
+        cartToken: cart.token as string,
+        customerId: customer.id as string,
+      });
     }
     // Persist the payment method. is_default=true via savePaymentMethod
     // semantics (the newest vault wins) — customer/admin can flip later.
@@ -532,10 +593,15 @@ export async function POST(request: NextRequest) {
   try {
     gateway = await getBraintreeGateway(cart.workspace_id);
   } catch (err) {
-    return NextResponse.json(
-      { error: "braintree_not_configured", details: errText(err) },
-      { status: 500 },
-    );
+    return sanitizedCheckoutErrorResponse({
+      workspaceId: cart.workspace_id as string,
+      stage: "braintree_charge",
+      errorCode: "braintree_not_configured",
+      status: 500,
+      error: err,
+      cartToken: cart.token as string,
+      customerId: customer.id as string,
+    });
   }
 
   const amountDecimal = (totalCents / 100).toFixed(2);
@@ -618,26 +684,25 @@ export async function POST(request: NextRequest) {
         console.warn(`[checkout] Avalara void after Braintree fail threw for ${orderNumber}:`, err);
       }
     }
-    await logCheckoutError({
+    // Info-disclosure guard: the raw gateway message + vaulted BT payment
+    // method token + BT customer id must NEVER reach the client on the payment
+    // path. Full context is captured server-side via logCheckoutError and the
+    // `transactions` row updated above (error_message + processor_response_*);
+    // the client sees only the stable `error` code.
+    return sanitizedCheckoutErrorResponse({
       workspaceId: cart.workspace_id as string,
       stage: "braintree_charge",
+      errorCode: "transaction_failed",
+      status: 402,
+      error: message,
       cartToken: cart.token as string,
       customerId: customer.id as string,
-      errorCode: "transaction_failed",
-      errorMessage: message,
-      context: {
+      logContext: {
         total_cents: totalCents,
         processor_response_code: (txnResult as { transaction?: { processorResponseCode?: string } }).transaction?.processorResponseCode || null,
         order_number: orderNumber,
       },
     });
-    return NextResponse.json({
-      error: "transaction_failed",
-      details: message,
-      // Card stays vaulted; surface the token so a retry can reuse it.
-      braintree_payment_method_token: chargeToken,
-      braintree_customer_id: braintreeCustomerId,
-    }, { status: 402 });
   }
   const transaction = txnResult.transaction;
   const paymentMethodToken: string = chargeToken;
@@ -908,19 +973,24 @@ export async function POST(request: NextRequest) {
         console.warn(`[checkout] Avalara void after order_insert_failed threw for ${orderNumber}:`, voidErr);
       }
     }
-    await logCheckoutError({
+    return sanitizedCheckoutErrorResponse({
       workspaceId: cart.workspace_id as string,
       stage: "order_insert",
+      errorCode: "order_insert_failed",
+      status: 500,
+      error: orderErr ?? new Error("order insert failed after successful charge"),
       cartToken: cart.token as string,
       customerId: customer.id as string,
-      errorCode: "order_insert_failed",
-      errorMessage: orderErr?.message || "order insert failed after successful charge",
-      context: { braintree_transaction_id: transaction.id, order_number: orderNumber, total_cents: totalCents, refunded: true },
+      logContext: {
+        braintree_transaction_id: transaction.id,
+        order_number: orderNumber,
+        total_cents: totalCents,
+        refunded: true,
+      },
+      // braintree_transaction_id is a safe reference (not an error internal) —
+      // the client needs it so a retry / support flow can reconcile the charge.
+      extraBody: { braintree_transaction_id: transaction.id },
     });
-    return NextResponse.json(
-      { error: "order_insert_failed", details: orderErr?.message, braintree_transaction_id: transaction.id },
-      { status: 500 },
-    );
   }
 
   // Patch the transactions row with the resulting order_id.
