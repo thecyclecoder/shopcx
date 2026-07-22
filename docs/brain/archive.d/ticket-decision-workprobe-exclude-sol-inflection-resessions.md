@@ -1,0 +1,1 @@
+- **Exclude Sol inflection re-sessions from the AI orchestrator work probe** · verified 2026-07-22 · → [[../libraries/control-tower]]
