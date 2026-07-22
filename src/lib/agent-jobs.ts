@@ -2810,6 +2810,105 @@ export interface GoalFinalizeResult {
 }
 
 /**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 3 — the ATOMIC POST-MERGE
+ * sequence a caller runs the moment `mergeGoalBranchIntoMain(goalSlug)` returns a real `mergeSha`. Folds
+ * the four sanctioned effects (stamp merge SHA → open Reva deploy-watch → apply promotion effects →
+ * outside-dependent auto-queue → finalize goal row + enqueue goal-fold) into ONE exported entrypoint so
+ * NO caller can land a goal on main without running finalize. Before Phase 3 the sequence was inline in
+ * `promoteCompleteGoalsToMain`, so a hand-merged / ad-hoc promoter that skipped it would strand every
+ * member fold at the fold gate's Rail-3 goal-bound-defer (live: v3-ad-creative-engine hand-merge stranded
+ * all 10 member folds; a human had to backfill).
+ *
+ * ORDER MATTERS:
+ *   1. `stampGoalPromotedToMain` — persist the atomic merge SHA on the goal row so any downstream reader
+ *      (spec-fold gate, control-tower heartbeat) sees the promoted state before the effect chain fires.
+ *   2. `openDeployWatch({isAtomic:true})` — snapshot the pre-deploy baseline as close to the merge as
+ *      possible; Reva ESCALATES a regression instead of auto-reverting a whole-goal blast radius.
+ *   3. `applyGoalPromotionEffects` — the ONLY shipped-writer: flip every member spec's phases to
+ *      `shipped` tagged with `mergeSha`, stamp card-level `last_merge_sha`, enqueue spec-tests, invoke
+ *      the reactive fold lane.
+ *   4. `autoQueueUnblockedByGoal` — release OUTSIDE dependents whose blocker is `kind:"goal"` (the
+ *      per-member `autoQueueUnblockedBy` calls inside `applyGoalPromotionEffects` only cover the
+ *      `kind:"spec"` goal-mate case).
+ *   5. `finalizePromotedGoal` — the NON-SKIPPABLE tail: flip stored `goals.status` `greenlit → complete`
+ *      (the goal-fold lane's guard reads the STORED status) + enqueue ONE deduped `goal-fold` job. If a
+ *      future ad-hoc promoter reaches step 1 without this call, the goal lingers forever as `greenlit`
+ *      and every member fold defers on Rail-3 — the exact v3 stranding this refactor prevents.
+ *
+ * Best-effort per step (never throws); each step's failure is logged and the sequence continues so a
+ * transient step-1 failure doesn't skip the effects, and a transient step-3 failure doesn't skip the
+ * finalize. Idempotent: a re-run against an already-promoted goal restamps inertly (compare-and-set on
+ * id) and `finalizePromotedGoal` no-ops an already-folded goal + dedupes an in-flight goal-fold.
+ * `[[reconcileCompletedGoalsToFolded]]` is the belt-and-suspenders reconciler that catches any goal
+ * still stranded despite this entrypoint (main_merge_sha set, stored status ≠ complete/folded).
+ */
+export interface FinalizeGoalMainPromotionResult {
+  /** the promotion effects (specs flipped shipped, folds triggered, reactive folds). */
+  effects: GoalPromotionEffects;
+  /** outside-dependent spec slugs auto-queued after the goal landed on main. */
+  outsideQueued: string[];
+  /** the finalize result — stored greenlit → complete + goal-fold enqueue. */
+  finalize: GoalFinalizeResult;
+}
+
+export async function finalizeGoalMainPromotion(input: {
+  workspaceId: string;
+  goalId: string;
+  goalSlug: string;
+  mergeSha: string;
+  adminClient?: Admin;
+}): Promise<FinalizeGoalMainPromotionResult> {
+  const { workspaceId, goalId, goalSlug, mergeSha } = input;
+  const admin = input.adminClient || createAdminClient();
+  // (1) Persist the atomic merge SHA on the goal row. Runs FIRST so any downstream reader firing off the
+  //     effect chain sees the promoted state (`main_merge_sha` set clears the HELD backstop too).
+  try {
+    const { stampGoalPromotedToMain } = await import("@/lib/goals-table");
+    await stampGoalPromotedToMain(goalId, mergeSha, `m5-promote:${goalSlug}`);
+  } catch (e) {
+    console.warn(`[goal-main-promote] ${goalSlug} stampGoalPromotedToMain failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  // (2) Reva atomic deploy-watch (snapshot the pre-deploy baseline close to the merge).
+  try {
+    const { openDeployWatch } = await import("@/lib/deploy-guardian");
+    await openDeployWatch({
+      admin,
+      branch: `goal/${goalSlug}`,
+      mergeSha,
+      workspaceId,
+      slug: goalSlug,
+      isAtomic: true,
+    });
+  } catch (e) {
+    console.warn(`[goal-main-promote] ${goalSlug} deploy-watch open failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  // (3) Promotion effects — the ONLY shipped-writer (member phases → shipped + reactive fold).
+  //     `applyGoalPromotionEffects` catches its own per-spec failures; wrap the outer call too so a
+  //     throw here (e.g. `goalBranchState` transient failure) never skips steps 4 and 5 (the whole
+  //     point of the Phase-3 non-skippable chokepoint — the finalize tail MUST fire).
+  let effects: GoalPromotionEffects = { stampedSpecs: [], phasesStamped: 0, foldsTriggered: [], foldedNow: [] };
+  try {
+    effects = await applyGoalPromotionEffects(workspaceId, goalSlug, mergeSha);
+  } catch (e) {
+    console.warn(`[goal-main-promote] ${goalSlug} applyGoalPromotionEffects failed (continuing to finalize):`, e instanceof Error ? e.message : e);
+  }
+  // (4) Outside-dependent auto-queue — the `kind:"goal"` blocker leg the per-member calls miss.
+  let outsideQueued: string[] = [];
+  try {
+    outsideQueued = await autoQueueUnblockedByGoal(workspaceId, goalSlug);
+    if (outsideQueued.length) {
+      console.log(`[goal-main-promote] ${goalSlug} outside-dependent auto-queue → ${outsideQueued.join(", ")}`);
+    }
+  } catch (e) {
+    console.warn(`[goal-main-promote] ${goalSlug} outside-dependent unblock failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  // (5) THE NON-SKIPPABLE TAIL: retire the goal (stored greenlit → complete + goal-fold enqueue). Without
+  //     this the promoted goal lingers `greenlit` forever and every member fold defers on Rail-3.
+  const finalize = await finalizePromotedGoal(workspaceId, goalSlug, admin);
+  return { effects, outsideQueued, finalize };
+}
+
+/**
  * post-M5-goal-finalization — RETIRE a goal that just promoted to main. A goal that completed the full path
  * (every member spec on the goal branch, then the atomic goal→main merge) was previously left lingering as
  * `greenlit`: M5 stamped the SPECS shipped but never touched the GOAL row, and nothing enqueued a goal-fold.
@@ -2905,6 +3004,30 @@ async function resolveBuildConsoleWorkspace(admin: Admin): Promise<string | null
   return (ws as { id?: string } | null)?.id ?? null;
 }
 
+/**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 1 — the on-branch fast-path
+ * predicate the M5 member-eligibility loop reads to SKIP a stale per-member accumulation re-check on a member
+ * that already merged onto the goal branch.
+ *
+ * A member with `onGoalBranch=true` ALREADY passed the accumulation gate at spec→goal merge time — M4's
+ * `promoteEligibleSpecsToGoalBranch` gates on the SAME `isSpecAccumulationComplete` /
+ * `verifyPhaseAccumulatedOnBranch` predicate before landing the spec on `goal/{slug}`. Re-running that grep
+ * against the member's now-stale `claude/build-{slug}` branch at M5 catches OVER-PRECISE / drifted patterns
+ * as FALSE-NEGATIVES even when the goal-branch artifact is deploy-clean (live: v3-ad-creative-engine held on
+ * 8/10 members' stale-grep false-negatives despite the goal branch passing tsc + every predeploy gate and a
+ * 0-conflict merge — a human had to hand-merge and the manual path then SKIPPED `finalizePromotedGoal`,
+ * stranding all 10 member folds).
+ *
+ * Phantom-protection stays at spec→goal merge (where a member FIRST accumulates); at goal→main the artifact
+ * that ships is the GOAL BRANCH itself (Phase 2 gates the goal-branch HEAD's CI positively), not the
+ * per-member build branch. Pure predicate — testable without DB or GitHub. `isSpecPromoteEligible` keeps its
+ * current behavior for the spec→goal promote (where accumulation MUST be verified for a not-yet-merged
+ * member); only the goal→main member loop takes this fast-path.
+ */
+export function memberAccumulationSatisfiedOnGoalBranch(member: { onGoalBranch: boolean }): boolean {
+  return member.onGoalBranch === true;
+}
+
 export interface PromoteGoalsToMainResult {
   /** goal slugs atomically merged to main this pass + had all member phases stamped shipped. */
   promoted: string[];
@@ -2950,9 +3073,9 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
   const admin = adminClient || createAdminClient();
   if (!ghToken()) return result;
   try {
-    const { listGoals, isGoalParentExempt, stampGoalPromotedToMain, stampGoalPromotionHeld } = await import("@/lib/goals-table");
+    const { listGoals, isGoalParentExempt, stampGoalPromotionHeld } = await import("@/lib/goals-table");
     const { goalBranchState } = await import("@/lib/specs-table");
-    const { mergeGoalBranchIntoMain } = await import("@/lib/github-pr-resolve");
+    const { mergeGoalBranchIntoMain, goalBranchCiGreen } = await import("@/lib/github-pr-resolve");
 
     // Resolve the build-console workspace (the one that runs builds = owns the goals/specs we promote). One
     // workspace per build console; the newest agent_jobs row's workspace, falling back to the first workspace
@@ -2981,9 +3104,48 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         }
         // (3) GREEN (option b) — every member spec individually promote-eligible on its own branch. (The atomic
         //     merge below is the final combination check.) A member that isn't promote-eligible HOLDS the goal.
+        //
+        // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 1 — an on-branch member
+        // (`memberAccumulationSatisfiedOnGoalBranch`) takes the FAST-PATH: skip the stale per-member
+        // `verifyPhaseAccumulatedOnBranch` accumulation re-check (already passed at spec→goal merge, and its
+        // build branch is now stale — see the helper's docstring for the v3-ad-creative-engine incident) and
+        // gate ONLY on the cheap DB-read green legs (`isSpecTestGreenForBranch` + `isSecurityGreenForBranch`).
+        // A member that ISN'T on the goal branch keeps the full `isSpecPromoteEligible` gate (the pre-Phase-1
+        // path). Fails CLOSED on a green-check throw (mirrors `isSpecPromoteEligible`'s fail-closed shape).
         let allEligible = true;
         for (const memberSpec of state.specs) {
           const branch = `claude/build-${memberSpec.slug}`;
+          if (memberAccumulationSatisfiedOnGoalBranch(memberSpec)) {
+            let specTestGreen = false;
+            let securityGreen = false;
+            let greenReadReason: string | null = null;
+            try {
+              const { isSpecTestGreenForBranch } = await import("@/lib/spec-test-runs");
+              specTestGreen = await isSpecTestGreenForBranch(workspaceId, memberSpec.slug, branch);
+            } catch (e) {
+              greenReadReason = `spec-test green read failed (treated not-green): ${errText(e)}`;
+            }
+            try {
+              const { isSecurityGreenForBranch } = await import("@/lib/security-agent");
+              securityGreen = await isSecurityGreenForBranch(admin, branch);
+            } catch (e) {
+              greenReadReason = greenReadReason || `security green read failed (treated not-green): ${errText(e)}`;
+            }
+            if (specTestGreen && securityGreen) continue;
+            allEligible = false;
+            const reason =
+              greenReadReason ||
+              [
+                specTestGreen ? null : "spec-test not green on branch preview",
+                securityGreen ? null : "security not green on branch",
+              ]
+                .filter(Boolean)
+                .join("; ");
+            console.warn(
+              `[goal-main-promote] ${goalSlug}: on-branch member ${memberSpec.slug} not promote-eligible (${reason}) — holding goal`,
+            );
+            break;
+          }
           const elig = await isSpecPromoteEligible(workspaceId, memberSpec.slug, branch);
           if (!elig.eligible) {
             allEligible = false;
@@ -2993,6 +3155,25 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
         }
         if (!allEligible) {
           result.notReady.push(goalSlug);
+          continue;
+        }
+        // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 2 — POSITIVE
+        // VERIFICATION on the ARTIFACT that ships. Phase 1 dropped the stale per-member accumulation
+        // grep on the member's `claude/build-{slug}` branch (source of the v3-ad-creative-engine
+        // false-negative); the bar-lowering compensator is this: require the goal branch HEAD's own
+        // check-runs to be all-green before the atomic merge. Fails CLOSED — an unreadable CI state,
+        // empty check-run list, in-flight run, or any red conclusion HOLDS the promote via `notReady`
+        // (surfaced like every other not-ready path, never a silent skip). See
+        // `classifyCheckRunsForCiGreen` for the exact predicate.
+        let ciVerdict: { green: boolean; reason: string };
+        try {
+          ciVerdict = await goalBranchCiGreen(goalSlug);
+        } catch (e) {
+          ciVerdict = { green: false, reason: `ci-status read threw (fail-closed): ${errText(e)}` };
+        }
+        if (!ciVerdict.green) {
+          result.notReady.push(goalSlug);
+          console.warn(`[goal-main-promote] ${goalSlug}: goal-branch CI not green — holding goal (${ciVerdict.reason})`);
           continue;
         }
         // (4) ATOMIC promote: merge goal/{slug} → main in ONE merge.
@@ -3027,59 +3208,26 @@ export async function promoteCompleteGoalsToMain(adminClient?: Admin): Promise<P
           console.warn(`[goal-main-promote] ${goalSlug}: not merged (${merge.reason ?? "unknown"})`);
           continue;
         }
-        // goal-promotion-fold-collision-and-held-surfacing Phase 2 — PERSIST the atomic merge SHA on the
-        // goal row so the roadmap reader knows the goal's code has ACTUALLY landed on main. Also clears any
-        // prior HELD reason (a previously-409'd goal that just landed drops its badge in the same write).
-        // Runs BEFORE `applyGoalPromotionEffects` so any reader firing off the effect chain (spec-fold gate,
-        // control-tower heartbeat) sees the promoted state. Best-effort — never blocks the effects.
-        try {
-          await stampGoalPromotedToMain(goal.id, merge.mergeSha, `m5-promote:${goalSlug}`);
-        } catch (e) {
-          console.warn(`[goal-main-promote] ${goalSlug} stampGoalPromotedToMain failed (continuing):`, e instanceof Error ? e.message : e);
-        }
-        // Reva (deploy-guardian) — open an ATOMIC deploy-watch over the goal→main deploy BEFORE the shipped
-        // stamp/fold (the watch snapshots the pre-deploy baseline; do it as close to the merge as possible).
-        // This is the highest-blast-radius deploy in the system (a whole goal's many specs in one merge), and
-        // it was previously UNWATCHED — Gate A's watch only covers per-spec `claude/*` merges, which goal-bound
-        // specs no longer take. An atomic watch ESCALATES a regression instead of auto-reverting a whole goal
-        // (the regression bar is tuned for tiny per-phase diffs). Best-effort — never blocks the promotion.
-        try {
-          const { openDeployWatch } = await import("@/lib/deploy-guardian");
-          await openDeployWatch({
-            admin,
-            branch: `goal/${goalSlug}`,
-            mergeSha: merge.mergeSha,
-            workspaceId,
-            slug: goalSlug,
-            isAtomic: true,
-          });
-        } catch (e) {
-          console.warn(`[goal-main-promote] ${goalSlug} deploy-watch open failed (continuing):`, e instanceof Error ? e.message : e);
-        }
-        // Promotion effects — the SHIPPED stamp (the only shipped-writer) + per-spec fold trigger + reactive fold.
-        const effects = await applyGoalPromotionEffects(workspaceId, goalSlug, merge.mergeSha);
+        // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 3 — the SINGLE
+        // NON-SKIPPABLE POST-MERGE ENTRYPOINT. Folds `stampGoalPromotedToMain` (persist merge SHA on
+        // the goal row + clear the HELD backstop) → Reva atomic `openDeployWatch` (snapshot the
+        // pre-deploy baseline) → `applyGoalPromotionEffects` (the only shipped-writer + reactive
+        // fold) → `autoQueueUnblockedByGoal` (release outside dependents whose blocker is
+        // `kind:"goal"`) → `finalizePromotedGoal` (stored greenlit → complete + goal-fold enqueue)
+        // into ONE call. No caller (this seam or a future ad-hoc/manual promoter) can land the merge
+        // without running finalize — the exact miss that stranded v3-ad-creative-engine's 10 member
+        // folds when a human hand-merged the goal. See `finalizeGoalMainPromotion` for the ordering
+        // rationale and idempotency contract.
+        const finalizeResult = await finalizeGoalMainPromotion({
+          workspaceId,
+          goalId: goal.id,
+          goalSlug,
+          mergeSha: merge.mergeSha,
+          adminClient: admin,
+        });
+        const { effects, finalize } = finalizeResult;
         result.promoted.push(goalSlug);
         result.effects[goalSlug] = effects;
-        // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 2 — the
-        // OUTSIDE-DEPENDENT auto-queue leg. `applyGoalPromotionEffects` already fires
-        // `autoQueueUnblockedBy(memberSpec.slug)` for each goal-mate leg. That path only catches
-        // dependents whose stored `blocked_by` matches a member-spec slug AS A SPEC blocker — which is
-        // the goal-mate case (Phase 1 leaves goal-mates as `kind:"spec"`). An OUTSIDE dependent's
-        // resolved blocker is `kind:"goal"` with `slug=goalSlug`, so the per-member calls silently
-        // skip it. This sweep releases those outside dependents the moment the goal's atomic promotion
-        // stamped `main_merge_sha` (see [[autoQueueUnblockedByGoal]] for the pure predicate + guards).
-        try {
-          const outsideQueued = await autoQueueUnblockedByGoal(workspaceId, goalSlug);
-          if (outsideQueued.length) {
-            console.log(`[goal-main-promote] ${goalSlug} outside-dependent auto-queue → ${outsideQueued.join(", ")}`);
-          }
-        } catch (e) {
-          console.warn(`[goal-main-promote] ${goalSlug} outside-dependent unblock failed (continuing):`, e instanceof Error ? e.message : e);
-        }
-        // post-M5-goal-finalization — RETIRE the goal itself: greenlit → complete (explicit override) + enqueue
-        // the goal-fold lane (folds into the brain + flips → folded). Without this the promoted goal lingers as
-        // `greenlit` on the active board forever (the gap observed live on noop-goal-v2).
-        const finalize = await finalizePromotedGoal(workspaceId, goalSlug, admin);
         result.finalized[goalSlug] = finalize;
         console.log(
           `[goal-main-promote] ATOMIC promoted ${goalSlug} → main (${merge.mergeSha.slice(0, 8)}); stamped ${effects.phasesStamped} phase(s) across ${effects.stampedSpecs.length} spec(s) shipped; folded-now: ${effects.foldedNow.join(", ") || "—"}; goal-finalize: complete=${finalize.completed} fold-queued=${finalize.foldQueued}${finalize.reason ? ` (${finalize.reason})` : ""}`,
@@ -3142,6 +3290,10 @@ export async function reconcileCompletedGoalsToFolded(
 ): Promise<CompletedGoalFoldResult> {
   const out: CompletedGoalFoldResult = { folded: [], kept: [] };
   const admin = adminClient || createAdminClient();
+  // Dedupe: a slug the derived-rollup pass processed must not also fire the stranded-shape pass (would
+  // re-invoke `finalizePromotedGoal` after a foldQueue and get reported as `kept` for a benign in-flight
+  // dedupe, noisy but not wrong).
+  const processed = new Set<string>();
   try {
     const { getGoals } = await import("@/lib/brain-roadmap");
     const { isGoalParentExempt } = await import("@/lib/goals-table");
@@ -3156,10 +3308,12 @@ export async function reconcileCompletedGoalsToFolded(
         const exempt = await isGoalParentExempt(workspaceId, goal.slug);
         if (exempt.exempt) {
           out.kept.push({ slug: goal.slug, reason: exempt.reason });
+          processed.add(goal.slug);
           continue;
         }
         // (3) FOLD via the sanctioned retire path (greenlit/complete → complete + goal-fold enqueue).
         const fin = await finalizePromotedGoal(workspaceId, goal.slug, admin);
+        processed.add(goal.slug);
         if (fin.foldQueued || fin.completed) {
           out.folded.push({ slug: goal.slug, previous: goal.status });
           // Supervisor-visible report: one director_activity row per goal folded (never silent).
@@ -3192,6 +3346,73 @@ export async function reconcileCompletedGoalsToFolded(
         console.warn(`[completed-goal-self-archive] ${goal.slug} fold threw (continuing):`, e instanceof Error ? e.message : e);
       }
     }
+
+    // goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 3 — the STRANDED-SHAPE
+    // belt-and-suspenders pass. `finalizeGoalMainPromotion` now makes the post-merge sequence
+    // non-skippable, but a PRE-EXISTING stranded goal (a goal that landed on main before Phase 3, via
+    // a hand-merge or an ad-hoc script that skipped `finalizePromotedGoal`) still sits `greenlit` on
+    // the board forever — its `main_merge_sha` is set but its STORED status was never flipped. This
+    // pass catches that shape by iterating raw `listGoals` rows (the stored status is authoritative,
+    // NOT the derived card status the first pass reads) and running `finalizePromotedGoal` on any
+    // non-parent goal where main_merge_sha is set AND stored status ∈ ('proposed','greenlit'). A goal
+    // already caught by pass 1 (rollup 100% path) is deduped via `processed`. Idempotent per-slug and
+    // reason-forcing: even if the rollup isn't 100% (e.g. `applyGoalPromotionEffects` never ran on the
+    // ad-hoc land, so the member specs never got their `shipped` stamps), the goal itself still
+    // deserves the greenlit→complete flip + goal-fold enqueue — the fold lane picks up whatever
+    // shipped state the goal actually carries.
+    try {
+      const { listGoals: listGoalsRaw, isGoalParentExempt: isGoalParentExemptRaw } = await import("@/lib/goals-table");
+      const rawRows = await listGoalsRaw(workspaceId, {});
+      for (const row of rawRows) {
+        if (processed.has(row.slug)) continue;
+        if (!row.main_merge_sha) continue; // never landed atomically — not the stranded shape
+        if (row.status === "complete" || row.status === "folded") continue; // already finalized/folded
+        try {
+          // PARENT EXEMPTION — a parent should never atomic-promote in the first place, but if a
+          // main_merge_sha somehow appeared on one, don't run the finalize (its children promote
+          // independently; folding the parent would misretire the family).
+          const parentExempt = await isGoalParentExemptRaw(workspaceId, row.slug);
+          if (parentExempt.exempt) {
+            out.kept.push({ slug: row.slug, reason: `stranded-parent-exempt — ${parentExempt.reason}` });
+            processed.add(row.slug);
+            continue;
+          }
+          const fin = await finalizePromotedGoal(workspaceId, row.slug, admin);
+          processed.add(row.slug);
+          if (fin.foldQueued || fin.completed) {
+            out.folded.push({ slug: row.slug, previous: row.status });
+            try {
+              const { recordDirectorActivity } = await import("@/lib/director-activity");
+              await recordDirectorActivity(admin, {
+                workspaceId,
+                directorFunction: "platform",
+                actionKind: "reconciled_completed_goal_folded",
+                specSlug: row.slug,
+                reason: `reconciler:stranded-promoted-goal finalized the stranded goal '${row.slug}' — main_merge_sha=${row.main_merge_sha.slice(0, 8)} is set but stored status stayed '${row.status}' (a pre-Phase-3 hand-merge / ad-hoc promoter landed the goal branch on main without running finalize, so it lingered greenlit forever). Ran the sanctioned retire path (greenlit → complete + goal-fold enqueue).`,
+                metadata: {
+                  actor: "reconciler:stranded-promoted-goal",
+                  signal: "main_merge_sha-set-status-not-complete",
+                  main_merge_sha: row.main_merge_sha,
+                  stored_status: row.status,
+                  completed: fin.completed,
+                  fold_queued: fin.foldQueued,
+                  finalize_reason: fin.reason ?? null,
+                },
+              });
+            } catch {
+              /* audit is best-effort — the fold already enqueued */
+            }
+          } else {
+            out.kept.push({ slug: row.slug, reason: `stranded-no-op — ${fin.reason ?? "finalize no-op"}` });
+          }
+        } catch (e) {
+          console.warn(`[stranded-promoted-goal-finalize] ${row.slug} fold threw (continuing):`, e instanceof Error ? e.message : e);
+        }
+      }
+    } catch (e) {
+      console.warn("[stranded-promoted-goal-finalize] pass failed (continuing):", e instanceof Error ? e.message : e);
+    }
+
     return out;
   } catch (e) {
     console.error("[completed-goal-self-archive] pass failed:", e instanceof Error ? e.message : e);

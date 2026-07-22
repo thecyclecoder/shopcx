@@ -1025,6 +1025,109 @@ async function branchHeadSha(branch: string): Promise<string | null> {
 }
 
 /**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 2 — the SHAPE the pure
+ * classifier consumes. The wrapper reads GitHub's `/commits/{ref}/check-runs` and passes only the fields
+ * that matter (name for diagnostics, `status`+`conclusion` for the verdict). Keeps the pure predicate
+ * decoupled from the GitHub API's full response shape.
+ */
+export type CheckRunLite = {
+  name?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+};
+
+export interface CiGreenVerdict {
+  green: boolean;
+  reason: string;
+}
+
+/**
+ * A completed check-run is GREEN when its conclusion is `success`, `neutral`, or `skipped`. `neutral` is
+ * used by some checks to mean "advisory not blocking"; `skipped` fires when a workflow is a no-op
+ * (unchanged files, path filter). `failure`/`cancelled`/`timed_out`/`action_required`/`stale` are NOT
+ * green — the goal-branch artifact ships as-is, so any red conclusion HOLDS the promote.
+ */
+const GREEN_CONCLUSIONS: ReadonlySet<string> = new Set(["success", "neutral", "skipped"]);
+
+/**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 2 — the PURE PREDICATE the M5
+ * CI gate reads to decide `green | not-green` on the goal-branch HEAD's check-runs. Deterministic,
+ * testable without GitHub or DB (see the test alongside).
+ *
+ * Fails CLOSED on every unknown state (mirrors the CLAUDE.md "database is the spec" / "unknown artifact
+ * state HOLDS the promote" invariant the spec's Why cites — never merge on an artifact whose readiness
+ * we can't positively verify):
+ *   - `null` — an upstream fetch error → not green.
+ *   - empty check-run list — no CI ran on the HEAD SHA → not green (there is no positive verification
+ *     to trust; the pre-M5 stale per-member greps were the FALSE-negative source, so their absence must
+ *     not silently green-light the merge).
+ *   - any `status !== "completed"` — a queued/in-progress run → not green.
+ *   - any completed run whose `conclusion ∉ {success, neutral, skipped}` → not green.
+ *   - otherwise → green, with the run count as evidence.
+ * Returns `{ green, reason }` so the M5 caller can log WHY a hold fired.
+ */
+export function classifyCheckRunsForCiGreen(checkRuns: ReadonlyArray<CheckRunLite> | null): CiGreenVerdict {
+  if (checkRuns === null) return { green: false, reason: "ci-status read failed" };
+  if (!checkRuns.length) return { green: false, reason: "no check-runs on branch HEAD (fail-closed)" };
+  const inFlight = checkRuns.find((c) => (c.status ?? "") !== "completed");
+  if (inFlight) {
+    return {
+      green: false,
+      reason: `check "${inFlight.name ?? "(unnamed)"}" not completed (status=${inFlight.status ?? "unknown"})`,
+    };
+  }
+  const nonGreen = checkRuns.find((c) => !GREEN_CONCLUSIONS.has(c.conclusion ?? ""));
+  if (nonGreen) {
+    return {
+      green: false,
+      reason: `check "${nonGreen.name ?? "(unnamed)"}" not green (conclusion=${nonGreen.conclusion ?? "null"})`,
+    };
+  }
+  return { green: true, reason: `all ${checkRuns.length} check-run(s) green` };
+}
+
+/**
+ * goal-main-promote-gates-on-artifact-not-stale-per-member-rechecks Phase 2 — the POSITIVE-VERIFICATION
+ * CI gate the M5 goal→main promote reads before merging `goal/{slug}` into main. Replaces the pre-Phase-1
+ * per-member stale-branch accumulation greps with a check on the ARTIFACT that actually ships (the goal
+ * branch HEAD). Mirrors the same `gh()` + `branchHeadSha()` + [[commits/{sha}/check-runs]] shape the
+ * other GitHub-side lanes use in this file — no local checkout, no `gh` CLI, so it runs identically from
+ * the box worker standing pass AND the Vercel webhook.
+ *
+ * Steps:
+ *   1. Resolve `goal/{goalSlug}`'s tip SHA via `branchHeadSha`. Null → the branch doesn't exist → NOT
+ *      green (the caller normally never reaches this — `state.allOnGoalBranch` implies a branch — but
+ *      this is the defensive fail-closed backstop).
+ *   2. GET `/repos/{repo}/commits/{headSha}/check-runs?per_page=100` (pins to the exact commit that
+ *      would merge, not a mutable ref).
+ *   3. Extract each check-run's `(name, status, conclusion)` and pass through
+ *      `classifyCheckRunsForCiGreen` (the pure predicate). Returns its verdict verbatim.
+ *
+ * Fails CLOSED everywhere (see the classifier's docstring): a read error, an empty list, an in-flight
+ * run, or ANY red conclusion → `green:false`. A non-green result HOLDS the promote (`notReady[]`),
+ * never a silent skip. Best-effort per goal — the caller catches a throw and falls back to hold.
+ */
+export async function goalBranchCiGreen(goalSlug: string): Promise<CiGreenVerdict> {
+  if (!ghToken()) return { green: false, reason: "no GitHub token" };
+  const goalBranch = `goal/${goalSlug}`;
+  const head = await branchHeadSha(goalBranch);
+  if (head === null) {
+    return { green: false, reason: `goal branch ${goalBranch} has no HEAD (fail-closed)` };
+  }
+  const r = await gh("GET", `/repos/${GH_REPO}/commits/${encodeURIComponent(head)}/check-runs?per_page=100`);
+  if (!r.ok) return { green: false, reason: `check-runs read failed for ${head.slice(0, 8)} (${r.status})` };
+  const body = r.json as { check_runs?: unknown[] } | Array<Record<string, unknown>>;
+  const rawRuns = Array.isArray(body) ? [] : Array.isArray(body.check_runs) ? body.check_runs : [];
+  const runs: CheckRunLite[] = (rawRuns as Array<Record<string, unknown>>).map((c) => ({
+    name: typeof c.name === "string" ? c.name : null,
+    status: typeof c.status === "string" ? c.status : null,
+    conclusion: typeof c.conclusion === "string" ? c.conclusion : null,
+  }));
+  const verdict = classifyCheckRunsForCiGreen(runs);
+  return { green: verdict.green, reason: `${goalBranch}@${head.slice(0, 8)}: ${verdict.reason}` };
+}
+
+/**
  * spec-goal-branch-pm-flow M4 — merge a spec's `claude/build-{slug}` branch INTO its goal branch
  * `goal/{goalSlug}`, creating the goal branch from `origin/main` if it doesn't exist yet (the FIRST spec of a
  * goal seeds it). A real (non-squash) merge commit so the goal branch carries each spec's full history, ready
