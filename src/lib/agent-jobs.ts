@@ -1459,8 +1459,11 @@ export async function isSpecPromoteEligible(
     return out;
   }
   const admin = createAdminClient();
-  // Accumulation (M2) — fail OPEN (a PM blip mustn't wedge a green spec; the green signals still gate).
-  const acc = await isSpecAccumulationComplete(workspaceId, slug);
+  // merge-gate-verifies-real-phase-checks P1 — pass the branch through so each phase's REAL grep checks
+  // are run against the branch HEAD. The gate now fails CLOSED (a phantom-stamped phase whose code is
+  // absent on the branch reads NOT accumulated); the pre-P1 fail-open path was one of the exploit triggers
+  // the spec cites.
+  const acc = await isSpecAccumulationComplete(workspaceId, slug, branch);
   out.accumulationComplete = acc.complete;
   // Green signals (M3) — fail CLOSED: a read error or an absent per-branch run reads as NOT green.
   try {
