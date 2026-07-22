@@ -14,6 +14,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  analyzeGrowth,
+  analyzeGrowthTrend,
   analyzeInstanceHealth,
   analyzeRequestVolume,
   analyzeSlowQuery,
@@ -21,6 +23,7 @@ import {
   classifyExplainPlan,
   enqueueDbHealthProposal,
   getDbHealthPanel,
+  GROWTH_LEGITIMATE_TABLES,
   isForeignQuery,
   isInfrastructuralQuery,
   isMaintenanceCommand,
@@ -28,6 +31,7 @@ import {
   type DbHealthFinding,
   type RequestVolumeInput,
   type SlowQueryRow,
+  type TableSizeRow,
 } from "./db-health";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { parseAuthoredSpecMarkdown } from "@/lib/brain-roadmap";
@@ -818,4 +822,61 @@ test("temp_spill_pressure falls back to the cumulative flag when there is no pri
   const t = analyzeInstanceHealth(input).find((f) => f.cause === "temp_spill_pressure");
   assert.ok(t, "with no prior reading the cumulative flag must still catch an acute incident");
   assert.match(t!.evidence, /cumulative fallback/);
+});
+
+// ── GROWTH_LEGITIMATE_TABLES exemption (db-health-exempt-customers-from-unbounded-growth-retention-flag)
+// The 2026-07-22 CEO decline: `customers` grew 759 MB → 1.1 GB (+44%/day BYTES) with only +437 rows —
+// bloat, not row growth. Both the day-over-day (`analyzeGrowth`) and trend (`analyzeGrowthTrend`) passes
+// must skip a `GROWTH_LEGITIMATE_TABLES` entry so no `retention_cron` proposal is emitted for a
+// business-entity table where DELETE is never the remedy.
+function sizeRow(t: Partial<TableSizeRow> & { table_name: string; total_bytes: number }): TableSizeRow {
+  return {
+    row_estimate: 1_000_000,
+    seq_scan: 0,
+    idx_scan: 0,
+    n_live_tup: 1_000_000,
+    n_dead_tup: 0,
+    last_autovacuum: null,
+    ...t,
+  };
+}
+
+test("customers is in GROWTH_LEGITIMATE_TABLES", () => {
+  assert.ok(GROWTH_LEGITIMATE_TABLES.includes("customers"));
+});
+
+test("analyzeGrowth — customers hitting +44%/day (the 2026-07-22 signature) is EXEMPT (no retention_cron proposal)", () => {
+  const prior = [sizeRow({ table_name: "customers", total_bytes: 759 * 1024 * 1024, row_estimate: 240_000 })];
+  const latest = [sizeRow({ table_name: "customers", total_bytes: 1.1 * GB, row_estimate: 240_437 })];
+  const findings = analyzeGrowth(latest, prior);
+  assert.equal(
+    findings.find((f) => f.table === "customers"),
+    undefined,
+    "customers is a business-entity table — the byte spike is bloat (an autovacuum concern), not unbounded row growth; DELETE is never the remedy",
+  );
+});
+
+test("analyzeGrowth — a non-exempt sizeable table growing +44%/day still fires (guardrail didn't over-rotate)", () => {
+  const prior = [sizeRow({ table_name: "other_table", total_bytes: 759 * 1024 * 1024 })];
+  const latest = [sizeRow({ table_name: "other_table", total_bytes: 1.1 * GB })];
+  const findings = analyzeGrowth(latest, prior);
+  const hit = findings.find((f) => f.table === "other_table");
+  assert.ok(hit, "the exemption is scoped to GROWTH_LEGITIMATE_TABLES — a real unbounded-growth candidate must still be proposed");
+  assert.equal(hit!.fixKind, "retention_cron");
+});
+
+test("analyzeGrowthTrend — customers on a steady trend toward the 10 GB ceiling is EXEMPT (both passes consult the set)", () => {
+  const now = Date.UTC(2026, 6, 22);
+  const day = 24 * 60 * 60 * 1000;
+  const history: TableSizeRow[] = [
+    sizeRow({ table_name: "customers", total_bytes: 5 * GB, captured_at: new Date(now - 20 * day).toISOString() }),
+    sizeRow({ table_name: "customers", total_bytes: 7 * GB, captured_at: new Date(now - 10 * day).toISOString() }),
+    sizeRow({ table_name: "customers", total_bytes: 9 * GB, captured_at: new Date(now).toISOString() }),
+  ];
+  const findings = analyzeGrowthTrend(history, now);
+  assert.equal(
+    findings.find((f) => f.table === "customers"),
+    undefined,
+    "the trend detector must consult GROWTH_LEGITIMATE_TABLES too — otherwise the exemption would leak through the slow-burn path",
+  );
 });

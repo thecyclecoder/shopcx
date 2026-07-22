@@ -337,6 +337,19 @@ export const BLOAT_TREND_RISE = 0.05; // +5 points dead-tuple ratio over the win
  *  loop_heartbeats got its prune cron (loop-heartbeats-retention). */
 export const RETENTION_AWARE_TABLES: string[] = ["loop_heartbeats"];
 
+/** Business-entity tables whose row growth is LEGITIMATE (never a retention-DELETE target). Keep SHORT.
+ *  These are core identity/order tables FK'd across the schema; a retention-cron proposal on them
+ *  destroys real business data and does nothing for what actually spiked. Both `analyzeGrowth` and
+ *  `analyzeGrowthTrend` consult this set to suppress the `unbounded_growth` → `retention_cron`
+ *  proposal; the bloat detector (`analyzeBloat`) still flags them freely, because a byte spike on
+ *  one of these is an autovacuum concern, not a row-purge one.
+ *
+ *  `customers` — CEO declined the growth flag on 2026-07-22: table grew 759 MB → 1.1 GB (+44%/day
+ *  bytes) but only +437 ROWS; the byte spike was table BLOAT, not row growth. Customers is the
+ *  core identity table (FK'd by orders, subscriptions, payment methods); a DELETE fixes nothing
+ *  and destroys real customers. Without this exemption the proposal re-fires every growth pass. */
+export const GROWTH_LEGITIMATE_TABLES: string[] = ["customers"];
+
 /**
  * Sunset / retiring-system allowlist (db-health-agent-accuracy spec — gap 3). A table being turned
  * off must NOT get a perf/size/bloat proposal — we don't tune what we're decommissioning. Mirrors
@@ -733,6 +746,7 @@ export function analyzeGrowth(latest: TableSizeRow[], prior: TableSizeRow[]): Db
   for (const cur of latest) {
     if (cur.total_bytes < SIZE_MIN_BYTES) continue;
     if (RETENTION_AWARE_TABLES.includes(cur.table_name)) continue;
+    if (GROWTH_LEGITIMATE_TABLES.includes(cur.table_name)) continue; // business-entity table — row growth is legitimate; DELETE is never the remedy
     if (isAllowlisted(cur.table_name, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — don't tune what we're turning off
     const was = priorBy.get(cur.table_name);
     if (!was || was.total_bytes <= 0) continue;
@@ -1265,6 +1279,7 @@ export function analyzeGrowthTrend(history: TableSizeRow[], now: number): DbHeal
     const span = points[points.length - 1].t - points[0].t;
     if (span < TREND_MIN_SPAN_DAYS) continue;
     if (RETENTION_AWARE_TABLES.includes(table)) continue;
+    if (GROWTH_LEGITIMATE_TABLES.includes(table)) continue; // business-entity table — row growth is legitimate; DELETE is never the remedy
     if (isAllowlisted(table, DB_HEALTH_SUNSET_ALLOWLIST)) continue; // sunset table — don't tune what we're turning off
     const latest = points[points.length - 1].row;
     if (latest.total_bytes < SIZE_MIN_BYTES) continue;
