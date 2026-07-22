@@ -1,0 +1,1 @@
+- **Checkout route returns generic error responses to the client — never raw err.message (payment-path info-disclosure)** · verified 2026-07-22 · → [[../lifecycles/storefront-checkout]]
