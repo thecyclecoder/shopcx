@@ -7,8 +7,20 @@
  *
  * A "combination" = `angle_key` (the concept) × `treatment` (the creative execution/archetype). The media
  * buyer stamps each row's outcome (won/lost/reactivated) once its test concludes — see [[media-buyer-agent]].
+ *
+ * Phase 3 of [[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] adds
+ * `loadCreativeLearningWithRollup` — combines the existing byAngle + byTreatment + bestTreatments
+ * with a `byCombinationRollup` slice sourced from `getFactorRollup` so downstream callers can consult
+ * ONE shape (outcomes-ledger learning + significance-gated CPA/CTR/ROAS numbers) without threading
+ * two loaders. The existing `loadCreativeLearning` shape is UNCHANGED so `nextTreatmentFor` callers
+ * don't regress.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+
+import {
+  getFactorRollup,
+  type FactorSignificance,
+} from "./factor-rollup-sdk";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -44,11 +56,35 @@ export interface TreatmentStat {
   winRate: number | null; // won / (won+lost); null if never judged
 }
 
+/** Phase-3 slice: per-combination CPA/CTR/ROAS numbers from the significance-gated factor
+ *  rollup, so downstream callers of `loadCreativeLearningWithRollup` see the same numbers
+ *  the picker biases on. Populated only when the rollup returns a passesGate+ambiguous row —
+ *  the picker filters on `significance.passesGate`, this slice returns EVERY row (both
+ *  passesGate and not) so a caller can decide its own gate.
+ *  ([[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 3.) */
+export interface CombinationRollupSlice {
+  combinationId: string;
+  cpa_cents: number | null;
+  roas: number | null;
+  ctr: number | null;
+  purchases: number;
+  significance: FactorSignificance;
+}
+
 export interface CreativeLearning {
   byAngle: Map<string, AngleStat>;
   byTreatment: Map<Treatment, TreatmentStat>;
   /** treatments ranked by historical win-rate (desc) — bias new combinations toward what wins. */
   bestTreatments: Treatment[];
+}
+
+/** Phase-3 extended learning: the `loadCreativeLearning` shape PLUS the per-combination
+ *  rollup slice. `loadCreativeLearning` callers (e.g. `nextTreatmentFor`) don't see this
+ *  shape — only `loadCreativeLearningWithRollup` returns it, so a future caller that
+ *  wants the rollup numbers pins to THIS type without the existing byAngle/byTreatment
+ *  contract regressing under it. */
+export interface CreativeLearningWithRollup extends CreativeLearning {
+  byCombinationRollup: CombinationRollupSlice[];
 }
 
 /** Load the learning for a product — per-angle + per-treatment win/loss history. */
@@ -81,6 +117,41 @@ export async function loadCreativeLearning(admin: Admin, workspaceId: string, pr
     .sort((x, y) => (y.winRate ?? -1) - (x.winRate ?? -1) || y.won - x.won)
     .map((t) => t.treatment);
   return { byAngle, byTreatment, bestTreatments };
+}
+
+/**
+ * Load the learning + the significance-gated per-combination rollup slice in ONE shape —
+ * so a downstream caller (Cleo's dashboard, the Phase-3 audit trail, a future scoring lane)
+ * sees both the outcomes-ledger memory AND the real spend/purchases/CPA/ROAS numbers
+ * without threading two loaders. `loadCreativeLearning` is unchanged so `nextTreatmentFor`
+ * (and every other pre-Phase-3 caller) doesn't regress. See
+ * [[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 3.
+ */
+export async function loadCreativeLearningWithRollup(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  lookbackDays?: number,
+): Promise<CreativeLearningWithRollup> {
+  const [learning, rollup] = await Promise.all([
+    loadCreativeLearning(admin, workspaceId, productId),
+    getFactorRollup(admin, {
+      workspaceId,
+      productId,
+      lookbackDays,
+    }),
+  ]);
+  const byCombinationRollup: CombinationRollupSlice[] = rollup.byCombination.map(
+    (r) => ({
+      combinationId: r.combination_id,
+      cpa_cents: r.cpa_cents,
+      roas: r.roas,
+      ctr: r.ctr,
+      purchases: r.purchases,
+      significance: r.significance,
+    }),
+  );
+  return { ...learning, byCombinationRollup };
 }
 
 /** The next UNTRIED treatment for a concept, biased toward historically-winning treatments — so a

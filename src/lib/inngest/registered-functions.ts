@@ -134,6 +134,7 @@ import { creativeScoutWeeklyCron, creativeScoutManualSweep } from "@/lib/inngest
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
+import { angleDemandSweepCadenceCron, angleDemandSweepCadenceManual } from "@/lib/inngest/angle-demand-sweep-cadence";
 import { researchSensorCron } from "@/lib/inngest/research-sensor";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
 import { nodeAncestrySyncCron } from "@/lib/inngest/node-ancestry-sync-cron";
@@ -315,6 +316,8 @@ export const registeredInngestFunctions = [
   landingPageScoutAnalyze,
   acquisitionResearchCadenceCron,
   acquisitionResearchCadenceManual,
+  angleDemandSweepCadenceCron,
+  angleDemandSweepCadenceManual,
   researchSensorCron,
   controlTowerMonitor,
   nodeAncestrySyncCron,

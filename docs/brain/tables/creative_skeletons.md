@@ -20,10 +20,13 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `media_type` | `text` | — | default `'static'` · `static` \| `video` (routed at ingestion) |
 | `format` | `text` | ✓ | `ugc` \| `studio` \| `text-card` \| `before_after` \| `demo` \| … (vision) |
 | `framework` | `text` | ✓ | `hook-promise-proof` \| `problem-pivot-payoff` \| variant (vision) |
-| `hook` | `text` | ✓ | slot 1 (vision) |
-| `mechanism_claim` | `text` | ✓ | slot 2 (vision) |
-| `proof` | `text` | ✓ | slot 3 (vision) |
-| `offer` | `text` | ✓ | slot 4 (vision) |
+| `hook` | `text` | ✓ | slot 1 (vision) — **substance column, kept for the analyzed-competitor archive** (see the Wireframe redesign gotcha). |
+| `mechanism_claim` | `text` | ✓ | slot 2 (vision) — substance column. |
+| `proof` | `text` | ✓ | slot 3 (vision) — substance column. |
+| `offer` | `text` | ✓ | slot 4 (vision) — substance column. |
+| `elements` | `jsonb` | ✓ | **Agnostic wireframe** — array of `{zone: header\|hero\|body\|footer\|cta, role: hook\|mechanism\|proof\|offer\|risk_reversal\|social_proof\|price, prominence: 0..1}`. Scaffold-only; the raw substance stays in the four substance columns above. Shape-gated by `creative_skeletons_elements_shape_chk` (each element must be an object with a whitelisted zone + role and a prominence in [0,1]). Written by the Phase-2 vision extractor + backfill. Migration `20261124120000`. See [[../specs/skeleton-agnostic-wireframe-redesign]]. |
+| `product_presentation` | `text[]` | — | default `'{}'` · vision-emitted tags describing how the product is shown: `packshot` \| `lifestyle` \| `founder` \| `none`. Migration `20261124120000`. |
+| `punchiness` | `text[]` | — | default `'{}'` · vision-emitted tags describing the copy cadence: `short_line` \| `pattern_interrupt` \| `number` \| `contrast`. Migration `20261124120000`. |
 | `days_running` | `int4` | ✓ | AdLibrary `days_count` — longevity = winner proxy |
 | `heat` | `numeric` | ✓ | AdLibrary `heat` / exposure score |
 | `first_seen` | `date` | ✓ | AdLibrary `first_seen` |
@@ -81,6 +84,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 - The matrix counts **distinct `advertiser`s** — repetition across independent brands is the signal, never one ad's `heat`/`days_running` (those are tiebreakers only).
 - **Display serves OUR hosted copy, not AdLibrary.** `image_url` 403s without the Bearer key AND is full-res (6–22MB) — live-proxying it 502'd (serverless response-size limit). So `ingestAd` stores a downscaled analyzable copy in the private `creative-shots` bucket (`thumb_path`) and the list route returns a signed URL to it. `/api/ads/creative-finder/media` remains only as a downscaling fallback for legacy rows without `thumb_path`.
 - **Full payload from `ingestAd`, not vision** — `destination_domain`/copy/CTA/spend/engagement/`platform` columns come straight from the AdLibrary row ([[../specs/ad-creative-scout]]); only `format`/`framework`/`hook`/`mechanism_claim`/`proof`/`offer` are vision-extracted. `destination_domain` is null for ads with no store url (`has_store_url=false`).
+- **Wireframe redesign (2026-11-24).** The substance columns (`hook`, `mechanism_claim`, `proof`, `offer`) stay for the analyzed-competitor archive — they carry the raw phrases the vision pass pulled off the ad and remain the input the M4 reuse-verdict helper diffs against — but the `elements[]` scaffold is the shape readers should prefer for reuse decisions. The v3 recast is deliberate: skeleton is scaffold-not-substance, so per-copy-section reuse verdicts are computed at AUTHOR time (never stored) against the product's *current* intelligence. New readers building on skeletons should read `elements[]` + `product_presentation` + `punchiness`; only legacy readers (pattern matrix, dedup) still key off the substance columns. Migration `20261124120000` · [[../specs/skeleton-agnostic-wireframe-redesign]] Phase 1.
 
 ## Written by
 [[../libraries/creative-skeleton]] (`ingestAd`) ← [[../inngest/creative-finder]]; [[../libraries/video-skeleton]] (`processVideoPending` updates `video_pending` → `analyzed`) ← [[../inngest/creative-finder]] (`creative-finder-video-process`).

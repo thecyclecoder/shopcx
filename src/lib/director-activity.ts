@@ -250,6 +250,15 @@ export type DirectorActionKind =
   // by Platform (director_function='platform'). metadata: { actor:'serialized-rebase-merge-guard',
   // goal_slug, spec_branch, rebased, autonomous:true }.
   | "goal_branch_merge_escalated"
+  // factor-scores-reweight-selection-engine Phase 3 — the picker's per-pick audit trail
+  // (docs/brain/specs/factor-scores-reweight-selection-engine.md). Written by
+  // `pickNextCombination` in [[../lib/ads/selection-engine]] on every return, so a founder
+  // (or coach) can retrace which factor scores biased the decision — no silent proxy
+  // optimization per the north-star supervisable-autonomy rail. Owned by Growth
+  // (director_function='growth'). metadata: { product_id, temperature, intent,
+  // exploit_source, biased_by_factors, filtered_by_factors, chosen_combination_id,
+  // chosen_angle_id, chosen_pattern_id, autonomous:true }.
+  | "media_buyer_selection_reweighted"
   // build-lane-pre-commit-self-verify Phase 2 — the pre-commit self-verify gate ([[builder-worker]]
   // § Pre-commit self-verify gate) stamps ONE row per firing so Ada can supervise whether the rail
   // actually drops Bo's first-pass fix-phase rate (the ~18% Ask-Ada number). Emitted from
