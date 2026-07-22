@@ -2588,6 +2588,35 @@ async function emitTimecard(input: {
   }
 }
 
+// build-completed-with-deferred-pr-must-auto-redrive-not-silently-stall Phase 2 — helper for the
+// build lane to close orphaned `needs_input` wait spans for a spec on RESUME + COMPLETION. The
+// per-row `resolvePendingWaitTransition` only closes the CURRENT row's own wait; a stall like
+// factor-scores-reweight-selection-engine (two open needs_input spans across separate rows) needs
+// this active sweep. Best-effort, never throws — the audit ledger is not on the critical path.
+async function closeOrphanedNeedsInputSpansForSpec(
+  workspace_id: string | null,
+  spec_slug: string | null,
+  reason: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  if (!workspace_id || !spec_slug) return;
+  try {
+    const { closeOrphanedNeedsInputWaitSpans } = await import("../src/lib/spec-timecards");
+    const res = await closeOrphanedNeedsInputWaitSpans(db, workspace_id, spec_slug, {
+      actor: "worker",
+      reason,
+      extra_metadata: extra,
+    });
+    if (res.closed > 0) {
+      console.log(
+        `[timecards] closed ${res.closed} orphaned needs_input wait span(s) for spec=${spec_slug} (${reason})`,
+      );
+    }
+  } catch (e) {
+    console.warn(`[timecards] closeOrphanedNeedsInputSpansForSpec failed spec=${spec_slug}: ${errText(e)}`);
+  }
+}
+
 // spec-timecard-chokepoint-instrumentation Phase 2 (Fix 1) — emit-once-per-kind guard. runSpecTestJob
 // records the spec_test_started + spec_test_verdict timecard pair from its lifetime (graduate-vera:
 // it's a deterministic runner now — no fused session; Vault emits its own security_* pair from its
@@ -24704,6 +24733,20 @@ async function dispatchJob(job: Job) {
   const wt = join(BUILDS_DIR, safeSlug ? `build-${safeSlug}` : job.id);
   console.log(`${tag} ${isResume ? "resuming" : "building"} (job ${job.id}) in ${wt}`);
 
+  // build-completed-with-deferred-pr-must-auto-redrive-not-silently-stall Phase 2 — the moment a build
+  // actually begins live work (fresh claim OR resume claim), close any still-open needs_input wait
+  // spans for this spec. The park cause has been superseded — the spec is doing work, not waiting.
+  // Best-effort, non-blocking; the per-row wait_exited chokepoint still handles the SAME row's own
+  // wait exit (this closes prior rows' orphans, which is the miss the spec's stall cited).
+  if (slug) {
+    void closeOrphanedNeedsInputSpansForSpec(
+      job.workspace_id,
+      slug,
+      isResume ? "build resumed — active work supersedes prior needs_input park" : "build claimed — active work supersedes prior needs_input park",
+      { job_id: job.id, event: isResume ? "build_resume" : "build_claim" },
+    );
+  }
+
   // build-worker-rebase-before-push-no-lost-phase-on-branch-race Phase 3: single-owner-per-branch
   // invariant — before this freshly-claimed build touches the worktree, transition ANY sibling
   // active build row for the same slug whose heartbeat is stale to `failed`. A worker-restart
@@ -25400,7 +25443,30 @@ async function dispatchJob(job: Job) {
           pr_number: job.pr_number ?? null,
           log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${acc.reason}`.slice(-2000),
         });
+        // Phase 2 — a deferred build that reached completion means the prior needs_input parks are
+        // no longer live; close any orphaned open spans so `getTimecard.open_waits` reflects reality.
+        void closeOrphanedNeedsInputSpansForSpec(
+          job.workspace_id,
+          slug,
+          "build completed (PR deferred) — active work supersedes prior needs_input park",
+          { job_id: job.id, event: "build_completed_deferred" },
+        );
         await chain();
+        // build-completed-with-deferred-pr-must-auto-redrive Phase 1 — a `completed` row + a DEFERRED PR is
+        // a silent dead-end when the chain-continuation has nothing to queue (every `planned` phase is
+        // already stamped built even though its real code isn't on the branch — the phantom-shipped class
+        // the factor-scores-reweight-selection-engine 35-min stall exhibited). The redrive path here
+        // enqueues a fresh build via the sanctioned `queueRoadmapBuild` (owner/blocker/active-build gates
+        // hold; capped at BUILDER_DEFERRED_REDRIVE_MAX/24h so a genuinely-unbuildable spec escalates to Ada
+        // instead of looping). De-duped internally: if the `chain()` above just queued a phase (or any
+        // other build is in-flight), the redrive skips. Never throws.
+        try {
+          const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
+          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, acc.reason, job.id);
+          console.log(`${tag} deferred-redrive: ${outcome.action} — ${outcome.reason}`);
+        } catch (e) {
+          console.error(`${tag} deferred-redrive threw (non-fatal, deferred build remains completed):`, e instanceof Error ? e.message : e);
+        }
         return;
       }
       // ACCUMULATION COMPLETE (last phase / one-shot) → open the (non-draft) PR; the PR + squash-merge action
@@ -25452,6 +25518,15 @@ async function dispatchJob(job: Job) {
         log_tail: opts.noChangeNote ? `${opts.noChangeNote}; un-drafted existing PR` : opts.finalLogTail,
       });
       console.log(`${tag} ✓ completed → ${pr.url}`);
+      // Phase 2 — accumulation-complete: a spec that reached PR is not parked. Close any orphan
+      // needs_input spans so the timecard's open_waits reflects the live state (not a stale park
+      // from an earlier session the finalize path resumed past).
+      void closeOrphanedNeedsInputSpansForSpec(
+        job.workspace_id,
+        slug,
+        "build completed (PR opened, accumulation complete) — active work supersedes prior needs_input park",
+        { job_id: job.id, event: "build_completed_accumulation" },
+      );
       await chain();
       // ⭐ PRE-MERGE TESTS AT ACCUMULATION-COMPLETE (fix: spec-test/security never fire on the resume-after-
       // approval finalize path). The M3 spec-test + M2 security triggers fire from the success-PUSH path's
