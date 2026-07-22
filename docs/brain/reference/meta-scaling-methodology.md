@@ -32,6 +32,18 @@ purchase-opt, equal ad-set budgets            purchase-opt
 - Test ad set `120252196709210184` — "MB — Test 01", $50/day, purchase-opt, broad (no age cap, 18+), automatic (Advantage+) placements, `LOWEST_COST_WITHOUT_CAP`.
 - Scaler = existing `120250561500610184` "Amazing Coffee Grouped Prospecting" (CBO $500/d).
 
+## Retarget campaign — the THIRD campaign (warm+hot mixed content)
+
+Beyond the two-campaign feeder model (cold TESTING → SCALING), a THIRD standing campaign holds the **warm + hot retargeting audiences** — site visitors, add-to-carts, engagers, and existing-adjacent lists who already know the brand. Because the audiences are warm/hot (not cold-prospecting), the creative is a MIX authored specifically for them (social-proof, offer-reminder, urgency) rather than the cold-50+ hook set the testing rail runs.
+
+Structure choice (2026-11, [[../specs/retarget-campaign-warm-hot-mixed-content]]): **ONE lean consolidated ad set**, not one adset per warm/hot segment. Consolidation is the same "clear ~50 events/week or you're learning-limited" rule from the account-structure section above — a retarget pool is small, so fragmenting it across segment-specific adsets starves each below the delivery floor. Every warm/hot creative Dahlia tags (`audience_temperature` in `{warm,hot}`) publishes into that one consolidated adset.
+
+Supervisable-autonomy rail (own owner + kill-switch + heartbeat, cold rail untouched):
+- **Config** lives in [[../tables/media_buyer_retarget_cohorts]] (its own table — distinct from the cold [[../tables/media_buyer_test_cohorts]]): `retarget_meta_campaign_id`, the single `retarget_meta_adset_id`, a `daily_ceiling_cents`, and an `audience_temperatures` whitelist (default `{warm,hot}`).
+- **Replenish loop** — [[../libraries/media-buyer-retarget-agent]] `runRetargetReplenishLoopForAccount`, driven daily by [[../inngest/media-buyer-retarget-cadence]]. It reads ready warm/hot creatives ([[../libraries/ready-to-test]] `listReadyToTest` with the temperature whitelist) and publishes passers into the consolidated adset.
+- **Publish gate** — [[../libraries/media-buyer-retarget-publish-gate]] `evaluateMediaBuyerRetargetPublish`: single-adset match + ceiling + the SHARED 9/10 Max copy-QC floor (reused verbatim from the cold gate, never re-implemented). A breach publishes PAUSED + escalates (`media_buyer_retarget_publish_refused`).
+- **Cold-only invariant preserved** — the retarget rail never reads the cold cohort table and never publishes into a cold adset; Bianca's cold replenish (`temperature: "cold"`) is byte-unchanged.
+
 ## The decision tree (CEO Dylan, 2026-07-12 — the media-buyer test-loop verdict bands)
 
 Evaluated each review on the test adset's **cumulative** metrics. Target/crown CAC = **$150**, profit/kill-floor CAC = **$220** (~LTV/1.5), test budget = **$150/day**. All values are configurable `iteration_policies` knobs — [[../libraries/media-buyer-agent]] `detectMetaCpaWinners`/`detectMetaCpaLosers` and [[../libraries/ad-insights-sdk]] `classifyAd` read them; **kill stays fast, only CROWNING is patient.** Deep-research (2026-07-12) refuted the old "$450 / 3-purchase" crown as statistical noise (~3 purchases); consensus is 7+ days AND ~8–10 purchases at/under target.

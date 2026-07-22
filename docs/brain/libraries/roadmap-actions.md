@@ -28,6 +28,31 @@ Marks one `pending_actions` item approved/declined; flips to `queued_resume` onl
 ### `createPrForJob(workspaceId, userId, { jobId })`  *(build-recover-pr-create)*
 Recovers a build that **succeeded and pushed its `claude/*` branch** but whose final `gh pr create` failed (transient GitHub error) — the worker flags such a job `needs_attention` with `error="branch pushed but PR creation failed"`. Instead of discarding the completed build via Rebuild, this **opens a PR for the already-pushed branch** against `main` and flips the job → `completed` with the recovered `pr_url`/`pr_number` (clears `error`). **Evidence-gated:** refuses unless `isPrCreateRecoverable(job)` (status `needs_attention` · that exact error · a `claude/*` `spec_branch`) **and** the branch still **exists on origin** (`GET /git/ref/heads/{branch}`) — a genuinely-stuck `needs_attention` (no pushed branch, dirty-resolver human-merge) keeps its human-attention treatment. **Idempotent:** if a PR already exists for the branch it **adopts** it (attaches url/number, `adopted:true`) rather than erroring on a duplicate; also re-checks for an open PR on a create failure (duplicate-PR race). Never pushes code, never touches `main`. Exported alongside `isPrCreateRecoverable` + `PR_CREATE_FAILED_ERROR` (the latter mirrored client-side by [[../dashboard/roadmap|BuildButton]] to offer **Create PR** as the primary action). The worker also retries `ensurePr` a few times with backoff **before** flagging, so this manual recovery is the rare fallback. See [[../specs/build-recover-pr-create]].
 
+### `redriveDeferredBuildOrEscalate(workspaceId, slug, unverifiedReason, sourceJobId)` *(build-completed-with-deferred-pr-must-auto-redrive Phase 1)*
+
+```ts
+async function redriveDeferredBuildOrEscalate(
+  workspaceId: string,
+  slug: string,
+  unverifiedReason: string,
+  sourceJobId: string,
+): Promise<DeferredRedriveOutcome>
+```
+
+The **PR-DEFERRED auto-redrive gate**. When a build finishes at the "PR DEFERRED" point (the merge gate's `verifyPhaseAccumulatedOnBranch` reported `complete:false` — one or more phases were stamped built but the branch's actual files don't carry the code), a bare `status='completed'` leaves the spec a silent dead-end: no in-flight row to continue it, no queued row to re-enqueue. This function re-drives a fresh build or escalates to Ada based on two conditions:
+
+1. **Blocker check** — `getSpecBlockers(slug)`. If ANY uncleared blockers remain (a dependency hasn't shipped yet), escalation is FORCED (the blocker must land before a redrive can succeed).
+2. **Redrive-count guard** — count prior `redrive_deferred_build` [[../tables/director_activity]] rows for this slug in the last 24h. If ≥ `BUILDER_DEFERRED_REDRIVE_MAX` (env-overridable via `BUILDER_DEFERRED_REDRIVE_MAX`, default 3, mirrors [[../lib/mario.ts]] `MARIO_LOOP_GUARD_MAX`), escalate (the spec has cycled enough times; a human should investigate).
+
+**Outcomes:**
+- **`action: "redrive"`** — blockers cleared ∧ redrive count < cap ⇒ enqueue a fresh build via the sanctioned `queueRoadmapBuild` (all safety rails: owner-gated, blocker-gated, active-build-gated). Records `redrive_deferred_build` [[../tables/director_activity]] row for the next invocation's 24h counter.
+- **`action: "escalate"`** — blockers uncleared OR redrive cap hit ⇒ create a `needs_approval` [[../tables/agent_jobs]] row (`kind='build'`, `status='needs_approval'`, `instructions='Reclaim spec {slug} — …'`) naming the specific unverified phases (from `unverifiedReason` param) so Ada can investigate. Records `redrive_deferred_build_escalated` row.
+- **`action: "skip"`** — another build already in-flight for this spec (a prior surface already redrove or the current build is still resuming) ⇒ de-dupe, no-op.
+
+**De-duped:** checks for any in-flight `kind='build'` row in `ACTIVE_STATUSES` + `needs_approval` before deciding. Never stacks a redundant redrive on a spec that's already rebuilding or awaiting approval.
+
+**Best-effort + idempotent.** Never throws — the caller (a completed build lane) must not fail on an audit blip. A director_activity write error is logged + swallowed. Called from `scripts/builder-worker.ts` at the PR-DEFERRED completion point.
+
 ### `mergeClaudePr(workspaceId, userId, prNumber)`
 Squash-merges an open `claude/*` PR via the GitHub API, **re-validating** server-side (open · `claude/*` head · `mergeable` · `mergeable_state` clean/behind). Best-effort stamps the originating [[../tables/agent_todos]] `merged_at` + deletes the branch. On a `claude/fold-*` merge it fires the `brain/index.refresh` event so [[../inngest/brain-index-refresh]] regenerates `archive.md` + README counts within minutes.
 
