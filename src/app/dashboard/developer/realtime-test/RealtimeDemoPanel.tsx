@@ -39,6 +39,8 @@ export default function RealtimeDemoPanel() {
 
   useEffect(() => {
     const supabase = createClient();
+    let channel: RealtimeChannel | null = null;
+    let cancelled = false;
 
     // Initial snapshot via the server route (session-authed) — the app reads data through /api/*,
     // not a browser-side PostgREST call; the browser client here is Realtime-only. After this ONE
@@ -46,7 +48,7 @@ export default function RealtimeDemoPanel() {
     void fetch("/api/developer/realtime-demo")
       .then((r) => (r.ok ? r.json() : { rows: [] }))
       .then((d: { rows?: DemoRow[] }) => {
-        if (d.rows) setRows(d.rows);
+        if (!cancelled && d.rows) setRows(d.rows);
       })
       .catch(() => {
         /* transient — the subscription still delivers live changes */
@@ -55,43 +57,58 @@ export default function RealtimeDemoPanel() {
     const pushLog = (kind: string, detail: string) =>
       setLog((prev) => [{ at: new Date().toLocaleTimeString(), kind, detail }, ...prev].slice(0, 30));
 
-    const channel = supabase
-      .channel("realtime-demo-panel")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "realtime_demo" },
-        (payload) => {
-          const next = payload.new as DemoRow | Record<string, never>;
-          const old = payload.old as DemoRow | Record<string, never>;
-          if (payload.eventType === "INSERT") {
-            setRows((prev) => [next as DemoRow, ...prev.filter((r) => r.id !== (next as DemoRow).id)]);
-            pushLog("INSERT", `${(next as DemoRow).label} tick=${(next as DemoRow).tick}`);
-          } else if (payload.eventType === "UPDATE") {
-            // Upsert: if the initial snapshot missed this row (or it was inserted while we were
-            // connecting), an UPDATE event should still surface it rather than be dropped.
-            setRows((prev) => {
-              const nr = next as DemoRow;
-              return prev.some((r) => r.id === nr.id)
-                ? prev.map((r) => (r.id === nr.id ? nr : r))
-                : [nr, ...prev];
-            });
-            pushLog("UPDATE", `${(next as DemoRow).label} tick=${(next as DemoRow).tick} · ${(next as DemoRow).note ?? ""}`);
-          } else if (payload.eventType === "DELETE") {
-            const goneId = (old as DemoRow).id;
-            setRows((prev) => prev.filter((r) => r.id !== goneId));
-            pushLog("DELETE", goneId ?? "(row)");
-          }
-        },
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") setConn("live");
-        else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setConn("error");
-        else if (status === "CLOSED") setConn("closed");
-      });
+    // Postgres Changes applies the table's RLS to EACH event, per the role on the Realtime socket. The
+    // browser client's socket is `anon` by default, and realtime_demo's SELECT policy requires an
+    // authenticated workspace member (auth.uid()) — so an anon socket is subscribed but every event is
+    // filtered out (green dot, zero delivery). Handing the socket the user's JWT makes auth.uid()
+    // resolve so the policy matches and events flow. This is the correct pattern for any authenticated
+    // dashboard Realtime view (unlike the public widget, which needs only the anon policy on
+    // ticket_messages). setAuth must happen BEFORE subscribe so the join carries the token.
+    void (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (data.session?.access_token) await supabase.realtime.setAuth(data.session.access_token);
 
-    channelRef.current = channel;
+      channel = supabase
+        .channel("realtime-demo-panel")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "realtime_demo" },
+          (payload) => {
+            const next = payload.new as DemoRow | Record<string, never>;
+            const old = payload.old as DemoRow | Record<string, never>;
+            if (payload.eventType === "INSERT") {
+              setRows((prev) => [next as DemoRow, ...prev.filter((r) => r.id !== (next as DemoRow).id)]);
+              pushLog("INSERT", `${(next as DemoRow).label} tick=${(next as DemoRow).tick}`);
+            } else if (payload.eventType === "UPDATE") {
+              // Upsert: if the initial snapshot missed this row (or it was inserted while we were
+              // connecting), an UPDATE event should still surface it rather than be dropped.
+              setRows((prev) => {
+                const nr = next as DemoRow;
+                return prev.some((r) => r.id === nr.id)
+                  ? prev.map((r) => (r.id === nr.id ? nr : r))
+                  : [nr, ...prev];
+              });
+              pushLog("UPDATE", `${(next as DemoRow).label} tick=${(next as DemoRow).tick} · ${(next as DemoRow).note ?? ""}`);
+            } else if (payload.eventType === "DELETE") {
+              const goneId = (old as DemoRow).id;
+              setRows((prev) => prev.filter((r) => r.id !== goneId));
+              pushLog("DELETE", goneId ?? "(row)");
+            }
+          },
+        )
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") setConn("live");
+          else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setConn("error");
+          else if (status === "CLOSED") setConn("closed");
+        });
+
+      channelRef.current = channel;
+    })();
+
     return () => {
-      void supabase.removeChannel(channel);
+      cancelled = true;
+      if (channel) void supabase.removeChannel(channel);
       channelRef.current = null;
     };
   }, []);
