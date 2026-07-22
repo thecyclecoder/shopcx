@@ -171,7 +171,7 @@ Browser POSTs to `/api/checkout`:
    - Clear the `cart` cookie.
    - Return `{order_id, order_number, order_placed_event_id, ...}` (client redirects to `/thank-you?order=...`).
 8. **On failure** (declined, 3DS challenge, gateway error):
-   - Return `{error: ...}` with user-friendly text from [[../tables/dunning_error_codes]].
+   - All error responses route through `sanitizedCheckoutErrorResponse(args: SanitizedCheckoutErrorArgs)` helper: the FULL error is logged server-side via [[../libraries/error-text]] `errText` + `logCheckoutError` (preserving PostgREST-shaped errors + stack detail for diagnostics), and the CLIENT receives ONLY `{ error: <code>, ...(extraBody) }` with NO raw `err.message` / `String(err)`. This closes the payment-path information-disclosure vector where gateway config text, Postgres error strings, or stack shapes could leak to the client. Safe reference IDs (e.g., `braintree_transaction_id`) pass through `extraBody` when needed; the sentinel `extraBody` field is the ONLY caller-controlled escape hatch for client-safe data. Error stages: `identify`, `submit`, `tokenize`, `braintree_charge`, `order_insert` (see [[../libraries/checkout-error-log]] `CheckoutErrorStage` union). The 6 sites historically returning raw error text (customer_create_failed, customer_reselect, braintree_customer_resolve_failed, card_verification_failed, braintree_not_configured, order_insert_failed) are now all sanitized. Shipped 2026-07-22.
    - Cart stays in `pending` — customer can retry.
 
 ## Phase 6 — thank-you
