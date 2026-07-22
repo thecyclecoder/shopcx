@@ -19,8 +19,11 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** The three tuning knobs the significance gate reads. Confidence is reserved
- *  for the follow-on statistical-gate work — the shipped gate is spend + purchases. */
+/** The tuning knobs the significance gate reads. Confidence is reserved
+ *  for the follow-on statistical-gate work — the shipped gate is spend + purchases.
+ *  `maxAcceptableCpaCents` is the Phase-2 loser floor the picker's fresh-sample
+ *  branch reads to exclude a passesGate high-CPA combination
+ *  ([[../../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 2). */
 export interface FactorRollupThresholds {
   /** Minimum window spend (cents) a factor bucket must hit before it can pass the gate. */
   minSpendCents: number;
@@ -28,16 +31,22 @@ export interface FactorRollupThresholds {
   minPurchases: number;
   /** Reserved confidence axis (0..1); unused by the shipped verdict but returned verbatim. */
   confidence: number;
+  /** Loser CPA floor (cents) — a passesGate combination whose cpa_cents exceeds this
+   *  is dropped from the fresh sample by the picker's Phase-2 branch. */
+  maxAcceptableCpaCents: number;
 }
 
 /** Code-owned defaults. A workspace with no `factor_rollup_policies` row gets these
  *  as-is. Numbers match the spec's Phase-1 description: $200 spend / 5 purchases /
  *  0.8 confidence — enough traffic that a bucket's CPA/CTR/ROAS is not two-purchase
- *  noise, without being so high that a mid-scale workspace can never pass the gate. */
+ *  noise, without being so high that a mid-scale workspace can never pass the gate.
+ *  `maxAcceptableCpaCents` defaults to $250 per the Phase-2 spec — a passesGate combo
+ *  above this is a proven loser and gets excluded from the fresh sample. */
 export const DEFAULT_FACTOR_ROLLUP_THRESHOLDS: FactorRollupThresholds = {
   minSpendCents: 20000, // $200
   minPurchases: 5,
   confidence: 0.8,
+  maxAcceptableCpaCents: 25000, // $250 — Phase-2 loser floor
 };
 
 /** Read the workspace's tuned thresholds, falling back to code defaults per axis. */
@@ -47,7 +56,7 @@ export async function resolveFactorRollupThresholds(
 ): Promise<FactorRollupThresholds> {
   const { data } = await admin
     .from("factor_rollup_policies")
-    .select("min_spend_cents, min_purchases, confidence")
+    .select("min_spend_cents, min_purchases, confidence, max_acceptable_cpa_cents")
     .eq("workspace_id", workspaceId)
     .maybeSingle();
   const p = (data ?? {}) as Record<string, number | null>;
@@ -56,5 +65,9 @@ export async function resolveFactorRollupThresholds(
     minSpendCents: n(p.min_spend_cents, DEFAULT_FACTOR_ROLLUP_THRESHOLDS.minSpendCents),
     minPurchases: n(p.min_purchases, DEFAULT_FACTOR_ROLLUP_THRESHOLDS.minPurchases),
     confidence: n(p.confidence, DEFAULT_FACTOR_ROLLUP_THRESHOLDS.confidence),
+    maxAcceptableCpaCents: n(
+      p.max_acceptable_cpa_cents,
+      DEFAULT_FACTOR_ROLLUP_THRESHOLDS.maxAcceptableCpaCents,
+    ),
   };
 }

@@ -22,6 +22,16 @@
  * so nothing regresses. Every return carries `exploitSource` + `biasedByFactors` so the
  * Phase-3 director_activity audit trail can cite the numbers verbatim.
  *
+ * The fresh (explore, 70%) slot is Phase-2 rewired ([[pickFreshCombination]]): the same
+ * rollup output is consulted BEFORE the freshness-cooldown ledger even fires so a
+ * significance-passed high-CPA combination is DROPPED regardless of its palette status
+ * (a proven money loser doesn't sit in the fresh sample burning budget waiting for
+ * creative-learning's outcome-ledger count to catch up), a significance-passed low-CTR
+ * pattern is excluded from the legal-pattern set, and a significance-passed high-CPA
+ * theme has its readyBinCap halved so the picker prefers other themes. Every decision
+ * stamps `filteredByFactors` on the return so the Phase-3 audit trail can list which
+ * combinations/themes/patterns biased the pick.
+ *
  * All coverage bumps + combination upserts stay in [[creative-combinations]]; this module
  * is read-only. All palette/pattern reads route through their existing SDK chokepoints —
  * never raw `.from('product_angle_palette')` or `.from('ad_headline_patterns')` here.
@@ -44,6 +54,11 @@ import {
   type CombinationRollupRow,
   type FactorRollupOutput,
 } from "./factor-rollup-sdk";
+import {
+  DEFAULT_FACTOR_ROLLUP_THRESHOLDS,
+  resolveFactorRollupThresholds,
+} from "./factor-rollup-policies";
+import { recordDirectorActivity } from "../director-activity";
 
 type Admin = SupabaseClient;
 
@@ -224,6 +239,24 @@ export const EXPLOIT_RATIO = 0.3;
  *  ([[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 1.) */
 export const EXPLOIT_LOOKBACK_DAYS = 30;
 
+/** Phase-2 loser CPA floor (cents) — the code-owned default the fresh-branch reads
+ *  when a workspace has no `factor_rollup_policies.max_acceptable_cpa_cents` row.
+ *  A significance-passed combination whose `cpa_cents` exceeds this is dropped from
+ *  the fresh sample regardless of its palette status (the whole point of Phase 2 —
+ *  a proven money loser doesn't burn budget waiting for creative-learning's
+ *  MAX_FAILED_COMBOS_BEFORE_RETIRE outcome-ledger count to catch up).
+ *  ([[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 2.) */
+export const LOSER_CPA_FLOOR_DEFAULT_CENTS =
+  DEFAULT_FACTOR_ROLLUP_THRESHOLDS.maxAcceptableCpaCents;
+
+/** Phase-2 pattern-fatigue CTR floor — a significance-passed pattern whose CTR is
+ *  below this floor is excluded from the legal-pattern set for the temperature. 0.008
+ *  = 0.8% CTR, roughly the mid-line where a shipped pattern is considered fatigued
+ *  vs still-productive on the Meta placement mix (a healthy DR pattern clears 1%+).
+ *  A named export so a workspace can move it in one place if the mix shifts.
+ *  ([[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 2.) */
+export const PATTERN_FATIGUE_CTR_FLOOR = 0.008;
+
 /** Which slot the picker fired for this pick — 'explore' = the 70% fresh sample,
  *  'exploit' = the 30% best-known bet. */
 export type PickIntent = "explore" | "exploit";
@@ -247,8 +280,25 @@ export interface BiasedByFactors {
   spend_cents?: number;
 }
 
+/** The Phase-2 audit slot on every explore-branch return: which combinations were
+ *  dropped, which themes had their quota halved, which patterns were excluded — the
+ *  same numbers the Phase-3 director_activity row cites so a founder can retrace the
+ *  decision. Empty arrays on an exploit-branch return (Phase 2 is a fresh-branch rewrite).
+ *  ([[../../docs/brain/specs/factor-scores-reweight-selection-engine.md]] Phase 2.) */
+export interface FilteredByFactors {
+  /** Combination ids dropped from the fresh sample because passesGate + cpa_cents > floor. */
+  combinationLoserExcluded: string[];
+  /** Themes whose theme-spread quota was halved because their byTheme rollup is a
+   *  passesGate high-CPA loser. The picker prefers other themes when a shot is available. */
+  themeQuotaHalved: string[];
+  /** Pattern ids excluded from the legal-pattern set because passesGate + ctr < floor. */
+  patternFatigueExcluded: string[];
+}
+
 /** One picker return: the (angle, pattern, theme, combination) tuple to ship, tagged
- *  with which slot chose it and — for exploit — how. */
+ *  with which slot chose it and — for exploit — how. `filteredByFactors` is populated
+ *  on the explore branch by Phase-2's rollup-informed filter/dampen; empty arrays on
+ *  an exploit-branch return so the Phase-3 audit trail can always read the shape. */
 export interface PickResult {
   angle: ProductAngle;
   pattern: HeadlinePattern;
@@ -259,6 +309,9 @@ export interface PickResult {
   exploitSource: ExploitSource;
   /** Populated on `intent='exploit'`; empty object on 'explore'. */
   biasedByFactors: BiasedByFactors;
+  /** Populated on `intent='explore'`; empty arrays on 'exploit' (Phase 2 is a
+   *  fresh-branch rewrite — the exploit slot's provenance lives on `exploitSource`). */
+  filteredByFactors: FilteredByFactors;
 }
 
 export interface PickNextCombinationArgs {
@@ -273,6 +326,11 @@ export interface PickNextCombinationArgs {
   nowIso?: string;
   /** Override for tests — defaults to `EXPLOIT_LOOKBACK_DAYS`. */
   exploitLookbackDays?: number;
+  /** Phase-2 override for tests — the loser CPA floor (cents) the fresh branch reads
+   *  to drop passesGate high-CPA combinations. Defaults to the workspace's
+   *  `factor_rollup_policies.max_acceptable_cpa_cents` (via `resolveFactorRollupThresholds`)
+   *  with a $250 code fallback. */
+  loserCpaFloorCents?: number;
 }
 
 interface CrownedCombinationCandidate {
@@ -419,6 +477,7 @@ export async function pickExploitCombination(
         purchases: row.purchases,
         spend_cents: row.spend_cents,
       },
+      filteredByFactors: emptyFilteredByFactors(),
     };
   }
 
@@ -433,6 +492,181 @@ export async function pickExploitCombination(
     intent: "exploit",
     exploitSource: "palette_status_crown_fallback",
     biasedByFactors: { combination_id: pick.combination.id },
+    filteredByFactors: emptyFilteredByFactors(),
+  };
+}
+
+/** Fresh instance of the empty Phase-2 audit shape — exported for the picker's
+ *  exploit-branch returns (Phase 2 is a fresh-branch rewrite; the exploit slot never
+ *  populates these arrays but must still carry the shape so the Phase-3 audit trail
+ *  can always read it). */
+function emptyFilteredByFactors(): FilteredByFactors {
+  return {
+    combinationLoserExcluded: [],
+    themeQuotaHalved: [],
+    patternFatigueExcluded: [],
+  };
+}
+
+/**
+ * The set of themes whose byTheme rollup is a significance-passed high-CPA loser —
+ * a loser theme has its per-theme readyBinCap halved so the picker prefers other
+ * themes when a legal shot exists elsewhere (spec Phase 2 (c)). Exported so tests
+ * pin the predicate + so the Phase-3 audit trail can list which themes were halved.
+ */
+export function loserThemesFromRollup(
+  rollup: FactorRollupOutput,
+  loserCpaFloorCents: number,
+): Set<string> {
+  const out = new Set<string>();
+  for (const row of rollup.byTheme) {
+    if (
+      row.significance.passesGate &&
+      row.cpa_cents != null &&
+      row.cpa_cents > loserCpaFloorCents
+    ) {
+      out.add(row.key);
+    }
+  }
+  return out;
+}
+
+/**
+ * The set of pattern ids whose byPattern rollup is a significance-passed low-CTR
+ * fatigued pattern — excluded from the legal-pattern set for the temperature (spec
+ * Phase 2 (d)). Exported so tests pin the predicate + so the Phase-3 audit trail
+ * can list which patterns were excluded.
+ */
+export function fatiguedPatternsFromRollup(
+  rollup: FactorRollupOutput,
+  ctrFloor: number = PATTERN_FATIGUE_CTR_FLOOR,
+): Set<string> {
+  const out = new Set<string>();
+  for (const row of rollup.byPattern) {
+    if (
+      row.significance.passesGate &&
+      row.ctr != null &&
+      row.ctr < ctrFloor
+    ) {
+      out.add(row.key);
+    }
+  }
+  return out;
+}
+
+/**
+ * The set of combination ids the rollup marks as significance-passed high-CPA
+ * losers — dropped from the fresh sample regardless of palette status (spec Phase 2
+ * (b)). Exported so tests pin the predicate + so the Phase-3 audit trail can list
+ * which combinations were dropped.
+ */
+export function loserCombinationsFromRollup(
+  rollup: FactorRollupOutput,
+  loserCpaFloorCents: number,
+): Set<string> {
+  const out = new Set<string>();
+  for (const row of rollup.byCombination) {
+    if (
+      row.significance.passesGate &&
+      row.cpa_cents != null &&
+      row.cpa_cents > loserCpaFloorCents
+    ) {
+      out.add(row.combination_id);
+    }
+  }
+  return out;
+}
+
+/**
+ * Choose the fresh-slot (explore) pick. Phase 2 wraps the pre-Phase-2 "first
+ * eligible shot" behaviour with three rollup-informed filters/dampers:
+ *   (b) drop combinations whose passesGate rollup has `cpa_cents > loserCpaFloor`
+ *   (c) prefer themes whose byTheme rollup is NOT a passesGate loser (halved quota)
+ *   (d) drop shots whose pattern is a passesGate low-CTR fatigued pattern
+ *
+ * Each decision stamps the audit slot on the return so the Phase-3 director_activity
+ * row can cite the exact combination/theme/pattern that biased the pick. A cold-start
+ * product (rollup returns empty arrays) skips every filter — the fresh sample is
+ * whatever `listEligibleCombinations` returned.
+ *
+ * Returns null only when zero legal shots remain after filtering — the caller
+ * (`pickNextCombination`) then has no fresh bet to offer.
+ *
+ * Exported so `pickNextCombination` composes it AND unit tests can pin the fresh-
+ * filter/dampen predicates without threading the 70/30 dice roll through.
+ */
+export async function pickFreshCombination(
+  args: PickNextCombinationArgs,
+  rollup?: FactorRollupOutput,
+): Promise<PickResult | null> {
+  const lookbackDays = args.exploitLookbackDays ?? EXPLOIT_LOOKBACK_DAYS;
+  const rollupOut =
+    rollup ??
+    (await getFactorRollup(args.admin, {
+      workspaceId: args.workspaceId,
+      productId: args.productId,
+      lookbackDays,
+      nowIso: args.nowIso,
+    }));
+
+  const loserCpaFloorCents =
+    args.loserCpaFloorCents ??
+    (await resolveFactorRollupThresholds(args.admin, args.workspaceId))
+      .maxAcceptableCpaCents;
+
+  const loserCombos = loserCombinationsFromRollup(rollupOut, loserCpaFloorCents);
+  const fatiguedPatterns = fatiguedPatternsFromRollup(rollupOut);
+  const loserThemes = loserThemesFromRollup(rollupOut, loserCpaFloorCents);
+
+  const eligible = await listEligibleCombinations({
+    admin: args.admin,
+    workspaceId: args.workspaceId,
+    productId: args.productId,
+    temperature: args.temperature,
+    nowIso: args.nowIso,
+  });
+
+  const combinationLoserExcluded: string[] = [];
+  const patternFatigueExcluded: string[] = [];
+  const surviving: EligibleShot[] = [];
+  for (const shot of eligible) {
+    if (loserCombos.has(shot.combination.id)) {
+      combinationLoserExcluded.push(shot.combination.id);
+      continue;
+    }
+    if (fatiguedPatterns.has(shot.pattern.id)) {
+      patternFatigueExcluded.push(shot.pattern.id);
+      continue;
+    }
+    surviving.push(shot);
+  }
+
+  if (surviving.length === 0) return null;
+
+  // Halved-quota themes are DEPRIORITIZED — the picker prefers a non-loser theme
+  // shot when one exists (the "prefer other themes" the spec names). Only when every
+  // legal shot is in a loser theme do we fall back to it so the caller doesn't
+  // starve. `themeQuotaHalved` in the audit slot lists exactly which themes had
+  // their quota halved (the loser themes present in the surviving shot set).
+  const themesInSurviving = new Set(surviving.map((s) => String(s.theme)));
+  const halvedForAudit = [...themesInSurviving].filter((t) => loserThemes.has(t));
+  const nonLoserShots = surviving.filter((s) => !loserThemes.has(String(s.theme)));
+  const pool = nonLoserShots.length > 0 ? nonLoserShots : surviving;
+  const shot = pool[0]!;
+
+  return {
+    angle: shot.angle,
+    pattern: shot.pattern,
+    theme: shot.theme,
+    combination: shot.combination,
+    intent: "explore",
+    exploitSource: null,
+    biasedByFactors: {},
+    filteredByFactors: {
+      combinationLoserExcluded,
+      themeQuotaHalved: halvedForAudit,
+      patternFatigueExcluded,
+    },
   };
 }
 
@@ -459,28 +693,50 @@ export async function pickNextCombination(
   const rand = args.rand ?? Math.random;
   const exploitBranchFires = rand() < EXPLOIT_RATIO;
 
-  if (exploitBranchFires) {
-    const exploit = await pickExploitCombination(args);
-    if (exploit) return exploit;
-    // Cold-start: no rollup rows AND no crowned combinations — fall through to fresh.
-  }
-
-  const eligible = await listEligibleCombinations({
-    admin: args.admin,
+  // Single-shot rollup — passed to both branches so a fresh-branch fall-through
+  // doesn't re-query. Passing an empty rollup would break the fresh filter (nothing
+  // to filter on); passing the real one keeps the audit trail consistent across
+  // exploit / fresh fall-through.
+  const rollup = await getFactorRollup(args.admin, {
     workspaceId: args.workspaceId,
     productId: args.productId,
-    temperature: args.temperature,
+    lookbackDays: args.exploitLookbackDays ?? EXPLOIT_LOOKBACK_DAYS,
     nowIso: args.nowIso,
   });
-  if (eligible.length === 0) return null;
-  const shot = eligible[0]!;
-  return {
-    angle: shot.angle,
-    pattern: shot.pattern,
-    theme: shot.theme,
-    combination: shot.combination,
-    intent: "explore",
-    exploitSource: null,
-    biasedByFactors: {},
-  };
+
+  let pick: PickResult | null = null;
+  if (exploitBranchFires) {
+    pick = await pickExploitCombination(args, rollup);
+    // Cold-start: no rollup rows AND no crowned combinations — fall through to fresh.
+  }
+  if (!pick) pick = await pickFreshCombination(args, rollup);
+  if (!pick) return null;
+
+  // Phase 3 — one director_activity row per pick so a founder / coach can retrace
+  // which numbers biased the decision (no silent proxy-optimization per the
+  // supervisable-autonomy north star). Best-effort + never throws (recordDirectorActivity).
+  await recordDirectorActivity(args.admin, {
+    workspaceId: args.workspaceId,
+    directorFunction: "growth",
+    actionKind: "media_buyer_selection_reweighted",
+    specSlug: null,
+    reason:
+      pick.intent === "exploit"
+        ? `Exploit pick via ${pick.exploitSource ?? "unknown"} — combination ${pick.combination.id}.`
+        : `Fresh pick — combination ${pick.combination.id}; ${pick.filteredByFactors.combinationLoserExcluded.length} loser combos excluded, ${pick.filteredByFactors.themeQuotaHalved.length} themes halved, ${pick.filteredByFactors.patternFatigueExcluded.length} patterns excluded.`,
+    metadata: {
+      product_id: args.productId,
+      temperature: args.temperature,
+      intent: pick.intent,
+      exploit_source: pick.exploitSource,
+      biased_by_factors: pick.biasedByFactors,
+      filtered_by_factors: pick.filteredByFactors,
+      chosen_combination_id: pick.combination.id,
+      chosen_angle_id: pick.angle.id,
+      chosen_pattern_id: pick.pattern.id,
+      autonomous: true,
+    },
+  });
+
+  return pick;
 }
