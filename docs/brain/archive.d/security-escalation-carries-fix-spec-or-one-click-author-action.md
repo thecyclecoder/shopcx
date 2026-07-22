@@ -1,0 +1,1 @@
+- **Security escalation carries fix spec or one-click author action** · verified 2026-07-22 · → [[../libraries/security-agent]]
