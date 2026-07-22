@@ -33,9 +33,11 @@
  * Service-role only (RLS allows read for authenticated; ALL ops for service_role). All callers go
  * through `createAdminClient()`.
  */
+import { spawn } from "node:child_process";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { Phase } from "@/lib/brain-roadmap";
+import type { GrepCheckParams } from "@/lib/spec-phase-checks-table";
 
 export type { Phase } from "@/lib/brain-roadmap";
 
@@ -1368,18 +1370,24 @@ export async function setPhaseMetadata(
  * spec-goal-branch-pm-flow M2/M3 — "is this spec FULLY accumulated on its `claude/build-{slug}` branch?"
  *
  * Under M1's branch-accumulation model a spec's phases build one-by-one onto ONE persistent branch (no
- * per-phase main merge). A phase is "built on the branch" when it carries a `build_sha` ([[stampPhaseBuilt]])
- * OR is already terminal (shipped / rejected). A phase still `planned` — or `in_progress` WITHOUT a
- * `build_sha` (queued/building, not yet committed) — is NOT yet accumulated.
+ * per-phase main merge). merge-gate-verifies-real-phase-checks P1 hardened the gate: a phase is
+ * "accumulated" only when `verifyPhaseAccumulatedOnBranch` reports the phase's REAL grep checks
+ * (`spec_phase_checks` rows with `exec_kind='grep'`) pass against the branch HEAD. A `status==='shipped'`
+ * flag alone is NOT sufficient — that let phantom-stamped phases ship with zero code (the v3
+ * factor-rollup-sdk-with-significance-gate incident the spec cites).
  *
  * Returns `{ complete, reason }`:
  *  - 0–1 phases ⇒ trivially complete (a one-shot/single-phase spec ships in one PR — nothing to accumulate).
- *  - every phase built-or-terminal ⇒ complete.
- *  - any un-built phase remains ⇒ NOT complete (with the offending positions in `reason`).
+ *  - every phase verified on the branch ⇒ complete.
+ *  - any phase whose grep checks don't pass on the branch ⇒ NOT complete (with positions + reasons).
  *
- * Fails OPEN on a read error / missing spec row (returns complete:true) — a transient PM-read blip must
- * never wedge a legitimately-complete one-off spec, and the downstream tests/build gates still guard any
- * actual promotion.
+ * FAILS CLOSED on a read error / missing verifier — the pre-P1 fail-OPEN path was one of the three
+ * exploit triggers the spec cites (a PM read blip phantom-passed an incomplete spec). Downstream box
+ * worker retries the gate on its next standing pass; a transient blip resolves on retry rather than
+ * shipping an unbuilt spec.
+ *
+ * `branchRef` defaults to `claude/build-{slug}` (the spec's own build branch). Callers with a different
+ * context (e.g. a spec merged onto a goal branch) pass it explicitly.
  *
  * This is the M3 trigger gate (enqueue the pre-merge spec-test only once the WHOLE spec is on the branch),
  * the M4/M2 auto-merge accumulation gate, AND one of the three [[isSpecPromoteEligible]] inputs — all three
@@ -1388,6 +1396,8 @@ export async function setPhaseMetadata(
 export async function isSpecAccumulationComplete(
   workspaceId: string | null,
   slug: string | null,
+  branchRef?: string | null,
+  deps: VerifyPhaseDeps = defaultVerifyPhaseDeps,
 ): Promise<{ complete: boolean; reason: string }> {
   if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
   try {
@@ -1396,21 +1406,229 @@ export async function isSpecAccumulationComplete(
     const phases = spec.phases ?? [];
     // 0–1 phases = one-shot / single-phase spec — it ships in one PR; nothing to accumulate.
     if (phases.length <= 1) return { complete: true, reason: `${phases.length} phase(s) — trivially complete` };
-    // A phase is "built on the branch" if it carries a build_sha OR is already terminal (shipped/rejected).
-    // Any phase still `planned` (or in_progress WITHOUT a build_sha — queued/building, not yet committed) is
-    // un-accumulated → not complete.
-    const unbuilt = phases.filter((p) => {
-      if (p.status === "shipped" || p.status === "rejected") return false; // terminal — done
-      return !p.build_sha; // not built on the branch yet
-    });
-    if (unbuilt.length === 0) {
-      return { complete: true, reason: `all ${phases.length} phases built on branch` };
+    // merge-gate-verifies-real-phase-checks P1 — a phase is "accumulated" only when
+    // `verifyPhaseAccumulatedOnBranch` reports the phase's REAL grep checks pass against the branch HEAD.
+    // A `status==='shipped'` flag alone is NOT sufficient (the phantom-ship class the spec cites — v3
+    // factor-rollup-sdk-with-significance-gate merged spec→goal with only P1 built because P2/P3 were
+    // blanket-stamped shipped with no code). Fail CLOSED: an unverifiable phase reads NOT accumulated.
+    const branch = branchRef && branchRef.trim() ? branchRef.trim() : `claude/build-${slug}`;
+    const verdicts = await Promise.all(
+      phases.map((p) => verifyPhaseAccumulatedOnBranch(workspaceId, slug, p.position, branch, deps)),
+    );
+    const notAccumulated = phases
+      .map((p, i) => ({ p, v: verdicts[i] }))
+      .filter((x) => !x.v.accumulated);
+    if (notAccumulated.length === 0) {
+      return { complete: true, reason: `all ${phases.length} phases verified on ${branch}` };
     }
-    const positions = unbuilt.map((p) => p.position).join(",");
-    return { complete: false, reason: `${unbuilt.length}/${phases.length} phase(s) not yet built on branch (positions ${positions})` };
+    const detail = notAccumulated
+      .map((x) => `pos ${x.p.position} (${x.v.reason})`)
+      .join("; ");
+    return {
+      complete: false,
+      reason: `${notAccumulated.length}/${phases.length} phase(s) not verified on ${branch}: ${detail}`,
+    };
   } catch (e) {
-    // Fail OPEN — a PM-read blip must not wedge a complete one-off spec; the tests/build gates still apply.
-    return { complete: true, reason: `accumulation read failed — fail open: ${e instanceof Error ? e.message : e}` };
+    // merge-gate-verifies-real-phase-checks P1 — fail CLOSED. The old fail-open path was one of the three
+    // exploit triggers that shipped phantom-stamped phases; a PM-read blip now blocks promotion until the
+    // read resolves rather than phantom-passing an incomplete spec. The downstream box worker retries the
+    // gate on its next standing pass; the tests/build gates remain authoritative on the green signals.
+    return {
+      complete: false,
+      reason: `accumulation read failed — fail closed: ${errText(e)}`,
+    };
+  }
+}
+
+// ── verifyPhaseAccumulatedOnBranch ────────────────────────────────────────────────────────────────
+//
+// The phase-level real-check verifier ([[../specs/merge-gate-verifies-real-phase-checks-not-status-flags]]
+// Phase 1). Reads the phase's `spec_phase_checks` rows filtered to `exec_kind='grep'` and executes each
+// against `branchRef` via `git grep -e <pattern> <branchRef> -- <path>`, returning pass/fail. Grep is the
+// code-presence signal (a pattern that MUST be present means "this code is written on the branch"; an
+// absent pattern means the phase's implementation is missing).
+//
+// FAILS CLOSED on any error — a git failure, unknown ref, or SDK-read blip reads as NOT accumulated
+// rather than the pre-P1 fail-open (which shipped phantom phases when a status flag existed with no
+// code). If the phase has no grep checks, the verifier can't detect code presence and falls back to the
+// phase's terminal-status / build_sha flag — best effort during the migration window while every phase
+// gets a grep check; a phase authored WITH grep checks (the wedge class the spec cites) is fully
+// verified.
+//
+// TSC / build / http_get / db_probe_readonly / unit_test checks are NOT run here — they're too expensive
+// and the [[spec-check-runner]] gates them separately at spec-test time. This is a fast pre-merge
+// code-presence check, not a full spec-test.
+export interface PhaseAccumulationVerdict {
+  accumulated: boolean;
+  reason: string;
+}
+
+export interface PhaseFlagsForVerify {
+  id: string;
+  status: Phase;
+  build_sha: string | null;
+}
+
+export interface VerifyPhaseDeps {
+  loadPhaseFlags: (
+    workspaceId: string,
+    slug: string,
+    position: number,
+  ) => Promise<PhaseFlagsForVerify | null>;
+  loadPhaseGrepChecks: (
+    phaseId: string,
+  ) => Promise<Array<{ description: string; params: GrepCheckParams }>>;
+  runGitGrepOnBranch: (
+    branchRef: string,
+    params: GrepCheckParams,
+  ) => Promise<{ ok: boolean; evidence: string }>;
+}
+
+async function defaultLoadPhaseFlags(
+  workspaceId: string,
+  slug: string,
+  position: number,
+): Promise<PhaseFlagsForVerify | null> {
+  const spec = await getSpec(workspaceId, slug);
+  if (!spec) return null;
+  const phase = (spec.phases ?? []).find((p) => p.position === position);
+  if (!phase) return null;
+  return { id: phase.id, status: phase.status, build_sha: phase.build_sha };
+}
+
+async function defaultLoadPhaseGrepChecks(
+  phaseId: string,
+): Promise<Array<{ description: string; params: GrepCheckParams }>> {
+  const { listPhaseChecks } = await import("@/lib/spec-phase-checks-table");
+  const rows = await listPhaseChecks(phaseId);
+  const out: Array<{ description: string; params: GrepCheckParams }> = [];
+  for (const r of rows) {
+    if (r.exec_kind !== "grep") continue;
+    const p = r.params as GrepCheckParams | null;
+    if (!p || typeof p.pattern !== "string" || (p.expect !== "present" && p.expect !== "absent")) continue;
+    out.push({ description: r.description, params: p });
+  }
+  return out;
+}
+
+async function runGitCmd(
+  args: string[],
+): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn("git", args, { cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      resolve({ code: null, stdout: "", stderr: "", error: (e as Error).message });
+      return;
+    }
+    const kill = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* noop */ }
+    }, 30_000);
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString();
+      if (stdout.length > 100_000) stdout = stdout.slice(-100_000);
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString();
+      if (stderr.length > 100_000) stderr = stderr.slice(-100_000);
+    });
+    child.on("error", (e) => {
+      clearTimeout(kill);
+      resolve({ code: null, stdout, stderr, error: e.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(kill);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+async function defaultRunGitGrepOnBranch(
+  branchRef: string,
+  params: GrepCheckParams,
+): Promise<{ ok: boolean; evidence: string }> {
+  // git grep against a tree-ish, path passed after `--` — matches the [[spec-check-runner]] grep hardening
+  // (pattern via `-e` so a `-`-leading pattern isn't reparsed as an option; path after `--`).
+  // Reject an obviously-unsafe branch ref up front — a spec-authored branchRef is treated as an untrusted
+  // capability boundary just like grep.path.
+  const refTrim = branchRef.trim();
+  if (!refTrim || refTrim.startsWith("-") || refTrim.includes("\0") || /\s/.test(refTrim)) {
+    return { ok: false, evidence: `refused unsafe branchRef '${branchRef}'` };
+  }
+  const args: string[] = ["grep", "-l", "-E", "-e", params.pattern, refTrim];
+  if (params.path) {
+    args.push("--", params.path);
+  }
+  const r = await runGitCmd(args);
+  if (r.error) return { ok: false, evidence: `spawn git: ${r.error}` };
+  // git grep exits 0 on match, 1 on no match. Anything else = git error (unknown ref, bad regex, etc.).
+  if (r.code !== 0 && r.code !== 1) {
+    return {
+      ok: false,
+      evidence: (r.stderr || r.stdout || `git grep exit ${r.code}`).slice(0, 4000),
+    };
+  }
+  const found = r.code === 0;
+  const ok = params.expect === "present" ? found : !found;
+  return {
+    ok,
+    evidence: `git grep '${params.pattern}' on ${refTrim}${params.path ? " -- " + params.path : ""} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+  };
+}
+
+export const defaultVerifyPhaseDeps: VerifyPhaseDeps = {
+  loadPhaseFlags: defaultLoadPhaseFlags,
+  loadPhaseGrepChecks: defaultLoadPhaseGrepChecks,
+  runGitGrepOnBranch: defaultRunGitGrepOnBranch,
+};
+
+export async function verifyPhaseAccumulatedOnBranch(
+  workspaceId: string,
+  slug: string,
+  phasePosition: number,
+  branchRef: string,
+  deps: VerifyPhaseDeps = defaultVerifyPhaseDeps,
+): Promise<PhaseAccumulationVerdict> {
+  if (!workspaceId || !slug || !branchRef) {
+    return { accumulated: false, reason: "verify context missing (workspace/slug/branchRef) — fail closed" };
+  }
+  try {
+    const phase = await deps.loadPhaseFlags(workspaceId, slug, phasePosition);
+    if (!phase) {
+      return { accumulated: false, reason: `phase position ${phasePosition} not found — fail closed` };
+    }
+    const checks = await deps.loadPhaseGrepChecks(phase.id);
+    if (checks.length === 0) {
+      // No code-presence signal available. Fall back to the phase's terminal flag as best effort during the
+      // migration window — a phase authored WITHOUT grep checks (legacy) still trusts the flag. The wedge
+      // class the spec cites (a phase authored WITH grep checks that then failed on the branch) is fully
+      // verified above.
+      const flagged = phase.status === "shipped" || phase.status === "rejected" || Boolean(phase.build_sha);
+      return {
+        accumulated: flagged,
+        reason: flagged
+          ? `no grep checks — falling back to terminal flag (status=${phase.status}, build_sha=${phase.build_sha ? "set" : "null"})`
+          : `no grep checks and no terminal flag (planned/in_progress with no build_sha)`,
+      };
+    }
+    for (const check of checks) {
+      const r = await deps.runGitGrepOnBranch(branchRef, check.params);
+      if (!r.ok) {
+        return {
+          accumulated: false,
+          reason: `phase ${phasePosition} check "${check.description}" failed on ${branchRef}: ${r.evidence}`,
+        };
+      }
+    }
+    return {
+      accumulated: true,
+      reason: `${checks.length} grep check(s) passed on ${branchRef}`,
+    };
+  } catch (e) {
+    return { accumulated: false, reason: `verify error — fail closed: ${errText(e)}` };
   }
 }
 

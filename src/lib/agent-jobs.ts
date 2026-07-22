@@ -7,7 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, type SpecStatus } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, verifyPhaseAccumulatedOnBranch, type VerifyPhaseDeps, type SpecStatus } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -1459,8 +1459,11 @@ export async function isSpecPromoteEligible(
     return out;
   }
   const admin = createAdminClient();
-  // Accumulation (M2) — fail OPEN (a PM blip mustn't wedge a green spec; the green signals still gate).
-  const acc = await isSpecAccumulationComplete(workspaceId, slug);
+  // merge-gate-verifies-real-phase-checks P1 — pass the branch through so each phase's REAL grep checks
+  // are run against the branch HEAD. The gate now fails CLOSED (a phantom-stamped phase whose code is
+  // absent on the branch reads NOT accumulated); the pre-P1 fail-open path was one of the exploit triggers
+  // the spec cites.
+  const acc = await isSpecAccumulationComplete(workspaceId, slug, branch);
   out.accumulationComplete = acc.complete;
   // Green signals (M3) — fail CLOSED: a read error or an absent per-branch run reads as NOT green.
   try {
@@ -3822,6 +3825,7 @@ export type VerifyPhaseAccumulatedFn = (
   workspaceId: string,
   slug: string,
   mergeSha: string,
+  phasePosition?: number,
 ) => Promise<{ ok: boolean; reason: string }>;
 
 /**
@@ -3838,10 +3842,41 @@ export type VerifyPhaseAccumulatedFn = (
  * (no un-shipped phase), and stampPhaseShipped on an already-shipped phase is inert. Only a `merged`-job spec
  * with a resolvable merge SHA is touched — a merged spec we can't prove a SHA for is LEFT for the audit path
  * (we never blanket-ship without provenance). Best-effort per spec; never throws.
+ *
+ * merge-gate-verifies-real-phase-checks P2 — a `verifyOnBranchOverride` deps injector overrides the default
+ * `verifyPhaseAccumulatedOnBranch` deps (git grep against the merged-sha ref). Tests inject a mock that
+ * returns preset per-position verdicts without touching git.
  */
+/**
+ * merge-gate-verifies-real-phase-checks P2 — the PURE partition the reconciler uses to gate the
+ * blanket-stamp on real per-phase verify verdicts. Given an ordered `unshipped` phase list and the same-
+ * length `verdicts` from `verifyPhaseAccumulatedOnBranch`, returns the phases that should be stamped
+ * (verifier said accumulated) and the phases that should be REFUSED (verifier said not accumulated,
+ * OR the verdict is missing — treated as refused / fail-closed). No I/O; sole purpose is to make the
+ * guard testable without mocking Supabase.
+ */
+export function partitionPhasesByVerifyVerdict<P extends { position: number }>(
+  unshipped: P[],
+  verdicts: { accumulated: boolean; reason: string }[],
+): { verified: P[]; refused: { position: number; reason: string }[] } {
+  const verified: P[] = [];
+  const refused: { position: number; reason: string }[] = [];
+  for (let i = 0; i < unshipped.length; i++) {
+    const v = verdicts[i];
+    if (v && v.accumulated) verified.push(unshipped[i]);
+    else refused.push({ position: unshipped[i].position, reason: v?.reason ?? "no verdict returned — fail closed" });
+  }
+  return { verified, refused };
+}
+
+function isVerifyPhaseDeps(deps: unknown): deps is VerifyPhaseDeps {
+  const d = deps as Partial<VerifyPhaseDeps> | null | undefined;
+  return !!d && typeof d.loadPhaseFlags === "function" && typeof d.loadPhaseGrepChecks === "function" && typeof d.runGitGrepOnBranch === "function";
+}
+
 export async function reconcileMergedSpecPhases(
   adminClient?: Admin,
-  deps?: { verifyPhaseAccumulated?: VerifyPhaseAccumulatedFn },
+  deps?: { verifyPhaseAccumulated?: VerifyPhaseAccumulatedFn; verifyOnBranchOverride?: VerifyPhaseDeps } | VerifyPhaseDeps,
 ): Promise<MergedSpecPhaseReconcileResult> {
   const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0, skipped: [] };
   const admin = adminClient || createAdminClient();
@@ -3873,30 +3908,53 @@ export async function reconcileMergedSpecPhases(
         const mergeSha = shippedSibling?.merge_sha ?? null;
         const pr = shippedSibling?.pr ?? null;
         if (!mergeSha) continue; // can't prove a merge SHA → don't blanket-ship (audit-spec-shipped-state owns that)
-        // merge-gate-verifies-real-phase-checks Phase 2 — FAIL CLOSED. Blanket-copying a shipped sibling's
-        // merge_sha onto EVERY unshipped phase assumes the squash-merge was fully accumulated — which stamped
-        // phases shipped whose code was never in the merge (the phantom-ship: factor-rollup P2/P3 with
-        // getFactorRollup never written). NEVER stamp a phase we can't prove: only back-fill when the injected
-        // box-side verifier confirms the merged code passes the spec's machine checks. No verifier ⇒ refuse.
-        if (!deps?.verifyPhaseAccumulated) {
+        // merge-gate-verifies-real-phase-checks P2 — GUARD THE BLANKET STAMP. The old code blanket-stamped
+        // every unshipped phase with the sibling's merge_sha with ZERO code check — one of the three exploit
+        // triggers the spec cites (v3 factor-rollup-sdk-with-significance-gate phantom-shipped P2/P3 this
+        // way). Now we verify EACH phase's real grep checks (`spec_phase_checks` with exec_kind='grep')
+        // against the MERGED code (the recovered merge_sha, which is the squash-merge commit on main). A
+        // phase whose verifier reports NOT accumulated is LEFT unshipped (Phase 3's phantom-ship detector
+        // will surface it), never blanket-stamped. Best-effort per phase; a verify error reads as NOT
+        // accumulated (fail closed).
+        const verifyDeps = isVerifyPhaseDeps(deps) ? deps : deps?.verifyOnBranchOverride;
+        const injectedVerify = !isVerifyPhaseDeps(deps) ? deps?.verifyPhaseAccumulated : undefined;
+        if (!injectedVerify && !verifyDeps) {
           out.skipped.push(`${slug}: back-fill REFUSED — no branch verifier (fail-closed phantom-ship guard)`);
           continue;
         }
-        const verdict = await deps
-          .verifyPhaseAccumulated(j.workspace_id, slug, mergeSha)
-          .catch((e) => ({ ok: false, reason: `verify threw: ${errText(e)}` }));
-        if (!verdict.ok) {
-          out.skipped.push(`${slug}: back-fill REFUSED — merged code fails the spec's checks (${verdict.reason})`);
-          console.warn(`[merged-phase-reconcile] ${slug}: SKIP blanket-stamp — ${verdict.reason}`);
+        const verdicts = await Promise.all(
+          unshipped.map(async (p) => {
+            if (injectedVerify) {
+              const v = await injectedVerify(j.workspace_id, slug, mergeSha, p.position).catch((e) => ({
+                ok: false,
+                reason: `verify threw: ${errText(e)}`,
+              }));
+              return { accumulated: v.ok, reason: v.reason };
+            }
+            return verifyPhaseAccumulatedOnBranch(j.workspace_id, slug, p.position, mergeSha, verifyDeps!);
+          }),
+        );
+        const { verified, refused } = partitionPhasesByVerifyVerdict(unshipped, verdicts);
+        if (refused.length) {
+          out.skipped.push(
+            `${slug}: back-fill REFUSED ${refused.length} un-verified phase(s) (${refused.map((r) => `pos ${r.position}: ${r.reason}`).join("; ")})`,
+          );
+          console.warn(
+            `[merged-phase-reconcile] ${slug}: refusing to blanket-stamp ${refused.length} un-verified phase(s) — ${refused.map((r) => `pos ${r.position} (${r.reason})`).join("; ")} — Phase-3 phantom-ship detector will surface`,
+          );
+        }
+        if (!verified.length) {
+          // Every unshipped phase failed verification — leave the spec alone (no stamping) and skip the
+          // post-ship hooks. The Phase-3 phantom-ship detector will surface this as a stuck spec.
           continue;
         }
         await Promise.all(
-          unshipped.map((p) => stampPhaseShipped(j.workspace_id, slug, p.position, { merge_sha: mergeSha, pr })),
+          verified.map((p) => stampPhaseShipped(j.workspace_id, slug, p.position, { merge_sha: mergeSha, pr })),
         );
-        out.phasesStamped += unshipped.length;
+        out.phasesStamped += verified.length;
         out.reconciled.push(slug);
         console.log(
-          `[merged-phase-reconcile] ${slug}: back-filled ${unshipped.length} un-shipped phase(s) → shipped (merge ${mergeSha.slice(0, 8)})`,
+          `[merged-phase-reconcile] ${slug}: back-filled ${verified.length}/${unshipped.length} verified phase(s) → shipped (merge ${mergeSha.slice(0, 8)}${refused.length ? `, refused ${refused.length} un-verified` : ""})`,
         );
         // The spec now rolls up to shipped — fire the post-ship hooks the original merge would have (deduped).
         try {
