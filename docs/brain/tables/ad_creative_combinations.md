@@ -40,10 +40,11 @@ The combination = an [[product_angle_palette]] angle × an [[ad_headline_pattern
 
 All reads/writes route through the [[../libraries/creative-combinations]] SDK — never raw `.from('ad_creative_combinations')` outside that file (shopcx no-raw-`.from()` rail).
 
-- **`upsertCombinationForPair(admin, {workspaceId, productId, angleId, patternId})` → `Promise<string>`** — idempotent upsert on the unique key `(workspace_id, angle_id, pattern_id)`, returns the combination id. Called by [[../libraries/creative-agent]] `insertReadyCreative` BEFORE the [[ad_campaigns]] insert so the row's `creative_combination_id` FK is real.
-- **`bumpCombinationUsed(admin, combinationId, nowIso, campaignId)` → `Promise<void>`** — read-then-write bump of `times_used` + set `last_used_at` + set `campaign_id` (the perf link). Called by `insertReadyCreative` AFTER the campaign insert, alongside [[../libraries/angle-palette]] `markAngleUsed` — the pair advances both sides of the coverage ledger in one call site.
+- **`listCombinationsForProduct(admin, {workspaceId, productId, status?})` → `Promise<CreativeCombination[]>`** — the READ chokepoint the [[../libraries/selection-engine]] leans on. Returns every ledger row for `(workspace_id, product_id)`, optionally narrowed to a `status` (typically `'fresh'`). The selector applies cooldown / palette-join / pattern-fillability filters in memory. Landed by [[../specs/selection-engine-coverage-ledger]] Phase 1.
+- **`upsertCombinationForPair(admin, {workspaceId, productId, angleId, patternId})` → `Promise<string>`** — *(wire-engine Phase 3)* idempotent upsert on the unique key `(workspace_id, angle_id, pattern_id)`, returns the combination id. Called by [[../libraries/creative-agent]] `insertReadyCreative` BEFORE the [[ad_campaigns]] insert so the row's `creative_combination_id` FK is real.
+- **`bumpCombinationUsed(admin, combinationId, nowIso, campaignId)` → `Promise<void>`** — *(wire-engine Phase 3)* read-then-write bump of `times_used` + set `last_used_at` + set `campaign_id` (the perf link). Called by `insertReadyCreative` AFTER the campaign insert, alongside [[../libraries/angle-palette]] `markAngleUsed` — the pair advances both sides of the coverage ledger in one call site.
 
-Wired by [[../specs/wire-engine-into-dahlia-author-path]] (Phase 3). The M4 selection-ledger + freshness-cooldown spec later sharpens WHICH combination the selector picks without changing this writer surface.
+Reads are wired by [[../specs/selection-engine-coverage-ledger]] Phase 1; writers land with [[../specs/wire-engine-into-dahlia-author-path]] Phase 3. The M4 selection-ledger + freshness-cooldown spec's Phase 2 picker sharpens WHICH combination the selector picks without changing this writer surface.
 
 ## Common queries
 
