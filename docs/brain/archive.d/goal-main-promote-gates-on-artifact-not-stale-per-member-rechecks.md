@@ -1,0 +1,1 @@
+- **Goal→main promote gates on the goal-branch ARTIFACT, not stale per-member build-branch re-checks** · verified 2026-07-22 · → [[../lifecycles/spec-goal-branch-pm-flow]]
