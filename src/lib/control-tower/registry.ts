@@ -409,7 +409,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     owner: "platform",
     label: "Box build worker",
     description: "The self-hosted build worker poll loop (scripts/builder-worker.ts).",
-    expectedCadence: "polls every ~5s",
+    expectedCadence: "polls every ~30s",
     livenessWindowMs: 5 * MIN,
     shaGraceMs: 30 * MIN,
   },
