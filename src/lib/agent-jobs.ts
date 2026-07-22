@@ -3811,7 +3811,18 @@ export interface MergedSpecPhaseReconcileResult {
   reconciled: string[];
   /** total phases flipped to shipped across all reconciled specs this pass. */
   phasesStamped: number;
+  /** merge-gate-verifies-real-phase-checks Phase 2 — specs whose blanket back-fill was REFUSED (no verifier,
+   *  or the merged code failed the spec's machine checks) so a phantom-ship can never be minted here. */
+  skipped: string[];
 }
+
+/** merge-gate-verifies-real-phase-checks Phase 2 — a box-side verifier (checks out the merge SHA + runs the
+ *  spec's machine checks against it). Injected so the reconciler NEVER stamps a phase shipped it can't prove. */
+export type VerifyPhaseAccumulatedFn = (
+  workspaceId: string,
+  slug: string,
+  mergeSha: string,
+) => Promise<{ ok: boolean; reason: string }>;
 
 /**
  * STANDING-PASS RECOVERY for ship-all-phases-on-squash-merge (post-merge-ships-only-one-phase fix). The
@@ -3828,8 +3839,11 @@ export interface MergedSpecPhaseReconcileResult {
  * with a resolvable merge SHA is touched — a merged spec we can't prove a SHA for is LEFT for the audit path
  * (we never blanket-ship without provenance). Best-effort per spec; never throws.
  */
-export async function reconcileMergedSpecPhases(adminClient?: Admin): Promise<MergedSpecPhaseReconcileResult> {
-  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0 };
+export async function reconcileMergedSpecPhases(
+  adminClient?: Admin,
+  deps?: { verifyPhaseAccumulated?: VerifyPhaseAccumulatedFn },
+): Promise<MergedSpecPhaseReconcileResult> {
+  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0, skipped: [] };
   const admin = adminClient || createAdminClient();
   try {
     const { data: jobs } = await admin
@@ -3859,6 +3873,23 @@ export async function reconcileMergedSpecPhases(adminClient?: Admin): Promise<Me
         const mergeSha = shippedSibling?.merge_sha ?? null;
         const pr = shippedSibling?.pr ?? null;
         if (!mergeSha) continue; // can't prove a merge SHA → don't blanket-ship (audit-spec-shipped-state owns that)
+        // merge-gate-verifies-real-phase-checks Phase 2 — FAIL CLOSED. Blanket-copying a shipped sibling's
+        // merge_sha onto EVERY unshipped phase assumes the squash-merge was fully accumulated — which stamped
+        // phases shipped whose code was never in the merge (the phantom-ship: factor-rollup P2/P3 with
+        // getFactorRollup never written). NEVER stamp a phase we can't prove: only back-fill when the injected
+        // box-side verifier confirms the merged code passes the spec's machine checks. No verifier ⇒ refuse.
+        if (!deps?.verifyPhaseAccumulated) {
+          out.skipped.push(`${slug}: back-fill REFUSED — no branch verifier (fail-closed phantom-ship guard)`);
+          continue;
+        }
+        const verdict = await deps
+          .verifyPhaseAccumulated(j.workspace_id, slug, mergeSha)
+          .catch((e) => ({ ok: false, reason: `verify threw: ${errText(e)}` }));
+        if (!verdict.ok) {
+          out.skipped.push(`${slug}: back-fill REFUSED — merged code fails the spec's checks (${verdict.reason})`);
+          console.warn(`[merged-phase-reconcile] ${slug}: SKIP blanket-stamp — ${verdict.reason}`);
+          continue;
+        }
         await Promise.all(
           unshipped.map((p) => stampPhaseShipped(j.workspace_id, slug, p.position, { merge_sha: mergeSha, pr })),
         );
