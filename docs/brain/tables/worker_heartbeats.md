@@ -21,7 +21,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 | `lanes` | `jsonb` | default `'[]'` — `[{ kind, job_id, spec_slug, since, phase? }]` for every in-flight lane this tick (`phase` = `"Phase N"` for a chained/per-phase build, null otherwise — [[../specs/box-lane-show-phase]]) |
 | `accounts` | `jsonb` | default `'{}'` — per-account Max load + failover state ([[../specs/box-multi-account-failover]] Phase 2): `{ pool: [{ label, in_flight, capped, capped_until }], healthy, total, all_capped, soonest_reset, events: [{ at, type, account, detail }] }`. `events.type` ∈ `cap｜failover｜all_capped｜recovered` (newest first, ring of ≤12). `{}` on a single-account / legacy box ⇒ readers treat as null. **`pool[].in_flight` is the GROUND-TRUTH active-lane count** (`activeLaneCountForAccount` off the `laneAccount` map — one entry per running lane, cleared in the single outer `runJob().finally`), NOT the free-running `acct.inFlight` counter. The counter used to be shown and drifted UP (a missed `inFlight--` on a reap/crash bail) + double-counted a `runBoxLane` lane (`withAccountFailover` and `runBoxSession` both `inFlight++`) — "Round Robin 2: 5 in flight" with 3 real lanes. The worker also reconciles `acct.inFlight` to this ground truth each heartbeat tick (`reconcileAccountLoad`) so the round-robin least-loaded selection self-heals — `consolidate-grade-coach-one-session` Phase 2. |
 | `started_at` | `timestamptz?` | when this worker process booted |
-| `last_poll_at` | `timestamptz?` | heartbeat — set every poll tick (~5s); a stale value ⇒ box down |
+| `last_poll_at` | `timestamptz?` | heartbeat — set every poll tick (~30s, widened from ~5s 2026-07-22); a stale value ⇒ box down |
 | `updated_at` | `timestamptz` | default `now()` |
 
 ## Who writes / reads
@@ -33,7 +33,7 @@ This is the answer to the gap that bit us on 2026-06-18/19: a merged worker fix 
 
 ## Gotchas
 
-- **Health = recency, not just `status`.** A worker that died can't flip its own row to unhealthy, so the dashboard treats a `last_poll_at` older than ~90s (vs the ~5s `POLL_MS`) as down regardless of the stored `status`.
+- **Health = recency, not just `status`.** A worker that died can't flip its own row to unhealthy, so the dashboard treats a stale `last_poll_at` as down regardless of the stored `status`. The registry [[../libraries/control-tower]] liveness window for the box worker is 5 min (`livenessWindowMs`), comfortably > the `POLL_MS` cadence — which was widened ~5s → **~30s** (2026-07-22, box-loop-30s-db-load) to cut the always-on DB-request floor; the worker still bumps `last_poll_at` every tick, so a ~30s cadence stays many ticks inside the 5-min window.
 - **Not workspace-scoped.** Unlike [[agent_jobs]], the box is global infra; the select policy is "any authenticated user" (`auth.uid() is not null`), not workspace membership.
 - **Self-update never runs mid-build — and a stale-but-busy box QUEUES a restart instead of force-killing.** The worker only resets/exits when `active_builds === 0`; an in-flight lane keeps the old code until it clears. When the box is far behind (`≥ FORCE_STALE_COMMITS`) AND busy, it no longer abandons in-flight builds — it sets the `worker_controls.drain_for_update` flag (`status='draining'`), stops claiming new work (incoming jobs queue), drains to idle, then self-updates on the fresh SHA. Same drain the "Queue restart" button triggers manually. NEVER kills a live session (see [[../specs/worker-self-update]] § Safety).
 
