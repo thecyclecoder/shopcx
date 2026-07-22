@@ -57,6 +57,16 @@ A single ad concept: product × variant × [[product_ad_angles|angle]] × [[ad_a
 - [[storefront_sessions]].`ad_campaign_id` (Phase 2b)
 - [[orders]].`ad_campaign_id` (Phase 2b)
 
+## Stamp writers — the four v3 attribution columns
+
+`creative_theme` / `angle_palette_id` / `headline_pattern_id` / `creative_combination_id` are the v3 attribution stamps the factor rollup + coverage ledger + theme-spread selector all read (migration `20261123120000` added the columns; [[../specs/wire-engine-into-dahlia-author-path]] wired the writers). Populated together on every insert produced by the wired author path:
+
+- **[[../libraries/creative-agent]] `buildAdCampaignInsertBody`** threads `(angle, pattern, theme)` chosen by [[../libraries/select-angle-pattern|`selectAnglePatternForBrief`]] onto the insert body — `creative_theme = theme`, `angle_palette_id = angle.id`, `headline_pattern_id = pattern.id`, `creative_combination_id = <upserted id from [[../libraries/creative-combinations|upsertCombinationForPair]]>`.
+- **[[../libraries/creative-agent]] `insertReadyCreative`** upserts the [[ad_creative_combinations]] row BEFORE this insert (unique on `(workspace_id, angle_id, pattern_id)`) so `creative_combination_id` is a real FK, then writes the campaign row.
+- **Post-insert coverage bump:** [[../libraries/angle-palette]] `markAngleUsed(admin, angle.id, nowIso)` advances the angle side; [[../libraries/creative-combinations]] `bumpCombinationUsed(admin, combinationId, nowIso, campaignId)` advances the combination side + sets `campaign_id` for the perf link.
+
+All four columns land NULL when the selector returned `null` (unwired product, no legal pattern) so the caller could fall back to the pre-M1 inlined path — the shape existing readers already tolerate. Deterministic-mode inserts + pre-Phase-3 rows are also NULL. The M5 factor rollup uses `IS NOT NULL` as the "stamped" predicate.
+
 ## Common queries
 
 ### List rows for a workspace

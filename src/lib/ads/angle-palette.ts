@@ -127,6 +127,13 @@ export interface AnglePaletteInput {
   source?: AngleSource;
   displayOrder?: number;
   notes?: string | null;
+  /**
+   * Optional — omitted by default so the DB default (`true`) applies on INSERT and the field is
+   * NOT touched on UPDATE (a stray `is_active:true` in the upsert row would reactivate a manually-
+   * retired angle). Pass `false` to land a draft row that awaits owner promotion (angle-demand-sweep
+   * uses this for dahlia_fanned drafts).
+   */
+  isActive?: boolean;
 }
 
 /** List a product's palette, optionally filtered by theme / status / awareness stage. */
@@ -171,7 +178,7 @@ export async function upsertAngle(
   productId: string,
   input: AnglePaletteInput,
 ): Promise<string> {
-  const row = {
+  const row: Record<string, unknown> = {
     workspace_id: workspaceId,
     product_id: productId,
     theme: input.theme,
@@ -192,6 +199,7 @@ export async function upsertAngle(
     notes: input.notes ?? null,
     updated_at: new Date().toISOString(),
   };
+  if (input.isActive !== undefined) row.is_active = input.isActive;
   const { data, error } = await admin
     .from("product_angle_palette")
     .upsert(row, { onConflict: "workspace_id,product_id,theme,problem" })
@@ -221,6 +229,30 @@ export async function setAngleStatus(admin: Admin, angleId: string, status: Angl
   const { error } = await admin
     .from("product_angle_palette")
     .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", angleId);
+  if (error) throw error;
+}
+
+/**
+ * Targeted refresh of an existing angle's search-demand tier (+ optional notes). Used by the
+ * angle-demand-sweep executor to replace a hand-scored `search_demand` with an evidence-grounded
+ * one WITHOUT clobbering the seeded enemy / mechanism / proof / awareness_stages / is_active —
+ * the sweep must NEVER flip a row active (that stays owner-gated). Prefer this over `upsertAngle`
+ * when you only want to update the demand signal on an existing row.
+ */
+export async function refreshAngleSearchDemand(
+  admin: Admin,
+  angleId: string,
+  patch: { searchDemand: SearchDemand; notes?: string | null },
+): Promise<void> {
+  const update: Record<string, unknown> = {
+    search_demand: patch.searchDemand,
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.notes !== undefined) update.notes = patch.notes;
+  const { error } = await admin
+    .from("product_angle_palette")
+    .update(update)
     .eq("id", angleId);
   if (error) throw error;
 }
