@@ -684,26 +684,25 @@ export async function POST(request: NextRequest) {
         console.warn(`[checkout] Avalara void after Braintree fail threw for ${orderNumber}:`, err);
       }
     }
-    await logCheckoutError({
+    // Info-disclosure guard: the raw gateway message + vaulted BT payment
+    // method token + BT customer id must NEVER reach the client on the payment
+    // path. Full context is captured server-side via logCheckoutError and the
+    // `transactions` row updated above (error_message + processor_response_*);
+    // the client sees only the stable `error` code.
+    return sanitizedCheckoutErrorResponse({
       workspaceId: cart.workspace_id as string,
       stage: "braintree_charge",
+      errorCode: "transaction_failed",
+      status: 402,
+      error: message,
       cartToken: cart.token as string,
       customerId: customer.id as string,
-      errorCode: "transaction_failed",
-      errorMessage: message,
-      context: {
+      logContext: {
         total_cents: totalCents,
         processor_response_code: (txnResult as { transaction?: { processorResponseCode?: string } }).transaction?.processorResponseCode || null,
         order_number: orderNumber,
       },
     });
-    return NextResponse.json({
-      error: "transaction_failed",
-      details: message,
-      // Card stays vaulted; surface the token so a retry can reuse it.
-      braintree_payment_method_token: chargeToken,
-      braintree_customer_id: braintreeCustomerId,
-    }, { status: 402 });
   }
   const transaction = txnResult.transaction;
   const paymentMethodToken: string = chargeToken;
