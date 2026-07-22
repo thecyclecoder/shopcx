@@ -80,6 +80,32 @@ The M3 stall-detector cron's scan. Fetches events for the (optionally) scoped wo
 
 **Called by:** the M3 detector cron (not yet wired — that's the M3 spec).
 
+### `closeOrphanedNeedsInputWaitSpans` — function  *(build-completed-with-deferred-pr-must-auto-redrive Phase 2)*
+
+```ts
+async function closeOrphanedNeedsInputWaitSpans(
+  admin: Admin,
+  workspace_id: string,
+  spec_slug: string,
+  opts: {
+    actor: string;
+    reason: string;
+    wait_kind?: TimecardWaitKind | string | null;
+    extra_metadata?: Record<string, unknown>;
+  },
+): Promise<CloseOrphanedWaitSpansResult>
+```
+
+The **worker-side wait-span closer**. When a build resumes or completes, it may encounter orphaned `wait_entered` spans from prior job rows — waits that were never closed because they occurred on an **earlier row** than the one driving the current transition (the per-row `resolvePendingWaitTransition` only closes a wait on the SAME row). Example: `factor-scores-reweight-selection-engine` had two open `needs_input` spans (04:08 and 12:59 on different rows) that the build resumed past and completed without closing, so `getTimecard().open_waits` reported `waiting:true` for a spec that was actively running — corrupting the M3 stall detector's legit-wait filter.
+
+This function reads the spec's full [[../tables/spec_timecard_events]] ledger, folds it with the **SAME stack-pair logic** `foldTimeline` uses (so wait spans are correctly matched despite multiple rows), and emits ONE `wait_exited` per still-open span whose `wait_kind` matches the `opts.wait_kind` filter (default `'needs_input'`, pass `null` for ANY wait kind).
+
+**Result:** `{ closed: number, wait_kinds: string[] }` — count of closed spans + the kinds closed. Idempotent (nothing open ⇒ returns `{closed:0, wait_kinds:[]}`; a repeat call finds no new opens).
+
+**Metadata.** Every emitted `wait_exited` row carries `metadata.superseded_by_build_activity=true` + `opts.reason` so the audit trail self-documents why the span was closed by the worker (not a user-side unblock). `opts.extra_metadata` is merged in as additional structured notes.
+
+**Best-effort + idempotent.** Never throws. A DB read error logs + returns no-op. Called from `scripts/builder-worker.ts` at three sites via a fire-and-forget helper: (1) the build-lane dispatch entry (right after `resuming|building` log), (2) the PR-DEFERRED completion path, and (3) the accumulation-complete completion path. All calls are wrapped in try/catch so the ledger never blocks a build.
+
 ## Invariants
 
 - **Best-effort writes.** `recordTimecardEvent` never throws. A DB error logs + returns. The ledger is an audit trail, not a critical-path write — a write failure must not break the caller's lifecycle transition.
