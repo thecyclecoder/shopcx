@@ -31,6 +31,13 @@ A dashboard view that currently polls (`setInterval(load, N)`) to stay fresh —
 
 ## Gotchas
 
+- **⚠️ Authenticate the socket, or RLS silently drops every event.** Postgres Changes applies the table's RLS to EACH event, evaluated as the **role on the Realtime WebSocket** — which is `anon` by default for the browser client. If your SELECT policy needs `auth.uid()` (any workspace-scoped table), an `anon` socket is *subscribed* (green/`SUBSCRIBED`) but receives **zero events** — they're all filtered out. Symptom: the channel connects, nothing ever arrives, a refresh shows the change. Fix — hand the socket the user's JWT **before** subscribing:
+  ```tsx
+  const { data } = await supabase.auth.getSession();
+  if (data.session?.access_token) await supabase.realtime.setAuth(data.session.access_token);
+  // ...then .channel(...).subscribe()
+  ```
+  The public `ticket_messages` widget doesn't need this because it relies on an explicit **`anon`** SELECT policy (`visibility = 'external'`); an authenticated dashboard view (realtime_demo, box session steps) MUST `setAuth`. This is NOT a replica-identity issue — `default(pk)` delivers the full NEW row fine; it's purely the socket's role vs the policy.
 - **Realtime payloads can truncate large columns** — for a big body/jsonb, treat the event as a "something changed" signal and re-fetch the full row (the live-chat widget does exactly this).
 - **The publication add is DDL** — it ships as a guarded migration, applied by the migration-drift reconciler like any other.
 - **Filter server-side** (`filter: 'id=eq.…'`) so the subscriber isn't woken for every row in the table.
