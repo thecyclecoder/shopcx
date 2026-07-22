@@ -1,0 +1,1 @@
+- **A build that finishes 'completed' with a DEFERRED PR must auto-redrive or escalate, not silently stall** · verified 2026-07-22 · → [[../lifecycles/roadmap-build-console]]
