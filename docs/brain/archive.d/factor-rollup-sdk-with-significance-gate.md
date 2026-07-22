@@ -1,0 +1,1 @@
+- **Factor-rollup SDK: per-{theme,angle,pattern,combination} CPA/CTR with significance gate** · verified 2026-07-22 · → [[../libraries/factor-rollup-sdk]]

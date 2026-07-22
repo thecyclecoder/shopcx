@@ -1,0 +1,1 @@
+- **Demand-sourced angle sweep: search-demand feeder for product_angle_palette** · verified 2026-07-22 · → [[../libraries/angle-demand-sweep]]
