@@ -735,6 +735,21 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     registeredAt: "2026-06-25T14:30:03.155Z",
     personaKind: "research", // Rhea — the acquisition-research crons merge into one Rhea worker under Max/Growth
   },
+  // demand-sourced-angle-sweep spec, Phase 3: the daily palette-refresh loop. Enumerates ad-tool
+  // workspaces × active products, calls runSweepForProduct per product (search_demand refresh +
+  // is_active=false dahlia_fanned drafts on high-tier no-match lanes). newcron-grace: registeredAt
+  // starts the first-tick window so the tile doesn't RED on cut-over. Owner Growth so the CEO can
+  // kill it via the ancestor `growth` node in one write (kill_switches cascades down).
+  {
+    id: "angle-demand-sweep-cadence-cron",
+    kind: "cron",
+    owner: "growth",
+    label: "Angle demand sweep cadence",
+    description: "Daily sweep: refresh product_angle_palette.search_demand from real search-volume evidence + surface is_active=false drafts for previously-uncovered high-tier ingredient×problem lanes. Draft rows stay owner-gated (never auto-active).",
+    expectedCadence: "daily (30 10 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    registeredAt: "2026-07-22T00:00:00Z",
+  },
   {
     // rhea-research-automation spec, Phase 1: the paced hourly claim of the top-spend unreviewed
     // research URL. Per ad-tool workspace: sync research_urls → pick top ad_count unreviewed →
@@ -856,6 +871,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // the goals/autonomous-media-buyer-supervision M2 policy → no Meta writes.
   { id: "media-buyer-cadence-cron", kind: "cron", owner: "growth", label: "Media buyer daily cadence", description: "Daily fan-out: enqueues one kind='media-buyer' agent_jobs row per active media_buyer_test_cohorts row per workspace (shadow-default under the M2 policy).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-08T13:00:00Z" },
   { id: "ad-creative-cadence-cron", kind: "cron", owner: "growth", label: "Ad creative daily cadence", description: "Daily fan-out: enqueues one kind='ad-creative' agent_jobs row per intelligence-backed product whose ready-to-test bin is below the floor, so Dahlia keeps Bianca's bin stocked.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-10T11:00:00Z" },
+  { id: "media-buyer-retarget-cadence", kind: "cron", owner: "growth", label: "Media buyer retarget daily cadence", description: "Daily: iterates active meta_ad_accounts → runRetargetReplenishLoopForAccount → publishes warm+hot creatives into the ONE consolidated retarget adset via the retarget publish gate (retarget-campaign-warm-hot-mixed-content). Cold-only invariant of the test rail untouched; moves no scale/kill dollars.", expectedCadence: "daily (30 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-11-27T00:00:00Z" },
   // ads-supervisor-3h-agent Phase 1: the persistent every-3h supervisory pass over Bianca (media-buyer)
   // + Dahlia (ad-creative). Fans out one `kind='ads-supervisor'` agent_jobs row per workspace with an
   // active media_buyer_test_cohorts mapping (unbounded dedup — a not-yet-terminal prior pass covers the
@@ -908,7 +924,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // control_tower_loop_beats RPC stays fast. registeredAt claims the registered_not_firing grace
   // (a newly-added daily cron hasn't had its first tick yet — see control-tower-registered-not-firing-new-cron-grace).
   { id: "loop-heartbeats-prune", kind: "cron", owner: "platform", label: "Loop heartbeats prune", description: "Daily batched prune of loop_heartbeats older than 3 days — keeps the table small so the Control Tower beats RPC stays fast.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-23T00:00:00Z" },
-  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR, outputAssertion: "segment-coverage" },
+  { id: "refresh-customer-segments-cron", kind: "cron", owner: "growth", label: "Customer segment refresh", description: "Daily recompute of customer segments.", expectedCadence: "daily (0 7 * * *)", livenessWindowMs: 30 * HOUR, outputAssertion: "segment-coverage" },
   {
     id: "refund-settlement-reconcile",
     kind: "cron",
@@ -926,20 +942,20 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 30 * HOUR },
-  // ─ Weekly crons (window ~8 days) ─
-  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
-  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
   {
-    id: "media-buyer-all-customers-refresh-weekly",
+    id: "media-buyer-all-customers-refresh-daily",
     kind: "cron",
     owner: "growth",
     label: "Media buyer all-customers exclusion refresh",
     description:
-      "Weekly incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience — uploads customers with first_order_at ≥ last-run watermark. Hashed email+phone only; no plaintext PII. Keeps the cold-test exclusion current so newly-acquired customers stop seeing cold-prospecting adsets (bianca-full-order-history-customer-list-exclusion-audience Fix 1).",
-    expectedCadence: "weekly Mon (0 12 * * 1)",
-    livenessWindowMs: 9 * DAY,
+      "Daily incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience — uploads customers with first_order_at ≥ last-run watermark. Hashed email+phone only; no plaintext PII. Keeps the cold-test exclusion current so newly-acquired customers stop seeing cold-prospecting adsets within ~1d (bianca-full-order-history-customer-list-exclusion-audience Fix 1; daily cadence CEO 2026-07-20).",
+    expectedCadence: "daily (0 12 * * *)",
+    livenessWindowMs: 30 * HOUR,
     registeredAt: "2026-07-16T12:00:00Z",
   },
+  // ─ Weekly crons (window ~8 days) ─
+  { id: "demographics-snapshot-builder", kind: "cron", owner: "growth", label: "Demographics snapshot builder", description: "Weekly customer-demographics snapshot build.", expectedCadence: "weekly Sun (0 8 * * 0)", livenessWindowMs: 9 * DAY },
+  { id: "reseller-discovery-weekly", kind: "cron", owner: "growth", label: "Reseller discovery", description: "Weekly Amazon SP-API reseller scan.", expectedCadence: "weekly Mon (0 12 * * 1)", livenessWindowMs: 9 * DAY },
   { id: "reviews/tag-cancel-relevance-cron", kind: "cron", owner: "retention", label: "Review cancel-relevance tagging", description: "Weekly tagging of cancel-relevant reviews.", expectedCadence: "weekly Mon (0 4 * * 1)", livenessWindowMs: 9 * DAY },
   {
     id: "playbook-compiler",
@@ -1050,6 +1066,47 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 24 * HOUR,
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
+  },
+  {
+    // Self-healing return refunds Phase 2 (node-completeness trio: owner
+    // above + kill-switch ancestry inherited from the `retention` seat +
+    // end-of-run heartbeat via `emitReactiveHeartbeat("returns-issue-refund", ...)`
+    // in src/lib/inngest/returns.ts). The refund function that actually
+    // MOVES money — this tile is what alerts on a total outage of the
+    // rail (silent zero-work runs vs. the error-rate signal that
+    // aggregates thrown attempts + onFailure exhaustions).
+    id: "returns-issue-refund",
+    kind: "reactive",
+    owner: "retention",
+    label: "Returns — issue refund",
+    description:
+      "Reconciles against the live gateway ledger, refunds via Shopify/Braintree (or issues store credit), and stamps the return. Throws on failure so Inngest retries: 2 engages; exhaustion escalates via onFailure with a dashboard notification.",
+    expectedCadence: "per return delivery event",
+    livenessWindowMs: 24 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+  {
+    // Self-healing return refunds Phase 3 — the daily reconcile sweep
+    // that catches everything the reactive rails missed (a webhook that
+    // never arrived, a gateway blip, a human that flipped a delivery
+    // through a path that fires no event). Cadence + liveness satisfy
+    // the CLAUDE.md monitor-cadence invariant (daily → 30h window).
+    // Node-completeness trio: owner (retention) + kill-switch ancestry
+    // inherited from the retention seat + end-of-run heartbeat via
+    // `emitCronHeartbeat("returns-reconcile-sweep", ...)` in
+    // src/lib/inngest/returns-reconcile-sweep.ts (try/finally,
+    // ok:false on throw).
+    id: "returns-reconcile-sweep",
+    kind: "cron",
+    owner: "retention",
+    label: "Returns — daily reconcile sweep",
+    description:
+      "Finds delivered+unrefunded returns (reconciles vs the live gateway ledger — stamps out-of-band or re-drives returns/issue-refund) AND label_created/in_transit returns aged past 14d (probes EasyPost; promotes to delivered or escalates). Emits { swept, healed, redriven, escalated } counts on its heartbeat so a zero-work run is distinguishable from a broken one.",
+    expectedCadence: "daily (0 6 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 3,
   },
   {
     id: "journey-session-completed",

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
 import { inngest } from "@/lib/inngest/client";
@@ -85,7 +86,13 @@ export async function POST(
       migrate: true,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // Full lossless diagnostic stays INTERNAL — server logs + the ticket's internal thread —
+    // never the public 502 body. errText() surfaces a PostgREST error's code/details/hint by
+    // design (see [[docs/brain/libraries/error-text]]); returning that string to a customer-
+    // authenticated payment sink would leak schema hints / FK-constraint names / DB error codes
+    // (Fix 1 of lossless-error-diagnostics-no-object-object — 2026-07 pre-merge security review).
+    const msg = errText(e);
+    console.error(`[journey/submit-payment] add_payment_method vault failed: ${msg}`);
     if (session.ticket_id) {
       await admin.from("ticket_messages").insert({
         ticket_id: session.ticket_id,
@@ -95,10 +102,12 @@ export async function POST(
         body: `[System] add_payment_method journey vault failed: ${msg}`,
       });
     }
+    // `no_braintree_customer` is a stable throw-key from the vault helper — a control-flow
+    // signal, not a lossless diagnostic — so surfacing it as an error code is safe.
     if (msg === "no_braintree_customer") {
       return NextResponse.json({ error: "no_braintree_customer" }, { status: 400 });
     }
-    return NextResponse.json({ error: "vault_failed", message: msg }, { status: 502 });
+    return NextResponse.json({ error: "vault_failed" }, { status: 502 });
   }
 
   // Record migratedCount + payment_method_id on the session's `responses`

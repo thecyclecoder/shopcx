@@ -23,6 +23,7 @@
  */
 import "./_bootstrap"; // loads .env.local locally; no-op on the box (env from systemd)
 import * as T from "../src/lib/product-intelligence/seed-tools";
+import { errText } from "../src/lib/error-text";
 import type { NanoBananaAspect } from "../src/lib/gemini";
 
 function readStdin(): Promise<string> {
@@ -41,7 +42,7 @@ async function json<T = unknown>(): Promise<T> {
   try {
     return JSON.parse(raw) as T;
   } catch (e) {
-    throw new Error(`invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`invalid JSON on stdin: ${errText(e)}`);
   }
 }
 
@@ -51,7 +52,7 @@ async function jsonOptional<T = unknown>(fallback: T): Promise<T> {
   try {
     return JSON.parse(raw) as T;
   } catch (e) {
-    throw new Error(`invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`invalid JSON on stdin: ${errText(e)}`);
   }
 }
 
@@ -212,6 +213,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  out({ error: e instanceof Error ? e.message : String(e) });
+  out({ error: errText(e) });
   process.exit(1);
 });

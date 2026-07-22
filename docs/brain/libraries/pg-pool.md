@@ -20,7 +20,27 @@ If the pool can't initialize (no `SUPABASE_DB_PASSWORD` / `SUPABASE_DB_URL` on t
 ## Exports
 
 ### `getPgPool(): Pool | null`
-Lazy singleton `pg.Pool` off `poolerConnectionString()` (`SUPABASE_DB_URL` → `DATABASE_URL` → `postgres.<ref>:<pw>@<host>:6543/postgres`). Returns `null` when no creds are available. Small (`max: 4`) with `idleTimeoutMillis: 10s`, `connectionTimeoutMillis: 5s`, `maxLifetimeSeconds: 300` — so a stale connection can't linger past a DB failover, and the pool never hogs pooler slots. Registers a shutdown hook on first init (`beforeExit` / `SIGTERM` / `SIGINT` → `closePgPool()`).
+Lazy singleton `pg.Pool` off `poolerConnectionString()` (`SUPABASE_DB_URL` → `DATABASE_URL` → `postgres.<ref>:<pw>@<host>:6543/postgres`). Returns `null` when no creds are available. Small (`max`: **1 on Vercel, 4 on the box** — see below) with `idleTimeoutMillis: 10s`, `connectionTimeoutMillis: 5s`, `maxLifetimeSeconds: 300` — so a stale connection can't linger past a DB failover, and the pool never hogs pooler slots. Registers a shutdown hook on first init (`beforeExit` / `SIGTERM` / `SIGINT` → `closePgPool()`).
+
+#### `max` is runtime-aware — `process.env.VERCEL ? 1 : 4`
+
+The pool is a **per-process singleton**, so the real cost is `max × process count`, and the two runtimes
+that reach this module scale process count very differently:
+
+| Runtime | Process count | `max` | Why |
+|---|---|---|---|
+| Box worker | Bounded, long-lived (`MAX_CONCURRENT` builds + the concurrency-1 lanes) | 4 | The poll loop wants a few warm connections; process count can't run away. |
+| Vercel | Fluid instances scale OUT with traffic, sharing nothing between siblings | 1 | At `max: 4` a burst multiplies straight into the Supavisor queue. An instance serving a handful of concurrent requests needs ~1 connection. |
+
+Context: Supabase alerted 2026-07-21 that connections were stacking in the pooler queue during a traffic
+burst while the instance itself sat idle. Measured at the time: Supavisor **pool size 15** (below the
+project default of 20 for XL compute — a manual throttle nobody had revisited), `max_client_conn` 1000
+fixed, cluster `max_connections` 240 with ~33 backends in use. `SUPABASE_DB_PASSWORD` is set in Vercel
+Production, so every serverless instance touching a pooled spec/goal read opened its own pool. Capping at
+1 turns the burst term from `4 × instances` into `1 × instances`.
+
+`VERCEL` is set to `"1"` on every Vercel runtime (build + all function invocations) and is unset on the
+box, so this needs no new configuration to stay correct.
 
 ### `pgQuery<T>(text, params?): Promise<T[] | null>`
 Read query through the shared pool. Returns rows on success; returns `null` on init failure OR query throw. Consumers must handle `null` as fall-back.

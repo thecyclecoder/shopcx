@@ -19,7 +19,7 @@
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { getGoal, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
-import { listSpecs, type SpecRow } from "@/lib/specs-table";
+import { getAllSpecs, type SpecRow } from "@/lib/specs-table";
 
 /** One milestone rendered as a `### {title}` block with its child specs, for the fold renderer. */
 export interface MaterializedMilestone {
@@ -39,7 +39,9 @@ export async function materializeGoal(workspaceId: string, slug: string, dir: st
   if (!row) throw new Error(`materializeGoal: no goals row for workspace ${workspaceId} slug ${slug}`);
 
   // Resolve each milestone's child specs (the FULL spec set for the workspace, grouped by milestone_id).
-  const allSpecs = await listSpecs(workspaceId);
+  // spec-read-egress-scope-and-cursor: a folded spec is still a milestone member and must appear
+  // in the materialized goal, so this stays folded-inclusive — stated explicitly.
+  const allSpecs = await getAllSpecs(workspaceId);
   const byMilestone = new Map<string, SpecRow[]>();
   for (const s of allSpecs) {
     if (!s.milestone_id) continue;

@@ -19,6 +19,7 @@
  * Runs against prod via the shared bootstrap. Strictly read-only.
  */
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { unbackedEffectClaim } from "../src/lib/claim-guard";
 
 // action_type context assigned to each shadowed row. Approximated because
@@ -194,6 +195,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(`shadow-claim-guard-inline: ${err instanceof Error ? err.message : String(err)}\n`);
+  process.stderr.write(`shadow-claim-guard-inline: ${errText(err)}\n`);
   process.exit(1);
 });

@@ -203,8 +203,44 @@ test("unbuildableReason flags phases with empty titles + empty bodies", () => {
   assert.match(unbuildableReason(row), /every one is empty/);
 });
 
-test("summary-only spec (one-shot) is buildable", () => {
+// spec-cannot-exist-without-phases Phase 3 — the summary-only fallback is REMOVED. A spec with a summary
+// but no phases has zero `spec_phase_checks` (they live under phases), so the promote-on-green tests gate
+// can never go green: the build succeeds, opens a PR, and sits unmergeable. That is exactly the shape the
+// three stuck specs on 2026-07-20 shared. The gate now requires >=1 phase with a non-empty title/body.
+test("zero-phase spec with a non-empty summary is NOT buildable — the build gate would produce an unmergeable PR", () => {
   const row = makeRow({ summary: "The whole thing ships in one PR — the summary carries the intent." });
+  assert.equal(specHasBuildableContent(row), false);
+  const reason = unbuildableReason(row);
+  assert.match(reason, /no spec_phases rows/);
+  // The reason should name the REAL consequence — no phases → no spec_phase_checks → unmergeable PR.
+  assert.match(reason, /spec_phase_checks|unmergeable/);
+});
+
+test("single-phase spec with real title/body is STILL buildable (Phase 3 didn't break the one-phase path)", () => {
+  const row = makeRow({
+    summary: null,
+    phases: [
+      {
+        id: "p1",
+        spec_id: "s1",
+        position: 1,
+        title: "Do the thing",
+        body: "The one-shot spec now carries its work in a single phase.",
+        status: "planned",
+        pr: null,
+        merge_sha: null,
+        build_sha: null,
+        verification: "vv",
+        why: null,
+        what: null,
+        kind: "phase",
+        origin_check_keys: [],
+        metadata: {},
+        created_at: "2026-07-02T00:00:00Z",
+        updated_at: "2026-07-02T00:00:00Z",
+      },
+    ],
+  });
   assert.equal(specHasBuildableContent(row), true);
   assert.equal(unbuildableReason(row), "");
 });

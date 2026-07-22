@@ -836,28 +836,53 @@ export function isOrderAwaitingFraudScreen(order: { source_name?: string | null 
 }
 
 /**
+ * Shared list of `agent_jobs.kind='ticket-handle'` `instructions.reason` values that identify a
+ * dispatch OWNED by Sol rather than the inline Sonnet orchestrator. Each reason represents a
+ * deliberate alternate handler for a customer inbound message, so the `tickets-awaiting-decision`
+ * probe subtracts the matching messages from orchestrator demand — no ai:orchestrator beat is
+ * expected on those turns.
+ *
+ * Members:
+ *  - `first_touch` — unified-ticket-handler.ts:2030-2041 enqueues on the first inbound of a chat
+ *    or async channel with `sol_first_touch_enabled=true`. See spec
+ *    `ticket-decision-workprobe-exclude-async-sol-first-touch`.
+ *  - `inflection` — [[../inflection-detector]] `reSessionSol` enqueues when the drift/frustration
+ *    gate fires on a subsequent inbound, superseding the live Direction and handing the turn to
+ *    a fresh Sol session. See spec `ticket-decision-workprobe-exclude-sol-inflection-resessions`.
+ *
+ * When a new Sol-owned `ticket-handle` dispatch class is added it MUST land here (and in the LIKE
+ * prefilter below) — otherwise its inbound message re-enters the orchestrator work count with no
+ * heartbeat and false-fires the `ai:orchestrator` tile.
+ */
+export const SOL_HANDLE_BYPASS_REASONS = ["first_touch", "inflection"] as const;
+export type SolHandleBypassReason = (typeof SOL_HANDLE_BYPASS_REASONS)[number];
+
+/**
  * Extract the set of ticket_ids from a batch of `agent_jobs.kind='ticket-handle'` rows whose
- * `instructions` payload identifies a Sol first-touch dispatch (`reason: 'first_touch'`).
+ * `instructions` payload identifies a Sol-owned dispatch (`reason` ∈ `SOL_HANDLE_BYPASS_REASONS`).
  *
  * `agent_jobs` has no ticket_id column (see [[../../lib/portal/enqueue-sol-first-touch]] and
  * unified-ticket-handler.ts:2030-2041) — every kind stores its per-job params inside a
  * `JSON.stringify(...)`'d `instructions` text column. The `tickets-awaiting-decision` monitor
- * probe uses this helper to turn a window of first-touch dispatch rows into the ticket-id set it
- * subtracts from the inbound-message count, so Sol-first-touch async channels (email/SMS/portal —
- * every non-chat channel skips the `sol_first_touch_ack` ledger row by design) aren't counted as
- * orchestrator-owned work with 0 beats. Extracted from the probe body so it can be unit-tested
- * without mocking Supabase — same pattern as `isOrderAwaitingFraudScreen`.
+ * probe uses this helper to turn a window of Sol dispatch rows into the ticket-id set it
+ * subtracts from the inbound-message count, so async first-touch channels (email/SMS/portal —
+ * every non-chat channel skips the `sol_first_touch_ack` ledger row by design) AND Sol
+ * inflection re-sessions aren't counted as orchestrator-owned work with 0 beats. Extracted from
+ * the probe body so it can be unit-tested without mocking Supabase — same pattern as
+ * `isOrderAwaitingFraudScreen`.
  *
  * Robustness:
  *  - Non-JSON / malformed `instructions` rows are silently skipped (pre-Sol jobs, or a future
  *    kind whose payload isn't JSON) — the probe's null/error-safe defaults do not change.
- *  - Rows with a `reason` other than 'first_touch' are skipped (inflection, portal_error, etc.
- *    each keep their own accounting).
+ *  - Rows with a `reason` outside `SOL_HANDLE_BYPASS_REASONS` are skipped (portal_error, etc.
+ *    each keep their own accounting — those inbounds still went through a Sonnet path that
+ *    produced an ai:orchestrator beat).
  *  - Returned ids are deduped so a re-enqueue on the same ticket doesn't inflate the exclusion.
  */
-export function extractSolFirstTouchDispatchTicketIds(
+export function extractSolHandleBypassTicketIds(
   rows: Array<{ instructions: string | null }>,
 ): string[] {
+  const bypass = new Set<string>(SOL_HANDLE_BYPASS_REASONS);
   const ids = new Set<string>();
   for (const row of rows) {
     const raw = row.instructions;
@@ -870,7 +895,7 @@ export function extractSolFirstTouchDispatchTicketIds(
     }
     if (!parsed || typeof parsed !== "object") continue;
     const payload = parsed as { ticket_id?: unknown; reason?: unknown };
-    if (payload.reason !== "first_touch") continue;
+    if (typeof payload.reason !== "string" || !bypass.has(payload.reason)) continue;
     if (typeof payload.ticket_id !== "string" || payload.ticket_id.length === 0) continue;
     ids.add(payload.ticket_id);
   }
@@ -1154,14 +1179,18 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //           orchestrator work with 0 beats — the exact monitor-false-positive that
             //           red-tiled `ai:orchestrator` on a quiet-window inbound email. Kept as-is
             //           for chat.
-            //       (b) `agent_jobs(kind='ticket-handle', instructions.reason='first_touch')`
-            //           — the durable dispatch signal that unified-ticket-handler.ts writes for
-            //           EVERY first-touch channel (chat + async), captured off the enqueue
-            //           payload. Extends the exclusion to async channels using the same
-            //           handler-side ownership decision (the ticket is a Sol first-touch
-            //           dispatch, not orchestrator work) rather than a channel-scoped
-            //           downstream ledger row. This is the channel-agnostic signal the spec
-            //           `ticket-decision-workprobe-exclude-async-sol-first-touch` calls for.
+            //       (b) `agent_jobs(kind='ticket-handle', instructions.reason ∈
+            //           SOL_HANDLE_BYPASS_REASONS)` — the durable dispatch signal that
+            //           unified-ticket-handler.ts + [[../inflection-detector]] `reSessionSol`
+            //           write for EVERY Sol-owned turn (first-touch on chat + async, plus
+            //           drift/frustration inflection re-sessions), captured off the enqueue
+            //           payload. Extends the exclusion to async channels AND inflection
+            //           bounces using the same handler-side ownership decision (the ticket
+            //           is a Sol dispatch, not orchestrator work) rather than a channel-scoped
+            //           downstream ledger row. Covers spec
+            //           `ticket-decision-workprobe-exclude-async-sol-first-touch` (first_touch)
+            //           and `ticket-decision-workprobe-exclude-sol-inflection-resessions`
+            //           (inflection).
             //     A message may match both (a) and (b) on chat; per the overlap-safe note
             //     below, double-subtraction only lowers the work count further, so the tile
             //     still cannot false-fire idle_while_work.
@@ -1184,7 +1213,8 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     monitor-false-positive on a healthy system (the correct handler ran, the
             //     ticket closed, the human never should have paged).
             //
-            // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass):
+            // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass,
+            // extended by ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t):
             //     Even with (5) in place, the pre-orchestrator race remains: the classifier bucket
             //     is stamped over ~seconds AFTER the inbound row is inserted (`step.run(...)`
             //     boundaries + async Inngest fanout), so a monitor tick sampling in that gap sees
@@ -1195,6 +1225,24 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     mirrors the backstop reconciler's INTENT_SETTLE_MS. A message older than the
             //     window with none of the bypass classes matching is genuine orchestrator work
             //     and still counts.
+            //
+            //     The settle grace is applied to `MAX(msg.created_at, ticket.created_at)`, not
+            //     just `msg.created_at`. Ticket auto-merge (unified-ticket-handler.ts § 1a) picks
+            //     the newest ticket as the target and remaps messages from the customer's older
+            //     tickets onto it while keeping their original `created_at`, so a 16-minute-old
+            //     inbound can end up parented to a 13-second-old ticket. Without the ticket-side
+            //     cutoff that remapped message reads as "past the settle boundary" on its own
+            //     timestamp and counts as orchestrator demand before the classifier + first-touch
+            //     dispatch have had a chance to run on the FRESH parent ticket — a healthy inbound
+            //     that just got auto-merged still races the same pre-orchestrator gates as a raw
+            //     inbound on a brand-new ticket. Filtering EVERY count on
+            //     `tickets.created_at <= decisionSettleCutoffIso` (via `tickets!inner(id)` on the
+            //     queries that don't already join it) implements the MAX(): a message counts only
+            //     when BOTH its own timestamp AND its current parent ticket's timestamp are older
+            //     than the settle cutoff. Symmetric across allRes / excludedRes / the two Sol
+            //     first-touch subtractions, so the fresh-ticket filter never leaks into a false
+            //     negative (a genuine outage that dispatches a real inbound onto an older ticket
+            //     still counts and still fires idle_while_work).
             //
             // The first three exclusions are expressed as a single positive-match on the
             // tickets row (closed OR csat:reopened OR active_playbook_id IS NOT NULL) —
@@ -1214,11 +1262,12 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             const [allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchJobsRes] = await Promise.all([
               admin
                 .from("ticket_messages")
-                .select("id", { count: "exact", head: true })
+                .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
-                .lte("created_at", decisionSettleCutoffIso),
+                .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso),
               admin
                 .from("ticket_messages")
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
@@ -1226,6 +1275,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .or(
                   "status.eq.closed,tags.cs.{csat:reopened},tags.cs.{outreach},tags.cs.{cls:outreach},active_playbook_id.not.is.null",
                   { referencedTable: "tickets" },
@@ -1237,34 +1287,39 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .eq("tickets.ticket_resolution_events.reasoning", "sol_first_touch_ack"),
               // agent_jobs has no ticket_id column (see enqueueSolFirstTouchForPortalError.ts) —
-              // the ticket_id lives in the JSON-encoded `instructions` string. Prefilter on the
-              // reason marker with a LIKE (underscore escaped so `first_touch` is literal, not a
-              // single-char wildcard) then parse the ticket_ids in Node via the pure
-              // extractSolFirstTouchDispatchTicketIds helper for unit-testability. The
-              // decisionSettleCutoffIso window is applied when we subtract by ticket_id below,
-              // NOT here — we want to catch a first-touch job whose enqueue landed inside the
-              // settle boundary for an inbound that will soon leave the settle boundary.
+              // the ticket_id lives in the JSON-encoded `instructions` string. Every ticket-handle
+              // job has a `reason` field in its payload, so a single broad LIKE (`%"reason":%`)
+              // narrows to well-formed rows and the pure extractSolHandleBypassTicketIds helper
+              // enforces the strict `reason ∈ SOL_HANDLE_BYPASS_REASONS` allowlist Node-side.
+              // (A `.or(...)` of per-reason LIKEs would need PostgREST's quoted-value grammar to
+              // handle embedded `"` chars — this route keeps the DB filter substring-only and
+              // makes the allowlist a unit-testable pure predicate.)
+              // The decisionSettleCutoffIso window is applied when we subtract by ticket_id
+              // below, NOT here — we want to catch a Sol dispatch whose enqueue landed inside
+              // the settle boundary for an inbound that will soon leave the settle boundary.
               admin
                 .from("agent_jobs")
                 .select("instructions")
                 .eq("kind", "ticket-handle")
                 .gte("created_at", sinceIso)
-                .like("instructions", '%"reason":"first\\_touch"%'),
+                .like("instructions", '%"reason":%'),
             ]);
-            const dispatchTicketIds = extractSolFirstTouchDispatchTicketIds(
+            const dispatchTicketIds = extractSolHandleBypassTicketIds(
               (solFirstTouchDispatchJobsRes.data ?? []) as Array<{ instructions: string | null }>,
             );
             let solFirstTouchDispatchExcluded = 0;
             if (dispatchTicketIds.length > 0) {
               const { count } = await admin
                 .from("ticket_messages")
-                .select("id", { count: "exact", head: true })
+                .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
+                .lte("tickets.created_at", decisionSettleCutoffIso)
                 .in("ticket_id", dispatchTicketIds);
               solFirstTouchDispatchExcluded = count ?? 0;
             }

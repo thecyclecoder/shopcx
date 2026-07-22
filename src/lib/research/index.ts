@@ -7,6 +7,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { verifyCouponPromises } from "@/lib/research/recipes/verify-coupon-promises";
 import { verifySubscriptionChanges } from "@/lib/research/recipes/verify-subscription-changes";
 import { verifyGrandfatheredPricing } from "@/lib/research/recipes/verify-grandfathered-pricing";
@@ -54,7 +55,7 @@ export async function runRecipe(
   try {
     result = await recipe.run(ticketId, options.args);
   } catch (err) {
-    return { error: `Recipe ${recipeSlug} threw: ${err instanceof Error ? err.message : String(err)}` };
+    return { error: `Recipe ${recipeSlug} threw: ${errText(err)}` };
   }
 
   const { data: inserted, error } = await admin

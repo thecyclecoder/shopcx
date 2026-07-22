@@ -17,6 +17,48 @@ async function syncMetaStructure(p: SyncParams): Promise<{ campaigns: number; ad
 ```
 Upserts campaigns/adsets/ads (+ budgets, status) keyed on the Meta object id.
 
+After the [[../tables/meta_adsets]] upsert, on the **scoped path only**
+(`opts.campaignIds` provided), runs a drop-out reconcile: any mirror row for
+those campaigns that Meta didn't return this run and isn't already `ARCHIVED`
+is flipped to `status='ARCHIVED'`, `effective_status='ARCHIVED'` (chunked
+compare-and-set, workspace + account scoped). Meta excludes archived adsets
+from its default `/adsets` list, so without this an archived adset stays stuck
+ACTIVE in the mirror forever (Superfood Tabs incident). Never runs on the
+full-account path — the 2-hourly test-cadence sync scopes to the test
+campaigns, so the surface that needs it self-heals every 2 hours.
+
+### `reconcileDroppedAdsetIds` — function
+
+```ts
+function reconcileDroppedAdsetIds(
+  syncedCampaignIds: string[],
+  returnedAdsetIds: string[],
+  mirroredAdsets: Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[]
+```
+Pure set-difference used by `syncMetaStructure`'s drop-out reconcile: returns
+the mirrored adset ids that belong to a synced campaign but Meta didn't return
+and aren't already ARCHIVED. Kept pure so the Superfood-Tabs case is unit-tested
+without touching Graph or Supabase — see `performance.reconcile-dropped-adsets.test.ts`.
+
+After the [[../tables/meta_ads]] upsert, the same scoped-only drop-out reconcile
+is applied to `meta_ads` via `reconcileDroppedAdIds` — a dropped AD leaves the
+same ghost the Ad Testing creative view + ad-level signals read against.
+Campaign-level drop-out is out of scope (campaigns are long-lived).
+
+### `reconcileDroppedAdIds` — function
+
+```ts
+function reconcileDroppedAdIds(
+  syncedCampaignIds: string[],
+  returnedAdIds: string[],
+  mirroredAds: Array<{ meta_ad_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[]
+```
+Meta-ads mirror of `reconcileDroppedAdsetIds`. Same shape, same scope guard,
+same idempotency; consumed by `syncMetaStructure` after the meta_ads upsert to
+flip dropped ads to ARCHIVED. Kept pure and covered by the same test file.
+
 ### `syncMetaInsightsForLevel` — function
 
 ```ts

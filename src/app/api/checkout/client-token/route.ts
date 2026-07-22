@@ -11,6 +11,7 @@
  * Returns: { client_token: string }
  */
 import { NextResponse, type NextRequest } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
 import { readSessionFromRequest } from "@/lib/auth-session";
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
       has_saved_methods: !!braintreeCustomerId,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errText(err);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

@@ -1,0 +1,1 @@
+- **Downgrade the EasyPost tracker business-signal log from console.error to console.warn** · verified 2026-07-21 · → [[../integrations/easypost]]

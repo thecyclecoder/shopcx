@@ -459,12 +459,16 @@ export function isTransientAppstleFrequencyUpstreamTimeout(
  * A non-500 Appstle unskip failure (a 4xx from Appstle, a different body class), a
  * throw from `loggedAppstleFetch` itself (which logs `Appstle unskip order failed:`
  * with the caught `err`), or any other Appstle log carries a different marker /
- * prefix and stays captured. Wired in `/api/webhooks/vercel-logs` as the
- * `transient` flag to `recordError`, which auto-resolves a first sighting
- * (recorded for visibility, NOT paged, no repair fan-out) and escalates to a real
- * open+page ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS`
- * — so a one-off Appstle 500 is dropped while a chronic Appstle outage (would
- * recur every beat) still surfaces.
+ * prefix and stays captured. Wired in `/api/webhooks/vercel-logs` `isError` as a
+ * CAPTURE-TIME DROP — the log is skipped before it becomes a group, so `recordError`
+ * never sees it and a chronic Appstle outage cannot reopen the vendor-owned incident
+ * on the transient-recurrence window. Previously this rode the transient OR-chain
+ * (auto-resolve first sighting, escalate to open+page on recurrence within
+ * `TRANSIENT_RECUR_WINDOW_MS`), but the same 500 signature repeats in-window during
+ * a real Appstle outage — reopening Control Tower `vercel:5959f3e309a7800c` on a
+ * surface we hold no levers on. Dropping at capture time matches the shape of the
+ * other foreign / bare-noise filters in `isError` (bare lifecycle, aborted-stream,
+ * Inngest wrapped-non-error, terminal-failure mirror).
  */
 export function isForeignAppstleUnskipUpstream500(
   path: string | null | undefined,
@@ -475,6 +479,57 @@ export function isForeignAppstleUnskipUpstream500(
   if (!text) return false;
   if (!text.startsWith("Appstle unskip order error for ")) return false;
   return text.includes("Internal Server Error");
+}
+
+/**
+ * Foreign-app noise — EasyPost's account-level rate limit surfacing on the
+ * returns-reconcile-sweep's `lookupTracking` call
+ * ([[../specs/error-feed-scope-easypost-returns-sweep-rate-limit-noise]]).
+ *
+ * `src/lib/inngest/returns-reconcile-sweep.ts` calls `lookupTracking` (which
+ * hits EasyPost's `/trackers` endpoint) for each in-flight return; when
+ * EasyPost's account-level throttle kicks in the client throws with the exact
+ * `... temporarily rate-limited due to excessive resource consumption` body,
+ * and the sweep's catch branch logs
+ * `console.error(\`[returns-reconcile-sweep] lookupTracking failed for return ${id} (tracking ${n}):\`, err)`
+ * and `return`s from the per-row worker — the row is skipped and re-picked on
+ * the next daily sweep, no state to repair on our side. So a burst of ~39 of
+ * these in ~15 seconds (Control Tower `vercel:53af50d6c3a578ec`) is a foreign
+ * vendor's throttle hitting a code path that already self-heals; minting a
+ * fresh OPEN paged incident + repair fan-out for it churns Platform owners on
+ * a surface we hold no levers on (EasyPost's own error text says to contact
+ * their Support if it recurs).
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/inngest` — the returns-reconcile-sweep Inngest
+ *      function is the only surface that reaches this call site today; a
+ *      different caller would fire on a different path and stays captured /
+ *      paged,
+ *   2. the trimmed message begins with the exact
+ *      `[returns-reconcile-sweep] lookupTracking failed for return ` prefix
+ *      (the sweep's own console.error label — not any other EasyPost log), AND
+ *   3. the message carries the `temporarily rate-limited` marker (EasyPost's
+ *      account-level throttle body).
+ *
+ * A different `lookupTracking` failure on the same sweep — a bad tracking
+ * number, a genuine EasyPost outage carrying a different body class, a throw
+ * from our own client — carries a different marker and stays captured /
+ * paged. Wired in `/api/webhooks/vercel-logs` as the `transient` flag to
+ * `recordError`, which auto-resolves a first sighting (recorded for
+ * visibility, NOT paged, no repair fan-out) and escalates to a real open+page
+ * ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` — so a
+ * one-off EasyPost throttle burst is dropped while a chronic EasyPost outage
+ * (would recur every daily sweep) still surfaces.
+ */
+export function isForeignEasyPostReturnsSweepRateLimit(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("[returns-reconcile-sweep] lookupTracking failed for return ")) return false;
+  return text.includes("temporarily rate-limited");
 }
 
 /**
@@ -939,16 +994,19 @@ export function isTransientSupabaseEdgeHtmlBody(message: string | null | undefin
  * `AnthropicDependencyError` with `OUTAGE_SPANNING_RETRIES`, and `claude-health` folds it
  * into the outage-aware breaker). Best-effort callers that catch-and-log the throw (e.g.
  * `src/lib/fraud-detector.ts` `[fraud] AI screen error:` around the AI screen fetch —
- * `throw new Error(`AI API error: ${aiRes.status}`)` at `fraud-detector.ts:704`) surface the
- * caught error to `console.error`, which Vercel drains to `/api/webhooks/vercel-logs`. A
- * single such 529 leak therefore mints a fresh OPEN paged incident on a loop that already
- * gracefully handled the failure — the classic monitor-false-positive that the existing
- * transient-classifier chain was built to catch (Control Tower
- * `vercel:ca4ae59dcd07707a`).
+ * `throw new Error(`AI API error: ${aiRes.status}`)` at `fraud-detector.ts:704`, and the
+ * `throw new Error(`Anthropic API error: ${response.status}`)` at
+ * `src/lib/inngest/fraud-detection.ts:174`) surface the caught error to `console.error`,
+ * which Vercel drains to `/api/webhooks/vercel-logs`. A single such 529 leak therefore mints
+ * a fresh OPEN paged incident on a loop that already gracefully handled the failure — the
+ * classic monitor-false-positive that the existing transient-classifier chain was built to
+ * catch (Control Tower `vercel:ca4ae59dcd07707a`, and the sibling
+ * `Anthropic API error: 5NN` widening from `vercel:752bb49488e5aa72`).
  *
  * `true` when the message carries an unambiguous Anthropic-5xx/overload marker:
- *   - `AI API error: 5NN` — the fraud-detector's exact throw shape (and any other caller that
- *      copies the pattern).
+ *   - `AI API error: 5NN` / `Anthropic API error: 5NN` — the two sibling caught-throw shapes
+ *      (`src/lib/fraud-detector.ts:704` and `src/lib/inngest/fraud-detection.ts:174`,
+ *      respectively), and any other caller that copies either pattern.
  *   - `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from
  *     [[anthropic-retry]], including the 529-overloaded case.
  *   - `AnthropicDependencyError` — the class name Node's `util.inspect` writes for a caught
@@ -971,10 +1029,13 @@ export function isTransientAnthropicOverloadError(message: string | null | undef
   const text = (message ?? "").trim();
   if (!text) return false;
 
-  // `AI API error: 5NN` — the fraud-detector's caught throw shape (and any other caller that
-  // copies the pattern). 529 is the specific overload signal we care about; the full 5xx band
-  // is retryable per `isRetryableAnthropicStatus`.
-  if (/AI API error:\s*5\d{2}\b/.test(text)) return true;
+  // `AI API error: 5NN` / `Anthropic API error: 5NN` — the two sibling caught-throw shapes,
+  // from `src/lib/fraud-detector.ts:704` and `src/lib/inngest/fraud-detection.ts:174`
+  // respectively (and any other caller that copies either pattern). 529 is the specific
+  // overload signal we care about; the full 5xx band is retryable per
+  // `isRetryableAnthropicStatus`. The `Anthropic API error:` prefix was folded in for the
+  // `fraud-generate-summary` false positive at Control Tower `vercel:752bb49488e5aa72`.
+  if (/(?:AI|Anthropic) API error:\s*5\d{2}\b/.test(text)) return true;
 
   // `Anthropic ... returned 5NN` — the `throwForAnthropicStatus` shape from anthropic-retry
   // (e.g. "Anthropic messages returned 529").

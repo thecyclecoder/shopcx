@@ -38,8 +38,9 @@
  * functions/archive markdown into the roadmap routes (the specs + goals markdown is no longer read).
  */
 import { promises as fs } from "fs";
+import { errText } from "@/lib/error-text";
 import path from "path";
-import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow } from "@/lib/specs-table";
+import { listSpecs as listSpecsFromDb, getSpec as getSpecFromDb, getActiveSpecs, listArchivedSpecIndex, specsForMilestone, onSpecCacheInvalidate, specRowFromDbForPool, type SpecRow, type SpecPhaseRow, type ArchivedSpecIndexRow } from "@/lib/specs-table";
 import { getGoal as getGoalFromDbRow, listGoals as listGoalsFromDb, type GoalRow, type GoalMilestoneRow } from "@/lib/goals-table";
 // derive-rollup-status: the canonical phase→status rollup. spec-card-state only TYPE-imports from this
 // module (Phase/SpecStatus), so this value import is runtime-cycle-free (the type import erases).
@@ -560,7 +561,7 @@ async function buildGoalMembershipMap(
     return out;
   } catch (e) {
     console.warn(
-      `[blocker-goal-normalize] buildGoalMembershipMap failed — falling back to empty (spec-slug blockers only): ${e instanceof Error ? e.message : String(e)}`,
+      `[blocker-goal-normalize] buildGoalMembershipMap failed — falling back to empty (spec-slug blockers only): ${errText(e)}`,
     );
     return new Map<string, GoalMembership>();
   }
@@ -573,15 +574,50 @@ async function buildGoalMembershipMap(
  * getRoadmap/getSpec/listSpecSlugs caller needs a workspaceId. No-arg callers (org-chart at startup, the
  * legacy scripts/agents that haven't been retargeted yet) use this shim to pick the single-tenant workspace.
  */
+// agent-jobs-read-amplification — memoize the resolved id.
+//
+// This shim was the single largest reader of `agent_jobs`: 391,101 calls, and each one read the ENTIRE
+// table to return one value. `ORDER BY created_at DESC LIMIT 1` has no matching index (the only
+// created_at index is `agent_jobs_ws_status_idx`, whose leading columns are workspace_id + status), so
+// the plan was an index-only scan of all 22,160 rows feeding a top-N heapsort — 2,019 buffers, ~7.9 ms
+// per call. 22,160 rows × 391,101 calls ≈ 8.7 BILLION tuples, essentially the whole 8.9 B `seq_tup_read`
+// Supabase's health check flagged on this table (2026-07-21).
+//
+// Indexing `created_at` would fix the plan but not the waste: the value is effectively CONSTANT (the doc
+// above says as much — a single-tenant build console), so the right fix is to stop asking. A TTL memo
+// collapses it to ~1 query per process per window, and costs `agent_jobs` no extra write overhead.
+//
+// TTL rather than permanent: the rule is "ride the LATEST agent_jobs row", which could legitimately move
+// if a second workspace ever starts building. 5 minutes bounds that staleness while still retiring
+// >99.9% of the reads.
+//
+// Only a NON-NULL result is cached. A null means the lookup failed (transient DB error) or the DB is
+// genuinely empty; caching that would strand every no-arg caller for the whole window, so we retry on
+// the next call — same fail-open posture as the rest of this module.
+const DEFAULT_WORKSPACE_TTL_MS = 5 * 60_000;
+let defaultWorkspaceMemo: { id: string; expiresAt: number } | null = null;
+
+/** Test-only reset for the default-workspace memo. Never called by production code paths. */
+export function clearDefaultWorkspaceMemoForTests(): void {
+  defaultWorkspaceMemo = null;
+}
+
 async function resolveDefaultWorkspaceId(): Promise<string | null> {
+  const memo = defaultWorkspaceMemo;
+  if (memo && Date.now() < memo.expiresAt) return memo.id;
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
     const admin = createAdminClient();
     const { data: job } = await admin.from("agent_jobs").select("workspace_id").order("created_at", { ascending: false }).limit(1).maybeSingle();
     const fromJob = (job as { workspace_id?: string } | null)?.workspace_id;
-    if (fromJob) return fromJob;
+    if (fromJob) {
+      defaultWorkspaceMemo = { id: fromJob, expiresAt: Date.now() + DEFAULT_WORKSPACE_TTL_MS };
+      return fromJob;
+    }
     const { data: ws } = await admin.from("workspaces").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
-    return (ws as { id?: string } | null)?.id ?? null;
+    const fromWs = (ws as { id?: string } | null)?.id ?? null;
+    if (fromWs) defaultWorkspaceMemo = { id: fromWs, expiresAt: Date.now() + DEFAULT_WORKSPACE_TTL_MS };
+    return fromWs;
   } catch {
     return null;
   }
@@ -796,7 +832,11 @@ const SPEC_RANK: Record<SpecStatus, number> = { in_progress: 0, in_testing: 0.5,
  *  short-circuit / one-shot-PR flags. This REPLACES the old `readSpecs()` (parseSpec across the .md files).
  *  Sorted by board column then title — the same order callers used to get from the markdown reader. */
 async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
-  const rows = (await listSpecsFromDb(workspaceId)).filter((r) => isBoardableStatus(r.status));
+  // roadmap-archive-split: `getActiveSpecs` (scope='active') instead of fetching every spec and
+  // dropping folded rows in JS. The board never renders a folded spec, so those 659 rows were pure
+  // wire cost — 5.15 MB fetched to display 4 cards. The isBoardableStatus filter stays as the belt:
+  // it is the one place that defines "boardable", and a future scope change must not silently widen it.
+  const rows = (await getActiveSpecs(workspaceId)).filter((r) => isBoardableStatus(r.status));
   const cards = rows.map(dbRowToSpecCard);
   const bySlug = new Map(cards.map((c) => [c.slug, c]));
   // one-off-spec-depending-on-goal-work-blocks-on-the-goal-not-the-member-spec Phase 1 — the workspace's
@@ -1287,6 +1327,10 @@ export interface ArchiveEntry {
   date: string; // verified date, "YYYY-MM-DD" (or "" if unparseable)
   link: string; // brain-relative slug the entry points at, e.g. "lifecycles/roadmap-build-console"
   label: string; // display label for the link (last path segment, humanized)
+  /** roadmap-archive-split — the `public.specs.slug`, so the listing can link to the read-only
+   *  archived-spec detail page (/dashboard/roadmap/archive/{slug}). Null for entries that came from
+   *  the filesystem fallback path, which has no DB row behind it. */
+  specSlug: string | null;
 }
 
 /** Parse one archive entry list item ("- **Title** · verified YYYY-MM-DD · → [[link]]") → entry, or null. */
@@ -1300,7 +1344,9 @@ function parseArchiveLine(line: string): ArchiveEntry | null {
   const titleM = t.match(/\*\*(.+?)\*\*/);
   const title = titleM ? cleanInline(titleM[1]) : cleanInline(t.slice(2).split("·")[0]);
   const label = functionLabel(target.replace(/^.*\//, "")); // humanize last segment
-  return { title, date, link: target, label };
+  // roadmap-archive-split: the filesystem fallback has no `public.specs` row behind it, so there is
+  // no spec to link to — the listing falls back to the brain page for these.
+  return { title, date, link: target, label, specSlug: null };
 }
 
 /**
@@ -1368,9 +1414,13 @@ export async function getArchive(workspaceId?: string): Promise<ArchiveEntry[]> 
   // spec-fold-from-db-row Phase 2: the LISTING comes from the DB row — every folded spec is one row
   // with `status='folded'`, title, slug, and an updated_at that's the verified date. Workspace-scoped.
   if (workspaceId) {
-    let folded: SpecRow[];
+    // roadmap-archive-split: the LISTING needs slug + title + date, never a phase — so it reads the
+    // typed archive INDEX (0.10 MB) instead of full SpecRows with their joined phases (5.11 MB
+    // measured across 659 folded specs). See [[specs-table]] `listArchivedSpecIndex` for why this is
+    // a distinct type rather than a phases-less SpecRow.
+    let folded: ArchivedSpecIndexRow[];
     try {
-      folded = await listSpecsFromDb(workspaceId, { status: "folded" });
+      folded = await listArchivedSpecIndex(workspaceId);
     } catch {
       folded = [];
     }
@@ -1381,10 +1431,10 @@ export async function getArchive(workspaceId?: string): Promise<ArchiveEntry[]> 
     const entries: ArchiveEntry[] = folded.map((row) => {
       const enriched = enrichment.get(row.slug);
       if (enriched) {
-        return { title: enriched.title || row.title, date: enriched.date || isoDate(row.updated_at), link: enriched.link, label: enriched.label };
+        return { title: enriched.title || row.title, date: enriched.date || isoDate(row.updated_at), link: enriched.link, label: enriched.label, specSlug: row.slug };
       }
       const link = `lifecycles/${row.slug}`;
-      return { title: row.title, date: isoDate(row.updated_at), link, label: functionLabel(row.slug) };
+      return { title: row.title, date: isoDate(row.updated_at), link, label: functionLabel(row.slug), specSlug: row.slug };
     });
     entries.sort((a, b) => b.date.localeCompare(a.date) || a.link.localeCompare(b.link));
     if (entries.length) return entries;

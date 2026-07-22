@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignEasyPostReturnsSweepRateLimit,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
   isTransientAnthropicOverloadError,
@@ -114,6 +115,18 @@ function isError(log: VercelLog): boolean {
   // incident makes ONE upstream wobble look like two independent problems (Control Tower
   // `vercel:6d4f3f4eee64afcf` — the meta_500 mirror of shopcx-media-buyer-test-cadence).
   if (isInngestTerminalFailureMirrorLog(message, path)) return false;
+  // Drop the foreign Appstle unskip-order 500: `src/lib/appstle.ts` `appstleUnskipOrder`
+  // logs `Appstle unskip order error for <id>: Internal Server Error` when Appstle's own
+  // endpoint 500s, then returns a structured `{ success: false }` — the dunning-recovery
+  // step continues with the failure result, so there is nothing on our side to repair.
+  // This used to ride the transient OR-chain (auto-resolve first sighting, page on
+  // recurrence within TRANSIENT_RECUR_WINDOW_MS), but Appstle repeatedly 500s in-window
+  // during a real vendor outage, which reopens Control Tower `vercel:5959f3e309a7800c`
+  // on a surface we hold no levers on. Drop it at capture time so it never becomes a
+  // group. Non-500 Appstle unskip failures (Not Found, Unauthorized) and the sibling
+  // `Appstle unskip order failed` catch-branch throw carry different markers and stay
+  // captured / paged.
+  if (isForeignAppstleUnskipUpstream500(path, message)) return false;
   return true;
 }
 
@@ -210,7 +223,7 @@ export async function POST(request: Request) {
         isTransientInngestStepRetryThrow(g.path, g.message) ||
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
         isTransientAppstleFrequencyUpstreamTimeout(g.path, g.message) ||
-        isForeignAppstleUnskipUpstream500(g.path, g.message) ||
+        isForeignEasyPostReturnsSweepRateLimit(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
         isTransientSupabaseEdgeHtmlBody(g.message) ||
         isTransientUndiciHeadersTimeout(g.message) ||

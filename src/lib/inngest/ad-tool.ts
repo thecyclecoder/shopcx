@@ -44,6 +44,7 @@ import { getMetaUserToken, uploadAdVideo, waitForVideoReady, getVideoThumbnail, 
 import { resolvePlacementPublish } from "@/lib/ads/placement-publish";
 import { evaluateCreativePackGate, missingCreativePackDiagnosis, MISSING_CREATIVE_PACK_REASON } from "@/lib/ads/creative-pack-gate";
 import { MISSING_INSTAGRAM_IDENTITY_REASON, shouldRefuseForMissingInstagramIdentity } from "@/lib/ads/publish-instagram-identity-guard";
+import { STALE_ADSET_FAILURE_REASON, isMetaAdsetUnavailableError } from "@/lib/ads/publish-adset-unavailable-classifier";
 import type { CreativePackSnapshot } from "@/lib/ads/creative-pack";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -1195,6 +1196,14 @@ export const adToolPublishToMeta = inngest.createFunction(
             productId: ctx.productId ?? null,
             metaAdsetId: gateAdsetId,
             projectedDailyCents: gateProjected,
+            // Hand the gate the SAME per-test targeting the publisher will POST to Meta, so the
+            // purchaser/customer-exclusion rail inspects the real `excluded_custom_audiences` list
+            // instead of a null spec. Omitting this made the rail read `null` targeting and refuse
+            // `missing_purchaser_exclusion` on EVERY per-test publish once a cohort declared an
+            // exclusion audience — silently pausing Bianca's fleet-wide test launches. The spec
+            // carries the exclusion ids (inherited from the cohort's adset template); passing it is
+            // what lets the gate confirm them. See publish-gate.ts `evaluateMediaBuyerTestPublish`.
+            createAdsetSpec: perTestSpec,
           });
           if (!gate.allowed) {
             effectivePublishActive = false;
@@ -1236,12 +1245,38 @@ export const adToolPublishToMeta = inngest.createFunction(
           return { ok: false, reason: "no_adset_id" };
         }
 
-        const adId = await createAd(ctx.token!, j.meta_account_id, {
-          name: ctx.adName,
-          adsetId: effectiveAdsetId,
-          creativeId,
-          status: effectivePublishActive ? "ACTIVE" : "PAUSED",
-        });
+        // Final ad-creation boundary. A stale/deleted/archived target adset (or
+        // one the token no longer has permission for) is a PERMANENT config
+        // problem, not a transient Graph wobble — classify it here and fail the
+        // job closed with a stable `meta_adset_unavailable` reason instead of
+        // rethrowing (which turned every permanent config error into a Vercel
+        // `/api/inngest` crash + Control Tower incident). Other unexpected
+        // errors from `createAd` still rethrow so real infra regressions surface.
+        let adId: string;
+        try {
+          adId = await createAd(ctx.token!, j.meta_account_id, {
+            name: ctx.adName,
+            adsetId: effectiveAdsetId,
+            creativeId,
+            status: effectivePublishActive ? "ACTIVE" : "PAUSED",
+          });
+        } catch (err: any) {
+          if (isMetaAdsetUnavailableError(err)) {
+            await setStatus("failed", { error: STALE_ADSET_FAILURE_REASON });
+            if (j.recommendation_id) {
+              await admin
+                .from("iteration_recommendations")
+                .update({
+                  status: "failed",
+                  external_result: { ad_publish_job_id: job_id, error: STALE_ADSET_FAILURE_REASON },
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", j.recommendation_id);
+            }
+            return { ok: false, reason: STALE_ADSET_FAILURE_REASON };
+          }
+          throw err;
+        }
         await setStatus("published", { meta_video_id: videoId, meta_creative_id: creativeId, meta_ad_id: adId, error: null });
         // Phase 6b write-back: if this job fulfills an iteration_recommendation,
         // record the engine-created Meta ids on it and flip status → executed.

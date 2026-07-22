@@ -2,9 +2,12 @@
 
 // Research › Ads — the owner-facing competitor-ad library, filtered by STATIC vs VIDEO and by one of the
 // ~6 advertised (hero) products. Reuses the /api/ads/creative-finder API (extended with productId +
-// mediaType filters) and the advertised-products dropdown source. Read-only browse — the pattern-matrix +
-// shortlist workflow stays on Marketing › Ads › Winning statics. Owner-gated (API 403 + client short-circuit).
+// mediaType filters) and the advertised-products dropdown source. The LIST is a clean, clickable grid —
+// each card links to the per-ad detail page (`/dashboard/research/ads/[id]`) where the actions live
+// ("Generate ad" + "Don't use"), so the list view stays uncluttered. Owner-gated (API 403 + client
+// short-circuit).
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface Ad {
@@ -22,6 +25,13 @@ interface Ad {
   offer: string | null;
   days_running: number | null;
   seed_kind: string | null;
+  product_id: string | null;
+  // flag-a-competitor-ad-do-not-use Phase 2 — the CEO's per-AD exclusion flag (skipped by
+  // `queryProvenAngles`). Toggled on the detail page; here it only drives the dim + badge.
+  do_not_use: boolean;
+  do_not_use_reason: string | null;
+  do_not_use_by: string | null;
+  do_not_use_at: string | null;
 }
 interface ProductRow {
   id: string;
@@ -88,7 +98,8 @@ export default function ResearchAdsPage() {
     <div className="mx-auto w-full max-w-screen-xl px-4 py-6 sm:px-6">
       <h1 className="mb-1 text-2xl font-bold text-zinc-900 dark:text-zinc-100">Ads</h1>
       <p className="mb-6 text-sm text-zinc-500">
-        Competitor ads found in the ad library for our seeded competitors, split by static and video.
+        Competitor ads found in the ad library for our seeded competitors. Click an ad to open it and
+        generate one like it.
       </p>
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
@@ -140,9 +151,12 @@ export default function ResearchAdsPage() {
           {ads.map((s) => {
             const src = s.thumb_url ?? proxy(s.image_url);
             return (
-              <div
+              <Link
                 key={s.id}
-                className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+                href={`/dashboard/research/ads/${s.id}`}
+                className={`group block overflow-hidden rounded-lg border border-zinc-200 bg-white transition-shadow hover:shadow-md hover:ring-1 hover:ring-indigo-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:ring-indigo-700 ${
+                  s.do_not_use ? "opacity-50 grayscale" : ""
+                }`}
               >
                 <div className="relative aspect-square w-full bg-zinc-100 dark:bg-zinc-800">
                   {src ? (
@@ -154,10 +168,24 @@ export default function ResearchAdsPage() {
                       ▶ video
                     </span>
                   ) : null}
+                  {s.do_not_use ? (
+                    <span
+                      className="absolute right-2 top-2 rounded bg-red-600/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white"
+                      title={
+                        s.do_not_use_reason
+                          ? `Don't use — ${s.do_not_use_reason} (by ${s.do_not_use_by ?? "?"})`
+                          : "Don't use — flagged"
+                      }
+                    >
+                      don&apos;t use
+                    </span>
+                  ) : null}
                 </div>
                 <div className="space-y-2 p-3 text-sm">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-zinc-900 dark:text-zinc-100">{s.advertiser || "—"}</span>
+                    <span className="font-semibold text-zinc-900 group-hover:text-indigo-700 dark:text-zinc-100 dark:group-hover:text-indigo-300">
+                      {s.advertiser || "—"}
+                    </span>
                     <span className="shrink-0 text-xs text-zinc-500">{s.days_running ?? "?"}d</span>
                   </div>
                   <div className="flex flex-wrap gap-1 text-xs">
@@ -165,11 +193,8 @@ export default function ResearchAdsPage() {
                     {s.framework ? <Tag>{s.framework}</Tag> : null}
                   </div>
                   <Slot k="Hook" v={s.hook} />
-                  <Slot k="Mechanism" v={s.mechanism_claim} />
-                  <Slot k="Proof" v={s.proof} />
-                  <Slot k="Offer" v={s.offer} />
                 </div>
-              </div>
+              </Link>
             );
           })}
         </div>

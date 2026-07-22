@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createShopifyReturn, getReturnableItems } from "@/lib/shopify-returns";
@@ -163,6 +164,6 @@ export async function POST(
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
     console.error("Failed to create return:", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: errText(err) }, { status: 500 });
   }
 }

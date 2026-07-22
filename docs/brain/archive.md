@@ -12,10 +12,31 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Downgrade the EasyPost tracker business-signal log from console.error to console.warn** · verified 2026-07-21 · → [[../integrations/easypost]]
+- **Drop recurring Appstle unskip upstream 500s from the Vercel error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Scope EasyPost account-level rate-limit noise out of the returns-reconcile-sweep error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Widen Anthropic overload classifier to catch the fraud-detection.ts "Anthropic API error: 5NN" throw shape** · verified 2026-07-21 · → [[../libraries/control-tower]]
+- **Lossless error diagnostics — kill the `[object Object]` blackhole** · verified 2026-07-21 · → [[../libraries/error-text]]
+- **Downgrade EasyPost rate-limit log in returns-reconcile-sweep from error to warn** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
+- **Returns-reconcile sweep: escalate on missing-carrier config; downgrade transient tracker errors** · verified 2026-07-21 · → [[../inngest/returns-reconcile-sweep]]
+- **Founder escalations must actually reach the founder** · verified 2026-07-20 · → [[../libraries/approval-inbox]] · [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]
+- **Stamp origin spec_slug on imitation-quality-review agent_jobs enqueue** · verified 2026-07-20 · → [[../libraries/imitation-quality-review]]
+- **Close the internal-subscription write-path gaps the commerce-SDK sweep found** · verified 2026-07-20 · → [[../lifecycles/dunning]], [[../journeys/shipping-address]], [[../libraries/commerce__subscription]], [[../operational-rules]]
+- **Rerun the excluded_all_customers_audience_id migration under a fresh version so it actually lands** · verified 2026-07-20 · → [[../tables/media_buyer_test_cohorts]]
+- **Meta structure sync marks a no-longer-returned adset (archived/deleted on Meta) as not-active in the mirror** · verified 2026-07-20 · → [[../lifecycles/iteration-engine-phase-1]]
+- **Detect duplicate 14-digit migration version prefixes as drift** · verified 2026-07-20 · → [[../libraries/control-tower]]
+- **Give Sol and June a live Shopify refund-ledger read (out-of-band refunds become visible)** · verified 2026-07-20 · → [[libraries/refund-ledger]]
+- **Self-healing return refunds — cap against the live ledger, fail loud, and sweep the stuck ones** · verified 2026-07-20 · → [[../lifecycles/return-pipeline]]
+- **A spec cannot exist without phases — enforce the invariant at the SDK writer and the build gate** · verified 2026-07-20 · → [[operational-rules]] · [[libraries/specs-table]] · [[libraries/build-spec-materializer]]
+- **Unique migration version guard + collision-cluster audit** · verified 2026-07-20 · → [[../libraries/control-tower]]
+- **All ad creative goes through the Dahlia/Max box session — retire the deterministic node path; explore/exploit badge tells the crown-gated truth** · verified 2026-07-19 · → [[../lifecycles/ad-creative]]
 - **Bianca's static publish uploads all 5 copy variations + maps the right-column 1:1 asset** · verified 2026-07-19 · → [[../lifecycles/ad-publish]]
 - **Cold prospecting never imitates a warm/hot offer/retargeting (or cross-category) competitor ad — stamp a cold temperature + hard-exclude offer mismatches** · verified 2026-07-19 · → [[lifecycles/ad-creative]]
 - **Creative scout falls back to keyword/domain search when winners API returns empty** · verified 2026-07-19 · → [[../inngest/creative-scout]]
 - **Creative scout reliably ingests EVERY approved competitor's winning ads — fix the silent per-competitor drops + non-mapped leakage** · verified 2026-07-19 · → [[lifecycles/creative-finder]]
+- **Scope Appstle unskip upstream 500s out of the Vercel error feed** · verified 2026-07-19 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Flag a competitor ad as 'do not use'** · verified 2026-07-19 · → [[../lifecycles/creative-finder]]
+- **Keep media-buyer test cadence heartbeat honest on Meta pull failures** · verified 2026-07-19 · → [[inngest/media-buyer-test-cadence]]
 - **Stop Vercel from duplicating Inngest terminal failure incidents** · verified 2026-07-19 · → [[lifecycles/control-tower]]
 - **A Max copy-QC miss still bins the ad as HELD (never drops it) — so nothing Dahlia produces vanishes before the CEO can review or override** · verified 2026-07-18 · → [[lifecycles/ad-creative]]
 - **All product ads ALWAYS publish under the single Superfoods Company FB page + Instagram** · verified 2026-07-18 · → [[../libraries/media-buyer-publish-identity]]

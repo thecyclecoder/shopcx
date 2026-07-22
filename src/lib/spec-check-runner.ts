@@ -26,6 +26,7 @@
  * imports the runner + defaults from here without change.
  */
 import { spawn } from "node:child_process";
+import { errText } from "@/lib/error-text";
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -123,6 +124,42 @@ export async function runSpecChecks(input: RunSpecChecksInput): Promise<RunSpecC
   return { workspaceId, slug, results };
 }
 
+/**
+ * verify-real-checks-not-status-flags (merge-gate-verifies-real-phase-checks-not-status-flags Phase 1) —
+ * the accumulation TRUTH the spec→goal merge gate must use INSTEAD of trusting `spec_phases.status`.
+ *
+ * Runs the spec's machine checks (grep/tsc/…) against the actual branch checkout at `deps.repoRoot`
+ * and reports whether EVERY auto-testable check passes. FAIL-CLOSED: any `fail` (a phase's code isn't
+ * on the branch) ⇒ NOT accumulated; and if NO auto check could run (all `needs_human`) we also report
+ * NOT accumulated (we cannot prove the code landed) rather than fail-open. `needs_human` rows are
+ * advisory and never block. A status flag (`shipped`) — which the reconciler / a fail-open read can set
+ * without any code — is no longer sufficient to call a phase accumulated. See
+ * docs/brain/libraries/spec-check-runner.md.
+ */
+export interface AccumulationVerifyResult {
+  /** every auto check passed on the branch AND at least one auto check actually ran. */
+  accumulated: boolean;
+  /** the checks that FAILED on the branch — a proxy for un-built / phantom-shipped phases. */
+  failing: { text: string; evidence: string }[];
+  /** how many auto (machine) checks actually ran (needs_human excluded). */
+  autoRan: number;
+  reason: string;
+}
+export async function verifyPhaseAccumulatedOnBranch(input: RunSpecChecksInput): Promise<AccumulationVerifyResult> {
+  const res = await runSpecChecks(input);
+  const failing = res.results
+    .filter((r) => r.verdict === "fail")
+    .map((r) => ({ text: r.text, evidence: r.evidence }));
+  const autoRan = res.results.filter((r) => r.verdict !== "needs_human").length;
+  const accumulated = failing.length === 0 && autoRan > 0;
+  const reason = accumulated
+    ? `all ${autoRan} machine check(s) pass on the branch`
+    : autoRan === 0
+      ? "fail-closed: no auto-testable check could run against the branch (cannot prove the code landed)"
+      : `fail-closed: ${failing.length} machine check(s) FAIL on the branch — code not accumulated (${failing.map((f) => f.text).slice(0, 3).join("; ")})`;
+  return { accumulated, failing, autoRan, reason };
+}
+
 async function runOneCheck(row: LoadedCheck, deps: RunSpecChecksDeps): Promise<CheckResult> {
   const key = checkKey(row.text);
   const base = { text: row.text, checkKey: key, exec_kind: row.exec_kind } as const;
@@ -173,7 +210,7 @@ async function runOneCheck(row: LoadedCheck, deps: RunSpecChecksDeps): Promise<C
   } catch (e) {
     // A thrown executor is a HARNESS error too (spawn failure, network unreachable, DB blip) — not
     // an assertion `fail`. Preserving the raw message keeps the harness signature matchable.
-    const msg = (e as Error).message ?? String(e);
+    const msg = errText(e);
     executed = { ok: false, evidence: `executor error: ${msg}` };
   }
 

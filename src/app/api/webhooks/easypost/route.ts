@@ -1,7 +1,18 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import crypto from "crypto";
+import { inngest } from "@/lib/inngest/client";
+
+// Statuses that mean the carrier says the package is at the destination
+// and no further tracking events are expected. `available_for_pickup` is
+// USPS post office / locker delivery — the return is IN and the refund
+// should fire; before Phase 2 the code stamped the return as delivered
+// on this status but never fired `returns/process-delivery`, so the
+// return sat forever. Keep both in one set — one source of truth for
+// what "delivered" means to the refund rail.
+const DELIVERED_TRACKER_STATUSES = new Set(["delivered", "available_for_pickup"]);
 
 // EasyPost sends tracker.updated events when tracking status changes.
 // We match by easypost_shipment_id or tracking_number to update our returns table.
@@ -159,6 +170,12 @@ export async function POST(request: Request) {
 
     case "delivered":
     case "available_for_pickup":
+      // Phase 2 EasyPost webhook gap: this branch already stamped the
+      // return as delivered for BOTH statuses, but the event dispatch
+      // below only fired for the literal "delivered" — so an
+      // `available_for_pickup` return was a permanently-stuck one. The
+      // event trigger below now checks DELIVERED_TRACKER_STATUSES so
+      // both paths converge on `returns/process-delivery`.
       updates.status = "delivered";
       updates.delivered_at = new Date().toISOString();
       break;
@@ -172,7 +189,7 @@ export async function POST(request: Request) {
     case "cancelled":
     case "return_to_sender":
       // Create a dashboard notification for these
-      console.error(
+      console.warn(
         `[easypost-webhook] Tracking issue for return ${returnRecord.id}: ${trackerStatus}`,
       );
       await admin.from("dashboard_notifications").insert({
@@ -190,29 +207,59 @@ export async function POST(request: Request) {
   }
 
   if (Object.keys(updates).length > 1) {
-    // More than just updated_at
-    await admin.from("returns").update(updates).eq("id", returnRecord.id);
+    // Phase 2 EasyPost webhook gap: this update's error was previously
+    // unchecked; the code flowed straight into the event fire even when
+    // the return row never actually updated (so the refund could fire on
+    // a stale status). Check + bail loudly with a 500 so EasyPost's own
+    // retry policy engages — a returns row that never advanced to
+    // delivered is a stuck one, and silently returning 200 hides it.
+    const { error: updErr } = await admin
+      .from("returns")
+      .update(updates)
+      .eq("id", returnRecord.id);
+    if (updErr) {
+      console.error(
+        `[easypost-webhook] returns update failed for ${returnRecord.id} (tracking ${result.tracking_code}):`,
+        updErr,
+      );
+      return NextResponse.json(
+        { error: "returns update failed", detail: updErr.message },
+        { status: 500 },
+      );
+    }
   }
 
-  // On delivery, fire an Inngest event for processing
-  if (trackerStatus === "delivered") {
+  // On delivery, fire an Inngest event for processing. Phase 2 EasyPost
+  // webhook gap: the previous raw `fetch` to inn.gs (a) fired for the
+  // literal "delivered" status only — an `available_for_pickup` return
+  // was permanently stuck — (b) never inspected the response status,
+  // (c) silently sent NOTHING when `INNGEST_EVENT_KEY` was unset while
+  // still returning 200 so EasyPost never retried, and (d) swallowed
+  // any throw to `console.error`. Use the `inngest` client (as
+  // `returnsProcessDelivery` itself does) and fail loudly (500) so
+  // EasyPost's own retries engage. Both delivered statuses converge on
+  // one dispatch site via DELIVERED_TRACKER_STATUSES.
+  if (trackerStatus && DELIVERED_TRACKER_STATUSES.has(trackerStatus)) {
     try {
-      const inngestKey = process.env.INNGEST_EVENT_KEY;
-      if (inngestKey) {
-        await fetch("https://inn.gs/e/" + inngestKey, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: "returns/process-delivery",
-            data: {
-              return_id: returnRecord.id,
-              workspace_id: returnRecord.workspace_id,
-            },
-          }),
-        });
-      }
+      await inngest.send({
+        name: "returns/process-delivery",
+        data: {
+          return_id: returnRecord.id,
+          workspace_id: returnRecord.workspace_id,
+        },
+      });
     } catch (err) {
-      console.error("[easypost-webhook] Failed to fire Inngest event:", err);
+      console.error(
+        `[easypost-webhook] inngest.send returns/process-delivery failed for ${returnRecord.id} (tracking ${result.tracking_code}, status ${trackerStatus}):`,
+        err,
+      );
+      return NextResponse.json(
+        {
+          error: "inngest dispatch failed",
+          detail: errText(err),
+        },
+        { status: 500 },
+      );
     }
   }
 

@@ -76,6 +76,22 @@ function ancestorsFor(node: OrgNode): string[] {
 }
 
 /**
+ * ad-creative-box-session-only-retire-deterministic-path Phase 3 (2026-07-19) —
+ * **agent-kind bare-slug alias.** For an agent-kind mirror row we ALSO expose the bare
+ * agent-kind slug in `ancestors[]` (a self-alias — the slug names the same node as
+ * `node_id`). This mirrors the department-key convenience already in `ancestorsFor` and
+ * closes the gap that let a `kill_switches.node_id='ad-creative'` row (the bare slug — the
+ * form the CEO cockpit surfaces) fail to match `agent:ad-creative` in
+ * `public.claim_agent_job`'s ancestor join on 2026-07-19. Deduped, always leading — a
+ * row's `ancestors[]` therefore ALWAYS contains its own `kind` as the first element.
+ */
+function withKindAlias(ancestors: string[], kindSlug: string, canonicalNodeId: string): string[] {
+  if (kindSlug === canonicalNodeId) return ancestors; // no alias needed (canonical id === slug)
+  if (ancestors.includes(kindSlug)) return ancestors; // already covered
+  return [kindSlug, ...ancestors];
+}
+
+/**
  * Compute the desired mirror from the frozen `NODES` graph — one row per agent_jobs.kind. Two
  * sources:
  *   1) Every `MONITORED_LOOPS` row with an `agentKind` — the node's id is a real MONITORED_LOOPS
@@ -84,6 +100,10 @@ function ancestorsFor(node: OrgNode): string[] {
  *      `agent-kind:<kind>` synthetic ids in the registry (KIND_OWNER_FALLBACK). Skip a kind that
  *      does not resolve to any node — the caller is expected to keep KIND_OWNER_FALLBACK in
  *      sync (`_check-node-registry-drift.ts` catches drift at CI time).
+ *
+ * Each row's `ancestors[]` carries the bare agent-kind slug as a self-alias (see `withKindAlias`)
+ * so a `kill_switches` row keyed by the bare slug matches `public.claim_agent_job`'s ancestor
+ * join alongside the canonical `node_id`.
  */
 export function computeNodeAncestryRows(): NodeAncestryRow[] {
   const rows = new Map<string, NodeAncestryRow>(); // keyed by kind (unique)
@@ -96,7 +116,7 @@ export function computeNodeAncestryRows(): NodeAncestryRow[] {
     rows.set(loop.agentKind, {
       node_id: node.id,
       kind: loop.agentKind,
-      ancestors: ancestorsFor(node),
+      ancestors: withKindAlias(ancestorsFor(node), loop.agentKind, node.id),
     });
   }
 
@@ -111,7 +131,7 @@ export function computeNodeAncestryRows(): NodeAncestryRow[] {
     rows.set(kind, {
       node_id: node.id,
       kind,
-      ancestors: ancestorsFor(node),
+      ancestors: withKindAlias(ancestorsFor(node), kind, node.id),
     });
   }
 

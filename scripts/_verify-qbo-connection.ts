@@ -1,4 +1,5 @@
 import { loadEnv } from "./_bootstrap"; loadEnv();
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { getQboAccessToken, getQboConnection } from "../src/lib/quickbooks";
 const WS="fdc11e10-b89f-4989-8b73-ed6526c4d906";
@@ -21,6 +22,6 @@ async function main(){
     const tok = await getQboAccessToken(WS, admin);
     console.log("ACCESS TOKEN OBTAINED:", tok ? `yes (len ${tok.length})` : "no");
     console.log("→ Independent token is VALID and refreshes on our own credentials.");
-  } catch(e){ console.log("TOKEN REFRESH FAILED:", e instanceof Error?e.message:String(e)); }
+  } catch(e){ console.log("TOKEN REFRESH FAILED:", errText(e)); }
 }
 main().catch(e=>{console.error(e);process.exit(1);});

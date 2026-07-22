@@ -19,6 +19,7 @@
 // diagnostic. Prereq: the workspaces.is_test column must exist
 // (scripts/apply-workspaces-is-test-migration.ts).
 import { createAdminClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import { SPEC_TEST_FIXTURES, resolveOwnerUserId } from "../src/lib/spec-test-sandbox";
 
 const F = SPEC_TEST_FIXTURES;
@@ -31,7 +32,7 @@ function fmtErr(e: PgErr | unknown): string {
       .filter(Boolean)
       .join(" · ");
   }
-  return e instanceof Error ? e.message : String(e);
+  return errText(e);
 }
 
 async function main() {

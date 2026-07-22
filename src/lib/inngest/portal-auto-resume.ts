@@ -7,6 +7,7 @@
 // the cron handles everything.
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { appstleSubscriptionAction } from "@/lib/appstle";
@@ -91,7 +92,7 @@ export const portalAutoResumeCron = inngest.createFunction(
           return { contractId: sub.shopify_contract_id, outcome: "resumed" };
         } catch (err) {
           console.error(`[Auto-Resume] Failed for ${sub.shopify_contract_id}:`, err);
-          return { contractId: sub.shopify_contract_id, outcome: `error: ${String(err).slice(0, 100)}` };
+          return { contractId: sub.shopify_contract_id, outcome: `error: ${errText(err).slice(0, 100)}` };
         }
       });
 

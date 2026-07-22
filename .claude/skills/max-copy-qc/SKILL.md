@@ -1,6 +1,6 @@
 ---
 name: max-copy-qc
-description: Be Max's INDEPENDENT copy-QC over ONE finished ad creative (image + composed headline/primary/description + brief + Dahlia's self_score for context) on Max — judge as a scrolling buyer would refuse to click, NEVER as a rubric mirror of Dahlia's own self_score. Emit ONE JSON verdict {hard_gate_pass, hard_gates:{no_fabrication, no_cold_offer, no_competitor_leak, single_promise, render_ok}, persuasion_score:0..10, persuasion_rubric:{lf8, schwartz, cialdini, hopkins, sugarman, evidence:string[]}, verdict_reason:string}. READ-ONLY — the ad-creative Node lane (src/lib/ads/creative-qa.ts runQaCreativeCopyViaBoxSession, dispatched by scripts/builder-worker.ts runAdCreativeCopyQcJob) is the only mutator; on a hard-gate fail it bounces Dahlia's author session to a copy-only revise (image + brief reused) up to MAX_COPY_QA_ATTEMPTS, on a hard-gate pass it persists the advisory persuasion score to public.ad_creative_copy_qc_verdicts and lands the campaign in Bianca's bin, on exhaustion it emits a director_activity row action_kind='max_copy_qc_exhausted' and REFUSES the bin insert. Invoked per creative by the worker's ad-creative-copy-qc lane as a top-level `claude -p` on Max (no ANTHROPIC_API_KEY). Implements docs/brain/specs/dahlia-max-independent-copy-qc-box-session.md Phase 1.
+description: Be Max's INDEPENDENT copy-QC over ONE finished ad creative (image + composed headline/primary/description + brief + Dahlia's self_score for context) on Max — judge as a scrolling buyer would refuse to click, NEVER as a rubric mirror of Dahlia's own self_score. Emit ONE JSON verdict {hard_gate_pass, hard_gates:{no_fabrication, no_cold_offer, no_competitor_leak, render_ok}, persuasion_score:0..10, persuasion_rubric:{lf8, schwartz, cialdini, hopkins, sugarman, evidence:string[]}, verdict_reason:string}. READ-ONLY — the ad-creative Node lane (src/lib/ads/creative-qa.ts runQaCreativeCopyViaBoxSession, dispatched by scripts/builder-worker.ts runAdCreativeCopyQcJob) is the only mutator; on a hard-gate fail it bounces Dahlia's author session to a copy-only revise (image + brief reused) up to MAX_COPY_QA_ATTEMPTS, on a hard-gate pass it persists the advisory persuasion score to public.ad_creative_copy_qc_verdicts and lands the campaign in Bianca's bin, on exhaustion it emits a director_activity row action_kind='max_copy_qc_exhausted' and REFUSES the bin insert. Invoked per creative by the worker's ad-creative-copy-qc lane as a top-level `claude -p` on Max (no ANTHROPIC_API_KEY). Implements docs/brain/specs/dahlia-max-independent-copy-qc-box-session.md Phase 1.
 ---
 
 # max-copy-qc
@@ -48,7 +48,7 @@ The worker hands you:
   is safe to trust. It carries:
   - `VALIDATOR_PASS:` — `true` when every safety rail passed, `false` otherwise.
   - `RAILS:` — one line per rail (`lf8` / `meta_caps` / `no_msrp` / `no_competitor_leak` /
-    `cold_offer_gate` / `single_promise`) with `pass` / `fail` + a short reason on a fail.
+    `cold_offer_gate`) with `pass` / `fail` + a short reason on a fail.
   The rails are **safety only** — the validator does NOT score persuasion. You still form
   your independent persuasion judgment via the 5-lens rubric below (LF8 / Schwartz /
   Cialdini / Hopkins / Sugarman). When your `hard_gates` output flips `false` for a safety
@@ -132,11 +132,7 @@ or in-copy phrase in `evidence` — no unattributed hard-gate fails.**
    verbatim slogan the brief traced to a competitor's ad (an "imitation" creative rewrites the
    competitor angle for OUR brand; the competitor name never survives). Cite the competitor
    phrase.
-4. **`single_promise`** — the caption commits to ONE main benefit; a caption that hedges across
-   3+ unrelated benefits ("more energy AND better sleep AND clearer skin AND weight loss AND
-   focus") reads as a supplement grab-bag and fails. One primary + one supporting is fine; a
-   grab-bag is a fail. Cite the competing promises.
-5. **`render_ok`** — the on-image text is legible AND the caption doesn't reference something
+4. **`render_ok`** — the on-image text is legible AND the caption doesn't reference something
    the image doesn't show ("look at the pouch" when there's no pouch, "the yellow label" when
    the pack is red). This is NOT the full render-defect QC — Dahlia's own creative-qc pass
    already ran; you're the cross-check for caption↔image consistency. Cite the mismatch on a
@@ -331,7 +327,6 @@ fenced, the JSON is the last thing in the message). The exact shape MUST match t
     "no_fabrication": true,
     "no_cold_offer": true,
     "no_competitor_leak": true,
-    "single_promise": true,
     "render_ok": true
   },
   "persuasion_score": 7,

@@ -647,7 +647,7 @@ export async function escalateMediaBuyerTestPublishRefusal(
 /** Why Bianca's publish path refused to post a creative to Meta. */
 export type MaxCopyQcPublishRefusalReason =
   | "missing_max_copy_qc_verdict" // no ad_creative_copy_qc_verdicts row (Max never scored the creative).
-  | "hard_gate_fail" // verdict exists but a Max hard gate failed (fabrication, cold-offer, competitor leak, single-promise, render).
+  | "hard_gate_fail" // verdict exists but a Max hard gate failed (fabrication, cold-offer, competitor leak, render).
   | "below_score_floor"; // hard gates passed but persuasion_score < MAX_QC_ELIGIBILITY_FLOOR (9).
 
 export interface MaxCopyQcPublishGateAllowResult {
@@ -740,7 +740,6 @@ function maxCopyQcRefusalDiagnosis(
         if (!g.no_fabrication) failed.push("no_fabrication");
         if (!g.no_cold_offer) failed.push("no_cold_offer");
         if (!g.no_competitor_leak) failed.push("no_competitor_leak");
-        if (!g.single_promise) failed.push("single_promise");
         if (!g.render_ok) failed.push("render_ok");
       }
       return (

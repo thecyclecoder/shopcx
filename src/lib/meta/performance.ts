@@ -113,6 +113,61 @@ interface SyncParams {
 
 // ── Structure ────────────────────────────────────────────────────────────────
 
+/**
+ * Pure set-difference over the synced campaigns: return mirrored adset ids that
+ * belong to a synced campaign but Meta didn't return this run and aren't already
+ * ARCHIVED. Meta's default `/adsets` list excludes archived adsets, so an adset
+ * that dropped out of the returned set is either archived on Meta or otherwise
+ * gone — either way the mirror's ACTIVE row is a lie until we flip it. Kept
+ * pure so it's unit-testable against the Superfood-Tabs stuck-ACTIVE incident
+ * without touching Graph or Supabase.
+ */
+export function reconcileDroppedAdsetIds(
+  syncedCampaignIds: string[],
+  returnedAdsetIds: string[],
+  mirroredAdsets: Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[] {
+  if (syncedCampaignIds.length === 0) return [];
+  const scoped = new Set(syncedCampaignIds);
+  const returned = new Set(returnedAdsetIds);
+  const dropped: string[] = [];
+  for (const row of mirroredAdsets) {
+    if (row.meta_campaign_id == null || !scoped.has(row.meta_campaign_id)) continue;
+    if (returned.has(row.meta_adset_id)) continue;
+    if (row.status === "ARCHIVED") continue;
+    dropped.push(row.meta_adset_id);
+  }
+  return dropped;
+}
+
+/**
+ * Same set-difference as [[reconcileDroppedAdsetIds]] but for meta_ads. Meta's
+ * default `/ads` list ALSO excludes archived/deleted ads, so a dropped ad leaves
+ * the same ghost the Ad Testing creative view + ad-level signals read against.
+ * Scoped to the synced campaigns via each row's `meta_campaign_id`; a row whose
+ * campaign is unknown or outside the scoped set is left untouched. Pure so the
+ * scope + idempotency invariants are unit-testable without touching Graph or
+ * Supabase. Campaign-level drop-out is intentionally out of scope (campaigns
+ * are long-lived).
+ */
+export function reconcileDroppedAdIds(
+  syncedCampaignIds: string[],
+  returnedAdIds: string[],
+  mirroredAds: Array<{ meta_ad_id: string; meta_campaign_id: string | null; status: string | null }>,
+): string[] {
+  if (syncedCampaignIds.length === 0) return [];
+  const scoped = new Set(syncedCampaignIds);
+  const returned = new Set(returnedAdIds);
+  const dropped: string[] = [];
+  for (const row of mirroredAds) {
+    if (row.meta_campaign_id == null || !scoped.has(row.meta_campaign_id)) continue;
+    if (returned.has(row.meta_ad_id)) continue;
+    if (row.status === "ARCHIVED") continue;
+    dropped.push(row.meta_ad_id);
+  }
+  return dropped;
+}
+
 /** Mirror campaign/adset/ad structure + budgets + status into our tables.
  * `opts.campaignIds` scopes the pull to specific Meta campaigns (the intraday test-cadence path pulls
  * ONLY the media-buyer test campaigns, not the whole account) via Graph `filtering`. */
@@ -186,6 +241,50 @@ export async function syncMetaStructure(
       )
     : 0;
 
+  // Drop-out reconcile: Meta excludes archived adsets from its default `/adsets`
+  // list, so an adset the mirror knows about but Meta didn't return this run for
+  // one of the caller-scoped campaigns stays stuck ACTIVE forever (Superfood
+  // Tabs incident). SCOPED PATH ONLY — never the full-account sync: an unscoped
+  // run could interleave with a scoped run and a partial page from Graph would
+  // wrongly flip live adsets ARCHIVED. The 2-hourly test-cadence sync passes
+  // opts.campaignIds, so this self-heals every 2 hours for the test campaigns.
+  if (scoped && scoped.length > 0) {
+    const returnedAdsetIds = (adsets as Array<{ id?: unknown }>).map((a) => String(a.id ?? "")).filter(Boolean);
+    const { data: mirrorRows, error: mirrorErr } = await admin
+      .from("meta_adsets")
+      .select("meta_adset_id, meta_campaign_id, status")
+      .eq("workspace_id", p.workspaceId)
+      .eq("meta_ad_account_id", p.adAccountId)
+      .in("meta_campaign_id", scoped);
+    if (mirrorErr) {
+      await reportDbError(mirrorErr, { op: "meta-structure-dropped-adsets-read", table: "meta_adsets", account: p.adAccountId });
+      throw new Error(
+        `meta_adsets drop-out read failed: ${(mirrorErr as { code?: string }).code ?? "?"} ${mirrorErr.message}`,
+      );
+    }
+    const droppedIds = reconcileDroppedAdsetIds(scoped, returnedAdsetIds, (mirrorRows ?? []) as Array<{ meta_adset_id: string; meta_campaign_id: string | null; status: string | null }>);
+    if (droppedIds.length > 0) {
+      // Chunked compare-and-set: only flip rows in this account/workspace whose
+      // status is not already ARCHIVED. This is idempotent and re-scopes the write
+      // to the exact rows the helper identified.
+      for (let i = 0; i < droppedIds.length; i += 500) {
+        const chunk = droppedIds.slice(i, i + 500);
+        const { error: updErr } = await admin
+          .from("meta_adsets")
+          .update({ status: "ARCHIVED", effective_status: "ARCHIVED", synced_at: now, updated_at: now })
+          .eq("workspace_id", p.workspaceId)
+          .eq("meta_ad_account_id", p.adAccountId)
+          .in("meta_adset_id", chunk);
+        if (updErr) {
+          await reportDbError(updErr, { op: "meta-structure-dropped-adsets-archive", table: "meta_adsets", account: p.adAccountId, count: chunk.length });
+          throw new Error(
+            `meta_adsets drop-out archive failed: ${(updErr as { code?: string }).code ?? "?"} ${updErr.message} — after archiving ${i}/${droppedIds.length}`,
+          );
+        }
+      }
+    }
+  }
+
   const ads = await graphGetAll(
     `${acct}/ads`,
     { fields: "id,name,status,effective_status,adset_id,campaign_id,creative,created_time,updated_time", limit: "500", ...byCampaign },
@@ -214,6 +313,49 @@ export async function syncMetaStructure(
         { op: "meta-structure-upsert", label: "ads", extra: { account: p.adAccountId } },
       )
     : 0;
+
+  // Same scoped drop-out reconcile as meta_adsets above, applied to meta_ads.
+  // Meta excludes archived/deleted ads from its default `/ads` list, so an ad
+  // the mirror knows about but Meta didn't return this run for one of the
+  // caller-scoped campaigns stays stuck ACTIVE forever and shows as a live
+  // creative in the Ad Testing view. SCOPED PATH ONLY — never the full-account
+  // sync (an unscoped run could interleave and a partial page would wrongly
+  // flip live ads ARCHIVED). Campaign-level drop-out is intentionally out of
+  // scope: campaigns are long-lived, and archiving a whole campaign is a
+  // manual, high-consequence action a reconciler shouldn't take.
+  if (scoped && scoped.length > 0) {
+    const returnedAdIds = (ads as Array<{ id?: unknown }>).map((a) => String(a.id ?? "")).filter(Boolean);
+    const { data: mirrorAdRows, error: mirrorAdErr } = await admin
+      .from("meta_ads")
+      .select("meta_ad_id, meta_campaign_id, status")
+      .eq("workspace_id", p.workspaceId)
+      .eq("meta_ad_account_id", p.adAccountId)
+      .in("meta_campaign_id", scoped);
+    if (mirrorAdErr) {
+      await reportDbError(mirrorAdErr, { op: "meta-structure-dropped-ads-read", table: "meta_ads", account: p.adAccountId });
+      throw new Error(
+        `meta_ads drop-out read failed: ${(mirrorAdErr as { code?: string }).code ?? "?"} ${mirrorAdErr.message}`,
+      );
+    }
+    const droppedAdIds = reconcileDroppedAdIds(scoped, returnedAdIds, (mirrorAdRows ?? []) as Array<{ meta_ad_id: string; meta_campaign_id: string | null; status: string | null }>);
+    if (droppedAdIds.length > 0) {
+      for (let i = 0; i < droppedAdIds.length; i += 500) {
+        const chunk = droppedAdIds.slice(i, i + 500);
+        const { error: updAdErr } = await admin
+          .from("meta_ads")
+          .update({ status: "ARCHIVED", effective_status: "ARCHIVED", synced_at: now, updated_at: now })
+          .eq("workspace_id", p.workspaceId)
+          .eq("meta_ad_account_id", p.adAccountId)
+          .in("meta_ad_id", chunk);
+        if (updAdErr) {
+          await reportDbError(updAdErr, { op: "meta-structure-dropped-ads-archive", table: "meta_ads", account: p.adAccountId, count: chunk.length });
+          throw new Error(
+            `meta_ads drop-out archive failed: ${(updAdErr as { code?: string }).code ?? "?"} ${updAdErr.message} — after archiving ${i}/${droppedAdIds.length}`,
+          );
+        }
+      }
+    }
+  }
 
   return { campaigns: campaignsPersisted, adsets: adsetsPersisted, ads: adsPersisted };
 }

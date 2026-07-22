@@ -1,0 +1,1 @@
+- **Lossless error diagnostics — kill the `[object Object]` blackhole** · verified 2026-07-21 · → [[../libraries/error-text]]

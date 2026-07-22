@@ -36,7 +36,9 @@ Uses the `@easypost/api` npm SDK (no raw HTTP). The SDK targets `https://api.eas
 
 Inbound tracking webhook → handler verifies `easypost_webhook_secret` → matches by `easypost_shipment_id` → updates [[../tables/returns]].`status` / `delivered_at` / `tracking_status`.
 
-**On `delivered` event:** fires Inngest `returns/process-delivery` → [[../inngest/returns]] → instantly fires `returns/issue-refund`. No 24h wait, no inventory dispose.
+**On `delivered` OR `available_for_pickup` event:** fires Inngest `returns/process-delivery` → [[../inngest/returns]] → instantly fires `returns/issue-refund`. No 24h wait, no inventory dispose. Phase 2 fix — `available_for_pickup` (USPS post-office / locker delivery) used to stamp the return as delivered but never fire the event (guaranteed-stuck refund); the dispatch now checks a `DELIVERED_TRACKER_STATUSES` set so both statuses converge on one dispatch site.
+
+**Fail-loud webhook.** The route uses the `inngest` client (not a raw `fetch` to `https://inn.gs/e/<key>` — that gap silently swallowed dispatch failures + returned 200 so EasyPost never retried), checks the returns-update error and returns 500 on failure, and returns 500 on any `inngest.send` throw so EasyPost's own retry policy engages. `src/app/api/webhooks/easypost/route.ts`.
 
 ## Gotchas
 
@@ -47,6 +49,7 @@ Inbound tracking webhook → handler verifies `easypost_webhook_secret` → matc
 - **Refund fires on EasyPost `delivered`, not carrier first-scan.** See feedback_return_refund_trigger.
 - **Imported returns** (not created by us — `easypost_shipment_id IS NULL`) should never be auto-refunded. Always filter `.not("easypost_shipment_id", "is", null)`.
 - **Test mode keys** can buy labels against the USPS sandbox — but the labels are NOT usable. Production cutover requires flipping `easypost_test_mode = false`.
+- **Webhook log-level for tracker statuses.** The webhook handler logs `return_to_sender`, `failure`, `error`, and `cancelled` tracker statuses at `console.warn` (not error), because these are normal business signals (USPS bouncing a package back, delivery failures due to address issues, etc.), not code faults. Logging at warn avoids creating false Control Tower error incidents for fully-handled business events; the workspace still receives the dashboard notification and the webhook returns 200 OK. See src/app/api/webhooks/easypost/route.ts lines 186–205.
 
 ## Files
 

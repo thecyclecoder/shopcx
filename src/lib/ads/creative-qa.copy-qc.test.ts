@@ -49,7 +49,7 @@ test("(a) computeCopyQcPreCheck: clean copy → validator pass + TRUSTED CONTEXT
   assert.match(result.trustedContextBlock, /END_VALIDATOR_TRUSTED_CONTEXT_v1/);
   assert.match(result.trustedContextBlock, /VALIDATOR_PASS: true/);
   // Every rail must appear so Max can align his hard_gates output on the same names.
-  for (const rail of ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate", "single_promise"]) {
+  for (const rail of ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate"]) {
     assert.match(result.trustedContextBlock, new RegExp(rail));
   }
 });
@@ -147,7 +147,6 @@ const passVerdictWithScrollStop = {
     no_fabrication: true,
     no_cold_offer: true,
     no_competitor_leak: true,
-    single_promise: true,
     render_ok: true,
   },
   persuasion_score: 7,
@@ -658,7 +657,6 @@ test("(f) parseCopyQaVerdict: hard-gate fail carries scroll_stop unchanged (advi
       no_fabrication: false,
       no_cold_offer: true,
       no_competitor_leak: true,
-      single_promise: true,
       render_ok: true,
     },
     persuasion_score: null,

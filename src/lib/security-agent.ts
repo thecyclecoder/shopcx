@@ -286,7 +286,7 @@ async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityRev
  * fire-and-forget — if it's dropped (a Vercel deploy reaps the Inngest sync mid-flight, the box is down,
  * a transient error), the merged commit never gets its post-merge security pass and nothing re-checks.
  *
- * This is the cheap if-due re-sweep, mirroring `enqueueSpecTestIfDue` / `enqueueSpecReviewIfDue` for
+ * This is the cheap if-due re-sweep, mirroring `enqueueSpecTestIfDue` for
  * symmetry: enumerate the audit-authoritative source of every merged `claude/*` build in the window —
  * `spec_status_history` rows with `actor='merge:<sha>'` (written by `markSpecCardMergeShipped` inside
  * `applyMergedBuildEffects`, append-only + never deleted → survives `fold`). For each unique merge SHA

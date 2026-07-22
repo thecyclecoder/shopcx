@@ -2,6 +2,7 @@
 // Used by fraud detection to tag orders as "suspicious" and release on dismiss
 
 import { getShopifyCredentials } from "@/lib/shopify-sync";
+import { errText } from "@/lib/error-text";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 
 async function shopifyGraphQLMutation(
@@ -68,7 +69,7 @@ export async function addOrderTags(
     return { success: true };
   } catch (err) {
     console.error(`Failed to add tags to order ${orderId}:`, err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -110,6 +111,6 @@ export async function removeOrderTags(
     return { success: true };
   } catch (err) {
     console.error(`Failed to remove tags from order ${orderId}:`, err);
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }

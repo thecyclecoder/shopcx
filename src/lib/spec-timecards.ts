@@ -373,3 +373,90 @@ export async function listStalledCandidates(
   }
   return out;
 }
+
+// ── build-completed-with-deferred-pr-must-auto-redrive-not-silently-stall Phase 2 ────────────────
+//
+// Close orphaned needs_input wait spans on build resume / completion.
+//
+// The per-row wait_entered / wait_exited chokepoint (`resolvePendingWaitTransition` in
+// [[../../scripts/builder-worker.ts]]) fires ONLY when the SAME agent_jobs row transitions from a
+// wait status to `queued_resume`. That misses the multi-open-span case the
+// factor-scores-reweight-selection-engine 35-min stall exhibited: two separate `needs_input`
+// spans (04:08 + 12:59) opened for the same spec across different job rows, and the resume →
+// build-done flow closed neither — so `getTimecard.open_waits` reported waiting:true for a spec
+// that was already running work, corrupting the M3 legit-wait filter and any operator read.
+//
+// This helper reads the spec's ledger, folds it with the SAME stack-pairing logic
+// [[foldTimeline]] uses, and emits ONE `wait_exited` per still-open span whose `wait_kind`
+// matches `waitKind` (default `needs_input`). Idempotent — a call with nothing to close is a
+// no-op; a repeat call finds no open spans and returns 0. The emitted rows carry
+// `metadata.superseded_by_build_activity=true` + the `reason` so the audit trail explains why
+// the span was closed by the worker rather than by a paired user-side unblock.
+export interface CloseOrphanedWaitSpansResult {
+  closed: number;
+  wait_kinds: string[];
+}
+
+export async function closeOrphanedNeedsInputWaitSpans(
+  admin: Admin,
+  workspace_id: string,
+  spec_slug: string,
+  opts: {
+    actor: string;
+    reason: string;
+    /** Restrict to one kind (default `needs_input` — the class the spec cites). Pass `null` for ANY wait. */
+    wait_kind?: TimecardWaitKind | string | null;
+    /** Structured note attached to the emitted `wait_exited` metadata so the audit is self-describing. */
+    extra_metadata?: Record<string, unknown>;
+  },
+): Promise<CloseOrphanedWaitSpansResult> {
+  try {
+    const { data, error } = await admin
+      .from("spec_timecard_events")
+      .select(SELECT_COLS)
+      .eq("workspace_id", workspace_id)
+      .eq("spec_slug", spec_slug)
+      .order("at", { ascending: true });
+    if (error) {
+      console.warn(
+        `[spec-timecards] closeOrphanedNeedsInputWaitSpans read failed spec=${spec_slug}: ${error.message}`,
+      );
+      return { closed: 0, wait_kinds: [] };
+    }
+    const events = (data ?? []) as TimecardEvent[];
+    const view = foldTimeline(spec_slug, events);
+    const wanted = opts.wait_kind === undefined ? "needs_input" : opts.wait_kind;
+    const orphans = view.open_waits.filter((w) => wanted === null ? true : w.wait_kind === wanted);
+    if (orphans.length === 0) return { closed: 0, wait_kinds: [] };
+    let closed = 0;
+    const kinds: string[] = [];
+    for (const w of orphans) {
+      // Emit ONE wait_exited per open span. foldTimeline's stack-pairing means the most-recent
+      // matching wait_entered pops off first, so repeated emissions here close successive spans
+      // in stack order (LIFO). We emit sequentially (not concurrently) so an inbound get-view
+      // read never observes a partial state.
+      await recordTimecardEvent(admin, {
+        workspace_id,
+        spec_slug,
+        event_kind: "wait_exited",
+        actor: opts.actor,
+        wait_kind: w.wait_kind,
+        metadata: {
+          superseded_by_build_activity: true,
+          reason: opts.reason,
+          entered_at: w.entered_at,
+          waiting_on: w.waiting_on,
+          ...(opts.extra_metadata ?? {}),
+        },
+      });
+      closed += 1;
+      kinds.push(String(w.wait_kind));
+    }
+    return { closed, wait_kinds: kinds };
+  } catch (e) {
+    console.warn(
+      `[spec-timecards] closeOrphanedNeedsInputWaitSpans threw spec=${spec_slug}: ${(e as Error).message}`,
+    );
+    return { closed: 0, wait_kinds: [] };
+  }
+}

@@ -257,7 +257,10 @@ const SCHWARTZ_SOLUTION_AWARE: readonly string[] = [
   "vitamin", "protein", "collagen", "probiotic",
 ];
 const SCHWARTZ_MOST_AWARE: readonly string[] = [
-  "save", "off", "free shipping", "deal", "today", "buy now", "order now",
+  // `free shipping` intentionally NOT here (CEO 2026-07-21) — it's a trust/risk-reversal element usable
+  // at any awareness stage, not a deal-chase most-aware offer signal. Mirrors its removal from the
+  // cold-offer gate in lf8.ts.
+  "save", "off", "deal", "today", "buy now", "order now",
   "% off", "$ off",
 ];
 

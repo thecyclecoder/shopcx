@@ -16,7 +16,7 @@ validateGeneratedCopy(
 
 `pass` is `checks.every(c => c.pass)`. Every check reports one rail's verdict, a short `reason` when it fails, and (when relevant) the offending substring in `evidence`. The `brief` parameter is threaded through unused in Phase 1 so future rails that need to cross-reference the brief's proof stack don't force a signature change on either Phase-2 call site.
 
-## The six rails (fixed order)
+## The five rails (fixed order)
 
 | # | Rail | What it checks | SSOT reuse |
 |---|---|---|---|
@@ -25,9 +25,10 @@ validateGeneratedCopy(
 | 3 | `no_msrp` | No bare `$N` in any field UNLESS the same field carries `~~` (strikethrough) or a `per serving` / `per cup` / `per pouch` phrase | inline regex — same rule as `buildMetaCopy`'s MSRP guard |
 | 4 | `no_competitor_leak` | For each token from `context.competitorAdvertisers` (≥3 chars, less the product-name allowlist), the token must NOT appear as a whole word in any field | mirrors debrand.ts `PRODUCT_NAME_ALLOWLIST` + word-boundary rule |
 | 5 | `cold_offer_gate` | When `context.audience_temperature === "cold"`, delegates to `hasColdOfferLeak(copy)` — otherwise `pass: true` (warm/hot/null untouched) | [[lf8]] `hasColdOfferLeak` + `COLD_OFFER_TOKENS` (shipped by the M1 `dahlia-audience-temperature-marking-and-cold-offer-gate` spec) |
-| 6 | `single_promise` | `headline + primaryText` matches at most ONE unique promise substring across a small compiled regex list (`lose N lbs`, `boosts X`, `more X`, `fixes X`) | inline promise patterns |
 
-Rails run in the listed order and every rail always runs — so a fail in rail 1 doesn't short-circuit the rest, and `checks[]` always carries six entries. Consumers can key on `rail` to render a per-rail badge instead of a bare `pass: false`.
+> **`single_promise` was REMOVED (CEO 2026-07-21).** It capped the ad at one benefit promise, but our hero products are legitimately multi-benefit — multiple promises are fine as long as each is a REAL benefit, which the `no_fabrication` claim-trace firewall already enforces (every claim must trace to real evidence). The count-limit was an un-sanctioned overreach from `dahlia-shared-deterministic-copy-validator` Phase 1. Removed from the validator AND from Max's copy-QC hard gates ([[creative-qa]] `HARD_GATE_KEYS`) + the [[../../../.claude/skills/max-copy-qc/SKILL]] verdict shape.
+
+Rails run in the listed order and every rail always runs — so a fail in rail 1 doesn't short-circuit the rest, and `checks[]` always carries five entries. Consumers can key on `rail` to render a per-rail badge instead of a bare `pass: false`.
 
 ## Consumers (Phase 2 — WIRED)
 

@@ -19,6 +19,7 @@
  */
 
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { CsStoryline } from "./cs-director-digest";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
 
@@ -122,7 +123,7 @@ async function walkLeash(
     }
     return { ok: true, autonomy: next };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: errText(err) };
   }
 }
 
@@ -179,7 +180,7 @@ export async function addPolicyFromStoryline(
     }
     return { ok: true, policy_id: String(data.id) };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: errText(err) };
   }
 }
 
@@ -212,7 +213,7 @@ export async function addRuleFromStoryline(
     }
     return { ok: true, sonnet_prompt_id: id };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: errText(err) };
   }
 }
 
@@ -250,6 +251,6 @@ export async function stampDigestReply(
     }
     return { ok: true };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: errText(err) };
   }
 }

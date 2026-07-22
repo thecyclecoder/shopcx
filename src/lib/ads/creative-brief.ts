@@ -99,6 +99,21 @@ export interface ScoredAngle {
   conceptTags?: ConceptTags | null;
 }
 
+/** Internal angle-CATEGORY labels used as an angle's `leadBenefit` for grouping (never real ad copy).
+ *  They must never render on a creative — `supportingBenefits` maps angle leadBenefits into the
+ *  on-image subhead, so a category label like "Ingredient / mechanism" leaked into the pixels and
+ *  Max's QC rejected it (2026-07-19/20). Defense-in-depth alongside the ingredient-angle source fix:
+ *  filter these out wherever leadBenefit becomes rendered copy. */
+export const INTERNAL_ANGLE_LABELS: ReadonlySet<string> = new Set([
+  "Ingredient / mechanism",
+  "Weight loss (real customer transformation)",
+]);
+
+/** True iff a string is an internal angle-category label that must never render as ad copy. */
+export function isInternalAngleLabel(s: string | null | undefined): boolean {
+  return !!s && INTERNAL_ANGLE_LABELS.has(s.trim());
+}
+
 function scoreAngle(hook: string, leadBenefit: string, source: ScoredAngle["source"], retentionSignal: number, raw?: Row): ScoredAngle {
   const text = `${hook} ${leadBenefit}`;
   const reasons: string[] = [];
@@ -172,9 +187,14 @@ export function selectAngles(pi: ProductIntelligence, transformationStories: PIR
   }
   // Ingredient / mechanism angles — "the ingredient that does X / how it actually works". A DIFFERENT
   // concept from a transformation story (the ingredient-breakdown creative is a real winner for us).
+  // leadBenefit MUST be a REAL benefit string, never the internal category label: it feeds
+  // `supportingBenefits` (the rendered subhead), so the literal "Ingredient / mechanism" leaked onto
+  // the on-image copy and Max's QC rejected it (2026-07-19/20). Use the ingredient's real
+  // mechanism/benefit as the supporting truth instead.
   for (const ir of (pi.ingredientResearch as Row[]).slice(0, 4)) {
     const hook = str(ir.benefit_headline) || str(ir.mechanism_explanation).slice(0, 80);
-    if (hook) out.push(scoreAngle(hook, "Ingredient / mechanism", "ingredient", 5, ir));
+    const leadBen = str(ir.mechanism_explanation).slice(0, 100) || str(ir.benefit_headline) || hook;
+    if (hook) out.push(scoreAngle(hook, leadBen, "ingredient", 5, ir));
   }
   // Authority / proof angles — nutritionist / 3rd-party-tested / award / guarantee credibility.
   const p = pi.product as Row | null;
@@ -257,6 +277,10 @@ export function selectAnglesForTemperature(
 export interface CreativeBrief {
   productTitle: string;
   angle: ScoredAngle;
+  /** Owner's free-text directions for THIS generation (Research › Ads "Generate ad like this"),
+   *  e.g. "remove the free tote badge". Applied as an explicit instruction in BOTH the image prompt
+   *  and the copy-author prompt so it lands first-pass. Null/absent when no note was given. */
+  authorNotes?: string | null;
   /** The proof behind the LEAD claim — a real review quote or an ingredient-research citation. */
   leadProof: { kind: "review" | "ingredient" | "cluster"; text: string; attribution?: string } | null;
   /** A real customer transformation to anchor the creative (weight-loss angles), with its photo if any. */
@@ -349,6 +373,11 @@ export interface BuildCreativeBriefOpts {
    *  role='lead' benefit onto the brief. The riff is the STRONG DEFAULT (`false`); the
    *  minority pure-competitor slot is opt-in for learning. Ignored for own-brand angles. */
   pureCompetitor?: boolean;
+  /** Research › Ads "Generate ad like this" free-text notes — the owner's targeted directions for
+   *  THIS generation ("remove the free tote badge", "lead with the focus benefit"). Surfaced onto
+   *  `brief.authorNotes` so both the image prompt (`buildPrompt`) and the copy-author prompt
+   *  (`buildCopyAuthorPrompt`) apply it first-pass — skipping rounds of manual editing. */
+  authorNotes?: string;
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -422,10 +451,28 @@ export async function buildCreativeBrief(
   }
 
   // Supporting retention truths — the loved-but-commodity benefits (energy-no-crash, taste) go in the body.
-  const supportingBenefits = selectAngles(pi, transformationStories)
+  const supportingBenefitsBase = selectAngles(pi, transformationStories)
     .filter((a) => a.commodity || a.retentionTruth >= 8)
-    .slice(0, 3)
-    .map((a) => a.leadBenefit);
+    .map((a) => a.leadBenefit)
+    // never let an internal angle-category label reach the rendered subhead (defense-in-depth)
+    .filter((b) => b && !isInternalAngleLabel(b))
+    .slice(0, 3);
+  // dahlia-converts-competitor-benefits-to-ours — surface OUR product's REAL listed benefits
+  // (`product_benefit_selections` role in {lead, supporting}) so when Dahlia imitates a competitor she
+  // can CONVERT their benefit claims into OURS instead of carrying a benefit our product lacks (the
+  // Bloom "gut / immunity / hair / nails" → Amazing Creamer "skin / focus / weight" case — Dahlia kept
+  // carrying Bloom's benefits and the never-fabricate firewall correctly rejected them). These are ALSO
+  // firewall-groundable: `verifyClaimTrace` grounds a `supportingBenefit` claim against
+  // `brief.supportingBenefits`, so a claim about one of OUR listed benefits now passes the gate.
+  // Appended AFTER the retention-truth benefits so the image subhead (`.slice(0,2)`) is unchanged.
+  const ourListedBenefits = ((pi.benefits as Row[]) ?? [])
+    .filter((b) => { const r = str(b.role); return r === "lead" || r === "supporting"; })
+    .map((b) => str(b.benefit_name).trim())
+    .filter((n) => n && !isInternalAngleLabel(n));
+  const supportingBenefits = [
+    ...supportingBenefitsBase,
+    ...ourListedBenefits.filter((n) => !supportingBenefitsBase.some((b) => b.toLowerCase() === n.toLowerCase())),
+  ].slice(0, 8);
 
   // Verified proof stack — product certs/awards + store selling points.
   const p = pi.product as Row | null;
@@ -584,7 +631,7 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
+  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
 }
 
 /**

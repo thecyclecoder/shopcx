@@ -42,7 +42,7 @@ export type DirectorActionKind =
   // spec-review-agent Phase 3 — Vale narrowed to QUALITY ONLY; one verdict per in_review spec.
   | "spec_review_passed" // well-formed (CHECKLIST cleared) → flags.vale_pass=true; spec stays in_review for Ada's disposition lane.
   // spec-review-pass-always-stamps-review-passed-flag Phase 2 — the passed-but-unstamped reconciler
-  // ([[../libraries/agents-spec-review]] `runValeReviewPassReconciler`) healed a legacy spec that had a
+  // (the retired Vale lane's `runValeReviewPassReconciler`) healed a legacy spec that had a
   // `spec_review_passed` activity row from a prior pass but a NULL `specs.vale_review_passed_at` (dropped by
   // the pre-Phase-1 best-effort mirror path). One row per spec healed; metadata:
   // { actor:'reconciler:vale-review-passed-flag', stamped_at, source_activity_id?, autonomous:true }.
@@ -53,7 +53,7 @@ export type DirectorActionKind =
   | "spec_dispose_downgrade" // author suggested `planned`, Ada deferred — autonomous flip + a CEO notification (one-click override to planned).
   | "spec_dispose_upgrade_proposed" // author suggested `deferred`, Ada wants `planned` — GATED, parks a CEO approval card (Planned / Deferred + reason).
   // spec-review-agent Phase 4 — any agent (Vale on re-check, Bo, Ada, repair/regression, the CEO via the
-  // board control) that flips a malformed/off spec BACK to `in_review` so it returns to Vale's queue.
+  // board control) that flips a malformed/off spec BACK to `in_review` so Ada re-disposes it.
   // The `actor` on the row records WHO sent it back; the `reason` records WHAT was off.
   | "spec_sent_back_to_review" // a malformed/off spec was returned to the in_review column; the build pipeline refuses to dispatch it until Vale clears it again.
   // goal-greenlight-button-and-author-writes-db Phase 1 — the CEO's one-click DB-flag actions on a goal
@@ -250,6 +250,15 @@ export type DirectorActionKind =
   // by Platform (director_function='platform'). metadata: { actor:'serialized-rebase-merge-guard',
   // goal_slug, spec_branch, rebased, autonomous:true }.
   | "goal_branch_merge_escalated"
+  // factor-scores-reweight-selection-engine Phase 3 — the picker's per-pick audit trail
+  // (docs/brain/specs/factor-scores-reweight-selection-engine.md). Written by
+  // `pickNextCombination` in [[../lib/ads/selection-engine]] on every return, so a founder
+  // (or coach) can retrace which factor scores biased the decision — no silent proxy
+  // optimization per the north-star supervisable-autonomy rail. Owned by Growth
+  // (director_function='growth'). metadata: { product_id, temperature, intent,
+  // exploit_source, biased_by_factors, filtered_by_factors, chosen_combination_id,
+  // chosen_angle_id, chosen_pattern_id, autonomous:true }.
+  | "media_buyer_selection_reweighted"
   // build-lane-pre-commit-self-verify Phase 2 — the pre-commit self-verify gate ([[builder-worker]]
   // § Pre-commit self-verify gate) stamps ONE row per firing so Ada can supervise whether the rail
   // actually drops Bo's first-pass fix-phase rate (the ~18% Ask-Ada number). Emitted from

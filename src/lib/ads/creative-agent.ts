@@ -14,6 +14,7 @@
  * per product whose bin is below the floor. See [[../../../docs/brain/lifecycles/ad-creative.md]].
  */
 import { randomUUID } from "crypto";
+import { errText } from "@/lib/error-text";
 import { writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -25,7 +26,7 @@ import { hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey, type Treatment } from "@/lib/ads/creative-learning";
-import { getProvenCompetitorAngles, scoreCompetitorAcquisitionPower, type CreativeIntent } from "@/lib/ads/creative-sourcing";
+import { getProvenCompetitorAngles, getCompetitorAngleBySkeletonId, scoreCompetitorAcquisitionPower, type CreativeIntent, type CompetitorAngle } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { chooseGroundedSubstitute, debrandForOurBrand, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
 import { generateCreative } from "@/lib/ads/creative-generate";
@@ -818,6 +819,11 @@ export interface CopyAuthorSessionInputs {
     | { ok: true; maxVerdict: CopyQaVerdict }
     | { ok: false; reason: string; maxVerdict: CopyQaVerdict | null }
   >;
+  /** dahlia-max-live-timeline — best-effort live progress narration for the Dahlia→Max ping-pong.
+   *  The caller (the runner) writes each note to `agent_jobs.session_note` so the box/session card
+   *  stops being a black box (it shows "Dahlia authoring… → Max scoring… → competitor leak, revising…
+   *  → exhausted", instead of a silent 10-min run). MUST NOT throw. Omit ⇒ no narration (tests). */
+  reportProgress?: (note: string) => void;
 }
 
 /** Discriminated outcome of `runCopyAuthorSession`. `ok` carries the parsed verdict + how many
@@ -874,6 +880,12 @@ export type CopyAuthorSessionOutcome =
        *  `max_qc_eligible=false` instead of discarding the whole session — the CEO's rule: never
        *  waste a produced creative. */
       lastAuthorVerdict?: AuthorModeCopy | null;
+      /** always-bin-held-creative-with-flags — the LAST authored caption for ANY exhaustion class
+       *  (unlike `lastAuthorVerdict`, which is Max-safe only). Set after every successful parse and
+       *  never cleared, so stockProduct can bin the creative HELD + flagged for CEO review on a
+       *  firewall / validator / self-score / Max exhaustion alike — never discard a produced creative.
+       *  The `reason` field names what failed (the red flag). Absent only if no attempt ever parsed. */
+      heldCaption?: AuthorModeCopy | null;
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -1265,6 +1277,13 @@ export function buildCopyAuthorPrompt(
 ): string {
   const briefJson = sanitizeAuthorField(JSON.stringify(inputs.brief));
   const rubric = sanitizeAuthorField(inputs.rubricText);
+  // Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS ad
+  // ("remove the free tote badge"). Owner-authenticated ⇒ TRUSTED (rendered in the preamble beside
+  // AUDIENCE_TEMPERATURE, not inside the untrusted DATA block) — but still `sanitizeAuthorField`'d so
+  // free text can never break the copy-QC / author fence markers. Null when no note was given.
+  const ownerDirections = inputs.brief.authorNotes?.trim()
+    ? sanitizeAuthorField(inputs.brief.authorNotes.trim())
+    : null;
   // dahlia-preserve-competitor-copy-dna-debranded Phase 2 — emit the six-slot debranded shape
   // (`hook / framework / mechanism_claim / proof / offer / competitor_advertiser`) the SKILL's
   // IMITATE-DEBRANDED rule reads. Snake-case keys inside the payload mirror the spec's session
@@ -1305,6 +1324,11 @@ export function buildCopyAuthorPrompt(
     // was empty. Dahlia may cite this in her verdict rationale (and MUST when she drops
     // to shelfModal per the never-fabricate firewall's target-1-fallback rule).
     `MARKET_SOPHISTICATION_EVIDENCE: ${sanitizeAuthorField(JSON.stringify(inputs.marketSophisticationEvidence))}`,
+    // Owner's up-front "Generate ad like this" directions — a TRUSTED worker input (the owner asked
+    // for this ad). Apply exactly; overrides the brief on any conflict. Absent → not emitted.
+    ...(ownerDirections
+      ? ["", `OWNER_DIRECTIONS (apply these EXACTLY — the owner asked for this ad and left specific directions; they override the brief on any conflict): ${ownerDirections}`]
+      : []),
     "",
     COPY_AUTHOR_INJECTION_GUARDRAIL,
     "",
@@ -1567,6 +1591,33 @@ export function parseAuthorVerdict(text: string): ParseAuthorVerdictResult {
  * Pure w.r.t. Supabase — takes a dispatcher callable + the injected firewall closure; the caller
  * (stockProduct) is responsible for writing the tmp jpeg + calling insertReadyCreative on ok.
  */
+/** PURE — turn an internal revise `lastReason` into a short human phrase for the live session card
+ *  (dahlia-max-live-timeline). Keeps the ping-pong narration readable ("competitor brand leaked in")
+ *  instead of leaking raw rail codes. Exported for the unit test. */
+export function humanizeReviseReason(reason: string): string {
+  const r = (reason || "").trim();
+  if (!r) return "revising";
+  if (r.startsWith("validator_failed:")) {
+    const rails = r.slice("validator_failed:".length).trim();
+    if (/no_competitor_leak/.test(rails)) return "competitor brand leaked in";
+    if (/cold_offer_gate/.test(rails)) return "offer leaked into cold copy";
+    if (/no_msrp/.test(rails)) return "bare price shown";
+    if (/lf8/.test(rails)) return "weak core desire";
+    if (/meta_caps/.test(rails)) return "over Meta length caps";
+    return `failed ${rails}`;
+  }
+  if (r.startsWith("parse_failed")) return "unparseable output";
+  if (r.startsWith("self_score")) return "self-score too low";
+  if (r === "cold_offer_leak") return "offer leaked into cold copy";
+  if (r.startsWith("ad_name_invalid")) return "invalid ad name";
+  if (r.startsWith("paragraph_structure")) return "wrong paragraph shape";
+  if (r.startsWith("human_voice")) return "AI-tell phrasing (em-dash)";
+  if (r.startsWith("max_qc_below_floor")) return "Max scored below 7/10";
+  if (/claim|firewall/i.test(r)) return "unverified claim";
+  if (r.startsWith("dispatch_threw") || r === "session_error" || r.startsWith("session_lost")) return "session error";
+  return r.slice(0, 60);
+}
+
 export async function runCopyAuthorSession(
   inputs: CopyAuthorSessionInputs,
   dispatch: CopyAuthorSessionDispatcher,
@@ -1586,6 +1637,12 @@ export async function runCopyAuthorSession(
   // exhaustion only surfaces a caption when Max was the block AND the caption is otherwise safe
   // to bin.
   let lastAuthorVerdict: AuthorModeCopy | null = null;
+  // always-bin-held-creative-with-flags — the LAST successfully-parsed caption regardless of which
+  // gate it then failed. Unlike `lastAuthorVerdict` (Max-safe only), this is set after EVERY parse and
+  // NEVER cleared, so on exhaustion of ANY class stockProduct can still bin the creative HELD (flagged,
+  // non-postable) for CEO review instead of discarding 10+ minutes of work. Null only if not one
+  // attempt ever parsed.
+  let lastParsedVerdict: AuthorModeCopy | null = null;
   // copy-author-self-heal (2026-07-17) — the box session to RESUME on the next revise turn. Set from
   // each healthy dispatch's returned sessionId/configDir; cleared to null whenever we must go fresh (a
   // lost session, a dispatch that threw, or one that never established a session). null ⇒ the next turn
@@ -1594,7 +1651,13 @@ export async function runCopyAuthorSession(
   let resumeSessionId: string | null = null;
   let resumeConfigDir: string | null = null;
   const cap = MAX_COPY_AUTHOR_REVISE_ATTEMPTS;
+  const note = (s: string) => { try { inputs.reportProgress?.(s); } catch { /* best-effort */ } };
   for (let attempt = 0; attempt <= cap; attempt++) {
+    // dahlia-max-live-timeline — narrate each ping-pong beat onto the session card. On a revise, name
+    // WHY (the prior gate) so a 10-min run reads "Dahlia revising (competitor brand leaked in)…" instead of blank.
+    note(attempt === 0
+      ? "Dahlia is authoring the copy…"
+      : `Dahlia is revising — ${humanizeReviseReason(lastReason)} (try ${attempt + 1}/${cap + 1})…`);
     // Resume the SAME session with a short revise turn when we hold a live session id; otherwise send
     // the full context (attempt 0, or a fresh session after the lost-session failsafe fired).
     const resumePin = resumeSessionId
@@ -1607,7 +1670,7 @@ export async function runCopyAuthorSession(
     try {
       dispatchResult = await dispatch(prompt, inputs.imagePath, resumePin);
     } catch (err) {
-      lastReason = `dispatch_threw: ${err instanceof Error ? err.message : String(err)}`;
+      lastReason = `dispatch_threw: ${errText(err)}`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;
@@ -1654,6 +1717,9 @@ export async function runCopyAuthorSession(
       continue;
     }
     const verdict = parsed.verdict;
+    // always-bin-held-creative-with-flags — remember the last authored caption regardless of which gate
+    // it fails below, so exhaustion of ANY class still has a caption to bin HELD for CEO review.
+    lastParsedVerdict = verdict;
     if (verdict.selfScore.total < AUTHOR_SELF_SCORE_FLOOR) {
       lastReason = `self_score_below_floor (total=${verdict.selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR})`;
       lastValidatorMisses = undefined;
@@ -1816,6 +1882,7 @@ export async function runCopyAuthorSession(
     // without ever showing her the critique. Skipped when the caller injected no closure (the
     // bench / deterministic callers stay Phase-1/2 behavior byte-identical).
     if (inputs.verifyMaxCopyQc) {
+      note("Max is grading the copy…");
       const maxCheck = await inputs.verifyMaxCopyQc(verdict);
       if (!maxCheck.ok) {
         lastReason = maxCheck.reason;
@@ -1834,10 +1901,13 @@ export async function runCopyAuthorSession(
       lastMaxCopyQcMissed = false;
       lastMaxCopyQcVerdict = maxCheck.maxVerdict;
       lastAuthorVerdict = null;
+      note(`Max approved (${maxCheck.maxVerdict.persuasion_score}/10) — rendering the final ad…`);
       return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: maxCheck.maxVerdict };
     }
+    note("Copy cleared all checks — rendering the final ad…");
     return { kind: "ok", verdict, attempts: attempt + 1 };
   }
+  note(`Gave up after ${cap + 1} tries — ${humanizeReviseReason(lastReason)}`);
   return {
     kind: "exhausted",
     reason: lastReason || "exhausted",
@@ -1847,6 +1917,10 @@ export async function runCopyAuthorSession(
     ...(lastMaxCopyQcMissed
       ? { maxCopyQcMissed: true, lastMaxCopyQcVerdict, lastAuthorVerdict }
       : {}),
+    // always-bin-held-creative-with-flags — the last authored caption for ANY exhaustion class, so
+    // stockProduct can bin it HELD + flagged (not just the Max-QC class). Undefined only if no attempt
+    // ever parsed a caption.
+    ...(lastParsedVerdict ? { heldCaption: lastParsedVerdict } : {}),
   };
 }
 
@@ -1881,6 +1955,8 @@ async function runCopyAuthorSessionForImage(
      *  hold). Passed straight through to `runCopyAuthorSession`. Optional so pre-existing
      *  callers keep compiling. */
     verifyMaxCopyQc?: CopyAuthorSessionInputs["verifyMaxCopyQc"];
+    /** dahlia-max-live-timeline — live ping-pong narration passthrough to the session card. */
+    reportProgress?: CopyAuthorSessionInputs["reportProgress"];
   },
   dispatch: CopyAuthorSessionDispatcher,
 ): Promise<CopyAuthorSessionOutcome> {
@@ -1895,13 +1971,13 @@ async function runCopyAuthorSessionForImage(
       .jpeg({ quality: 82 })
       .toBuffer();
   } catch (err) {
-    return { kind: "exhausted", reason: `image_undecodable: ${err instanceof Error ? err.message : String(err)}`, attempts: 0 };
+    return { kind: "exhausted", reason: `image_undecodable: ${errText(err)}`, attempts: 0 };
   }
   const imagePath = join(tmpdir(), `creative-author-${randomUUID()}.jpg`);
   try {
     await writeFile(imagePath, normalized);
   } catch (err) {
-    return { kind: "exhausted", reason: `tmpfile_write_failed: ${err instanceof Error ? err.message : String(err)}`, attempts: 0 };
+    return { kind: "exhausted", reason: `tmpfile_write_failed: ${errText(err)}`, attempts: 0 };
   }
   try {
     return await runCopyAuthorSession(
@@ -1917,6 +1993,7 @@ async function runCopyAuthorSessionForImage(
         ourBrand: input.ourBrand,
         verifyClaimTrace: input.verifyClaimTrace,
         verifyMaxCopyQc: input.verifyMaxCopyQc,
+        reportProgress: input.reportProgress,
       },
       dispatch,
     );
@@ -2094,13 +2171,13 @@ async function runCopyQcForCreative(
           .jpeg({ quality: 82 })
           .toBuffer();
       } catch (err) {
-        return { verdict: null, reason: `image_undecodable_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+        return { verdict: null, reason: `image_undecodable_${render.format}: ${errText(err)}` };
       }
       const imagePath = join(tmpdir(), `creative-copy-qc-${runId}-${render.format}.jpg`);
       try {
         await writeFile(imagePath, normalized);
       } catch (err) {
-        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${err instanceof Error ? err.message : String(err)}` };
+        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${errText(err)}` };
       }
       tmpFiles.push({ format: render.format, path: imagePath });
     }
@@ -2144,6 +2221,18 @@ async function runCopyQcForCreative(
       runTargetTemperature: input.audienceTemperature,
     });
     if (parsed.kind !== "ok") {
+      // DIAGNOSTIC (2026-07-19) — copy-QC has been missing every grade with
+      // `copy_qc_verdict_no_json_block` (Max's session returns no JSON), silently blocking ALL
+      // ad postability. The dispatcher never logged Max's raw output, so the actual failure mode
+      // (prose-only / empty / truncated response) was invisible. Log a bounded snippet of the raw
+      // resultText on any parse miss so the precise cause is diagnosable, then remove once fixed.
+      const raw = outcome.resultText ?? "";
+      console.warn("copy_qc_parse_miss_raw", {
+        reason: parsed.reason,
+        rawLength: raw.length,
+        rawHead: raw.slice(0, 500),
+        rawTail: raw.length > 700 ? raw.slice(-200) : "",
+      });
       return { verdict: null, reason: `copy_qc_parse_error: ${parsed.reason}` };
     }
     return { verdict: parsed.verdict };
@@ -2242,6 +2331,11 @@ export interface AdCampaignInsertBody {
    *  ran (deterministic mode / kill-switch off / legacy). Bianca's `listReadyToTest` filters
    *  `.not("max_qc_eligible","is",false)` so NULL and TRUE both surface. */
   max_qc_eligible: boolean | null;
+  /** always-bin-held-creative-with-flags — the red-flag payload for a HELD creative (binned after
+   *  exhaustion of any class): `{ gate, reason, human, attempts }`. NULL on a normal (postable)
+   *  insert. Rendered as the "⚠ Held — <human>" banner on the ad detail page. Migration adds the
+   *  `hold_flag jsonb` column. */
+  hold_flag: { gate: string; reason: string; human: string; attempts: number } | null;
 }
 
 /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
@@ -2295,6 +2389,9 @@ export function buildAdCampaignInsertBody(args: {
    *  eligibility. Undefined / null → stamps NULL (deterministic-mode / no dispatcher / legacy);
    *  TRUE → postable; FALSE → binned-but-ineligible. */
   maxQcEligible?: boolean | null;
+  /** always-bin-held-creative-with-flags — the red-flag payload for a HELD creative. Absent on a
+   *  normal insert → stamps NULL. */
+  holdReason?: { gate: string; reason: string; human: string; attempts: number };
 }): AdCampaignInsertBody {
   const explicit = args.conceptTag;
   const conceptTag: AndromedaConceptTag | null =
@@ -2309,6 +2406,7 @@ export function buildAdCampaignInsertBody(args: {
     author_self_score: args.authorModeCopy ? args.authorModeCopy.selfScore : null,
     concept_tag: conceptTag,
     max_qc_eligible: args.maxQcEligible ?? null,
+    hold_flag: args.holdReason ?? null,
   };
 }
 
@@ -2394,14 +2492,31 @@ export interface AngleProvenance {
   lead_benefit: string;
 }
 
-/** Pure — derive the persisted provenance from a scored angle. Kept pure + exported so the
- *  explore/exploit split (and the competitor-only field gating) is unit-testable without a DB. */
-export function buildAngleProvenance(angle: ScoredAngle): AngleProvenance {
+/** Pure — derive the persisted provenance from a scored angle + the crown-gated slot intent.
+ *  Kept pure + exported so the intent → mode mapping (and the competitor-only field gating) is
+ *  unit-testable without a DB.
+ *
+ *  ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit Phase 4
+ *  (2026-07-19) — `mode` is now the crown-gated slot INTENT (`stockProduct`'s plan already
+ *  computes `wantExploit = Math.min(Math.floor(count/2), exploitPool.length)` where
+ *  `exploitPool = eligible.filter(isWon)` — so 0 crowns ⇒ 0 exploit slots), NOT `isCompetitor`.
+ *  Pre-Phase-4 the badge came from `isCompetitor ? 'explore' : 'exploit'`, so every own-brand
+ *  angle was badged EXPLOIT even when there were zero crowned winners anywhere — the badge
+ *  never told the crown-gated truth. Now an own-brand angle in an explore slot badges
+ *  `explore`, and a competitor angle in an exploit slot badges `exploit` (the rare case where
+ *  a previously-crowned competitor imitation is being doubled down on). Competitor-only fields
+ *  (advertiser / ad_image_url / hook) stay gated on `source === 'competitor'` — those are
+ *  genuinely source-specific and NOT intent-derived. `src/lib/ads/ads-read-sdk.ts`
+ *  `deriveExploreExploit` (spec-declared read chokepoint) reads the same crown-gated truth. */
+export function buildAngleProvenance(
+  angle: ScoredAngle,
+  intent: "explore" | "exploit",
+): AngleProvenance {
   const isCompetitor = angle.source === "competitor";
   const raw = (angle.raw ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
   return {
-    mode: isCompetitor ? "explore" : "exploit",
+    mode: intent,
     source: angle.source,
     competitor_advertiser: isCompetitor ? str(raw.advertiser) : null,
     competitor_ad_image_url: isCompetitor ? str(raw.imageUrl) : null,
@@ -2462,6 +2577,11 @@ async function insertReadyCreative(
      *  kill-switch off / legacy) — Bianca's filter treats NULL identically to TRUE, so today's
      *  byte-for-byte behavior is preserved for those callers. */
     maxQcEligible?: boolean | null;
+    /** always-bin-held-creative-with-flags (CEO 2026-07-21) — when a creative is binned HELD after
+     *  exhaustion (any class), the red-flag payload the detail page renders so the CEO knows which line
+     *  to fix: `{ gate, reason, human, attempts }`. Stored on the campaign `metadata.hold_flag`.
+     *  Absent on a normal (postable) insert. */
+    holdReason?: { gate: string; reason: string; human: string; attempts: number };
     /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
      *  the deterministic whole-pack lane's Treatment-derived Andromeda tag (see
      *  `mapTreatmentToConceptTag`). Threaded straight into `buildAdCampaignInsertBody`, where it
@@ -2475,6 +2595,15 @@ async function insertReadyCreative(
      *  the scan text so the swap isn't flagged as a cold-audience leak. Absent / null →
      *  today's behavior (no allowance). */
     allowedOffer?: CreativeBrief["offer"];
+    /** ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+     *  Phase 4 (2026-07-19) — the CROWN-GATED slot intent from `stockProduct`'s planner
+     *  (`wantExploit` is capped at `exploitPool.length` where `exploitPool` = eligible with
+     *  a prior win, so 0 crowns ⇒ 0 exploit slots). Threaded into `buildAngleProvenance` so
+     *  the persisted `metadata.provenance.mode` badge tells the crown-gated truth (own-brand
+     *  in an explore slot ⇒ `explore`, NOT `exploit` as the pre-Phase-4 isCompetitor branch
+     *  emitted). Absent → defaults to `"explore"` (the correct default when no crowned
+     *  winner exists, matching the planner's fallback at `!plan.length` → all-explore). */
+    intent?: "explore" | "exploit";
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. The
@@ -2505,7 +2634,14 @@ async function insertReadyCreative(
       meta_headline: copyPack.headlines[0].slice(0, META_CAPS.headline),
       meta_primary_text: copyPack.primaryTexts[0].slice(0, META_CAPS.primary_text),
       meta_description: copyPack.description.slice(0, META_CAPS.description),
-      metadata: { copy_pack: copyPack, provenance: buildAngleProvenance(angle) },
+      metadata: {
+        copy_pack: copyPack,
+        // ad-creative-box-session-only-retire-deterministic-path Phase 4 — provenance.mode
+        // reflects the CROWN-GATED slot intent (default explore when the caller did not
+        // thread one, matching stockProduct's planner fallback when there are zero crowned
+        // winners), not `isCompetitor`. See buildAngleProvenance's docstring for the reason.
+        provenance: buildAngleProvenance(angle, opts?.intent ?? "explore"),
+      },
     })
     .select("id").single();
 
@@ -2564,6 +2700,8 @@ async function insertReadyCreative(
     // verdict, threaded from stockProduct. Absent (deterministic / kill-switch off) → NULL;
     // Bianca's `.not("max_qc_eligible","is",false)` keeps NULL rows postable.
     maxQcEligible: opts?.maxQcEligible ?? null,
+    // always-bin-held-creative-with-flags — the red-flag payload for a HELD creative → metadata.hold_flag.
+    holdReason: opts?.holdReason,
   });
   const { data: campaign, error: cErr } = await admin
     .from("ad_campaigns")
@@ -2667,7 +2805,20 @@ async function stockProduct(
    *  adds the sub-7 bounce-back-to-Dahlia self-heal). When undefined (a caller without a
    *  spawn context / a bench test), the QC step is skipped byte-identical to today. */
   copyQcDispatcher?: CopyQcSessionDispatcher,
+  /** Research › Ads "Generate ad" pin — a `creative_skeletons.id` the owner chose as the EXACT
+   *  imitation base ("make one like this ad"). When set + it resolves, it becomes the SOLE
+   *  competitor angle, bypassing the shelf ranking, the cold/warm exclusion, and the retired
+   *  filter. Undefined ⇒ the shelf is ranked normally (every pre-existing caller). */
+  pinnedCompetitorSkeletonId?: string,
+  /** Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS
+   *  generation ("remove the free tote badge"). Threaded onto `brief.authorNotes` so both the image
+   *  prompt and the copy-author prompt apply it first-pass. Undefined ⇒ no note. */
+  authorNotes?: string,
+  /** dahlia-max-live-timeline — best-effort live progress narration written to the job's
+   *  `session_note` by the runner. Undefined ⇒ no narration (cadence / tests). */
+  reportProgress?: (note: string) => void,
 ): Promise<StockedCreative[]> {
+  const progress = (s: string) => { try { reportProgress?.(s); } catch { /* best-effort */ } };
   // dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope.
   // Every downstream research read (getProvenCompetitorAngles) is SCOPED to this intent so a
   // cold-audience task prefers cold-appropriate winner concepts (concept_tags.awareness_stage
@@ -2675,6 +2826,17 @@ async function stockProduct(
   // reason to exist per the spec.
   const researchIntent = resolveResearchIntent(intentOverride);
   const out: StockedCreative[] = [];
+  // Pinned-ad imitation base (Research › Ads "Generate ad"). Resolve the exact skeleton the owner
+  // picked; if it loads with a hook, it REPLACES the shelf as the competitor pool (see below). A
+  // missing/hook-less id falls back to normal sourcing + warns (never a silent wrong-ad substitute).
+  let pinnedAngle: CompetitorAngle | null = null;
+  if (pinnedCompetitorSkeletonId) {
+    pinnedAngle = await getCompetitorAngleBySkeletonId(admin, workspaceId, pinnedCompetitorSkeletonId).catch(() => null);
+    if (!pinnedAngle?.hook) {
+      console.warn("dahlia_pinned_skeleton_unusable", { workspaceId, productId, pinnedCompetitorSkeletonId, found: !!pinnedAngle });
+      pinnedAngle = null;
+    }
+  }
   // DAHLIA_COPY_MODE kill switch. Phase 1 landed the env-var READ + a default `deterministic`
   // short-circuit; Phase 3 wires the actual branch — when the flag is `author` AND a caller-
   // supplied `copyAuthorDispatcher` is available, EACH QC-passed image is handed to Dahlia's
@@ -2729,18 +2891,22 @@ async function stockProduct(
   // 60d+ AND resume_advertising=true (a still-running, deeply-proven angle is a far stronger imitate base
   // than a 30d one that may already be dead). Empty deeply-proven pool falls back visibly to the shallow
   // 30d pool + emits a `dahlia_deeply_proven_fallback` director_activity row.
-  const { angles: sourced, usedFallback: sourcedUsedFallback } = await getProvenCompetitorAngles(
-    admin,
-    workspaceId,
-    // dahlia-researches-from-winners-flow-ad-library Phase 1 — pass the declared intent so
-    // the returned angles rank temperature-appropriate winners first (concept_tags.awareness_stage
-    // matching the intent's audience_temperature). Off-temperature angles still fill the tail —
-    // never starve the batch. `getProvenCompetitorAngles` also now selects `winner_tier`,
-    // `winner_score`, and `concept_tags` and re-orders by winner-tier rank → winner_score →
-    // days_running, so the imitation shelf is ranked by OUR longitudinal winner signal first.
-    { productId, preferDeeplyProven: true, limit: 6, intent: researchIntent },
-  ).catch(() => ({ angles: [], usedFallback: false }));
-  if (sourcedUsedFallback) {
+  const { angles: sourced, usedFallback: sourcedUsedFallback } = pinnedAngle
+    ? { angles: [pinnedAngle], usedFallback: false } // PIN: the owner's exact ad IS the pool (no shelf read)
+    : await getProvenCompetitorAngles(
+        admin,
+        workspaceId,
+        // dahlia-researches-from-winners-flow-ad-library Phase 1 — pass the declared intent so
+        // the returned angles rank temperature-appropriate winners first (concept_tags.awareness_stage
+        // matching the intent's audience_temperature). Off-temperature angles still fill the tail —
+        // never starve the batch. `getProvenCompetitorAngles` also now selects `winner_tier`,
+        // `winner_score`, and `concept_tags` and re-orders by winner-tier rank → winner_score →
+        // days_running, so the imitation shelf is ranked by OUR longitudinal winner signal first.
+        { productId, preferDeeplyProven: true, limit: 6, intent: researchIntent },
+      ).catch(() => ({ angles: [], usedFallback: false }));
+  if (pinnedAngle) {
+    console.info("dahlia_pinned_imitation_base", { workspaceId, productId, pinnedCompetitorSkeletonId, advertiser: pinnedAngle.advertiser, hook: pinnedAngle.hook?.slice(0, 60) });
+  } else if (sourcedUsedFallback) {
     console.info("dahlia_competitor_shelf_used_fallback", { workspaceId, productId, productTitle });
   }
   // dahlia-market-sophistication-escalation Phase 1 — read the product's own
@@ -2810,14 +2976,23 @@ async function stockProduct(
   // slimming-probiotic ad — retargeting + wrong category — was selected for a cold creamer
   // test). Warm/hot intents keep the raw pool (temperature-scoped exclusion — warm/hot tests
   // WANT the offer/mechanism/review angles as their imitation base).
-  const ranked = selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
+  // PIN bypasses the temperature exclusion: an explicit human "make one like THIS ad" overrides the
+  // cold/warm auto-filter (selectAnglesForTemperature would otherwise drop a warm/hot pinned ad on a
+  // cold run). Temperature still shapes the COPY downstream (offer stripping etc.).
+  const ranked = pinnedAngle
+    ? competitorAngles
+    : selectAnglesForTemperature(competitorAngles, ownAngles, researchIntent.audience_temperature);
 
   // Combination-aware selection (CEO 2026-07-10): a concept is only RETIRED after several distinct
   // combinations fail — a failed angle×creative×copy×destination is not a dead angle. So we drop only
   // RETIRED concepts, and for each surviving concept pick a FRESH combination (an untried treatment,
   // biased toward historically-winning treatments). The learning ledger makes each cycle smarter.
   const learning = await loadCreativeLearning(admin, workspaceId, productId);
-  const eligible = ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
+  // PIN also bypasses the retired filter — the owner explicitly chose this ad, so honour it even if a
+  // prior test of the same hook was retired.
+  const eligible = pinnedAngle
+    ? ranked
+    : ranked.filter((a) => !learning.byAngle.get(angleKey(a.hook))?.retired);
 
   // ── Explore/exploit slot allocation (CEO 2026-07-10) ──────────────────────────────────────────────
   // Keep the bin a MIX so Bianca always has both to launch:
@@ -2889,7 +3064,7 @@ async function stockProduct(
         // Phase 2 riff: pass `pureCompetitor` through so a competitor-source brief carries the
         // product's role='lead' benefit UNLESS this slot is the batch's minority pure-competitor
         // explore. Own-brand angles are untouched by the flag.
-        const brief = await buildCreativeBrief(pi, angle, stories, { pureCompetitor: !!pureCompetitor });
+        const brief = await buildCreativeBrief(pi, angle, stories, { pureCompetitor: !!pureCompetitor, authorNotes });
         // Cold-audience creatives lead with the hook, NEVER a discount (CEO: a cold ad doesn't need to
         // lead with an offer). The cold-offer gate (`hasColdOfferLeak`) already enforces this on the
         // COPY, but the IMAGE prompt renders `brief.offer` regardless of temperature — so a cold
@@ -2909,7 +3084,7 @@ async function stockProduct(
           if (!escalatedForPackshot.has(productId)) {
             escalatedForPackshot.add(productId);
             await escalatePackshotMissing(admin, workspaceId, productId, productTitle).catch((e) => {
-              console.warn("dahlia_packshot_escalation_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+              console.warn("dahlia_packshot_escalation_failed", { workspaceId, productId, err: errText(e) });
             });
           }
           out.push({
@@ -2926,6 +3101,7 @@ async function stockProduct(
         // this creative rather than persist a half-pack.
         // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
         const packPlan = placementPackPlan();
+        progress(`Generating the ad image (${treatment}${attempt > 0 ? `, retry ${attempt + 1}` : ""})…`);
         const gen = await generateCreative(workspaceId, brief, {
           treatment,
           designReferenceUrl: plan.designReferenceUrl,
@@ -2949,6 +3125,7 @@ async function stockProduct(
           ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
           : null;
         const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
+        progress("Checking the image quality…");
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
           : await qaCreative(workspaceId, qaInput);
@@ -2998,6 +3175,10 @@ async function stockProduct(
            *  for-offer Phase 1 — OUR real brief.offer threaded through as the cold gate's
            *  allowlist so an offer-for-offer swap that renders it verbatim isn't flagged. */
           allowedOffer?: CreativeBrief["offer"];
+          /** ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+           *  Phase 4 — the CROWN-GATED slot intent from the planner. Threaded so the persisted
+           *  provenance badge tells the crown-gated truth, not `isCompetitor`. */
+          intent?: "explore" | "exploit";
         } | undefined = undefined;
         let authorVerdict: AuthorModeCopy | null = null;
         // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — Max's eligible verdict
@@ -3172,7 +3353,7 @@ async function stockProduct(
                   copyQcDispatcher,
                 ).catch((err) => ({
                   verdict: null as null,
-                  reason: `max_copy_qc_threw: ${err instanceof Error ? err.message : String(err)}`,
+                  reason: `max_copy_qc_threw: ${errText(err)}`,
                 }));
                 if (!qcRun.verdict) {
                   console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
@@ -3201,6 +3382,7 @@ async function stockProduct(
               ourBrand,
               verifyClaimTrace: verifyClaimTraceForVerdict,
               verifyMaxCopyQc: verifyMaxCopyQcForVerdict,
+              reportProgress,
             },
             copyAuthorDispatcher,
           );
@@ -3295,7 +3477,7 @@ async function stockProduct(
                   : exhaustionKind === "max_qc_below_floor"
                     ? "max_qc_below_floor_exhausted_activity_failed"
                     : "dahlia_copy_author_exhausted_activity_failed";
-              console.warn(failKey, { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+              console.warn(failKey, { workspaceId, productId, err: errText(e) });
             });
             // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max-QC
             // exhaustion class ALWAYS bins the last-attempted caption at
@@ -3306,19 +3488,40 @@ async function stockProduct(
             // postable list. `outcome.lastAuthorVerdict` is populated by the loop at the
             // Max-fail branch (never populated on firewall / author-self exhaustion — those
             // paths keep discard-and-escalate because the caption isn't claim-safe).
-            const lastAuthorVerdict = isMaxQcExhaustion ? outcome.lastAuthorVerdict ?? null : null;
-            if (isMaxQcExhaustion && lastAuthorVerdict) {
+            // always-bin-held-creative-with-flags (CEO 2026-07-21) — bin the last-authored caption HELD
+            // + FLAGGED for EVERY exhaustion class (firewall / validator / self-score / Max), not just
+            // Max. Discarding 10+ minutes of work because one line has an ungrounded claim is the wrong
+            // outcome: the CEO wants to SEE the near-miss, read what tripped (the red flag), fix that one
+            // line, and approve (`override_postable`). `max_qc_eligible=false` keeps it strictly
+            // non-postable so Bianca can never auto-publish an unsafe caption; the hold flag rides on the
+            // campaign metadata for the detail page. `heldCaption` is populated for ANY class that ever
+            // parsed a caption; the only fallthrough-discard case now is "no attempt ever parsed".
+            const heldCaption = outcome.heldCaption ?? outcome.lastAuthorVerdict ?? null;
+            const heldFlag = {
+              gate: exhaustionKind, // "firewall" | "max_qc_below_floor" | "author"
+              reason: outcome.reason,
+              human: humanizeReviseReason(outcome.reason),
+              attempts: outcome.attempts,
+            };
+            if (heldCaption) {
               try {
-                const ineligibleCopyPack = authorCopyPack(lastAuthorVerdict);
+                const ineligibleCopyPack = authorCopyPack(heldCaption);
                 const ineligibleInsertOpts = {
-                  audienceTemperature: lastAuthorVerdict.audience_temperature,
-                  authorModeCopy: lastAuthorVerdict,
+                  audienceTemperature: heldCaption.audience_temperature,
+                  authorModeCopy: heldCaption,
                   maxQcEligible: false,
+                  // always-bin-held-creative-with-flags — the red-flag payload the detail page renders
+                  // ("⚠ Held — <human> (<reason>)") so the CEO knows exactly which line to fix.
+                  holdReason: heldFlag,
                   // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
                   // offer-for-offer Phase 1 — OUR real offer is an allowed offer on the cold
                   // gate (an offer-for-offer swap renders it verbatim); a different discount
                   // still trips.
                   allowedOffer: brief.offer,
+                  // ad-creative-box-session-only-retire-deterministic-path Phase 4 — crown-gated
+                  // slot intent from the planner. Threaded through so the provenance badge on
+                  // the always-binned ineligible row tells the same truth as the postable path.
+                  intent,
                 };
                 const binResult = await insertReadyCreative(
                   admin, workspaceId, productId, product.handle, productTitle, angle, ineligibleCopyPack,
@@ -3337,7 +3540,7 @@ async function stockProduct(
                   }).catch((err) => {
                     console.warn("max_copy_qc_verdict_insert_failed_on_ineligible", {
                       workspaceId, productId, campaignId: binCampaignId,
-                      err: err instanceof Error ? err.message : String(err),
+                      err: errText(err),
                     });
                     return null;
                   });
@@ -3353,7 +3556,7 @@ async function stockProduct(
                   },
                 }).catch((e) => {
                   console.warn("combination_record_failed_on_ineligible_bin", {
-                    workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+                    workspaceId, productId, err: errText(e),
                   });
                 });
                 out.push({
@@ -3367,18 +3570,18 @@ async function stockProduct(
                   // the "0 produced" the pre-Phase-2 discard reported.
                   ok: !!binCampaignId,
                   reason: binCampaignId
-                    ? `binned_ineligible_max_qc_below_floor: ${outcome.reason}`
-                    : `bin_ineligible_insert_failed: ${outcome.reason}`,
+                    ? `binned_held_${exhaustionKind}: ${outcome.reason}`
+                    : `bin_held_insert_failed: ${outcome.reason}`,
                 });
                 landed = !!binCampaignId;
                 skipped = true;
                 break;
               } catch (err) {
-                // A throw from the ineligible-bin path must not crash the batch — fall through to
+                // A throw from the held-bin path must not crash the batch — fall through to
                 // the discard-and-escalate default below with the driver reason recorded.
-                console.warn("max_qc_below_floor_bin_ineligible_threw", {
-                  workspaceId, productId,
-                  err: err instanceof Error ? err.message : String(err),
+                console.warn("bin_held_creative_threw", {
+                  workspaceId, productId, exhaustionKind,
+                  err: errText(err),
                 });
               }
             }
@@ -3454,7 +3657,7 @@ async function stockProduct(
                   }
                 } catch (err) {
                   console.warn("max_creative_qc_regen_gen_failed", {
-                    workspaceId, productId, format: fmt, err: err instanceof Error ? err.message : String(err),
+                    workspaceId, productId, format: fmt, err: errText(err),
                   });
                   regenOk = false;
                   break;
@@ -3543,7 +3746,7 @@ async function stockProduct(
               },
             }).catch((e) => {
               console.warn("max_creative_qc_exhausted_activity_failed", {
-                workspaceId, productId, err: e instanceof Error ? e.message : String(e),
+                workspaceId, productId, err: errText(e),
               });
             });
             out.push({
@@ -3571,32 +3774,56 @@ async function stockProduct(
             // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-
             // offer-for-offer Phase 1 — thread OUR real offer as the cold gate's allowlist.
             allowedOffer: brief.offer,
+            // ad-creative-box-session-only-retire-deterministic-path Phase 4 — crown-gated
+            // slot intent from the planner (`wantExploit` capped at `exploitPool.length` where
+            // exploitPool = eligible with prior win). Threaded so provenance.mode is honest.
+            intent,
           };
         } else {
-          // The finished 4-headline + 4-primary-text pack — same LF8 psychology core as `buildMetaCopy`
-          // (the canonical is its first entry) with 3 hook rotations across the brief's real material.
-          // Persisted to `product_ad_angles.metadata.copy_pack` so Bianca's publish gate reads the full
-          // pack, not just the first pair.
-          copyPack = buildMetaCopyPack(brief);
-          // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 1 —
-          // stamp `audience_temperature` + a deterministic `concept_tag` on the deterministic
-          // whole-pack insert too, mirroring how the author-mode path stamps them from Dahlia's
-          // verdict. Temperature is resolved from the angle via the same
-          // `resolveAudienceTemperature` predicate the author-mode path uses (line ~2951) so the
-          // two paths never disagree on a given angle — critical because upstream
-          // `imageOfferForAudience` already stripped `brief.offer` on the SAME cold predicate at
-          // line ~2842, so `buildMetaCopyPack` on a cold angle produces offer-free copy and the
-          // Phase-2 cold-offer gate stays clean. Without this stamp the whole-pack row lands
-          // `audience_temperature: NULL` — which disabled the cold-mismatch classifier AND broke
-          // Bianca's temperature routing (the 2026-07-17 Amazing Creamer regression). The
-          // `concept_tag` is derived from the run's `treatment` (`before_after` / `testimonial` /
-          // …) via the pure `mapTreatmentToConceptTag`, so the whole-pack row is CLASSIFIABLE +
-          // ROUTABLE by concept too (never NULL).
-          insertOpts = {
-            audienceTemperature: resolveAudienceTemperature(angle),
-            conceptTag: mapTreatmentToConceptTag(treatment),
-            allowedOffer: brief.offer,
-          };
+          // ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
+          // Phase 2 (2026-07-19) — the deterministic `buildMetaCopyPack` fallback is RETIRED.
+          // Phase 1 made the production `runAdCreativeJob` inject the copy-author dispatcher
+          // unconditionally, so this else-branch is dead in production; deleting the
+          // `buildMetaCopyPack` call prevents any future regression from silently re-enabling
+          // the node-path (that was the exact trap the pre-Phase-1 default sprang: workspace
+          // flag unset → the whole cadence produced un-graded exploit ads). When no
+          // copy-author dispatcher is available (test / manual invocation / accidental
+          // regression), stockProduct HOLDS the creative and escalates with the greppable
+          // marker `dahlia_no_session_available` — same shape as the `dahlia_copy_author_exhausted`
+          // ledger row so operators can slice no-session holds apart from session-exhaustion
+          // holds. The rail invariant: every ad-creative in the bin was produced by the
+          // Dahlia/Max ping-pong box session, never the deterministic node path.
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: "growth",
+            actionKind: "dahlia_no_session_available",
+            specSlug: "ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit",
+            reason:
+              `dahlia_no_session_available: no copy-author dispatcher for ${productTitle} (${angle.source} angle) — held out of the bin ` +
+              `(box-session-only invariant; deterministic buildMetaCopyPack fallback retired in Phase 2)`,
+            metadata: {
+              product_id: productId,
+              product_title: productTitle,
+              angle_source: angle.source,
+              angle_hook: angle.hook,
+              audience_temperature: resolveAudienceTemperature(angle),
+              intent,
+              autonomous: true,
+            },
+          }).catch((e) => {
+            console.warn("dahlia_no_session_available_activity_failed", {
+              workspaceId, productId, err: errText(e),
+            });
+          });
+          out.push({
+            productId,
+            angleHook: angle.hook,
+            campaignId: null,
+            ok: false,
+            reason: "dahlia_no_session_available",
+          });
+          skipped = true;
+          break;
         }
         const result = await insertReadyCreative(admin, workspaceId, productId, product.handle, productTitle, angle, copyPack, {
           // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — post-regen
@@ -3641,7 +3868,7 @@ async function stockProduct(
               workspaceId,
               productId,
               campaignId,
-              err: err instanceof Error ? err.message : String(err),
+              err: errText(err),
             });
             return null;
           });
@@ -3655,7 +3882,7 @@ async function stockProduct(
         out.push({ productId, angleHook: angle.hook, campaignId, ok: !!campaignId, reason: campaignId ? undefined : "bin_insert_failed", qaIssues: verdict.issues.length ? verdict.issues : undefined });
         landed = !!campaignId;
       } catch (err) {
-        lastIssues = [err instanceof Error ? err.message : String(err)];
+        lastIssues = [errText(err)];
       }
     }
     if (!landed && !skipped) out.push({ productId, angleHook: angle.hook, campaignId: null, ok: false, reason: "qa_or_gen_failed", qaIssues: lastIssues });
@@ -3721,7 +3948,7 @@ async function escalatePackshotMissing(
     },
   }).catch((e) => {
     // Best-effort — a director_activity write failure must not fail the ad-creative loop.
-    console.warn("dahlia_packshot_activity_write_failed", { workspaceId, productId, err: e instanceof Error ? e.message : String(e) });
+    console.warn("dahlia_packshot_activity_write_failed", { workspaceId, productId, err: errText(e) });
   });
 }
 
@@ -3766,9 +3993,20 @@ export async function runAdCreativeLoop(
      *  research is scoped to the intent's temperature. Omit to accept the default
      *  (`cold + test-to-find-winner`) — today's every-caller behavior. */
     intent?: CreativeIntent;
+    /** Research › Ads "Generate ad" pin — a `creative_skeletons.id` to imitate EXACTLY. Threaded to
+     *  `stockProduct` as `pinnedCompetitorSkeletonId`; only meaningful on the single-product path
+     *  (a pin is one ad for one product). Omit ⇒ the shelf is ranked normally. */
+    pinnedCompetitorSkeletonId?: string;
+    /** Research › Ads "Generate ad like this" free-text notes — the owner's directions for THIS ad
+     *  ("remove the free tote badge"). Threaded to `stockProduct` → `brief.authorNotes` (image +
+     *  copy prompts). Only applied on the single-product path. Omit ⇒ no note. */
+    authorNotes?: string;
+    /** dahlia-max-live-timeline — best-effort live progress narration; the runner writes each note to
+     *  the job's `session_note` so the Dahlia→Max session card shows the ping-pong live. Omit ⇒ none. */
+    reportProgress?: (note: string) => void;
   },
 ): Promise<AdCreativeRunResult> {
-  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent } = opts;
+  const { workspaceId, qcDispatcher, copyAuthorDispatcher, copyQcDispatcher, intent, pinnedCompetitorSkeletonId, authorNotes, reportProgress } = opts;
   const binFloor = opts.binFloor ?? DEFAULT_BIN_FLOOR;
   const stocked: StockedCreative[] = [];
 
@@ -3799,7 +4037,13 @@ export async function runAdCreativeLoop(
   }
 
   for (const t of targets) {
-    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher);
+    // The pin is one ad for one product — only apply it on the explicit single-product path
+    // (opts.productId set). A workspace-wide cadence top-up must never pin the same competitor ad
+    // across every product.
+    const pinForTarget = opts.productId && t.productId === opts.productId ? pinnedCompetitorSkeletonId : undefined;
+    // Owner notes ride the same single-product-only rule as the pin (a cadence top-up carries none).
+    const notesForTarget = opts.productId && t.productId === opts.productId ? authorNotes : undefined;
+    const results = await stockProduct(admin, workspaceId, t.productId, t.count, qcDispatcher, copyAuthorDispatcher, intent, copyQcDispatcher, pinForTarget, notesForTarget, reportProgress);
     stocked.push(...results);
   }
 

@@ -1,6 +1,7 @@
 // Inngest dunning functions: payment-failed orchestration, new-card recovery, billing-success cleanup
 
 import { inngest } from "./client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 import {
@@ -191,7 +192,7 @@ export const dunningPaymentFailed = inngest.createFunction(
         }
         return deduped;
       } catch (err) {
-        console.error(`[Dunning] CRITICAL: getCustomerPaymentMethods failed for customer ${shopify_customer_id} (contract ${shopify_contract_id}):`, String(err));
+        console.error(`[Dunning] CRITICAL: getCustomerPaymentMethods failed for customer ${shopify_customer_id} (contract ${shopify_contract_id}):`, errText(err));
         return [];
       }
     });
@@ -513,7 +514,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
 
           return { contractId: cancelled.contractId, recovered: billingRes.success };
         } catch (err) {
-          return { contractId: cancelled.contractId, recovered: false, error: String(err) };
+          return { contractId: cancelled.contractId, recovered: false, error: errText(err) };
         }
       });
       results.push(result);
@@ -577,7 +578,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
           return { contractId: cycle.shopify_contract_id, recovered: billingRes.success };
         } catch (err) {
           console.error(`Recovery failed for contract ${cycle.shopify_contract_id}:`, err);
-          return { contractId: cycle.shopify_contract_id, recovered: false, error: String(err) };
+          return { contractId: cycle.shopify_contract_id, recovered: false, error: errText(err) };
         }
       });
 

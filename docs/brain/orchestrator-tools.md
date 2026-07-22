@@ -25,6 +25,7 @@ Sonnet decides which to call based on the customer message. Minimal pre-context 
 | `get_email_history` | "Didn't receive email" questions | Last 10 email events with open/click/bounce status |
 | `get_dunning_status` | Payment failures, billing issues | Dunning cycles, payment failure attempts |
 | `get_payment_methods` | "Update my card", payment method questions | Payment methods from Shopify, deduped by last4+expiry |
+| `get_order_refund_ledger` | **Refund-amount dispute · "how much can I still refund?" · out-of-band refund suspected · before quoting/proposing a refund** | LIVE Shopify transaction ledger for ONE order (arg: `order_number`), reconciled against `public.order_refunds`: `saleCents`, `refundedCents`, `pendingCents`, `refundableCents` (max(0, sale − refunded − pending) — the CEILING for a new refund), `outOfBandCents` (settled Shopify refunds NOT in our local mirror — someone refunded outside ShopCX). Backed by [[libraries/refund-ledger]] `getOrderRefundLedger`. `outOfBandCents > 0` is the exact signal that would have resolved SC133086 (2026-07-20) at first touch. |
 
 Pre-loaded context (no tool call needed): customer name + email, ticket tags (includes crisis tags), conversation history (last 8 messages + action completion notes), available handler names (journeys, playbooks, workflows), AI personality.
 

@@ -6,23 +6,18 @@
  */
 import { loadEnv } from "./_bootstrap";
 loadEnv();
-import { createAdminClient } from "../src/lib/supabase/admin";
-import { setCompetitorMetaResolution } from "../src/lib/competitors";
+import { listCompetitors, setCompetitorMetaResolution } from "../src/lib/competitors";
 import { resolveAdvertiser } from "../src/lib/adlibrary-winners";
 
 const WS = process.argv[2] || "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
 async function main() {
-  const admin = createAdminClient();
-  const { data: comps } = await admin
-    .from("competitors")
-    .select("id, brand, search_keyword, domain, product_id")
-    .eq("workspace_id", WS)
-    .neq("status", "rejected");
-  const rows = comps ?? [];
+  // Read through the competitors SDK chokepoint (never a raw table query). The SDK's `status`
+  // filter is single-equals, so list all + drop rejected here.
+  const rows = (await listCompetitors({ workspaceId: WS })).filter((c) => c.status !== "rejected");
   const resolved: string[] = [];
   const unresolved: string[] = [];
-  for (const c of rows as Array<{ id: string; brand: string; search_keyword: string | null; domain: string | null }>) {
+  for (const c of rows) {
     const term = c.search_keyword || c.brand;
     const r = await resolveAdvertiser(term, { domain: c.domain });
     await setCompetitorMetaResolution(

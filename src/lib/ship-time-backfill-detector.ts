@@ -35,6 +35,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import {
   SHIP_TIME_BACKFILL_LOOP_ID,
@@ -226,7 +227,7 @@ export async function detectAndEscalateShipTimeBackfills(
   } catch (e) {
     heartbeatOk = false;
     console.warn(
-      `[ship-time-backfill-detector] detect/escalate failed for pr=${args.prNumber} spec=${args.specSlug}: ${e instanceof Error ? e.message : String(e)}`,
+      `[ship-time-backfill-detector] detect/escalate failed for pr=${args.prNumber} spec=${args.specSlug}: ${errText(e)}`,
     );
     return summary;
   } finally {

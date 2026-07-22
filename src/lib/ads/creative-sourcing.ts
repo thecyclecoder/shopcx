@@ -15,6 +15,7 @@
  *      winners; CTR + engagement are TRAPS (losers click/react MORE). See [[meta-cpa-signal]] · [[creative-brief]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import type { ConceptTags } from "@/lib/creative-skeleton";
@@ -54,20 +55,26 @@ export function awarenessStageMatchesTemperature(
 }
 
 /** True iff a competitor ad's FOCAL POINT reads WARM/HOT (retargeting) rather than cold prospecting
- *  (CEO 2026-07-17). A cold audience is a scroll-stopping stranger — an ad whose focus is an OFFER,
- *  a MECHANISM, or a CUSTOMER REVIEW is almost certainly aimed at a warm/hot (already-aware) audience,
- *  so it's the wrong imitation base for a cold creative. Signals (any → true):
+ *  (CEO 2026-07-17; authority/mechanism un-excluded 2026-07-19). A cold audience is a scroll-stopping
+ *  stranger — an ad whose focus is an OFFER, a CUSTOMER REVIEW, or URGENCY is almost certainly aimed
+ *  at a warm/hot (already-aware) audience, so it's the wrong imitation base for a cold creative.
+ *  Signals (any → true):
  *   - an OFFER is present (`angle.offer`) — a discount is the clearest warm/hot tell;
- *   - the Cialdini lever is `social_proof` (review-focal), `scarcity` (offer/urgency), or `authority`
- *     (credential/mechanism-focal);
- *   - the archetype / angle text names an offer / review / mechanism / guarantee / comparison focus. */
+ *   - the Cialdini lever is `social_proof` (review-focal) or `scarcity` (offer/urgency);
+ *   - the archetype / angle text names an offer / review / guarantee / comparison focus.
+ *  NOTE — `authority` (credential/expert-backed: "clinically shown", "nutritionist-formulated") and
+ *  MECHANISM ("how it actually works") are COLD-APPROPRIATE, NOT warm/hot: a stranger trusts
+ *  credibility + education to open awareness. Excluding them emptied the cold shelf for products whose
+ *  entire proven competitor set is authority-framed (Guru Focus: all 8 deeply-proven winners were
+ *  `cialdini=authority` → 0 cold-eligible → own-brand fallback every run). The OFFER check (line
+ *  below) still hard-excludes discount/retargeting ads, so the 2026-07-17 cold_offer_leak stays shut. */
 export function competitorFocalIsWarmHot(angle: Pick<CompetitorAngle, "offer" | "conceptTags">): boolean {
   if (angle.offer && angle.offer.trim().length > 0) return true;
   const ct = angle.conceptTags ?? null;
   const lever = (ct?.cialdini_lever ?? "").toLowerCase();
-  if (lever === "social_proof" || lever === "scarcity" || lever === "authority") return true;
+  if (lever === "social_proof" || lever === "scarcity") return true;
   const text = `${ct?.archetype ?? ""} ${ct?.angle ?? ""}`.toLowerCase();
-  return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|mechanism|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
+  return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
 }
 
 /** True iff a competitor ad's FOCAL POINT reads COLD/prospecting — curiosity or problem→solution, the
@@ -278,6 +285,11 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     // then the video pipeline drains it to `status='analyzed'` with `media_type='video'` — 25 such rows
     // were on the shelf. Filter to `media_type='static'` so the imitation base is always a static ad.
     .eq("media_type", "static")
+    // flag-a-competitor-ad-do-not-use Phase 1: a proven long-runner is NOT automatically a good
+    // imitation base (the Magic Mind display-box packshot vs. the Onnit "Lock in when it matters
+    // most" hook — both proven long-runners, only one worth imitating). The CEO (and Phase 3's
+    // Max grader) flags weak ads via `do_not_use`; the flag must NEVER become an imitation angle.
+    .eq("do_not_use", false)
     .not("hook", "is", null)
     .gte("days_running", q.minDaysRunning)
     .order("days_running", { ascending: false, nullsFirst: false })
@@ -286,7 +298,15 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   if (q.productId) query = query.eq("product_id", q.productId);
   else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
   const { data } = await query;
-  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map(mapRowToCompetitorAngle);
+  return rankByWinnerSignalAndIntent(mapped, q.intent);
+}
+
+/** PURE — map ONE `creative_skeletons` row (the shared select column set) to a `CompetitorAngle`.
+ *  Single source of truth for the mapping so `queryProvenAngles` (the shelf reader) and
+ *  `getCompetitorAngleBySkeletonId` (the pinned-ad reader) can never drift. */
+export function mapRowToCompetitorAngle(r: Record<string, unknown>): CompetitorAngle {
+  return {
     advertiser: (r.advertiser as string | null) ?? null,
     hook: (r.hook as string | null) ?? null,
     framework: (r.framework as string | null) ?? null,
@@ -301,8 +321,29 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     winnerTier: (r.winner_tier as string | null) ?? null,
     winnerScore: r.winner_score == null ? null : Number(r.winner_score),
     conceptTags: coerceConceptTags(r.concept_tags),
-  }));
-  return rankByWinnerSignalAndIntent(mapped, q.intent);
+  };
+}
+
+/** Load ONE competitor ad by `creative_skeletons.id` as a `CompetitorAngle` — the imitation base
+ *  when the owner PINS a specific ad from the Research › Ads "Generate ad" panel. Deliberately does
+ *  NOT apply the shelf filters (`status`/`media_type`/`do_not_use`/`days_running`) — an explicit
+ *  human pick overrides the auto-selection guards. Scoped to the workspace. Returns null when the
+ *  id doesn't resolve (→ `stockProduct` falls back to normal shelf ranking + warns). */
+export async function getCompetitorAngleBySkeletonId(
+  admin: Admin,
+  workspaceId: string,
+  skeletonId: string,
+): Promise<CompetitorAngle | null> {
+  const { data } = await admin
+    .from("creative_skeletons")
+    .select(
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("id", skeletonId)
+    .maybeSingle();
+  if (!data) return null;
+  return mapRowToCompetitorAngle(data as Record<string, unknown>);
 }
 
 /** Winner-tier-first ranking + optional intent-scoped partition. Pure so a unit test can pin
@@ -437,7 +478,7 @@ export async function getProvenCompetitorAngles(
       console.warn("dahlia_deeply_proven_fallback_activity_failed", {
         workspaceId,
         productId: opts.productId ?? null,
-        err: e instanceof Error ? e.message : String(e),
+        err: errText(e),
       });
     });
     return { angles: fallback, usedFallback: true };

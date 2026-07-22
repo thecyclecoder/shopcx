@@ -23,6 +23,7 @@
  * See docs/brain/integrations/supabase-management-logs.md · docs/brain/specs/error-feed-monitoring.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { encrypt, decrypt } from "@/lib/crypto";
 import {
   recordError,
@@ -297,7 +298,7 @@ export async function pollSupabaseLogs(adminClient?: Admin): Promise<PollResult>
     try {
       rows = await fetchLogRows(config, q.sql, startIso, endIso);
     } catch (e) {
-      errors.push(`${q.key}: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(`${q.key}: ${errText(e)}`);
       continue;
     }
     totalRows += rows.length;

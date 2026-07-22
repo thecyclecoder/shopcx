@@ -20,10 +20,13 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `media_type` | `text` | — | default `'static'` · `static` \| `video` (routed at ingestion) |
 | `format` | `text` | ✓ | `ugc` \| `studio` \| `text-card` \| `before_after` \| `demo` \| … (vision) |
 | `framework` | `text` | ✓ | `hook-promise-proof` \| `problem-pivot-payoff` \| variant (vision) |
-| `hook` | `text` | ✓ | slot 1 (vision) |
-| `mechanism_claim` | `text` | ✓ | slot 2 (vision) |
-| `proof` | `text` | ✓ | slot 3 (vision) |
-| `offer` | `text` | ✓ | slot 4 (vision) |
+| `hook` | `text` | ✓ | slot 1 (vision) — **substance column, kept for the analyzed-competitor archive** (see the Wireframe redesign gotcha). |
+| `mechanism_claim` | `text` | ✓ | slot 2 (vision) — substance column. |
+| `proof` | `text` | ✓ | slot 3 (vision) — substance column. |
+| `offer` | `text` | ✓ | slot 4 (vision) — substance column. |
+| `elements` | `jsonb` | ✓ | **Agnostic wireframe** — array of `{zone: header\|hero\|body\|footer\|cta, role: hook\|mechanism\|proof\|offer\|risk_reversal\|social_proof\|price, prominence: 0..1}`. Scaffold-only; the raw substance stays in the four substance columns above. Shape-gated by `creative_skeletons_elements_shape_chk` (each element must be an object with a whitelisted zone + role and a prominence in [0,1]). Written by the Phase-2 vision extractor + backfill. Migration `20261124120000`. See [[../specs/skeleton-agnostic-wireframe-redesign]]. |
+| `product_presentation` | `text[]` | — | default `'{}'` · vision-emitted tags describing how the product is shown: `packshot` \| `lifestyle` \| `founder` \| `none`. Migration `20261124120000`. |
+| `punchiness` | `text[]` | — | default `'{}'` · vision-emitted tags describing the copy cadence: `short_line` \| `pattern_interrupt` \| `number` \| `contrast`. Migration `20261124120000`. |
 | `days_running` | `int4` | ✓ | AdLibrary `days_count` — longevity = winner proxy |
 | `heat` | `numeric` | ✓ | AdLibrary `heat` / exposure score |
 | `first_seen` | `date` | ✓ | AdLibrary `first_seen` |
@@ -55,6 +58,10 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `observed_sweeps` | `integer` | — | default `1` · how many sweeps we've observed the ad in (`reobserveAd` ++). Migration `20261022170000`. |
 | `still_active` | `boolean` | — | default `true` · present in its competitor's latest sweep. `markDisappearedAds` sets it `false` (→ `winner_tier='retired'`) when the ad vanishes. Migration `20261022170000`. |
 | `concept_tags` | `jsonb` | ✓ | **The unified concept breakdown** — `{ angle, archetype, why_it_works, cialdini_lever, awareness_stage, format }`. ALWAYS from OUR vision (both lanes), so Dahlia researches + Max grades one shape. AdLibrary's own tags were dropped — they were mislabeled (`angle`="solution_aware", `awareness_stage`="warm" = a temperature). Migration `20261022160000`. |
+| `do_not_use` | `boolean` | — | default `false` · **per-ad exclusion flag** ([[../specs/flag-a-competitor-ad-do-not-use-manual-ceo-then-max-graded]] Phase 1). A proven long-runner is NOT automatically a good imitation base (Magic Mind display-box packshot vs. Onnit "Lock in when it matters most" — same tier, only one worth imitating). When `true`, [[../libraries/creative-sourcing]] `queryProvenAngles` filters this row out so Dahlia never riffs on a lame competitor ad. Preserved across scout re-observation by design — `ingestAd`'s upsert row and `reobserveAd`'s update SET clause do not include this column. Migration `20261119120000`. |
+| `do_not_use_reason` | `text` | ✓ | why this ad was flagged (e.g. `max_weak_imitation_base` from the Phase-3 auto-flag, or a CEO-written note). Migration `20261119120000`. |
+| `do_not_use_by` | `text` | ✓ | who flagged it — `'ceo'` for a manual CEO flag from the competitor library page, `'max'` for the Phase-3 imitation-quality grader's auto-flag (still surfaced for CEO review — never a silent proxy-optimizer). Migration `20261119120000`. |
+| `do_not_use_at` | `timestamptz` | ✓ | when the flag was set. Migration `20261119120000`. |
 | `status` | `text` | — | default `'analyzed'` · `pending` \| `analyzed` \| `video_pending` \| `shortlisted` \| `archived` \| `failed` |
 | `raw` | `jsonb` | ✓ | full AdLibrary row for replay/audit |
 | `visioned_at` | `timestamptz` | ✓ | when the skeleton was extracted |
@@ -62,7 +69,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `updated_at` | `timestamptz` | — | default `now()` |
 
 **Unique:** `(workspace_id, source, dedup_key)` — the idempotent upsert key.
-**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path), `(product_id)`, `(competitor_id)` (per-product scout read path, migration `20261020120000`), `(workspace_id, winner_tier) WHERE winner_tier IS NOT NULL` (migration `20261022160000`), `(workspace_id, still_active, winner_score desc) WHERE source='adlibrary'` (winners-flow persistence ranking, migration `20261022170000`).
+**Indexes:** `(workspace_id, status)`, `(workspace_id, advertiser)`, `(workspace_id, days_running desc)`, `(workspace_id, destination_domain) WHERE destination_domain IS NOT NULL` ([[../specs/landing-page-scout]] read path), `(product_id)`, `(competitor_id)` (per-product scout read path, migration `20261020120000`), `(workspace_id, winner_tier) WHERE winner_tier IS NOT NULL` (migration `20261022160000`), `(workspace_id, still_active, winner_score desc) WHERE source='adlibrary'` (winners-flow persistence ranking, migration `20261022170000`), `(workspace_id, product_id) WHERE do_not_use` (flag-a-competitor-ad-do-not-use Phase 1 exclusion scan, migration `20261119120000`).
 
 > **Deliberate-scout reset (2026-07-12).** Migration `20261020120000` added `product_id` + `competitor_id` and **hard-cleared all 473 pre-refactor rows** (`delete where product_id is null`) — they predated product tagging and weren't re-derivable. HARD delete (not archive) because the pattern-matrix / promotion scans read `source='adlibrary'` with no status filter. The [[../inngest/creative-scout]] repopulates per-product, tagged. This is the "clean the competitive ad library" step of the base-layer imitate→innovate fix.
 
@@ -77,6 +84,7 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 - The matrix counts **distinct `advertiser`s** — repetition across independent brands is the signal, never one ad's `heat`/`days_running` (those are tiebreakers only).
 - **Display serves OUR hosted copy, not AdLibrary.** `image_url` 403s without the Bearer key AND is full-res (6–22MB) — live-proxying it 502'd (serverless response-size limit). So `ingestAd` stores a downscaled analyzable copy in the private `creative-shots` bucket (`thumb_path`) and the list route returns a signed URL to it. `/api/ads/creative-finder/media` remains only as a downscaling fallback for legacy rows without `thumb_path`.
 - **Full payload from `ingestAd`, not vision** — `destination_domain`/copy/CTA/spend/engagement/`platform` columns come straight from the AdLibrary row ([[../specs/ad-creative-scout]]); only `format`/`framework`/`hook`/`mechanism_claim`/`proof`/`offer` are vision-extracted. `destination_domain` is null for ads with no store url (`has_store_url=false`).
+- **Wireframe redesign (2026-11-24).** The substance columns (`hook`, `mechanism_claim`, `proof`, `offer`) stay for the analyzed-competitor archive — they carry the raw phrases the vision pass pulled off the ad and remain the input the M4 reuse-verdict helper diffs against — but the `elements[]` scaffold is the shape readers should prefer for reuse decisions. The v3 recast is deliberate: skeleton is scaffold-not-substance, so per-copy-section reuse verdicts are computed at AUTHOR time (never stored) against the product's *current* intelligence. New readers building on skeletons should read `elements[]` + `product_presentation` + `punchiness`; only legacy readers (pattern matrix, dedup) still key off the substance columns. Migration `20261124120000` · [[../specs/skeleton-agnostic-wireframe-redesign]] Phase 1.
 
 ## Written by
 [[../libraries/creative-skeleton]] (`ingestAd`) ← [[../inngest/creative-finder]]; [[../libraries/video-skeleton]] (`processVideoPending` updates `video_pending` → `analyzed`) ← [[../inngest/creative-finder]] (`creative-finder-video-process`).

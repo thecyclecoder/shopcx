@@ -39,6 +39,7 @@
  * [[control-tower]] · [[director-activity]] · [[github-pr-resolve]] · [[../goals/devops-director]].
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { buildControlTowerSnapshot } from "@/lib/control-tower/monitor";
 import { isAuditSkippedKpiDriftLoop } from "@/lib/agents/platform-scorecard";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -690,7 +691,7 @@ export async function revertDeployMerge(args: {
     }
     return { reverted: true, revertSha };
   } catch (e) {
-    return { reverted: false, reason: e instanceof Error ? e.message : String(e) };
+    return { reverted: false, reason: errText(e) };
   }
 }
 
@@ -1458,7 +1459,7 @@ export async function applyBoxDeployReview(admin: Admin, jobId: string, verdict:
     return { ok: true, finalVerdict: "regressed", revertSha: null };
   } catch (e) {
     console.error("[deploy-guardian] applyBoxDeployReview threw:", e instanceof Error ? e.message : e);
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: errText(e) };
   }
 }
 
@@ -1576,6 +1577,6 @@ export async function failsafeStampWatchUnsure(
     return { stamped: true, escalated };
   } catch (e) {
     console.error("[deploy-guardian] failsafeStampWatchUnsure threw:", e instanceof Error ? e.message : e);
-    return { stamped: false, reason: e instanceof Error ? e.message : String(e) };
+    return { stamped: false, reason: errText(e) };
   }
 }

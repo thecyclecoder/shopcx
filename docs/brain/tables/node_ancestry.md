@@ -16,12 +16,13 @@ DB mirror of the [[../libraries/control-tower-node-registry|canonical node regis
 |---|---|---|
 | `node_id` | `text` | PK · canonical node id from [[../libraries/control-tower-node-registry]] `resolveNodeOwner` (e.g. `agent:media-buyer`, `agent-kind:build`). |
 | `kind` | `text` | the `agent_jobs.kind` slug this node handles. Uniquely selects the node in `public.kind_to_node_id`. Indexed. |
-| `ancestors` | `text[]` | parent → parent walk up to the root department, PLUS the bare function slug at the department level (`growth`, not just `dept:growth`) so a `kill_switches` row stored under either form is honored. GIN-indexed. |
+| `ancestors` | `text[]` | parent → parent walk up to the root department, PLUS the bare function slug at the department level (`growth`, not just `dept:growth`), PLUS the row's own bare agent-kind slug as a self-alias (so `kill_switches.node_id='ad-creative'` matches the same node as `node_id='agent:ad-creative'` — [[../specs/ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit]] Phase 3, 2026-07-19). GIN-indexed. |
 
 ## Invariants
 
 - **MISSING ROW ⇒ FAIL-OPEN.** An unregistered kind (no row) claims normally — the RPC's `not exists` returns true. The sync is idempotent; a stale drift is not a live outage.
 - **BARE SLUG AT DEPARTMENT LEVEL.** `ancestors[]` includes BOTH the canonical `dept:<fn>` id AND the bare `<fn>` slug so a `kill_switches` row keyed by either form matches — mirrors the department-key convenience in [[../libraries/kill-switch-resolver]] `findOffendingAncestor`.
+- **BARE SLUG AT AGENT-KIND LEVEL ([[../specs/ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit]] Phase 3 — 2026-07-19).** `ancestors[]` ALSO prepends the row's own bare agent-kind slug (e.g. `ad-creative` alongside `node_id='agent:ad-creative'`) via [[../libraries/node-ancestry-sync]] `withKindAlias`, so `public.claim_agent_job`'s ancestor join matches a `kill_switches` row keyed by the bare slug — the form the CEO cockpit surfaces. Closes the 2026-07-19 gap where a frozen `ad-creative` switch let ~2 queued+claimed jobs land.
 - **REGISTRY IS SOURCE OF TRUTH.** Every row is derived from `src/lib/control-tower/node-registry.ts`. A row that no longer appears in the registry is deleted on the next sync (the stale-sweep step in [[../libraries/node-ancestry-sync]] `syncNodeAncestry`).
 
 ## Readers / writers

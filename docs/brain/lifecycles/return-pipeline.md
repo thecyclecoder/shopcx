@@ -91,6 +91,12 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
 2. **Read `net_refund_cents`.** If missing or zero:
    - Insert [[../tables/dashboard_notifications]] "Return needs manual review — no refund amount stored."
    - Stop. Don't refund.
+2b. **Reconcile against the live gateway ledger (money-refund path only).** Before dispatching the refund, `returnsIssueRefund` calls `getOrderRefundLedger(workspace_id, order_id)` from [[../libraries/refund-ledger]] and branches:
+   - **Null `returns.order_id`** — resolve it from `returns.shopify_order_gid` (trailing numeric id → `orders.shopify_order_id`, workspace-scoped), persist via a compare-and-set on `.is('order_id', null)`, then continue. (SC131156.)
+   - **`refundableCents === 0` AND `refundedCents ≥ net_refund_cents`** — money already moved out of band. STAMP the return `status='refunded'`, `refund_id='out_of_band_shopify'`, `refunded_at=now()` with a compare-and-set on `.is('refunded_at', null)`. Fire NO refund. (SC130193.)
+   - **`0 < refundableCents < net_refund_cents`** — refund `refundableCents` (the CAP) and record `refund_shortfall_cents = net_refund_cents - refundableCents` on the return row for audit. (SC133086 / SC129432.)
+   - **`refundableCents ≥ net_refund_cents`** — refund the full contract (unchanged behaviour).
+   > **Contract vs ceiling.** `net_refund_cents` remains the intent (set at return creation; the pipeline never re-derives it — see § "Why this design" #3). The live ledger is only ever the CEILING — the reconcile lowers what the rail dispatches, never raises it. Store-credit issuance does not touch the gateway and skips this branch.
 3. **Branch on `resolution_type`**:
    - `refund_return` → `partialRefundByAmount(orderId, net_refund_cents)`.
    - `store_credit_return` → `issueStoreCredit(customerId, net_refund_cents)`.
@@ -104,11 +110,11 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
    - Update [[../tables/returns]] `status='refunded'`, `refunded_at=now()`, `refund_id`, `refund_method`.
    - Send confirmation email via `sendReturnConfirmationEmail` ([[../integrations/resend]]).
    - Write [[../tables/customer_events]] event `return.refunded`.
-7. **On failure**:
-   - The most common failure is `Braintree::AuthenticationError` when Shopify-side refund hits a stale gateway connection.
-   - Insert [[../tables/dashboard_notifications]] "Return refund failed — manual action needed" with the error detail and a link to the ticket.
-   - Don't retry blindly — the issue usually needs admin attention (re-auth a gateway, manually refund via Shopify Admin).
-   - Manual fix path: refund via Shopify Admin → set `returns.refund_id='manual-braintree'` → re-fire the email send (or it'll re-fire on next manual return state change).
+7. **On failure (Phase 2 — throw, don't return):**
+   - The refund and store-credit failure branches THROW instead of writing a per-attempt dashboard row, so Inngest's `retries: 2` engages (refunds stay money-moves-once safe via `refundOrder`'s pre-dispatch `order_refunds.request_key` guard).
+   - The `returnsIssueRefund` `onFailure` handler fires ONCE after retries exhaust, inserting a single [[../tables/dashboard_notifications]] row with title `Return refund exhausted retries — manual action needed` (or `Return store credit exhausted retries — manual action needed`, routed by the return's `resolution_type`) with the error detail, and emits an `ok:false` reactive heartbeat so the MONITORED_LOOPS `returns-issue-refund` tile rolls the exhaustion into its error-rate signal.
+   - `MONITORED_LOOPS` now carries a `returns-issue-refund` entry (kind `reactive`, owner `retention`, `livenessWindowMs = 24h`) — before Phase 2, the function that actually moved money had no monitoring at all.
+   - Manual fix path: investigate the order's gateway ledger (`getOrderRefundLedger` in [[../libraries/refund-ledger]]) and either fix the underlying gateway condition + re-fire `returns/issue-refund { workspace_id, return_id }`, or stamp the return manually if the money has moved out of band (Phase 1's `refund_id='out_of_band_shopify'` sentinel).
 
 ## Free-label vs customer-pays-shipping
 
@@ -172,9 +178,9 @@ If `createFullReturn()` itself fails (Shopify return mutation rejected, EasyPost
 
 ## Status / open work
 
-**Shipped:** `createFullReturn()` single entry-point (2026-05-14 rewrite). EasyPost label with USPS preference + carrier fallback. `net_refund_cents` stored at creation. Instant refund on EasyPost `delivered` (no 24h wait, no Shopify dispose). Shopify partial refund OR Braintree direct refund (with email+amount+date fallback). Return confirmation email. Crisis-return auto-handling.
+**Shipped:** `createFullReturn()` single entry-point (2026-05-14 rewrite). EasyPost label with USPS preference + carrier fallback. `net_refund_cents` stored at creation. Instant refund on EasyPost `delivered` (no 24h wait, no Shopify dispose). Shopify partial refund OR Braintree direct refund (with email+amount+date fallback). Return confirmation email. Crisis-return auto-handling. **Self-healing return-refund rail (2026-07):** Phase 1 reconcile-before-money (contract vs ceiling; stamp out-of-band; cap-to-ledger; null-order-id repair) inside `returnsIssueRefund`. Phase 2 throw-on-failure + `onFailure` exhaustion escalation + `returns-issue-refund` MONITORED_LOOPS entry + EasyPost webhook fail-loud gaps closed. Phase 3 daily `returns-reconcile-sweep` cron ([[../inngest/returns-reconcile-sweep]]) that covers both delivered+unrefunded (via the live ledger) and label_created/in_transit stranded returns (via EasyPost); logs `{ swept, healed, redriven, escalated }` on its heartbeat.
 
-**Known gaps / not yet shipped:** None identified.
+**Known gaps / not yet shipped:** None identified — the self-healing rail supersedes the earlier "do not retry blindly; manual fix path" guidance.
 
 **Recent activity:**
 - Defect #1 (phantom refund on internal orders) **closed by the Phase-3 refund dispatcher, regression-probed by Phase 4.** Every refund entry point in the codebase — returns Inngest issue-refund, AI `partial_refund` + `redeem_points_as_refund`, ticket-detail Improve-tab refund, manual return-refund route, fraud-case `cancel_refund_orders` step — now routes through `src/lib/refund.ts` `refundOrder()`, which reads the order's gateway and can never fire a Shopify refund mutation on a Braintree-paid order. `refundBraintreeTransaction` is called from ONE file (`src/lib/refund.ts`); the Shopify-side refund REST + `refundCreate` mutations are constrained to `src/lib/shopify-order-actions.ts`. Phase 4 shipped `scripts/_verify-refund-dispatcher.ts` — a cohort probe that dryRun-refunds sampled Shopify-paid + Braintree-paid orders and asserts (a) each resolves to the expected gateway with ZERO SDK calls, and (b) recent `order.refunded` events' matching returns rows carry `refunded_at IS NOT NULL` (the SC132396 double-refund guard). See [[../reference/commerce-sdk-inventory]] § Defect register. (2026-07-05)

@@ -15,6 +15,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { cleanEmailBody } from "@/lib/email-cleaner";
@@ -601,7 +602,7 @@ export async function analyzeTicket(
     await emitInlineAgentHeartbeat(INLINE_AGENT_IDS.ticketAnalyzer, {
       ok: !isError,
       produced,
-      detail: threw ? `threw: ${threw instanceof Error ? threw.message : String(threw)}` : result?.reason ?? undefined,
+      detail: threw ? `threw: ${errText(threw)}` : result?.reason ?? undefined,
       durationMs: Date.now() - startedAt,
     });
   }
@@ -642,7 +643,7 @@ export async function enqueueTicketAnalyzeJob(
   const tags = (t.tags as string[]) || [];
   if (tags.some((tag) => SKIP_TAGS.has(tag))) return { ok: false, reason: "skip_tag" };
 
-  // One-in-flight dedup — same shape enqueueSpecReviewIfDue uses. spec_slug carries the ticket
+  // One-in-flight dedup — same shape enqueueSpecTestIfDue uses. spec_slug carries the ticket
   // id so the box's per-slug queue view surfaces one row per ticket.
   const { data: inflight } = await admin
     .from("agent_jobs")
@@ -1733,7 +1734,7 @@ async function applySeverityActions(
     } catch (e) {
       // Never wedge the grade on an enqueue failure — the signal + note still land, and the ticket
       // is re-opened so a human / the next inbound turn can pick it up.
-      enqNote = ` Sol re-session enqueue threw (${e instanceof Error ? e.message : String(e)}).`;
+      enqNote = ` Sol re-session enqueue threw (${errText(e)}).`;
     }
 
     // Durable coaching signal → June's digest → add_rule permanent fix for the cheap path.

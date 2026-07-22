@@ -64,3 +64,26 @@ test("buildPrompt: an own-brand angle renders its headline exactly and needs no 
   assert.equal(expectedCopy.headline, "The #1 superfood coffee", "own-brand asserts its exact hook");
   assert.ok(/render EXACTLY/.test(prompt));
 });
+
+// ── debrand hardening 2026-07-19 — drop mismatched benefits + unverified claims + no third-party brands
+
+test("buildPrompt: the imitation HEADLINE clause tells the model to DROP a mismatched BENEFIT (not just a product attribute)", () => {
+  const { prompt } = buildPrompt(brief("Deeper Sleep, Clear Mornings"), true, undefined, true);
+  assert.ok(/DROP any BENEFIT, RESULT, or PROMISE that is not what/.test(prompt), "must forbid carrying a benefit our product doesn't deliver");
+  assert.ok(/deeper sleep/i.test(prompt), "the rule names the concrete failure mode (a sleep hook on a non-sleep product)");
+  assert.ok(/lead with OUR real benefit/.test(prompt));
+});
+
+test("buildPrompt: the imitation HEADLINE clause forbids carrying a competitor's specific unverified claim / timeframe (fabrication)", () => {
+  const { prompt } = buildPrompt(brief("10 Weeks to Younger-Looking Skin"), true, undefined, true);
+  assert.ok(/NEVER carry over a SPECIFIC, UNVERIFIED CLAIM/.test(prompt));
+  assert.ok(/efficacy TIMEFRAME/.test(prompt) && /10 weeks/i.test(prompt), "names timeframe fabrication as the failure mode");
+  assert.ok(/is a FABRICATION, not an imitation/.test(prompt));
+});
+
+test("buildPrompt: a competitor imitation carries a NO THIRD-PARTY BRANDS rule (no Red Bull/Monster in a before-frame)", () => {
+  const { prompt } = buildPrompt(brief("Ditch the 3pm crash"), true, undefined, true);
+  assert.ok(prompt.includes("NO THIRD-PARTY BRANDS"), "imitation prompt must carry the no-third-party-brand hard rule");
+  assert.ok(/Red Bull/.test(prompt) && /Monster/.test(prompt), "names the concrete brands that leaked");
+  assert.ok(/before.?frame|before.?state|before/i.test(prompt), "covers a staged before-state prop");
+});

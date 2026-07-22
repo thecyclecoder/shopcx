@@ -127,9 +127,69 @@ function enclosingFn(lines: string[], idx: number): string {
   return "<module>";
 }
 
-/** Scan one file's text for raw PM-table writes. */
-function findRawWrites(rel: string, text: string): Finding[] {
-  const lines = text.split("\n");
+/**
+ * Blank out comment BODIES while preserving every byte offset and line break, so a `.from(...)` chain
+ * quoted in prose can't be mistaken for a real write.
+ *
+ * The original scanner assumed "comment lines never carry a real `.from(...).update(...)` chain" — but
+ * a doc comment that DOCUMENTS the write disproves it, e.g. in specs-table.compensate-partial-write.test.ts:
+ *   /** Records IDs of specs the fake removed via `.from('specs').delete()` … *\/
+ * That read as a violation of the very rule the test exists to defend.
+ *
+ * String literals are deliberately left INTACT: `.from("specs")` puts the table name in a string, so
+ * blanking strings would blind the scanner to every real write. Tracking string state still matters
+ * though — it stops an apostrophe inside a comment ("don't") from flipping us into a bogus string state.
+ *
+ * Known limitation: a regex literal containing `//` (e.g. /https:\/\//) is treated as a line comment,
+ * which could mask a real write placed AFTER it on the same line. No such line exists in scope today,
+ * and `upsertSpec`'s runtime self-gate (UngatedSpecAuthorError) remains the suspenders to this belt.
+ */
+function stripCommentsPreservingOffsets(text: string): string {
+  type State = "code" | "line" | "block" | "sq" | "dq" | "tpl";
+  let state: State = "code";
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const d = text[i + 1];
+    const keep = () => (out += c);
+    const blank = () => (out += c === "\n" ? "\n" : " ");
+    switch (state) {
+      case "code":
+        if (c === "/" && d === "/") { state = "line"; out += " "; continue; }
+        if (c === "/" && d === "*") { state = "block"; out += " "; continue; }
+        if (c === "'") { state = "sq"; keep(); continue; }
+        if (c === '"') { state = "dq"; keep(); continue; }
+        if (c === "`") { state = "tpl"; keep(); continue; }
+        keep();
+        continue;
+      case "line":
+        if (c === "\n") { state = "code"; out += "\n"; continue; }
+        blank();
+        continue;
+      case "block":
+        if (c === "*" && d === "/") { out += "  "; i++; state = "code"; continue; }
+        blank();
+        continue;
+      default: {
+        // Inside a string literal: honour escapes so `\'` doesn't close it early.
+        if (c === "\\") { keep(); if (d !== undefined) { out += d; i++; } continue; }
+        const closes =
+          (state === "sq" && c === "'") || (state === "dq" && c === '"') || (state === "tpl" && c === "`");
+        if (closes) state = "code";
+        keep();
+        continue;
+      }
+    }
+  }
+  return out;
+}
+
+/** Scan one file's text for raw PM-table writes. Comments are blanked first — see above. */
+function findRawWrites(rel: string, originalText: string): Finding[] {
+  // Snippets are quoted from the ORIGINAL text (so the reader sees real source); matching runs against
+  // the comment-blanked copy, which is byte-aligned with it.
+  const lines = originalText.split("\n");
+  const text = stripCommentsPreservingOffsets(originalText);
   const out: Finding[] = [];
   // Work on the whole-file text so a multi-line `.from(...)\n.verb(` chain is visible. After each
   // `.from("<table>")` match, scan forward for the next member access; if it's a write verb, record it.
@@ -169,6 +229,65 @@ function findRawWrites(rel: string, text: string): Finding[] {
 
 /** Files allowed to call `upsertSpec` directly (the sanctioned gate wrapper). */
 const UPSERT_SPEC_ALLOWED = new Set(["src/lib/author-spec.ts"]);
+
+/**
+ * Sanctioned direct-`upsertSpec` UNIT TESTS: (file, reason) entries, mirroring SANCTIONED_RAW_WRITES.
+ *
+ * The guard above exists to stop PRODUCTION code authoring a spec around the gate. A unit test for
+ * `upsertSpec` ITSELF is the one legitimate direct caller: it must invoke the low-level writer to
+ * exercise the writer's own rails, and routing it through `submitSpec` would test a different function.
+ *
+ * Structural rail: every entry MUST be a `.test.ts` file (asserted at startup below), so this list can
+ * never be used to exempt production code — the widest hole it can open is a test file, and each one
+ * still carries a written reason. Keep it minimal; every entry is debt.
+ */
+interface SanctionedUpsertEntry {
+  file: string;
+  reason: string;
+}
+
+const SANCTIONED_UPSERT_SPEC_CALLS: SanctionedUpsertEntry[] = [
+  {
+    file: "src/lib/specs-table.compensate-partial-write.test.ts",
+    reason:
+      "Unit-tests `upsertSpec`'s COMPENSATING-DELETE behaviour on a partial write: a phase-write failure " +
+      "on a NEW spec must delete the parent `specs` row (no phase-less spec left behind), while the same " +
+      "failure on an EXISTING spec must PRESERVE it (a failed re-author must not destroy real work). Both " +
+      "assertions are about the low-level writer's own failure path against a fake admin client — " +
+      "`submitSpec` would exercise the gate instead of the compensation logic under test. No DB is touched.",
+  },
+  {
+    file: "src/lib/specs-table.empty-phases-gate.test.ts",
+    reason:
+      "Unit-tests the unconditional empty-phase-list rail (spec-cannot-exist-without-phases Phase 1) — " +
+      "that `upsertSpec` THROWS `EmptySpecPhasesError` rather than writing a spec that could build but " +
+      "never merge. It asserts the raw writer REJECTS ungated input, i.e. it strengthens the very " +
+      "invariant this check enforces. The guard fires before `createAdminClient()`, so no DB or env is " +
+      "required.",
+  },
+];
+
+const SANCTIONED_UPSERT_FILES = new Set(SANCTIONED_UPSERT_SPEC_CALLS.map((s) => s.file));
+
+/**
+ * Structural rail on the allow-list itself: a non-test entry would let production code author specs
+ * around the gate, which is exactly what this check exists to prevent. Fail loudly at startup rather
+ * than silently honouring it.
+ */
+function assertUpsertAllowlistIsTestsOnly(): void {
+  const bad = SANCTIONED_UPSERT_SPEC_CALLS.filter((s) => !s.file.endsWith(".test.ts"));
+  if (bad.length === 0) return;
+  console.error(
+    `\n❌ check-pm-sdk-compliance — SANCTIONED_UPSERT_SPEC_CALLS may only contain \`.test.ts\` files:\n`,
+  );
+  for (const b of bad) console.error(`  • ${b.file}`);
+  console.error(
+    `\nThis allow-list exempts direct \`upsertSpec(\` calls. Exempting production code would defeat the\n` +
+    `gate entirely — a unit test of the writer is the only sanctioned direct caller. Route production\n` +
+    `code through \`submitSpec\` / \`authorSpecRowStructured\` instead.\n`,
+  );
+  process.exit(1);
+}
 
 interface UpsertFinding {
   file: string;
@@ -218,16 +337,23 @@ function isSanctioned(f: Finding): boolean {
 }
 
 function main() {
+  assertUpsertAllowlistIsTestsOnly();
   const summary = process.argv.includes("--summary");
   const files = scanFiles();
   const all: Finding[] = [];
   const upsertViolations: UpsertFinding[] = [];
+  const upsertAllowed: UpsertFinding[] = [];
   for (const abs of files) {
     const rel = relative(REPO_ROOT, abs).split("\\").join("/");
     if (SDK_INTERNALS.has(rel)) continue; // the SDK writers — sanctioned by definition
     const text = readFileSync(abs, "utf8");
     all.push(...findRawWrites(rel, text));
-    if (!UPSERT_SPEC_ALLOWED.has(rel)) upsertViolations.push(...findUpsertSpecCalls(rel, text));
+    if (!UPSERT_SPEC_ALLOWED.has(rel)) {
+      // A sanctioned unit test of `upsertSpec` itself is recorded, not failed — see
+      // SANCTIONED_UPSERT_SPEC_CALLS. Everything else is a gate bypass.
+      const target = SANCTIONED_UPSERT_FILES.has(rel) ? upsertAllowed : upsertViolations;
+      target.push(...findUpsertSpecCalls(rel, text));
+    }
   }
 
   const violations = all.filter((f) => !isSanctioned(f));
@@ -241,6 +367,8 @@ function main() {
     }
     console.log(`  upsertSpec direct calls outside author-spec.ts: ${upsertViolations.length}`);
     for (const u of upsertViolations) console.log(`  [UPSERT] ${u.file}:${u.line}  ${u.snippet}`);
+    console.log(`  upsertSpec sanctioned unit-test calls: ${upsertAllowed.length}`);
+    for (const u of upsertAllowed) console.log(`  [UPSERT-ALLOWED] ${u.file}:${u.line}  ${u.snippet}`);
   }
 
   if (upsertViolations.length > 0) {
@@ -285,9 +413,23 @@ function main() {
     console.warn(`Remove from SANCTIONED_RAW_WRITES — the raw write it sanctioned is gone.`);
   }
 
+  // Same hygiene for the upsertSpec test allow-list: an entry whose file no longer calls upsertSpec
+  // (test deleted, or rewritten onto submitSpec) is debt that should be dropped.
+  const upsertHitFiles = new Set(upsertAllowed.map((u) => u.file));
+  const staleUpsert = SANCTIONED_UPSERT_SPEC_CALLS.filter((s) => !upsertHitFiles.has(s.file));
+  if (staleUpsert.length) {
+    console.warn(
+      `⚠ check-pm-sdk-compliance — ${staleUpsert.length} stale upsertSpec allow-list entry/entries (no matching call):`,
+    );
+    for (const s of staleUpsert) console.warn(`  • ${s.file} — ${s.reason}`);
+    console.warn(`Remove from SANCTIONED_UPSERT_SPEC_CALLS — the direct call it sanctioned is gone.`);
+  }
+
   console.log(
     `✓ check-pm-sdk-compliance — ${files.length} file(s) scanned; ` +
-    `${allowed.length} sanctioned raw PM-write(s) (allow-listed); 0 unexpected.`,
+    `${allowed.length} sanctioned raw PM-write(s) (allow-listed); ` +
+    `${upsertAllowed.length} sanctioned upsertSpec unit-test call(s) in ${SANCTIONED_UPSERT_FILES.size} file(s); ` +
+    `0 unexpected.`,
   );
 }
 

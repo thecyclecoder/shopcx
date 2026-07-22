@@ -13,6 +13,7 @@
  * `getSpec()` remains display-only.
  */
 import { getLatestSpecTestRuns, getHumanCheckResolutions, deriveGreenBullets } from "@/lib/spec-test-runs";
+import { errText } from "@/lib/error-text";
 import { getSpec } from "@/lib/specs-table";
 import { listSpecPhaseChecks } from "@/lib/spec-phase-checks-table";
 import { getActiveWorkspaceId } from "@/lib/workspace";
@@ -48,7 +49,7 @@ export async function reflectSpecGreenChecks(workspaceId: string, slug: string):
     });
     bullets = checks.map((c) => c.text);
   } catch (e) {
-    return SKIP(`spec read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return SKIP(`spec read failed: ${errText(e)}`);
   }
   if (bullets.length === 0) {
     return { ok: true, changed: false, allGreen: false, greenCount: 0, total: 0, reason: "no verification checks" };

@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { sendTicketReply } from "@/lib/email";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
@@ -86,7 +87,7 @@ export async function executeWorkflow(
   } catch (err) {
     console.error(`Workflow "${workflow.name}" error:`, err);
     // Add internal note about the failure
-    await addNote(admin, context, `Workflow "${workflow.name}" failed: ${err instanceof Error ? err.message : String(err)}`);
+    await addNote(admin, context, `Workflow "${workflow.name}" failed: ${errText(err)}`);
   }
 }
 

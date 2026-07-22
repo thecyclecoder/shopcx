@@ -3,6 +3,7 @@
  * Run: npx tsx scripts/_apply-landing-url.ts
  */
 import { readFileSync } from "fs";
+import { errText } from "../src/lib/error-text";
 import { Client } from "pg";
 for (const line of readFileSync("/Users/admin/Projects/shopcx/.env.local", "utf8").split("\n")) {
   const t = line.trim(); if (!t || t.startsWith("#")) continue;
@@ -31,7 +32,7 @@ async function tryOne(c: { label: string; host: string; user: string }): Promise
   try {
     await client.connect();
   } catch (e) {
-    console.log(`· ${c.label}: ${(e instanceof Error ? e.message : String(e)).slice(0, 80)}`);
+    console.log(`· ${c.label}: ${(errText(e)).slice(0, 80)}`);
     try { await client.end(); } catch {}
     return false;
   }

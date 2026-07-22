@@ -146,13 +146,50 @@ lines.** The point of imitate-then-innovate is that these four slots are what th
 benefit throws that evidence away. Concretely:
 
 - `hook` — the seed for your headline (a stopping-scroll opener the market already validated).
+  **⚠️ PRESERVE THE INTRIGUE — the hook is what stops the scroll, and its CURIOSITY GAP is the proven
+  part.** The winning hook usually runs a "you'd expect X, but you actually need Y" contrarian pattern
+  (`"Your skin doesn't need more serums. It needs collagen."`) — the gap ("not serums? then WHAT?") is
+  the intrigue. Keep that mechanism. **Two hard rules:**
+  (1) **When the competitor's hook is built on a benefit OUR product ALSO delivers (an OVERLAP — check
+  `brief.supportingBenefits` / `brief.leadBenefitWeave`), keep the hook NEARLY VERBATIM.** It's already
+  proven AND already grounded in our product — do NOT needlessly rewrite it. Amazing Creamer literally
+  contains collagen + hyaluronic acid (Skin Health is a listed lead benefit), so `"Your skin doesn't
+  need more serums, it needs collagen"` transfers as-is. Only the CONVERT rule below applies when our
+  product genuinely LACKS the competitor's benefit.
+  (2) **Never flatten a curiosity hook into a literal, obvious product statement.** `"Your skin doesn't
+  need more serums, it needs collagen"` → `"Your coffee doesn't need more sugar, it needs Amazing
+  Creamer"` is a REGRESSION: the second has zero curiosity gap (of course creamer, not sugar) and
+  anchors on the product category instead of the intriguing benefit. **Anchor the hook on the surprising
+  BENEFIT (skin / collagen), not the product category (coffee / creamer)** — the product reveal belongs
+  in the body + the packshot, not the scroll-stopping headline.
 - `framework` — the structural shape (before/after, objection→answer, mechanism→proof, story arc)
   your primary text should mirror.
 - `mechanism_claim` — the *why-it-works* line to reuse in the body (respecting rail 1's
   ingredient-name / dose citation gates when you attach a specific number).
+  **⚠️ CONVERT THE BENEFIT TO OURS — but ONLY the benefits we actually LACK.** First check the OVERLAP:
+  is the competitor's benefit ALSO one of OUR listed benefits (`brief.supportingBenefits` /
+  `brief.leadBenefitWeave`)? **If it OVERLAPS, KEEP it** — collagen/skin is Amazing Creamer's own benefit,
+  so keep the collagen/skin claim (and its hook, per the PRESERVE-THE-INTRIGUE rule above). **Only SWAP a
+  benefit our product genuinely does NOT have.** A collagen brand also sells `gut · immunity · hair ·
+  nails` — Amazing Creamer has NONE of those, so those get converted to our real ones (`skin · focus ·
+  weight`), while the shared `collagen/skin` stays. Never carry a benefit our product lacks (a carried
+  `gut`/`immunity` claim is a `firewall_claim_miss` that bounces your session); never needlessly rewrite
+  a benefit we DO share (that discards a proven, grounded angle for a weaker one). This is the benefit
+  twin of the offer-slot swap (rail 4): imitate the STRUCTURE, keep the shared claims, convert only the
+  non-ours ones — ground every claim in OUR product.
 - `proof` — the type of proof to lead with (a customer quote, a clinical study, a satisfaction
   stat). Substitute an equivalent proof point from OUR brief (a real reviewer, a real ingredient
   study) — never quote the competitor's proof text verbatim as if it were ours.
+  **⚠️ CONVERT THE PROOF, NEVER INVENT A NUMBER.** If the competitor's `proof` is a STAT (a `%`, a
+  count, a timeframe, a `4.7-star` rating, `8 out of 10`), do NOT carry their number and do NOT
+  invent a matching one just to keep the proof's punch. Two grounded options only: (a) cite one of
+  OUR REAL `proofStack` numbers — `700,000+ customers`, `15,000+ reviews`, the `30-day money-back
+  guarantee`, or a real award/cert — with `source='proofStack'`; or (b) make the proof QUALITATIVE
+  and drop the number (`a favorite of thousands of coffee lovers`, not `loved by 89%`). Any number
+  that doesn't literally trace to OUR brief (`proofStack` / a real `reviews.byClaim` body / an
+  `ingredients` dosage row) is a `fabricated_number` firewall miss — the exact failure that bounced
+  the Bloom→Amazing Creamer imitation. This is the PROOF twin of the benefit-convert + offer-swap
+  rules: imitate the STRUCTURE, ground every stat in OUR real data or drop it.
 - `offer` — informational context (how the winner framed the ask); the actual offer text you
   write comes from OUR brief's `offer` field per rail 3 / rail 4 rules.
 
@@ -217,15 +254,22 @@ role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED 
 3. **Never emit a bare MSRP.** No standalone `$59` / `$29.99` sticker price. Prices are OK
    only as: strikethrough → discount (`~~$59~~ $39`), per-serving value
    (`$1.30 per serving`), or a comparison anchor. Bare-price is the top Meta policy reject.
-4. **Never emit offer language when `AUDIENCE_TEMPERATURE=cold`.** Cold prospects are
-   Schwartz stage 1-2 (problem-aware at best); an offer / discount / CTA-to-buy wastes the
-   impression on someone who doesn't yet know they have the problem. Cold copy leads with
-   the pain, the mechanism, or the transformation story — never with `20% OFF`, `Save $X`,
-   `Free shipping`, `Buy now`, `Shop now`, a bare `\d+%`, or a bare `$\d`. **The phase-2
-   cold-offer-gate in `insertReadyCreative` is the enforcer** — a cold caption that trips
-   `hasColdOfferLeak` in [[../../../src/lib/ads/lf8.ts]] returns
-   `{ kind:'skip', reason:'cold_offer_leak' }`, the campaign never lands, and the worker
-   re-invokes you ONCE for a copy-only rewrite. Don't get skipped.
+4. **On `AUDIENCE_TEMPERATURE=cold`, SWAP the offer slot for a proof point or risk-reversal —
+   never a discount.** Cold prospects are Schwartz stage 1-2 (problem-aware at best); a
+   deal-chase discount wastes the impression on someone who doesn't yet know they have the
+   problem. But when you're imitating an offer-led competitor ad, DON'T just drop the offer slot
+   (and NEVER carry the competitor's discount) — **replace it with a cold-appropriate trust
+   element** drawn from the brief: a **risk-reversal** (`30-day money-back guarantee`, `risk-free`,
+   `try it risk-free`), **free shipping**, or a **proof point** (`third-party tested`, `700K+
+   customers`, `Non-GMO`, `clinically studied`). These reduce purchase risk without training a
+   cold viewer to chase deals. **BANNED on cold** (these trip the gate): `20% OFF`, `Save $X`,
+   `Sale`, `Discount`, `Coupon`, `BOGO`, a bare `\d+%` adjacent to an offer word, or a bare `$\d`.
+   Lead the copy with the pain / mechanism / transformation; the offer slot is the swapped-in
+   trust element, not the headline. **The cold-offer-gate in `insertReadyCreative` is the
+   enforcer** — a cold caption that trips `hasColdOfferLeak` in [[../../../src/lib/ads/lf8.ts]]
+   returns `{ kind:'skip', reason:'cold_offer_leak' }` and triggers ONE copy-only rewrite. So swap
+   the discount for a guarantee / free shipping / proof — don't get skipped, and don't kill a good
+   imitation just because the source ad led with a discount.
 5. **Warm / hot** may lead with the real offer from the brief (never invent one), respecting
    rails 1-3.
 

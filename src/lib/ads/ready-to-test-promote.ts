@@ -24,6 +24,7 @@
  * module never reads from `agent_jobs` itself beyond the pending-actions handed in.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { inngest } from "@/lib/inngest/client";
 import { generateMetaCopy } from "@/lib/ad-meta-copy";
 import { recordDirectorActivity } from "@/lib/director-activity";
@@ -243,7 +244,7 @@ export async function executePromoteReadyToTest(
 
     return { ok: true, ad_publish_jobs_id: adPublishJobsId };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
+    return { ok: false, reason: errText(err).slice(0, 200) };
   }
 }
 

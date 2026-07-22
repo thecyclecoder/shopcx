@@ -1,0 +1,1 @@
+- **A spec cannot exist without phases — enforce the invariant at the SDK writer and the build gate** · verified 2026-07-20 · → [[operational-rules]] · [[libraries/specs-table]] · [[libraries/build-spec-materializer]]

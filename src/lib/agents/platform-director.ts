@@ -35,6 +35,7 @@
  * See docs/brain/specs/platform-director-agent.md · docs/brain/libraries/platform-director.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import {
   CEO,
   resolveApprover,
@@ -205,31 +206,6 @@ export function platformDrivesSpec(owner: string | null | undefined, chart: OrgC
   return specDriver(owner, chart, autonomy) === PLATFORM;
 }
 
-/**
- * Spec-review gate for the build-enqueue lanes (escort / backstop / board-grooming / init / front door).
- * RETIRED to a constant `true` — see the inline note. Vale's LLM spec-review lane is gone; well-formedness
- * is enforced deterministically at author time, so a spec that exists as a row has already passed review,
- * and the `vale_review_passed_at` durable signal this used to read is no longer stamped by anything. Kept
- * as a named predicate (not inlined) so its ~14 call sites — and the two regression tests — stay a single,
- * documented chokepoint rather than 14 scattered edits.
- */
-export function specReviewDone(_card: Pick<SpecCard, "valeReviewPassed" | "status">): boolean {
-  // escort-retire-vale-eligibility-gate: the Vale LLM spec-review lane is RETIRED
-  // (retire-vale-spec-review-becomes-deterministic-authoring-gate). Well-formedness (phases + per-phase
-  // machine-runnable checks, real Owner/Parent, no dupes/cycles, DB companion) is now enforced
-  // DETERMINISTICALLY at the AUTHORING chokepoint (`assertSpecReviewGate` in author-spec.ts), which THROWS
-  // before the row is ever written — so a spec that EXISTS as a `public.specs` row has ALREADY passed
-  // review. The old `vale_review_passed_at` durable stamp is DEAD: `stampSpecValeReviewPassed` has ZERO
-  // callers repo-wide (nothing sets it), so gating on `valeReviewPassed` silently held EVERY escort /
-  // backstop / board-grooming / init / front-door lane forever — a goal member spec authored under the
-  // deterministic model never received the stamp, so `escortApprovedGoals` + `reconcileReadyGoalMembers`
-  // skipped it every pass (the exact stall on the Dahlia copy-engine goal). retire-vale updated the
-  // claim-time build gate (`evaluateClaimTimeBuildGate`) + `enqueueBuildIfDue` to stop requiring the stamp;
-  // this predicate was the one residue it missed. An existing card is review-done — the remaining
-  // eligibility guards (not-shipped-with-provenance, not-deferred, auto_build, blockers-cleared, in-flight,
-  // loop-guard) still gate the build. `_card` retained for call-site + type compatibility.
-  return true;
-}
 
 /**
  * The director's AUTHORITATIVE live-state, rendered as a prompt block — sourced from `public.function_autonomy`
@@ -709,7 +685,7 @@ function isApprovedInProgress(goal: GoalCard): boolean {
 /**
  * The STATIC buildable-spec predicate — the goal-admission gate for a greenlit-at-0% goal (and the loop's own
  * static skips, kept DRY). A spec is buildable when it's: NOT really-shipped, NOT a tagless-shipped drift
- * suspect (status=shipped), NOT deferred (parked), Vale-reviewed (specReviewDone), NOT opted out of auto-build,
+ * suspect (status=shipped), NOT deferred (parked), NOT opted out of auto-build,
  * and NOT still blocked. This is exactly the set of unconditional `continue` guards at the top of the escort
  * loop — but WITHOUT the DB/stateful guards (in-flight, loop-guard, build-gate), which decide what to do with
  * a buildable spec, not whether it's buildable at all. Used to admit a ready-at-0% goal INTO the escort.
@@ -718,7 +694,6 @@ function isBuildableSpec(card: SpecCard): boolean {
   if (isCardFullyShippedWithProvenance(card)) return false; // really landed
   if (card.status === "shipped") return false; // tagless-shipped drift suspect — the loop surfaces it, never builds it
   if (card.status === "deferred") return false; // parked until the CEO un-defers it
-  if (!specReviewDone(card)) return false; // in_review / un-Vale-passed — Vale must pass it first
   if (card.autoBuild === false) return false; // owner opted this spec out of auto-build
   if (card.blockedBy.some((b) => !b.cleared)) return false; // still blocked → its auto-queue fires on unblock
   return true;
@@ -830,7 +805,7 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
   // Platform owns). The escort MUST drive every greenlit goal regardless of `owner`, or a growth-owned
   // (or CS-owned, etc.) goal with ready specs sits forever — the exact stall the autonomous-media-buyer-
   // supervision incident hit even after the per-spec readiness fixes (blocker-cleared, durable-vale-stamp)
-  // landed. Every downstream guard (specReviewDone via vale_review_passed_at, blocker-cleared per
+  // landed. Every downstream guard (blocker-cleared per
   // [[../spec-phase-provenance]], loop-guard, build-gate) is intact — only the goal-OWNER restriction
   // is removed.
   //
@@ -875,7 +850,6 @@ export async function escortApprovedGoals(admin: Admin): Promise<{ goals: GoalEs
         continue;
       }
       if (card.status === "deferred") continue; // parked — every auto-build lane skips a deferred spec until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
-      if (!specReviewDone(card)) continue; // no-max-on-unreviewed-specs (PRIMARY): never queue a build for an in_review / un-vale-passed spec — Vale must pass it first or the claim-gate just bounces it after a Max session was already spun up
       if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
       if (card.autoBuild === false) continue; // owner opted this spec out of auto-build (mirrors autoQueueUnblockedBy)
       if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → the auto-queue fires when its last blocker ships
@@ -1135,7 +1109,6 @@ export async function escortFixSpecs(admin: Admin): Promise<FixEscortResult> {
       continue;
     }
     if (card.status === "deferred") continue; // parked — a deferred fix spec is skipped until the CEO un-defers it (director-drives-all-specs-and-deferred-status Phase 1)
-    if (!specReviewDone(card)) continue; // no-max-on-unreviewed-specs (PRIMARY): a fix spec authored straight to planned still needs Vale's pass before a build is queued — else the claim-gate bounces it after a Max session was already spun up
     if (gate && card.slug !== gate.gatedUntil && !card.critical) continue; // build-gate: pause routine, but let the gate spec + any **Priority:** critical (priority builds) through
     if (card.autoBuild === false) continue; // owner opted out of auto-build
     if (card.blockedBy.some((b) => !b.cleared)) continue; // still blocked → its auto-queue fires on unblock
@@ -1512,14 +1485,6 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
       continue;
     }
     if (card.status === "deferred") {
-      result.skipped++;
-      continue;
-    }
-    if (!specReviewDone(card)) {
-      // no-max-on-unreviewed-specs (PRIMARY): the escort sweep's queued_build / failed_retry lanes insert a
-      // build job. Never queue one for an in_review / un-vale-passed spec — Vale must pass it first, else the
-      // claim-gate just bounces the build after Bo already spun up a Max session. (Bo's claim-selection hard-skip
-      // is the backstop.)
       result.skipped++;
       continue;
     }
@@ -3669,8 +3634,6 @@ export interface PhaseProgressionResult {
  *     (create-or-extend checks out the existing branch tip), and no-ops when no planned phase remains.
  *
  * RESPECTS, in addition to the helper's own guards:
- *   - the spec-review gate — `specReviewDone(card)` is the SAME `vale_review_passed_at`-backed durable signal
- *     every other Ada build-enqueue lane gates on; an `in_review` / un-Vale-passed spec is NEVER advanced;
  *   - one-phase-per-session scoping — we advance exactly ONE next phase per spec (`queueNextChainedPhase`
  *     queues a single `phaseScopedInstructions` phase, which the worker builds and then chains the next);
  *   - the build-driver keystone — only specs Ada drives (`platformDrivesSpec`), the same scope as every
@@ -3708,7 +3671,6 @@ export async function backstopPhaseProgression(admin: Admin): Promise<PhaseProgr
       !isCardFullyShippedWithProvenance(s) && // already done — nothing to advance
       s.status !== "deferred" && // parked — never advance a deferred spec (mirrors groom/init)
       s.status !== "shipped" && // a tagless-but-shipped rollup: the drift lanes handle it, not us
-      specReviewDone(s) && // spec-review gate — NEVER advance an un-Vale-passed / in_review spec
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.blockedBy.some((b) => !b.cleared) && // still blocked → its auto-queue fires when the last blocker ships
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic, keystone-routed: this director drives it
@@ -3825,7 +3787,6 @@ export async function backstopStuckAccumulation(admin: Admin): Promise<StuckAccu
       !isCardFullyShippedWithProvenance(s) &&
       s.status !== "deferred" &&
       s.status !== "shipped" &&
-      specReviewDone(s) &&
       s.autoBuild !== false &&
       platformDrivesSpec(s.owner, chart, autonomy) &&
       s.phases.length > 1 && // multi-phase — a one-shot spec cannot wedge on accumulation (trivially complete)
@@ -4298,7 +4259,6 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
       // spec "unstarted" and risk the init lane re-queuing it. `branchBuiltCount === 0` recognizes the
       // branch-built phase as started. (The per-candidate `state.inFlight` check below also dedups.)
       branchBuiltCount(s) === 0 && // unstarted — no phase built on the branch or shipped (tagless ✅ doesn't count)
-      specReviewDone(s) && // no-max-on-unreviewed-specs (PRIMARY): NEVER init a spec that hasn't passed Vale spec-review — an in_review / un-vale-passed spec would queue a build (and run a Max soundness investigation) only to be bounced at the claim-gate, burning a Max session each pass. Vale must pass it first.
       s.autoBuild !== false && // owner opted out of auto-build → leave it under manual control
       !s.repairSignature && // a fix spec — escortFixSpecs owns it, never the feature-init lane
       platformDrivesSpec(s.owner, chart, autonomy) && // owner-agnostic: Ada is the sole builder, she drives every spec (CEO directive 2026-06-29)
@@ -4792,7 +4752,7 @@ export async function applyDirectorAuthorFollowup(
         intendedStatusSetBy: `director:${PLATFORM}`,
       });
     } catch (e) {
-      return { ok: false, error: `followup spec DB author failed: ${e instanceof Error ? e.message : String(e)}`, authoredSlug: slug, existed: false };
+      return { ok: false, error: `followup spec DB author failed: ${errText(e)}`, authoredSlug: slug, existed: false };
     }
     // spec-review-agent Phase 3 — a director-authored followup is a freshly-created spec; mark its card
     // `in_review` with `flags.intended_status='planned'`. Best-effort: a mirror-write failure is swallowed
@@ -4893,7 +4853,7 @@ export async function applyDirectorFoldSuperseded(
   try {
     await setSpecStatus(workspaceId, candidate.slug, "folded", `director:${PLATFORM}`);
   } catch (e) {
-    return { ok: false, error: `fold_superseded setSpecStatus failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `fold_superseded setSpecStatus failed: ${errText(e)}` };
   }
   const foldNote = `Superseded by ${supersedingRef} — work already shipped elsewhere; folded off the board. ${reason}`.slice(0, 4000);
   return applyDirectorDismissCandidate(admin, workspaceId, "init", { slug: candidate.slug, owner: candidate.owner ?? null }, foldNote, {

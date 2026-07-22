@@ -1,0 +1,1 @@
+- **Founder escalations must actually reach the founder** · verified 2026-07-20 · → [[../libraries/approval-inbox]] · [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]

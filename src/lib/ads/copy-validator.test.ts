@@ -1,5 +1,5 @@
 /**
- * copy-validator tests — pins the six deterministic rails validateGeneratedCopy rolls up. Each
+ * copy-validator tests — pins the five deterministic rails validateGeneratedCopy rolls up. Each
  * case starts from an all-green baseline copy and mutates ONE field to prove that ONE rail flips
  * to fail while the others still pass. This is the SSOT the M1 keystone author + Max QC will
  * both read in Phase 2, so drift here would let one consumer flag a rail the other silently
@@ -26,18 +26,18 @@ const baseContext: ValidatorContext = {
 };
 
 /** Baseline copy — carries an LF8 keyword, fits every META cap, no bare MSRP, no competitor
- *  leak, no cold-audience concern (warm), a single promise. All six rails green. */
+ *  leak, no cold-audience concern (warm). All five rails green. */
 const goodCopy = {
   headline: "Cleaner morning energy",
   primaryText: "Drink one cup and get through the afternoon without the crash.",
   description: "Real reviews from customers who switched.",
 };
 
-test("(a) baseline copy passes all six rails", () => {
+test("(a) baseline copy passes all five rails", () => {
   const r = validateGeneratedCopy(goodCopy, stubBrief, baseContext);
   assert.equal(r.pass, true, `expected pass; got ${JSON.stringify(r.checks.filter((c) => !c.pass))}`);
   const rails = r.checks.map((c) => c.rail);
-  assert.deepEqual(rails, ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate", "single_promise"]);
+  assert.deepEqual(rails, ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate"]);
 });
 
 test("(b) headline > META_CAPS.headline → meta_caps fails", () => {
@@ -125,32 +125,21 @@ test("cold_offer_gate: warm audience + the same offer copy passes (gate is tempe
   assert.equal(gate.pass, true);
 });
 
-test("(f) 'lose 40 lbs and boost energy and clear brain fog' → single_promise fails", () => {
+test("multiple benefit promises are ALLOWED — no single_promise rail (CEO 2026-07-21: multi-benefit products stack real benefits)", () => {
+  // The kind of copy the removed rail used to reject. Our hero products are legitimately multi-benefit;
+  // the only requirement is that each promise be a REAL benefit (enforced by the claim-trace firewall,
+  // not this deterministic validator). So this must PASS and there must be NO single_promise rail.
   const r = validateGeneratedCopy(
     {
-      headline: "Lose 40 lbs and boost energy",
-      primaryText: "Lose 40 lbs and boost energy and clear brain fog with one delicious cup.",
+      headline: "More energy, more focus",
+      primaryText: "Boost energy and boost focus with one delicious cup — every single morning.",
       description: "Real reviews from customers.",
     },
     stubBrief,
     baseContext,
   );
-  const promise = r.checks.find((c) => c.rail === "single_promise")!;
-  assert.equal(promise.pass, false, `expected single_promise fail; got ${JSON.stringify(r.checks)}`);
-});
-
-test("single_promise: one clean promise passes", () => {
-  const r = validateGeneratedCopy(
-    {
-      headline: "Cleaner morning energy",
-      primaryText: "Boost focus with one cup — delicious every morning.",
-      description: "Real reviews from customers.",
-    },
-    stubBrief,
-    baseContext,
-  );
-  const promise = r.checks.find((c) => c.rail === "single_promise")!;
-  assert.equal(promise.pass, true);
+  assert.equal(r.pass, true, `expected pass; got ${JSON.stringify(r.checks.filter((c) => !c.pass))}`);
+  assert.ok(!r.checks.some((c) => (c.rail as string) === "single_promise"), "the single_promise rail must be gone");
 });
 
 test("lf8: copy with no LF8 keyword in headline+primary → lf8 fails", () => {
@@ -164,11 +153,11 @@ test("lf8: copy with no LF8 keyword in headline+primary → lf8 fails", () => {
   assert.equal(lf8.pass, false, `expected lf8 fail; got ${JSON.stringify(r.checks)}`);
 });
 
-test("rail order is fixed (lf8 → meta_caps → no_msrp → no_competitor_leak → cold_offer_gate → single_promise)", () => {
+test("rail order is fixed (lf8 → meta_caps → no_msrp → no_competitor_leak → cold_offer_gate)", () => {
   const r = validateGeneratedCopy(goodCopy, stubBrief, baseContext);
   assert.deepEqual(
     r.checks.map((c) => c.rail),
-    ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate", "single_promise"],
+    ["lf8", "meta_caps", "no_msrp", "no_competitor_leak", "cold_offer_gate"],
   );
 });
 

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getRoadmap, getArchive, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
+import { getRoadmap, getRoadmapFilters, type Phase, type SpecStatus, type SpecCard, type SpecSource } from "@/lib/brain-roadmap";
 import { getActiveWorkspaceId } from "@/lib/workspace";
 import { getLatestJobsBySlug, getPendingFolds, reconcileMergedJobs, isActive, type AgentJob, type PendingFold } from "@/lib/agent-jobs";
 import { getLatestSpecTestRuns, getHumanResolutionCounts, getHumanCheckResolutions, getLiveSpecTestSlugs, type SpecTestRun } from "@/lib/spec-test-runs";
@@ -137,24 +137,6 @@ function CountPills({ counts }: { counts: SpecCard["counts"] }) {
   );
 }
 
-// build-card-lifecycle-timeline Phase 2 — a folded spec's timeline reads ALL FIVE NODES CHECKED. The
-// Archive section below the active board renders a tiny version of the timeline on every folded entry
-// using this stable constant, so the verification "a folded spec → all 5 nodes checked" is visible.
-const FOLDED_DERIVATION = deriveLifecycleStage({
-  status: "folded",
-  valePass: true,
-  phases: [],
-  builtOnBranch: true,
-  buildLive: false,
-  buildNeedsAttention: false,
-  specTestVerdict: "approved",
-  specTestHasOpenRegression: false,
-  specTestLive: false,
-  specTestHasChecks: true,
-  securityLive: false,
-  securitySurfaced: false,
-  securityCompletedClean: true,
-});
 
 function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, source, humanResolutions, liveSpecTestSlugs, security, folded }: { spec: SpecCard; job: AgentJob | null; fold: PendingFold | null; testRun: SpecTestRun | null; humanResolved?: number; status: SpecStatus; goalSlugs: string[]; source: SpecSource; humanResolutions: Map<string, import("@/lib/spec-test-runs").HumanCheckRow>; liveSpecTestSlugs: ReadonlySet<string>; security: SecurityStateBySlug | undefined; folded: boolean }) {
   // build-card-lifecycle-timeline Phase 2: the 5-node timeline replacing the floating pill on the card.
@@ -274,12 +256,10 @@ export default async function RoadmapPage() {
   // getRoadmap(workspaceId) returns SpecCard[] with status DERIVED from spec_phases (the phase rollup
   // plus the explicit in_review / deferred overrides) and card.phases straight from the DB row with
   // per-phase pr/merge_sha provenance — the SOLE spec data source the board reads. No spec_card_state.
-  const [{ specs }, archive, filters] = await Promise.all([
+  // roadmap-archive-split: getArchive() is NOT fetched here any more — it lives on
+  // /dashboard/roadmap/archive. Fetching it for a collapsed list cost this page 5.11 MB per load.
+  const [{ specs }, filters] = await Promise.all([
     getRoadmap(workspaceId ?? undefined),
-    // spec-fold-from-db-row Phase 2: pass the workspaceId so getArchive() reads folded specs from
-    // public.specs directly (the row is preserved at fold time, status='folded'). Falls back to the
-    // filesystem when no workspace is in scope.
-    getArchive(workspaceId ?? undefined),
     getRoadmapFilters(workspaceId ?? undefined),
   ]);
   // build-card-lifecycle-timeline Phase 2 — additional per-board fetches the lifecycle timeline reads:
@@ -384,43 +364,22 @@ export default async function RoadmapPage() {
         </div>
       )}
 
-      {archive.length > 0 && (
-        <details id="roadmap-archive" className="mt-6 rounded-lg border border-zinc-200 bg-white/60 dark:border-zinc-800 dark:bg-zinc-900/40">
-          <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 marker:text-zinc-400 dark:text-zinc-400">
-            Archived — verified &amp; retired
-            <span className="ml-2 tabular-nums text-zinc-400">{archive.length}</span>
-          </summary>
-          <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
-            <p className="mb-3 text-xs text-zinc-400">
-              Shipped + owner-verified in production, folded into the brain. Reads the folded{" "}
-              <code>public.specs</code> rows (status=&apos;folded&apos;). Re-hydrate any of these into a fresh spec.
-            </p>
-            <ul className="space-y-2">
-              {archive.map((e, i) => (
-                <li key={i} data-spec-search={`${e.title} ${e.link} ${e.label}`.toLowerCase()} className="flex flex-col gap-1 rounded-md px-1 py-1.5 text-xs">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
-                    <Link href={`/dashboard/brain/${e.link}`} className="font-medium text-zinc-700 hover:text-indigo-600 dark:text-zinc-200 dark:hover:text-indigo-400">
-                      {e.title}
-                    </Link>
-                    {e.date && <span className="text-zinc-400">verified {e.date}</span>}
-                    <span className="text-zinc-300 dark:text-zinc-600">·</span>
-                    <Link href={`/dashboard/brain/${e.link}`} className="text-teal-600 hover:underline dark:text-teal-400">
-                      {e.label} ↗
-                    </Link>
-                    <AuthoringChat seed seedSlug={e.link} triggerLabel="New spec from brain" />
-                  </div>
-                  {/* build-card-lifecycle-timeline Phase 2 — a folded spec's timeline reads all 5 nodes
-                      checked. Rendered in a compact density so it stays unobtrusive in the archive list. */}
-                  <div className="ml-3.5 max-w-md">
-                    <LifecycleTimeline derivation={FOLDED_DERIVATION} density="compact" />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </details>
-      )}
+      {/* roadmap-archive-split: the archived list moved to its own page. It used to render here in a
+          collapsed <details>, which meant every board load fetched all 659 folded specs WITH their
+          phases (5.11 MB measured) to draw a list of titles nobody had expanded. The board now pays
+          for boardable specs only; the archive is fetched when someone goes looking for it. */}
+      <div className="mt-6 flex items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white/60 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/40">
+        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+          <span className="font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Archived</span>
+          <span className="ml-2">Shipped, owner-verified, and folded into the brain.</span>
+        </div>
+        <Link
+          href="/dashboard/roadmap/archive"
+          className="flex-shrink-0 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:border-indigo-300 hover:text-indigo-600 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400"
+        >
+          Go to archived specs →
+        </Link>
+      </div>
     </div>
   );
 }

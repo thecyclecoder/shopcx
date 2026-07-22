@@ -119,12 +119,32 @@ function resolveOrgNode(nodeId: string): OrgNode | null {
 }
 
 /**
+ * ad-creative-box-session-only-retire-deterministic-path Phase 3 (2026-07-19) — extract the bare
+ * agent-kind slug from an agent-node id. Agent nodes carry one of two id forms:
+ *   - `agent:<slug>`     — MONITORED_LOOPS agent-kind rows (e.g. `agent:ad-creative`)
+ *   - `agent-kind:<slug>` — KIND_OWNER_FALLBACK synthetic nodes (e.g. `agent-kind:fold`)
+ * Returns the bare slug, or null when the id does not carry either prefix (defensive; the caller
+ * still checks `node.kind === "agent"` upstream).
+ */
+function bareAgentSlugForNode(node: OrgNode): string | null {
+  if (node.kind !== "agent") return null;
+  if (node.id.startsWith("agent:")) return node.id.slice("agent:".length);
+  if (node.id.startsWith("agent-kind:")) return node.id.slice("agent-kind:".length);
+  return null;
+}
+
+/**
  * Walk the ancestor chain starting at `node` up to (and including) the root department, checking
  * each ancestor against the map. Returns the FIRST hit — the OFFENDING ancestor — or null if the
  * chain is clear.
  *
  * At a department node, both stored key forms are honored: the canonical id (`dept:growth`) AND
  * the bare function slug (`growth`, matching [[../tables/function_autonomy]] convention).
+ *
+ * At an agent-kind node, the bare agent-kind slug is ALSO honored alongside the canonical
+ * `agent:<slug>` / `agent-kind:<slug>` id — mirrors the department-key convenience above and
+ * closes the 2026-07-19 gap where a `kill_switches.node_id='ad-creative'` row failed to suppress
+ * an `agent:ad-creative` claim (ad-creative-box-session-only-retire-deterministic-path Phase 3).
  */
 function findOffendingAncestor(node: OrgNode, map: KillSwitchMap): KillSwitchRow | null {
   const seen = new Set<string>();
@@ -138,6 +158,15 @@ function findOffendingAncestor(node: OrgNode, map: KillSwitchMap): KillSwitchRow
     if (cursor.kind === "department") {
       const bySlug = map.get(cursor.owner);
       if (bySlug) return bySlug;
+    }
+    // Agent-kind bare-slug convenience: honor a kill_switches row keyed by the bare agent-kind
+    // slug (`ad-creative`) alongside the canonical `agent:ad-creative` / `agent-kind:<slug>` id.
+    if (cursor.kind === "agent") {
+      const bareSlug = bareAgentSlugForNode(cursor);
+      if (bareSlug) {
+        const byAgentSlug = map.get(bareSlug);
+        if (byAgentSlug) return byAgentSlug;
+      }
     }
     // Step up. A root department has parent=null → loop exits.
     if (!cursor.parent) break;

@@ -20,6 +20,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 
 const AMPLIFIER_BASE = "https://api.amplifier.com";
@@ -189,7 +190,7 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
   try {
     cfg = await getAmplifierConfig(input.workspaceId);
   } catch (err) {
-    return { success: false, error: "amplifier_not_configured", details: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: "amplifier_not_configured", details: errText(err) };
   }
 
   let shipping: Address;
@@ -197,7 +198,7 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
   try {
     ({ shipping, billing } = reconcileAddresses(input));
   } catch (err) {
-    return { success: false, error: "missing_address", details: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: "missing_address", details: errText(err) };
   }
 
   // Amplifier requires SKU on every line item. Drop anything that has
@@ -269,6 +270,6 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
     }
     return { success: true, amplifier_order_id: parsed.id };
   } catch (err) {
-    return { success: false, error: "amplifier_fetch_failed", details: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: "amplifier_fetch_failed", details: errText(err) };
   }
 }

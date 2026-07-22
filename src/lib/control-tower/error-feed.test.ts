@@ -16,6 +16,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isInngestStepWrappedNonErrorLog,
@@ -979,14 +980,17 @@ test("isTransientAppstleFrequencyUpstreamTimeout returns false on empty / nullis
   assert.equal(isTransientAppstleFrequencyUpstreamTimeout("/api/inngest", ""), false);
 });
 
-// ── isForeignAppstleUnskipUpstream500 (error-feed-scope-appstle-unskip-upstream-500-noise) ──
+// ── isForeignAppstleUnskipUpstream500 (error-feed-drop-appstle-unskip-upstream-500-noise) ──
 // `src/lib/appstle.ts` `appstleUnskipOrder` logs `console.error(\`Appstle unskip order error
 // for ${id}:\`, text)` when Appstle's own `unskip-order` endpoint 500s, then returns a
 // structured `{ success: false }` — the dunning-recovery step continues with the failure
 // result. The log-drain line is a foreign-owned upstream 500 the code already handles; the
-// false positive that opened Control Tower `vercel:5959f3e309a7800c`. Classifying it
-// transient auto-resolves a first sighting (recorded, not paged); a chronic Appstle outage
-// would recur within the window and still surface.
+// false positive that repeatedly reopened Control Tower `vercel:5959f3e309a7800c`. Wired
+// in `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP — the log is skipped
+// before it becomes a group so `recordError` never sees it and repeats cannot reopen the
+// vendor-owned incident on the transient-recurrence window (previous behavior). Non-500
+// Appstle unskip failures (Not Found, Unauthorized) and the sibling `Appstle unskip order
+// failed` catch-branch throw carry different markers and stay captured / paged.
 
 test("isForeignAppstleUnskipUpstream500 matches the captured /api/inngest signature", () => {
   assert.equal(
@@ -1091,6 +1095,86 @@ test("isForeignAppstleUnskipUpstream500 returns false on empty / nullish input",
   assert.equal(isForeignAppstleUnskipUpstream500(undefined, undefined), false);
   assert.equal(isForeignAppstleUnskipUpstream500("", ""), false);
   assert.equal(isForeignAppstleUnskipUpstream500("/api/inngest", ""), false);
+});
+
+test("capture-time drop keeps adjacent Appstle unskip failures (Not Found / Unauthorized / unskip order failed)", () => {
+  // The route's `isError` calls this predicate to drop the log BEFORE it becomes a group,
+  // so the same acceptance shape decides what recordError sees. Prove the drop-path intent:
+  // the exact `/api/inngest` Appstle Internal Server Error body is dropped; the three
+  // adjacent messages named in the spec's verification stay kept and reach recordError.
+  const path = "/api/inngest";
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      path,
+      "Appstle unskip order error for 1234567890: Internal Server Error",
+    ),
+    true,
+    "dropped: the exact vendor 500 body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(path, "Appstle unskip order error for 1234567890: Not Found"),
+    false,
+    "kept: 4xx Not Found body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(
+      path,
+      "Appstle unskip order error for 1234567890: Unauthorized",
+    ),
+    false,
+    "kept: 4xx Unauthorized body",
+  );
+  assert.equal(
+    isForeignAppstleUnskipUpstream500(path, "Appstle unskip order failed: Error: upstream_timeout"),
+    false,
+    "kept: sibling catch-branch throw log (different prefix)",
+  );
+});
+
+// ── isForeignEasyPostReturnsSweepRateLimit (error-feed-scope-easypost-returns-sweep-rate-limit-noise) ──
+// `src/lib/inngest/returns-reconcile-sweep.ts` logs `[returns-reconcile-sweep] lookupTracking
+// failed for return <id> (tracking <n>): <err>` when EasyPost's account-level throttle throws
+// on the per-row `lookupTracking` call, then returns from the row-worker — the row is skipped
+// and re-picked on the next daily sweep. The log-drain line is a foreign-vendor rate-limit
+// burst the code already handles; the false positive that opened Control Tower
+// `vercel:53af50d6c3a578ec` (39 identical lines in ~15s). Classifying it transient
+// auto-resolves a first sighting (recorded, not paged); a chronic EasyPost outage would
+// recur within the window and still surface.
+
+test("isForeignEasyPostReturnsSweepRateLimit matches the captured /api/inngest signature", () => {
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: You are being temporarily rate-limited due to excessive resource consumption. Contact support@easypost.com if this problem persists.",
+    ),
+    true,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepRateLimit KEEPS a non-rate-limit EasyPost failure (paged)", () => {
+  // A real EasyPost bug on the same sweep — bad tracking number, carrier not recognized,
+  // etc. — carries a different marker and stays captured / paged so a genuine outage still
+  // surfaces on first sighting.
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: bad tracking number",
+    ),
+    false,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepRateLimit KEEPS the same rate-limit message on a non-/api/inngest path (paged)", () => {
+  // Only the returns-reconcile-sweep Inngest function reaches this call site today. If some
+  // other caller starts emitting the same body from a different path, that's a NEW surface
+  // and stays captured / paged — a re-scope would land in this same classifier.
+  assert.equal(
+    isForeignEasyPostReturnsSweepRateLimit(
+      "/api/portal",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: You are being temporarily rate-limited due to excessive resource consumption.",
+    ),
+    false,
+  );
 });
 
 // ── isTransientClientNetworkAbort (error-feed-drop-safari-load-failed-client-network-abort-noise) ──
@@ -1508,6 +1592,28 @@ test("isTransientAnthropicOverloadError matches AI API error across the 5xx band
   for (const status of ["500", "502", "503", "504", "520", "529"]) {
     assert.equal(
       isTransientAnthropicOverloadError(`[fraud] AI screen error: Error: AI API error: ${status}`),
+      true,
+      `status=${status}`,
+    );
+  }
+});
+
+// `fraud-generate-summary` (`src/lib/inngest/fraud-detection.ts:174`) throws
+// `Anthropic API error: ${response.status}` — the sibling of the `AI API error:` shape from
+// `src/lib/fraud-detector.ts:704`. Vercel drained an Anthropic 529 as a first-sighting OPEN
+// paged incident (`vercel:752bb49488e5aa72`) because the classifier only matched the older
+// `AI` prefix. The widened alternation covers both.
+test("isTransientAnthropicOverloadError matches the fraud-generate-summary 529 throw shape", () => {
+  assert.equal(
+    isTransientAnthropicOverloadError("Error: Anthropic API error: 529"),
+    true,
+  );
+});
+
+test("isTransientAnthropicOverloadError matches Anthropic API error across the 5xx band", () => {
+  for (const status of ["500", "502", "503", "504", "520", "529"]) {
+    assert.equal(
+      isTransientAnthropicOverloadError(`Error: Anthropic API error: ${status}`),
       true,
       `status=${status}`,
     );

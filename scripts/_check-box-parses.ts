@@ -25,6 +25,7 @@
  * never runs the bundled code.
  */
 import { build } from "esbuild";
+import { errText } from "../src/lib/error-text";
 import { existsSync } from "fs";
 import { resolve } from "path";
 
@@ -129,7 +130,7 @@ async function parseEntry(rel: string): Promise<{ rel: string; ok: boolean; erro
       });
       return { rel, ok: false, error: lines.join("\n    ") };
     }
-    return { rel, ok: false, error: err.message || String(e) };
+    return { rel, ok: false, error: err.message || errText(e) };
   }
 }
 
@@ -155,4 +156,4 @@ async function main() {
   for (const r of results) console.log(`  • ${r.rel}`);
 }
 
-main().catch((e) => fail(e instanceof Error ? e.message : String(e)));
+main().catch((e) => fail(errText(e)));

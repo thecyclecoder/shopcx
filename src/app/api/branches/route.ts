@@ -11,6 +11,7 @@
  * See docs/brain/dashboard/branches.md.
  */
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { cookies } from "next/headers";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -79,7 +80,7 @@ export async function GET() {
     const all = (await gh(`/repos/${REPO}/pulls?state=open&per_page=100`)) as GhPull[];
     pulls = all.filter((p) => p.head?.ref?.startsWith("claude/"));
   } catch (err) {
-    return NextResponse.json({ configured: true, error: String(err), branches: [], total: 0 }, { status: 502 });
+    return NextResponse.json({ configured: true, error: errText(err), branches: [], total: 0 }, { status: 502 });
   }
 
   // Match each PR to the todo that created it (execution_result.pr_url).

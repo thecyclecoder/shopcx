@@ -49,12 +49,14 @@ test("cold + '20% off' trips the gate (bare-percent regex)", () => {
 });
 
 test("COLD_OFFER_TOKENS colocates the LF8 offer/urgency cluster (SSOT — no drift)", () => {
-  // The LF8 offer/urgency cluster (lf8.ts lines 41-42): save · off · free shipping · deal · today.
-  // The gate MUST reuse these — a divergent list would let a hallucinated cold caption ship with
-  // an LF8-flagged token the supervisor gate would still see.
-  for (const t of ["save", "off", "free shipping", "deal", "today"]) {
+  // The LF8 offer/urgency cluster (lf8.ts): save · off · deal · today. The gate MUST reuse these — a
+  // divergent list would let a hallucinated cold caption ship with an LF8-flagged token the
+  // supervisor gate would still see. `free shipping` was removed from BOTH (CEO 2026-07-21 — it's a
+  // cold-allowed trust/risk-reversal element, not a deal-chase discount), so the mirror stays intact.
+  for (const t of ["save", "off", "deal", "today"]) {
     assert.ok(COLD_OFFER_TOKENS.includes(t), `expected COLD_OFFER_TOKENS to include LF8 offer/urgency token "${t}"`);
   }
+  assert.ok(!COLD_OFFER_TOKENS.includes("free shipping"), "free shipping is no longer a cold-offer token");
 });
 
 test("hasColdOfferLeak scans all three copy fields (headline / primaryText / description)", () => {

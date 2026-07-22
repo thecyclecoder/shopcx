@@ -42,12 +42,31 @@ export async function GET(req: Request) {
   const kind = url.searchParams.get("kind"); // category | competitor
   const productId = url.searchParams.get("productId"); // filter to one advertised product's ads
   const mediaType = url.searchParams.get("mediaType"); // 'static' | 'video' — the Research › Ads toggle
+  const skeletonId = url.searchParams.get("skeletonId"); // single-ad fetch for the Research › Ads detail page
+
+  const SELECT =
+    "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at, do_not_use, do_not_use_reason, do_not_use_by, do_not_use_at";
+
+  // Detail page — one ad by id, regardless of status/media_type (the owner clicked into it from the grid).
+  if (skeletonId) {
+    const { data: one, error: oneErr } = await auth.admin
+      .from("creative_skeletons")
+      .select(SELECT)
+      .eq("workspace_id", workspaceId as string)
+      .eq("id", skeletonId)
+      .maybeSingle();
+    if (oneErr) return NextResponse.json({ error: oneErr.message }, { status: 500 });
+    if (!one) return NextResponse.json({ error: "not found" }, { status: 404 });
+    const r = one as Record<string, unknown>;
+    return NextResponse.json({
+      ...r,
+      thumb_url: r.thumb_path ? await signCreativeShot(r.thumb_path as string) : null,
+    });
+  }
 
   let q = auth.admin
     .from("creative_skeletons")
-    .select(
-      "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at",
-    )
+    .select(SELECT)
     .eq("workspace_id", workspaceId as string)
     .order("days_running", { ascending: false, nullsFirst: false })
     .limit(500);

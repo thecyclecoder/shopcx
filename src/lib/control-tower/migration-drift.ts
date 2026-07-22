@@ -36,6 +36,7 @@
  * the raw-SQL schema read. See docs/brain/libraries/control-tower.md.
  */
 import { readdirSync, readFileSync } from "fs";
+import { errText } from "@/lib/error-text";
 import { join } from "path";
 import { MIGRATION_DRIFT_LOOP_ID } from "@/lib/control-tower/registry";
 import { classifyMigrationSql, type MigrationSeverity } from "@/lib/migration-safety";
@@ -87,7 +88,7 @@ export interface MergedUnappliedMigration {
 }
 
 export interface DriftResult {
-  /** 'ok' = no drift · 'drift' = ≥1 expected table missing OR ≥1 merged-but-unapplied migration · 'skipped' = couldn't read the live schema. */
+  /** 'ok' = no drift · 'drift' = ≥1 expected table missing OR ≥1 merged-but-unapplied migration OR ≥1 duplicate local version · 'skipped' = couldn't read the live schema. */
   status: "ok" | "drift" | "skipped";
   /** absent expected tables that ALERT (excludes allowlisted/sunset ones). */
   missing: MissingTable[];
@@ -103,6 +104,14 @@ export interface DriftResult {
    * case (an old apply that pre-dates a file rename/delete). INFORMATIONAL, never a red alarm.
    */
   appliedNotOnMain: string[];
+  /**
+   * Two or more supabase/migrations/*.sql files that share the SAME 14-digit YYYYMMDDNNNNNN version
+   * prefix. The applied-set reconcile keys on the version alone, so a collision silently dedupes to
+   * one 'applied' row and the loser's DDL is dropped from the auto-apply path invisibly — exactly
+   * the media_buyer_cohort_excluded_all_customers_audience regression this axis pins. ALERTABLE.
+   * migration-drift-detect-duplicate-14-digit-version-collisions spec Phase 1.
+   */
+  duplicateVersions: Array<{ version: string; files: string[] }>;
   /** count of distinct migration-created tables (net of drops). */
   expectedCount: number;
   /** count of live public tables read (0 when skipped). */
@@ -273,6 +282,37 @@ export function extractMigrationVersion(filename: string): string | null {
 }
 
 /**
+ * Group migration filenames by their 14-digit YYYYMMDDNNNNNN version prefix and return every group
+ * whose size > 1 — the colliding-versions set. The applied-set reconcile keys on the version alone
+ * (schema_migrations.version is unique), so two local files that share a prefix silently dedupe to
+ * one 'applied' row and the loser's DDL is dropped from the auto-apply path with no alert. Detecting
+ * these directly is the durable defect fix; the tile's applied-set axis can't see it (both files
+ * count as one version).
+ *
+ * PURE + exported so the collision detector is unit-testable without fs. Off-format files (no
+ * 14-digit prefix) are skipped — they can't collide via the versioned index. Files WITHIN a group
+ * are sorted lexically for stable output; groups are sorted by version.
+ * migration-drift-detect-duplicate-14-digit-version-collisions spec Phase 1.
+ */
+export function detectDuplicateLocalVersions(
+  files: string[],
+): Array<{ version: string; files: string[] }> {
+  const byVersion = new Map<string, string[]>();
+  for (const file of files) {
+    const version = extractMigrationVersion(file);
+    if (version == null) continue;
+    const bucket = byVersion.get(version);
+    if (bucket) bucket.push(file);
+    else byVersion.set(version, [file]);
+  }
+  const out: Array<{ version: string; files: string[] }> = [];
+  for (const [version, group] of byVersion) {
+    if (group.length > 1) out.push({ version, files: [...group].sort() });
+  }
+  return out.sort((a, b) => a.version.localeCompare(b.version));
+}
+
+/**
  * Diff the local file set against the applied version set → merged-but-unapplied + informational
  * appliedNotOnMain. PURE: exported so the reconcile logic is unit-testable without fs/pg.
  *
@@ -355,6 +395,7 @@ export interface RunDriftOpts {
 export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftResult> {
   const allowlist = opts.allowlist ?? MIGRATION_DRIFT_ALLOWLIST;
   const { expected, parsedFiles, files } = parseExpectedTables(opts.migrationsDir);
+  const duplicateVersions = detectDuplicateLocalVersions(files);
 
   let applied: string[] | null = null;
   let appliedReason: string | undefined;
@@ -362,7 +403,7 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
     try {
       applied = await opts.fetchAppliedVersions();
     } catch (e) {
-      appliedReason = `applied-versions read failed: ${e instanceof Error ? e.message : String(e)}`;
+      appliedReason = `applied-versions read failed: ${errText(e)}`;
     }
     if (applied == null && !appliedReason) {
       appliedReason = "applied versions unavailable (no DB connection on this host)";
@@ -387,11 +428,12 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
       allowlistedMissing: [],
       mergedButUnapplied,
       appliedNotOnMain,
+      duplicateVersions,
       expectedCount: expected.size,
       liveCount: 0,
       parsedFiles,
       appliedCount,
-      reason: `live schema read failed: ${e instanceof Error ? e.message : String(e)}`,
+      reason: `live schema read failed: ${errText(e)}`,
       appliedCheckSkipped,
     };
   }
@@ -402,6 +444,7 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
       allowlistedMissing: [],
       mergedButUnapplied,
       appliedNotOnMain,
+      duplicateVersions,
       expectedCount: expected.size,
       liveCount: 0,
       parsedFiles,
@@ -412,13 +455,15 @@ export async function runMigrationDriftCheck(opts: RunDriftOpts): Promise<DriftR
   }
 
   const { missing, allowlistedMissing } = computeDrift(expected, live, allowlist);
-  const hasDrift = missing.length > 0 || mergedButUnapplied.length > 0;
+  const hasDrift =
+    missing.length > 0 || mergedButUnapplied.length > 0 || duplicateVersions.length > 0;
   return {
     status: hasDrift ? "drift" : "ok",
     missing,
     allowlistedMissing,
     mergedButUnapplied,
     appliedNotOnMain,
+    duplicateVersions,
     expectedCount: expected.size,
     liveCount: live.length,
     parsedFiles,
@@ -448,6 +493,15 @@ export function driftSummary(r: DriftResult): string {
     const list = r.mergedButUnapplied.slice(0, 5).map((m) => `${m.version} (${m.file})`).join(", ");
     const tail = outcomes ? ` [${outcomes}]` : "";
     parts.push(`${r.mergedButUnapplied.length} merged-but-unapplied: ${list}${r.mergedButUnapplied.length > 5 ? `, +${r.mergedButUnapplied.length - 5} more` : ""}${tail}`);
+  }
+  if (r.duplicateVersions.length > 0) {
+    const list = r.duplicateVersions
+      .slice(0, 5)
+      .map((d) => `${d.version} (${d.files.join(", ")})`)
+      .join("; ");
+    parts.push(
+      `${r.duplicateVersions.length} duplicate version${r.duplicateVersions.length === 1 ? "" : "s"}: ${list}${r.duplicateVersions.length > 5 ? `, +${r.duplicateVersions.length - 5} more` : ""}`,
+    );
   }
   return `migration drift — ${parts.join("; ")}`;
 }
@@ -755,7 +809,7 @@ export async function applyMergedMigrations(
       out.push({
         ...m,
         outcome: "apply-failed",
-        error: `read failed: ${(e as Error)?.message ?? String(e)}`,
+        error: `read failed: ${(e as Error)?.message ?? errText(e)}`,
       });
       continue;
     }
@@ -782,7 +836,7 @@ export async function applyMergedMigrations(
             severity: cls.severity,
             matches: cls.matches,
             outcome: "apply-failed",
-            error: (e as Error)?.message ?? String(e),
+            error: (e as Error)?.message ?? errText(e),
           });
         }
       }
@@ -800,7 +854,7 @@ export async function applyMergedMigrations(
       } catch (e) {
         console.error(
           `[migration-drift] onApprovalNeeded hook threw for ${m.file}:`,
-          (e as Error)?.message ?? String(e),
+          (e as Error)?.message ?? errText(e),
         );
       }
     }

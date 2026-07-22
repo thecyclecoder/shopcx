@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCompetitor, setCompetitorStatus } from "@/lib/competitors";
+import { setSkeletonDoNotUse } from "@/lib/creative-skeleton";
 
 // Competitor Scout review action (docs/brain/specs/competitor-scout.md, Phase 1) — approve or
 // reject one proposed competitor. Approving flips status → 'approved' (it then enters the
@@ -59,7 +61,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: errText(err) },
       { status: 500 },
     );
   }
@@ -72,4 +74,52 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       reviewed_at: updated.reviewed_at,
     },
   });
+}
+
+// flag-a-competitor-ad-do-not-use Phase 2 — the CEO's per-AD "don't use" toggle.
+//
+// Under PATCH, the URL `[id]` addresses a `creative_skeletons` row (one competitor AD), not a
+// competitor brand row (which is what POST's `[id]` addresses). Deliberately verb-scoped: the
+// flag is per-AD by design (a brand can hold both great and lame ads — CEO's Magic Mind vs.
+// Onnit case), so the resource under PATCH is the skeleton. The write goes through the sole
+// chokepoint `setSkeletonDoNotUse` in src/lib/creative-skeleton.ts (workspace-scoped +
+// compare-and-set); the flag is honored by `queryProvenAngles` in src/lib/ads/creative-sourcing.ts
+// (Phase 1) so a flagged ad never becomes an imitation angle for Dahlia.
+//
+// Body: { workspaceId: string, doNotUse: boolean, reason?: string | null }.
+// The `by` audit column is stamped 'ceo' server-side — this route is the manual-flag path; the
+// Phase-3 Max grader calls `setSkeletonDoNotUse` directly with `by='max'`, not through here.
+export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id: skeletonId } = await params;
+  const { user } = await getAuthedUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const body = (await req.json().catch(() => ({}))) as {
+    workspaceId?: string;
+    doNotUse?: boolean;
+    reason?: string | null;
+  };
+  const workspaceId: string | null = body.workspaceId ?? null;
+  if (typeof body.doNotUse !== "boolean")
+    return NextResponse.json({ error: "doNotUse (boolean) required" }, { status: 400 });
+
+  const auth = await authorize(workspaceId, user);
+  if (auth.error) return auth.error;
+
+  try {
+    const ok = await setSkeletonDoNotUse({
+      workspaceId: workspaceId as string,
+      skeletonId,
+      doNotUse: body.doNotUse,
+      reason: body.doNotUse ? (body.reason ?? "ceo_manual") : null,
+      by: "ceo",
+    });
+    if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: errText(err) },
+      { status: 500 },
+    );
+  }
+  return NextResponse.json({ ok: true, do_not_use: body.doNotUse });
 }

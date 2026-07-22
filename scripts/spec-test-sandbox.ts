@@ -21,6 +21,7 @@
 //
 // Prints a JSON verdict to stdout. NEVER touches a non-test workspace.
 import { createAdminClient, pgClient } from "./_bootstrap";
+import { errText } from "../src/lib/error-text";
 import {
   SPEC_TEST_FIXTURES,
   INTERNAL_ONLY_FLOWS,
@@ -300,6 +301,6 @@ async function main() {
   }
 }
 main().catch((e) => {
-  console.error(JSON.stringify({ pass: false, error: e instanceof Error ? e.message : String(e) }));
+  console.error(JSON.stringify({ pass: false, error: errText(e) }));
   process.exit(1);
 });

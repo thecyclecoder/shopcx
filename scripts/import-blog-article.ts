@@ -6,6 +6,7 @@
  *   npx tsx scripts/import-blog-article.ts <article-handle | shopify-article-id>
  */
 import { readFileSync, existsSync } from "node:fs";
+import { errText } from "../src/lib/error-text";
 import { resolve } from "node:path";
 const envPath = resolve(__dirname, "../.env.local");
 if (existsSync(envPath)) for (const line of readFileSync(envPath, "utf8").split("\n")) {
@@ -36,4 +37,4 @@ async function main() {
     images_migrated: r.imagesMigrated,
   }));
 }
-main().catch((e) => { console.error(JSON.stringify({ error: e instanceof Error ? e.message : String(e) })); process.exit(1); });
+main().catch((e) => { console.error(JSON.stringify({ error: errText(e) })); process.exit(1); });

@@ -1,0 +1,1 @@
+- **Self-healing return refunds — cap against the live ledger, fail loud, and sweep the stuck ones** · verified 2026-07-20 · → [[../lifecycles/return-pipeline]]

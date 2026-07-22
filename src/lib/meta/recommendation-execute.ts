@@ -37,6 +37,7 @@
  * docs/brain/specs/meta-campaign-adset-creation-primitive.md (Phase 2).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { inngest } from "@/lib/inngest/client";
 import type { RecommendationType } from "@/lib/meta/decision-engine";
 import {
@@ -284,7 +285,7 @@ export async function executeRecommendation(
     if (rec.action_type === "new_campaign") return await executeNewCampaignAdapter(rec);
     return await executePublishAdapter(rec);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errText(err);
     await updateRecommendationGuarded(admin, rec, {
       status: "failed",
       external_result: { ...(rec.external_result || {}), error: message.slice(0, 500) },

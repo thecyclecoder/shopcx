@@ -33,8 +33,11 @@
  * Service-role only (RLS allows read for authenticated; ALL ops for service_role). All callers go
  * through `createAdminClient()`.
  */
+import { spawn } from "node:child_process";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import type { Phase } from "@/lib/brain-roadmap";
+import type { GrepCheckParams } from "@/lib/spec-phase-checks-table";
 
 export type { Phase } from "@/lib/brain-roadmap";
 
@@ -55,6 +58,29 @@ export class UngatedSpecAuthorError extends Error {
         `skill) — never raw \`upsertSpec\` — so the Verification + Intent gates run.`,
     );
     this.name = "UngatedSpecAuthorError";
+  }
+}
+
+/**
+ * Thrown UNCONDITIONALLY by `upsertSpec` when the phase list is empty — the last rail against a phase-less
+ * spec landing in `public.specs`. A spec's `spec_phase_checks` live under its phases, so a spec with zero
+ * phases has zero checks and the promote-on-green tests gate can never go green: the build succeeds, opens
+ * a PR, and sits unmergeable until a human intervenes (2026-07-20 — three such specs shipped in one day
+ * from three different author paths; two were byte-identical duplicates). Sibling to
+ * `UngatedSpecAuthorError` — same "fail-loud-at-the-writer" pattern; distinct class so callers can
+ * `instanceof EmptySpecPhasesError` and treat it specifically (an empty phase list is a shape defect,
+ * not a per-field authoring gap). Applies to insert AND update: no legitimate re-author reduces a spec
+ * to zero phases; both author chokepoints already reject one upstream.
+ */
+export class EmptySpecPhasesError extends Error {
+  constructor(slug: string) {
+    super(
+      `upsertSpec refused to write spec \`${slug}\`: phase list is empty. A spec's \`spec_phase_checks\` ` +
+        `live under its phases, so a spec with no phases has no checks — the promote-on-green tests gate ` +
+        `can never go green, and the build would produce an unmergeable PR. Author through ` +
+        `\`authorSpecRowStructured\` / \`submitSpec\` (the submit-spec skill), which requires >=1 phase.`,
+    );
+    this.name = "EmptySpecPhasesError";
   }
 }
 
@@ -264,8 +290,42 @@ export interface ListSpecsFilter {
    *  `'active'` = boardable specs (`status IS NULL OR status <> 'folded'`); `'archived'` = folded specs;
    *  `'all'` = every spec. Defaults to `'all'` so pre-RPC listSpecs semantics (folded-inclusive) are
    *  preserved for the callers that need them (director-kpis, spec-dispose audits). Boardable readers
-   *  should prefer the [[getActiveSpecs]] wrapper. */
-  scope?: "active" | "archived" | "all";
+   *  should prefer the [[getActiveSpecs]] wrapper.
+   *
+   *  spec-read-egress-scope-and-cursor: when omitted, a `status` filter NARROWS the default — see
+   *  [[scopeForFilter]]. Passing `scope` explicitly always wins. */
+  scope?: SpecScope;
+}
+
+/** The server-side row sets `list_specs_with_phases(p_scope)` understands. */
+export type SpecScope = "active" | "archived" | "all";
+
+const SPEC_SCOPES = ["active", "archived", "all"] as const;
+
+/**
+ * spec-read-egress-scope-and-cursor — derive the cheapest server-side scope that is PROVABLY
+ * equivalent to the caller's filter, so a `status` filter stops paying for the full board.
+ *
+ * An explicit `scope` always wins — this only narrows the `'all'` default. The equivalence rests on
+ * two facts, both verified against prod rather than assumed:
+ *   1. `specRowFromDb` passes `status` through VERBATIM from the stored column (unlike phase status,
+ *      which is derived at the read boundary), so a `status` filter tests exactly what the RPC's
+ *      `p_scope` predicate tests.
+ *   2. `specs_status_check` is `status IS NULL OR status IN ('deferred','folded')`, so a stored
+ *      status can only ever be one of those three values.
+ * Therefore `status='folded'` ⟺ scope `'archived'`, and `status='deferred'` is strictly inside
+ * scope `'active'` (`status <> 'folded'`) with the in-memory filter narrowing the rest.
+ *
+ * Every OTHER `SpecStatus` ('in_review' | 'planned' | 'in_progress' | 'shipped') is a DERIVED
+ * lifecycle value the CHECK constraint forbids in the column, so it matches nothing either way. We
+ * deliberately do NOT narrow those: if the constraint is ever widened, an un-narrowed `'all'` stays
+ * correct, where a narrowed scope would silently drop rows. Cheapness must never outrank correctness.
+ */
+export function scopeForFilter(filter: ListSpecsFilter): SpecScope {
+  if (filter.scope) return filter.scope;
+  if (filter.status === "folded") return "archived";
+  if (filter.status === "deferred") return "active";
+  return "all";
 }
 
 interface SpecRowDb {
@@ -477,6 +537,10 @@ export function onSpecCacheInvalidate(cb: SpecCacheInvalidator): () => void {
 /** Evict a cached (workspace, slug) entry. Called by every writer in this module on success. */
 export function invalidateSpecCache(workspaceId: string, slug: string): void {
   specCache.delete(specCacheKey(workspaceId, slug));
+  // spec-read-egress-scope-and-cursor — the whole-board snapshot is a function of every spec in the
+  // workspace, so any spec write drops it too. Same chokepoint as the per-slug eviction, which is
+  // why a read-after-write is fresh INSIDE the TTL and no writer path can be missed.
+  invalidateListSpecsCache(workspaceId);
   for (const cb of specCacheInvalidators) {
     try {
       cb(workspaceId, slug);
@@ -500,9 +564,82 @@ export function invalidateSpecCache(workspaceId: string, slug: string): void {
   })();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// spec-read-egress-scope-and-cursor — whole-board read cache.
+//
+// `list_specs_with_phases` is the largest single egress driver on the project: measured 2026-07-20
+// over a 12-day `pg_stat_statements` window, 238,379 calls / 150,011,498 rows — ~19,900 calls/day
+// at 629 rows/call, ≈97 GB/day. A full-board row is ~7.8 KB (68.7% of it the joined `phases`
+// jsonb), so one `scope='all'` call ships 5.14 MB where `scope='active'` ships 0.05 MB. The
+// Phase-5 `p_since` cursor and the `specsMaxUpdatedAt` change-probe were both built end-to-end for
+// exactly this, but `listSpecs` passed neither — every caller re-shipped the whole board every call.
+//
+// This is the same probe-validated wrapper cache [[brain-roadmap]] `getRoadmap` already runs
+// (spec-read-eff-roadmap-cache Phase 3 + p_since Phase 5), lifted DOWN to the SDK so it covers
+// EVERY whole-board reader — board render, roadmap, spec-drift, pulse, review-gate, the box poll
+// loop — not just the roadmap wrapper. On a stale entry we spend one index-only scan
+// (`specs_ws_updated_at_idx`) asking "did anything change?"; when the answer is no, extend the TTL
+// and serve cached rows instead of re-shipping 5.14 MB.
+//
+// Correctness rails, in order of importance:
+//  - Keyed by (workspace, scope) — a narrower scope must never be served from a wider entry.
+//  - Evicted by `invalidateSpecCache`, the SAME chokepoint every writer in this module already
+//    calls, so a read-after-write is fresh INSIDE the TTL. Cross-process writers arrive via the
+//    existing `spec_changed` LISTEN/NOTIFY rail, which routes to that same invalidator.
+//  - Probe unavailable (pool blip) ⇒ full re-fetch. Over-fetching is always safe; serving
+//    genuinely stale specs is not.
+//  - `filter` is applied AFTER the cache and never baked into the entry, so a filtered call can
+//    never poison the entry an unfiltered caller reads.
+type ListSpecsCacheEntry = { rows: SpecRow[]; expiresAt: number; maxUpdatedAt: Date | null };
+const listSpecsCache = new Map<string, ListSpecsCacheEntry>();
+
+function listSpecsCacheKey(workspaceId: string, scope: SpecScope): string {
+  return `${workspaceId}::${scope}`;
+}
+
+/** Drop every cached scope for a workspace — any write can move a row into or out of any scope. */
+function invalidateListSpecsCache(workspaceId: string): void {
+  for (const scope of SPEC_SCOPES) listSpecsCache.delete(listSpecsCacheKey(workspaceId, scope));
+}
+
+/** What [[listSpecsCached]] should do with a cache entry. Pure — see [[decideListSpecsCache]]. */
+export type ListSpecsCacheDecision = "fresh" | "probe" | "fetch";
+
+/**
+ * spec-read-egress-scope-and-cursor — the pure cache decision, extracted so the risky part (TTL
+ * arithmetic + high-water-mark comparison) is unit-testable without a DB.
+ *
+ *   'fresh' — inside the TTL; serve cached rows, no I/O at all.
+ *   'probe' — expired, but we hold a high-water mark, so ONE index-only scan is worth it to ask
+ *             whether anything changed before re-shipping 5.14 MB.
+ *   'fetch' — no entry, or expired with no mark to compare against. Full re-fetch.
+ */
+export function decideListSpecsCache(
+  entry: { expiresAt: number; maxUpdatedAt: Date | null } | undefined,
+  now: number,
+): ListSpecsCacheDecision {
+  if (!entry) return "fetch";
+  if (now < entry.expiresAt) return "fresh";
+  return entry.maxUpdatedAt ? "probe" : "fetch";
+}
+
+/**
+ * True iff a change-probe proves the cached snapshot is still current — i.e. no spec in the
+ * workspace has been written since we cached it.
+ *
+ * A `null` probe (pool blip) is deliberately NOT "unchanged": over-fetching is always safe, serving
+ * genuinely stale specs is not. The comparison is `<=` because `maxUpdatedAt` is captured AFTER the
+ * rows, so an equal timestamp means the same board we already hold.
+ */
+export function probeSaysUnchanged(probe: Date | null, maxUpdatedAt: Date | null): boolean {
+  if (probe === null || maxUpdatedAt === null) return false;
+  return probe.getTime() <= maxUpdatedAt.getTime();
+}
+
 /** Test-only cache reset. Never called by production code paths. */
 export function clearSpecCacheForTests(): void {
   specCache.clear();
+  listSpecsCache.clear();
 }
 
 /**
@@ -571,31 +708,14 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
-  const scope = filter.scope ?? "all";
-  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
-  // Pooled path (box worker + any runtime with pooler creds): one pooled query, no PostgREST
-  // preamble. `null` = pool unavailable / query error → fall through to the supabase-js RPC path
-  // (same fail-open contract as `getSpec` above).
-  let rows: Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }> | null = null;
-  try {
-    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
-    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
-    if (pooled !== null) {
-      rows = pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
-    }
-  } catch {
-    /* fall through to supabase-js RPC */
-  }
-  if (rows === null) {
-    const admin = createAdminClient();
-    const { data, error } = await admin.rpc("list_specs_with_phases", {
-      p_workspace_id: workspaceId,
-      p_scope: scope,
-    });
-    if (error) throw error;
-    rows = (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
-  }
-  let out = rows.map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]));
+  // spec-read-egress-scope-and-cursor — narrow the server-side row set when the caller's filter
+  // proves a narrower one is equivalent. An explicit `filter.scope` always wins.
+  const scope = scopeForFilter(filter);
+  // The cached entry is already slug-sorted by `listSpecsCached`. Every `.filter` below produces a
+  // FRESH array, but a call with no filters would otherwise hand the caller the cached array itself
+  // — and the old tail called `.sort()`, which mutates in place. Copy so no caller can reorder or
+  // splice another reader's cache entry.
+  let out: SpecRow[] = [...(await listSpecsCached(workspaceId, scope))];
   if (filter.status) out = out.filter((r) => r.status === filter.status);
   if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
   if (filter.milestone_id !== undefined) {
@@ -604,7 +724,82 @@ export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {
       ? out.filter((r) => r.milestone_id === null)
       : out.filter((r) => r.milestone_id === wanted);
   }
-  return out.sort((a, b) => a.slug.localeCompare(b.slug));
+  return out;
+}
+
+/**
+ * spec-read-egress-scope-and-cursor — the cached, probe-validated whole-board fetch behind
+ * [[listSpecs]]. Returns slug-sorted rows for one (workspace, scope).
+ *
+ * Order of attempts, cheapest first:
+ *   1. Fresh cache entry (inside TTL) → 0 bytes.
+ *   2. Stale entry + change-probe says `max(updated_at)` has NOT advanced → one index-only scan,
+ *      extend the TTL, serve cached rows. This is the case that retires the ~97 GB/day: a poller
+ *      re-reading an unchanged board pays a timestamp instead of 5.14 MB.
+ *   3. Otherwise a full fetch (pooled, falling back to the supabase-js RPC).
+ */
+async function listSpecsCached(workspaceId: string, scope: SpecScope): Promise<SpecRow[]> {
+  const key = listSpecsCacheKey(workspaceId, scope);
+  const cached = listSpecsCache.get(key);
+  const decision = decideListSpecsCache(cached, Date.now());
+  if (decision === "fresh") return cached!.rows;
+  // Stale entry + a captured high-water mark: ask Postgres whether anything changed at all. A probe
+  // that hasn't advanced past what we cached proves no spec in the workspace was written since.
+  // Probe unavailable (pool blip) falls through to a full re-fetch — over-fetching is always safe.
+  if (decision === "probe" && cached) {
+    try {
+      const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+      const probe = await specsMaxUpdatedAt(workspaceId);
+      if (probeSaysUnchanged(probe, cached.maxUpdatedAt)) {
+        cached.expiresAt = Date.now() + getSpecCacheTTLMs();
+        return cached.rows;
+      }
+    } catch {
+      /* fall through to a full re-fetch */
+    }
+  }
+  const rows = await fetchSpecsWithPhases(workspaceId, scope);
+  const out = rows
+    .map((r) => specRowFromDb(r.spec, (r.phases ?? []) as SpecPhaseRow[]))
+    .sort((a, b) => a.slug.localeCompare(b.slug));
+  // Capture the high-water mark ALONGSIDE the snapshot so the next stale check has something to
+  // compare against. Probe failure ⇒ null ⇒ the next miss simply does a full re-fetch (pre-cache
+  // behavior). Read AFTER the rows so a write landing mid-fetch can only make the mark look older
+  // than the data — which forces an extra re-fetch, never a stale serve.
+  let maxUpdatedAt: Date | null = null;
+  try {
+    const { specsMaxUpdatedAt } = await import("@/lib/pg-pool");
+    maxUpdatedAt = await specsMaxUpdatedAt(workspaceId);
+  } catch {
+    /* leave null */
+  }
+  listSpecsCache.set(key, { rows: out, expiresAt: Date.now() + getSpecCacheTTLMs(), maxUpdatedAt });
+  return out;
+}
+
+/**
+ * The raw whole-board fetch: pooled path first (box worker + any runtime with pooler creds — one
+ * pooled query, no PostgREST `set_config` preamble), supabase-js RPC as the fail-open fallback.
+ * Unchanged from the pre-cache `listSpecs` body; extracted so the cache above has one seam.
+ */
+async function fetchSpecsWithPhases(
+  workspaceId: string,
+  scope: SpecScope,
+): Promise<Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>> {
+  try {
+    const { listSpecsWithPhases } = await import("@/lib/pg-pool");
+    const pooled = await listSpecsWithPhases<SpecRowDb, SpecPhaseRow>(workspaceId, scope);
+    if (pooled !== null) return pooled.map((r) => ({ spec: r.spec, phases: r.phases }));
+  } catch {
+    /* fall through to supabase-js RPC */
+  }
+  const admin = createAdminClient();
+  const { data, error } = await admin.rpc("list_specs_with_phases", {
+    p_workspace_id: workspaceId,
+    p_scope: scope,
+  });
+  if (error) throw error;
+  return (data ?? []) as Array<{ spec: SpecRowDb; phases: SpecPhaseRow[] | null }>;
 }
 
 /** Every BOARDABLE spec — thin wrapper over [[listSpecs]] with `scope='active'`, i.e. `status IS NULL OR
@@ -619,6 +814,42 @@ export async function getActiveSpecs(workspaceId: string): Promise<SpecRow[]> {
  *  set (director-kpis owner attribution, spec-dispose audits, drift). */
 export async function getAllSpecs(workspaceId: string): Promise<SpecRow[]> {
   return listSpecs(workspaceId, { scope: "all" });
+}
+
+/** One archived spec as the archive LISTING needs it — a title, a date, and a slug to link to. */
+export interface ArchivedSpecIndexRow {
+  slug: string;
+  title: string;
+  updated_at: string;
+}
+
+/**
+ * roadmap-archive-split — the folded-spec INDEX: slug + title + updated_at, nothing else.
+ *
+ * This is deliberately NOT a `SpecRow`. The archive listing renders a title, a date and a link; it
+ * never reads a phase. Pulling `SpecRow[]` for it meant shipping all 659 folded specs WITH their
+ * joined `phases` jsonb — 5.11 MB measured — to render a list of titles.
+ *
+ * The separate TYPE is the point, not an accident. `SpecRow.phases` is non-optional, and per the CEO
+ * invariant (2026-07-20, [[../../docs/brain/operational-rules.md]]) a spec CANNOT exist without
+ * phases: zero phases ⇒ zero machine checks ⇒ a spec that can be BUILT but never MERGED. A `SpecRow`
+ * carrying `phases: []` would be indistinguishable from that pathological state to every consumer
+ * that checks — including the build gate — so a caller that doesn't need phases gets a DIFFERENT
+ * type, never a degraded spec. Read [[listSpecs]] when you need specs; read this when you need a list.
+ *
+ * Sorted newest-first by `updated_at` (the fold date). Returns `[]` on read error: the archive is a
+ * browsing surface, so an empty list renders a visibly-empty page rather than a wrong one.
+ */
+export async function listArchivedSpecIndex(workspaceId: string): Promise<ArchivedSpecIndexRow[]> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("specs")
+    .select("slug, title, updated_at")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "folded")
+    .order("updated_at", { ascending: false });
+  if (error) return [];
+  return (data ?? []) as ArchivedSpecIndexRow[];
 }
 
 /**
@@ -736,8 +967,20 @@ export async function upsertSpec(
   workspaceId: string,
   row: SpecRowInput,
   phases: SpecPhaseInput[],
+  // Test seam only — swap in a fake admin to unit-test the compensating-write path
+  // (spec-cannot-exist-without-phases Phase 2). Real callers omit; every production path uses
+  // `createAdminClient()` (service-role).
+  opts?: { admin?: ReturnType<typeof createAdminClient> },
 ): Promise<UpsertSpecResult> {
-  const admin = createAdminClient();
+  // spec-cannot-exist-without-phases Phase 1 — refuse an empty phase list BEFORE any DB write, and BEFORE
+  // the field-level `assertUpsertFullyAuthored` gate, so the caller gets a specific `EmptySpecPhasesError`
+  // (not a bundled `UngatedSpecAuthorError`) for the shape defect. UNCONDITIONAL — applies to insert AND
+  // update; no legitimate re-author reduces a spec to zero phases. Both author chokepoints
+  // (`authorSpecRowStructured`, `authorSpecRowFromMarkdown`) already reject one upstream — this is the
+  // shared-writer floor that no path (present or future, structured, markdown, or a throwaway script) can
+  // bypass. Without it, a phase-less spec landed silently: the phase loop below simply never ran.
+  if (phases.length === 0) throw new EmptySpecPhasesError(row.slug);
+  const admin = opts?.admin ?? createAdminClient();
   // harden-spec-submission — self-gating floor. Throws `UngatedSpecAuthorError` before any write if a phase
   // would land with empty verification/why/what (or the spec with empty why/what). The [[author-spec]]
   // chokepoint already asserts this and passes complete data, so this is a no-op for the sanctioned path and
@@ -798,16 +1041,30 @@ export async function upsertSpec(
   // `setSpecStatus(slug, null)` by the CEO — a re-author is never an implicit un-fold. (Belt-and-suspenders:
   // an omitted `status` is already preserved by the upsert, but a derived `status` would clobber it; this
   // re-asserts `folded` in both cases.)
-  {
-    const { data: existing } = await admin
-      .from("specs")
-      .select("status")
-      .eq("workspace_id", workspaceId)
-      .eq("slug", row.slug)
-      .maybeSingle();
-    if ((existing as { status: string | null } | null)?.status === "folded" && upsertRow.status !== "folded") {
-      upsertRow.status = "folded";
-    }
+  // spec-cannot-exist-without-phases Phase 2 — determine whether the specs upsert below will INSERT a new row
+  // or UPDATE an existing one. This SAME pre-upsert read also feeds the folded-status preservation below,
+  // so we do it once. If the row already exists → it's an update; if it doesn't → the upsert will INSERT
+  // and the compensating catch further down owns cleaning up a partial write.
+  const { data: preExisting } = await admin
+    .from("specs")
+    .select("id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", row.slug)
+    .maybeSingle();
+  const preExistingRow = preExisting as { id: string; status: string | null } | null;
+  const wasNewInsert = !preExistingRow;
+
+  // folded-spec-must-stay-folded: `folded` is TERMINAL. A re-author must NEVER silently clear that override
+  // back to NULL/active — that is the db-reduce-calls split (archive.d/ markdown present, but a later
+  // re-author normalized a derived status to NULL → the rollup re-DERIVES `planned`/`in_progress` → the
+  // archived spec re-appears on the active board AND `cancelJobsForArchivedSpecs` auto-cancels its builds
+  // as "spec archived"). Read the existing override; if it's already `folded`, PRESERVE it unless the caller
+  // is EXPLICITLY re-folding (`row.status === 'folded'`). The only sanctioned un-fold is an explicit
+  // `setSpecStatus(slug, null)` by the CEO — a re-author is never an implicit un-fold. (Belt-and-suspenders:
+  // an omitted `status` is already preserved by the upsert, but a derived `status` would clobber it; this
+  // re-asserts `folded` in both cases.)
+  if (preExistingRow?.status === "folded" && upsertRow.status !== "folded") {
+    upsertRow.status = "folded";
   }
 
   const { data: upserted, error: upErr } = await admin
@@ -818,71 +1075,98 @@ export async function upsertSpec(
   if (upErr || !upserted) throw upErr ?? new Error("upsert specs returned no row");
   const specId = (upserted as { id: string }).id;
 
-  const { data: existingPhases, error: exErr } = await admin
-    .from("spec_phases")
-    .select("id, position, pr, merge_sha")
-    .eq("spec_id", specId);
-  if (exErr) throw exErr;
-  const byPosition = new Map<number, { id: string; pr: number | null; merge_sha: string | null }>();
-  for (const p of (existingPhases ?? []) as { id: string; position: number; pr: number | null; merge_sha: string | null }[]) {
-    byPosition.set(p.position, { id: p.id, pr: p.pr, merge_sha: p.merge_sha });
-  }
-
-  const inputPositions = new Set(phases.map((p) => p.position));
-  const positionsToDelete: number[] = [];
-  for (const pos of byPosition.keys()) if (!inputPositions.has(pos)) positionsToDelete.push(pos);
-  if (positionsToDelete.length) {
-    const { error: dErr } = await admin
-      .from("spec_phases")
-      .delete()
-      .eq("spec_id", specId)
-      .in("position", positionsToDelete);
-    if (dErr) throw dErr;
-  }
-
+  // spec-cannot-exist-without-phases Phase 2 — compensating-write: `upsertSpec` writes through PostgREST
+  // (no cross-statement transaction available), so if any phase read/delete/update/insert throws AFTER the
+  // parent `specs` row committed, we're left with a phase-less spec — exactly the shape that produced the
+  // three stuck specs on 2026-07-20. Wrap the phase block; on any throw, if THIS call was the one that
+  // INSERTED the parent row (not an update of an already-existing spec), delete it before re-throwing.
+  // The `spec_phases_spec_id_fkey` FK is ON DELETE CASCADE, so any partially-written children go with it.
+  // An EXISTING spec is NEVER deleted here — a failed re-author must not destroy real work. The ORIGINAL
+  // error is re-thrown unchanged so downstream `instanceof` checks (EmptySpecPhasesError, PostgrestError,
+  // etc.) still work.
   const phaseIds: Record<number, string> = {};
-  for (const phase of phases) {
-    const existing = byPosition.get(phase.position);
-    if (existing) {
-      const updateRow: Record<string, unknown> = {
-        title: phase.title,
-        body: phase.body,
-        status: phase.status,
-        updated_at: new Date().toISOString(),
-      };
-      if (phase.pr !== undefined) updateRow.pr = phase.pr;
-      if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
-      if (phase.verification !== undefined) updateRow.verification = phase.verification;
-      if (phase.why !== undefined) updateRow.why = phase.why;
-      if (phase.what !== undefined) updateRow.what = phase.what;
-      if (phase.kind !== undefined) updateRow.kind = phase.kind;
-      if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
-      const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
-      if (uErr) throw uErr;
-      phaseIds[phase.position] = existing.id;
-    } else {
-      const insertRow: Record<string, unknown> = {
-        spec_id: specId,
-        position: phase.position,
-        title: phase.title,
-        body: phase.body,
-        status: phase.status,
-        pr: phase.pr ?? null,
-        merge_sha: phase.merge_sha ?? null,
-        verification: phase.verification ?? null,
-        why: phase.why ?? null,
-        what: phase.what ?? null,
-        kind: phase.kind ?? "phase",
-        origin_check_keys: phase.origin_check_keys ?? [],
-      };
-      const { data: inserted, error: iErr } = await admin
-        .from("spec_phases")
-        .insert(insertRow)
-        .select("id")
-        .single();
-      if (iErr || !inserted) throw iErr ?? new Error("insert spec_phases returned no row");
-      phaseIds[phase.position] = (inserted as { id: string }).id;
+  try {
+    const { data: existingPhases, error: exErr } = await admin
+      .from("spec_phases")
+      .select("id, position, pr, merge_sha")
+      .eq("spec_id", specId);
+    if (exErr) throw exErr;
+    const byPosition = new Map<number, { id: string; pr: number | null; merge_sha: string | null }>();
+    for (const p of (existingPhases ?? []) as { id: string; position: number; pr: number | null; merge_sha: string | null }[]) {
+      byPosition.set(p.position, { id: p.id, pr: p.pr, merge_sha: p.merge_sha });
     }
+
+    const inputPositions = new Set(phases.map((p) => p.position));
+    const positionsToDelete: number[] = [];
+    for (const pos of byPosition.keys()) if (!inputPositions.has(pos)) positionsToDelete.push(pos);
+    if (positionsToDelete.length) {
+      const { error: dErr } = await admin
+        .from("spec_phases")
+        .delete()
+        .eq("spec_id", specId)
+        .in("position", positionsToDelete);
+      if (dErr) throw dErr;
+    }
+
+    for (const phase of phases) {
+      const existing = byPosition.get(phase.position);
+      if (existing) {
+        const updateRow: Record<string, unknown> = {
+          title: phase.title,
+          body: phase.body,
+          status: phase.status,
+          updated_at: new Date().toISOString(),
+        };
+        if (phase.pr !== undefined) updateRow.pr = phase.pr;
+        if (phase.merge_sha !== undefined) updateRow.merge_sha = phase.merge_sha;
+        if (phase.verification !== undefined) updateRow.verification = phase.verification;
+        if (phase.why !== undefined) updateRow.why = phase.why;
+        if (phase.what !== undefined) updateRow.what = phase.what;
+        if (phase.kind !== undefined) updateRow.kind = phase.kind;
+        if (phase.origin_check_keys !== undefined) updateRow.origin_check_keys = phase.origin_check_keys;
+        const { error: uErr } = await admin.from("spec_phases").update(updateRow).eq("id", existing.id);
+        if (uErr) throw uErr;
+        phaseIds[phase.position] = existing.id;
+      } else {
+        const insertRow: Record<string, unknown> = {
+          spec_id: specId,
+          position: phase.position,
+          title: phase.title,
+          body: phase.body,
+          status: phase.status,
+          pr: phase.pr ?? null,
+          merge_sha: phase.merge_sha ?? null,
+          verification: phase.verification ?? null,
+          why: phase.why ?? null,
+          what: phase.what ?? null,
+          kind: phase.kind ?? "phase",
+          origin_check_keys: phase.origin_check_keys ?? [],
+        };
+        const { data: inserted, error: iErr } = await admin
+          .from("spec_phases")
+          .insert(insertRow)
+          .select("id")
+          .single();
+        if (iErr || !inserted) throw iErr ?? new Error("insert spec_phases returned no row");
+        phaseIds[phase.position] = (inserted as { id: string }).id;
+      }
+    }
+  } catch (phaseErr) {
+    // Only compensate a spec THIS call created. Scope the delete by workspace_id + id for defense-in-depth
+    // (a compare-and-set — the write can only fire against the row we intended to write, never a stray
+    // cross-workspace collision). Swallow a compensating-delete failure with a console warning rather than
+    // masking the ORIGINAL error the caller cares about.
+    if (wasNewInsert) {
+      try {
+        await admin.from("specs").delete().eq("workspace_id", workspaceId).eq("id", specId);
+      } catch (compErr) {
+        console.warn(
+          `[upsertSpec] compensating delete of newly-inserted spec ${row.slug} (id ${specId}) failed after a phase-write throw:`,
+          compErr,
+        );
+      }
+    }
+    throw phaseErr;
   }
 
   invalidateSpecCache(workspaceId, row.slug);
@@ -968,7 +1252,7 @@ export async function stampPhaseShipped(
       },
     });
   } catch (e) {
-    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[timecards] phase_shipped emit failed spec=${slug} pos=${position}: ${errText(e)}`);
   }
 }
 
@@ -1086,18 +1370,24 @@ export async function setPhaseMetadata(
  * spec-goal-branch-pm-flow M2/M3 — "is this spec FULLY accumulated on its `claude/build-{slug}` branch?"
  *
  * Under M1's branch-accumulation model a spec's phases build one-by-one onto ONE persistent branch (no
- * per-phase main merge). A phase is "built on the branch" when it carries a `build_sha` ([[stampPhaseBuilt]])
- * OR is already terminal (shipped / rejected). A phase still `planned` — or `in_progress` WITHOUT a
- * `build_sha` (queued/building, not yet committed) — is NOT yet accumulated.
+ * per-phase main merge). merge-gate-verifies-real-phase-checks P1 hardened the gate: a phase is
+ * "accumulated" only when `verifyPhaseAccumulatedOnBranch` reports the phase's REAL grep checks
+ * (`spec_phase_checks` rows with `exec_kind='grep'`) pass against the branch HEAD. A `status==='shipped'`
+ * flag alone is NOT sufficient — that let phantom-stamped phases ship with zero code (the v3
+ * factor-rollup-sdk-with-significance-gate incident the spec cites).
  *
  * Returns `{ complete, reason }`:
  *  - 0–1 phases ⇒ trivially complete (a one-shot/single-phase spec ships in one PR — nothing to accumulate).
- *  - every phase built-or-terminal ⇒ complete.
- *  - any un-built phase remains ⇒ NOT complete (with the offending positions in `reason`).
+ *  - every phase verified on the branch ⇒ complete.
+ *  - any phase whose grep checks don't pass on the branch ⇒ NOT complete (with positions + reasons).
  *
- * Fails OPEN on a read error / missing spec row (returns complete:true) — a transient PM-read blip must
- * never wedge a legitimately-complete one-off spec, and the downstream tests/build gates still guard any
- * actual promotion.
+ * FAILS CLOSED on a read error / missing verifier — the pre-P1 fail-OPEN path was one of the three
+ * exploit triggers the spec cites (a PM read blip phantom-passed an incomplete spec). Downstream box
+ * worker retries the gate on its next standing pass; a transient blip resolves on retry rather than
+ * shipping an unbuilt spec.
+ *
+ * `branchRef` defaults to `claude/build-{slug}` (the spec's own build branch). Callers with a different
+ * context (e.g. a spec merged onto a goal branch) pass it explicitly.
  *
  * This is the M3 trigger gate (enqueue the pre-merge spec-test only once the WHOLE spec is on the branch),
  * the M4/M2 auto-merge accumulation gate, AND one of the three [[isSpecPromoteEligible]] inputs — all three
@@ -1106,6 +1396,8 @@ export async function setPhaseMetadata(
 export async function isSpecAccumulationComplete(
   workspaceId: string | null,
   slug: string | null,
+  branchRef?: string | null,
+  deps: VerifyPhaseDeps = defaultVerifyPhaseDeps,
 ): Promise<{ complete: boolean; reason: string }> {
   if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
   try {
@@ -1114,21 +1406,229 @@ export async function isSpecAccumulationComplete(
     const phases = spec.phases ?? [];
     // 0–1 phases = one-shot / single-phase spec — it ships in one PR; nothing to accumulate.
     if (phases.length <= 1) return { complete: true, reason: `${phases.length} phase(s) — trivially complete` };
-    // A phase is "built on the branch" if it carries a build_sha OR is already terminal (shipped/rejected).
-    // Any phase still `planned` (or in_progress WITHOUT a build_sha — queued/building, not yet committed) is
-    // un-accumulated → not complete.
-    const unbuilt = phases.filter((p) => {
-      if (p.status === "shipped" || p.status === "rejected") return false; // terminal — done
-      return !p.build_sha; // not built on the branch yet
-    });
-    if (unbuilt.length === 0) {
-      return { complete: true, reason: `all ${phases.length} phases built on branch` };
+    // merge-gate-verifies-real-phase-checks P1 — a phase is "accumulated" only when
+    // `verifyPhaseAccumulatedOnBranch` reports the phase's REAL grep checks pass against the branch HEAD.
+    // A `status==='shipped'` flag alone is NOT sufficient (the phantom-ship class the spec cites — v3
+    // factor-rollup-sdk-with-significance-gate merged spec→goal with only P1 built because P2/P3 were
+    // blanket-stamped shipped with no code). Fail CLOSED: an unverifiable phase reads NOT accumulated.
+    const branch = branchRef && branchRef.trim() ? branchRef.trim() : `claude/build-${slug}`;
+    const verdicts = await Promise.all(
+      phases.map((p) => verifyPhaseAccumulatedOnBranch(workspaceId, slug, p.position, branch, deps)),
+    );
+    const notAccumulated = phases
+      .map((p, i) => ({ p, v: verdicts[i] }))
+      .filter((x) => !x.v.accumulated);
+    if (notAccumulated.length === 0) {
+      return { complete: true, reason: `all ${phases.length} phases verified on ${branch}` };
     }
-    const positions = unbuilt.map((p) => p.position).join(",");
-    return { complete: false, reason: `${unbuilt.length}/${phases.length} phase(s) not yet built on branch (positions ${positions})` };
+    const detail = notAccumulated
+      .map((x) => `pos ${x.p.position} (${x.v.reason})`)
+      .join("; ");
+    return {
+      complete: false,
+      reason: `${notAccumulated.length}/${phases.length} phase(s) not verified on ${branch}: ${detail}`,
+    };
   } catch (e) {
-    // Fail OPEN — a PM-read blip must not wedge a complete one-off spec; the tests/build gates still apply.
-    return { complete: true, reason: `accumulation read failed — fail open: ${e instanceof Error ? e.message : e}` };
+    // merge-gate-verifies-real-phase-checks P1 — fail CLOSED. The old fail-open path was one of the three
+    // exploit triggers that shipped phantom-stamped phases; a PM-read blip now blocks promotion until the
+    // read resolves rather than phantom-passing an incomplete spec. The downstream box worker retries the
+    // gate on its next standing pass; the tests/build gates remain authoritative on the green signals.
+    return {
+      complete: false,
+      reason: `accumulation read failed — fail closed: ${errText(e)}`,
+    };
+  }
+}
+
+// ── verifyPhaseAccumulatedOnBranch ────────────────────────────────────────────────────────────────
+//
+// The phase-level real-check verifier ([[../specs/merge-gate-verifies-real-phase-checks-not-status-flags]]
+// Phase 1). Reads the phase's `spec_phase_checks` rows filtered to `exec_kind='grep'` and executes each
+// against `branchRef` via `git grep -e <pattern> <branchRef> -- <path>`, returning pass/fail. Grep is the
+// code-presence signal (a pattern that MUST be present means "this code is written on the branch"; an
+// absent pattern means the phase's implementation is missing).
+//
+// FAILS CLOSED on any error — a git failure, unknown ref, or SDK-read blip reads as NOT accumulated
+// rather than the pre-P1 fail-open (which shipped phantom phases when a status flag existed with no
+// code). If the phase has no grep checks, the verifier can't detect code presence and falls back to the
+// phase's terminal-status / build_sha flag — best effort during the migration window while every phase
+// gets a grep check; a phase authored WITH grep checks (the wedge class the spec cites) is fully
+// verified.
+//
+// TSC / build / http_get / db_probe_readonly / unit_test checks are NOT run here — they're too expensive
+// and the [[spec-check-runner]] gates them separately at spec-test time. This is a fast pre-merge
+// code-presence check, not a full spec-test.
+export interface PhaseAccumulationVerdict {
+  accumulated: boolean;
+  reason: string;
+}
+
+export interface PhaseFlagsForVerify {
+  id: string;
+  status: Phase;
+  build_sha: string | null;
+}
+
+export interface VerifyPhaseDeps {
+  loadPhaseFlags: (
+    workspaceId: string,
+    slug: string,
+    position: number,
+  ) => Promise<PhaseFlagsForVerify | null>;
+  loadPhaseGrepChecks: (
+    phaseId: string,
+  ) => Promise<Array<{ description: string; params: GrepCheckParams }>>;
+  runGitGrepOnBranch: (
+    branchRef: string,
+    params: GrepCheckParams,
+  ) => Promise<{ ok: boolean; evidence: string }>;
+}
+
+async function defaultLoadPhaseFlags(
+  workspaceId: string,
+  slug: string,
+  position: number,
+): Promise<PhaseFlagsForVerify | null> {
+  const spec = await getSpec(workspaceId, slug);
+  if (!spec) return null;
+  const phase = (spec.phases ?? []).find((p) => p.position === position);
+  if (!phase) return null;
+  return { id: phase.id, status: phase.status, build_sha: phase.build_sha };
+}
+
+async function defaultLoadPhaseGrepChecks(
+  phaseId: string,
+): Promise<Array<{ description: string; params: GrepCheckParams }>> {
+  const { listPhaseChecks } = await import("@/lib/spec-phase-checks-table");
+  const rows = await listPhaseChecks(phaseId);
+  const out: Array<{ description: string; params: GrepCheckParams }> = [];
+  for (const r of rows) {
+    if (r.exec_kind !== "grep") continue;
+    const p = r.params as GrepCheckParams | null;
+    if (!p || typeof p.pattern !== "string" || (p.expect !== "present" && p.expect !== "absent")) continue;
+    out.push({ description: r.description, params: p });
+  }
+  return out;
+}
+
+async function runGitCmd(
+  args: string[],
+): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn("git", args, { cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      resolve({ code: null, stdout: "", stderr: "", error: (e as Error).message });
+      return;
+    }
+    const kill = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* noop */ }
+    }, 30_000);
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString();
+      if (stdout.length > 100_000) stdout = stdout.slice(-100_000);
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString();
+      if (stderr.length > 100_000) stderr = stderr.slice(-100_000);
+    });
+    child.on("error", (e) => {
+      clearTimeout(kill);
+      resolve({ code: null, stdout, stderr, error: e.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(kill);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+async function defaultRunGitGrepOnBranch(
+  branchRef: string,
+  params: GrepCheckParams,
+): Promise<{ ok: boolean; evidence: string }> {
+  // git grep against a tree-ish, path passed after `--` — matches the [[spec-check-runner]] grep hardening
+  // (pattern via `-e` so a `-`-leading pattern isn't reparsed as an option; path after `--`).
+  // Reject an obviously-unsafe branch ref up front — a spec-authored branchRef is treated as an untrusted
+  // capability boundary just like grep.path.
+  const refTrim = branchRef.trim();
+  if (!refTrim || refTrim.startsWith("-") || refTrim.includes("\0") || /\s/.test(refTrim)) {
+    return { ok: false, evidence: `refused unsafe branchRef '${branchRef}'` };
+  }
+  const args: string[] = ["grep", "-l", "-E", "-e", params.pattern, refTrim];
+  if (params.path) {
+    args.push("--", params.path);
+  }
+  const r = await runGitCmd(args);
+  if (r.error) return { ok: false, evidence: `spawn git: ${r.error}` };
+  // git grep exits 0 on match, 1 on no match. Anything else = git error (unknown ref, bad regex, etc.).
+  if (r.code !== 0 && r.code !== 1) {
+    return {
+      ok: false,
+      evidence: (r.stderr || r.stdout || `git grep exit ${r.code}`).slice(0, 4000),
+    };
+  }
+  const found = r.code === 0;
+  const ok = params.expect === "present" ? found : !found;
+  return {
+    ok,
+    evidence: `git grep '${params.pattern}' on ${refTrim}${params.path ? " -- " + params.path : ""} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+  };
+}
+
+export const defaultVerifyPhaseDeps: VerifyPhaseDeps = {
+  loadPhaseFlags: defaultLoadPhaseFlags,
+  loadPhaseGrepChecks: defaultLoadPhaseGrepChecks,
+  runGitGrepOnBranch: defaultRunGitGrepOnBranch,
+};
+
+export async function verifyPhaseAccumulatedOnBranch(
+  workspaceId: string,
+  slug: string,
+  phasePosition: number,
+  branchRef: string,
+  deps: VerifyPhaseDeps = defaultVerifyPhaseDeps,
+): Promise<PhaseAccumulationVerdict> {
+  if (!workspaceId || !slug || !branchRef) {
+    return { accumulated: false, reason: "verify context missing (workspace/slug/branchRef) — fail closed" };
+  }
+  try {
+    const phase = await deps.loadPhaseFlags(workspaceId, slug, phasePosition);
+    if (!phase) {
+      return { accumulated: false, reason: `phase position ${phasePosition} not found — fail closed` };
+    }
+    const checks = await deps.loadPhaseGrepChecks(phase.id);
+    if (checks.length === 0) {
+      // No code-presence signal available. Fall back to the phase's terminal flag as best effort during the
+      // migration window — a phase authored WITHOUT grep checks (legacy) still trusts the flag. The wedge
+      // class the spec cites (a phase authored WITH grep checks that then failed on the branch) is fully
+      // verified above.
+      const flagged = phase.status === "shipped" || phase.status === "rejected" || Boolean(phase.build_sha);
+      return {
+        accumulated: flagged,
+        reason: flagged
+          ? `no grep checks — falling back to terminal flag (status=${phase.status}, build_sha=${phase.build_sha ? "set" : "null"})`
+          : `no grep checks and no terminal flag (planned/in_progress with no build_sha)`,
+      };
+    }
+    for (const check of checks) {
+      const r = await deps.runGitGrepOnBranch(branchRef, check.params);
+      if (!r.ok) {
+        return {
+          accumulated: false,
+          reason: `phase ${phasePosition} check "${check.description}" failed on ${branchRef}: ${r.evidence}`,
+        };
+      }
+    }
+    return {
+      accumulated: true,
+      reason: `${checks.length} grep check(s) passed on ${branchRef}`,
+    };
+  } catch (e) {
+    return { accumulated: false, reason: `verify error — fail closed: ${errText(e)}` };
   }
 }
 
@@ -1450,7 +1950,7 @@ export async function setSpecBlockers(
  * DURABLE `specs.vale_review_passed_at` timestamp (build-gate-durable-review-signal). The primary
  * pass path already dual-writes this via [[spec-card-state]] `markSpecCardValePassed` →
  * `dualWriteSpecRow`, but that path is best-effort (a mirror hiccup is silently swallowed). This
- * writer is the INVARIANT GUARD called by [[../agents/spec-review]] `assertDurableReviewPassStamp`
+ * writer is the INVARIANT GUARD once called by the retired Vale lane's `assertDurableReviewPassStamp`
  * after the pass to force the stamp when the mirror write dropped it — errors THROW so the caller
  * refuses to record a `spec_review_passed` `director_activity` row when the durable stamp isn't in
  * place. Returns `true` when the write actually stamped the row (was NULL, now `now()`), `false`

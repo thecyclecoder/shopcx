@@ -11,6 +11,7 @@
  * See docs/brain/specs/box-ticket-improve.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { runImproveActions, type ImproveAction } from "@/lib/improve-actions";
 import type { ImprovePlanAction } from "@/lib/ticket-improve-chats";
 
@@ -133,7 +134,7 @@ export async function executeImprovePlan(
         if (r.closed) resolved = true;
       } catch (e) {
         a.status = "failed";
-        a.result = `orchestrator_action failed: ${e instanceof Error ? e.message : String(e)}`;
+        a.result = `orchestrator_action failed: ${errText(e)}`;
       }
       results.push(a.result);
     }
@@ -150,7 +151,7 @@ export async function executeImprovePlan(
       results.push(a.result);
     } catch (e) {
       a.status = "failed";
-      a.result = `rescore failed: ${e instanceof Error ? e.message : String(e)}`;
+      a.result = `rescore failed: ${errText(e)}`;
       results.push(a.result);
     }
   }
@@ -241,7 +242,7 @@ export async function executeImprovePlan(
       }
     } catch (e) {
       a.status = "failed";
-      a.result = `spec author failed: ${e instanceof Error ? e.message : String(e)}`;
+      a.result = `spec author failed: ${errText(e)}`;
     }
     results.push(a.result!);
   }
@@ -278,7 +279,7 @@ export async function executeImprovePlan(
       if (patch.status === "closed") resolved = true;
     } catch (e) {
       a.status = "failed";
-      a.result = `resolve_sequence failed: ${e instanceof Error ? e.message : String(e)}`;
+      a.result = `resolve_sequence failed: ${errText(e)}`;
       results.push(a.result);
     }
   }

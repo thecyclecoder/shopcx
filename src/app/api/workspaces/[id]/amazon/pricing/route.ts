@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
@@ -297,7 +298,7 @@ export async function POST(
         results.push({ sku: update.sku, success: false, error: `API error ${res.status}: ${text.slice(0, 100)}` });
       }
     } catch (err) {
-      results.push({ sku: update.sku, success: false, error: String(err).slice(0, 100) });
+      results.push({ sku: update.sku, success: false, error: errText(err).slice(0, 100) });
     }
   }
 

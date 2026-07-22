@@ -20,6 +20,7 @@
  * See docs/brain/inngest/media-buyer-test-cadence.md · [[../media-buyer/agent]] · [[../meta/performance]].
  */
 import { inngest } from "@/lib/inngest/client";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { syncMetaStructure, syncMetaInsightsForLevel } from "@/lib/meta/performance";
@@ -138,7 +139,7 @@ export async function pullOneCadenceTarget(
     await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
     return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
   } catch (e) {
-    return { ok: false, account: t.metaAccountId, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, account: t.metaAccountId, error: errText(e) };
   }
 }
 

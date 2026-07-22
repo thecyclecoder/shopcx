@@ -21,6 +21,7 @@
  * driver too — see `main()` at the bottom.
  */
 import { chromium, type Browser, type Page } from "playwright";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "./_bootstrap";
 
 /** Mobile capture parity with scripts/landing-page-snapshot.ts + the Landing Page Scout spec. */
@@ -129,7 +130,7 @@ async function loadWithRetry(page: Page, url: string): Promise<{ ok: boolean; er
       }
       lastError = `http ${s || "no-response"}`;
     } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
+      lastError = errText(e);
     }
     if (attempt < NAV_RETRIES) await page.waitForTimeout(1500 * attempt);
   }
@@ -282,7 +283,7 @@ export async function captureOne(input: ResearchCaptureInput, stamp: string): Pr
       strategy: "none",
       chapters: [],
       capture_ref: null,
-      error: e instanceof Error ? e.message : String(e),
+      error: errText(e),
     };
   } finally {
     await browser.close().catch(() => {});
@@ -312,7 +313,7 @@ export async function captureBatch(
       strategy: "none" as const,
       chapters: [],
       capture_ref: null,
-      error: e instanceof Error ? e.message : String(e),
+      error: errText(e),
     }));
     out.push(r);
   }
@@ -342,7 +343,7 @@ async function main() {
 // Only run main() when invoked as a script (not when imported by builder-worker).
 if (require.main === module) {
   main().catch((e) => {
-    console.error(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+    console.error(JSON.stringify({ ok: false, error: errText(e) }));
     process.exit(1);
   });
 }

@@ -17,6 +17,7 @@
  * pure sender + payload builder + sink resolver.
  */
 import { createHash } from "crypto";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
@@ -231,7 +232,7 @@ export async function sendCapiEvents(
     const body = await res.text();
     return { ok: res.ok, status: res.status, body: body.slice(0, 2000) };
   } catch (err) {
-    return { ok: false, status: 0, body: err instanceof Error ? err.message : String(err) };
+    return { ok: false, status: 0, body: errText(err) };
   }
 }
 

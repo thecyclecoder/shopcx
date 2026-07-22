@@ -1,21 +1,21 @@
 # inngest/media-buyer-all-customers-refresh
 
-Weekly Mon 12:00 UTC cron: incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience. Uploads customers whose `first_order_at >= watermark` (last-run completion or now − 8d on first run) — hashed email + phone only, no plaintext PII. Keeps the cold-test rail's complete existing-customer coverage current so newly-acquired customers stop seeing cold-prospecting adsets as the business grows. [[../specs/bianca-full-order-history-customer-list-exclusion-audience]] Fix 1.
+Daily 12:00 UTC cron: incremental top-up of each per-test cohort's CUSTOMER_LIST (all-customers, hashed) exclusion audience. Uploads customers whose `first_order_at >= watermark` (last-run completion or now − 2d on first run) — hashed email + phone only, no plaintext PII. Keeps the cold-test rail's complete existing-customer coverage current so newly-acquired customers stop seeing cold-prospecting adsets within ~1d as the business grows. Daily (not weekly) because the upload is incremental + append-only, so it's cheap to run every day and shrinks the new-customer exclusion lag from ~7d to ~1d (CEO 2026-07-20). [[../specs/bianca-full-order-history-customer-list-exclusion-audience]] Fix 1.
 
 **File:** `src/lib/inngest/media-buyer-all-customers-refresh.ts`
 
 ## Functions
 
-### `media-buyer-all-customers-refresh-weekly`
-- **Trigger:** cron `0 12 * * 1` (Mondays 12:00 UTC)
+### `media-buyer-all-customers-refresh-daily`
+- **Trigger:** cron `0 12 * * *` (daily 12:00 UTC)
 - **Retries:** 1
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
 - **Owner:** Growth (Bianca) — declared in [[../libraries/control-tower]] `MONITORED_LOOPS`
-- **Liveness window:** 9 days (weekly + 20% jitter grace per the monitor-cadence invariant)
+- **Liveness window:** 30 hours (daily + 20% jitter grace per the monitor-cadence invariant)
 
 ## Pure helpers
 
-- `pickRefreshWatermarkIso({ lastRunAtIso, nowIso, lookbackDays? })` — returns the ISO the customers-since-watermark selector reads. On first run (no last-run row) falls back to `now − 8d` — one 24h grace over the 7d cadence so a paused/delayed run doesn't silently skip the miss window. Unit-tested in `src/lib/media-buyer/all-customers-exclusion.test.ts`.
+- `pickRefreshWatermarkIso({ lastRunAtIso, nowIso, lookbackDays? })` — returns the ISO the customers-since-watermark selector reads. On first run (no last-run row) falls back to `now − 2d` — one 24h grace over the 1d daily cadence so a paused/delayed run doesn't silently skip the miss window. Unit-tested in `src/lib/media-buyer/all-customers-exclusion.test.ts`.
 
 ## Downstream events sent
 
@@ -40,7 +40,7 @@ _None._
 
 - **Owner** — `owner: 'growth'` on the `MONITORED_LOOPS` row (registered in [[../libraries/control-tower]]); [[../libraries/control-tower-node-registry]] resolves it to the Growth department seat with no orphan fallthrough.
 - **Kill switch ancestry** — inherits Growth's `director:growth` seat (Bianca) via the node-registry's parent chain, so pausing Growth pauses this cron.
-- **Heartbeat** — `emitCronHeartbeat("media-buyer-all-customers-refresh-weekly", { ok, produced, detail })` at end of run; monitored by `control-tower-monitor` against `livenessWindowMs = 9d`.
+- **Heartbeat** — `emitCronHeartbeat("media-buyer-all-customers-refresh-daily", { ok, produced, detail })` at end of run; monitored by `control-tower-monitor` against `livenessWindowMs = 30h`.
 
 ---
 

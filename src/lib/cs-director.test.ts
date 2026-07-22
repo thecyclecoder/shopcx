@@ -37,6 +37,7 @@ import {
   applyBoxCsDirectorCall,
   buildAuthorSpecInput,
   buildRemedySonnetDecision,
+  canOfferOneTapApproval,
   extractRemedyCustomerMessage,
   planAuthorSpec,
   planRemedyExecution,
@@ -350,6 +351,58 @@ test("planRemedyExecution — missing action_type is fail-safe", () => {
   const result = planRemedyExecution({ payload: { next_billing_date: "2026-10-06" } });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, "remedy_missing_action_type");
+});
+
+// ── canOfferOneTapApproval — the reorder gate for raiseFounderApproval ─────────────────────────
+
+test("canOfferOneTapApproval — a {kind, summary} recommendation is NOT one-tappable (guard-first: no cockpit arm, no SMS)", () => {
+  // The exact shape that caused the 2026-07-20 incident: escalate_founder's recommended_remedy is a
+  // suggestion, not an {action_type} action. The predicate returning FALSE is what makes
+  // raiseFounderApproval short-circuit BEFORE calling getActiveSession/armSession — so the founder
+  // is never texted "tap in" for a card that will never open.
+  assert.equal(
+    canOfferOneTapApproval({
+      kind: "acknowledge_and_request_info",
+      summary: "Ask the customer for the order number on the $236.50 charge we can't locate.",
+    }),
+    false,
+  );
+});
+
+test("canOfferOneTapApproval — a canonical single-action remedy IS one-tappable (proceeds to arm + text)", () => {
+  // The executable path: raiseFounderApproval passes the guard, resolves/arms a cockpit session,
+  // opens the card, and sends the SMS. Same shape that planRemedyExecution accepts as canonical.
+  assert.equal(
+    canOfferOneTapApproval({
+      action_type: "change_next_date",
+      payload: { next_billing_date: "2026-10-06", contract_id: "contract-1" },
+      customer_message: "Moved to Oct 6.",
+    }),
+    true,
+  );
+});
+
+test("canOfferOneTapApproval — null / undefined / non-object short-circuits to false (no drift from planner)", () => {
+  // The predicate is a THIN wrapper: any new planner rejection reason automatically propagates.
+  // If a caller ever hands raiseFounderApproval a null or malformed remedy, the guard MUST bail
+  // (no arm / no SMS) — the executor would reject with `remedy_missing` on Approve anyway.
+  assert.equal(canOfferOneTapApproval(null), false);
+  assert.equal(canOfferOneTapApproval(undefined), false);
+});
+
+test("canOfferOneTapApproval — a multi-action actions[] batch with a malformed step is NOT one-tappable", () => {
+  // Same invariant as planRemedyExecution: a batch with one broken step fails the WHOLE plan
+  // (no partial fire on Approve), so the guard MUST block the founder page too.
+  assert.equal(
+    canOfferOneTapApproval({
+      actions: [
+        { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+        { payload: { next_billing_date: "2026-10-06" } }, // missing action_type
+      ],
+      customer_message: "would be a false promise",
+    }),
+    false,
+  );
 });
 
 test("planRemedyExecution — REJECTS a legacy single-action step whose payload carries a reserved `type` (bypass class)", () => {

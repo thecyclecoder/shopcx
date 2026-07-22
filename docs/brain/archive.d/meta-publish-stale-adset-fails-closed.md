@@ -1,0 +1,1 @@
+- **Fail Meta publishes closed when the target ad set is missing or inaccessible** · verified 2026-07-22 · → [[../inngest/ad-tool]] · [[../libraries/publish-adset-unavailable-classifier]]

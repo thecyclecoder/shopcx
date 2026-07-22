@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { errText } from "@/lib/error-text";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { subSwapVariant, getLastOrderPrice, calcBasePrice, subUpdateLineItemPrice } from "@/lib/subscription-items";
@@ -110,7 +111,7 @@ export async function POST(
       swapped++;
     } catch (e) {
       failed++;
-      errors.push(`${sub.shopify_contract_id}: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(`${sub.shopify_contract_id}: ${errText(e)}`);
     }
   }
 

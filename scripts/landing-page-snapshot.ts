@@ -18,6 +18,7 @@
 // Usage:
 //   npx tsx scripts/landing-page-snapshot.ts --workspace-id <uuid> [--product-id <uuid>] [--no-analyze]
 import { chromium } from "playwright";
+import { errText } from "../src/lib/error-text";
 import { createAdminClient } from "./_bootstrap";
 import {
   loadLanderTargets,
@@ -138,7 +139,7 @@ async function captureLander(
     if (!chapters.length) return { status: "failed", chapters: [], hrefs, error: "no chapters captured" };
     return { status: "captured", chapters, hrefs, error: null };
   } catch (e) {
-    return { status: "failed", chapters: [], hrefs: [], error: e instanceof Error ? e.message : String(e) };
+    return { status: "failed", chapters: [], hrefs: [], error: errText(e) };
   } finally {
     await browser.close().catch(() => {});
   }
@@ -206,7 +207,7 @@ async function main() {
           });
           pageType = d?.page_type ?? null;
         } catch (e) {
-          deconstructError = e instanceof Error ? e.message : String(e);
+          deconstructError = errText(e);
         }
       }
 
@@ -249,6 +250,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+  console.error(JSON.stringify({ ok: false, error: errText(e) }));
   process.exit(1);
 });

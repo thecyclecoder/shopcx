@@ -1,0 +1,1 @@
+- **Drop recurring Appstle unskip upstream 500s from the Vercel error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

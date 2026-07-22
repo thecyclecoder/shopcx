@@ -261,6 +261,24 @@ export interface HistoryEntry {
  * row honest with the mirror so callers reading either source see the same answer. Best-effort: a
  * missing specs row (pre-authored slug / pre-backfill) is a 0-row UPDATE, not an error.
  */
+/**
+ * spec-card-mirror-in-review-write — the ONLY statuses `public.spec_card_state.status` accepts, per
+ * its live CHECK constraint `spec_card_state_status_check`.
+ *
+ * Deliberately NARROWER than `SpecStatus`, which also carries `in_review` / `deferred` / `folded`.
+ * That gap is the bug this guards: `in_review` is a DERIVED state — `deriveSpecCardStatus` is pinned
+ * by test to never emit it ([[brain-roadmap.derive-status-no-in-review.test]], the
+ * retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 2 invariant) — and the review
+ * state itself is carried by FLAGS (`ada_disposition` / `intended_status` / `vale_*`), not by this
+ * column. Writing it here is both illegal and redundant.
+ */
+export const MIRROR_STATUSES = new Set<string>(["planned", "in_progress", "shipped", "rejected"]);
+
+/** True iff `status` is one the mirror's CHECK constraint will accept. */
+export function isMirrorStatus(status: string): boolean {
+  return MIRROR_STATUSES.has(status);
+}
+
 async function upsertCardState(
   workspaceId: string,
   slug: string,
@@ -283,10 +301,37 @@ async function upsertCardState(
       flags: mergedFlags,
       updated_at: new Date().toISOString(),
     };
-    if (patch.status !== undefined) row.status = patch.status;
+    // spec-card-mirror-in-review-write — only a status the CHECK constraint accepts may reach the
+    // row. `spec_card_state_status_check` allows planned | in_progress | shipped | rejected; anything
+    // else (in practice `in_review`) makes Postgres reject the WHOLE upsert, taking the flags and
+    // phase_states in the same patch down with it. Dropping just the offending field keeps the rest
+    // of the patch landing, which is the part callers actually depend on. See [[MIRROR_STATUSES]].
+    if (patch.status !== undefined) {
+      if (isMirrorStatus(patch.status)) {
+        row.status = patch.status;
+      } else {
+        console.warn(
+          `[spec-card-state] dropping non-mirror status '${patch.status}' for ${slug} — ` +
+            `spec_card_state.status accepts ${[...MIRROR_STATUSES].join("|")}; the rest of the patch still lands`,
+        );
+      }
+    }
     if (patch.phase_states !== undefined) row.phase_states = patch.phase_states;
     if (patch.last_merge_sha !== undefined) row.last_merge_sha = patch.last_merge_sha;
-    await admin.from("spec_card_state").upsert(row, { onConflict: "workspace_id,spec_slug" });
+    const { error: upsertErr } = await admin
+      .from("spec_card_state")
+      .upsert(row, { onConflict: "workspace_id,spec_slug" });
+    // spec-card-mirror-in-review-write — supabase-js RETURNS `{error}` rather than throwing, so this
+    // used to fail completely silently inside the swallow-everything catch below. The `in_review`
+    // write failed ~17x/day for two weeks (242 recorded transitions, zero mirror rows) and nothing
+    // surfaced it. Log loudly; still do NOT throw — a mirror-write failure must never wedge a caller,
+    // and the dual-write to the canonical public.specs row below still needs to run.
+    if (upsertErr) {
+      console.warn(
+        `[spec-card-state] mirror upsert FAILED for ${slug}: ${upsertErr.message}` +
+          (upsertErr.code ? ` (${upsertErr.code})` : ""),
+      );
+    }
 
     // Phase 3 dual-write to public.specs — the future-canonical row. Map mirror-shape fields to typed
     // columns: status → specs.status, flags.deferred → specs.deferred (the trigger rolls status to
@@ -595,10 +640,14 @@ export async function markSpecCardForReview(
   intendedStatus: "planned" | "deferred",
   audit: { actor: string; reason?: string },
 ): Promise<void> {
+  // spec-card-mirror-in-review-write — no `status` on the patch. `in_review` is DERIVED (never
+  // emitted by deriveSpecCardStatus) and the mirror's CHECK constraint rejects it, which used to fail
+  // this ENTIRE upsert and drop `intended_status` on the floor. The flag IS the review state — it's
+  // what Ada's disposition sweep consumes — so writing the flag alone is both legal and sufficient.
   await upsertCardState(
     workspaceId,
     slug,
-    { status: "in_review", flags: { intended_status: intendedStatus } },
+    { flags: { intended_status: intendedStatus } },
     [{ field: "status", actor: audit.actor, reason: audit.reason ?? `spec authored — intended_status=${intendedStatus}` }],
   );
 }
@@ -652,10 +701,11 @@ export async function markSpecCardValePassed(
 
 /**
  * vale-instant-per-spec-review — Vale's quality verdict (needs_fix leg): stamp the DURABLE
- * "reviewed → malformed" marker so the spec LEAVES Vale's queue until it's re-authored. Sets
+ * "reviewed → malformed" marker so the spec is not re-disposed until it's re-authored. Sets
  * `flags.vale_pass=false` (mirrors to `specs.vale_pass=false`), reusing the existing tri-state:
  *
- *   • `null`  — never verdicted → IN Vale's queue (`selectUnreviewedInReviewSpecs` picks it up).
+ *   • `null`  — never verdicted. (The Vale LLM lane is retired and its module DELETED — nothing
+ *     consumes this queue; the flag survives only as history on pre-retirement rows.)
  *   • `false` — reviewed, needs_fix → OUT of the queue (no re-review until the spec is re-authored).
  *   • `true`  — passed → OUT of the queue, parked for Ada's disposition lane.
  *
@@ -762,7 +812,7 @@ export async function markSpecCardPendingUpgrade(
  * spec-review-agent Phase 4 — the SHARED back-to-review writer. Any agent that spots a malformed/off
  * spec (Vale on a re-check, Bo refusing to build on an empty/phaseless body, Ada's `spec-status` action,
  * repair/regression noticing an authored spec doesn't pass the CHECKLIST, the CEO via the board control)
- * flips the card back to `in_review` so it returns to Vale's queue — the build pipeline refuses to
+ * flips the card back to `in_review` so Ada re-disposes it — the build pipeline refuses to
  * dispatch an in_review spec, which is the whole point (don't build around a broken spec).
  *
  * Consumes the prior disposition lane's signals: `vale_pass`, `ada_disposition`, `intended_status` are
@@ -783,11 +833,14 @@ export async function markSpecCardBackToReview(
   slug: string,
   audit: { actor: string; reason?: string },
 ): Promise<void> {
+  // spec-card-mirror-in-review-write — no `status` on the patch (see markSpecCardForReview). The
+  // REAL work of a send-back-to-review is the flag CLEARING below — above all `ada_disposition`,
+  // which is what makes Ada re-disposition the spec. The illegal `in_review` status used to abort
+  // the whole upsert, so none of these clears reached the mirror row.
   await upsertCardState(
     workspaceId,
     slug,
     {
-      status: "in_review",
       flags: {
         vale_pass: undefined,
         vale_review_passed: false,

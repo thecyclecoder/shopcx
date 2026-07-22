@@ -20,7 +20,8 @@ import {
   evalInlineAgent,
   evalWorker,
   extractCronExpr,
-  extractSolFirstTouchDispatchTicketIds,
+  extractSolHandleBypassTicketIds,
+  SOL_HANDLE_BYPASS_REASONS,
   firstScheduledFiringMs,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isBoxEmittedCronLoop,
@@ -834,25 +835,39 @@ test("evalInlineAgent still flips RED on a real Shopify/web order with no ai:fra
   assert.equal(result.violation?.reason, "idle_while_work");
 });
 
-// ── tickets-awaiting-decision Sol first-touch async-channel exclusion ──────────
-// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
-// an inbound customer email dispatched to Sol as a `ticket-handle` first-touch job counted as
-// orchestrator-owned work in the `tickets-awaiting-decision` probe. The chat-only ack ledger
-// row (`ticket_resolution_events(reasoning='sol_first_touch_ack')`) is skipped by design on
-// async channels, so the probe subtracted nothing and the tile flipped red on 0 beats.
-// The channel-agnostic dispatch signal is the `agent_jobs` row unified-ticket-handler.ts:2030-2041
-// writes for EVERY first-touch (chat + async), captured off the enqueue payload
-// (`kind='ticket-handle', instructions.reason='first_touch'`). These tests pin the pure helper
-// that extracts the ticket_ids from that batch — the piece the probe subtracts on top of the
-// existing ack exclusion so async first-touch tickets no longer manufacture a false red tile.
+// ── tickets-awaiting-decision Sol bypass exclusions (first_touch + inflection) ─
+// Originating false pages (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+//   1) An inbound customer email dispatched to Sol as a `ticket-handle` first-touch job counted
+//      as orchestrator-owned work in the `tickets-awaiting-decision` probe. The chat-only ack
+//      ledger row (`ticket_resolution_events(reasoning='sol_first_touch_ack')`) is skipped by
+//      design on async channels, so the probe subtracted nothing and the tile flipped red on 0
+//      beats. Spec: `ticket-decision-workprobe-exclude-async-sol-first-touch`.
+//   2) A drift/frustration inbound routed through [[../inflection-detector]] `reSessionSol`
+//      (which supersedes the live Direction and enqueues a fresh `ticket-handle` job with
+//      `reason: 'inflection'`) never reaches callSonnetOrchestratorV2 either — no orchestrator
+//      beat is emitted — but the same probe still counted it as orchestrator work. Spec:
+//      `ticket-decision-workprobe-exclude-sol-inflection-resessions`.
+// The channel-agnostic dispatch signal is the `agent_jobs` row that unified-ticket-handler.ts
+// (§ 2b, first_touch) and `reSessionSol` (inflection) both write with `kind='ticket-handle'`
+// and `instructions.reason` in `SOL_HANDLE_BYPASS_REASONS`. These tests pin the pure helper
+// that extracts the ticket_ids from that batch — the piece the probe subtracts so async
+// first-touch tickets AND inflection re-sessions no longer manufacture a false red tile.
 
-test("extractSolFirstTouchDispatchTicketIds picks up an async (email) first-touch ticket-handle job with no ack row", () => {
-  // The originating condition: unified-ticket-handler.ts § 2b takes the async channel branch —
-  // no send, no `sol_first_touch_ack` `ticket_resolution_events` row — and enqueues a
-  // ticket-handle `agent_jobs` row with `reason: 'first_touch'` in the instructions payload.
-  // Direct mirror of the enqueue shape at unified-ticket-handler.ts:2030-2041 (`JSON.stringify({
-  // ticket_id, workspace_id, turn_index: 1, reason: 'first_touch' })`) — the exact payload the
-  // async email path writes.
+test("SOL_HANDLE_BYPASS_REASONS carries the two Sol-owned ticket-handle reasons the tickets-awaiting-decision probe subtracts", () => {
+  // The shared list is the source of truth the probe's LIKE prefilter and the helper's Node-side
+  // filter both derive from. Pinning its membership catches a silent drop that would re-open the
+  // false page (e.g. removing 'inflection' would let a drift/frustration inbound with no
+  // orchestrator beat re-flip the tile red).
+  assert.deepEqual([...SOL_HANDLE_BYPASS_REASONS], ["first_touch", "inflection"]);
+});
+
+test("extractSolHandleBypassTicketIds picks up an async (email) first-touch ticket-handle job with no ack row", () => {
+  // The originating condition for the first-touch false page: unified-ticket-handler.ts § 2b
+  // takes the async channel branch — no send, no `sol_first_touch_ack` `ticket_resolution_events`
+  // row — and enqueues a ticket-handle `agent_jobs` row with `reason: 'first_touch'` in the
+  // instructions payload. Direct mirror of the enqueue shape at unified-ticket-handler.ts:2030-2041
+  // (`JSON.stringify({ ticket_id, workspace_id, turn_index: 1, reason: 'first_touch' })`) — the
+  // exact payload the async email path writes.
   const rows = [
     {
       instructions: JSON.stringify({
@@ -863,17 +878,55 @@ test("extractSolFirstTouchDispatchTicketIds picks up an async (email) first-touc
       }),
     },
   ];
-  const ids = extractSolFirstTouchDispatchTicketIds(rows);
+  const ids = extractSolHandleBypassTicketIds(rows);
   assert.deepEqual(ids, ["ticket-async-email"]);
   // Consumed by the probe as `.in('ticket_id', [...])` → the inbound-message count for this ticket
   // is subtracted from the total, so the async-first-touch email that fired the false page now
   // reads as work=0 instead of work=1 in the ai:orchestrator tile — no idle_while_work violation.
 });
 
-test("extractSolFirstTouchDispatchTicketIds also catches a failed first-touch job (dispatch was made, so orchestrator was still bypassed)", () => {
+test("extractSolHandleBypassTicketIds picks up an inflection re-session ticket-handle job (drift / frustration bounce)", () => {
+  // The originating condition for THIS spec's false page: the inflection gate
+  // ([[../inflection-detector]] `applyInflectionGate`) fires on a subsequent inbound, stages
+  // the `sol:inflection-<kind>` ledger row, optionally sends a holding message, and calls
+  // `reSessionSol` — which supersedes the live Direction and enqueues a ticket-handle
+  // `agent_jobs` row with `reason: 'inflection'` in the instructions payload. Direct mirror of
+  // the enqueue shape at inflection-detector.ts:679-697 (`JSON.stringify({ ticket_id,
+  // workspace_id, turn_index, reason: 'inflection', kind, evidence, superseded_direction_id })`)
+  // — callSonnetOrchestratorV2 never runs on that inbound, so no ai:orchestrator beat is emitted
+  // and the probe MUST subtract the message from orchestrator demand.
+  const rows = [
+    {
+      instructions: JSON.stringify({
+        ticket_id: "ticket-drift-inflection",
+        workspace_id: "ws-1",
+        turn_index: 3,
+        reason: "inflection",
+        kind: "drift",
+        evidence: { markers: ["drift:direction_mismatch"] },
+        superseded_direction_id: "dir-old",
+      }),
+    },
+  ];
+  const ids = extractSolHandleBypassTicketIds(rows);
+  assert.deepEqual(ids, ["ticket-drift-inflection"]);
+});
+
+test("extractSolHandleBypassTicketIds returns both first_touch and inflection ticket_ids from a mixed batch", () => {
+  // The probe's `agent_jobs` window will typically contain a mix of Sol-owned dispatch classes.
+  // The helper must return every bypass ticket_id in one pass so the single `.in('ticket_id',
+  // ids)` subtraction below the probe can cover both classes without a second query.
+  const rows = [
+    { instructions: JSON.stringify({ ticket_id: "ticket-ft", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-in", workspace_id: "ws-1", turn_index: 4, reason: "inflection", kind: "frustration", evidence: null, superseded_direction_id: "d-1" }) },
+  ];
+  assert.deepEqual(extractSolHandleBypassTicketIds(rows).sort(), ["ticket-ft", "ticket-in"]);
+});
+
+test("extractSolHandleBypassTicketIds also catches a failed first-touch job (dispatch was made, so orchestrator was still bypassed)", () => {
   // The spec's other named scenario: a `ticket-handle` job that later transitioned to `failed`
-  // still represents a first-touch dispatch — unified-ticket-handler.ts already handed the
-  // inbound message to Sol and returned before callSonnetOrchestratorV2 could run, so no
+  // still represents a Sol dispatch — unified-ticket-handler.ts / reSessionSol already handed
+  // the inbound message to Sol and returned before callSonnetOrchestratorV2 could run, so no
   // ai:orchestrator beat is emitted regardless of the box worker's later outcome. The helper is
   // status-agnostic (the probe's caller doesn't filter on status either) so a queued OR failed
   // job of the same shape both exclude their inbound message.
@@ -887,24 +940,31 @@ test("extractSolFirstTouchDispatchTicketIds also catches a failed first-touch jo
       }),
     },
   ];
-  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["ticket-async-failed"]);
+  assert.deepEqual(extractSolHandleBypassTicketIds(rows), ["ticket-async-failed"]);
 });
 
-test("extractSolFirstTouchDispatchTicketIds skips ticket-handle jobs with a different reason (portal_error, inflection)", () => {
-  // Only the first-touch class is subtracted here — portal-error and inflection ticket-handle
-  // jobs have their own downstream accounting (portal-errors-route-to-sol-first-escalate-to-june,
-  // sol-drift-frustration-detector-and-re-session-router) and their inbound messages already
-  // went through a Sonnet path that produced a beat. Filtering to `reason: 'first_touch'` keeps
-  // the exclusion tight to the actual pre-orchestrator bypass class the false page fired on.
+test("extractSolHandleBypassTicketIds skips ticket-handle jobs with a reason outside SOL_HANDLE_BYPASS_REASONS (portal_error, drift, unknown)", () => {
+  // Only reasons in SOL_HANDLE_BYPASS_REASONS are subtracted here — portal-error ticket-handle
+  // jobs (enqueueSolFirstTouchForPortalError) have their own downstream accounting
+  // (portal-errors-route-to-sol-first-escalate-to-june) and their inbound messages already went
+  // through a Sonnet path that produced a beat. A `reason: 'drift'` marker (the classifier
+  // kind, NOT the enqueue reason — the enqueue reason for a drift bounce is 'inflection') must
+  // not accidentally leak in via a substring match; the strict allowlist check keeps the
+  // exclusion tight to the actual pre-orchestrator bypass classes the false pages fired on.
   const rows = [
     { instructions: JSON.stringify({ ticket_id: "ticket-portal", workspace_id: "ws-1", turn_index: 1, reason: "portal_error", route: "cancel", error_code: null }) },
-    { instructions: JSON.stringify({ ticket_id: "ticket-inflection", workspace_id: "ws-1", turn_index: 3, reason: "drift" }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-drift-mislabel", workspace_id: "ws-1", turn_index: 3, reason: "drift" }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-future-kind", workspace_id: "ws-1", turn_index: 2, reason: "some_future_reason" }) },
     { instructions: JSON.stringify({ ticket_id: "ticket-first-touch", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+    { instructions: JSON.stringify({ ticket_id: "ticket-inflection", workspace_id: "ws-1", turn_index: 4, reason: "inflection" }) },
   ];
-  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["ticket-first-touch"]);
+  assert.deepEqual(
+    extractSolHandleBypassTicketIds(rows).sort(),
+    ["ticket-first-touch", "ticket-inflection"],
+  );
 });
 
-test("extractSolFirstTouchDispatchTicketIds tolerates null / non-JSON / malformed instructions without throwing", () => {
+test("extractSolHandleBypassTicketIds tolerates null / non-JSON / malformed instructions without throwing", () => {
   // The probe already null/error-safes at the outer layer (defaults dispatch count to 0). The
   // helper matches that contract so a legacy or future kind whose instructions aren't a JSON
   // object can't blow up the tickets-awaiting-decision computation.
@@ -915,20 +975,22 @@ test("extractSolFirstTouchDispatchTicketIds tolerates null / non-JSON / malforme
     { instructions: JSON.stringify({ ticket_id: "", reason: "first_touch" }) }, // empty id
     { instructions: JSON.stringify({ reason: "first_touch" }) }, // no ticket_id
     { instructions: JSON.stringify({ ticket_id: "T", reason: "first_touch" }) }, // valid — kept
+    { instructions: JSON.stringify({ ticket_id: "U", reason: "inflection" }) }, // valid — kept
+    { instructions: JSON.stringify({ ticket_id: "V", reason: 42 }) }, // non-string reason
   ];
-  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
+  assert.deepEqual(extractSolHandleBypassTicketIds(rows).sort(), ["T", "U"]);
 });
 
-test("extractSolFirstTouchDispatchTicketIds dedupes when a ticket has multiple first-touch jobs in the window", () => {
-  // Sol re-session (reSessionSol) enqueues a fresh ticket-handle job on inflection; the portal
-  // path also enqueues one for portal_error. Neither reuses `reason: 'first_touch'`, so the
-  // dedupe here really targets a rare double-enqueue on the same first-touch turn — the set
-  // guarantees a single message can't be subtracted twice via the `in('ticket_id', ids)` fan-out.
+test("extractSolHandleBypassTicketIds dedupes when a ticket has multiple bypass ticket-handle jobs in the window", () => {
+  // A ticket may match more than one bypass class in-window (first-touch on the opening inbound,
+  // then an inflection re-session on a later turn). The set guarantees a single message can't be
+  // subtracted twice via the `in('ticket_id', ids)` fan-out.
   const rows = [
     { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
     { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 1, reason: "first_touch" }) },
+    { instructions: JSON.stringify({ ticket_id: "T", workspace_id: "ws-1", turn_index: 4, reason: "inflection" }) },
   ];
-  assert.deepEqual(extractSolFirstTouchDispatchTicketIds(rows), ["T"]);
+  assert.deepEqual(extractSolHandleBypassTicketIds(rows), ["T"]);
 });
 
 // ── tickets-awaiting-decision settle-window + outreach bypass ─────────────────
@@ -1005,6 +1067,74 @@ test("Flippa-style outreach close race — tickets-awaiting-decision probe appli
     block,
     /\.lte\(\s*"created_at"\s*,/,
     "`tickets-awaiting-decision` case must apply `.lte(\"created_at\", cutoff)` to bound the count from above — dropping this filter turns the settle constant into dead code and lets the Flippa-style outreach close race fire the ai:orchestrator tile red again.",
+  );
+});
+
+// ── tickets-awaiting-decision auto-merge remap grace ──────────────────────────
+// Spec: ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t.
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// ticket auto-merge (unified-ticket-handler.ts § 1a, mergeTickets → newest as target) remaps
+// inbound `ticket_messages` rows from older tickets onto a brand-new ticket while keeping
+// their ORIGINAL `created_at`. A 16-minute-old inbound whose parent ticket is now 13 seconds
+// old ages past `TICKET_DECISION_SETTLE_MS` on its own timestamp before the classifier /
+// first-touch dispatch have had a chance to run on the FRESH parent ticket, so it counts as
+// orchestrator demand with 0 beats and flips the tile red on healthy traffic. Fix: extend the
+// settle cutoff to `MAX(msg.created_at, ticket.created_at)` — a message counts only when
+// BOTH its own timestamp AND its current parent ticket's timestamp are older than the cutoff.
+// Source-inspection tests here (the case body is inline in the switch statement rather than a
+// pure helper — matches the sibling settle-window + outreach-bypass tests just above).
+
+test("Auto-merge remap race — tickets-awaiting-decision probe applies the settle cutoff to tickets.created_at as well", () => {
+  // The joined-ticket cutoff (`.lte("tickets.created_at", cutoff)`) is what implements the
+  // MAX(msg.created_at, ticket.created_at) settle grace. Without it, a message whose OWN
+  // created_at is already past the cutoff (because auto-merge remapped it from an older ticket)
+  // counts as demand even though its CURRENT parent ticket was created seconds ago and the
+  // classifier + first-touch dispatch haven't had a chance to run yet — the exact false page
+  // the spec closes.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/,
+    "`tickets-awaiting-decision` case must apply `.lte(\"tickets.created_at\", decisionSettleCutoffIso)` on the joined tickets row — this is the ticket-side half of the MAX(msg.created_at, ticket.created_at) settle grace and the sole gate that prevents an auto-merged old inbound from counting as demand before the classifier + first-touch dispatch have run on the fresh parent ticket.",
+  );
+});
+
+test("Auto-merge remap race — every count query gates on BOTH msg.created_at AND tickets.created_at (symmetric filter)", () => {
+  // If any of the four count queries (allRes, excludedRes, solFirstTouchAckRes, and the
+  // solFirstTouchDispatchExcluded follow-up) applies the ticket-side cutoff without the
+  // others, the subtraction is asymmetric and the Math.max floor no longer covers the
+  // auto-merge case: e.g. allRes drops the fresh-ticket message but excludedRes does not,
+  // so the message stays in the total-count residual even though its counterpart was pruned
+  // upstream. The four queries must all filter identically on both `created_at` and
+  // `tickets.created_at` for the settle boundary to hold across the whole computation.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const msgCutoffMatches = block.match(/\.lte\(\s*"created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  const ticketCutoffMatches = block.match(/\.lte\(\s*"tickets\.created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  assert.equal(
+    ticketCutoffMatches.length,
+    msgCutoffMatches.length,
+    `every ticket_messages count query in the tickets-awaiting-decision case must gate on both msg.created_at AND tickets.created_at — found ${msgCutoffMatches.length} msg-side cutoffs and ${ticketCutoffMatches.length} ticket-side cutoffs. An asymmetric filter re-opens the auto-merge remap race the ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t spec is designed to close.`,
+  );
+  // Sanity floor: at least one of each (all four queries share the ticket_messages shape today —
+  // if this drops to zero, the case body was refactored and this whole file needs a re-look).
+  assert.ok(msgCutoffMatches.length >= 4, `expected ≥4 msg-side settle cutoffs in the tickets-awaiting-decision case (one per ticket_messages count query), found ${msgCutoffMatches.length}. Did the case body shape change?`);
+});
+
+test("Auto-merge remap race — the `all` (unbypassed) count query joins tickets!inner so the ticket-side cutoff can apply", () => {
+  // Before this spec, `allRes` selected only from `ticket_messages` with no join — there was
+  // no `tickets` row on the query for a `.lte("tickets.created_at", ...)` filter to bind to.
+  // The fix must add `tickets!inner(id)` to the `allRes` select so PostgREST parses the
+  // nested-column filter as a scope-qualified predicate rather than dropping it silently.
+  // Guard: the count block must include at least TWO `tickets!inner` join specs — one for
+  // `allRes` (added by this spec) and one for `excludedRes` (pre-existing). The
+  // `solFirstTouchAckRes` uses `tickets!inner(id, ticket_resolution_events!inner(id))` which
+  // this regex intentionally does NOT match — keeps the assertion pinned on the two plain
+  // `tickets!inner(id)` joins the spec is directly responsible for.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const plainInnerJoins = block.match(/tickets!inner\(id\)/g) ?? [];
+  assert.ok(
+    plainInnerJoins.length >= 2,
+    `expected ≥2 \`tickets!inner(id)\` joins in the tickets-awaiting-decision case (allRes + excludedRes; solFirstTouchDispatchExcluded adds a 3rd) to bind the \`tickets.created_at\` settle cutoff onto every count query — found ${plainInnerJoins.length}. Without the join the nested-column filter is silently ignored and the auto-merge remap race re-opens.`,
   );
 });
 

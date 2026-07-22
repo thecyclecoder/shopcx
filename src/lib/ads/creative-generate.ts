@@ -57,12 +57,33 @@ const NEGATIVE_PROMPT_MARKER = "OFFER FIDELITY (hard rule)";
  */
 export function renderPromptHasCompetitorOffer(prompt: string): boolean {
   const idx = prompt.indexOf(NEGATIVE_PROMPT_MARKER);
-  const scanRegion = idx >= 0 ? prompt.slice(0, idx) : prompt;
+  let scanRegion = idx >= 0 ? prompt.slice(0, idx) : prompt;
+  // Exclude the TRUSTED human-instruction clauses (CEO edit / owner "Generate ad like this"
+  // directions). A human may legitimately say "remove the free tote badge" — the guard exists to
+  // catch a competitor freebie that LEAKED into the machine-composed content, not to reject the
+  // owner telling us to strip one. Without this, "Remove the free tote badge" false-tripped the guard
+  // and failed the whole generation (the 2026-07-20 Bloom→Amazing Creamer pinned run). Each clause
+  // runs from its sentinel header to the next blank line.
+  scanRegion = stripHumanInstructionClauses(scanRegion);
   for (const re of RENDER_COMPETITOR_OFFER_PATTERNS) {
     re.lastIndex = 0;
     if (re.test(scanRegion)) return true;
   }
   return false;
+}
+
+/** PURE — remove the CEO-edit + owner-directions clauses (each a `${HEADER} … up to the next blank
+ *  line`) from a scan region, so the competitor-offer guard never false-positives on a human's
+ *  instruction that NAMES an artifact to remove. */
+function stripHumanInstructionClauses(region: string): string {
+  let out = region;
+  for (const header of [CEO_EDIT_HEADER, AUTHOR_NOTES_HEADER]) {
+    const h = out.indexOf(header);
+    if (h < 0) continue;
+    const end = out.indexOf("\n\n", h);
+    out = out.slice(0, h) + (end >= 0 ? out.slice(end) : "");
+  }
+  return out;
 }
 
 /**
@@ -120,6 +141,9 @@ export interface GenerateCreativeOpts {
  *  prompt (Nano Banana's instruction-following weighs the earliest lines heaviest). Same-file
  *  constant so buildPrompt + tests never drift. */
 export const CEO_EDIT_HEADER = "CEO EDIT (apply exactly to this format):";
+/** Sentinel header for the owner's up-front "Generate ad like this" free-text directions (Research ›
+ *  Ads). A test greps for it; distinct from CEO_EDIT_HEADER (a post-review surgical edit). */
+export const AUTHOR_NOTES_HEADER = "OWNER DIRECTIONS (apply exactly to this ad):";
 
 const TREATMENT_STEER: Record<NonNullable<GenerateCreativeOpts["treatment"]>, string> = {
   before_after: "TREATMENT: before/after transformation-led — the two-photo transformation is the hero.",
@@ -187,7 +211,7 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
 
   // HEADLINE clause — imitation vs own-brand (see isImitation note above).
   const headlineClause = isImitation
-    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Write OUR headline in the SAME structure/energy, but it must name ONLY ${brief.productTitle} and reference ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL: also DROP any product ATTRIBUTE or ingredient descriptor from the competitor's hook that is NOT true of ${brief.productTitle} — e.g. if the competitor angle says "protein coffee" / "keto" / "collagen" and OUR product is not that, do NOT carry the word over; describe our product by its REAL nature shown on the pack (e.g. "superfood coffee"). When the competitor's product noun differs from ours, SWAP IN OURS — never copy their attribute. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
+    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Echo only its STRUCTURE and ENERGY, never its words. Write OUR headline that names ONLY ${brief.productTitle} and references ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL — three things to strip, not just the brand: (1) DROP any product ATTRIBUTE or ingredient descriptor that is NOT true of ${brief.productTitle} (e.g. competitor says "protein coffee" / "keto" / "collagen" and we are not that; when the competitor's product noun differs from ours, SWAP IN OURS — the real product noun shown on the pack, never their attribute). (2) DROP any BENEFIT, RESULT, or PROMISE that is not what ${brief.productTitle} actually delivers — if the competitor's hook promises "deeper sleep" / "younger skin" / "weight loss" and OUR product is for a DIFFERENT benefit, do NOT carry their benefit over; lead with OUR real benefit. The headline must promise ONLY what our product does. (3) NEVER carry over a SPECIFIC, UNVERIFIED CLAIM from the competitor's hook — no efficacy TIMEFRAME ("10 weeks", "30 days", "overnight"), no QUANTITY / numeric RESULT ("lose 40 lbs", "3x"), no PERCENTAGE — unless it is a verified fact about ${brief.productTitle}. Echoing the competitor's number/timeframe as ours (e.g. their "10 Weeks to Younger Skin" → "10 Weeks to Steady Energy") is a FABRICATION, not an imitation. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
     : `HEADLINE (render EXACTLY, correct spelling, no dropped/repeated words): "${headline}" — big, bold, with 1–2 key phrases highlighted in a color block.`;
 
   // When the brief has NO transformation, the model must NOT free-associate a weight-loss before/after —
@@ -207,7 +231,16 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? `\n\n${CEO_EDIT_HEADER} the CEO reviewed this exact ad and left a targeted instruction. Apply it EXACTLY — this is a surgical edit to THIS format's existing render, not a redesign. Keep every other element (headline, proof, reviewer, product) unchanged from the composition below unless the note explicitly says otherwise. THE NOTE: "${ceoNote.replace(/"/g, "'")}".`
     : "";
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}
+  // Research › Ads "Generate ad like this" free-text notes — the owner's up-front directions for THIS
+  // fresh generation ("remove the free tote badge"). Unlike ceoEditClause (a surgical edit to an
+  // EXISTING render), this steers the design as it's built. Emitted early (Nano Banana weighs earliest
+  // instructions heaviest) so it lands first-pass and skips a manual revise round. Absent → "".
+  const briefNote = brief.authorNotes?.trim();
+  const authorNotesClause = briefNote
+    ? `\n\n${AUTHOR_NOTES_HEADER} the owner asked for this ad and left specific directions. Apply them EXACTLY when designing this ad (they override the generic composition below on any conflict). THE DIRECTIONS: "${briefNote.replace(/"/g, "'")}".`
+    : "";
+
+  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}${authorNotesClause}
 
 ${headlineClause}
 
@@ -228,6 +261,8 @@ CLAIM FIDELITY (hard rule): every product attribute, ingredient, or nutrient des
 REVIEW FIDELITY (hard rule): any customer review, testimonial, quote, reviewer name, or star-rating visible in the competitor reference is THEIRS — it is NOT about ${brief.productTitle}. NEVER copy, echo, paraphrase, or render the competitor's review text, reviewer name, or rating. ${hasProvidedReview ? "Render ONLY the customer review provided above — it is a real, featured review of OUR product. You MAY tighten a long review to its strongest, most relevant lines (a faithful condensation is fine), but keep the reviewer NAME exactly as given and never embellish, invent, or add a claim the review does not actually make." : "NO review of our product is provided, so render NO customer review, testimonial, quote, reviewer name, or star-rating anywhere — do NOT invent one and do NOT carry over the competitor's."} Rendering a competitor's (or an invented) review on our ad is a fabricated-testimonial defect.
 
 NO COMPETITOR OFFER (hard rule — applies to EVERY format render: Feed 4:5, Reels 9:16, Stories 9:16, right-column 1:1): a competitor's promotional freebie (a bonus tote, a free gift-with-purchase pouch, a giveaway sticker, a bonus item, a "GWP" badge, a "free bag" callout) is NOT part of OUR real store offer — do NOT paint, render, badge, sticker, tag, or otherwise depict any of these anywhere in the image, even when the design reference clearly carries one. Specifically: NO tote, NO free tote, NO free gift, NO bonus item, NO gift-with-purchase, NO free bag, NO giveaway artifact of any kind. Rendering a competitor's offer graphic on our ad is a defect (the 2026-07-18 Superfoods Tabs Feed leak — the competitor's 'free tote' bled into the pixels while our copy stayed clean).
+
+NO THIRD-PARTY BRANDS (hard rule — EVERY format + EVERY panel incl. any before/after frame): the ONLY branded product, package, logo, wordmark, or label anywhere in the image is OUR own ${brief.productTitle}. NEVER paint, render, or depict any OTHER company's product, can, bottle, box, logo, or recognizable branded item — not the competitor whose composition you are reusing, and not an unrelated brand used to stage a "before" state (NO Red Bull, Monster, Starbucks, or any real energy-drink / coffee / supplement can or bottle; NO recognizable third-party packaging of any kind). To depict a "before" problem state, use a generic, UN-branded prop or a person's expression — never a real brand's product. Rendering any third-party brand on our ad is a trademark/brand-safety defect (the 2026-07-19 Guru Focus render leaked real Red Bull and Monster cans into a before-frame).
 
 HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
 

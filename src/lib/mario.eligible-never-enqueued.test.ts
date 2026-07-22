@@ -24,7 +24,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reclaimAndRedrive, shouldSurfaceEligibleNeverEnqueued } from "./mario";
+import {
+  MARIO_BUILD_SCAN_IN_CHUNK,
+  foldSlugsWithBuild,
+  reclaimAndRedrive,
+  shouldSurfaceEligibleNeverEnqueued,
+} from "./mario";
 
 const GRACE_MS = 60 * 60 * 1000;
 const OVER_GRACE_MS = GRACE_MS + 1;
@@ -129,6 +134,74 @@ test("Bullet 5 — age EQUAL to grace (boundary) is NOT surfaced (strict >, not 
     graceMs: GRACE_MS,
   });
   assert.equal(surfaced, false);
+});
+
+// ── foldSlugsWithBuild — the chunked + fail-loud build-existence scan ────────
+// Pins the two named failing states that motivate spec
+// [[../specs/mario-eligible-never-enqueued-chunk-build-scan]]:
+//   (1) an unchunked `.in()` blows past the PostgREST URL/param length ceiling and the errored
+//       result was read as "no build exists" — every aged auto_build spec surfaced falsely,
+//       burning a Mario Max session per aged spec per hour workspace-wide.
+//   (2) the destructure `{ data: builds }` omitted `error`, so a genuine query error was
+//       silently swallowed into an empty-set read — same false-positive detonation.
+
+test("foldSlugsWithBuild — chunks a > 200-slug list into batches of ≤ MARIO_BUILD_SCAN_IN_CHUNK", async () => {
+  const slugs = Array.from({ length: 450 }, (_, i) => `spec-${i}`);
+  const batchSizes: number[] = [];
+  await foldSlugsWithBuild(async (batch) => {
+    batchSizes.push(batch.length);
+    return { data: [], error: null };
+  }, slugs);
+  // 450 → 200 + 200 + 50; every batch must be ≤ MARIO_BUILD_SCAN_IN_CHUNK, never a single unchunked hit.
+  assert.deepEqual(batchSizes, [MARIO_BUILD_SCAN_IN_CHUNK, MARIO_BUILD_SCAN_IN_CHUNK, 50]);
+  for (const size of batchSizes) assert.ok(size <= MARIO_BUILD_SCAN_IN_CHUNK, `batch of ${size} exceeded chunk cap`);
+});
+
+test("foldSlugsWithBuild — a per-batch error THROWS (never silently treated as empty)", async () => {
+  const slugs = Array.from({ length: 250 }, (_, i) => `spec-${i}`);
+  let calls = 0;
+  const boom = new Error("PostgREST URL too long");
+  await assert.rejects(
+    foldSlugsWithBuild(async () => {
+      calls += 1;
+      if (calls === 1) return { data: [{ spec_slug: "spec-0" }], error: null };
+      return { data: null, error: boom };
+    }, slugs),
+    (err: unknown) => err === boom,
+  );
+});
+
+test("foldSlugsWithBuild — merges results across batches into one set", async () => {
+  const slugs = Array.from({ length: 300 }, (_, i) => `spec-${i}`);
+  let calls = 0;
+  const seen = await foldSlugsWithBuild(async (batch) => {
+    calls += 1;
+    // Return only the first slug in each batch — asserts every batch is scanned and merged.
+    return { data: [{ spec_slug: batch[0] ?? null }], error: null };
+  }, slugs);
+  assert.equal(calls, 2); // 300 / 200 = 2 batches
+  assert.deepEqual([...seen].sort(), ["spec-0", "spec-200"]);
+});
+
+test("foldSlugsWithBuild — empty slug list returns an empty set without hitting the scan callback", async () => {
+  let calls = 0;
+  const seen = await foldSlugsWithBuild(async () => {
+    calls += 1;
+    return { data: [], error: null };
+  }, []);
+  assert.equal(calls, 0);
+  assert.equal(seen.size, 0);
+});
+
+test("foldSlugsWithBuild — drops null/empty spec_slug rows on the merge side", async () => {
+  const seen = await foldSlugsWithBuild(
+    async () => ({
+      data: [{ spec_slug: null }, { spec_slug: "" }, { spec_slug: "real-spec" }],
+      error: null,
+    }),
+    ["a"],
+  );
+  assert.deepEqual([...seen], ["real-spec"]);
 });
 
 test("Applier — `reclaim_and_redrive` verb is wired (reclaimAndRedrive is a function)", () => {

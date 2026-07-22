@@ -20,6 +20,7 @@
  * (GET /api/developer/agents/grades). See docs/brain/libraries/director-leash-recommendations.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { loadAutonomyMap } from "@/lib/agents/approval-router";
 import { PLATFORM } from "@/lib/agents/platform-director";
 import { GROWTH } from "@/lib/agents/growth-director";
@@ -361,7 +362,7 @@ export async function computeDirectorGradeReport(opts: {
       generatedAt,
     };
   } catch (e) {
-    console.warn(`[director-leash-recommendations] report failed ws=${opts.workspaceId} fn=${directorFunction}: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[director-leash-recommendations] report failed ws=${opts.workspaceId} fn=${directorFunction}: ${errText(e)}`);
     return empty;
   }
 }

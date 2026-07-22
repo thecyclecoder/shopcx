@@ -132,8 +132,8 @@ test("non-dispatched raw inbounds are excluded structurally — no author-type o
   );
   assert.doesNotMatch(
     block,
-    /extractSolFirstTouchDispatchTicketIds/,
-    "`tickets-awaiting-handler-dispatch` case must NOT reuse the Sol first-touch dispatch-ticket-id extraction — first-touch dispatches happen ON TOP of the handler run (unified-ticket-handler enqueues them mid-run), so a message that reached the handler has already had its stamp cleared and never enters this count. The subtraction is meaningless here and adding it re-couples the handler tile to the orchestrator's bypass classes.",
+    /extractSolHandleBypassTicketIds/,
+    "`tickets-awaiting-handler-dispatch` case must NOT reuse the Sol bypass-ticket-id extraction — Sol first-touch/inflection dispatches happen ON TOP of the handler run (unified-ticket-handler / reSessionSol enqueue them mid-run), so a message that reached the handler has already had its stamp cleared and never enters this count. The subtraction is meaningless here and adding it re-couples the handler tile to the orchestrator's bypass classes.",
   );
 });
 

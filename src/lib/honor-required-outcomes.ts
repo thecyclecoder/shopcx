@@ -19,6 +19,7 @@
  * gate ever passes" ordering invariant is provably true without spinning up Supabase.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 import type { ActionParams, ActionContext, ActionResult } from "./action-executor";
 import { directActionHandlers, verifyActionInDB } from "./action-executor";
 import {
@@ -112,7 +113,7 @@ export async function decideOutcome(
   try {
     handlerResult = await dispatch(action);
   } catch (err) {
-    return { verdict: "failed", reason: `handler threw: ${err instanceof Error ? err.message : String(err)}` };
+    return { verdict: "failed", reason: `handler threw: ${errText(err)}` };
   }
   if (!handlerResult.success) {
     return { verdict: "failed", reason: handlerResult.error ?? "handler returned success=false" };
@@ -121,7 +122,7 @@ export async function decideOutcome(
   try {
     verified = await verify(action);
   } catch (err) {
-    return { verdict: "failed", reason: `verify threw: ${err instanceof Error ? err.message : String(err)}` };
+    return { verdict: "failed", reason: `verify threw: ${errText(err)}` };
   }
   if (verified) return { verdict: "verified" };
   return { verdict: "failed", reason: "db verify did not confirm expected state" };

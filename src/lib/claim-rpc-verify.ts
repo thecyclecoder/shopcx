@@ -32,6 +32,7 @@
  * Brain: docs/brain/libraries/claim-rpc-verify.md (co-committed with the code).
  */
 import { pgQuery } from "./pg-pool";
+import { errText } from "@/lib/error-text";
 
 export interface ClaimCooldownVerification {
   /** true = live RPC honors the cooldown predicate (or we couldn't verify and are failing open). */
@@ -92,7 +93,7 @@ export async function verifyClaimAgentJobCooldown(): Promise<ClaimCooldownVerifi
       ok: true,
       probed: false,
       reason: `pg-pool query threw while verifying claim_agent_job cooldown (failing open): ${
-        e instanceof Error ? e.message : String(e)
+        errText(e)
       }`,
     };
   }

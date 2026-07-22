@@ -144,7 +144,7 @@ export default function AdTestingDashboard() {
   const t = data?.thresholds;
 
   return (
-    <div className="mx-auto max-w-6xl p-6">
+    <div className="mx-auto w-full max-w-6xl p-4 sm:p-6">
       <div className="mb-1 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">Ad Testing</h1>
         {data && <span className="text-xs text-slate-400">as of {new Date(data.generatedAt).toLocaleString()}</span>}
@@ -188,22 +188,34 @@ export default function AdTestingDashboard() {
                 </div>
                 <div className="divide-y divide-slate-100">
                   {g.rows.map((row) => (
-                    <div key={row.adsetId} className={`flex items-center gap-3 px-4 py-2.5 ${row.active ? "" : "opacity-60"}`}>
-                      <Thumb row={row} onClick={() => setModalRow(row)} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`rounded border px-1.5 py-0.5 text-[11px] font-medium ${TIER[row.tier].cls}`}>{TIER[row.tier].label}</span>
-                          <span className={`text-[11px] ${row.active ? "text-green-600" : "text-slate-400"}`}>{row.active ? "● live" : "○ paused"}</span>
+                    <div key={row.adsetId} className={`px-4 py-2.5 ${row.active ? "" : "opacity-60"}`}>
+                      <div className="flex items-center gap-3">
+                        <Thumb row={row} onClick={() => setModalRow(row)} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`rounded border px-1.5 py-0.5 text-[11px] font-medium ${TIER[row.tier].cls}`}>{TIER[row.tier].label}</span>
+                            <span className={`text-[11px] ${row.active ? "text-green-600" : "text-slate-400"}`}>{row.active ? "● live" : "○ paused"}</span>
+                          </div>
+                          <div className="truncate text-sm text-slate-700">{row.creative?.headline || row.adsetName}</div>
                         </div>
-                        <div className="truncate text-sm text-slate-700">{row.creative?.headline || row.adsetName}</div>
+                        {/* Desktop: compact inline metrics. Hidden on mobile, where the metrics grid below takes over. */}
+                        <div className="hidden shrink-0 gap-4 text-right text-xs text-slate-600 sm:flex">
+                          <Metric k="Spend" v={usd(row.spendCents)} />
+                          <Metric k="CPM" v={usdOrDash(row.cpmCents || null)} />
+                          <Metric k="CTR" v={`${row.ctrPct}%`} />
+                          <Metric k="ATC" v={String(row.addToCart)} />
+                          <Metric k="Sales" v={String(row.purchases)} strong />
+                          <Metric k="CAC" v={usdOrDash(row.cacCents)} strong />
+                        </div>
                       </div>
-                      <div className="hidden shrink-0 gap-4 text-right text-xs text-slate-600 sm:flex">
-                        <Metric k="Spend" v={usd(row.spendCents)} />
-                        <Metric k="CPM" v={usdOrDash(row.cpmCents || null)} />
-                        <Metric k="CTR" v={`${row.ctrPct}%`} />
-                        <Metric k="ATC" v={String(row.addToCart)} />
-                        <Metric k="Sales" v={String(row.purchases)} strong />
-                        <Metric k="CAC" v={usdOrDash(row.cacCents)} strong />
+                      {/* Mobile: the same metrics as a readable 3-col card grid (the desktop row hides them off-screen). */}
+                      <div className="mt-2.5 grid grid-cols-3 gap-x-3 gap-y-2 rounded-lg bg-slate-50 p-3 sm:hidden">
+                        <MobileMetric k="Spend" v={usd(row.spendCents)} />
+                        <MobileMetric k="CPM" v={usdOrDash(row.cpmCents || null)} />
+                        <MobileMetric k="CTR" v={`${row.ctrPct}%`} />
+                        <MobileMetric k="ATC" v={String(row.addToCart)} />
+                        <MobileMetric k="Sales" v={String(row.purchases)} strong />
+                        <MobileMetric k="CAC" v={usdOrDash(row.cacCents)} strong />
                       </div>
                     </div>
                   ))}
@@ -241,6 +253,17 @@ function Metric({ k, v, strong }: { k: string; v: string; strong?: boolean }) {
     <div className="w-14">
       <div className="text-[10px] uppercase text-slate-400">{k}</div>
       <div className={strong ? "font-semibold text-slate-900" : "text-slate-700"}>{v}</div>
+    </div>
+  );
+}
+
+// Mobile-only metric cell — fills its grid column (no fixed width) with a larger, tappable-sized
+// value so the funnel is legible on a phone, where the desktop inline metrics row is hidden.
+function MobileMetric({ k, v, strong }: { k: string; v: string; strong?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wide text-slate-400">{k}</div>
+      <div className={`truncate text-sm ${strong ? "font-semibold text-slate-900" : "text-slate-700"}`}>{v}</div>
     </div>
   );
 }

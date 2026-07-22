@@ -18,6 +18,7 @@
  * unit test can pin the branch decision + writes without hitting Nano Banana or Supabase Storage.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import { buildCreativeBrief, type ScoredAngle } from "@/lib/ads/creative-brief";
@@ -190,7 +191,7 @@ export async function regenerateExistingFormat(
       ceoReviseReason: trimmedReason,
     });
   } catch (err) {
-    return { ok: false, reason: `render_failed:${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: `render_failed:${errText(err)}` };
   }
 
   // 5) Overwrite the existing ad_videos row's stored blob + refresh its signed URL. Reusing the
@@ -203,14 +204,14 @@ export async function regenerateExistingFormat(
   try {
     await upload(storagePath, render.buffer, render.mimeType);
   } catch (err) {
-    return { ok: false, reason: `upload_failed:${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: `upload_failed:${errText(err)}` };
   }
 
   let url: string;
   try {
     url = await sign(storagePath);
   } catch (err) {
-    return { ok: false, reason: `sign_failed:${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, reason: `sign_failed:${errText(err)}` };
   }
 
   // Merge storage_path into meta rather than overwriting the whole object — the row may carry an

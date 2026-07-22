@@ -2,6 +2,7 @@
 // Subscribe/unsubscribe customers to email and SMS marketing
 
 import { getShopifyCredentials } from "@/lib/shopify-sync";
+import { errText } from "@/lib/error-text";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -57,7 +58,7 @@ export async function subscribeToEmailMarketing(
 
     return { success: true, email_subscribed: true };
   } catch (err) {
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -107,7 +108,7 @@ export async function subscribeToSmsMarketing(
 
     return { success: true, sms_subscribed: true };
   } catch (err) {
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -142,7 +143,7 @@ export async function unsubscribeFromEmailMarketing(
     if (errors?.length) return { success: false, error: errors[0].message };
     return { success: true, email_subscribed: false };
   } catch (err) {
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -177,7 +178,7 @@ export async function unsubscribeFromSmsMarketing(
     if (errors?.length) return { success: false, error: errors[0].message };
     return { success: true, sms_subscribed: false };
   } catch (err) {
-    return { success: false, error: String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
