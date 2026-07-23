@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useBoxLive } from "@/lib/use-box-live";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus } from "@/lib/agent-jobs";
 
@@ -49,7 +50,6 @@ export default function PlanButton({
   const workspace = useWorkspace();
   const [job, setJob] = useState<AgentJob | null>(initialJob);
   const [busy, setBusy] = useState(false);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
     try {
@@ -60,15 +60,10 @@ export default function PlanButton({
     }
   }, [goalSlug]);
 
-  useEffect(() => {
-    if (!job || !ACTIVE.includes(job.status)) return;
-    timer.current = setInterval(poll, 4000);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
-  }, [job, poll]);
-
   const active = !!job && ACTIVE.includes(job.status);
+  // roadmap-box-broadcast: was a 4s poll while the plan job is active. Now event-driven via useBoxLive —
+  // refetch this job on any agent_jobs change (only while active), with a 10s backstop for safety.
+  useBoxLive(poll, { enabled: active, backstopMs: 10_000 });
   const chip = job ? (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${CHIP[job.status]}`}>{LABEL[job.status]}</span>
   ) : null;

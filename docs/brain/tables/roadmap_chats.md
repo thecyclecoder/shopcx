@@ -2,7 +2,7 @@
 
 The DB-backed home for the Roadmap **authoring chat** ([[../lifecycles/roadmap-build-console]] Phase 1 author step). The chat ([[../dashboard/roadmap]] `AuthoringChat.tsx`) used to keep its transcript only in React state, so closing the modal lost the thread. Each row is one persisted conversation — resumable from any device (start on the laptop, finish on the phone). Saving a chat ≠ committing a spec; the spec is still only written on finalize. One row per conversation.
 
-**Box-hosted (box-spec-chat).** The chat no longer calls the Anthropic API: a row is a **long-running, resumable `claude -p` session on Max** running on the build box (full working-tree `Read`/`Grep`/`Glob` over `docs/brain/` + `src/`, `WebSearch`, accumulated context across turns). Each user turn enqueues a `kind='spec-chat'` [[agent_jobs]] row (its own concurrency-1 lane) that **resumes the same box session**; the box appends the reply. The route just appends the user message + flips `turn_status='thinking'`; the **DB is the source of truth for the transcript** (the box owns assistant appends — there is no client-side message autosave anymore, which would race the box's writes). The UI polls `chat-session?id=` while `turn_status='thinking'`.
+**Box-hosted (box-spec-chat).** The chat no longer calls the Anthropic API: a row is a **long-running, resumable `claude -p` session on Max** running on the build box (full working-tree `Read`/`Grep`/`Glob` over `docs/brain/` + `src/`, `WebSearch`, accumulated context across turns). Each user turn enqueues a `kind='spec-chat'` [[agent_jobs]] row (its own concurrency-1 lane) that **resumes the same box session**; the box appends the reply. The route just appends the user message + flips `turn_status='thinking'`; the **DB is the source of truth for the transcript** (the box owns assistant appends — there is no client-side message autosave anymore, which would race the box's writes). The UI (`AuthoringChat`) gets the box's reply **live via Realtime Broadcast** (roadmap-box-broadcast) — see the trigger below — instead of polling `chat-session?id=` on a timer.
 
 **Primary key:** `id`
 
@@ -28,7 +28,11 @@ The DB-backed home for the Roadmap **authoring chat** ([[../lifecycles/roadmap-b
 
 ## `turn_status` lifecycle (box-spec-chat)
 
-`idle` → **`thinking`** (the route appended a user turn + enqueued a `spec-chat` job) → `idle` (the box appended its reply / committed the finalized spec) · or → **`error`** (the box turn failed; `last_error` set, the job is `failed`). The UI polls `chat-session?id=` every ~3 s while `thinking`; a Retry re-enqueues a turn that **resumes the same `box_session_id`**.
+`idle` → **`thinking`** (the route appended a user turn + enqueued a `spec-chat` job) → `idle` (the box appended its reply / committed the finalized spec) · or → **`error`** (the box turn failed; `last_error` set, the job is `failed`). The UI ([[../dashboard/roadmap]] `AuthoringChat`) refreshes on the **Realtime Broadcast** the trigger below fires — the box's write here (turn complete) pushes the reply the instant it lands, with a 3s backstop; a Retry re-enqueues a turn that **resumes the same `box_session_id`**.
+
+### Trigger — `roadmap_chats_broadcast_trg` (live authoring chat)
+
+`20261203120000` (roadmap-box-broadcast). An `after insert or update` trigger that `realtime.send(..., 'box_change', 'box:'||workspace_id, private)`, so `AuthoringChat` gets the box's turn-complete write live instead of polling. Feeds the same per-workspace `box:<ws>` topic as [[agent_jobs]] + [[worker_heartbeats]], consumed by [[../libraries/use-box-live]]. Broadcast (not Postgres Changes); see [[../recipes/realtime-subscriptions]].
 
 ## Indexes / RLS
 

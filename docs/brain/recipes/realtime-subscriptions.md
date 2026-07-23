@@ -74,6 +74,10 @@ Use it for a view that currently polls to watch rows change — build progress, 
 
 For **process-to-process** eventing (not browser) — e.g. the box worker reacting to a DB change — use raw Postgres `LISTEN`/`NOTIFY`, not Realtime. See [[../libraries/pg-pool]] `startAgentJobQueuedListener` (event-driven box claims) + [[../tables/agent_jobs]] `agent_job_queued_notify_trg`. **Key gotcha:** `LISTEN`/`NOTIFY` is NOT delivered by the transaction pooler (`:6543`) — the listener must connect via the **session pooler (`:5432`)**.
 
+## Production example — the roadmap/box dashboards
+
+[[../libraries/use-box-live]] is the real-world version of this recipe: one private topic `box:<workspace_id>` fed by THREE triggers ([[../tables/agent_jobs]], [[../tables/worker_heartbeats]], [[../tables/roadmap_chats]]), consumed by one hook that **refetches on each event** (broadcast as a "something changed" signal, not the data) with a slow backstop. It replaced the 3–10s polls on the box build page, the roadmap board chip, the Plan/Build buttons, and the authoring chat (roadmap-box-broadcast). Pattern notes worth copying: **one topic, many producer triggers**; a singleton table with no `workspace_id` (`worker_heartbeats`) routes via the "oldest workspace" rule; debounce the refetch; keep a backstop because broadcast is fire-and-forget.
+
 ## Related
 
-[[../tables/realtime_demo]] · [[../dashboard/realtime-test]] · [[../tables/ticket_messages]] · [[../libraries/pg-pool]]
+[[../libraries/use-box-live]] · [[../tables/realtime_demo]] · [[../dashboard/realtime-test]] · [[../dashboard/roadmap__box]] · [[../tables/ticket_messages]] · [[../libraries/pg-pool]]
