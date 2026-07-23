@@ -1,0 +1,1 @@
+- **Persist crowned winners + never reactivate/re-test a graduate** · verified 2026-07-23 · → [[../libraries/media-buyer-agent]]
