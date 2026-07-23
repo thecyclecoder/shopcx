@@ -1,0 +1,1 @@
+- **checkout/client-token endpoint returns a generic error, not raw errText diagnostics** · verified 2026-07-23 · → [[../libraries/error-text]]

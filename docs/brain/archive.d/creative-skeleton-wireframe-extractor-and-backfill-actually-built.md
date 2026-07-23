@@ -1,0 +1,1 @@
+- **Actually build the skeleton wireframe: vision extractor emits elements/product_presentation/punchiness + idempotent backfill + fix the invalid CHECK migration** · verified 2026-07-23 · → [[../libraries/creative-skeleton]]
