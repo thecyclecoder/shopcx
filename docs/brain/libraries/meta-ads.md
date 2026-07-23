@@ -10,6 +10,7 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 | `listAdAccounts(token)` | `/me/adaccounts` |
 | `listCampaigns(token, accountId)` | `act_{id}/campaigns` (ACTIVE+PAUSED) |
 | `listAdSets(token, accountId, campaignId?)` | `act_{id}/adsets` (filtered by campaign) |
+| `listAdsForCampaignWithCreative(token, campaignId)` | **[[../specs/graduate-crowned-winners-into-the-cold-scaler-mint-campaign-and-duplicate]] Phase 2** — `GET /{campaignId}/ads?fields=id,creative{id}&effective_status=["ACTIVE","PAUSED","DELETED","ARCHIVED"]`. Idempotency source behind [[media-buyer-graduate-scaler]] `graduateCrownedWinnerToScaler`'s Gate-4 (never double-mint the same creative under the scaler campaign). Returns `Array<{ adId, creativeId }>` — ads whose `creative.id` is missing are dropped; the wide `effective_status` (incl. DELETED + ARCHIVED) prevents a manually-archived prior graduate from silently unblocking a re-mint. |
 | `listPages(token)` | `/me/accounts` + linked IG → `instagram_user_id` |
 | `uploadAdVideo(token, accountId, fileUrl, name)` | `act_{id}/advideos` (`file_url`; Meta downloads) → video_id |
 | `waitForVideoReady(token, videoId)` | poll `GET /{video_id}?fields=status` until `video_status='ready'` |

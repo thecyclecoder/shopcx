@@ -74,6 +74,31 @@ export async function listAdSets(token: string, accountId: string, campaignId?: 
   const j = await metaGet(`${actId(accountId)}/adsets?fields=id,name,status,campaign_id&limit=300&effective_status=["ACTIVE","PAUSED"]${filtering}`, token);
   return j.data || [];
 }
+
+/**
+ * List ads under a campaign with each ad's linked creative id — the idempotency
+ * source behind [[../media-buyer/graduate-scaler]] `graduateCrownedWinnerToScaler`.
+ * Returns `{ adId, creativeId }` pairs (any ad whose `creative.id` is missing is
+ * dropped). Includes ACTIVE + PAUSED + DELETED + ARCHIVED so a previously-
+ * graduated ad that was later archived still counts as "this creative already
+ * published under the scaler" — the graduate flow must not silently double-
+ * mint against the same creative after a manual archive. Introduced by
+ * [[../../docs/brain/specs/graduate-crowned-winners-into-the-cold-scaler-mint-campaign-and-duplicate]]
+ * Phase 2.
+ */
+export async function listAdsForCampaignWithCreative(
+  token: string,
+  campaignId: string,
+): Promise<Array<{ adId: string; creativeId: string }>> {
+  const j = await metaGet(
+    `${campaignId}/ads?fields=id,creative{id}&limit=300&effective_status=["ACTIVE","PAUSED","DELETED","ARCHIVED"]`,
+    token,
+  );
+  const rows = (j.data || []) as Array<{ id?: string; creative?: { id?: string } }>;
+  return rows
+    .map((r) => ({ adId: (r.id ?? "") as string, creativeId: (r.creative?.id ?? "") as string }))
+    .filter((r) => r.adId.length > 0 && r.creativeId.length > 0);
+}
 export async function listPages(token: string): Promise<MetaPage[]> {
   const j = await metaGet("me/accounts?fields=id,name,instagram_business_account{id,username}&limit=200", token);
   return (j.data || []).map((p: any) => ({ id: p.id, name: p.name, instagram_user_id: p.instagram_business_account?.id || null }));

@@ -15,6 +15,7 @@
  * (a wrong column name silently reads as empty).
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { getMetaUserToken, getOrCreateColdScalerCampaign } from "@/lib/meta-ads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -194,4 +195,161 @@ export async function listActiveColdScalerCohorts(
     return a.productId < b.productId ? -1 : 1;
   });
   return rows;
+}
+
+export interface ProvisionColdScalerCohortOptions {
+  workspaceId: string;
+  metaAdAccountId?: string | null;
+  productId?: string | null;
+  dailyScalerCeilingCents: number;
+  notes?: string | null;
+  updatedBy?: string | null;
+}
+
+export interface ProvisionColdScalerCohortResult {
+  cohortId: string;
+  metaAdAccountId: string | null;
+  productId: string | null;
+  dailyScalerCeilingCents: number;
+}
+
+/**
+ * SANCTIONED provision writer — retires any prior ACTIVE row for the same
+ * `(workspace, meta_ad_account, product)` scope, then inserts a fresh active
+ * row with the owner-set `daily_scaler_ceiling_cents`. The single allowed
+ * entry point for creating a [[../../../docs/brain/tables/media_buyer_cold_scaler_cohorts]]
+ * row (CLAUDE.md § "Raw .from(...) STOP" applies to writes too — a hand-rolled
+ * insert can silently drop `is_active` or misspell a column and leave the
+ * scaler rail dormant when the owner meant to opt in).
+ *
+ * Introduced by [[../../../docs/brain/specs/graduate-crowned-winners-into-the-cold-scaler-mint-campaign-and-duplicate]]
+ * Phase 1 as the M4 execution's cohort seed — the (future) Media Buyer admin
+ * surface calls this; a one-off script calls it today. Never client-side.
+ *
+ * Retire-then-insert preserves the table's partial unique index (one active
+ * row per scope) and leaves the audit trail on the prior row. `updatedBy` is
+ * `null` when a service-role script calls (mirrors the table's `updated_by`
+ * semantics).
+ */
+export async function provisionColdScalerCohort(
+  admin: Admin,
+  opts: ProvisionColdScalerCohortOptions,
+): Promise<ProvisionColdScalerCohortResult> {
+  if (!Number.isFinite(opts.dailyScalerCeilingCents) || opts.dailyScalerCeilingCents <= 0) {
+    throw new Error(
+      `daily_scaler_ceiling_cents_must_be_positive: got ${String(opts.dailyScalerCeilingCents)}`,
+    );
+  }
+  const metaAdAccountId = opts.metaAdAccountId ?? null;
+  const productId = opts.productId ?? null;
+  const now = new Date().toISOString();
+
+  let retireQuery = admin
+    .from("media_buyer_cold_scaler_cohorts")
+    .update({ is_active: false, updated_at: now })
+    .eq("workspace_id", opts.workspaceId)
+    .eq("is_active", true);
+  retireQuery =
+    metaAdAccountId === null
+      ? retireQuery.is("meta_ad_account_id", null)
+      : retireQuery.eq("meta_ad_account_id", metaAdAccountId);
+  retireQuery =
+    productId === null
+      ? retireQuery.is("product_id", null)
+      : retireQuery.eq("product_id", productId);
+  const { error: retireErr } = await retireQuery;
+  if (retireErr) throw retireErr;
+
+  const row = {
+    workspace_id: opts.workspaceId,
+    meta_ad_account_id: metaAdAccountId,
+    product_id: productId,
+    daily_scaler_ceiling_cents: opts.dailyScalerCeilingCents,
+    is_active: true,
+    notes: opts.notes ?? null,
+    updated_by: opts.updatedBy ?? null,
+  };
+  const { data, error } = await admin
+    .from("media_buyer_cold_scaler_cohorts")
+    .insert(row)
+    .select("id")
+    .single();
+  if (error || !data) {
+    throw new Error(
+      `cold_scaler_cohort_insert_failed: ${error?.message ?? "no row returned"}`,
+    );
+  }
+  return {
+    cohortId: (data as { id: string }).id,
+    metaAdAccountId,
+    productId,
+    dailyScalerCeilingCents: opts.dailyScalerCeilingCents,
+  };
+}
+
+export interface MintAndProvisionColdScalerCampaignOptions {
+  workspaceId: string;
+  cohortId: string;
+  /** The Meta act id string (e.g. `2352876514967984` or `act_…`) — where the CBO scaler campaign is minted. */
+  metaAccountActId: string;
+}
+
+export interface MintAndProvisionColdScalerCampaignResult {
+  cohortId: string;
+  scalerMetaCampaignId: string;
+  /** `true` = we minted+stamped in this call; `false` = the cohort was already stamped (idempotent no-op). */
+  stampedNow: boolean;
+}
+
+/**
+ * Mint (or find) the cohort's CBO / Advantage+ Sales scaler campaign on Meta,
+ * then compare-and-set-stamp its bare campaign id onto
+ * `media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id`.
+ *
+ * Composed of two pre-existing chokepoints: [[../meta-ads]]
+ * `getOrCreateColdScalerCampaign` (the CBO / Advantage+ Sales find-or-mint,
+ * `PAUSED`, new-customer-only, daily-budget = the cohort's ceiling) and this
+ * file's `setColdScalerCampaignId` (compare-and-set writer, race-safe).
+ *
+ * Idempotent — a cohort whose `scaler_meta_campaign_id` is already set
+ * short-circuits and returns the existing id without a Meta call. This is the
+ * Phase 1 execution helper the [[../../../docs/brain/specs/graduate-crowned-winners-into-the-cold-scaler-mint-campaign-and-duplicate]]
+ * mint-and-provision path invokes; callers no longer have to know to sequence
+ * the Meta mint + the DB stamp themselves. Throws `cold_scaler_cohort_not_found_or_dormant`
+ * when no active row exists for `cohortId` (fail-closed — a dormant cohort
+ * must never mint a campaign it can't own).
+ */
+export async function mintAndProvisionColdScalerCampaign(
+  admin: Admin,
+  opts: MintAndProvisionColdScalerCampaignOptions,
+): Promise<MintAndProvisionColdScalerCampaignResult> {
+  const cohort = await getMediaBuyerColdScalerCohortById(admin, {
+    workspaceId: opts.workspaceId,
+    id: opts.cohortId,
+  });
+  if (!cohort) {
+    throw new Error(`cold_scaler_cohort_not_found_or_dormant: ${opts.cohortId}`);
+  }
+  if (cohort.scalerMetaCampaignId) {
+    return {
+      cohortId: cohort.id,
+      scalerMetaCampaignId: cohort.scalerMetaCampaignId,
+      stampedNow: false,
+    };
+  }
+  const token = await getMetaUserToken(opts.workspaceId);
+  if (!token) throw new Error("no_meta_token");
+  const campaignId = await getOrCreateColdScalerCampaign(token, opts.metaAccountActId, {
+    cohortId: cohort.id,
+    dailyCeilingCents: cohort.dailyScalerCeilingCents,
+  });
+  const { stamped } = await setColdScalerCampaignId(admin, {
+    cohortId: cohort.id,
+    scalerMetaCampaignId: campaignId,
+  });
+  return {
+    cohortId: cohort.id,
+    scalerMetaCampaignId: campaignId,
+    stampedNow: stamped === 1,
+  };
 }

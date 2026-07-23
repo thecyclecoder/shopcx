@@ -10,7 +10,7 @@ Per-workspace **cold-scaler campaign + daily-ceiling configuration** for the Med
 - `product_id` — `NULL` = the (workspace, account) DEFAULT cohort; a non-null row is a per-product cohort in a shared Meta ad account so each product carries its own scaler campaign + ceiling.
 - `is_active` — the switch. `false` = dormant (opt-out from the scaler rail), treated identically to "no row" by the SDK. A partial unique index enforces one ACTIVE row per (workspace, meta_ad_account, product) — a shared account can hold both a null-product default AND one row per product simultaneously.
 
-**Owner-editable, service-role-written.** A workspace member can `SELECT` (RLS); writes go through the service role from the (future) Media Buyer admin surface, never client-side — mirrors [[media_buyer_test_cohorts]].
+**Owner-editable, service-role-written.** A workspace member can `SELECT` (RLS); writes go through [[../libraries/cold-scaler-cohort]] `provisionColdScalerCohort` (row upsert, retire-then-insert) and `setColdScalerCampaignId` (campaign-id stamp, compare-and-set) — the (future) Media Buyer admin surface calls both; a one-off seed script calls them today. Never client-side. Direct `.from("media_buyer_cold_scaler_cohorts").insert/update/delete` is FORBIDDEN (CLAUDE.md § "Raw .from(...) STOP") — a hand-rolled insert can silently drop `is_active` and leave the scaler rail dormant when the owner meant to opt in. Mirrors [[media_buyer_test_cohorts]] which routes writes through its own SDK.
 
 **No seed.** Ships empty — the scaler rail is dormant until the workspace owner opts in by designating a scaler campaign + ceiling. Bianca goal M4 explicitly requires this: "a bounded, supervised cold scaler gated on Dahlia winner supply". No row → the arming gate refuses, the CAC:LTV sensor has nothing to gate on, and the graduate spec has no target campaign.
 
@@ -52,8 +52,8 @@ If none matches → `null`. The consumer treats "no active row" as "scaler surfa
 
 ## Who writes / reads
 
-- **Writer:** a one-off `INSERT` from the owner today; a future Media Buyer admin surface will upsert through a service-role API. Never client-side.
-- **Reader:** [[../libraries/cold-scaler-cohort]] `getEffectiveMediaBuyerColdScalerCohort` (precedence) and `listActiveColdScalerCohorts` (enumeration). The Bianca M4 follow-on specs — arming gate, CAC:LTV sensor, graduate-crowned-winners — all consume the SDK.
+- **Writer:** [[../libraries/cold-scaler-cohort]] `provisionColdScalerCohort` retires the prior active row for a `(workspace, meta_ad_account, product)` scope and inserts a fresh one with the owner-set daily ceiling; `setColdScalerCampaignId` compare-and-sets the bare Meta campaign id onto that row after `mintAndProvisionColdScalerCampaign` (or [[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 3's `executeGraduateActionAgainstMeta`) mints the CBO campaign on Meta. Never client-side. Raw `.from(...)` is FORBIDDEN.
+- **Reader:** [[../libraries/cold-scaler-cohort]] `getEffectiveMediaBuyerColdScalerCohort` (precedence), `getMediaBuyerColdScalerCohortById` (id lookup, scoped to workspace + active), and `listActiveColdScalerCohorts` (enumeration). The Bianca M4 follow-on specs — arming gate, CAC:LTV sensor, graduate-crowned-winners — all consume the SDK.
 
 ## Gotchas
 
