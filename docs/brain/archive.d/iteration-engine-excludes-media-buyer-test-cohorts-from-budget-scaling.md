@@ -1,0 +1,1 @@
+- **Iteration Engine excludes media-buyer test cohorts from budget scaling** · verified 2026-07-23 · → [[../libraries/meta__decision-engine]]
