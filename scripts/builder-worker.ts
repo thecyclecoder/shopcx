@@ -25699,11 +25699,14 @@ async function dispatchJob(job: Job) {
       // grep check on an otherwise-complete build is very often a false negative: the code is on the branch
       // under a DIFFERENT literal (renamed symbol / case drift / rewording) than the pattern the spec author
       // guessed BEFORE the code existed. Before treating `acc.complete=false` as truth and deferring the PR,
-      // reconcile: step A a normalized re-match, step B a bounded intent judge over the phase branch DIFF.
-      // A successful reconcile repoints the check's pattern via upsertPhaseChecks — the phase then verifies
-      // ONLY when a real deterministic grep of the corrected pattern passes (no bypass, no phantom-ship).
-      // On no-reconcile the branch below defers/escalates exactly as before — a real code-missing signal is
-      // never masked. Best-effort: a thrown reconciler falls through to the existing defer path unchanged.
+      // call the per-check reconciler `reconcileStaleGrepCheck` (src/lib/build/check-reconciliation.ts) —
+      // step A a normalized re-match, step B a bounded intent judge over the phase branch DIFF — via the
+      // batch wrapper `reconcileFailingGrepChecksForSpec` which iterates every failing check on the spec
+      // and delegates each one to `reconcileStaleGrepCheck`. A successful reconcile repoints the check's
+      // pattern via upsertPhaseChecks — the phase then verifies ONLY when a real deterministic grep of the
+      // corrected pattern passes (no bypass, no phantom-ship). On no-reconcile the branch below defers/
+      // escalates exactly as before — a real code-missing signal is never masked. Best-effort: a thrown
+      // reconciler falls through to the existing defer path unchanged.
       // Phase 2 — carried out to the defer path below so the `check_reconcile_cap_reached`
       // surface (and the log_tail annotation) fires even after we re-read `acc`.
       let reconcileUnhealedListForDefer: string | null = null;
