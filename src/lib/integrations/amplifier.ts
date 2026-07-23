@@ -356,6 +356,6 @@ export async function stampAmplifierImportFailure(
       })
       .eq("id", orderId);
   } catch (e) {
-    console.warn(`[amplifier] stampAmplifierImportFailure failed for order ${orderId}:`, e instanceof Error ? e.message : e);
+    console.warn(`[amplifier] stampAmplifierImportFailure failed for order ${orderId}: ${errText(e)}`);
   }
 }

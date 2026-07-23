@@ -1126,8 +1126,8 @@ export async function POST(request: NextRequest) {
         await stampAmplifierImportFailure(admin, order.id as string, amplifierRes.error, amplifierRes.details);
       }
     } catch (err) {
-      console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
-      await stampAmplifierImportFailure(admin, order.id as string, "amplifier_threw", err instanceof Error ? err.message : String(err));
+      console.warn(`[checkout] Amplifier order create threw for ${orderNumber}: ${errText(err)}`);
+      await stampAmplifierImportFailure(admin, order.id as string, "amplifier_threw", errText(err));
     }
   }
 

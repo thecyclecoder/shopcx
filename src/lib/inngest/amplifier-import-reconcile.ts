@@ -31,6 +31,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { errText } from "@/lib/error-text";
 
 const RETRY_CAP = 5;
 const GRACE_MINUTES = 10;
@@ -276,8 +277,8 @@ export const amplifierImportReconcileCron = inngest.createFunction(
           else if (outcome === "skipped-no-skus") skippedNoSkus++;
           else skippedNonStorefront++;
         } catch (e) {
-          console.warn(`[amplifier-import-reconcile] threw for order ${row.id}:`, e instanceof Error ? e.message : e);
-          await stampAmplifierImportFailure(admin, row.id, "reconcile_threw", e instanceof Error ? e.message : String(e));
+          console.warn(`[amplifier-import-reconcile] threw for order ${row.id}: ${errText(e)}`);
+          await stampAmplifierImportFailure(admin, row.id, "reconcile_threw", errText(e));
           failed++;
         }
       }
