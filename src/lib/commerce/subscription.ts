@@ -186,6 +186,7 @@ async function buildViewFromRaw(
   const rawForPrice: Record<string, unknown> = {
     id: sub.id,
     is_internal: sub.is_internal ?? false,
+    comp: sub.comp ?? false,
     items: sub.items,
     delivery_price_cents: sub.delivery_price_cents ?? 0,
     shipping_protection_added: sub.shipping_protection_added ?? false,

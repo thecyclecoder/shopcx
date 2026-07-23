@@ -50,7 +50,18 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
-_None documented._
+- **Comp (free) subs short-circuit to `{ tax_cents: 0, total_cents: 0 }`** in both
+  `quoteSubscriptionTax` and `ensureFreshSubscriptionTaxQuote` — no Avalara call. A
+  comp sub prices to a $0 taxable subtotal, which otherwise makes `buildTaxInputs`
+  bail to `null`; the portal then renders a permanent "Calculating…" instead of a
+  tax number. Origin: CEO's owner-comp sub. Pairs with [[commerce__price]]
+  `resolveProtectionCents` (comp ⇒ $0 protection) so a comp sub reads fully $0.
+- **`null` tax = "Calculating…" forever in the portal.** The portal
+  ([[portal__handlers__subscription-detail]] → SubscriptionDetailScreen) shows
+  "Calculating…" whenever `tax_cents` is null; there is no retry. A null return
+  here (Avalara disabled, un-quotable inputs, or an Avalara error) is a stuck
+  spinner, not a transient state — resolve to a concrete number wherever the tax
+  is genuinely known (e.g. $0).
 
 ---
 

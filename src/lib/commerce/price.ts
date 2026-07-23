@@ -139,12 +139,34 @@ type Line = { id?: string; variantId?: string; quantity?: number; currentPrice?:
  * Money invariant: throws `PriceInvariantError` if any product line resolves to
  * undefined/NaN cents. Gifts + shipping-protection are expected zeros and pass.
  */
+/**
+ * Shipping-protection cents for a sub's summary/renewal projection.
+ *
+ * A comp (free) sub charges nothing — its renewal bills $0 by design
+ * (internal-subscription-renewals.ts). Protection must follow, or the portal
+ * shows a $4.95 protection line + total the comp customer is never charged. So
+ * comp ⇒ $0 protection; otherwise the added protection amount (0 when not added).
+ * Pure so the invariant is unit-testable.
+ */
+export function resolveProtectionCents(sub: {
+  comp?: boolean;
+  shipping_protection_added?: boolean;
+  shipping_protection_amount_cents?: number;
+}): number {
+  if (sub.comp) return 0;
+  return sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
+}
+
 export async function priceSubscription(
   workspaceId: string,
   sub: Record<string, unknown>,
 ): Promise<{ priced: Map<string, PricedLineLite>; pricing: ContractPricing }> {
   const subId = String(sub.id ?? "unknown");
-  const protectionCents = sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
+  const protectionCents = resolveProtectionCents({
+    comp: !!sub.comp,
+    shipping_protection_added: !!sub.shipping_protection_added,
+    shipping_protection_amount_cents: Number(sub.shipping_protection_amount_cents || 0),
+  });
   const priced = new Map<string, PricedLineLite>();
   let subtotalCents = 0;
   let msrpCents = 0;

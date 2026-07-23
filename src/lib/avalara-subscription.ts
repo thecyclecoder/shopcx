@@ -211,10 +211,15 @@ export async function quoteSubscriptionTax(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, workspace_id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal")
+    .select("id, workspace_id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp")
     .eq("id", subscriptionId)
     .single();
   if (!sub || !sub.is_internal) return null;
+  // A comp (free) sub owes $0 tax — resolve to a concrete $0 quote so the portal
+  // shows "$0.00" instead of a permanent "Calculating…". No Avalara call: a comp
+  // renewal charges nothing (internal-subscription-renewals.ts prices comp lines
+  // at $0), so there's nothing to tax and nothing to file.
+  if (sub.comp) return { tax_cents: 0, total_cents: 0 };
 
   // Engine-priced inputs (catalog + rules) — internal sub items carry no baked
   // price. Mirrors the renewal: tax quoted on the engine subtotal + rule-decided
@@ -294,12 +299,16 @@ export async function ensureFreshSubscriptionTaxQuote(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
+    .select("id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
     .eq("id", subscriptionId)
     .single();
   if (!sub) return null;
   // Internal subs only. Appstle handles its own tax pipeline via Shopify.
   if (!sub.is_internal) return null;
+  // A comp (free) sub owes $0 tax — resolve to a concrete $0 quote so the portal
+  // shows "$0.00" instead of a permanent "Calculating…" (the taxable subtotal is
+  // $0, which otherwise makes buildTaxInputs bail to null). No Avalara call.
+  if (sub.comp) return { tax_cents: 0, total_cents: 0 };
 
   const inputs = await buildTaxInputs(workspaceId, sub);
   if (!inputs) return null; // not quotable yet (no items / no address)
