@@ -165,6 +165,7 @@ import { approvalEnqueueDirector } from "@/lib/inngest/approval-enqueue-director
 import { securityDepWatch } from "@/lib/inngest/security-dep-watch";
 import { securityDiffBackstopCron } from "@/lib/inngest/security-diff-backstop-cron";
 import { refundSettlementReconcileCron } from "@/lib/inngest/refund-settlement-reconcile";
+import { amplifierImportReconcileCron } from "@/lib/inngest/amplifier-import-reconcile";
 import { playbookCompilerCron } from "@/lib/inngest/playbook-compiler";
 import { digitalGoodsDelivery } from "@/lib/inngest/digital-goods-delivery";
 import { orderNowVerify } from "@/lib/inngest/order-now-verify";
@@ -348,6 +349,7 @@ export const registeredInngestFunctions = [
   securityDepWatch,
   securityDiffBackstopCron,
   refundSettlementReconcileCron,
+  amplifierImportReconcileCron,
   playbookCompilerCron,
   digitalGoodsDelivery,
   orderNowVerify,

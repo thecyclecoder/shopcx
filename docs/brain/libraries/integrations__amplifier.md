@@ -118,8 +118,13 @@ curly quotes, accents) before sending.
   [[../specs/amplifier-import-reliability-rail]] now stamps a durable trace
   on the order row (`amplifier_import_attempts` / `amplifier_last_error` /
   `amplifier_last_attempt_at`) via `stampAmplifierImportFailure` at every
-  swallowing call site (checkout + comp/paid internal renewal), so the
-  failure is queryable even before the Phase 2 reconcile sweep is live.
+  swallowing call site (checkout + comp/paid internal renewal); Phase 2
+  ([[../inngest/amplifier-import-reconcile]]) is the self-healing sweep on
+  top — every 15 min it finds paid orders with `amplifier_order_id IS NULL`
+  past a 10-minute grace under the retry cap of 5 and re-submits them
+  idempotently (compare-and-set on `.is('amplifier_order_id', null)` guards
+  against a live checkout retry). A row that exhausts the cap becomes the
+  Phase 3 CEO-inbox escalation.
 
 ---
 
