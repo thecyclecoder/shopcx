@@ -23,13 +23,23 @@ Delegates the pure branch decision to `decideMutationGate`.
 
 ### `decideMutationGate(first, orderCount, now)` — pure predicate
 
-Three branches:
+Ordered checks (first match wins):
 
-1. **Renewal short-circuit** — `orderCount > 1` ⇒ allow (a second order proves
+1. **No first order** ⇒ deny `no_order` (the sub genuinely has no box yet).
+2. **Renewal short-circuit** — `orderCount > 1` ⇒ allow (a second order proves
    the first billing cycle completed).
-2. **Internal order** (`shopify_order_id == null`) — tracking + EasyPost, or a
-   fulfilled-plus-7-day grace fallback.
-3. **Shopify order** — `fulfillment_status` in the allowed set ⇒ allow.
+3. **Known delivered** — `delivered_at` set or `easypost_status='delivered'` ⇒ allow.
+4. **Universal setup-grace age gate** — first order older than `SETUP_GRACE_MS`
+   (**5 days**) ⇒ allow, UNCONDITIONALLY, regardless of tracking/fulfillment.
+   This is the escape hatch: internal (Amplifier) orders routinely carry no
+   tracking number AND no `fulfillment_status` — and some are never imported to
+   Amplifier at all (e.g. `SHOPCX74`: empty `fulfillments[]`, null `amplifier_*`)
+   — so without an age-only gate they stayed locked in the "being set up" banner
+   forever. (CEO 2026-07-23.)
+5. **Within the 5-day window, internal order** (`shopify_order_id == null`) —
+   tracking ⇒ live EasyPost lookup (throttled); no tracking ⇒ deny `not_shipped`.
+6. **Within the 5-day window, Shopify order** — `fulfillment_status` in the
+   allowed set ⇒ allow, else deny `not_shipped`.
 
 ### `findSuppressedNewVariants(variantIds, suppressed)` — pure predicate
 
