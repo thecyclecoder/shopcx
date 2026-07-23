@@ -44,7 +44,7 @@ interface Address {
   email?: string | null;
 }
 
-interface LineItem {
+export interface LineItem {
   sku?: string | null;
   title?: string | null;
   description?: string | null;
@@ -185,6 +185,57 @@ function reconcileAddresses(input: CreateAmplifierOrderInput): {
   throw new Error("Order has no usable shipping or billing address (need street, city, postal code, and state)");
 }
 
+/**
+ * Pure core: given a variant-id → SKU map, set each line's SKU from its
+ * `reference_id` (variant_id) whenever the variant resolves to a SKU —
+ * ALWAYS overriding whatever value was baked onto the line. The baked line SKU
+ * is only a fallback for a line whose reference_id has no product_variants row
+ * (a genuinely non-fulfillable line — digital good, fee — which then stays
+ * SKU-less and is dropped downstream). Split out so the mapping is unit-testable
+ * without Supabase.
+ */
+export function applyVariantSkus(lineItems: LineItem[], skuById: Map<string, string>): LineItem[] {
+  if (skuById.size === 0) return lineItems;
+  return lineItems.map((li) => {
+    const vsku = li.reference_id ? skuById.get(String(li.reference_id)) : undefined;
+    return vsku ? { ...li, sku: vsku } : li;
+  });
+}
+
+/**
+ * The product_variants table is the SOURCE OF TRUTH for a line's SKU at import
+ * time — NEVER the baked value snapshotted onto the order/subscription line.
+ *
+ * Amplifier requires a SKU on every fulfillable line, and `createAmplifierOrder`
+ * DROPS any SKU-less line — so a line whose baked SKU is missing (or stale)
+ * silently vanishes and the whole order fails with `no_skus`, never shipping.
+ * Internal subscription lines persist exactly this shape (the coffee line carries
+ * a variant_id but no baked SKU), which dropped 8+ paid coffee renewals.
+ *
+ * So at this single 3PL chokepoint — every caller (checkout / renewals /
+ * fraud-dismiss) funnels through here — we re-resolve the SKU for EVERY line
+ * that carries a variant reference against product_variants, overriding the
+ * baked value. A line whose reference_id has no variant row keeps its baked SKU
+ * as a fallback (and if that's empty, it's correctly dropped as non-fulfillable).
+ * (CEO 2026-07-23: always check the variant table; don't trust baked SKUs.)
+ */
+async function resolveSkusFromVariants(workspaceId: string, lineItems: LineItem[]): Promise<LineItem[]> {
+  const withVariant = lineItems.filter((li) => li.reference_id);
+  if (withVariant.length === 0) return lineItems;
+  const variantIds = Array.from(new Set(withVariant.map((li) => String(li.reference_id))));
+  const admin = createAdminClient();
+  const { data: variants } = await admin
+    .from("product_variants")
+    .select("id, sku")
+    .eq("workspace_id", workspaceId)
+    .in("id", variantIds);
+  const skuById = new Map<string, string>();
+  for (const v of variants ?? []) {
+    if (v.sku) skuById.set(String(v.id), String(v.sku));
+  }
+  return applyVariantSkus(lineItems, skuById);
+}
+
 export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Promise<CreateAmplifierOrderResult> {
   let cfg;
   try {
@@ -201,10 +252,12 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
     return { success: false, error: "missing_address", details: errText(err) };
   }
 
-  // Amplifier requires SKU on every line item. Drop anything that has
-  // no SKU (shipping protection lines, fees) — those don't fulfill
-  // anyway. Set unit_price from cents.
-  const lineItems = input.lineItems
+  // Amplifier requires SKU on every line item. Re-resolve each line's SKU from
+  // the variant table (source of truth) FIRST — overriding baked values — then
+  // drop anything still SKU-less (shipping protection, fees, digital goods),
+  // which don't fulfill anyway.
+  const resolvedLineItems = await resolveSkusFromVariants(input.workspaceId, input.lineItems);
+  const lineItems = resolvedLineItems
     .filter((li) => li.sku && (li.quantity ?? 0) > 0)
     .map((li) => ({
       sku: li.sku || "",
