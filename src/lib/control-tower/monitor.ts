@@ -1658,7 +1658,11 @@ function evalOutputAssertion(
       // assertion polls the LIVE customers table each monitor tick — the number in
       // produced.sms_subscribed_* is for the tile, the DECISION is on the live probe so a
       // silently-lying beat can't hide it. Sample-guarded (book must have MIN_SAMPLE
-      // subscribers) so a fresh/tiny workspace never false-fires.
+      // subscribers) so a fresh/tiny workspace never false-fires. Post-cron new-subscriber gate
+      // (segment-coverage-ignore-post-cron-new-subscribers Phase 1): the stale-tail head count
+      // itself excludes SMS-subscribed rows whose created_at is after the latest
+      // refresh-customer-segments cron ran_at — a subscriber born after the last daily refresh
+      // can't prove the cron missed the book until the next scheduled refresh has had its shot.
       const total = inputs.smsSubscribedTotal;
       if (total < SEGMENT_COVERAGE_MIN_SAMPLE) return null;
       const fresh = inputs.smsSubscribedFresh26h;
@@ -1858,14 +1862,28 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 
   // Read the latest renewal-cron beat FIRST — countRenewalIntegrityOverdueSubs uses it to grace
   // out subs whose row changed after the cron already ran (post-cron-activation grace, Phase 1).
-  const { data: renewalCronBeatData } = await admin
-    .from("loop_heartbeats")
-    .select("ran_at")
-    .eq("loop_id", "internal-subscription-renewal-cron")
-    .order("ran_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Same for the refresh-customer-segments cron: the stale-tail head-count uses its ran_at to skip
+  // SMS-subscribed rows created AFTER the last daily refresh — those weren't eligible when the cron
+  // ran, so a NULL segments_refreshed_at on them isn't yet a missed refresh
+  // (segment-coverage-ignore-post-cron-new-subscribers Phase 1).
+  const [{ data: renewalCronBeatData }, { data: segmentsCronBeatData }] = await Promise.all([
+    admin
+      .from("loop_heartbeats")
+      .select("ran_at")
+      .eq("loop_id", "internal-subscription-renewal-cron")
+      .order("ran_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    admin
+      .from("loop_heartbeats")
+      .select("ran_at")
+      .eq("loop_id", "refresh-customer-segments-cron")
+      .order("ran_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
   const latestRenewalCronBeatIso = (renewalCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
+  const latestSegmentsCronBeatIso = (segmentsCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
 
   const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
@@ -1933,12 +1951,27 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .gte("segments_refreshed_at", segFreshCutoffIso),
     // Stale tail: segments_refreshed_at older than 48h OR NULL. `.or` gives us both branches in
     // one count (NULL-safe: `is.null` matches never-refreshed rows the `lt` branch would skip).
-    admin
-      .from("customers")
-      .select("id", { count: "exact", head: true })
-      .eq("sms_marketing_status", "subscribed")
-      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
-      .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`),
+    // Post-cron new-subscriber gate (segment-coverage-ignore-post-cron-new-subscribers Phase 1):
+    // when we know the latest refresh-customer-segments cron beat, exclude rows whose created_at
+    // is strictly after that ran_at — a subscriber that arrived after the last daily refresh
+    // completed hasn't had its chance to be refreshed yet, so a NULL / >48h shape on them cannot
+    // prove the cron missed the book. Pre-existing stale subscribers still count. Fallback (no
+    // beat ever recorded — never-fired or pruned): keep the unfiltered count so the stale-tail
+    // still catches a truly-registered-but-never-firing cron.
+    (latestSegmentsCronBeatIso
+      ? admin
+          .from("customers")
+          .select("id", { count: "exact", head: true })
+          .eq("sms_marketing_status", "subscribed")
+          .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+          .lte("created_at", latestSegmentsCronBeatIso)
+          .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`)
+      : admin
+          .from("customers")
+          .select("id", { count: "exact", head: true })
+          .eq("sms_marketing_status", "subscribed")
+          .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+          .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`)),
   ]);
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
