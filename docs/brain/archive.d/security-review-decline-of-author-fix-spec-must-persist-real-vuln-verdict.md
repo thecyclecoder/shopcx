@@ -1,0 +1,1 @@
+- **Declining the author_fix_spec action must persist the real-vuln verdict — never clear a real-vuln review to completed-clean** · verified 2026-07-23 · → [[../libraries/security-agent]]
