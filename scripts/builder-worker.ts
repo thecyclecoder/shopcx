@@ -25655,6 +25655,47 @@ async function dispatchJob(job: Job) {
       } catch (e) {
         acc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
       }
+      // ⭐ build-verify-self-heals-stale-grep-checks-before-deferring Phase 1 — a failing expect: 'present'
+      // grep check on an otherwise-complete build is very often a false negative: the code is on the branch
+      // under a DIFFERENT literal (renamed symbol / case drift / rewording) than the pattern the spec author
+      // guessed BEFORE the code existed. Before treating `acc.complete=false` as truth and deferring the PR,
+      // reconcile: step A a normalized re-match, step B a bounded intent judge over the phase branch DIFF.
+      // A successful reconcile repoints the check's pattern via upsertPhaseChecks — the phase then verifies
+      // ONLY when a real deterministic grep of the corrected pattern passes (no bypass, no phantom-ship).
+      // On no-reconcile the branch below defers/escalates exactly as before — a real code-missing signal is
+      // never masked. Best-effort: a thrown reconciler falls through to the existing defer path unchanged.
+      if (!acc.complete) {
+        try {
+          const { reconcileFailingGrepChecksForSpec, defaultBatchDeps } = await import("../src/lib/build/check-reconciliation");
+          const branchRefForReconcile = branch ?? `claude/build-${slug}`;
+          const rec = await reconcileFailingGrepChecksForSpec({
+            workspaceId: job.workspace_id,
+            slug,
+            branchRef: branchRefForReconcile,
+            repoRoot: wt,
+            deps: defaultBatchDeps,
+          });
+          if (rec.reconciled.length) {
+            // Never silent — Phase 2 wires this same audit hook to the build-card surface so the CEO sees
+            // what was auto-corrected. Phase 1 logs each repair to console (the run log tail).
+            for (const a of rec.reconciled) {
+              console.log(`${tag} check-reconciled: phase ${a.phasePosition} check '${a.description.slice(0, 80)}' (${a.step}): '${a.oldPattern}' → '${a.newPattern}' — ${a.rationale.slice(0, 200)}`);
+            }
+            // Re-read accumulation now that the check patterns reflect the branch reality.
+            try {
+              const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+              acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+            } catch (e) {
+              acc = { complete: true, reason: `accumulation re-check (post-reconcile) threw — fail open: ${e instanceof Error ? e.message : e}` };
+            }
+          }
+          if (rec.unreconciled.length) {
+            console.log(`${tag} check-reconcile: ${rec.unreconciled.length} check(s) could not be reconciled (deferring): ${rec.unreconciled.slice(0, 3).map((u) => `p${u.phasePosition} ${u.description.slice(0, 60)} — ${u.reason}`).join(" | ")}`);
+          }
+        } catch (e) {
+          console.error(`${tag} check-reconcile threw (non-fatal — proceeding to defer):`, e instanceof Error ? e.message : e);
+        }
+      }
       const chain = async () => {
         try {
           const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
