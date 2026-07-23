@@ -322,6 +322,14 @@ export interface AutonomousInputs {
   budgets: Map<string, number | null>;  // object_id → daily_budget_cents (null under CBO/ABO crossover)
   recentActions: RecentAction[];
   nowMs: number;
+  /**
+   * Object ids (Meta campaign/adset ids) the Iteration Engine must NEVER act on —
+   * the media-buyer test rail (Bianca owns it). Populated in `runDecisionEngine`
+   * from active `media_buyer_test_cohorts` rows: the test campaign (`test_meta_campaign_id`),
+   * every `meta_adsets` row under it, and the legacy shared `test_meta_adset_id`.
+   * Budget scaling only touches scaling/storefront objects — never the test rail.
+   */
+  excludedObjectIds: Set<string>;
 }
 
 /**
@@ -435,6 +443,8 @@ export function computeAutonomousActions(input: AutonomousInputs): {
 
   for (const row of rows) {
     if (row.level !== "adset" && row.level !== "campaign") continue;
+    // Media-buyer test rail (Bianca owns it) — never mutate: no pause/unpause/scale/replenish.
+    if (input.excludedObjectIds.has(row.object_id)) continue;
     if (inCooldown(row.object_id)) continue; // hard stop
 
     const budget = budgets.get(row.object_id) ?? null;
@@ -969,12 +979,14 @@ export async function runDecisionEngine(
       p.adAccountId,
       new Date(Date.now() - lookbackDays * 86400_000).toISOString(),
     );
+    const excludedObjectIds = await loadTestRailExcludedObjectIds(p.workspaceId, p.adAccountId);
     const res = computeAutonomousActions({
       rows: adsetCampaignRows,
       policy,
       budgets,
       recentActions,
       nowMs: Date.now(),
+      excludedObjectIds,
     });
     actions = res.actions;
     escalations = res.escalations;
@@ -1031,4 +1043,60 @@ async function loadBudgets(
     }
   }
   return out;
+}
+
+/**
+ * Media-buyer test rail — the object ids the Iteration Engine must NEVER act on.
+ *
+ * Bianca (media-buyer agent) owns the test campaign/adsets and crowns winners by
+ * DUPLICATING them into the cold-scaler. Raising a test adset's budget in place
+ * corrupts the clean equal-funded ABO read AND double-governs the object (two
+ * autonomous actors fighting). North-star rail boundary: budget scaling only on
+ * scaling/storefront objects; the test rail is opaque.
+ *
+ * Set = ACTIVE `media_buyer_test_cohorts.test_meta_campaign_id`
+ *     ∪ every `meta_adsets.meta_adset_id` under those test campaigns
+ *     ∪ legacy shared `media_buyer_test_cohorts.test_meta_adset_id`.
+ *
+ * (`media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id` is intentionally NOT
+ * excluded — the cold-scaler is the ALLOWED scaling target.)
+ */
+async function loadTestRailExcludedObjectIds(
+  workspaceId: string,
+  adAccountId: string,
+): Promise<Set<string>> {
+  const admin = createAdminClient();
+  const excluded = new Set<string>();
+  try {
+    const { data: cohortRows } = await admin
+      .from("media_buyer_test_cohorts")
+      .select("test_meta_campaign_id, test_meta_adset_id")
+      .eq("workspace_id", workspaceId)
+      .eq("meta_ad_account_id", adAccountId)
+      .eq("is_active", true);
+    const testCampaignIds: string[] = [];
+    for (const r of (cohortRows || []) as {
+      test_meta_campaign_id: string | null;
+      test_meta_adset_id: string | null;
+    }[]) {
+      if (r.test_meta_campaign_id) {
+        excluded.add(r.test_meta_campaign_id);
+        testCampaignIds.push(r.test_meta_campaign_id);
+      }
+      if (r.test_meta_adset_id) excluded.add(r.test_meta_adset_id);
+    }
+    if (testCampaignIds.length) {
+      const { data: adsetRows } = await admin
+        .from("meta_adsets")
+        .select("meta_adset_id")
+        .eq("workspace_id", workspaceId)
+        .in("meta_campaign_id", testCampaignIds);
+      for (const r of (adsetRows || []) as { meta_adset_id: string }[]) {
+        if (r.meta_adset_id) excluded.add(r.meta_adset_id);
+      }
+    }
+  } catch {
+    // Table absence / RLS misread → return whatever we have (defensive; no writes on this path).
+  }
+  return excluded;
 }

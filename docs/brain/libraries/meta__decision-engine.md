@@ -51,9 +51,24 @@ Returns `{ snapshotDate, policy_active, policy_version_id, autonomous: { actions
 ```ts
 function computeAutonomousActions(input: AutonomousInputs): { actions: ComputedAction[]; escalations: ComputedAction[] }
 ```
-The deterministic 4a core — no DB, no Meta. `AutonomousInputs = { rows, policy, budgets, recentActions, nowMs }`.
+The deterministic 4a core — no DB, no Meta. `AutonomousInputs = { rows, policy, budgets, recentActions, nowMs, excludedObjectIds }`.
 Each `ComputedAction` stamps `policy_version_id` + `triggering_scorecard_id` and a
 before/after `{ budget_cents, status }`; escalations additionally carry `guardrail`.
+
+`excludedObjectIds: Set<string>` — the media-buyer test rail. Every scorecard row
+whose `object_id` is in the set is skipped at the TOP of the row loop, so the engine
+emits NO `pause` / `unpause` / `scale_up` / `scale_down` / `replenish_creative` on
+those objects. `runDecisionEngine` builds it from ACTIVE
+[[../tables/media_buyer_test_cohorts]] rows (`test_meta_campaign_id` +
+legacy `test_meta_adset_id`) UNION every [[../tables/meta_adsets]] row under those
+test campaigns. This enforces the North-star rail boundary
+([[../operational-rules]] § North star): budget scaling only touches
+scaling/storefront objects; the media-buyer test rail is owned by Bianca (which
+crowns winners by DUPLICATING them into the cold-scaler
+[[../tables/media_buyer_cold_scaler_cohorts]] — the cold-scaler campaigns stay in
+the universe and remain the ALLOWED scaling targets). Raising a test adset's
+budget in place would corrupt the equal-funded ABO test read AND double-govern the
+object (two autonomous actors fighting).
 
 ### `generateRecommendations` / `persistRecommendations` — functions
 
