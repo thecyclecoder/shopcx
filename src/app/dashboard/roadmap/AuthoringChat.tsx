@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useBoxLive } from "@/lib/use-box-live";
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Session = {
@@ -62,46 +63,48 @@ export default function AuthoringChat({
   const seedReady = !seed || !!activeSeed;
   const busy = thinking || finalizing;
 
-  // Poll the thread while a turn/finalize is on the box. The box owns the transcript; we mirror it +
-  // clear the spinner when turn_status returns to idle (or surface a Retry on error).
-  useEffect(() => {
-    if (!open || !sessionId || !busy) return;
-    let stop = false;
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/roadmap/chat-session?id=${encodeURIComponent(sessionId)}`);
-        const d = await res.json();
-        const s = d.session as Session | null;
-        if (!s || stop) return;
-        setMessages(s.messages);
-        if (s.turn_status === "error") {
-          setError(s.last_error || "The box turn failed.");
-          setRetryable(true);
-          setThinking(false);
-          setFinalizing(false);
-          return;
-        }
-        if (s.turn_status === "idle") {
-          if (finalizing && s.status === "finalized" && s.spec_slug) {
-            setResult({ slug: s.spec_slug, title: (s.title || s.spec_slug).replace(/^Refine:\s*/, ""), queued: queueBuildRef.current });
-            setFinalizing(false);
-            router.refresh();
-          } else if (!finalizing) {
-            setThinking(false);
-          }
-        }
-      } catch {
-        // transient — keep polling
+  // Mirror the thread while a turn/finalize is on the box. The box owns the transcript; we clear the
+  // spinner when turn_status returns to idle (or surface a Retry on error).
+  //
+  // roadmap-box-broadcast: was a 3s poll. Now event-driven via useBoxLive — the box's write to
+  // roadmap_chats (turn complete) broadcasts on box:<ws>, so the reply lands the instant the box
+  // finishes rather than up to 3s later. A 3s backstop stays (same as the old cadence) so a missed
+  // broadcast never hangs the spinner, and we fire one tick on turn-start for the current state.
+  const tick = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`/api/roadmap/chat-session?id=${encodeURIComponent(sessionId)}`);
+      const d = await res.json();
+      const s = d.session as Session | null;
+      if (!s) return;
+      setMessages(s.messages);
+      if (s.turn_status === "error") {
+        setError(s.last_error || "The box turn failed.");
+        setRetryable(true);
+        setThinking(false);
+        setFinalizing(false);
+        return;
       }
-    };
-    const handle = setInterval(tick, 3000);
-    void tick();
-    return () => {
-      stop = true;
-      clearInterval(handle);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sessionId, busy, finalizing]);
+      if (s.turn_status === "idle") {
+        if (finalizing && s.status === "finalized" && s.spec_slug) {
+          setResult({ slug: s.spec_slug, title: (s.title || s.spec_slug).replace(/^Refine:\s*/, ""), queued: queueBuildRef.current });
+          setFinalizing(false);
+          router.refresh();
+        } else if (!finalizing) {
+          setThinking(false);
+        }
+      }
+    } catch {
+      // transient — the backstop / next broadcast retries
+    }
+  }, [sessionId, finalizing, router]);
+
+  const chatActive = open && !!sessionId && busy;
+  useBoxLive(tick, { enabled: chatActive, backstopMs: 3_000 });
+  // Fetch current state the moment a turn starts (useBoxLive only fires on events/backstop).
+  useEffect(() => {
+    if (chatActive) void tick();
+  }, [chatActive, tick]);
 
   async function openChat() {
     setOpen(true);

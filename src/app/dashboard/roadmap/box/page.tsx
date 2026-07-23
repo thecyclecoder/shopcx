@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useBoxLive } from "@/lib/use-box-live";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import { getPersona, type AgentPersona } from "@/lib/agents/personas";
 import { PersonaAvatar } from "@/components/agents/persona-chip";
@@ -673,13 +674,14 @@ export default function BoxPage() {
   const [drainBusy, setDrainBusy] = useState(false);
   const [previewOverride, setPreviewOverride] = useState<PreviewBuildOverride | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
+  // roadmap-box-broadcast: was a 5s poll of /api/roadmap/box. Now event-driven via Realtime Broadcast
+  // (useBoxLive) — a refetch fires the instant an agent_jobs row changes (session_checklist streaming,
+  // status flips, new queued jobs), with a 30s backstop + tab-return refresh for fire-and-forget safety.
+  const load = useCallback(
+    () =>
       fetch("/api/roadmap/box")
         .then((r) => r.json())
         .then((d) => {
-          if (!alive) return;
           setWorker(d.worker ?? null);
           setQueue(d.queue ?? []);
           setPaused(d.paused ?? []);
@@ -688,23 +690,13 @@ export default function BoxPage() {
           setPreviewOverride(d.preview_build_override ?? null);
         })
         .catch(() => {})
-        .finally(() => alive && setLoading(false));
+        .finally(() => setLoading(false)),
+    [],
+  );
+  useEffect(() => {
     load();
-    // cut-internal-egress-pooler-and-spec-rpcs Phase 3: visibility-guard the 5s tick — a
-    // backgrounded tab (a common state while a build finishes off-tab) stops firing the
-    // box-status poll and refreshes on 'visibilitychange' → visible so lane state is fresh
-    // the moment the tab returns. Mirrors the shipped sidebar reduce-calls pattern
-    // (src/app/dashboard/sidebar.tsx:347).
-    const runPoll = () => { if (document.visibilityState === "visible") load(); };
-    const onVisibility = () => { if (document.visibilityState === "visible") load(); };
-    const interval = setInterval(runPoll, 5000);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      alive = false;
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, []);
+  }, [load]);
+  useBoxLive(load, { backstopMs: 30_000 });
 
   const retry = async (slug: string) => {
     setRetrying((r) => ({ ...r, [slug]: true }));

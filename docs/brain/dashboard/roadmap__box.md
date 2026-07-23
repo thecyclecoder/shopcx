@@ -10,6 +10,16 @@ _TODO: page purpose._
 
 **Rendering:** `"use client"` component (client-side state + fetch).
 
+### Live updates — Realtime Broadcast, not polling (roadmap-box-broadcast)
+
+This page (and the roadmap board's `BoxChip`) **no longer poll** `/api/roadmap/box` on a timer (was 5s / 10s). They subscribe to the private per-workspace Realtime topic **`box:<workspace_id>`** via the shared hook [[../libraries/use-box-live]] and **refetch on each broadcast**, with a slow backstop (30s here / 60s for the chip) + a tab-return refresh for fire-and-forget safety. Three DB triggers feed that one topic (migration `20261203120000`):
+
+- **[[../tables/agent_jobs]]** `agent_jobs_broadcast_trg` → lanes / queue / paused / failed / `session_checklist` streaming / status flips.
+- **[[../tables/worker_heartbeats]]** `worker_heartbeats_broadcast_trg` → the box header's **`running_sha`** + liveness + lane usage. This is what answers *"which SHA is the box on / is it up?"* — `worker_heartbeats` updates every poll tick (~30s) and on restart but never touches `agent_jobs`, so it needs its OWN trigger or a SHA change on an idle box would only surface on the client backstop. It's a global singleton (no `workspace_id`), so it broadcasts to the single-tenant workspace's topic via the "oldest workspace" rule.
+- **[[../tables/roadmap_chats]]** `roadmap_chats_broadcast_trg` → the authoring chat's `turn_status` (for `AuthoringChat` on the roadmap page).
+
+So the box's SHA/liveness now pushes live every ~30s (the box's own heartbeat write broadcasts) and instantly on restart, and lane/queue changes appear the moment a job row changes — no steady polling. Uses **Broadcast** (not Postgres Changes — which has the open RLS/Walrus bug); see [[../recipes/realtime-subscriptions]].
+
 ### Lane grid — per-lane-group view
 
 The box worker runs each `agent_jobs.kind` in its OWN dedicated lane with its own cap (`MAX_CONCURRENT` for the build/plan pool, `MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL` for customer service, `MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH` for director, `MAX_FOLD` for fold, everything else in a bag of small concurrency-1/2 lanes). The page renders those groups as SEPARATE `LaneRowGrid` sections — Build/plan · Customer service · Director · Fold · **Producer agents · Supervisory agents** — driven from the heartbeat's `lane_groups` map ([[../tables/worker_heartbeats]] `lane_groups`), so each grid shows in-use/cap for its OWN kinds against the group's OWN cap. Before this the page did `buildLanes = worker.lanes.filter(kind !== 'fold')` and rendered every non-fold kind against `worker.build_lanes`, so a build pool at 10 with a customer-service lane + a director lane active could show "13/10 in use" — nonsense. The caps are now in `lane_groups` (a single source of truth on the heartbeat row) and the render is split into per-group grids.
