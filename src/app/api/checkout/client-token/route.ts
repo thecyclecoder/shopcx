@@ -75,7 +75,13 @@ export async function POST(request: NextRequest) {
       has_saved_methods: !!braintreeCustomerId,
     });
   } catch (err) {
-    const msg = errText(err);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    // NEVER return the raw errText body to the client — errText expands
+    // PostgREST-shaped diagnostics (code/details/hint) and would leak
+    // internal table / constraint / gateway shape on the PUBLIC cart-token
+    // endpoint. Log the full diagnostic server-side, return a generic code.
+    console.error(
+      `[client-token] clientToken.generate threw for workspace ${cart.workspace_id} cart ${cart_token}: ${errText(err)}`,
+    );
+    return NextResponse.json({ error: "client_token_failed" }, { status: 500 });
   }
 }
