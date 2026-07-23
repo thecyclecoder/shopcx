@@ -191,7 +191,13 @@ export async function POST(request: NextRequest) {
     offer_source_variant_id?: string;
     digital_good_id?: string;
   };
-  const lines = cart.line_items as Line[];
+  // Remap any bundle-marker paid line (e.g. the Starter Kit's SF-STARTER-KIT,
+  // which the 3PL can't fulfill) to its product's base variant — DOWNSTREAM of
+  // the cart's offer attachment so the free gifts are untouched. Keeps the
+  // marker on the cart (offers stay anchored) but writes a real, shippable SKU
+  // onto the order + subscription. See [[docs/brain/libraries/bundle-fulfillment]].
+  const { resolveBundleFulfillmentLines } = await import("@/lib/bundle-fulfillment");
+  const lines = (await resolveBundleFulfillmentLines(cart.workspace_id, cart.line_items as Line[])) as Line[];
   const subtotalCents = lines.reduce((s, l) => s + l.line_total_cents, 0);
   const subscribing = lines.some((l) => l.mode === "subscribe");
 
