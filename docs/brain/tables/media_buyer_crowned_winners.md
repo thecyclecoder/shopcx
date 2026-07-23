@@ -47,7 +47,7 @@ Mirrors [[media_buyer_cold_scaler_cohorts]] policies.
 
 ## Consumers
 
-- **Reactivation guard** (Phase 2 of the same spec) — [[../libraries/meta-cpa-signal]] `detectMetaCpaReactivations` calls [[../libraries/crowned-winners]] `listCrownedWinnerAdsetIds({ workspaceId, metaAdAccountId })` and removes those adset ids from the candidate set before the CPP recovery loop. A crowned/graduated winner is NEVER a reactivation target, regardless of who paused it or how well its CPA recovered.
+- **Reactivation guard** (Phase 2 of the same spec — WIRED) — [[../libraries/meta-cpa-signal]] `detectMetaCpaReactivations` calls [[../libraries/crowned-winners]] `listCrownedWinnerAdsetIds({ workspaceId, metaAdAccountId })` right after `stillPaused` is built and removes every crowned test adset from the candidate set BEFORE the CPP recovery loop runs. A crowned/graduated winner is NEVER a reactivation target, regardless of who paused it or how well its CPA recovered. The crown-marker row is the durable invariant — an adset present in this table cannot be resurrected into the test campaign, period.
 - **Future graduate / re-test / replenish flows** (contract) — MUST consult `listCrownedWinnerAdsetIds` before re-testing a creative or unpausing an adset. That is the crown-marker contract this table enforces; a proxy check (e.g. "did Bianca herself pause it") is not sufficient.
 
 ## Related

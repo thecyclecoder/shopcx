@@ -17,6 +17,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import type { DetectedWinner, WinnerCampaign, WinnerAngle } from "@/lib/ads/winning-creative-detect";
 import type { MediaBuyerLoser } from "@/lib/media-buyer/agent";
 import { tierForTest } from "@/lib/ads/testing-results-sdk";
+import { listCrownedWinnerAdsetIds } from "@/lib/media-buyer/crowned-winners";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -463,9 +464,28 @@ export async function detectMetaCpaReactivations(
     .select("meta_adset_id, effective_status")
     .eq("workspace_id", opts.workspaceId)
     .in("meta_adset_id", pausedByUs);
-  const stillPaused = ((adsets ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>)
+  const stillPausedAll = ((adsets ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>)
     .filter((a) => a.effective_status !== "ACTIVE")
     .map((a) => a.meta_adset_id);
+  if (!stillPausedAll.length) return [];
+
+  // Crowned-winner reactivation guard
+  // ([[../../../docs/brain/specs/media-buyer-persist-crowned-winners-and-guard-reactivation]] Phase 2):
+  // Any adset already crowned by an earlier Bianca pass has graduated to the
+  // scaler rail (or is queued to) and MUST NEVER be reactivated into the test
+  // campaign — regardless of who paused it or how well its recovered CPA
+  // looks. A crown's CPA is BY DEFINITION at or below crown target, which is
+  // exactly the reactivation threshold below, so without this filter every
+  // graduated winner qualifies for reactivation the moment it is paused.
+  // Read the durable crown ledger and drop every crowned test adset from the
+  // candidate set before the CPP recovery loop runs.
+  const crownedAdsetIds = new Set(
+    await listCrownedWinnerAdsetIds(admin, {
+      workspaceId: opts.workspaceId,
+      metaAdAccountId: opts.metaAdAccountId,
+    }),
+  );
+  const stillPaused = stillPausedAll.filter((id) => !crownedAdsetIds.has(id));
   if (!stillPaused.length) return [];
 
   // Cumulative lifetime CPP per candidate (Meta reported).
