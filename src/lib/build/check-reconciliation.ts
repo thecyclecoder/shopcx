@@ -19,18 +19,21 @@
  *     whitespace — repoint the pattern to the actually-present casing.
  *
  *   STEP B (bounded judge, only if A misses): read the check's `description` (its INTENT) +
- *     the phase's branch DIFF for `params.path`. A bounded box-side judge decides whether the
- *     diff satisfies the described intent under a DIFFERENT literal and, if so, returns the
- *     exact literal present in the diff. The returned literal must ALSO match a real grep on
- *     the branch before it's accepted — no silent bypass, no phantom-ship.
+ *     the phase's branch DIFF for `params.path`. A bounded box-side judge PROPOSES a literal
+ *     it thinks satisfies the intent. SECURITY: the judge reads the UNTRUSTED branch diff, so a
+ *     prompt-injection there could steer it to an unrelated-but-present literal — and a
+ *     deterministic grep of that literal only proves it EXISTS, not that it satisfies intent.
+ *     So step B NEVER auto-reconciles: the proposal is recorded as an UNRECONCILED human-review
+ *     diagnostic (reason='judge_proposal_needs_human'); the caller defers/escalates as for any
+ *     un-healed check and a human decides whether to repoint the pattern by hand.
  *
  * INVARIANTS (mirror the spec's guardrails):
  *   1. `expect: 'present'` ONLY. An `expect: 'absent'` miss is a different, real signal
  *      (the code SHOULDN'T be there and IS) — never reconcile it.
- *   2. A repointed pattern MUST pass a real deterministic grep before the phase is treated
- *      as reconciled. The final gate stays a real grep of the corrected pattern.
- *   3. The judge NEVER decides the phase passes — it only PROPOSES a literal. The verifier
- *      re-runs the deterministic grep on the proposal.
+ *   2. Only step A (deterministic normalized re-match) auto-reconciles, and its repointed
+ *      pattern MUST still pass a real deterministic grep. The LLM judge never clears a check.
+ *   3. The judge NEVER decides the phase passes and NEVER auto-reconciles — it only surfaces a
+ *      candidate literal for a human to review.
  *   4. Every dep is injectable (grep / diff / judge / upsert / real-grep) so unit tests drive
  *      policy without touching shell/DB/network.
  *
@@ -104,14 +107,20 @@ export type ReconcileOutcome =
   | {
       reconciled: true;
       newPattern: string;
-      /** 'normalized_case' (step A) | 'judge_proposal' (step B). */
-      step: "normalized_case" | "judge_proposal";
+      /**
+       * ONLY 'normalized_case' (step A, deterministic). The LLM intent judge
+       * (step B) NEVER autonomously reconciles — a judge proposal is recorded as
+       * an unreconciled human-review diagnostic (reason='judge_proposal_needs_human')
+       * so a prompt-injection in the branch diff can't steer it to clear a
+       * required check under an unrelated-but-present literal.
+       */
+      step: "normalized_case";
       rationale: string;
       evidence: string;
     }
   | {
       reconciled: false;
-      /** 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'proposal_did_not_match' | 'harness_error'. */
+      /** 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'judge_proposal_needs_human' | 'proposal_did_not_match' | 'harness_error'. */
       reason: string;
       evidence?: string;
     };
@@ -209,27 +218,37 @@ export async function reconcileStaleGrepCheck(args: ReconcileArgs): Promise<Reco
   }
 
   const proposedPattern = judged.literal;
-  // Belt-and-suspenders — the returned literal MUST actually match on the branch under the
-  // runner's real grep. A judge that fabricates a literal that isn't on the branch is caught
-  // here and never reconciles. This is the "real deterministic gate" invariant.
-  const finalCheck = await deps.runDeterministicGrep({
-    branchRef,
-    repoRoot,
-    params: { ...check.params, pattern: proposedPattern },
-  });
-  if (!finalCheck.ok) {
-    return {
-      reconciled: false,
-      reason: "proposal_did_not_match — judge's literal did not survive a real deterministic grep",
-      evidence: `judge proposed '${proposedPattern}' rationale: ${judged.rationale}; final grep: ${finalCheck.evidence}`,
-    };
+  // SECURITY (prompt-injection, high — security review of this spec): the LLM
+  // intent judge reads the UNTRUSTED branch diff, so a crafted / accidental
+  // prompt-injection comment can steer it to return an unrelated-but-PRESENT
+  // literal. The deterministic re-grep below only proves that literal EXISTS on
+  // the branch — NOT that it satisfies the check's intent — so acting on the
+  // judge here could clear a required check without the intended implementation.
+  //
+  // Therefore the judge NEVER autonomously reconciles. Only step A (deterministic
+  // normalized re-match) auto-heals. A judge proposal is recorded as an
+  // UNRECONCILED, human-review diagnostic: the caller defers/escalates exactly as
+  // it would for any un-healed check (a real code-missing signal is never masked),
+  // and a human sees the judge's candidate literal + rationale to decide whether
+  // to repoint the check by hand.
+  //
+  // We still run the deterministic grep purely to enrich the diagnostic (does the
+  // candidate even exist on the branch?) — its result never gates a reconcile.
+  let candidateExists = false;
+  try {
+    const finalCheck = await deps.runDeterministicGrep({
+      branchRef,
+      repoRoot,
+      params: { ...check.params, pattern: proposedPattern },
+    });
+    candidateExists = finalCheck.ok;
+  } catch {
+    candidateExists = false;
   }
   return {
-    reconciled: true,
-    newPattern: proposedPattern,
-    step: "judge_proposal",
-    rationale: judged.rationale,
-    evidence: `judge proposed '${proposedPattern}'; deterministic re-grep of new pattern: ${finalCheck.evidence}`,
+    reconciled: false,
+    reason: "judge_proposal_needs_human — intent judge proposed a literal; recorded as a human-review diagnostic, NOT auto-reconciled (prompt-injection guard)",
+    evidence: `judge proposed '${proposedPattern}' (present-on-branch=${candidateExists}) rationale: ${judged.rationale}; stepA: ${stepAEvidence}`,
   };
 }
 
@@ -285,7 +304,8 @@ export interface ReconciliationAudit {
   description: string;
   oldPattern: string;
   newPattern: string;
-  step: "normalized_case" | "judge_proposal";
+  /** Only 'normalized_case' — a reconcile is always the deterministic step A now. */
+  step: "normalized_case";
   rationale: string;
   evidence: string;
 }
@@ -774,8 +794,9 @@ export async function defaultUpsertReconciledCheck(args: {
  *
  * The row's `action_kind='check_reconciled'` carries the full audit shape a reader needs to
  * eyeball the auto-correction: old_pattern → new_pattern, the check description (intent),
- * which STEP fired (normalized_case vs judge_proposal), the rationale, and the evidence
- * string the deterministic gate produced. This is the "never silent" hard rule the Phase-2
+ * the STEP that fired (always `normalized_case` — the deterministic step A; the LLM judge
+ * never auto-reconciles), the rationale, and the evidence string the deterministic gate
+ * produced. This is the "never silent" hard rule the Phase-2
  * spec cites — a self-healing check that isn't surfaced is a proxy that optimizes itself.
  */
 export async function defaultAuditReconciliation(audit: ReconciliationAudit): Promise<void> {

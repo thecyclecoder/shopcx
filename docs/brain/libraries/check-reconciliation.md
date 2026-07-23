@@ -33,15 +33,15 @@ Reads:
 - The check's `description` — the INTENT the author wrote in prose (e.g. "reconciler defined").
 - The phase's branch DIFF for `params.path`, bounded to 16 KB via `git diff origin/main...<branchRef> -- <path>`.
 
-Asks Claude Sonnet (`SONNET_MODEL` from [[ai-models]]) to decide whether the diff satisfies the described intent under a DIFFERENT literal and, if so, return the EXACT literal present in the diff. Strict-JSON output: `{literal: string|null, rationale: string}`. Max 400 output tokens. Fail-closed on any API / parse error → `literal: null`, no reconcile.
+Asks Claude Sonnet (`SONNET_MODEL` from [[ai-models]]) to decide whether the diff satisfies the described intent under a DIFFERENT literal and, if so, return the EXACT literal present in the diff. Strict-JSON output: `{literal: string|null, rationale: string}`. Max 400 output tokens. Fail-closed on any API / parse error → `literal: null`.
 
-The judge NEVER decides the phase passes. It only PROPOSES a literal. The proposed literal is then run through the runner's real deterministic ripgrep — a fabricated literal that isn't on the branch is caught by the final grep and never reconciles.
+**SECURITY — the judge NEVER auto-reconciles.** The judge reads the UNTRUSTED branch diff, so a prompt-injection comment in that diff could steer it to an unrelated-but-present literal; a deterministic grep of that literal only proves it EXISTS, not that it satisfies the check's intent. So step B is **advisory only**: a judge proposal is recorded as an UNRECONCILED, human-review diagnostic (`reconciled: false, reason: 'judge_proposal_needs_human'`, with the candidate literal + `present-on-branch=<bool>` in `evidence`). The caller defers/escalates exactly as for any un-healed check — a real code-missing signal is never masked, and a human decides whether to repoint the pattern by hand. **Only step A (deterministic normalized re-match) auto-heals.** (Security review of `build-verify-self-heals-stale-grep-checks-before-deferring`, 2026-07-23.)
 
 ## Invariants
 
 1. **`expect: 'present'` ONLY.** An `expect: 'absent'` miss is a different, real signal (the code SHOULDN'T be there and IS) — never reconciled.
-2. **A repointed pattern MUST pass a real deterministic grep before the phase is treated as reconciled.** The final gate stays a real grep of the corrected pattern — no bypass, no phantom-ship. Both step A and step B route their proposal through `defaultRunDeterministicGrep` (identical argv to the runner's `defaultExecutors.grep`).
-3. **The judge NEVER decides pass/fail — it only PROPOSES a literal.** The deterministic grep of that proposal is the final gate.
+2. **Only step A (deterministic normalized re-match) auto-reconciles, and its repointed pattern MUST still pass a real deterministic grep** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`) — no bypass, no phantom-ship. The LLM judge never clears a check.
+3. **The judge NEVER decides pass/fail and NEVER auto-reconciles — it only surfaces a candidate literal for a human to review.** (Prompt-injection guard — see Step B above.)
 4. **Capped per build.** `reconcileFailingGrepChecksForSpec` accepts `maxReconciliationsPerBuild` (default: total grep-check count in the spec). Exceeded → any remaining unhealed checks report `cap_reached` and the caller defers as before.
 5. **Every reconciliation is surfaced — never silent.** Phase 1 logs each repair to the run log tail (`check-reconciled: phase N check 'D' (step): 'old' → 'new' — rationale`); Phase 2 wires the same audit hook to the build-card surface so the CEO sees what was auto-corrected.
 6. **Best-effort** — a thrown reconciler falls through to the existing defer path unchanged. The reconciler NEVER masks a real code-missing failure.
@@ -58,7 +58,7 @@ export interface FailingGrepCheck {
 }
 
 reconcileStaleGrepCheck({ check, branchRef, repoRoot, deps })
-  → { reconciled: true, newPattern, step: 'normalized_case' | 'judge_proposal', rationale, evidence }
+  → { reconciled: true, newPattern, step: 'normalized_case', rationale, evidence }  // step B never auto-reconciles
   | { reconciled: false, reason, evidence? }
 
 reconcileFailingGrepChecksForSpec({ workspaceId, slug, branchRef, repoRoot, deps, maxReconciliationsPerBuild? })
