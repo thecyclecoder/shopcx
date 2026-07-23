@@ -12,6 +12,26 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Declining the author_fix_spec action must persist the real-vuln verdict — never clear a real-vuln review to completed-clean** · verified 2026-07-23 · → [[../libraries/security-agent]]
+- **A build that finishes 'completed' with a DEFERRED PR must auto-redrive or escalate, not silently stall** · verified 2026-07-22 · → [[../lifecycles/roadmap-build-console]]
+- **Checkout route returns generic error responses to the client — never raw err.message (payment-path info-disclosure)** · verified 2026-07-22 · → [[../lifecycles/storefront-checkout]]
+- **Exempt customers from db-health unbounded-growth retention proposal** · verified 2026-07-22 · → [[../libraries/db-health]]
+- **Decision engine: temperature-keyed function-preserving substitution + Max as substitution supervisor** · verified 2026-07-22 · → [[../libraries/decision-engine]]
+- **Demand-sourced angle sweep: search-demand feeder for product_angle_palette** · verified 2026-07-22 · → [[../libraries/angle-demand-sweep]]
+- **Factor-rollup SDK: per-{theme,angle,pattern,combination} CPA/CTR with significance gate** · verified 2026-07-22 · → [[../libraries/factor-rollup-sdk]]
+- **Close the loop: factor-rollup scores re-weight the selection engine** · verified 2026-07-22 · → [[../lifecycles/quant-desk-reweight-loop]]
+- **Goal→main promote gates on the goal-branch ARTIFACT, not stale per-member build-branch re-checks** · verified 2026-07-22 · → [[../lifecycles/spec-goal-branch-pm-flow]]
+- **A held/bounced creative persists its authored copy + v3 provenance to the draft — not just the score + hold flag** · verified 2026-07-22 · → [[lifecycles/ad-render]] + [[tables/ad_campaigns]]
+- **Merge gate verifies REAL per-phase checks against the branch (fail closed)** · verified 2026-07-22 · → [[../libraries/agent-jobs]]
+- **Fail Meta publishes closed when the target ad set is missing or inaccessible** · verified 2026-07-22 · → [[../inngest/ad-tool]] · [[../libraries/publish-adset-unavailable-classifier]]
+- **Products UI: creative panel on product page + factor-rollup dashboard** · verified 2026-07-22 · → [[../dashboard/product-creative-panel]]
+- **Retarget campaign live: one lean adset, warm+hot mixed content, on its own kill-switch + heartbeat** · verified 2026-07-22 · → [[../inngest/media-buyer-retarget-cadence]]
+- **Security escalation carries fix spec or one-click author action** · verified 2026-07-22 · → [[../libraries/security-agent]]
+- **Seed product_angle_palette for the remaining 5 hero SKUs** · verified 2026-07-22 · → [[../tables/product_angle_palette]]
+- **Selection engine: theme-spread + coverage ledger + freshness cooldown + explore/exploit blend** · verified 2026-07-22 · → [[../libraries/selection-engine]]
+- **Skeleton redesign: agnostic wireframe (element × zone × role × prominence) + author-time reuse verdict** · verified 2026-07-22 · → [[../tables/creative_skeletons]]
+- **Exclude Sol inflection re-sessions from the AI orchestrator work probe** · verified 2026-07-22 · → [[../libraries/control-tower]]
+- **Wire M1 engine (angle-palette + compose-headline + patterns) into Dahlia's author path** · verified 2026-07-22 · → [[../lifecycles/ad-creative]]
 - **Downgrade the EasyPost tracker business-signal log from console.error to console.warn** · verified 2026-07-21 · → [[../integrations/easypost]]
 - **Drop recurring Appstle unskip upstream 500s from the Vercel error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
 - **Scope EasyPost account-level rate-limit noise out of the returns-reconcile-sweep error feed** · verified 2026-07-21 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
@@ -844,6 +864,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Mario — reactive pipeline-plumbing agent + spec timecards** · folded 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 - **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
+- **v3 Ad Creative Engine** · folded 2026-07-22 · → [[lifecycles/quant-desk-reweight-loop]]
 
 ## Related
 
