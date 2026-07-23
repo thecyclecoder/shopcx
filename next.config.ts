@@ -1,3 +1,10 @@
+// Side-effect import — MUST be first. Materializes a real top-level `node_modules` in place
+// when the worktree ships it as a symlink pointing OUT of the project (the exact shape the
+// box's spec-test worktree uses via `scripts/builder-worker.ts`). Turbopack panics on that
+// shape at `try_get_next_package` during its route scan; running this synchronously before
+// config load fixes the tree before Turbopack ever starts. No-op on a real directory or an
+// in-project symlink. See `scripts/_preflight-turbopack-node_modules.ts` for the full rationale.
+import "./scripts/_preflight-turbopack-node_modules";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {

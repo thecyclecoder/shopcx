@@ -12,11 +12,15 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, lstatSync, readFileSync as fsReadFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import {
   runSpecChecks,
   classifyDeterministicRun,
   mergeDeterministicWithLlmChecks,
   buildGrepArgv,
+  ensureRealTopLevelNodeModulesForBuild,
   type CheckExecutors,
   type LoadedCheck,
   type CheckResult,
@@ -352,6 +356,80 @@ test("buildGrepArgv places `--` before the user-controlled path (rg option-injec
   assert.equal(dashPattern[1], "-not-a-flag");
   assert.equal(dashPattern[2], "--");
   assert.equal(dashPattern[3], "src/lib");
+});
+
+test("ensureRealTopLevelNodeModulesForBuild — no-op when node_modules is already a real directory", async () => {
+  const wt = mkdtempSync(joinPath(tmpdir(), "scr-nm-real-"));
+  try {
+    mkdirSync(joinPath(wt, "node_modules"));
+    writeFileSync(joinPath(wt, "node_modules", "sentinel"), "hello");
+    const r = await ensureRealTopLevelNodeModulesForBuild(wt);
+    assert.equal(r.ok, true);
+    assert.equal(r.action, "noop");
+    // Real directory left untouched — sentinel still readable.
+    assert.equal(fsReadFileSync(joinPath(wt, "node_modules", "sentinel"), "utf8"), "hello");
+    assert.equal(lstatSync(joinPath(wt, "node_modules")).isSymbolicLink(), false);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("ensureRealTopLevelNodeModulesForBuild — no-op when node_modules is absent", async () => {
+  const wt = mkdtempSync(joinPath(tmpdir(), "scr-nm-none-"));
+  try {
+    const r = await ensureRealTopLevelNodeModulesForBuild(wt);
+    assert.equal(r.ok, true);
+    assert.equal(r.action, "noop");
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("ensureRealTopLevelNodeModulesForBuild — materializes a real top-level dir when symlink points OUT of repoRoot (the Turbopack-panic shape)", async () => {
+  const parent = mkdtempSync(joinPath(tmpdir(), "scr-nm-out-"));
+  try {
+    const shared = joinPath(parent, "shared-node_modules");
+    const wt = joinPath(parent, "worktree");
+    mkdirSync(shared);
+    mkdirSync(joinPath(shared, "next"));
+    writeFileSync(joinPath(shared, "next", "package.json"), '{"name":"next"}');
+    mkdirSync(wt);
+    symlinkSync(shared, joinPath(wt, "node_modules"));
+    // Precondition: repoRoot/node_modules IS a symlink pointing OUT of repoRoot — the exact shape
+    // scripts/builder-worker.ts creates for spec-test worktrees, and the exact shape Turbopack panics on.
+    assert.equal(lstatSync(joinPath(wt, "node_modules")).isSymbolicLink(), true);
+
+    const r = await ensureRealTopLevelNodeModulesForBuild(wt);
+    assert.equal(r.ok, true, `expected ok — got evidence: ${r.evidence ?? ""}`);
+    assert.equal(r.action, "materialized");
+
+    // The top-level is now a REAL directory (Turbopack accepts this), and the hardlink-copy
+    // preserved the shared tree's contents inside it.
+    assert.equal(lstatSync(joinPath(wt, "node_modules")).isSymbolicLink(), false);
+    assert.equal(lstatSync(joinPath(wt, "node_modules")).isDirectory(), true);
+    assert.equal(
+      fsReadFileSync(joinPath(wt, "node_modules", "next", "package.json"), "utf8"),
+      '{"name":"next"}',
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("ensureRealTopLevelNodeModulesForBuild — no-op when node_modules is a symlink to a sibling INSIDE repoRoot", async () => {
+  const wt = mkdtempSync(joinPath(tmpdir(), "scr-nm-in-"));
+  try {
+    const real = joinPath(wt, "actual-nm");
+    mkdirSync(real);
+    writeFileSync(joinPath(real, "sentinel"), "hello");
+    symlinkSync(real, joinPath(wt, "node_modules"));
+    const r = await ensureRealTopLevelNodeModulesForBuild(wt);
+    assert.equal(r.ok, true);
+    assert.equal(r.action, "noop", "symlink resolves inside repoRoot — Turbopack accepts, do nothing");
+    assert.equal(lstatSync(joinPath(wt, "node_modules")).isSymbolicLink(), true);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
 });
 
 test("results are position-ordered + fully typed (text, checkKey, verdict, category, evidence, exec_kind)", async () => {

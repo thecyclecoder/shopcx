@@ -34,10 +34,15 @@ const MAIN_SITE = "https://superfoodscompany.com";
 export async function generateStaticParams() {
   // A flaky build-time DB query here must NOT fail the whole production build — the blog
   // pages fall back to on-demand rendering. (This was freezing every production deploy.)
+  // Cache Components (Next 16) rejects an empty array with EmptyGenerateStaticParamsError,
+  // so on failure/emptiness we return a single sentinel workspace slug that the page-body's
+  // getBlogWorkspaceBySlug will resolve to null → notFound() at request time. Same on-demand
+  // fallback behavior; satisfies Cache Components' non-empty invariant.
   try {
-    return await listBlogWorkspaceParams();
+    const params = await listBlogWorkspaceParams();
+    return params.length > 0 ? params : [{ workspace: "__none__" }];
   } catch {
-    return [];
+    return [{ workspace: "__none__" }];
   }
 }
 
