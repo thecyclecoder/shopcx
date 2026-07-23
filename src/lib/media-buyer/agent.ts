@@ -44,8 +44,14 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
-import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
-import { recordCrownedWinner } from "@/lib/media-buyer/crowned-winners";
+import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, resolveWinnerSource, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import {
+  incrementExploitSpawned,
+  listActiveWinnersForProduct,
+  recordCrownedWinner,
+  recordExploitHit,
+} from "@/lib/media-buyer/crowned-winners";
+import { tierForTest, type TestThresholds } from "@/lib/ads/testing-results-sdk";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
@@ -355,6 +361,27 @@ export async function executeDecidedActionAgainstMeta(args: {
 export const DEFAULT_TEST_COHORT_TARGET = 4;
 
 /**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — when a product has at
+ * least one NON-EXHAUSTED crowned winner (`listActiveWinnersForProduct` returns
+ * ≥1 row), the EXPLORE-target drops from `DEFAULT_TEST_COHORT_TARGET=4` to this
+ * value, and `EXPLOIT_SLOT_COUNT` fresh exploit-clone slots take the remainder
+ * of the cohort. The two constants must sum to `DEFAULT_TEST_COHORT_TARGET`
+ * (2+2=4) so the cohort size stays fixed at crown; exhausting every winner
+ * reverts to 4-explore / 0-exploit.
+ */
+export const EXPLORE_TARGET_WITH_WINNER = 2;
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — number of exploit slots
+ * a crowned product's cohort dedicates to `amplifyWinner` clones, allocated
+ * 1-per-winner round-robin best-CAC-first across `listActiveWinnersForProduct`
+ * (1 winner ⇒ both slots off it; 2 winners ⇒ 1 each; 3+ ⇒ top 2). Shared
+ * across winners — never doubled — so `EXPLORE_TARGET_WITH_WINNER + EXPLOIT_SLOT_COUNT`
+ * always equals the pre-crown cohort target.
+ */
+export const EXPLOIT_SLOT_COUNT = 2;
+
+/**
  * media-buyer-sensor-trust-probe Phase 3 — the freshness cap on a sensor-trust snapshot.
  * A snapshot whose `created_at` is older than this is treated as untrusted (`stale_snapshot`
  * added to the reasons + the same denied path fires) — "stale trust ≡ untrusted", per the
@@ -491,9 +518,28 @@ function buildSensorTrustDormantPlan(
     kill: [],
     replenish: [],
     fatigueReplenish: [],
+    exploitSpawn: [],
+    splitInfo: emptySplitInfo(cohortTargetCount),
     replenishDiagnostic: null,
     deferred: [],
     summary: `Dormant: sensor-trust denied — ${denial.reason}`,
+  };
+}
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — the pre-crown default
+ * split (no active winners ⇒ full explore, 0 exploit) used on every empty /
+ * dormant plan return path. Keeps the plan shape complete without repeating
+ * the literal.
+ */
+function emptySplitInfo(cohortTargetCount: number): MediaBuyerPlan["splitInfo"] {
+  return {
+    hasActiveWinner: false,
+    exploreTarget: cohortTargetCount,
+    exploitSlotCount: 0,
+    liveExploreCount: 0,
+    liveExploitCount: 0,
+    activeWinnerCount: 0,
   };
 }
 
@@ -605,6 +651,29 @@ export interface MediaBuyerReplenishDiagnostic {
   readyTagsAvailable: string[];
 }
 
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — one exploit-slot the
+ * winner-aware replenish wants filled by `amplifyWinner`. The runner iterates
+ * and calls `amplifyWinner({ winner, n: variantCount, sourceCrownedAdsetId: sourceCrownedAdsetId })`
+ * so each spawned `ad_campaigns` row is tagged `is_exploit=true` +
+ * `source_crowned_adset_id=<sourceCrownedAdsetId>`. After a successful spawn,
+ * the runner also calls `incrementExploitSpawned(sourceCrownedAdsetId, variantsSpawned)`
+ * so the strike counter advances (Phase 3's hit-crediting can zero it).
+ */
+export interface MediaBuyerExploitSpawnAction {
+  kind: "exploit_spawn";
+  /** The crowned winner ad-grain meta_ad_id — becomes `winner` for `amplifyWinner`. */
+  sourceMetaAdId: string;
+  /** The crowned winner's test-adset meta id — `media_buyer_crowned_winners.test_meta_adset_id`. */
+  sourceCrownedAdsetId: string;
+  /** How many variants to spawn against THIS winner this pass (1 or 2 — round-robin best-CAC-first). */
+  variantCount: number;
+  /** Cited best-CAC ranking used for the allocation (audit trail on the activity row). */
+  rank: number;
+  rationale: string;
+  policyVersionId: string;
+}
+
 /** The typed plan the runner emits — one pass, one workspace. */
 export interface MediaBuyerPlan {
   /** True iff an active iteration_policies row was found. */
@@ -619,6 +688,26 @@ export interface MediaBuyerPlan {
   replenish: MediaBuyerReplenishAction[];
   /** Phase 3 — winners flagged as fatiguing that need their angle amplified. */
   fatigueReplenish: MediaBuyerFatigueReplenishAction[];
+  /**
+   * media-buyer-explore-exploit-split-on-crown Phase 2 — one entry per exploit
+   * slot the winner-aware replenish wants filled. Empty on any product without
+   * a live non-exhausted winner (pre-crown OR every winner exhausted ⇒ revert
+   * to 4-explore / 0-exploit).
+   */
+  exploitSpawn: MediaBuyerExploitSpawnAction[];
+  /**
+   * media-buyer-explore-exploit-split-on-crown Phase 2 — snapshot of the
+   * explore/exploit split the plan used. Surfaced on the pass heartbeat so the
+   * activity ledger records why replenish targeted 2 instead of 4.
+   */
+  splitInfo: {
+    hasActiveWinner: boolean;
+    exploreTarget: number;
+    exploitSlotCount: number;
+    liveExploreCount: number;
+    liveExploitCount: number;
+    activeWinnerCount: number;
+  };
   /**
    * `dahlia-andromeda-concept-diversity-tags` Phase 2 — non-null when replenish partialed
    * because the diversity gate rejected every remaining candidate. Consumed by the runner
@@ -663,7 +752,8 @@ export interface ShadowActivityRow {
     | "media_buyer_promoted_winner_shadow"
     | "media_buyer_paused_loser_shadow"
     | "media_buyer_replenished_test_cohort_shadow"
-    | "media_buyer_fatigue_replenish_triggered_shadow";
+    | "media_buyer_fatigue_replenish_triggered_shadow"
+    | "media_buyer_exploit_spawned_shadow";
   reason: string;
   metadata: Record<string, unknown>;
 }
@@ -738,6 +828,21 @@ export function buildShadowActivityRows(plan: MediaBuyerPlan): ShadowActivityRow
       },
     });
   }
+  for (const a of plan.exploitSpawn) {
+    rows.push({
+      actionKind: "media_buyer_exploit_spawned_shadow",
+      reason: a.rationale,
+      metadata: {
+        mode: "shadow",
+        plan_action: a,
+        source_meta_ad_id: a.sourceMetaAdId,
+        source_crowned_adset_id: a.sourceCrownedAdsetId,
+        rank: a.rank,
+        policy_version_id: a.policyVersionId,
+        autonomous: true,
+      },
+    });
+  }
   return rows;
 }
 
@@ -761,6 +866,29 @@ export interface MediaBuyerPlanInputs {
   readyToTest: ReadyToTestRow[];
   /** How many test-cohort live ads currently exist (published via origin='media-buyer-test'). */
   currentTestCohortSize: number;
+  /**
+   * media-buyer-explore-exploit-split-on-crown Phase 2 — how many of
+   * `currentTestCohortSize` are exploit clones (`ad_campaigns.is_exploit=true`),
+   * so the plan can split the live cohort into explore vs exploit counts and
+   * compute the two deficits independently. Omit / 0 in every pre-Phase-2
+   * caller — the plan treats the whole cohort as explore.
+   */
+  currentLiveExploitCount?: number;
+  /**
+   * media-buyer-explore-exploit-split-on-crown Phase 2 — non-exhausted crowned
+   * winners for this product, sorted best-CAC-first by the caller (via the
+   * testing-results/CPA read). Non-empty ⇒ Phase 2 drops the explore target to
+   * `EXPLORE_TARGET_WITH_WINNER=2` and allocates `EXPLOIT_SLOT_COUNT=2` exploit
+   * slots 1-per-winner round-robin. Every entry must carry a resolved
+   * `sourceMetaAdId` (the crowned winner's ad-grain meta_ad_id) — that's what
+   * `amplifyWinner` clones. Empty ⇒ pre-crown OR every winner exhausted ⇒
+   * revert to 4-explore / 0-exploit.
+   */
+  activeWinnersForExploit?: Array<{
+    testMetaAdsetId: string;
+    sourceMetaAdId: string;
+    cpaCents: number;
+  }>;
   cohortTargetCount?: number;
   /**
    * `dahlia-andromeda-concept-diversity-tags` Phase 2 — the DISTINCT non-null `ad_campaigns.concept_tag`
@@ -844,6 +972,8 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       kill: [],
       replenish: [],
       fatigueReplenish: [],
+      exploitSpawn: [],
+      splitInfo: emptySplitInfo(cohortTargetCount),
       replenishDiagnostic: null,
       deferred: [],
       summary:
@@ -992,24 +1122,80 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     });
   }
 
+  // ── Winner-aware split (Phase 2 of the explore/exploit-on-crown spec) ─────
+  // When the caller resolves ≥1 NON-EXHAUSTED crowned winner for this product
+  // (`activeWinnersForExploit` sorted best-CAC-first), the cohort shifts to
+  // EXPLORE_TARGET_WITH_WINNER=2 explore + EXPLOIT_SLOT_COUNT=2 exploit clones.
+  // Pre-crown (no winner OR every winner exhausted) the explore target reverts
+  // to the full `cohortTargetCount` and no exploit slots are spawned.
+  const activeWinners = input.activeWinnersForExploit ?? [];
+  const hasActiveWinner = activeWinners.length > 0;
+  const liveExploitCount = Math.max(0, input.currentLiveExploitCount ?? 0);
+  // Guard against a caller passing a live-exploit count that exceeds the total cohort
+  // size (a stale/racy read) — clamp so liveExploreCount is never negative.
+  const clampedLiveExploit = Math.min(liveExploitCount, Math.max(0, input.currentTestCohortSize));
+  const liveExploreCount = Math.max(0, input.currentTestCohortSize - clampedLiveExploit);
+  const exploreTarget = hasActiveWinner ? EXPLORE_TARGET_WITH_WINNER : cohortTargetCount;
+  const exploitSlotCountThisPass = hasActiveWinner ? EXPLOIT_SLOT_COUNT : 0;
+  const exploreDeficit = Math.max(0, exploreTarget - liveExploreCount);
+  const exploitDeficit = Math.max(0, exploitSlotCountThisPass - clampedLiveExploit);
+  const splitInfo = {
+    hasActiveWinner,
+    exploreTarget,
+    exploitSlotCount: exploitSlotCountThisPass,
+    liveExploreCount,
+    liveExploitCount: clampedLiveExploit,
+    activeWinnerCount: activeWinners.length,
+  };
+
+  // Round-robin allocate the exploit deficit across the best-CAC-first winners:
+  // 1 winner ⇒ both slots off it; 2 winners ⇒ 1 each; 3+ ⇒ 1 each on the top-2.
+  const exploitSpawn: MediaBuyerExploitSpawnAction[] = [];
+  if (input.cohort && input.cohort.isActive && exploitDeficit > 0 && activeWinners.length > 0) {
+    const allocationByWinner = new Map<number, number>();
+    for (let i = 0; i < exploitDeficit; i += 1) {
+      const idx = i % activeWinners.length;
+      allocationByWinner.set(idx, (allocationByWinner.get(idx) ?? 0) + 1);
+    }
+    for (const [idx, variantCount] of allocationByWinner.entries()) {
+      const w = activeWinners[idx];
+      exploitSpawn.push({
+        kind: "exploit_spawn",
+        sourceMetaAdId: w.sourceMetaAdId,
+        sourceCrownedAdsetId: w.testMetaAdsetId,
+        variantCount,
+        rank: idx + 1,
+        rationale:
+          `Exploit slot (rank ${idx + 1} of ${activeWinners.length} non-exhausted winners, CAC $${(w.cpaCents / 100).toFixed(2)}) — ` +
+          `spawn ${variantCount} amplifyWinner variant(s) from crowned adset ${w.testMetaAdsetId} (source ad ${w.sourceMetaAdId}); ` +
+          `is_exploit=true + source_crowned_adset_id lineage stamped so the strike counter advances and Phase 3 can attribute the verdict back.`,
+        policyVersionId: policy.id,
+      });
+    }
+  }
+
   // ── Replenish ──────────────────────────────────────────────────────────────
   // `dahlia-andromeda-concept-diversity-tags` Phase 2 — iterate ready-to-test in bin order
   // and REJECT a candidate whose concept_tag is already represented in the live cohort
   // (or in this pass's own accepted picks). NULL concept_tag is its own 'untagged' bucket
   // that never conflicts with any Andromeda token so deterministic-mode replenish stays
   // byte-identical (every candidate NULL, every skip a no-op).
+  //
+  // media-buyer-explore-exploit-split-on-crown Phase 2 — the replenish deficit is now
+  // `exploreDeficit` (winner-aware: 2 on a crowned product, else the full cohort target),
+  // NOT the raw `cohortTargetCount - currentTestCohortSize`. Explore replenish + exploit
+  // spawn together fill the cohort at 2+2 or 4+0.
   const replenish: MediaBuyerReplenishAction[] = [];
   const liveTagsForPass = new Set<string>(input.liveConceptTags ?? []);
   const readyTagsAvailable = new Set<string>();
   let diversitySkipped = false;
   let replenishDiagnostic: MediaBuyerReplenishDiagnostic | null = null;
   if (input.cohort && input.cohort.isActive) {
-    const deficit = Math.max(0, cohortTargetCount - input.currentTestCohortSize);
     const perTest = input.cohort.adsetPerTest;
     for (const p of input.readyToTest) {
       const tag = p.concept_tag ?? null;
       if (tag !== null) readyTagsAvailable.add(tag);
-      if (replenish.length >= deficit) continue;
+      if (replenish.length >= exploreDeficit) continue;
       if (tag !== null && liveTagsForPass.has(tag)) {
         diversitySkipped = true;
         continue;
@@ -1021,17 +1207,17 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
         adsetPerTest: perTest,
         dailyTestCeilingCents: input.cohort.dailyTestCeilingCents,
         rationale: perTest
-          ? `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — minting a fresh $${(input.cohort.perTestDailyBudgetCents / 100).toFixed(0)}/day ad set in campaign ${input.cohort.testMetaCampaignId} for ready-to-test campaign ${p.ad_campaign_id} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`
-          : `Replenish test cohort (${input.currentTestCohortSize}/${cohortTargetCount} live) — publishing ready-to-test campaign ${p.ad_campaign_id} into adset ${input.cohort.testMetaAdsetId} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`,
+          ? `Replenish explore slot (${liveExploreCount}/${exploreTarget} live-explore, ${clampedLiveExploit}/${exploitSlotCountThisPass} live-exploit) — minting a fresh $${(input.cohort.perTestDailyBudgetCents / 100).toFixed(0)}/day ad set in campaign ${input.cohort.testMetaCampaignId} for ready-to-test campaign ${p.ad_campaign_id} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`
+          : `Replenish explore slot (${liveExploreCount}/${exploreTarget} live-explore, ${clampedLiveExploit}/${exploitSlotCountThisPass} live-exploit) — publishing ready-to-test campaign ${p.ad_campaign_id} into adset ${input.cohort.testMetaAdsetId} via origin='${MEDIA_BUYER_TEST_ORIGIN}'.`,
       });
       if (tag !== null) liveTagsForPass.add(tag);
     }
-    if (deficit > 0 && replenish.length < deficit) {
+    if (exploreDeficit > 0 && replenish.length < exploreDeficit) {
       if (diversitySkipped) {
         // Distinguish the diversity failure from a straight-up empty bin — the runner reads
         // `replenishDiagnostic` to emit `media_buyer_replenish_no_diverse_candidate`.
         summaryParts.push(
-          `replenish short: ${replenish.length}/${deficit} — no diverse concept candidates (live=[${[...new Set(input.liveConceptTags ?? [])].sort().join(",")}])`,
+          `replenish short: ${replenish.length}/${exploreDeficit} — no diverse concept candidates (live=[${[...new Set(input.liveConceptTags ?? [])].sort().join(",")}])`,
         );
         replenishDiagnostic = {
           kind: "no_diverse_candidate",
@@ -1039,7 +1225,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
           readyTagsAvailable: [...readyTagsAvailable].sort(),
         };
       } else {
-        summaryParts.push(`replenish short: ${replenish.length}/${deficit} — ready-to-test bin exhausted`);
+        summaryParts.push(`replenish short: ${replenish.length}/${exploreDeficit} — ready-to-test bin exhausted`);
       }
     }
   } else {
@@ -1055,7 +1241,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   }
 
   summaryParts.unshift(
-    `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} fatigue_replenish=${fatigueReplenish.length} (policy v${policy.version})`,
+    `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} exploit_spawn=${exploitSpawn.length} fatigue_replenish=${fatigueReplenish.length} split=${liveExploreCount}/${exploreTarget}+${clampedLiveExploit}/${exploitSlotCountThisPass} (policy v${policy.version})`,
   );
 
   return {
@@ -1068,6 +1254,8 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     kill,
     replenish,
     fatigueReplenish,
+    exploitSpawn,
+    splitInfo,
     replenishDiagnostic,
     deferred,
     summary: summaryParts.join(" · "),
@@ -1187,6 +1375,262 @@ export async function readLiveCohortConceptTags(
     if (r.concept_tag) tags.add(r.concept_tag);
   }
   return tags;
+}
+
+// ── Live exploit-count reader (Phase 2 of the explore/exploit split) ─────────
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — count the ACTIVE
+ * `origin='media-buyer-test'` publish jobs whose parent `ad_campaigns` row is
+ * flagged `is_exploit=true`. Feeds `computeMediaBuyerPlan.splitInfo` so the
+ * replenish deficit is winner-aware: live exploit clones don't get double-counted
+ * as explore slots, and the 2-explore / 2-exploit target holds pass-to-pass.
+ *
+ * Same enumeration shape as `readLiveCohortConceptTags` — reads live jobs, then
+ * joins the campaign_ids back to `ad_campaigns` narrowed to `is_exploit=true`
+ * (optionally + productId, mirroring `readCurrentTestCohortSize`'s
+ * product-scoping). Every pre-Phase-2 row has `is_exploit=false` (migration
+ * default), so a workspace with no crown-driven amplifications returns 0.
+ */
+export async function readCurrentLiveExploitCount(
+  admin: Admin,
+  args: { workspaceId: string; productId: string | null },
+): Promise<number> {
+  const { data: liveJobsRaw } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
+    .eq("publish_active", true)
+    .eq("publish_status", "published");
+  const campaignIds = ((liveJobsRaw ?? []) as Array<{ campaign_id: string | null }>)
+    .map((j) => j.campaign_id)
+    .filter((id): id is string => !!id);
+  if (!campaignIds.length) return 0;
+
+  let q = admin
+    .from("ad_campaigns")
+    .select("id")
+    .eq("workspace_id", args.workspaceId)
+    .in("id", campaignIds)
+    .eq("is_exploit", true);
+  if (args.productId) q = q.eq("product_id", args.productId);
+  const { data } = await q;
+  return (data ?? []).length;
+}
+
+// ── Active-winners-for-exploit resolver (Phase 2 of the split spec) ──────────
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 2 — resolve the non-exhausted
+ * crowned winners for THIS product, each stamped with the source ad-grain
+ * meta_ad_id + a lifetime CPA (spend/purchases summed from `meta_insights_daily`)
+ * used to sort BEST-CAC-FIRST. The pure plan-computer consumes this list to
+ * allocate `EXPLOIT_SLOT_COUNT` slots 1-per-winner round-robin.
+ *
+ * A crown-marker whose adset has zero lifetime purchases (attribution not yet
+ * recovered) OR whose winning_meta_ad_id is null (never resolved) is DROPPED —
+ * an exploit slot needs a source_meta_ad_id `amplifyWinner` can clone. Returns
+ * an empty array when the product has no active winners (pre-crown OR every
+ * winner already exhausted ⇒ `listActiveWinnersForProduct` returns []).
+ */
+export async function resolveActiveWinnersForExploit(
+  admin: Admin,
+  args: { workspaceId: string; metaAdAccountId: string; productId: string; nowMs?: number },
+): Promise<Array<{ testMetaAdsetId: string; sourceMetaAdId: string; cpaCents: number }>> {
+  const rows = await listActiveWinnersForProduct(admin, args);
+  if (!rows.length) return [];
+  const adsetIds = Array.from(new Set(rows.map((r) => r.testMetaAdsetId)));
+  const nowMs = args.nowMs ?? Date.now();
+  const lookbackIso = new Date(nowMs - 180 * 24 * 3600_000).toISOString().slice(0, 10);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents, purchases")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_account_id", args.metaAdAccountId)
+    .eq("level", "adset")
+    .in("meta_object_id", adsetIds)
+    .gte("snapshot_date", lookbackIso);
+  const life = new Map<string, { spend: number; purch: number }>();
+  for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
+    const k = String(r.meta_object_id);
+    const cur = life.get(k) ?? { spend: 0, purch: 0 };
+    cur.spend += Number(r.spend_cents ?? 0);
+    cur.purch += Number(r.purchases ?? 0);
+    life.set(k, cur);
+  }
+  const resolved: Array<{ testMetaAdsetId: string; sourceMetaAdId: string; cpaCents: number }> = [];
+  for (const r of rows) {
+    if (!r.winningMetaAdId) continue;
+    const l = life.get(r.testMetaAdsetId);
+    if (!l || l.purch <= 0) continue;
+    resolved.push({
+      testMetaAdsetId: r.testMetaAdsetId,
+      sourceMetaAdId: r.winningMetaAdId,
+      cpaCents: Math.round(l.spend / l.purch),
+    });
+  }
+  resolved.sort((a, b) => a.cpaCents - b.cpaCents);
+  return resolved;
+}
+
+// ── Exploit hit-crediting (Phase 3 of the explore/exploit split) ─────────────
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 3 — attribute each live/just-
+ * resolved EXPLOIT-origin test's `tierForTest` verdict back to its source winner.
+ *
+ * For every `ad_campaigns` row with `is_exploit=true`, a non-null
+ * `source_crowned_adset_id`, AND `exploit_hit_credited_at IS NULL` (uncredited),
+ * resolve the row's live Meta adset (via `ad_publish_jobs.meta_adset_id`), sum
+ * lifetime spend/purchases/atc from `meta_insights_daily`, compute `tierForTest`
+ * against the pass's active thresholds, and — for a `promising` or `crown` verdict —
+ * call [[crowned-winners]] `recordExploitHit(sourceCrownedAdsetId)` (bumps
+ * lifetime `exploit_hits`, resets `exploit_spawned` strike counter to 0, clears
+ * `exploit_exhausted` + `exploit_exhausted_at`).
+ *
+ * The write is a compare-and-set on `exploit_hit_credited_at IS NULL` so exactly
+ * one row transitions per (clone, verdict); a re-run reads zero rows and skips
+ * the SDK call entirely — the same hit is never credited twice across passes.
+ * A `dud`/`testing` verdict contributes no reset — the clone's spawn already
+ * counted a strike in Phase 2's `incrementExploitSpawned`, and Phase 1's
+ * `EXPLOIT_EXHAUST_STRIKES=4` predicate does the exhausting inside the SDK.
+ *
+ * Returns `{ credited, skipped }` — `credited` = number of hits successfully
+ * attributed this pass; `skipped` = uncredited clones whose Meta adset couldn't
+ * be resolved (no `ad_publish_jobs` row with a stamped `meta_adset_id` yet).
+ */
+export async function creditExploitHits(
+  admin: Admin,
+  args: {
+    workspaceId: string;
+    metaAdAccountId: string;
+    productId: string | null;
+    thresholds: TestThresholds;
+    nowMs: number;
+  },
+): Promise<{
+  credited: number;
+  skipped: number;
+  hits: Array<{
+    adCampaignId: string;
+    sourceCrownedAdsetId: string;
+    metaAdsetId: string;
+    tier: "crown" | "promising";
+    spendCents: number;
+    purchases: number;
+    addToCart: number;
+  }>;
+}> {
+  let q = admin
+    .from("ad_campaigns")
+    .select("id, source_crowned_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("is_exploit", true)
+    .is("exploit_hit_credited_at", null)
+    .not("source_crowned_adset_id", "is", null);
+  if (args.productId) q = q.eq("product_id", args.productId);
+  const { data: exploitRows } = await q;
+  const rows = (exploitRows ?? []) as Array<{ id: string; source_crowned_adset_id: string | null }>;
+  if (!rows.length) return { credited: 0, skipped: 0, hits: [] };
+
+  // Map each ad_campaign to its live Meta adset via ad_publish_jobs — the
+  // publisher stamps meta_adset_id after minting the per-test adset, so a row
+  // without a stamped meta_adset_id yet (mint in flight) is skipped this pass
+  // and picked up on the next.
+  const campaignIds = rows.map((r) => r.id);
+  const { data: pubJobs } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id, meta_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .in("campaign_id", campaignIds)
+    .not("meta_adset_id", "is", null);
+  const adsetByCampaign = new Map<string, string>();
+  for (const j of (pubJobs ?? []) as Array<{ campaign_id: string | null; meta_adset_id: string | null }>) {
+    if (!j.campaign_id || !j.meta_adset_id) continue;
+    if (!adsetByCampaign.has(j.campaign_id)) adsetByCampaign.set(j.campaign_id, j.meta_adset_id);
+  }
+  const adsetIds = Array.from(new Set(Array.from(adsetByCampaign.values())));
+  if (!adsetIds.length) return { credited: 0, skipped: rows.length, hits: [] };
+
+  const lookbackIso = new Date(args.nowMs - 180 * 24 * 3600_000).toISOString().slice(0, 10);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents, purchases, add_to_cart")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_account_id", args.metaAdAccountId)
+    .eq("level", "adset")
+    .in("meta_object_id", adsetIds)
+    .gte("snapshot_date", lookbackIso);
+  const life = new Map<string, { spend: number; purch: number; atc: number }>();
+  for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
+    const k = String(r.meta_object_id);
+    const cur = life.get(k) ?? { spend: 0, purch: 0, atc: 0 };
+    cur.spend += Number(r.spend_cents ?? 0);
+    cur.purch += Number(r.purchases ?? 0);
+    cur.atc += Number(r.add_to_cart ?? 0);
+    life.set(k, cur);
+  }
+
+  const hits: Array<{
+    adCampaignId: string;
+    sourceCrownedAdsetId: string;
+    metaAdsetId: string;
+    tier: "crown" | "promising";
+    spendCents: number;
+    purchases: number;
+    addToCart: number;
+  }> = [];
+  let skipped = 0;
+  for (const row of rows) {
+    const adsetId = adsetByCampaign.get(row.id);
+    if (!adsetId || !row.source_crowned_adset_id) {
+      skipped += 1;
+      continue;
+    }
+    const l = life.get(adsetId) ?? { spend: 0, purch: 0, atc: 0 };
+    const tier = tierForTest(
+      { spendCents: l.spend, purchases: l.purch, addToCart: l.atc },
+      args.thresholds,
+    );
+    if (tier !== "crown" && tier !== "promising") continue;
+    // Compare-and-set gate on exploit_hit_credited_at — exactly one row transitions
+    // per (clone, verdict) so a re-run cannot double-credit. .select("id") is what
+    // lets us count the transition and skip the SDK call when a racing pass beat us.
+    const nowIso = new Date(args.nowMs).toISOString();
+    const { data: updated } = await admin
+      .from("ad_campaigns")
+      .update({ exploit_hit_credited_at: nowIso })
+      .eq("id", row.id)
+      .eq("workspace_id", args.workspaceId)
+      .eq("is_exploit", true)
+      .is("exploit_hit_credited_at", null)
+      .select("id");
+    if (!updated || (updated as unknown[]).length !== 1) continue;
+    try {
+      await recordExploitHit(admin, {
+        workspaceId: args.workspaceId,
+        testMetaAdsetId: row.source_crowned_adset_id,
+      });
+    } catch (err) {
+      console.warn("recordExploitHit failed", {
+        workspaceId: args.workspaceId,
+        sourceCrownedAdsetId: row.source_crowned_adset_id,
+        err: errText(err),
+      });
+      continue;
+    }
+    hits.push({
+      adCampaignId: row.id,
+      sourceCrownedAdsetId: row.source_crowned_adset_id,
+      metaAdsetId: adsetId,
+      tier,
+      spendCents: l.spend,
+      purchases: l.purch,
+      addToCart: l.atc,
+    });
+  }
+  return { credited: hits.length, skipped, hits };
 }
 
 // ── Runner orchestrator ───────────────────────────────────────────────────────
@@ -1568,6 +2012,28 @@ export async function runMediaBuyerLoop(
     productId: cohortProductId,
   });
 
+  // media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split reads:
+  //   • currentLiveExploitCount — how many of currentTestCohortSize are exploit clones
+  //     (ad_campaigns.is_exploit=true), so the plan splits the live cohort into explore
+  //     vs exploit counts and never double-counts an exploit slot as explore.
+  //   • activeWinnersForExploit — non-exhausted crown-marker rows for THIS product,
+  //     each stamped with a lifetime CPA + sorted best-CAC-first, so the plan can
+  //     allocate the 2 exploit slots 1-per-winner round-robin (1 winner ⇒ 2 slots;
+  //     2+ winners ⇒ 1 each on the top 2). Empty ⇒ pre-crown OR every winner exhausted
+  //     ⇒ explore target reverts to the full cohort target and 0 exploit slots spawn.
+  const currentLiveExploitCount = await readCurrentLiveExploitCount(admin, {
+    workspaceId: opts.workspaceId,
+    productId: cohortProductId,
+  });
+  const activeWinnersForExploit = cohortProductId
+    ? await resolveActiveWinnersForExploit(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        productId: cohortProductId,
+        nowMs,
+      })
+    : [];
+
   // ── Compute the plan ──────────────────────────────────────────────────────
   const plan = computeMediaBuyerPlan({
     policy,
@@ -1579,6 +2045,8 @@ export async function runMediaBuyerLoop(
     fatigueByAdsetId,
     readyToTest,
     currentTestCohortSize,
+    currentLiveExploitCount,
+    activeWinnersForExploit,
     cohortTargetCount: opts.cohortTargetCount,
     liveConceptTags,
   });
@@ -1618,6 +2086,8 @@ export async function runMediaBuyerLoop(
         kill_count: plan.kill.length,
         replenish_count: plan.replenish.length,
         fatigue_replenish_count: plan.fatigueReplenish.length,
+        exploit_spawn_count: plan.exploitSpawn.length,
+        split_info: plan.splitInfo,
         amplified_ad_campaign_ids: [],
         cohort_configured: plan.cohortConfigured,
         current_test_cohort_size: plan.currentTestCohortSize,
@@ -1921,6 +2391,103 @@ export async function runMediaBuyerLoop(
     writes.amplifiedAdCampaignIds.push(...result.new_ad_campaign_ids);
   }
 
+  // media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware exploit spawn.
+  // For each allocated exploit slot, call amplifyWinner with `sourceCrownedAdsetId`
+  // so every inserted ad_campaigns row is stamped `is_exploit=true` +
+  // `source_crowned_adset_id=<crown adset>`. After a successful spawn (variants_spawned>0)
+  // we `incrementExploitSpawned(sourceCrownedAdsetId, variants_spawned)` — the strike
+  // counter that Phase 3's hit-crediting will zero on a promising|crown verdict.
+  // The lineage tag lets Bianca's NEXT pass split the live cohort into
+  // explore vs exploit counts so the deficit math is stable at 2+2.
+  for (const a of plan.exploitSpawn) {
+    // A historic crowned winner isn't in this pass's winners[] — synthesize a
+    // minimal DetectedWinner from the crown-marker's source_meta_ad_id.
+    const source = await resolveWinnerSource(admin, opts.workspaceId, a.sourceCrownedAdsetId);
+    if (!source.campaign) {
+      // Source campaign unresolvable — cannot clone. Log the miss on a director_activity
+      // row and skip (the strike counter does NOT advance — nothing was spawned).
+      const r0 = await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: "media_buyer_exploit_spawn_skipped",
+        specSlug: null,
+        reason: `Exploit spawn skipped: could not resolve source ad_campaign for crowned adset ${a.sourceCrownedAdsetId} (ad ${a.sourceMetaAdId}).`,
+        metadata: {
+          source_meta_ad_id: a.sourceMetaAdId,
+          source_crowned_adset_id: a.sourceCrownedAdsetId,
+          rank: a.rank,
+          variant_count_requested: a.variantCount,
+          policy_version_id: a.policyVersionId,
+          autonomous: true,
+        },
+      });
+      if (r0.recorded) writes.directorActivityRows += 1;
+      continue;
+    }
+    const winner: DetectedWinner = {
+      workspaceId: opts.workspaceId,
+      metaAdId: a.sourceMetaAdId,
+      variant: "meta_reported",
+      spendCents: 0,
+      onsiteCents: 0,
+      haloAdjustedRevenueCents: 0,
+      roas: 0,
+      sessions: 0,
+      windowStart: new Date(nowMs).toISOString().slice(0, 10),
+      windowEnd: new Date(nowMs).toISOString().slice(0, 10),
+      campaign: source.campaign,
+      angle: source.angle,
+    };
+    const result = await amplifyWinner(admin, {
+      workspaceId: opts.workspaceId,
+      winner,
+      n: a.variantCount,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      specSlug: "media-buyer-explore-exploit-split-on-crown",
+      sourceCrownedAdsetId: a.sourceCrownedAdsetId,
+      nowMs,
+    });
+    // Advance the strike counter by the ACTUAL number of variants spawned (not the
+    // requested count — a per-day cap can cut a request short and we count strikes on
+    // real clones only). A hit resets it in Phase 3.
+    if (result.variants_spawned > 0) {
+      try {
+        await incrementExploitSpawned(admin, {
+          workspaceId: opts.workspaceId,
+          testMetaAdsetId: a.sourceCrownedAdsetId,
+          by: result.variants_spawned,
+        });
+      } catch (err) {
+        console.warn("incrementExploitSpawned failed", {
+          workspaceId: opts.workspaceId,
+          testMetaAdsetId: a.sourceCrownedAdsetId,
+          err: errText(err),
+        });
+      }
+    }
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_exploit_spawned",
+      specSlug: null,
+      reason: a.rationale,
+      metadata: {
+        source_meta_ad_id: a.sourceMetaAdId,
+        source_crowned_adset_id: a.sourceCrownedAdsetId,
+        rank: a.rank,
+        policy_version_id: a.policyVersionId,
+        variant_count_requested: a.variantCount,
+        variants_spawned: result.variants_spawned,
+        new_ad_campaign_ids: result.new_ad_campaign_ids,
+        amplify_reason: result.reason ?? null,
+        day_count_before: result.day_count_before,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+    writes.amplifiedAdCampaignIds.push(...result.new_ad_campaign_ids);
+  }
+
   for (const a of plan.replenish) {
     const jobInsert = await enqueueReplenishPublish(admin, opts.workspaceId, cohort, a);
     if (jobInsert.inserted) {
@@ -2026,6 +2593,62 @@ export async function runMediaBuyerLoop(
     if (r.recorded) writes.directorActivityRows += 1;
   }
 
+  // media-buyer-explore-exploit-split-on-crown Phase 3 — feedback loop. Attribute
+  // each live/just-resolved EXPLOIT-origin test's tierForTest verdict back to
+  // its source winner: a promising|crown clone ⇒ recordExploitHit (resets strikes
+  // + clears exhausted); a dud/testing outcome contributes no reset — the clone's
+  // spawn already counted a strike in Phase 2. The compare-and-set gate inside
+  // creditExploitHits (`.is('exploit_hit_credited_at', null).select('id')`) means
+  // a re-run cannot double-credit the same clone. One media_buyer_exploit_hit_credited
+  // audit row per hit citing {source_meta_ad_id (via crown-marker), source_crowned_adset_id,
+  // ad_campaign_id, meta_adset_id, tier, spendCents, purchases, addToCart}.
+  //
+  // Runs on every armed pass regardless of whether the current pass spawned exploit
+  // slots — a hit on a PRIOR pass's clone must credit even when today's plan is idle.
+  // Requires an active policy (thresholds come from it); a no-active-policy pass took
+  // the early-return dormant branch above and never reaches here.
+  const thresholds: TestThresholds = {
+    crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000,
+    crownMinSpendCents: policy.crown_min_spend_cents ?? 45000,
+    crownMinPurchases: policy.crown_min_purchases ?? 8,
+    holdBandMaxCpaCents: policy.hold_band_max_cpa_cents ?? 22000,
+    maxTestSpendCents: policy.max_test_spend_cents ?? 120000,
+    earlyTrimMinSpendCents: policy.early_trim_min_spend_cents ?? 30000,
+    slowKillMinSpendCents: policy.slow_kill_min_spend_cents ?? 60000,
+    slowKillMaxCpaCents: policy.slow_kill_max_cpa_cents ?? 30000,
+  };
+  const exploitHitResult = await creditExploitHits(admin, {
+    workspaceId: opts.workspaceId,
+    metaAdAccountId: opts.metaAdAccountId,
+    productId: cohortProductId,
+    thresholds,
+    nowMs,
+  });
+  for (const h of exploitHitResult.hits) {
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_exploit_hit_credited",
+      specSlug: null,
+      reason:
+        `Exploit hit credited: clone ad_campaign ${h.adCampaignId} on adset ${h.metaAdsetId} reached tier=${h.tier} ` +
+        `(spend $${(h.spendCents / 100).toFixed(2)}, purchases ${h.purchases}, add_to_cart ${h.addToCart}); ` +
+        `recordExploitHit on source crowned adset ${h.sourceCrownedAdsetId} — strikes reset, exploit_exhausted cleared.`,
+      metadata: {
+        ad_campaign_id: h.adCampaignId,
+        source_crowned_adset_id: h.sourceCrownedAdsetId,
+        meta_adset_id: h.metaAdsetId,
+        tier: h.tier,
+        spend_cents: h.spendCents,
+        purchases: h.purchases,
+        add_to_cart: h.addToCart,
+        policy_version_id: plan.policyVersionId,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+  }
+
   // Pass heartbeat — one summary row per cadence pass, always emitted.
   const heartbeat = await recordDirectorActivity(admin, {
     workspaceId: opts.workspaceId,
@@ -2039,6 +2662,10 @@ export async function runMediaBuyerLoop(
       kill_count: plan.kill.length,
       replenish_count: plan.replenish.length,
       fatigue_replenish_count: plan.fatigueReplenish.length,
+      exploit_spawn_count: plan.exploitSpawn.length,
+      exploit_hit_credited_count: exploitHitResult.credited,
+      exploit_hit_skipped_count: exploitHitResult.skipped,
+      split_info: plan.splitInfo,
       amplified_ad_campaign_ids: writes.amplifiedAdCampaignIds,
       cohort_configured: plan.cohortConfigured,
       current_test_cohort_size: plan.currentTestCohortSize,
@@ -2148,6 +2775,8 @@ export async function runMediaBuyerLoopForAccount(
             kill: [],
             replenish: [],
             fatigueReplenish: [],
+            exploitSpawn: [],
+            splitInfo: emptySplitInfo(opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET),
             replenishDiagnostic: null,
             deferred: [],
             summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,

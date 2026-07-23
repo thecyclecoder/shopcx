@@ -175,8 +175,12 @@ async function dominantChildAdId(
 }
 
 /** Resolve a winning adset's dominant child ad + its source ad_campaign/angle (for the promote target +
- *  best-effort amplify). Campaign/angle are nullable — promote only needs the adset. */
-async function resolveWinnerSource(
+ *  best-effort amplify). Campaign/angle are nullable — promote only needs the adset.
+ *  Exported so the media-buyer runner can synthesize a `DetectedWinner` for a HISTORIC crown-marker
+ *  row that isn't in this pass's winners[] (Phase 2 of the explore/exploit-on-crown spec drives
+ *  amplifyWinner from `listActiveWinnersForProduct`, not from the current pass's winner detection).
+ *  See src/lib/media-buyer/agent.ts `resolveExploitDetectedWinner`. */
+export async function resolveWinnerSource(
   admin: Admin,
   workspaceId: string,
   metaAdsetId: string,
