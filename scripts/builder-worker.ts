@@ -92,6 +92,30 @@ const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN
 // heartbeat every tick (well inside the 5-min worker liveness window) and a claimable build starts at
 // most ~30s later — negligible against multi-minute builds. Takes effect on the next box restart.
 const POLL_MS = 30000;
+// box-listen-notify-instant-claims — interruptible poll wait. The loop normally sleeps POLL_MS between
+// ticks; the agent_job_queued LISTEN handler (wired at startup) calls signalPollWake() to cut the wait
+// short so a newly-queued job is claimed within milliseconds instead of up to POLL_MS later. If no wake
+// fires, the timer elapses as before — POLL_MS is now the BACKSTOP (+ the liveness heartbeat), and the
+// LISTEN is the primary claim trigger. Coalesces: wakes fired before the loop re-arms collapse into the
+// next single pass (the claim logic is already idempotent + atomic via claim_agent_job SKIP LOCKED).
+let pollWakeResolve: (() => void) | null = null;
+function signalPollWake(): void {
+  const w = pollWakeResolve;
+  pollWakeResolve = null;
+  if (w) w();
+}
+function sleepOrWake(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      pollWakeResolve = null;
+      resolve();
+    }, ms);
+    pollWakeResolve = () => {
+      clearTimeout(t);
+      resolve();
+    };
+  });
+}
 // build-gate-durable-review-signal: when the claim-time build gate HOLDS a build (requeue — e.g. a blocker
 // not yet shipped, or Vale hasn't passed the spec), it re-queues with `claimed_at` stamped this far into the
 // FUTURE so the claim RPC (which now skips queued jobs with a future claimed_at) backs off instead of
@@ -26490,6 +26514,27 @@ async function main() {
     }
   })();
 
+  // box-listen-notify-instant-claims — event-driven claims. Hold a session-mode (:5432) LISTEN on
+  // `agent_job_queued`; each notification wakes the poll loop NOW (signalPollWake) so a newly-queued
+  // job is claimed within milliseconds instead of up to POLL_MS later. Fire-and-forget, fail-open: a
+  // LISTEN failure (no session creds / transient) leaves the poll loop as the sole claim path — the
+  // same loop is also the backstop for any NOTIFY missed while the box was disconnected.
+  void (async () => {
+    try {
+      const { startAgentJobQueuedListener, isAgentJobQueuedListenerActive } = await import("../src/lib/pg-pool");
+      const ok = await startAgentJobQueuedListener((_kind) => {
+        signalPollWake();
+      });
+      if (ok && isAgentJobQueuedListenerActive()) {
+        console.log(`[agent-job-queued-listener] active (session pooler :5432) — claims are event-driven; poll every ${POLL_MS}ms is the backstop`);
+      } else {
+        console.log(`[agent-job-queued-listener] inactive (no session creds / LISTEN refused) — poll-only claims (every ${POLL_MS}ms)`);
+      }
+    } catch (e) {
+      console.warn("[agent-job-queued-listener] wiring failed (poll-only claims):", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // Deploy-time node_ancestry re-sync (claim-rpc-kill-switch-enforcement Phase 1): the box
   // worker restarts after a self-update, so recomputing the DB mirror of the canonical node
   // registry here keeps public.claim_agent_job's kill-switch cascade in sync with any newly-added
@@ -27571,7 +27616,9 @@ async function main() {
     } catch (e) {
       console.error("poll error:", e instanceof Error ? e.message : e);
     }
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    // box-listen-notify-instant-claims: interruptible — the agent_job_queued LISTEN cuts this short the
+    // instant a job becomes claimable; otherwise it elapses as the POLL_MS backstop (+ heartbeat cadence).
+    await sleepOrWake(POLL_MS);
   }
 }
 

@@ -20,7 +20,7 @@
  *
  * Brain: docs/brain/libraries/pg-pool.md
  */
-import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
+import { Client, Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 
 const PROJECT_REF = "urjbhjbygyxffrfkarqn";
 const DEFAULT_HOST = "aws-1-us-east-1.pooler.supabase.com";
@@ -61,6 +61,19 @@ function poolerConnectionString(): string | null {
   if (!password) return null;
   const host = process.env.SUPABASE_DB_HOST || DEFAULT_HOST;
   return `postgres://postgres.${PROJECT_REF}:${encodeURIComponent(password)}@${host}:6543/postgres`;
+}
+
+/**
+ * Session-mode (`:5432`) connection string for a LISTEN connection. The transaction pooler (`:6543`)
+ * multiplexes connections and does NOT deliver LISTEN/NOTIFY — verified against this project (a LISTEN
+ * on `:6543` never receives; the same test on `:5432` does). Prefer an explicit `SUPABASE_DB_SESSION_URL`;
+ * otherwise derive from the pooler string by swapping the port. Returns `null` when no creds are available.
+ */
+function sessionConnectionString(): string | null {
+  if (process.env.SUPABASE_DB_SESSION_URL) return process.env.SUPABASE_DB_SESSION_URL;
+  const base = poolerConnectionString();
+  if (!base) return null;
+  return base.replace(":6543/", ":5432/");
 }
 
 function ensureShutdownHook(): void {
@@ -129,8 +142,10 @@ export async function pgQuery<T extends QueryResultRow>(text: string, params?: u
   }
 }
 
-/** Close the pool + release its slots. Idempotent. Called on worker shutdown. */
+/** Close the pool + release its slots. Idempotent. Called on worker shutdown. Also tears down the
+ *  dedicated session-mode LISTEN connection so a graceful exit leaves no leaked backend. */
 export async function closePgPool(): Promise<void> {
+  await stopAgentJobQueuedListener();
   const p = pool;
   if (!p) return;
   pool = null;
@@ -517,4 +532,92 @@ export async function stopSpecChangedListener(): Promise<void> {
  *  TTL raise — a raised TTL only fires when event-driven eviction is actually running. */
 export function isSpecChangedListenerActive(): boolean {
   return listenClient !== null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// agent_job_queued — event-driven box claims (box-listen-notify-instant-claims).
+//
+// A dedicated SESSION-MODE (`:5432`) LISTEN connection so the box worker can claim a job the instant it
+// becomes claimable, instead of waiting up to a full poll tick. The `agent_job_queued_notify_trg` trigger
+// (migration 20261201120000) fires `pg_notify('agent_job_queued', kind)` on a new/requeued queued row.
+//
+// This deliberately does NOT reuse the shared transaction pool (`:6543`): that pooler does not deliver
+// LISTEN/NOTIFY. It opens its own raw `pg.Client` on the session pooler. Fail-open by construction — if
+// the session connection is unavailable or LISTEN throws, `start…` returns `false` and the caller keeps
+// its existing poll loop (which is also the backstop for any NOTIFY missed while disconnected).
+let agentJobListenClient: Client | null = null;
+let agentJobListenStarting = false;
+
+/**
+ * Hold ONE dedicated session-mode connection running `LISTEN agent_job_queued` and invoke `handler(kind)`
+ * for each notification (payload = the job `kind`, a wake signal). Idempotent: a second call while a
+ * listener is already active returns `true` without reopening.
+ *
+ * Returns `true` when the LISTEN is active, `false` when no session creds are available OR the connection
+ * refused LISTEN OR any setup error — the caller MUST treat `false` as "no event-driven claims, keep the
+ * poll loop." Errors on the client drop the listener and let the poll safety-net take over; the client is
+ * ended (never pooled — it's a raw dedicated connection).
+ */
+export async function startAgentJobQueuedListener(handler: (kind: string) => void): Promise<boolean> {
+  if (agentJobListenClient) return true;
+  if (agentJobListenStarting) return true;
+  const connectionString = sessionConnectionString();
+  if (!connectionString) return false;
+  agentJobListenStarting = true;
+  try {
+    const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
+    client.on("error", (err) => {
+      console.warn("[pg-pool] agent_job_queued LISTEN client error (dropping listener):", err.message);
+      const c = agentJobListenClient;
+      agentJobListenClient = null;
+      if (c) {
+        try {
+          void c.end();
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+    client.on("notification", (msg) => {
+      if (msg.channel !== "agent_job_queued") return;
+      try {
+        handler(msg.payload ?? "");
+      } catch (e) {
+        console.warn("[pg-pool] agent_job_queued handler threw (continuing):", e instanceof Error ? e.message : e);
+      }
+    });
+    await client.connect();
+    await client.query("LISTEN agent_job_queued");
+    agentJobListenClient = client;
+    ensureShutdownHook();
+    return true;
+  } catch (e) {
+    console.warn("[pg-pool] startAgentJobQueuedListener failed (keeping poll loop):", e instanceof Error ? e.message : e);
+    agentJobListenClient = null;
+    return false;
+  } finally {
+    agentJobListenStarting = false;
+  }
+}
+
+/** Graceful shutdown: `UNLISTEN` + end the dedicated session connection. Idempotent. */
+export async function stopAgentJobQueuedListener(): Promise<void> {
+  const c = agentJobListenClient;
+  if (!c) return;
+  agentJobListenClient = null;
+  try {
+    await c.query("UNLISTEN agent_job_queued");
+  } catch {
+    /* best-effort */
+  }
+  try {
+    await c.end();
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** True when the dedicated agent_job_queued LISTEN connection is active (event-driven claims live). */
+export function isAgentJobQueuedListenerActive(): boolean {
+  return agentJobListenClient !== null;
 }
