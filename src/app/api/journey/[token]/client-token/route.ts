@@ -62,9 +62,14 @@ export async function GET(
     }
     return NextResponse.json({ ok: true, client_token: result.clientToken });
   } catch (err) {
-    return NextResponse.json(
-      { error: "braintree_error", message: errText(err) },
-      { status: 500 },
+    // NEVER return the raw errText body to the client — errText expands
+    // PostgREST-shaped diagnostics (code/details/hint) and would leak internal
+    // table / constraint / gateway shape on this PUBLIC tokenized add-payment
+    // endpoint. Log the full diagnostic server-side, return a generic code —
+    // mirrors the sibling checkout/client-token handler.
+    console.error(
+      `[journey/client-token] clientToken.generate threw for workspace ${session.workspace_id}: ${errText(err)}`,
     );
+    return NextResponse.json({ error: "client_token_failed" }, { status: 500 });
   }
 }
