@@ -20,7 +20,8 @@ The legacy call sites still resolve via a thin shim at `src/lib/portal/helpers/e
 
 ## Exports
 
-- **`priceSubscription(workspaceId, sub)`** → `{ priced: Map<string, PricedLineLite>, pricing: ContractPricing }` — the core resolver. Returns per-line priced pairs keyed by BOTH line_id AND variant_id, plus the order-level pricing summary. Throws `PriceInvariantError` on any undefined/NaN cents on a product line.
+- **`priceSubscription(workspaceId, sub)`** → `{ priced: Map<string, PricedLineLite>, pricing: ContractPricing }` — the core resolver. Returns per-line priced pairs keyed by BOTH line_id AND variant_id, plus the order-level pricing summary. Throws `PriceInvariantError` on any undefined/NaN cents on a product line. **Pass `sub.comp`** — a comp (free) sub must price fully to $0; see `resolveProtectionCents`.
+- **`resolveProtectionCents(sub)`** → `number` — pure. Shipping-protection cents for the summary/projection: **`comp` ⇒ 0** (a comp renewal bills $0 by design, so the portal must not show a $4.95 protection line + total the customer is never charged), else the added amount (0 when not added). Regression: `price.test.ts`. Origin: CEO's owner-comp sub showed protection $4.95 + total $4.95 in the portal.
 - **`priceSubItemsForDisplay(workspaceId, sub)`** → `Array<Record<string, unknown>>` — dashboard-widget helper that fills `price_cents` + `base_price_cents` on raw `subscriptions.items` for internal subs (Appstle items pass through, they already have baked `price_cents`).
 - **`enrichContractPricing(workspaceId, sub, contract)`** → `ContractPricing` — API-handler wrapper that writes base/charged onto `contract.lines` (internal subs only). Returns the order-level pricing summary.
 - **`PriceInvariantError`** — thrown when a subscription line's resolved money is not a finite integer. Message includes `subscriptionId` + `lineId`.
