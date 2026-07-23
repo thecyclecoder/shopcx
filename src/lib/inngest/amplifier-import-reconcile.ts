@@ -155,6 +155,83 @@ async function reconcileOne(
   return "failed";
 }
 
+/**
+ * Phase 3 — CEO-inbox escalation on retry exhaustion. Called once per tick
+ * AFTER the candidate loop so a row that just tipped over the cap in this
+ * same tick is also caught. Idempotent per order — a matching un-dismissed
+ * `dashboard_notifications` row with `type='fulfillment_alert' AND
+ * metadata @> {order_id: X}` short-circuits the second insert. Mirrors the
+ * refund-drift dedupe shape (`refund-settlement-reconcile.openDriftNotification`).
+ *
+ * Selection: `amplifier_order_id IS NULL AND amplifier_import_attempts >= RETRY_CAP`
+ * — orders that exhausted retries but never made it in. A fraud-held order is
+ * also skipped here (the fraud-dismiss handler owns that surface); the sweep
+ * candidate loop already skips fraud-held rows, but a legacy row from before
+ * this cron shipped can carry both a fraud hold and exhausted attempts.
+ */
+async function escalateExhaustedOrders(admin: AdminClient): Promise<{ scanned: number; opened: number; already_open: number; skipped_fraud: number }> {
+  const { data: rows } = await admin
+    .from("orders")
+    .select("id, workspace_id, order_number, amplifier_last_error, amplifier_import_attempts")
+    .is("amplifier_order_id", null)
+    .gte("amplifier_import_attempts", RETRY_CAP)
+    .order("created_at", { ascending: true })
+    .limit(BATCH_LIMIT);
+
+  let scanned = 0;
+  let opened = 0;
+  let alreadyOpen = 0;
+  let skippedFraud = 0;
+  for (const row of (rows || []) as Array<{
+    id: string;
+    workspace_id: string;
+    order_number: string | null;
+    amplifier_last_error: string | null;
+    amplifier_import_attempts: number | null;
+  }>) {
+    scanned++;
+    if (await isFraudHeld(admin, row.workspace_id, row.id)) { skippedFraud++; continue; }
+
+    // Dedupe: an un-dismissed fulfillment_alert card for this order already
+    // exists ⇒ short-circuit. Same guard shape as openDriftNotification in
+    // refund-settlement-reconcile — the metadata @> {order_id: X} match is
+    // the durable idempotency key across ticks.
+    const { data: existing } = await admin
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", row.workspace_id)
+      .eq("type", "fulfillment_alert")
+      .eq("dismissed", false)
+      .contains("metadata", { order_id: row.id })
+      .limit(1)
+      .maybeSingle();
+    if (existing) { alreadyOpen++; continue; }
+
+    const orderLabel = row.order_number || row.id.slice(0, 8);
+    const attempts = row.amplifier_import_attempts ?? RETRY_CAP;
+    const { error } = await admin.from("dashboard_notifications").insert({
+      workspace_id: row.workspace_id,
+      type: "fulfillment_alert",
+      title: `${orderLabel} — Amplifier import failed after ${attempts} retries`,
+      body: `Paid order ${orderLabel} could not be handed off to Amplifier after ${attempts} attempts. Last error: ${row.amplifier_last_error || "unknown"}. Investigate before the customer notices (unknown SKU, un-fulfillable address, or a hard Amplifier reject).`,
+      link: `/dashboard/orders/${row.id}`,
+      metadata: {
+        kind: "amplifier_import_exhausted",
+        order_id: row.id,
+        order_number: row.order_number,
+        attempts,
+        last_error: row.amplifier_last_error,
+      },
+    });
+    if (error) {
+      console.warn(`[amplifier-import-reconcile] fulfillment_alert insert failed for order ${row.id}: ${error.message}`);
+    } else {
+      opened++;
+    }
+  }
+  return { scanned, opened, already_open: alreadyOpen, skipped_fraud: skippedFraud };
+}
+
 export const amplifierImportReconcileCron = inngest.createFunction(
   {
     id: "amplifier-import-reconcile",
@@ -216,15 +293,24 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       };
     });
 
+    // Phase 3 — CEO-inbox escalation on retry-cap exhaustion. Separate step so
+    // an escalation failure does not break the sweep result above, and so an
+    // Inngest retry re-runs escalation independently (the dedupe guard keeps
+    // it idempotent).
+    const escalation = await step.run("escalate-exhausted-orders", async () => {
+      const admin = createAdminClient();
+      return escalateExhaustedOrders(admin);
+    });
+
     await step.run("emit-heartbeat", async () => {
       await emitCronHeartbeat("amplifier-import-reconcile", {
         ok: true,
-        produced: result,
-        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront} skipped`,
+        produced: { ...result, escalation },
+        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup`,
         durationMs: Date.now() - startedAt,
       });
     });
 
-    return result;
+    return { ...result, escalation };
   },
 );

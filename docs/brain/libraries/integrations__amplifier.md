@@ -124,7 +124,10 @@ curly quotes, accents) before sending.
   past a 10-minute grace under the retry cap of 5 and re-submits them
   idempotently (compare-and-set on `.is('amplifier_order_id', null)` guards
   against a live checkout retry). A row that exhausts the cap becomes the
-  Phase 3 CEO-inbox escalation.
+  Phase 3 CEO-inbox escalation ([[../inngest/amplifier-import-reconcile]]
+  `escalateExhaustedOrders`) — a `dashboard_notifications` row of
+  `type='fulfillment_alert'` per order, deduped on
+  `metadata @> {order_id: X}` so a re-tick can't spam a second card.
 
 ---
 
