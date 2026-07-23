@@ -1,0 +1,1 @@
+- **Build lane requeues expired OAuth 401 as transient instead of terminal fail** · verified 2026-07-23 · → [[../recipes/build-box-setup]]
