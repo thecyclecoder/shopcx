@@ -451,6 +451,58 @@ export async function claimRegenSpendSlot(
 }
 
 /**
+ * Loyalty-refund coupon reconciliation guard (spec: loyalty-refund-no-double-
+ * payout-paused-sub-coupon-guard Phase 2). Closes the SC135320 double-payout
+ * class: a Tier-0 Loyalty Save turn issued `redeem_points` (minting an ACTIVE
+ * LOYALTY-* coupon, ~$15 spendable) AND a separate cash `partial_refund` — two
+ * payout vehicles for one 1,500-pt redemption. A later drifted turn then
+ * applied the dangling LOYALTY-* coupon to the customer's paused sub, so one
+ * redemption paid out twice.
+ *
+ * The safe atomic handler `redeem_points_as_refund` already avoids this (it
+ * writes status='redeemed_as_refund', code REFUND-*, no live coupon). This
+ * guard closes the redeem-then-separately-refund COMBO: whenever a loyalty
+ * cash refund settles for a member on a ticket, any still-active minted
+ * LOYALTY-* redemption for that member from the same ticket window is flipped
+ * to `redeemed_as_refund` so it can never be applied.
+ *
+ * Compare-and-set (mirror of `claimRegenSpendSlot`): the entire idempotency
+ * guarantee sits in the `.eq('status','active')` predicate on the UPDATE
+ * itself. A re-run finds 0 rows still active and is a safe no-op. The ticket
+ * window (`created_at >= ticket.created_at`) narrows the scope so a
+ * partial_refund on an unrelated ticket cannot consume an older LOYALTY-*
+ * coupon the customer legitimately earned in a prior session. Returns the
+ * number of reconciled rows for logging/tests.
+ *
+ * Exported for unit tests.
+ */
+export async function reconcileLoyaltyRefundCoupons(
+  admin: Admin,
+  workspaceId: string,
+  memberId: string,
+  ticketId: string,
+): Promise<number> {
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("created_at")
+    .eq("id", ticketId)
+    .maybeSingle();
+  const since = (ticket as { created_at?: string } | null)?.created_at;
+  if (!since) return 0;
+
+  const { data } = await admin
+    .from("loyalty_redemptions")
+    .update({ status: "redeemed_as_refund", used_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("member_id", memberId)
+    .eq("status", "active")
+    .ilike("discount_code", "LOYALTY-%")
+    .gte("created_at", since)
+    .select("id");
+  return Array.isArray(data) ? data.length : 0;
+}
+
+/**
  * Idempotent-replay recovery for `apply_loyalty_coupon` when
  * `claimRegenSpendSlot` returns false (an earlier regen already ran for
  * THIS code). Looks up the most-recently-inserted `active` redemption
@@ -1787,7 +1839,26 @@ export const directActionHandlers: Record<
       eventProperties: { ticket_id: ctx.ticketId },
       requestKey,
     });
-    if (r.success) await notifySlack(ctx, p, amountDecimal);
+    if (r.success) {
+      await notifySlack(ctx, p, amountDecimal);
+      // Phase-2 reconcile: on the loyalty-tagged combo (Sonnet emitted
+      // [redeem_points, partial_refund] in one turn), the cash refund + a
+      // still-active LOYALTY-* coupon become two payout vehicles for one
+      // redemption (SC135320). Look up the loyalty member and flip any
+      // active LOYALTY-* row minted in this ticket's window to
+      // `redeemed_as_refund`. Bounded by ticket.created_at so a routine
+      // shipping refund can't consume an older legit LOYALTY-* coupon.
+      const { data: loyaltyMember } = await ctx.admin
+        .from("loyalty_members")
+        .select("id")
+        .eq("workspace_id", ctx.workspaceId)
+        .eq("customer_id", ctx.customerId)
+        .maybeSingle();
+      const loyaltyMemberId = (loyaltyMember as { id?: string } | null)?.id;
+      if (loyaltyMemberId) {
+        await reconcileLoyaltyRefundCoupons(ctx.admin, ctx.workspaceId, loyaltyMemberId, ctx.ticketId);
+      }
+    }
 
     // When the refund went directly through Braintree (Shopify's native
     // Braintree refund is broken), record that on the ticket so agents/AI
@@ -1890,6 +1961,12 @@ export const directActionHandlers: Record<
       status: "redeemed_as_refund",
       used_at: new Date().toISOString(),
     });
+
+    // Phase-2 reconcile: if the same session ALSO ran a `redeem_points`
+    // (which mints an ACTIVE LOYALTY-* coupon), flip that stray active row
+    // to `redeemed_as_refund` so the cash refund + coupon combo can never
+    // coexist. Idempotent no-op on the common case (no LOYALTY-* minted).
+    await reconcileLoyaltyRefundCoupons(ctx.admin, ctx.workspaceId, member.id, ctx.ticketId);
 
     const newBalance = Math.max(0, (member.points_balance || 0) - tier.points_cost);
     return {

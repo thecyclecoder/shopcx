@@ -18,6 +18,19 @@ import {
 import { resolveCoupon } from "@/lib/coupons";
 import { applyDiscountWithReplace, removeExistingDiscounts } from "@/lib/appstle-discount";
 
+/**
+ * Coupon eligibility by subscription status — a discount is only ever valid on
+ * an ACTIVE subscription. A paused/cancelled sub must not accept a new coupon:
+ * a discount stored on it silently discounts a future renewal the customer
+ * didn't earn (Cora rule_violation, ticket f9e28d57 double-payout).
+ *
+ * See docs/brain/tables/subscriptions.md — status is lowercase, values in use
+ * are 'active' | 'paused' | 'cancelled'.
+ */
+export function couponApplicableToSubStatus(status: string | null | undefined): boolean {
+  return status === "active";
+}
+
 /** Look up product title + variant title from our catalog by variant ID */
 export async function resolveVariantTitles(
   workspaceId: string,
@@ -785,14 +798,22 @@ export async function subscriptionApplyCoupon(
 ): Promise<{ success: boolean; error?: string }> {
   if (!code) return { success: false, error: "Missing coupon code" };
 
+  // Resolve the sub's status BEFORE the internal/Appstle branch — a coupon is
+  // only ever valid on an active sub. Refusing here closes the SC135320 class
+  // (a $15 loyalty coupon applied to a PAUSED sub after a redeem+refund combo
+  // silently discounted a renewal the customer never earned).
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("customer_id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!couponApplicableToSubStatus(sub?.status as string | null | undefined)) {
+    return { success: false, error: "subscription_not_active" };
+  }
+
   if (await isInternalSubscription(workspaceId, contractId)) {
-    const admin = createAdminClient();
-    const { data: sub } = await admin
-      .from("subscriptions")
-      .select("customer_id")
-      .eq("workspace_id", workspaceId)
-      .eq("shopify_contract_id", contractId)
-      .maybeSingle();
     const resolved = await resolveCoupon(workspaceId, code, sub?.customer_id as string | null);
     if (!resolved) return { success: false, error: "coupon_not_found" };
     return internalSubApplyDiscount(workspaceId, contractId, resolved.code);

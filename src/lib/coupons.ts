@@ -13,6 +13,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { couponApplicableToSubStatus } from "@/lib/subscription-items";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -219,11 +220,14 @@ export async function applyCouponToSub(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, applied_discounts")
+    .select("id, applied_discounts, status")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", String(contractId))
     .single();
   if (!sub) return { success: false, error: "subscription_not_found" };
+  if (!couponApplicableToSubStatus(sub.status as string | null | undefined)) {
+    return { success: false, error: "subscription_not_active" };
+  }
 
   const existing = (sub.applied_discounts as AppliedDiscount[]) || [];
   const kept = existing.filter((d) => (d.code || d.title) !== resolved.code);
