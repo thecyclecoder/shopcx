@@ -1,0 +1,1 @@
+- **Patch the non-major vulnerable deps flagged by dep-watch (otel-jaeger DoS HIGH + esbuild/body-parser lows)** · verified 2026-07-23 · → [[../libraries/spec-check-runner]] § Turbopack node_modules preflight

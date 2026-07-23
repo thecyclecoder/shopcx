@@ -4,7 +4,7 @@ Deterministic Node runner over a spec's [[../tables/spec_phase_checks]] rows ([[
 
 > **⭐ graduate-vera (2026-07-17): this runner IS the spec-test verdict. Vera is RETIRED.** The spec-test job (`runSpecTestJob` in [[../../../scripts/builder-worker]]) NO LONGER spawns a Vera Max session. It runs `runSpecChecks` and writes the runner's `agentVerdict`/`summary`/`checks` straight to [[../tables/spec_test_runs]] — post-ship AND pre-merge. A residual (non-machine) bullet the runner can't execute stays `needs_human` (surfaced, never AI-judged — the submission/review gates make a prose verification near-impossible, and a mis-authored *pattern* is a broken check caught by [[spec-test-harness-classifier]]). A runner **exception** is a HARNESS error → a re-runnable `error` run, never a false `fail`. **Pre-merge runs against a branch worktree:** the code under test is on the `claude/build-*` branch, not main, so the box checks out `origin/<branch>` into a read-only `git worktree add --detach` (symlinked node_modules) and passes it as `repoRoot` — a grep/tsc against main would under-see branch-only code. **Security is Vault's own solo session** now — `runSpecTestJob` enqueues a standalone branch-mode `security-review` ([[security-agent]] `enqueueSecurityReviewJob`) on completion; the fused spec-test+security session is gone.
 
-**File:** `src/lib/spec-check-runner.ts` — exports `runSpecChecks`, `defaultExecutors`, `defaultLoadChecks`, `redirectUrlToPreview`, and the `LoadedCheck` / `CheckResult` / `CheckExecutors` types.
+**File:** `src/lib/spec-check-runner.ts` — exports `runSpecChecks`, `verifyPhaseAccumulatedOnBranch`, `ensureRealTopLevelNodeModulesForBuild`, `defaultExecutors`, `defaultLoadChecks`, `redirectUrlToPreview`, and the `LoadedCheck` / `CheckResult` / `CheckExecutors` types.
 
 > **`http_get` preview-redirect (graduate-vera):** `runSpecChecks` accepts `deps.previewOrigin`. When set (a pre-merge run), the `http_get` executor rewrites a `shopcx.ai` target URL to the per-build preview origin via `redirectUrlToPreview` (path + query preserved; external / relative URLs untouched) — so an endpoint check hits THIS branch's preview, not prod (the branch's code isn't on prod yet). Post-ship runs pass `previewOrigin: null` → no redirect. `runSpecTestJob` passes `isPreMerge ? previewOrigin : null`.
 
@@ -44,7 +44,20 @@ Per `exec_kind` the runner delegates to one method of the injected `CheckExecuto
 | `http_get` | `fetch(url)` — status compared to `expect_status` |
 | `db_probe_readonly` | looks up `params.probe_id` in [[spec-check-db-probes]] `DB_PROBES`, invokes the fixed shaped query with `params.args`, and deep-equals the returned scalar to `params.expect`. Evidence is the probe's REDACTED string (probe id + scalar) — NEVER a row body. Free-form SQL is not accepted; this closes the 5 pre-merge Vault findings on the old `exec_readonly_sql` path (injection · secret_leak · authz_rls · unsafe_admin_client · crypto_encrypted). |
 | `unit_test` | reads `package.json.scripts`, spawns `npm run <script>` (emits a harness-classifier-matching signature when `script` is absent — the same rail the app-layer validator uses at authoring) |
-| `build` | `npx next build` in `repoRoot` |
+| `build` | `npx next build` in `repoRoot` — with a **Turbopack node_modules preflight** (see below) |
+
+## Turbopack node_modules preflight — `ensureRealTopLevelNodeModulesForBuild`
+
+**Why:** The spec-test worktree is created via `git worktree add --detach` with a symlinked `node_modules` pointing to a shared cache outside `repoRoot`. Turbopack's resolver panics when a top-level `node_modules` symlink points OUTSIDE the project root (`"Symlink [project]/node_modules is invalid, it points out of the filesystem root"`). This was blocking deterministic `next build` checks on any pre-merge branch worktree.
+
+**The fix:** `ensureRealTopLevelNodeModulesForBuild(repoRoot)` (exported from `src/lib/spec-check-runner.ts`) detects when `node_modules` is a symlink resolving outside `repoRoot` and materializes it in-place:
+1. **Detect** — `lstat` the symlink and resolve its target
+2. **Materialize** — `rm` the symlink, then `cp -al` (hardlink-copy, no data copy) the shared cache tree into a real local `node_modules` directory
+3. **Reconcile** — `npm install --prefer-offline --no-audit --no-fund` to patch any drift between the shared cache snapshot and the branch's package-lock.json (e.g., if the branch bumped dependencies since the cache was built). Skipped if `package.json` is absent (sandboxes).
+
+**No-op cases:** When `node_modules` is missing, already a real directory, or a symlink resolving INSIDE `repoRoot` (safe for Turbopack). Wired into the `build` executor **before** `npx next build` spawns.
+
+**Pre-merge complement:** For specs whose branch also touches build configuration, `scripts/_preflight-turbopack-node_modules.ts` mirrors this approach INSIDE the repo tree — it runs on `next.config.ts` load before Turbopack initializes, detects the symlink, materializes it, and re-execs the Node process (so the module cache is fresh and Turbopack sees the real tree). Imported as a side-effect at the TOP of `next.config.ts` so it fires before any Turbopack code runs. This dual-preflight approach (post-merge + pre-merge) ensures `next build` never hits the symlink panic in either test phase.
 
 Every executor returns `{ ok, evidence }`; the runner turns `ok` into `verdict` and adds the harness-error downgrade. Tests inject deterministic doubles.
 
