@@ -48,7 +48,7 @@ import {
   vaultPaymentMethod,
   savePaymentMethod,
 } from "@/lib/integrations/braintree-customer";
-import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
+import { createAmplifierOrder } from "@/lib/integrations/amplifier";
 import { inngest } from "@/lib/inngest/client";
 import { generateOrderNumber } from "@/lib/order-number";
 import { logCheckoutError, type CheckoutErrorStage } from "@/lib/checkout-error-log";
@@ -1123,11 +1123,37 @@ export async function POST(request: NextRequest) {
           .eq("id", order.id);
       } else {
         console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
-        await stampAmplifierImportFailure(admin, order.id as string, amplifierRes.error, amplifierRes.details);
+        const { data: prev } = await admin
+          .from("orders")
+          .select("amplifier_import_attempts")
+          .eq("id", order.id)
+          .maybeSingle();
+        const prevAttempts = (prev?.amplifier_import_attempts as number | null) ?? 0;
+        await admin
+          .from("orders")
+          .update({
+            amplifier_import_attempts: prevAttempts + 1,
+            amplifier_last_error: `${amplifierRes.error ?? "unknown"}: ${amplifierRes.details ?? ""}`.slice(0, 1000),
+            amplifier_last_attempt_at: new Date().toISOString(),
+          })
+          .eq("id", order.id);
       }
     } catch (err) {
       console.warn(`[checkout] Amplifier order create threw for ${orderNumber}: ${errText(err)}`);
-      await stampAmplifierImportFailure(admin, order.id as string, "amplifier_threw", errText(err));
+      const { data: prev } = await admin
+        .from("orders")
+        .select("amplifier_import_attempts")
+        .eq("id", order.id)
+        .maybeSingle();
+      const prevAttempts = (prev?.amplifier_import_attempts as number | null) ?? 0;
+      await admin
+        .from("orders")
+        .update({
+          amplifier_import_attempts: prevAttempts + 1,
+          amplifier_last_error: `amplifier_threw: ${errText(err)}`.slice(0, 1000),
+          amplifier_last_attempt_at: new Date().toISOString(),
+        })
+        .eq("id", order.id);
     }
   }
 
