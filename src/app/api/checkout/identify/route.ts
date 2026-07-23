@@ -31,6 +31,7 @@
  */
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { readVisitorContext, stitchVisitor } from "@/lib/identity-stitch";
 import { toE164US } from "@/lib/phone";
 
@@ -95,7 +96,15 @@ export async function POST(request: Request) {
       }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
       .select("id")
       .maybeSingle();
-    if (error) return NextResponse.json({ error: error.message || "customer_create_failed" }, { status: 500 });
+    if (error) {
+      // Log the full PostgREST diagnostic server-side; never return
+      // error.message / code / details / hint to the client on the
+      // public identify endpoint (same class as client-token 500).
+      console.error(
+        `[checkout/identify] customers upsert failed for workspace ${cart.workspace_id} email ${email}: ${errText(error)}`,
+      );
+      return NextResponse.json({ error: "customer_create_failed" }, { status: 500 });
+    }
     if (row) {
       customer = row;
       created = true;

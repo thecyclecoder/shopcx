@@ -47,6 +47,29 @@ The order is deliberate — the **PostgREST-shaped branch runs BEFORE `instanceo
 Result is capped at **2000 chars** so a huge PostgREST body cannot blow the
 [[../tables/agent_jobs]] `log_tail` 2000-char budget on its own.
 
+## NEVER return `errText(err)` in a public HTTP response body
+
+`errText` is a **server-side diagnostic renderer**, not a client-facing message. Its whole point
+is to **preserve** PostgREST `code` / `details` / `hint`, gateway internals, and constraint text
+— exactly the fields you must not disclose to an unauthenticated caller. Every public route that
+catches a throw MUST:
+
+1. `console.error(...errText(err)...)` server-side (with route + workspace_id + relevant token in
+   the prefix so the log line is greppable), AND
+2. return `NextResponse.json({ error: '<generic_code>' }, { status })` with **no** raw error
+   content in the body. `<generic_code>` is a stable machine-readable slug (`client_token_failed`,
+   `customer_create_failed`, …), never the throw's message.
+
+The `sanitizedCheckoutErrorResponse` helper in `src/app/api/checkout/route.ts` is the same
+pattern with a durable ledger — it calls `logCheckoutError` (which itself uses `errText`) instead
+of raw `console.error` and passes `{ error: <code> }` to the client.
+
+The originating leak (spec: `checkout-client-token-endpoint-no-raw-errtext-to-client`): the public
+cart-token endpoint `src/app/api/checkout/client-token/route.ts` returned `{ error: errText(err) }`
+on its 500 branch, exposing PostgREST diagnostics on a payment-path route. Same class was open at
+`src/app/api/checkout/identify/route.ts` (`error.message` from a Supabase upsert). Both now use the
+log-server-side + generic-code shape above.
+
 ## Callers
 
 `Phase 1` ships the renderer + its pinned tests only. Phase 2 of the spec
