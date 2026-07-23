@@ -44,6 +44,7 @@ Mirrors [[media_buyer_cold_scaler_cohorts]] policies.
 ## Writers
 
 - [[../libraries/crowned-winners]] `recordCrownedWinner` — the ONLY writer (CLAUDE.md § "Raw .from(...) STOP" chokepoint). Idempotent upsert on `(workspace_id, test_meta_adset_id)` with `ignoreDuplicates: true` so `graduated_at` / `scaler_meta_*` are NEVER clobbered by a Bianca replay. Called from `src/lib/media-buyer/agent.ts` `runMediaBuyerLoop` after `detectWinners` + `metaAdIdToAdsetId` resolve — one call per winner with a resolved parent adset. Best-effort: a marker-write failure is logged but never fails the Media Buyer pass.
+  - **SECURITY (tenant boundary):** the winner `meta_ad_id → meta_adset_id` resolution that feeds each write goes through `resolveWinnerAdsetMap(admin, {workspaceId, metaAdAccountId, winnerAdIds})` in `agent.ts`, which scopes the `meta_ads` read by `workspace_id` **and** `meta_ad_account_id`. A bare `.in("meta_ad_id", …)` would let a FOREIGN workspace's adset (shared/duplicate Meta ad id) be crowned into this table for the current workspace. Regression: `agent.crown-tenant-scope.test.ts`. (Security review of the introducing spec, 2026-07-23.)
 
 ## Consumers
 
