@@ -26,6 +26,10 @@ This table is the durable crown marker Bianca writes at detection time and every
 | `graduated_at` | `timestamptz?` | set by the (future) graduate-crowned-winners flow when budget moves onto the scaler; null until then |
 | `scaler_meta_campaign_id` | `text?` | bare Meta campaign id of the scaler duplicate — set by graduate flow |
 | `scaler_meta_adset_id` | `text?` | bare Meta adset id of the scaler duplicate — set by graduate flow |
+| `exploit_spawned` | `integer` | NOT NULL default `0` · **strike counter** — exploit variants spawned SINCE the last hit. Bumped by [[../libraries/crowned-winners]] `incrementExploitSpawned` when Phase 2 spawns a clone against this winner; RESET to `0` by `recordExploitHit`. Reaching `EXPLOIT_EXHAUST_STRIKES=4` with zero intervening hits flips `exploit_exhausted=true` |
+| `exploit_hits` | `integer` | NOT NULL default `0` · total lifetime exploit clones whose test verdict reached `promising` or `crown`. Bumped by `recordExploitHit`; also resets `exploit_spawned` and clears `exploit_exhausted` |
+| `exploit_exhausted` | `boolean` | NOT NULL default `false` · set `true` when the strike counter tops `EXPLOIT_EXHAUST_STRIKES=4` with 0 hits (tapped-out angle — 4 consecutive dud clones). An exhausted winner drops out of `listActiveWinnersForProduct` so Phase 2 stops allocating it exploit slots; a subsequent hit re-enters it into rotation. When every winner for a product is exhausted the split reverts to 4-explore / 0-exploit |
+| `exploit_exhausted_at` | `timestamptz?` | set to `now()` alongside `exploit_exhausted=true`; nulled by `recordExploitHit` |
 | `created_at` | `timestamptz` | NOT NULL default `now()` |
 | `updated_at` | `timestamptz` | NOT NULL default `now()` · touched by trigger |
 
@@ -33,6 +37,7 @@ This table is the durable crown marker Bianca writes at detection time and every
 
 - UNIQUE `(workspace_id, test_meta_adset_id)` — one crown-marker row per test adset. The upsert chokepoint in [[../libraries/crowned-winners]] `recordCrownedWinner` targets this key so replaying Bianca's pass never creates duplicates.
 - `(workspace_id, meta_ad_account_id)` — the reactivation guard's read shape (`listCrownedWinnerAdsetIds` narrows on both).
+- `(workspace_id, meta_ad_account_id, product_id) WHERE exploit_exhausted = false` — the active-winners read shape (`listActiveWinnersForProduct` narrows on this tuple; the partial index skips exhausted rows entirely).
 
 ## RLS
 
@@ -50,6 +55,7 @@ Mirrors [[media_buyer_cold_scaler_cohorts]] policies.
 
 - **Reactivation guard** (Phase 2 of the same spec — WIRED) — [[../libraries/meta-cpa-signal]] `detectMetaCpaReactivations` calls [[../libraries/crowned-winners]] `listCrownedWinnerAdsetIds({ workspaceId, metaAdAccountId })` right after `stillPaused` is built and removes every crowned test adset from the candidate set BEFORE the CPP recovery loop runs. A crowned/graduated winner is NEVER a reactivation target, regardless of who paused it or how well its CPA recovered. The crown-marker row is the durable invariant — an adset present in this table cannot be resurrected into the test campaign, period.
 - **Future graduate / re-test / replenish flows** (contract) — MUST consult `listCrownedWinnerAdsetIds` before re-testing a creative or unpausing an adset. That is the crown-marker contract this table enforces; a proxy check (e.g. "did Bianca herself pause it") is not sufficient.
+- **Explore/exploit split on crown** ([[../specs/media-buyer-explore-exploit-split-on-crown]] Phase 1 — WIRED) — the exploit-tracking columns (`exploit_spawned` / `exploit_hits` / `exploit_exhausted` / `exploit_exhausted_at`) drive Dahlia's per-product 2-explore / 2-exploit shift after crown. Phase 2 (agent.ts replenish path) reads `listActiveWinnersForProduct` for the product, sorts best-CAC-first, and allocates the 2 exploit slots 1-per-winner via `amplifyWinner`; each spawn calls `incrementExploitSpawned(sourceWinner, N)` — the STRIKE counter (clones spawned since the last hit). Phase 3 attributes each exploit-origin test verdict back to its source winner: `promising | crown` ⇒ `recordExploitHit` (resets strikes, clears `exploit_exhausted`); a `dud`/`testing` outcome adds no reset — its spawn already counted a strike. At `exploit_spawned ≥ EXPLOIT_EXHAUST_STRIKES=4` with `exploit_hits = 0` (never hit), `incrementExploitSpawned` flips `exploit_exhausted=true` and stamps `exploit_exhausted_at`; the winner drops out of `listActiveWinnersForProduct` and Phase 2 stops allocating it exploit slots. When ALL a product's winners are exhausted the reader returns empty ⇒ Phase 2 reverts to 4-explore / 0-exploit. A NEW crown on a different test adset re-arms exploit fresh via its own row (own counters).
 
 ## Related
 
