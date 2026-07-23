@@ -45,6 +45,7 @@ import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import { recordCrownedWinner } from "@/lib/media-buyer/crowned-winners";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
@@ -1264,6 +1265,35 @@ export interface RunMediaBuyerAccountPass {
  *     decides whether the ad actually ships ACTIVE, and Phase 1's belt-and-
  *     suspenders escalates any rail hit.
  */
+/**
+ * Resolve winner ad-grain `meta_ad_id` → parent `meta_adset_id` from `meta_ads`,
+ * SCOPED to the current workspace + Meta ad account.
+ *
+ * SECURITY (tenant boundary): this service-role read MUST carry the workspace +
+ * account predicates. A bare `.in("meta_ad_id", …)` could resolve a FOREIGN
+ * workspace's adset — Meta ad ids are not globally unique to one tenant in
+ * `meta_ads` — and that foreign adset would then be crowned into
+ * `media_buyer_crowned_winners` for the current workspace. Exported so the
+ * cross-tenant regression test can drive it directly.
+ */
+export async function resolveWinnerAdsetMap(
+  admin: Admin,
+  args: { workspaceId: string; metaAdAccountId: string; winnerAdIds: string[] },
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!args.winnerAdIds.length) return out;
+  const { data } = await admin
+    .from("meta_ads")
+    .select("meta_ad_id, meta_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_account_id", args.metaAdAccountId)
+    .in("meta_ad_id", args.winnerAdIds);
+  for (const a of (data || []) as Array<{ meta_ad_id: string; meta_adset_id: string }>) {
+    out.set(a.meta_ad_id, a.meta_adset_id);
+  }
+  return out;
+}
+
 export async function runMediaBuyerLoop(
   admin: Admin,
   opts: RunMediaBuyerOptions,
@@ -1427,15 +1457,43 @@ export async function runMediaBuyerLoop(
     : [];
 
   // Winner ad-grain → parent meta_adset_id lookup (for the promote target).
+  // Tenant-scoped read — see resolveWinnerAdsetMap (must not crown a foreign
+  // workspace's adset off a shared meta_ad_id).
   const winnerAdIds = winners.map((w) => w.metaAdId);
-  const metaAdIdToAdsetId = new Map<string, string>();
-  if (winnerAdIds.length) {
-    const { data: adsForWinners } = await admin
-      .from("meta_ads")
-      .select("meta_ad_id, meta_adset_id")
-      .in("meta_ad_id", winnerAdIds);
-    for (const a of (adsForWinners || []) as Array<{ meta_ad_id: string; meta_adset_id: string }>) {
-      metaAdIdToAdsetId.set(a.meta_ad_id, a.meta_adset_id);
+  const metaAdIdToAdsetId = await resolveWinnerAdsetMap(admin, {
+    workspaceId: opts.workspaceId,
+    metaAdAccountId: opts.metaAdAccountId,
+    winnerAdIds,
+  });
+
+  // ── Persist the crown fact ────────────────────────────────────────────────
+  // For every detected winner, record a durable crown marker on
+  // [[docs/brain/tables/media_buyer_crowned_winners]]. The write is idempotent
+  // (upsert on `(workspace_id, test_meta_adset_id)`), so replaying the same
+  // pass is a no-op and never clobbers a later graduate-flow write of
+  // `graduated_at` / `scaler_meta_*`.
+  //
+  // This is the source-of-truth ledger the Phase-2 reactivation guard reads
+  // via `listCrownedWinnerAdsetIds` to REFUSE unpausing a crowned/graduated
+  // winner regardless of who paused it or how well its recovered CPA looks —
+  // a crown's CPA at/below crown IS the reactivation threshold. Best-effort:
+  // a marker-write failure is logged but never fails the pass.
+  const cohortProductIdForCrown = cohort?.productId ?? opts.productId ?? null;
+  for (const w of winners) {
+    const testAdsetId = metaAdIdToAdsetId.get(w.metaAdId);
+    if (!testAdsetId) continue; // parent adset not resolved — no crown fact to record
+    try {
+      await recordCrownedWinner(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        productId: cohortProductIdForCrown,
+        testMetaAdsetId: testAdsetId,
+        winningMetaAdId: w.metaAdId,
+      });
+    } catch (err) {
+      // Never fail a Media Buyer pass on a marker-write miss — the next pass
+      // will retry (idempotent). Kept as an audit trace only.
+      console.warn("recordCrownedWinner failed", { workspaceId: opts.workspaceId, testAdsetId, err: errText(err) });
     }
   }
 
