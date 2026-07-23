@@ -23,6 +23,8 @@ import {
   computeMediaBuyerPlan,
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
+  EXPLOIT_SLOT_COUNT,
+  EXPLORE_TARGET_WITH_WINNER,
   evaluateSensorTrustSnapshot,
   executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
@@ -2154,5 +2156,133 @@ test("agent.ts — runMediaBuyerLoop wires the inline Meta execute path (imports
   assert.ok(
     /escalateMediaBuyerExecuteFailure\(/.test(src),
     "runMediaBuyerLoop must call escalateMediaBuyerExecuteFailure on any Graph failure — a decided-but-unfired kill must surface, not vanish",
+  );
+});
+
+// ── media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split ──
+
+test("computeMediaBuyerPlan — pre-crown (no active winners) keeps 4 explore / 0 exploit", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  // The pre-crown split MUST fill 4 explore, spawn 0 exploit slots.
+  assert.equal(plan.splitInfo.hasActiveWinner, false);
+  assert.equal(plan.splitInfo.exploreTarget, DEFAULT_TEST_COHORT_TARGET);
+  assert.equal(plan.splitInfo.exploitSlotCount, 0);
+  assert.equal(plan.replenish.length, DEFAULT_TEST_COHORT_TARGET);
+  assert.equal(plan.exploitSpawn.length, 0);
+});
+
+test("computeMediaBuyerPlan — one active winner ⇒ 2 explore + 2 exploit slots both routed to that winner", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 4000 },
+      ],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  assert.equal(plan.splitInfo.hasActiveWinner, true);
+  assert.equal(plan.splitInfo.exploreTarget, EXPLORE_TARGET_WITH_WINNER);
+  assert.equal(plan.splitInfo.exploitSlotCount, EXPLOIT_SLOT_COUNT);
+  // Explore replenish drops from 4 → 2 (the winner-aware deficit).
+  assert.equal(plan.replenish.length, EXPLORE_TARGET_WITH_WINNER);
+  // The single active winner gets BOTH exploit slots (round-robin with 1 winner ⇒ 2 slots off it).
+  assert.equal(plan.exploitSpawn.length, 1);
+  assert.equal(plan.exploitSpawn[0].sourceCrownedAdsetId, "adset-crown-A");
+  assert.equal(plan.exploitSpawn[0].sourceMetaAdId, "meta_ad_A");
+  assert.equal(plan.exploitSpawn[0].variantCount, EXPLOIT_SLOT_COUNT);
+});
+
+test("computeMediaBuyerPlan — two active winners best-first ⇒ 1 exploit slot each", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [
+        // Caller has already sorted best-CAC-first — the plan honors that order.
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 3500 },
+        { testMetaAdsetId: "adset-crown-B", sourceMetaAdId: "meta_ad_B", cpaCents: 4200 },
+        // A third winner exists but is skipped — 2 slots max.
+        { testMetaAdsetId: "adset-crown-C", sourceMetaAdId: "meta_ad_C", cpaCents: 4900 },
+      ],
+      readyToTest: [],
+    }),
+  );
+  assert.equal(plan.exploitSpawn.length, 2);
+  const bySource = new Map(plan.exploitSpawn.map((a) => [a.sourceCrownedAdsetId, a]));
+  assert.equal(bySource.get("adset-crown-A")?.variantCount, 1);
+  assert.equal(bySource.get("adset-crown-B")?.variantCount, 1);
+  assert.equal(bySource.has("adset-crown-C"), false, "3rd winner drops out — only 2 slots to allocate");
+});
+
+test("computeMediaBuyerPlan — live exploit count already at target ⇒ exploit deficit is 0 (no double-spawn)", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 4,
+      currentLiveExploitCount: 2, // both exploit slots already live
+      activeWinnersForExploit: [
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 3500 },
+      ],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  // liveExplore = 4 - 2 = 2, exploreTarget = 2 ⇒ no explore replenish, no exploit spawn either.
+  assert.equal(plan.replenish.length, 0);
+  assert.equal(plan.exploitSpawn.length, 0);
+  assert.equal(plan.splitInfo.liveExploitCount, 2);
+  assert.equal(plan.splitInfo.liveExploreCount, 2);
+});
+
+// ── media-buyer-explore-exploit-split-on-crown Phase 3 — hit-credit + exhaust wiring ──
+
+// Structural pin — the runner MUST call creditExploitHits (Phase 3 feedback loop) so
+// a promising|crown exploit-origin verdict resets the source winner's strike counter
+// via recordExploitHit. A stray edit that removes the call would silently milk a
+// tapped-out winner forever (the spec's "4 dud clones with 0 hits ⇒ exhausted" rail
+// depends on hits being credited).
+test("agent.ts — Phase 3 runner calls creditExploitHits + emits media_buyer_exploit_hit_credited (structural pin: dropping the call regresses to the milk-forever bug)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+  assert.ok(
+    /await creditExploitHits\(admin, \{[\s\S]*?workspaceId: opts\.workspaceId,[\s\S]*?metaAdAccountId: opts\.metaAdAccountId,[\s\S]*?productId: cohortProductId,[\s\S]*?thresholds,[\s\S]*?nowMs,[\s\S]*?\}\)/.test(src),
+    "runMediaBuyerLoop must call creditExploitHits({workspaceId, metaAdAccountId, productId, thresholds, nowMs}) — that's the Phase 3 feedback-loop wire",
+  );
+  assert.ok(
+    src.includes('actionKind: "media_buyer_exploit_hit_credited"'),
+    "runMediaBuyerLoop must emit media_buyer_exploit_hit_credited director_activity per hit — the audit ledger the spec's verification cites",
+  );
+});
+
+// Compare-and-set gate — the crediting update MUST filter on
+// `.is('exploit_hit_credited_at', null)` and `.select('id')` so a re-run cannot
+// double-credit the same clone (Learning #11: any authoritative mutation after
+// an async read must re-assert the read-time predicate in the write itself).
+test("agent.ts — creditExploitHits update is a compare-and-set on exploit_hit_credited_at IS NULL + selects the transitioned id (double-credit guard)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+  const casPattern = /\.update\(\{ exploit_hit_credited_at: nowIso \}\)[\s\S]*?\.eq\("id", row\.id\)[\s\S]*?\.eq\("workspace_id", args\.workspaceId\)[\s\S]*?\.eq\("is_exploit", true\)[\s\S]*?\.is\("exploit_hit_credited_at", null\)[\s\S]*?\.select\("id"\)/;
+  assert.ok(
+    casPattern.test(src),
+    "creditExploitHits must gate its update with .eq('id',row.id).eq('workspace_id',ws).eq('is_exploit',true).is('exploit_hit_credited_at',null).select('id') — the compare-and-set that makes double-crediting structurally impossible",
   );
 });
