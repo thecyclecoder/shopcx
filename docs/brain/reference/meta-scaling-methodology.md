@@ -55,6 +55,7 @@ Evaluated each review on the test adset's **cumulative** metrics. Target/crown C
 | **Hold / keep-testing** | converting, **CPA ≤ $220**, not yet crown-qualified (CPA $150–220, OR CPA ≤ $150 but < 8 purchases) | HOLD — never trimmed on a leading signal | `hold_band_max_cpa_cents` $220 |
 | **Crown → scale** | **CPA ≤ $150 AND spend ≥ $450 AND ≥ 8 purchases** | CROWN → duplicate into the scaler | `crown_max_cpa_cents` $150 · `crown_min_spend_cents` $450 · `crown_min_purchases` 8 |
 | **Slow-kill (bleeding)** | converting but **CPA > $220** after ≥ $450 | KILL | `hold_band_max_cpa_cents` |
+| **Slow-kill (over-CPA converter)** | converter still at **CPA > $300 after ≥ $600 spend** (CEO 2026-07-15) | KILL — an over-breakeven converter must die at $600, not the $1,200 deadline | `slow_kill_min_spend_cents` $600 · `slow_kill_max_cpa_cents` $300 |
 | **Decision deadline** | reaches **$1,200** (~8 test-days) WITHOUT crowning | RETIRE — free the $150/day slot | `max_test_spend_cents` $1,200 |
 
 Worked example (the Superfood Tabs `ingredient-breakdown` ad): at $450 / 3 purchases / $143 CPA it is **HOLD, not a crown** — it must earn 8 purchases (~$1,050–1,200, ~8 days) before we pour scale budget in. A converter at $700 / $160 CPA is **HELD** (profitable, under the $220 floor), not killed. Leading indicators (cost-per-ATC, CTR, thumbstop) **KILL fast, never crown** — the crown signal is CPA + purchase volume only.

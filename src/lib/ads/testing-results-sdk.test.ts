@@ -10,6 +10,7 @@ import { tierForTest, compareTests, type TestThresholds, type TestAdsetRow } fro
 const T: TestThresholds = {
   crownMaxCpaCents: 15000, crownMinSpendCents: 45000, crownMinPurchases: 8,
   holdBandMaxCpaCents: 22000, maxTestSpendCents: 120000, earlyTrimMinSpendCents: 30000,
+  slowKillMinSpendCents: 60000, slowKillMaxCpaCents: 30000,
 };
 
 test("crown requires all three: ≥8 purchases AND CAC ≤ $150 AND spend ≥ $450", () => {
@@ -41,6 +42,17 @@ test("testing = early / converting-but-above-hold at low spend", () => {
   assert.equal(tierForTest({ spendCents: 10000, purchases: 0, addToCart: 1 }, T), "testing");
   // 1 sale at CAC $300 but low spend (not past deadline) → testing, not dud
   assert.equal(tierForTest({ spendCents: 30000, purchases: 1, addToCart: 2 }, T), "testing");
+});
+
+test("slow-kill dud = spend ≥ $600 AND CAC > $300 (CEO 2026-07-15) — Amazing Coffee live case", () => {
+  // Amazing Coffee: $1,199 spend / 3 sales → CAC $400 (> $300) at spend $1,199 (≥ $600) → dud.
+  assert.equal(tierForTest({ spendCents: 119900, purchases: 3, addToCart: 19 }, T), "dud");
+});
+
+test("slow-kill dud NOT triggered on skeptic v3 shape ($678 spend / 3 sales / CAC $226) — hold band protection intact", () => {
+  // Skeptic v3 near-miss: CAC $226 is under the $300 slow-kill line (though over the $220 hold band).
+  // Spend $678 ≥ $600 but CAC $226 not > $300 → NOT dud (stays testing so the deadline-then-decide contract holds).
+  assert.equal(tierForTest({ spendCents: 67800, purchases: 3, addToCart: 13 }, T), "testing");
 });
 
 const mk = (over: Partial<TestAdsetRow>): TestAdsetRow => ({

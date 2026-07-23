@@ -1411,6 +1411,8 @@ export async function runMediaBuyerLoop(
       crownMinSpendCents: policy.crown_min_spend_cents ?? 45000, // slow-kill / 0-purchase-backstop floor
       crownMinPurchases: policy.crown_min_purchases ?? 8, // crown-qualified adsets are never deadline-retired
       maxTestSpendCents: policy.max_test_spend_cents ?? 120000, // decision deadline — retire if not crowned
+      slowKillMinSpendCents: policy.slow_kill_min_spend_cents ?? 60000, // slow-kill floor (CEO 2026-07-15 — $600)
+      slowKillMaxCpaCents: policy.slow_kill_max_cpa_cents ?? 30000, // slow-kill CAC ceiling ($300 — over this past $600 = dud)
     });
   }
 

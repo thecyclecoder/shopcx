@@ -302,6 +302,8 @@ export function isDecisionTreeKill(
     holdBandMaxCpaCents: number;
     maxTestSpendCents: number;
     earlyTrimMinSpendCents: number;
+    slowKillMinSpendCents: number;
+    slowKillMaxCpaCents: number;
     trimMaxCostPerAtcCents: number;
     trimMaxCpmCents: number;
   },
@@ -317,6 +319,8 @@ export function isDecisionTreeKill(
       holdBandMaxCpaCents: t.holdBandMaxCpaCents,
       maxTestSpendCents: t.maxTestSpendCents,
       earlyTrimMinSpendCents: t.earlyTrimMinSpendCents,
+      slowKillMinSpendCents: t.slowKillMinSpendCents,
+      slowKillMaxCpaCents: t.slowKillMaxCpaCents,
     },
   );
   if (tier === "dud") return true;
@@ -367,6 +371,13 @@ export interface MetaCpaLoserOptions {
   /** Decision deadline: an adset that reaches this cumulative spend WITHOUT crowning is retired to free
    *  the test slot for a fresh creative. Default $1,200 (~8 test-days at $150/day). CEO 2026-07-12. */
   maxTestSpendCents: number;
+  /** Slow-kill floor: once an adset has spent ≥ this, a converter still over `slowKillMaxCpaCents` is a
+   *  dud (kill before the deadline). Default $600 — the CEO 2026-07-15 rule to stop funding over-CPA
+   *  converters to the $1,200 deadline. */
+  slowKillMinSpendCents: number;
+  /** Slow-kill CAC ceiling: past `slowKillMinSpendCents`, a converter with CAC > this dies. Default $300
+   *  (~2× the crown CPA, > the $220 hold band so a promising converter isn't touched). CEO 2026-07-15. */
+  slowKillMaxCpaCents: number;
 }
 
 /**
@@ -403,6 +414,8 @@ export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOption
         holdBandMaxCpaCents: opts.holdBandMaxCpaCents,
         maxTestSpendCents: opts.maxTestSpendCents,
         earlyTrimMinSpendCents: opts.earlyTrimMinSpendCents,
+        slowKillMinSpendCents: opts.slowKillMinSpendCents,
+        slowKillMaxCpaCents: opts.slowKillMaxCpaCents,
         trimMaxCostPerAtcCents: opts.trimMaxCostPerAtcCents,
         trimMaxCpmCents: opts.trimMaxCpmCents,
       },

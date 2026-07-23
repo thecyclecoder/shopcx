@@ -76,6 +76,8 @@ function policy(overrides: Partial<IterationPolicy> = {}): IterationPolicy {
     crown_min_purchases: null,
     hold_band_max_cpa_cents: null,
     max_test_spend_cents: null,
+    slow_kill_min_spend_cents: null,
+    slow_kill_max_cpa_cents: null,
     ...overrides,
   };
 }
@@ -395,6 +397,8 @@ const P2_THRESHOLDS = {
   holdBandMaxCpaCents: 22_000, // $220
   maxTestSpendCents: 120_000, // $1,200
   earlyTrimMinSpendCents: 30_000, // $300
+  slowKillMinSpendCents: 60_000, // $600 — CEO 2026-07-15 slow-kill floor
+  slowKillMaxCpaCents: 30_000, // $300 — CEO 2026-07-15 slow-kill CAC ceiling
   trimMaxCostPerAtcCents: 8_000, // $80
   trimMaxCpmCents: 10_000, // $100
 };
@@ -405,6 +409,8 @@ const P2_TIER_THRESHOLDS = {
   holdBandMaxCpaCents: P2_THRESHOLDS.holdBandMaxCpaCents,
   maxTestSpendCents: P2_THRESHOLDS.maxTestSpendCents,
   earlyTrimMinSpendCents: P2_THRESHOLDS.earlyTrimMinSpendCents,
+  slowKillMinSpendCents: P2_THRESHOLDS.slowKillMinSpendCents,
+  slowKillMaxCpaCents: P2_THRESHOLDS.slowKillMaxCpaCents,
 };
 
 test("Phase 2 parity — isDecisionTreeKill returns true for EVERY tierForTest='dud' input (deadline dud + early dud)", () => {
@@ -511,9 +517,38 @@ test("Phase 2 — retired (S) slow-kill: converter over hold_band past crownMinS
   // Old (S) slow-kill would have fired here: 2 purchases, cpa $300 (> hold_band $220), spend $600 (> crownMinSpend $450, < maxTestSpend $1200).
   // Phase 2 retires (S) — this state now returns 'testing' from tierForTest, kill=false. Deadline-then-decide.
   // Chosen numbers keep the leading signals BELOW the trim thresholds: cost-per-ATC $600/8 = $75 (< $80) and CPM $24 (< $100).
+  // Under the CEO 2026-07-15 slow-kill rule (spend ≥ $600 AND CAC > $300), this is boundary — CAC == $300 exactly is
+  // NOT strictly greater than $300, so the state stays testing / kill=false. A converter with CAC > $300 at ≥ $600
+  // spend WOULD dud out; that's the Amazing Coffee case (next test).
   const slow = { spendCents: 60_000, purchases: 2, addToCart: 8, impressions: 25_000, clicks: 80 };
   assert.equal(tierForTest({ spendCents: slow.spendCents, purchases: slow.purchases, addToCart: slow.addToCart }, P2_TIER_THRESHOLDS), "testing");
   assert.equal(isDecisionTreeKill(slow, P2_THRESHOLDS, true), false);
+});
+
+// ── media-buyer-slow-kill-over-cpa-converters-past-600-spend Phase 1 — the CEO 2026-07-15 slow-kill rule ──
+//
+// The 2026-07-12 retirement of (S) slow-kill over-corrected — a converter at ANY CAC now runs to $1,200.
+// Live proof: Amazing Coffee test adset `Dahlia · Amazing Coffee · comp` at $1,199 / 19 ATC / 3 sales /
+// CAC $400 (2.7× the $150 crown, 1.8× the $220 profit floor). Cost-per-ATC $63 is under the $80 trim line
+// so leading-signal trim never fires, and the converter guard blocks every other early kill.
+// New rule (SSOT in tierForTest): spend ≥ slowKillMinSpendCents ($600) AND CAC > slowKillMaxCpaCents ($300) = dud.
+// Because isDecisionTreeKill reads tierForTest's verdict, agent kill and dashboard dud stay in lockstep.
+
+test("Phase 1 slow-kill — Amazing Coffee live case ($1,199 spend, 3 purchases, CAC $400) is now DUD → killed", () => {
+  const amazingCoffee = { spendCents: 119_900, purchases: 3, addToCart: 19, impressions: 40_000, clicks: 150 };
+  const tier = tierForTest({ spendCents: amazingCoffee.spendCents, purchases: amazingCoffee.purchases, addToCart: amazingCoffee.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "dud", "an over-CPA converter past $600 must die before the $1,200 deadline");
+  assert.equal(isDecisionTreeKill(amazingCoffee, P2_THRESHOLDS, true), true);
+});
+
+test("Phase 1 slow-kill — skeptic v3 $226 near-miss ($678 spend, 3 purchases, CAC $226) stays NOT killed (hold-band protection preserved)", () => {
+  // The spec's canonical protect-me case: CAC $226 is just over the $220 hold band, but well under the $300
+  // slow-kill line. Spend $678 ≥ $600 but CAC not > $300 → NOT dud (stays testing). The rule kills only
+  // over-CPA converters, never a near-miss on the hold-band boundary — the 2026-07-12 protection is intact.
+  const skepticV3 = { spendCents: 67_800, purchases: 3, addToCart: 13, impressions: 30_000, clicks: 120 };
+  const tier = tierForTest({ spendCents: skepticV3.spendCents, purchases: skepticV3.purchases, addToCart: skepticV3.addToCart }, P2_TIER_THRESHOLDS);
+  assert.equal(tier, "testing", "$226 CAC is under the $300 slow-kill line — protected");
+  assert.equal(isDecisionTreeKill(skepticV3, P2_THRESHOLDS, true), false);
 });
 
 test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {

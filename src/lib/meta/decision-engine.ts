@@ -112,6 +112,12 @@ export interface IterationPolicy {
   hold_band_max_cpa_cents: number | null;
   /** Decision deadline (cents): an adset that reaches this spend without crowning is retired. CEO 2026-07-12. */
   max_test_spend_cents: number | null;
+  /** Slow-kill floor (cents): once an adset has spent ≥ this, a converter with CAC > `slow_kill_max_cpa_cents`
+   *  is a dud (kill before the deadline). Default 60000 = $600. CEO 2026-07-15. */
+  slow_kill_min_spend_cents: number | null;
+  /** Slow-kill CAC ceiling (cents): past `slow_kill_min_spend_cents`, a converter with CAC > this is a dud.
+   *  Default 30000 = $300 (~2× crown target, > $220 hold band so a promising converter is untouched). CEO 2026-07-15. */
+  slow_kill_max_cpa_cents: number | null;
 }
 
 export type AutonomousActionType =
@@ -265,6 +271,10 @@ export async function loadActivePolicy(
       crown_min_purchases: p.crown_min_purchases == null ? null : Number(p.crown_min_purchases),
       hold_band_max_cpa_cents: p.hold_band_max_cpa_cents == null ? null : Number(p.hold_band_max_cpa_cents),
       max_test_spend_cents: p.max_test_spend_cents == null ? null : Number(p.max_test_spend_cents),
+      // Slow-kill knobs (CEO 2026-07-15). Absent column ⇒ null ⇒ the agent applies its documented
+      // defaults (slow_kill_min_spend $600, slow_kill_max_cpa $300).
+      slow_kill_min_spend_cents: p.slow_kill_min_spend_cents == null ? null : Number(p.slow_kill_min_spend_cents),
+      slow_kill_max_cpa_cents: p.slow_kill_max_cpa_cents == null ? null : Number(p.slow_kill_max_cpa_cents),
     };
   } catch {
     return null;
