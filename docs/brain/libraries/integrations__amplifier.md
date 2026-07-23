@@ -35,6 +35,20 @@ async function createAmplifierOrder(input: CreateAmplifierOrderInput) : Promise<
 
 ### `CreateAmplifierOrderResult` — interface
 
+### `applyVariantSkus(lineItems, skuById)` — pure SKU-resolution core
+
+**Invariant: `product_variants` is the source of truth for a line's SKU at import
+time — never the baked value on the order/subscription line.** Given a
+`variant_id → sku` map, sets each line's SKU from its `reference_id` whenever the
+variant resolves — **always overriding** whatever was baked on the line (so a SKU
+changed on the variant flows to every future order; a missing baked SKU can't
+drop a real product). A line whose `reference_id` has no variant row keeps its
+baked SKU as a fallback, and a line that's still SKU-less (digital good, fee) is
+dropped downstream. The async wrapper `resolveSkusFromVariants` (private) reads
+`product_variants` by every variant-identified line's `reference_id` and calls
+this at the top of `createAmplifierOrder`, **before** the SKU-drop filter, so
+every caller is covered. Unit-tested in `amplifier.test.ts`.
+
 ## Callers
 
 - `src/app/api/checkout/route.ts`
@@ -67,6 +81,19 @@ curly quotes, accents) before sending.
   note ≤ 225 (enforced in the builder + the integration). See above.
 - **Non-ASCII is rejected at validation** — `stripUnicode` on line descriptions
   and the packing-slip note keeps a stray emoji from tanking the whole order.
+- **A SKU-less line is DROPPED; an order with zero SKU lines fails `no_skus` and
+  never ships.** Internal subscription lines persisted a physical coffee line with
+  a `variant_id` but no baked SKU (SKU lives on `product_variants`, never copied
+  onto the line) → 8+ paid coffee renewals silently dropped, never fulfilled.
+  Fixed by `resolveSkusFromVariants` / `applyVariantSkus`, which re-resolve every
+  variant-identified line's SKU from the variant table at the chokepoint,
+  overriding baked values. If you see `no_skus`, check whether the caller passed a
+  `reference_id` (the variant UUID) — that's what the resolver keys on.
+- **Failures are returned, not thrown — and checkout/renewal callers only
+  `console.warn` them with no retry.** A transient Amplifier error therefore
+  drops a paid order permanently and invisibly. Any new caller MUST surface a
+  non-success result (escalate / re-queue), not swallow it. (Follow-up: a
+  durable retry/escalation rail for the two swallowing callers.)
 
 ---
 
