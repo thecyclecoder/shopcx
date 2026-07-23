@@ -23,6 +23,8 @@ import {
   computeMediaBuyerPlan,
   DEFAULT_FATIGUE_REPLENISH_VARIANTS,
   DEFAULT_TEST_COHORT_TARGET,
+  EXPLOIT_SLOT_COUNT,
+  EXPLORE_TARGET_WITH_WINNER,
   evaluateSensorTrustSnapshot,
   executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
@@ -2155,4 +2157,98 @@ test("agent.ts — runMediaBuyerLoop wires the inline Meta execute path (imports
     /escalateMediaBuyerExecuteFailure\(/.test(src),
     "runMediaBuyerLoop must call escalateMediaBuyerExecuteFailure on any Graph failure — a decided-but-unfired kill must surface, not vanish",
   );
+});
+
+// ── media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split ──
+
+test("computeMediaBuyerPlan — pre-crown (no active winners) keeps 4 explore / 0 exploit", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  // The pre-crown split MUST fill 4 explore, spawn 0 exploit slots.
+  assert.equal(plan.splitInfo.hasActiveWinner, false);
+  assert.equal(plan.splitInfo.exploreTarget, DEFAULT_TEST_COHORT_TARGET);
+  assert.equal(plan.splitInfo.exploitSlotCount, 0);
+  assert.equal(plan.replenish.length, DEFAULT_TEST_COHORT_TARGET);
+  assert.equal(plan.exploitSpawn.length, 0);
+});
+
+test("computeMediaBuyerPlan — one active winner ⇒ 2 explore + 2 exploit slots both routed to that winner", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 4000 },
+      ],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-3", archetype: null, lander_url: "https://x3", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-4", archetype: null, lander_url: "https://x4", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  assert.equal(plan.splitInfo.hasActiveWinner, true);
+  assert.equal(plan.splitInfo.exploreTarget, EXPLORE_TARGET_WITH_WINNER);
+  assert.equal(plan.splitInfo.exploitSlotCount, EXPLOIT_SLOT_COUNT);
+  // Explore replenish drops from 4 → 2 (the winner-aware deficit).
+  assert.equal(plan.replenish.length, EXPLORE_TARGET_WITH_WINNER);
+  // The single active winner gets BOTH exploit slots (round-robin with 1 winner ⇒ 2 slots off it).
+  assert.equal(plan.exploitSpawn.length, 1);
+  assert.equal(plan.exploitSpawn[0].sourceCrownedAdsetId, "adset-crown-A");
+  assert.equal(plan.exploitSpawn[0].sourceMetaAdId, "meta_ad_A");
+  assert.equal(plan.exploitSpawn[0].variantCount, EXPLOIT_SLOT_COUNT);
+});
+
+test("computeMediaBuyerPlan — two active winners best-first ⇒ 1 exploit slot each", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 0,
+      currentLiveExploitCount: 0,
+      activeWinnersForExploit: [
+        // Caller has already sorted best-CAC-first — the plan honors that order.
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 3500 },
+        { testMetaAdsetId: "adset-crown-B", sourceMetaAdId: "meta_ad_B", cpaCents: 4200 },
+        // A third winner exists but is skipped — 2 slots max.
+        { testMetaAdsetId: "adset-crown-C", sourceMetaAdId: "meta_ad_C", cpaCents: 4900 },
+      ],
+      readyToTest: [],
+    }),
+  );
+  assert.equal(plan.exploitSpawn.length, 2);
+  const bySource = new Map(plan.exploitSpawn.map((a) => [a.sourceCrownedAdsetId, a]));
+  assert.equal(bySource.get("adset-crown-A")?.variantCount, 1);
+  assert.equal(bySource.get("adset-crown-B")?.variantCount, 1);
+  assert.equal(bySource.has("adset-crown-C"), false, "3rd winner drops out — only 2 slots to allocate");
+});
+
+test("computeMediaBuyerPlan — live exploit count already at target ⇒ exploit deficit is 0 (no double-spawn)", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 4,
+      currentLiveExploitCount: 2, // both exploit slots already live
+      activeWinnersForExploit: [
+        { testMetaAdsetId: "adset-crown-A", sourceMetaAdId: "meta_ad_A", cpaCents: 3500 },
+      ],
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  // liveExplore = 4 - 2 = 2, exploreTarget = 2 ⇒ no explore replenish, no exploit spawn either.
+  assert.equal(plan.replenish.length, 0);
+  assert.equal(plan.exploitSpawn.length, 0);
+  assert.equal(plan.splitInfo.liveExploitCount, 2);
+  assert.equal(plan.splitInfo.liveExploreCount, 2);
 });

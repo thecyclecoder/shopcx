@@ -475,6 +475,18 @@ export interface AmplifyWinnerOptions {
   specSlug?: string | null;
   /** Override "now" for deterministic day-cap windows in tests. */
   nowMs?: number;
+  /**
+   * media-buyer-explore-exploit-split-on-crown Phase 2 — when this call is
+   * spawning an EXPLOIT slot for Dahlia's replenish (2-explore / 2-exploit on a
+   * crowned product), pass the crowned winner's `test_meta_adset_id`. Every
+   * inserted `ad_campaigns` row is stamped with `is_exploit=true` +
+   * `source_crowned_adset_id=<this>` so Bianca can split the live cohort by
+   * flag (deficit math) and Phase 3 can attribute the test verdict back to the
+   * source winner (`recordExploitHit` on `promising|crown`). Omit / null for
+   * every non-exploit amplification (fatigue-replenish keeps the historical
+   * shape — `is_exploit=false`, source column null).
+   */
+  sourceCrownedAdsetId?: string | null;
   /** Test-only deps. */
   deps?: AmplifyWinnerDeps;
 }
@@ -595,6 +607,7 @@ export async function amplifyWinner(
       ? String(source.name).slice(0, 60)
       : opts.winner.metaAdId.slice(0, 8);
 
+  const isExploit = !!opts.sourceCrownedAdsetId;
   const inserted: string[] = [];
   for (let i = 0; i < plan.length; i += 1) {
     const variantPlan = plan[i];
@@ -614,6 +627,12 @@ export async function amplifyWinner(
       // winning angle); statics start clean so the maker derives PI-grounded copy/imagery.
       hero_image_url: variantPlan.kind === "video" ? source.hero_image_url ?? null : null,
       script_text: variantPlan.kind === "video" ? source.script_text ?? null : null,
+      // media-buyer-explore-exploit-split-on-crown Phase 2 — exploit-lineage tag.
+      // Set ONLY when the caller passed sourceCrownedAdsetId (the winner-aware
+      // exploit-slot allocator). Every other amplification (fatigue-replenish)
+      // keeps the historical shape — is_exploit=false, source column null.
+      is_exploit: isExploit,
+      source_crowned_adset_id: opts.sourceCrownedAdsetId ?? null,
     };
 
     const { data: campaign, error: cErr } = await admin
@@ -674,6 +693,10 @@ export async function amplifyWinner(
       roas: opts.winner.roas,
       plan,
       day_count_before: dayCountBefore,
+      // Phase 2 exploit-lineage — carried on the activity row so the ledger
+      // records which crowned winner spawned this clone (null on fatigue-replenish).
+      is_exploit: isExploit,
+      source_crowned_adset_id: opts.sourceCrownedAdsetId ?? null,
       autonomous: true,
     },
   });
