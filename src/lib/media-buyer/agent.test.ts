@@ -2252,3 +2252,37 @@ test("computeMediaBuyerPlan — live exploit count already at target ⇒ exploit
   assert.equal(plan.splitInfo.liveExploitCount, 2);
   assert.equal(plan.splitInfo.liveExploreCount, 2);
 });
+
+// ── media-buyer-explore-exploit-split-on-crown Phase 3 — hit-credit + exhaust wiring ──
+
+// Structural pin — the runner MUST call creditExploitHits (Phase 3 feedback loop) so
+// a promising|crown exploit-origin verdict resets the source winner's strike counter
+// via recordExploitHit. A stray edit that removes the call would silently milk a
+// tapped-out winner forever (the spec's "4 dud clones with 0 hits ⇒ exhausted" rail
+// depends on hits being credited).
+test("agent.ts — Phase 3 runner calls creditExploitHits + emits media_buyer_exploit_hit_credited (structural pin: dropping the call regresses to the milk-forever bug)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+  assert.ok(
+    /await creditExploitHits\(admin, \{[\s\S]*?workspaceId: opts\.workspaceId,[\s\S]*?metaAdAccountId: opts\.metaAdAccountId,[\s\S]*?productId: cohortProductId,[\s\S]*?thresholds,[\s\S]*?nowMs,[\s\S]*?\}\)/.test(src),
+    "runMediaBuyerLoop must call creditExploitHits({workspaceId, metaAdAccountId, productId, thresholds, nowMs}) — that's the Phase 3 feedback-loop wire",
+  );
+  assert.ok(
+    src.includes('actionKind: "media_buyer_exploit_hit_credited"'),
+    "runMediaBuyerLoop must emit media_buyer_exploit_hit_credited director_activity per hit — the audit ledger the spec's verification cites",
+  );
+});
+
+// Compare-and-set gate — the crediting update MUST filter on
+// `.is('exploit_hit_credited_at', null)` and `.select('id')` so a re-run cannot
+// double-credit the same clone (Learning #11: any authoritative mutation after
+// an async read must re-assert the read-time predicate in the write itself).
+test("agent.ts — creditExploitHits update is a compare-and-set on exploit_hit_credited_at IS NULL + selects the transitioned id (double-credit guard)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+  const casPattern = /\.update\(\{ exploit_hit_credited_at: nowIso \}\)[\s\S]*?\.eq\("id", row\.id\)[\s\S]*?\.eq\("workspace_id", args\.workspaceId\)[\s\S]*?\.eq\("is_exploit", true\)[\s\S]*?\.is\("exploit_hit_credited_at", null\)[\s\S]*?\.select\("id"\)/;
+  assert.ok(
+    casPattern.test(src),
+    "creditExploitHits must gate its update with .eq('id',row.id).eq('workspace_id',ws).eq('is_exploit',true).is('exploit_hit_credited_at',null).select('id') — the compare-and-set that makes double-crediting structurally impossible",
+  );
+});

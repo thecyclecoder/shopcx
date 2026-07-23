@@ -49,7 +49,9 @@ import {
   incrementExploitSpawned,
   listActiveWinnersForProduct,
   recordCrownedWinner,
+  recordExploitHit,
 } from "@/lib/media-buyer/crowned-winners";
+import { tierForTest, type TestThresholds } from "@/lib/ads/testing-results-sdk";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
@@ -1472,6 +1474,165 @@ export async function resolveActiveWinnersForExploit(
   return resolved;
 }
 
+// ── Exploit hit-crediting (Phase 3 of the explore/exploit split) ─────────────
+
+/**
+ * media-buyer-explore-exploit-split-on-crown Phase 3 — attribute each live/just-
+ * resolved EXPLOIT-origin test's `tierForTest` verdict back to its source winner.
+ *
+ * For every `ad_campaigns` row with `is_exploit=true`, a non-null
+ * `source_crowned_adset_id`, AND `exploit_hit_credited_at IS NULL` (uncredited),
+ * resolve the row's live Meta adset (via `ad_publish_jobs.meta_adset_id`), sum
+ * lifetime spend/purchases/atc from `meta_insights_daily`, compute `tierForTest`
+ * against the pass's active thresholds, and — for a `promising` or `crown` verdict —
+ * call [[crowned-winners]] `recordExploitHit(sourceCrownedAdsetId)` (bumps
+ * lifetime `exploit_hits`, resets `exploit_spawned` strike counter to 0, clears
+ * `exploit_exhausted` + `exploit_exhausted_at`).
+ *
+ * The write is a compare-and-set on `exploit_hit_credited_at IS NULL` so exactly
+ * one row transitions per (clone, verdict); a re-run reads zero rows and skips
+ * the SDK call entirely — the same hit is never credited twice across passes.
+ * A `dud`/`testing` verdict contributes no reset — the clone's spawn already
+ * counted a strike in Phase 2's `incrementExploitSpawned`, and Phase 1's
+ * `EXPLOIT_EXHAUST_STRIKES=4` predicate does the exhausting inside the SDK.
+ *
+ * Returns `{ credited, skipped }` — `credited` = number of hits successfully
+ * attributed this pass; `skipped` = uncredited clones whose Meta adset couldn't
+ * be resolved (no `ad_publish_jobs` row with a stamped `meta_adset_id` yet).
+ */
+export async function creditExploitHits(
+  admin: Admin,
+  args: {
+    workspaceId: string;
+    metaAdAccountId: string;
+    productId: string | null;
+    thresholds: TestThresholds;
+    nowMs: number;
+  },
+): Promise<{
+  credited: number;
+  skipped: number;
+  hits: Array<{
+    adCampaignId: string;
+    sourceCrownedAdsetId: string;
+    metaAdsetId: string;
+    tier: "crown" | "promising";
+    spendCents: number;
+    purchases: number;
+    addToCart: number;
+  }>;
+}> {
+  let q = admin
+    .from("ad_campaigns")
+    .select("id, source_crowned_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .eq("is_exploit", true)
+    .is("exploit_hit_credited_at", null)
+    .not("source_crowned_adset_id", "is", null);
+  if (args.productId) q = q.eq("product_id", args.productId);
+  const { data: exploitRows } = await q;
+  const rows = (exploitRows ?? []) as Array<{ id: string; source_crowned_adset_id: string | null }>;
+  if (!rows.length) return { credited: 0, skipped: 0, hits: [] };
+
+  // Map each ad_campaign to its live Meta adset via ad_publish_jobs — the
+  // publisher stamps meta_adset_id after minting the per-test adset, so a row
+  // without a stamped meta_adset_id yet (mint in flight) is skipped this pass
+  // and picked up on the next.
+  const campaignIds = rows.map((r) => r.id);
+  const { data: pubJobs } = await admin
+    .from("ad_publish_jobs")
+    .select("campaign_id, meta_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .in("campaign_id", campaignIds)
+    .not("meta_adset_id", "is", null);
+  const adsetByCampaign = new Map<string, string>();
+  for (const j of (pubJobs ?? []) as Array<{ campaign_id: string | null; meta_adset_id: string | null }>) {
+    if (!j.campaign_id || !j.meta_adset_id) continue;
+    if (!adsetByCampaign.has(j.campaign_id)) adsetByCampaign.set(j.campaign_id, j.meta_adset_id);
+  }
+  const adsetIds = Array.from(new Set(Array.from(adsetByCampaign.values())));
+  if (!adsetIds.length) return { credited: 0, skipped: rows.length, hits: [] };
+
+  const lookbackIso = new Date(args.nowMs - 180 * 24 * 3600_000).toISOString().slice(0, 10);
+  const { data: ins } = await admin
+    .from("meta_insights_daily")
+    .select("meta_object_id, spend_cents, purchases, add_to_cart")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_ad_account_id", args.metaAdAccountId)
+    .eq("level", "adset")
+    .in("meta_object_id", adsetIds)
+    .gte("snapshot_date", lookbackIso);
+  const life = new Map<string, { spend: number; purch: number; atc: number }>();
+  for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
+    const k = String(r.meta_object_id);
+    const cur = life.get(k) ?? { spend: 0, purch: 0, atc: 0 };
+    cur.spend += Number(r.spend_cents ?? 0);
+    cur.purch += Number(r.purchases ?? 0);
+    cur.atc += Number(r.add_to_cart ?? 0);
+    life.set(k, cur);
+  }
+
+  const hits: Array<{
+    adCampaignId: string;
+    sourceCrownedAdsetId: string;
+    metaAdsetId: string;
+    tier: "crown" | "promising";
+    spendCents: number;
+    purchases: number;
+    addToCart: number;
+  }> = [];
+  let skipped = 0;
+  for (const row of rows) {
+    const adsetId = adsetByCampaign.get(row.id);
+    if (!adsetId || !row.source_crowned_adset_id) {
+      skipped += 1;
+      continue;
+    }
+    const l = life.get(adsetId) ?? { spend: 0, purch: 0, atc: 0 };
+    const tier = tierForTest(
+      { spendCents: l.spend, purchases: l.purch, addToCart: l.atc },
+      args.thresholds,
+    );
+    if (tier !== "crown" && tier !== "promising") continue;
+    // Compare-and-set gate on exploit_hit_credited_at — exactly one row transitions
+    // per (clone, verdict) so a re-run cannot double-credit. .select("id") is what
+    // lets us count the transition and skip the SDK call when a racing pass beat us.
+    const nowIso = new Date(args.nowMs).toISOString();
+    const { data: updated } = await admin
+      .from("ad_campaigns")
+      .update({ exploit_hit_credited_at: nowIso })
+      .eq("id", row.id)
+      .eq("workspace_id", args.workspaceId)
+      .eq("is_exploit", true)
+      .is("exploit_hit_credited_at", null)
+      .select("id");
+    if (!updated || (updated as unknown[]).length !== 1) continue;
+    try {
+      await recordExploitHit(admin, {
+        workspaceId: args.workspaceId,
+        testMetaAdsetId: row.source_crowned_adset_id,
+      });
+    } catch (err) {
+      console.warn("recordExploitHit failed", {
+        workspaceId: args.workspaceId,
+        sourceCrownedAdsetId: row.source_crowned_adset_id,
+        err: errText(err),
+      });
+      continue;
+    }
+    hits.push({
+      adCampaignId: row.id,
+      sourceCrownedAdsetId: row.source_crowned_adset_id,
+      metaAdsetId: adsetId,
+      tier,
+      spendCents: l.spend,
+      purchases: l.purch,
+      addToCart: l.atc,
+    });
+  }
+  return { credited: hits.length, skipped, hits };
+}
+
 // ── Runner orchestrator ───────────────────────────────────────────────────────
 
 export interface RunMediaBuyerOptions {
@@ -2432,6 +2593,62 @@ export async function runMediaBuyerLoop(
     if (r.recorded) writes.directorActivityRows += 1;
   }
 
+  // media-buyer-explore-exploit-split-on-crown Phase 3 — feedback loop. Attribute
+  // each live/just-resolved EXPLOIT-origin test's tierForTest verdict back to
+  // its source winner: a promising|crown clone ⇒ recordExploitHit (resets strikes
+  // + clears exhausted); a dud/testing outcome contributes no reset — the clone's
+  // spawn already counted a strike in Phase 2. The compare-and-set gate inside
+  // creditExploitHits (`.is('exploit_hit_credited_at', null).select('id')`) means
+  // a re-run cannot double-credit the same clone. One media_buyer_exploit_hit_credited
+  // audit row per hit citing {source_meta_ad_id (via crown-marker), source_crowned_adset_id,
+  // ad_campaign_id, meta_adset_id, tier, spendCents, purchases, addToCart}.
+  //
+  // Runs on every armed pass regardless of whether the current pass spawned exploit
+  // slots — a hit on a PRIOR pass's clone must credit even when today's plan is idle.
+  // Requires an active policy (thresholds come from it); a no-active-policy pass took
+  // the early-return dormant branch above and never reaches here.
+  const thresholds: TestThresholds = {
+    crownMaxCpaCents: policy.crown_max_cpa_cents ?? 15000,
+    crownMinSpendCents: policy.crown_min_spend_cents ?? 45000,
+    crownMinPurchases: policy.crown_min_purchases ?? 8,
+    holdBandMaxCpaCents: policy.hold_band_max_cpa_cents ?? 22000,
+    maxTestSpendCents: policy.max_test_spend_cents ?? 120000,
+    earlyTrimMinSpendCents: policy.early_trim_min_spend_cents ?? 30000,
+    slowKillMinSpendCents: policy.slow_kill_min_spend_cents ?? 60000,
+    slowKillMaxCpaCents: policy.slow_kill_max_cpa_cents ?? 30000,
+  };
+  const exploitHitResult = await creditExploitHits(admin, {
+    workspaceId: opts.workspaceId,
+    metaAdAccountId: opts.metaAdAccountId,
+    productId: cohortProductId,
+    thresholds,
+    nowMs,
+  });
+  for (const h of exploitHitResult.hits) {
+    const r = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_exploit_hit_credited",
+      specSlug: null,
+      reason:
+        `Exploit hit credited: clone ad_campaign ${h.adCampaignId} on adset ${h.metaAdsetId} reached tier=${h.tier} ` +
+        `(spend $${(h.spendCents / 100).toFixed(2)}, purchases ${h.purchases}, add_to_cart ${h.addToCart}); ` +
+        `recordExploitHit on source crowned adset ${h.sourceCrownedAdsetId} — strikes reset, exploit_exhausted cleared.`,
+      metadata: {
+        ad_campaign_id: h.adCampaignId,
+        source_crowned_adset_id: h.sourceCrownedAdsetId,
+        meta_adset_id: h.metaAdsetId,
+        tier: h.tier,
+        spend_cents: h.spendCents,
+        purchases: h.purchases,
+        add_to_cart: h.addToCart,
+        policy_version_id: plan.policyVersionId,
+        autonomous: true,
+      },
+    });
+    if (r.recorded) writes.directorActivityRows += 1;
+  }
+
   // Pass heartbeat — one summary row per cadence pass, always emitted.
   const heartbeat = await recordDirectorActivity(admin, {
     workspaceId: opts.workspaceId,
@@ -2446,6 +2663,8 @@ export async function runMediaBuyerLoop(
       replenish_count: plan.replenish.length,
       fatigue_replenish_count: plan.fatigueReplenish.length,
       exploit_spawn_count: plan.exploitSpawn.length,
+      exploit_hit_credited_count: exploitHitResult.credited,
+      exploit_hit_skipped_count: exploitHitResult.skipped,
       split_info: plan.splitInfo,
       amplified_ad_campaign_ids: writes.amplifiedAdCampaignIds,
       cohort_configured: plan.cohortConfigured,
