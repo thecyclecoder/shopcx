@@ -9,8 +9,11 @@
  * (2) internal-vs-Shopify branch keys on the ORDER's shopify_order_id, NOT the
  *     sub's is_internal flag (migrated subs are is_internal=true with SC-numbered
  *     Shopify orders and used to fall through to the EasyPost path forever).
- * (3) internal single-order fallback — no tracking + fulfilled + >7d = delivered
- *     (grace), <7d stays locked.
+ * (3) universal setup-grace age gate — a first order older than SETUP_GRACE_MS
+ *     (5 days) unlocks the sub UNCONDITIONALLY, regardless of tracking or
+ *     fulfillment_status. Internal orders routinely carry neither (some never
+ *     import to Amplifier), so an age-only gate is the only thing that keeps them
+ *     from being trapped in the "being set up" banner forever. (CEO 2026-07-23.)
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -48,9 +51,12 @@ test("MUTATION_GATED_ROUTES gates every subscription-mutating route named in the
 
 const NOW = new Date("2026-07-06T12:00:00Z").getTime();
 
+// Default age is INSIDE the setup window (1 day) so the deny/lookup branches
+// under test aren't pre-empted by the universal age gate; tests that exercise
+// the age gate set `created_at` explicitly.
 const baseOrder = (overrides: Partial<GateOrder> = {}): GateOrder => ({
   id: "order-1",
-  created_at: new Date(NOW - 30 * 24 * 3600 * 1000).toISOString(),
+  created_at: new Date(NOW - 1 * 24 * 3600 * 1000).toISOString(),
   fulfillment_status: null,
   delivered_at: null,
   easypost_status: null,
@@ -128,38 +134,43 @@ test("internal single-order + tracking + recent easypost check (in throttle) →
   if (d.kind === "deny") assert.equal(d.state, "in_transit");
 });
 
-test("internal single-order + NO tracking + fulfilled + >7 days old → allowed via 7-day grace", () => {
+test("SHOPCX74 case: internal single-order + NO tracking + NO fulfillment_status + >5 days old → allowed via universal age gate", () => {
+  // The bug report: a native internal sub (SHOPCX-numbered order, never imported
+  // to Amplifier) with empty fulfillments, null fulfillment_status, null tracking.
+  // Before the age gate it fell through to deny not_shipped FOREVER.
   const first = baseOrder({
     shopify_order_id: null,
     amplifier_tracking_number: null,
-    fulfillment_status: "fulfilled",
-    created_at: new Date(NOW - 8 * 24 * 3600 * 1000).toISOString(),
+    fulfillment_status: null,
+    created_at: new Date(NOW - 16 * 24 * 3600 * 1000).toISOString(),
+  });
+  const d = decideMutationGate(first, 1, NOW);
+  assert.equal(d.kind, "allow");
+  if (d.kind === "allow") assert.equal(d.state, "delivered");
+});
+
+test("universal age gate wins over the tracking/EasyPost branch: internal + tracking + >5 days → allow (no lookup)", () => {
+  // A delivered-but-never-synced internal order: the age gate short-circuits so
+  // we don't even need the live EasyPost call to unlock it.
+  const first = baseOrder({
+    shopify_order_id: null,
+    amplifier_tracking_number: "TRACK123",
+    created_at: new Date(NOW - 6 * 24 * 3600 * 1000).toISOString(),
   });
   const d = decideMutationGate(first, 1, NOW);
   assert.equal(d.kind, "allow");
 });
 
-test("internal single-order + NO tracking + fulfilled + <7 days old → deny not_shipped (grace has not tripped)", () => {
+test("age gate boundary: internal + NO tracking + NOT fulfilled + <5 days old → still deny not_shipped (window not elapsed)", () => {
   const first = baseOrder({
     shopify_order_id: null,
     amplifier_tracking_number: null,
-    fulfillment_status: "fulfilled",
+    fulfillment_status: null,
     created_at: new Date(NOW - 3 * 24 * 3600 * 1000).toISOString(),
   });
   const d = decideMutationGate(first, 1, NOW);
   assert.equal(d.kind, "deny");
   if (d.kind === "deny") assert.equal(d.state, "not_shipped");
-});
-
-test("internal single-order + NO tracking + NOT fulfilled → deny not_shipped even if aged (grace requires fulfilled)", () => {
-  const first = baseOrder({
-    shopify_order_id: null,
-    amplifier_tracking_number: null,
-    fulfillment_status: null,
-    created_at: new Date(NOW - 30 * 24 * 3600 * 1000).toISOString(),
-  });
-  const d = decideMutationGate(first, 1, NOW);
-  assert.equal(d.kind, "deny");
 });
 
 test("already-delivered order (delivered_at set) → allow (cheap path, no lookup)", () => {

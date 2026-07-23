@@ -38,11 +38,16 @@
  *   - shopify_order_id IS NULL → internal (Amplifier-fulfilled): we don't buy
  *     the EasyPost label so we never get a delivered webhook. If a tracking
  *     number exists we do a LIVE EasyPost lookup on portal visit (throttled,
- *     cached back onto the order). If no tracking number yet, we fall back to
- *     the fulfillment status + a 7-day grace: a fulfilled internal order older
- *     than 7 days counts as delivered.
+ *     cached back onto the order). If no tracking number yet, the sub stays
+ *     locked ONLY until the universal setup-grace age gate trips (below).
  *   - shopify_order_id present → Shopify: the order's `fulfillment_status` is
  *     the delivery proxy. "fulfilled" = shipped/delivered enough for the gate.
+ *
+ * Universal escape hatch: regardless of branch, a first order older than
+ * SETUP_GRACE_MS (5 days) unlocks the subscription unconditionally. Internal
+ * orders routinely carry no tracking number AND no fulfillment_status (some are
+ * never imported to Amplifier at all), so without an age-only gate they'd stay
+ * trapped in the "being set up" banner forever. (CEO 2026-07-23.)
  *
  * Fails OPEN (allows the mutation) on an EasyPost error — this is an
  * anti-gaming gate, not a security control, and we never want an API hiccup to
@@ -92,8 +97,16 @@ export const MUTATION_GATED_ROUTES = new Set([
 /** Don't re-hit EasyPost more than once per this window per order. */
 const LOOKUP_THROTTLE_MS = 30 * 60 * 1000;
 
-/** Internal order with no tracking that's fulfilled + this old = delivered (grace). */
-const INTERNAL_FULFILLED_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Universal setup-grace escape hatch. A first order older than this is past the
+ * anti-gaming window UNCONDITIONALLY — no fulfillment_status, no tracking number,
+ * no delivered webhook required. Internal (Amplifier) orders routinely have NONE
+ * of those signals (SHOPCX-numbered orders that never imported to Amplifier carry
+ * empty `fulfillments[]`, null `amplifier_*`, null `fulfillment_status`), which
+ * used to trap the subscription in the "being set up" banner forever. 5 days ⇒
+ * unlocked, no matter the fulfillment signal. (CEO 2026-07-23.)
+ */
+const SETUP_GRACE_MS = 5 * 24 * 60 * 60 * 1000;
 
 export interface MutationGate {
   allowed: boolean;
@@ -153,7 +166,20 @@ export function decideMutationGate(
     return { kind: "allow", state: "delivered" };
   }
 
-  // (b) Branch on the ORDER, not the subscription. shopify_order_id-null = internal.
+  // (b) Universal setup-grace escape hatch — a first order older than
+  // SETUP_GRACE_MS is past the anti-gaming window no matter its fulfillment
+  // signal. This runs BEFORE the tracking/fulfillment branches on purpose: an
+  // internal order can have NO tracking number, NO fulfillment_status, and no
+  // Amplifier import at all (e.g. SHOPCX74 — never imported to Amplifier), which
+  // otherwise leaves the sub locked in the "being set up" banner indefinitely.
+  // 5 days ⇒ unlocked, full stop. (CEO 2026-07-23.)
+  const firstAgeMs = now - new Date(first.created_at).getTime();
+  if (firstAgeMs > SETUP_GRACE_MS) {
+    return { kind: "allow", state: "delivered" };
+  }
+
+  // Within the setup window — use the best delivery signal we have.
+  // Branch on the ORDER, not the subscription. shopify_order_id-null = internal.
   const isInternalOrder = first.shopify_order_id == null;
 
   if (isInternalOrder) {
@@ -167,16 +193,7 @@ export function decideMutationGate(
       }
       return { kind: "easypost_lookup", tracking, carrier: first.amplifier_carrier, order: first };
     }
-    // (c) No tracking yet — fall back to fulfilled + 7-day grace. A fulfilled
-    // internal order older than 7 days counts as delivered (Amplifier will
-    // never send us a delivered event and the customer shouldn't be trapped).
-    const ff = String(first.fulfillment_status || "").toLowerCase();
-    const isFulfilledLike = FULFILLED_STATUSES.has(ff);
-    const createdAt = new Date(first.created_at).getTime();
-    const ageMs = now - createdAt;
-    if (isFulfilledLike && ageMs > INTERNAL_FULFILLED_GRACE_MS) {
-      return { kind: "allow", state: "delivered" };
-    }
+    // No tracking yet and still inside the setup window → not shipped.
     return { kind: "deny", state: "not_shipped", reason: NOT_SHIPPED_REASON };
   }
 
