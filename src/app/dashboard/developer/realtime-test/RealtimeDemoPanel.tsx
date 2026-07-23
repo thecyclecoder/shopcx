@@ -57,46 +57,43 @@ export default function RealtimeDemoPanel() {
     const pushLog = (kind: string, detail: string) =>
       setLog((prev) => [{ at: new Date().toLocaleTimeString(), kind, detail }, ...prev].slice(0, 30));
 
-    // Postgres Changes applies the table's RLS to EACH event, per the role on the Realtime socket. The
-    // browser client's socket is `anon` by default, and realtime_demo's SELECT policy requires an
-    // authenticated workspace member (auth.uid()) — so an anon socket is subscribed but every event is
-    // filtered out (green dot, zero delivery). Handing the socket the user's JWT makes auth.uid()
-    // resolve so the policy matches and events flow. This is the correct pattern for any authenticated
-    // dashboard Realtime view (unlike the public widget, which needs only the anon policy on
-    // ticket_messages). setAuth must happen BEFORE subscribe so the join carries the token.
+    // Realtime BROADCAST (not Postgres Changes). A DB trigger (realtime_demo_broadcast_trg) calls
+    // realtime.broadcast_changes() to push each row change to the PRIVATE 'realtime_demo' topic; we
+    // subscribe to that topic. This deliberately avoids Postgres Changes, whose per-row RLS engine
+    // (Walrus) silently drops INSERT/UPDATE events on our table (a known open Supabase bug — only
+    // DELETE, which skips RLS, leaked through). Broadcast authorization is channel-level via an
+    // RLS policy on realtime.messages, gated by topic — much simpler and it actually works.
+    //
+    // A private channel requires the socket to carry the user's JWT, so setAuth runs BEFORE subscribe.
     void (async () => {
       const { data } = await supabase.auth.getSession();
       if (cancelled) return;
       if (data.session?.access_token) await supabase.realtime.setAuth(data.session.access_token);
 
       channel = supabase
-        .channel("realtime-demo-panel")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "realtime_demo" },
-          (payload) => {
-            const next = payload.new as DemoRow | Record<string, never>;
-            const old = payload.old as DemoRow | Record<string, never>;
-            if (payload.eventType === "INSERT") {
-              setRows((prev) => [next as DemoRow, ...prev.filter((r) => r.id !== (next as DemoRow).id)]);
-              pushLog("INSERT", `${(next as DemoRow).label} tick=${(next as DemoRow).tick}`);
-            } else if (payload.eventType === "UPDATE") {
-              // Upsert: if the initial snapshot missed this row (or it was inserted while we were
-              // connecting), an UPDATE event should still surface it rather than be dropped.
-              setRows((prev) => {
-                const nr = next as DemoRow;
-                return prev.some((r) => r.id === nr.id)
-                  ? prev.map((r) => (r.id === nr.id ? nr : r))
-                  : [nr, ...prev];
-              });
-              pushLog("UPDATE", `${(next as DemoRow).label} tick=${(next as DemoRow).tick} · ${(next as DemoRow).note ?? ""}`);
-            } else if (payload.eventType === "DELETE") {
-              const goneId = (old as DemoRow).id;
-              setRows((prev) => prev.filter((r) => r.id !== goneId));
-              pushLog("DELETE", goneId ?? "(row)");
-            }
-          },
-        )
+        .channel("realtime_demo", { config: { private: true } })
+        .on("broadcast", { event: "db_change" }, (msg) => {
+          // broadcast_changes payload: { operation, record (new), old_record (old), table, schema }
+          const p = (msg.payload ?? {}) as {
+            operation?: string;
+            record?: DemoRow | null;
+            old_record?: DemoRow | null;
+          };
+          if (p.operation === "INSERT" || p.operation === "UPDATE") {
+            const nr = p.record;
+            if (!nr) return;
+            setRows((prev) =>
+              prev.some((r) => r.id === nr.id)
+                ? prev.map((r) => (r.id === nr.id ? nr : r))
+                : [nr, ...prev],
+            );
+            pushLog(p.operation, `${nr.label} tick=${nr.tick} · ${nr.note ?? ""}`);
+          } else if (p.operation === "DELETE") {
+            const goneId = p.old_record?.id;
+            if (goneId) setRows((prev) => prev.filter((r) => r.id !== goneId));
+            pushLog("DELETE", goneId ?? "(row)");
+          }
+        })
         .subscribe((status) => {
           if (status === "SUBSCRIBED") setConn("live");
           else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setConn("error");

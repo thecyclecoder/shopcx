@@ -1,6 +1,6 @@
 # dashboard/realtime-test
 
-`/dashboard/developer/realtime-test` — a live verification of Supabase Realtime (Postgres Changes). Proves the push-not-poll pattern before it's adopted on real live views.
+`/dashboard/developer/realtime-test` — a live verification of Supabase Realtime **Broadcast**. Proves the push-not-poll pattern before it's adopted on real live views. (Originally tried Postgres Changes, which hit the open Supabase RLS/Walrus bug — switched to Broadcast, which works. See [[../recipes/realtime-subscriptions]].)
 
 **Files:** `src/app/dashboard/developer/realtime-test/page.tsx` (thin client wrapper) + `RealtimeDemoPanel.tsx` (the subscription) · **table:** [[../tables/realtime_demo]] · **pattern:** [[../recipes/realtime-subscriptions]]
 
