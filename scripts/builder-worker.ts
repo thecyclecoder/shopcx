@@ -23924,9 +23924,31 @@ async function runSecurityReviewJob(job: Job) {
   const authorAction = (job.pending_actions || []).find((a) => a.type === "author_fix_spec");
   if (authorAction && (authorAction.status === "approved" || authorAction.status === "declined")) {
     if (authorAction.status === "declined") {
-      authorAction.result = "declined by disposer";
-      await update(job.id, { status: "completed", pending_actions: job.pending_actions, log_tail: `disposer declined the seeded author_fix_spec for ${instr.spec_slug || job.spec_slug || ""}`.slice(-2000) });
-      console.log(`${tag} author_fix_spec declined`);
+      // security-review-decline-of-author-fix-spec-must-persist-real-vuln-verdict Phase 1 — an
+      // `author_fix_spec` pending action is only parked when the underlying review verdict was
+      // `real-vuln` (see [[../src/lib/security-agent]] `applySecurityVerdictToJob` real-vuln
+      // branch above — the seed is captured on auto-author failure of a real-vuln finding). A
+      // decline REJECTS THE AUTO-FIX, not the finding — the vulnerability still stands. So on
+      // decline we (a) persist `instructions.verdict='real-vuln'` and (b) leave the job in a
+      // SURFACED terminal state (`needs_attention`), not a bare `completed`. Otherwise the three
+      // security rollups (`getSecurityStateBySlug` / `getSecurityStateForSlug` /
+      // `getSecurityStateForBranch`, whose `completedClean` is gated by `isRealVulnVerdict`) would
+      // read `status='completed'` + no verdict on instructions as CLEAN, turning the slug's
+      // Security signal green while the real vulnerability is still un-shipped — the M4 promote
+      // gate could auto-merge and the fold gate could archive a vulnerable spec. Only an
+      // APPROVED author_fix_spec (which produces the fix spec + re-enters `routeSecurityFix`) or
+      // a genuine clean re-review may flip the slug green.
+      const parentSlug = String(instr.spec_slug || job.spec_slug || "");
+      const declineInstr = JSON.stringify({ ...instr, verdict: "real-vuln" });
+      authorAction.result = "declined by disposer — verdict persisted as real-vuln; slug stays security-red until a fix ships";
+      await update(job.id, {
+        status: "needs_attention",
+        instructions: declineInstr,
+        pending_actions: job.pending_actions,
+        error: `author_fix_spec declined for ${parentSlug} — real vulnerability still requires a fix`,
+        log_tail: `disposer declined the seeded author_fix_spec for ${parentSlug} — verdict persisted as real-vuln; slug stays security-red until a fix ships`.slice(-2000),
+      });
+      console.log(`${tag} author_fix_spec declined → verdict=real-vuln persisted, surfaced needs_attention`);
       return;
     }
     const payload = (authorAction.payload || null) as SecurityAuthorFixSpecPayload | null;
