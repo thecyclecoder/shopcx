@@ -1478,6 +1478,46 @@ function isUsageCapError(text: string): boolean {
   return /rate_?limit_?(?:event|error|reached|exceeded)|(?:usage|session|daily|weekly|monthly|account|organization)\s+limit (?:reached|exceeded|hit)|(?:reached|hit) (?:your|the)[\w .]*\blimit\b|limit will reset|out of usage|usage limit|quota (?:exceeded|reached)|over your usage|\b\d+-? ?(?:hour|day) limit\b|weekly limit|overage[_ ]?status|too many requests.*(?:usage|limit|quota)/.test(t);
 }
 
+// Classify a session-ending error as a TRANSIENT expired-OAuth 401 (→ requeue the build so a fresh worker
+// with a refreshed token re-runs the idempotent build) vs a genuine crash (→ terminal failure).
+// [[../docs/brain/specs/build-lane-requeue-on-expired-oauth-401-instead-of-terminal-fail]] Phase 1.
+//
+// SIGNATURE: a `claude -p` whose OAuth token expires mid-run returns `api_error_status:401` alongside
+// `authentication_failed` / `OAuth access token has expired` / `re-authenticate to continue`. That is a
+// purely transient, fully-recoverable infra condition — nothing was merged, the branch is idempotent, and a
+// fresh session with a refreshed token completes the build fine. Today the build classifier only distinguishes
+// usage-wall (isUsageCapError → hop accounts) vs 529/overloaded (in-account retry); an expired token falls
+// through the `if (isError && !parsed)` sink and gets stamped terminal `failed`, forcing a Mario reclaim. This
+// exact signature stranded THIS spec twice in ~3h and is what fired the Mario session that authored it.
+//
+// SIGNAL VS VOCABULARY (mirrors isUsageCapError's discipline): anchored on the STRUCTURED 401 + auth-expired
+// shape, not bare "authentication" vocabulary that could appear in build code / a code-review transcript. AND
+// explicitly rules out a usage-wall (isUsageCapError) — a capped account MUST still take the wall/hop path;
+// this classifier is only for the pure expired-token class that requeues to a healthy account with a fresh
+// token. Never triggers on a 529/overloaded (isUsageCapError already returns false for that; the in-account
+// retry owns it, not a requeue).
+function isTransientAuthError(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  if (isUsageCapError(text)) return false; // usage wall / hard rejection owns this — never over-fire on a hop
+  const has401 = /api[_-]?error[_-]?status"?\s*[:=]\s*"?401\b|"status"?\s*[:=]\s*"?401\b|\bhttp\/?\d?\.?\d?\s*401\b|\b401\s+unauthorized\b/.test(t);
+  const hasAuthPhrase =
+    /authentication_failed/.test(t) ||
+    /oauth access token has expired/.test(t) ||
+    /re-?authenticate to continue/.test(t);
+  // Require EITHER the structured 401 code + an auth phrase, OR the two most-specific auth-expiry phrases on
+  // their own (the wording that only the expired-token class emits). Bare "authentication" or "401" alone is
+  // NOT enough — a build transcript quoting HTTP error handling would trip a naive matcher.
+  if (hasAuthPhrase && has401) return true;
+  return /oauth access token has expired|re-?authenticate to continue/.test(t);
+}
+
+// Cap on transient-auth requeues per build job (mirrors BUILD_GATE_MAX_ATTEMPTS shape). A persistently-broken
+// account (token that keeps re-expiring, revoked credential, mis-configured CLAUDE_CONFIG_DIR) can't loop
+// forever — after this many requeues the build falls to terminal 'failed' as today. The counter is encoded on
+// the job's `error` field as `TRANSIENT_AUTH_REQUEUE[<N>]` (same convention as `BUILD_GATE_FAILED[<N>]`) so
+// it survives worker restarts without a schema change.
+const TRANSIENT_AUTH_MAX_ATTEMPTS = 3;
+
 // The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
 // is null when starting fresh); `blocked` → every account is capped, park `blocked_on_usage`.
 type AccountDecision =
@@ -26132,6 +26172,38 @@ async function dispatchJob(job: Job) {
     }
 
     if (isError && !parsed) {
+      // ⭐ TRANSIENT EXPIRED-OAUTH 401 REQUEUE
+      // ([[../docs/brain/specs/build-lane-requeue-on-expired-oauth-401-instead-of-terminal-fail]] Phase 1).
+      // A `claude -p` whose OAuth token expires mid-run comes back with api_error_status:401 +
+      // authentication_failed / 'OAuth access token has expired' / 're-authenticate to continue'. That's a
+      // purely transient, fully-recoverable infra condition — nothing was merged, the build is idempotent, and
+      // a fresh worker with a refreshed token completes it fine. Today this falls through to terminal 'failed'
+      // and forces a Mario reclaim (this exact signature stranded THIS spec twice in ~3h and is what fired the
+      // Mario session that authored it). Same non-destructive status flip the reaper (status:'queued',
+      // claimed_at:null) uses for orphaned in-flight jobs. Bounded by TRANSIENT_AUTH_MAX_ATTEMPTS via a counter
+      // encoded on the `error` field (mirrors the BUILD_GATE_FAILED[N] convention already in-lane) so a
+      // persistently-broken token still fails terminally after the cap. The wall/hop path is untouched:
+      // isTransientAuthError explicitly rules out a usage-wall so a capped account still hops accounts.
+      if (isTransientAuthError(`${resultText}\n${raw}`)) {
+        const prior = /TRANSIENT_AUTH_REQUEUE\[(\d+)\]/.exec(job.error || "");
+        const attempt = (prior ? parseInt(prior[1], 10) : 0) + 1;
+        if (attempt < TRANSIENT_AUTH_MAX_ATTEMPTS) {
+          console.log(`${tag} transient expired-OAuth 401 (attempt ${attempt}/${TRANSIENT_AUTH_MAX_ATTEMPTS}) → requeuing build for a fresh worker/token`);
+          // Requeue as 'queued' (NOT queued_resume) — a fresh account can't `--resume` the prior account's
+          // expired session, and the build lane is idempotent (worktree/branch are re-derived on re-claim).
+          // Drop the session so resolveAccountForJob picks a healthy account fresh at re-claim.
+          await update(job.id, {
+            status: "queued",
+            claimed_at: null,
+            claude_session_id: null,
+            claude_session_config_dir: null,
+            error: `TRANSIENT_AUTH_REQUEUE[${attempt}]: expired OAuth token — re-running with a fresh session`,
+            log_tail: logTail,
+          });
+          return;
+        }
+        console.error(`${tag} transient expired-OAuth 401 exceeded ${TRANSIENT_AUTH_MAX_ATTEMPTS}× → terminal fail (persistently-broken token)`);
+      }
       await update(job.id, { status: "failed", error: "claude run errored", log_tail: logTail });
       return;
     }
