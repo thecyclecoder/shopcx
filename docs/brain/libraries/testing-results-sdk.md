@@ -24,7 +24,7 @@ Returns `{ generatedAt, thresholds, products: ProductTestGroup[], globalFlags, f
 
 - **👑 crown** — `≥ crown_min_purchases` sales AND CAC ≤ `crown_max_cpa_cents` AND spend ≥ `crown_min_spend_cents` (default 8 / $150 / $450).
 - **📈 promising** — CAC ≤ `hold_band_max_cpa_cents` ($220) — converting, high crowning potential.
-- **💀 dud** — spend ≥ `max_test_spend_cents` (deadline $1,200) without reaching the hold band, OR spend ≥ `early_trim_min_spend_cents` ($300) with 0 sales.
+- **💀 dud** — spend ≥ `max_test_spend_cents` (deadline $1,200) without reaching the hold band, OR spend ≥ `early_trim_min_spend_cents` ($300) with 0 sales, OR (**slow-kill over-CPA converter, CEO 2026-07-15**) spend ≥ `slow_kill_min_spend_cents` ($600) AND CAC > `slow_kill_max_cpa_cents` ($300) — order-safe on top of crown/promising because $300 sits above the $150 crown and $220 hold-band ceilings, so a slow-kill state can never be crown/promising. A converter with CAC between $220 and $300 stays `testing` (skeptic v3 $226 near-miss protection preserved).
 - **⏳ testing** — everything else (early / accumulating).
 
 `compareTests` sorts crown → promising → testing → dud, then sales desc, CAC asc, cost-per-ATC asc, CTR desc. Unit-tested in `src/lib/ads/testing-results-sdk.test.ts` (`npx tsx --test`).

@@ -44,6 +44,8 @@ export interface TestThresholds {
   holdBandMaxCpaCents: number; // crown < CPA ≤ this = hold/promising ($220)
   maxTestSpendCents: number;   // spend past this without crowning = dud (deadline, $1,200)
   earlyTrimMinSpendCents: number; // spend ≥ this with 0 purchases = early dud ($300)
+  slowKillMinSpendCents: number; // spend ≥ this AND cac > slowKillMaxCpaCents = slow-kill dud ($600)
+  slowKillMaxCpaCents: number;   // over this CAC past slowKillMinSpendCents = dud ($300)
 }
 
 const DEFAULT_THRESHOLDS: TestThresholds = {
@@ -53,12 +55,14 @@ const DEFAULT_THRESHOLDS: TestThresholds = {
   holdBandMaxCpaCents: 22000,
   maxTestSpendCents: 120000,
   earlyTrimMinSpendCents: 30000,
+  slowKillMinSpendCents: 60000,
+  slowKillMaxCpaCents: 30000,
 };
 
 export async function resolveTestThresholds(admin: Admin, workspaceId: string): Promise<TestThresholds> {
   const { data } = await admin
     .from("iteration_policies")
-    .select("crown_max_cpa_cents, crown_min_spend_cents, crown_min_purchases, hold_band_max_cpa_cents, max_test_spend_cents, early_trim_min_spend_cents")
+    .select("crown_max_cpa_cents, crown_min_spend_cents, crown_min_purchases, hold_band_max_cpa_cents, max_test_spend_cents, early_trim_min_spend_cents, slow_kill_min_spend_cents, slow_kill_max_cpa_cents")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -72,6 +76,8 @@ export async function resolveTestThresholds(admin: Admin, workspaceId: string): 
     holdBandMaxCpaCents: n(p.hold_band_max_cpa_cents, DEFAULT_THRESHOLDS.holdBandMaxCpaCents),
     maxTestSpendCents: n(p.max_test_spend_cents, DEFAULT_THRESHOLDS.maxTestSpendCents),
     earlyTrimMinSpendCents: n(p.early_trim_min_spend_cents, DEFAULT_THRESHOLDS.earlyTrimMinSpendCents),
+    slowKillMinSpendCents: n(p.slow_kill_min_spend_cents, DEFAULT_THRESHOLDS.slowKillMinSpendCents),
+    slowKillMaxCpaCents: n(p.slow_kill_max_cpa_cents, DEFAULT_THRESHOLDS.slowKillMaxCpaCents),
   };
 }
 
@@ -80,6 +86,11 @@ export function tierForTest(m: { spendCents: number; purchases: number; addToCar
   const cac = m.purchases > 0 ? m.spendCents / m.purchases : null;
   if (m.purchases >= t.crownMinPurchases && cac != null && cac <= t.crownMaxCpaCents && m.spendCents >= t.crownMinSpendCents) return "crown";
   if (m.purchases > 0 && cac != null && cac <= t.holdBandMaxCpaCents) return "promising";
+  // Slow-kill dud (CEO 2026-07-15): a converter still far over breakeven after real spend — an
+  // over-CPA converter must die at $600, not burn to the $1,200 deadline. Order-safe: crown needs
+  // cac ≤ $150 and promising cac ≤ $220 (both under the $300 slow-kill line), so a slow-kill state
+  // can never be crown/promising. A converter with cac between $220 and $300 stays `testing`.
+  if (m.spendCents >= t.slowKillMinSpendCents && cac != null && cac > t.slowKillMaxCpaCents) return "dud";
   // Deadline dud: burned the full test budget without converting to the hold band.
   if (m.spendCents >= t.maxTestSpendCents && (m.purchases === 0 || (cac != null && cac > t.holdBandMaxCpaCents))) return "dud";
   // Early dud: real spend, zero purchases (kill fast on the leading signal, don't wait for the deadline).
