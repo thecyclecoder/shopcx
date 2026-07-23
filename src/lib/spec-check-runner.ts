@@ -27,7 +27,7 @@
  */
 import { spawn } from "node:child_process";
 import { errText } from "@/lib/error-text";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
   AUTO_TESTABLE_EXEC_KINDS,
@@ -336,6 +336,83 @@ export function buildGrepArgv(params: GrepCheckParams): string[] {
   return ["-e", params.pattern, "--", params.path ?? "."];
 }
 
+/**
+ * Turbopack (Next 16) panics with `Symlink [project]/node_modules is invalid, it points out of
+ * the filesystem root` when the worktree's top-level `node_modules` is a symlink pointing OUTSIDE
+ * the project — the exact shape the spec-test worktree setup uses to share `REPO_DIR/node_modules`
+ * cheaply (`scripts/builder-worker.ts` `ln -sfn REPO_DIR/node_modules <wt>/node_modules`). Detect
+ * that shape before spawning `next build` and materialize a real hardlink-tree in place via Linux
+ * `cp -al` — no data copy (just inode refs), preserves internal symlinks, produces a fully-real
+ * top-level dir that Turbopack accepts. No-op when `node_modules` is missing, already a real
+ * directory, or a symlink that resolves INSIDE `repoRoot`.
+ *
+ * Exported for the pinning test in [[spec-check-runner.test]] — pure fs operation, no LLM.
+ */
+export async function ensureRealTopLevelNodeModulesForBuild(
+  repoRoot: string,
+): Promise<{ ok: boolean; evidence?: string; action: "noop" | "materialized" | "error" }> {
+  const nmPath = resolvePath(repoRoot, "node_modules");
+  let st;
+  try {
+    st = lstatSync(nmPath);
+  } catch {
+    return { ok: true, action: "noop" };
+  }
+  if (!st.isSymbolicLink()) return { ok: true, action: "noop" };
+  let target: string;
+  try {
+    target = readlinkSync(nmPath);
+  } catch (e) {
+    return { ok: false, action: "error", evidence: `readlink node_modules failed: ${errText(e)}` };
+  }
+  const resolved = resolvePath(repoRoot, target);
+  if (resolved === repoRoot || resolved.startsWith(repoRoot + "/")) return { ok: true, action: "noop" };
+  const rm = await runCmd("rm", ["-f", nmPath], repoRoot);
+  if (rm.code !== 0) {
+    return {
+      ok: false,
+      action: "error",
+      evidence: `node_modules preflight rm failed: ${(rm.stderr || rm.stdout || `exit ${rm.code}`).slice(0, 500)}`,
+    };
+  }
+  const cp = await runCmd("cp", ["-al", resolved + "/.", nmPath], repoRoot, 5 * 60 * 1000);
+  if (cp.code !== 0) {
+    return {
+      ok: false,
+      action: "error",
+      evidence: `node_modules preflight cp -al failed: ${(cp.stderr || cp.stdout || `exit ${cp.code}`).slice(0, 500)}`,
+    };
+  }
+  // The shared cache is a snapshot of some earlier install; when the BRANCH's package.json /
+  // package-lock.json diverges from it (e.g., this build bumped @remotion/* which pulled 42 new
+  // packages), the mirror is missing packages Turbopack later tries to resolve (the exact class
+  // that failed a first fix-attempt: `Cannot find module '@vercel/turbopack/postcss'`).
+  // `npm install --prefer-offline --no-audit --no-fund` patches the diff cheaply — reuses cached
+  // tarballs, no network for the common case, no audit or funding chatter. Skip when the target
+  // has no package.json (test sandboxes, non-npm projects) — the cp -al is enough there.
+  let hasPkg = false;
+  try {
+    lstatSync(resolvePath(repoRoot, "package.json"));
+    hasPkg = true;
+  } catch { /* no package.json — skip install */ }
+  if (hasPkg) {
+    const ni = await runCmd(
+      "npm",
+      ["install", "--prefer-offline", "--no-audit", "--no-fund"],
+      repoRoot,
+      10 * 60 * 1000,
+    );
+    if (ni.code !== 0) {
+      return {
+        ok: false,
+        action: "error",
+        evidence: `node_modules preflight npm install failed: ${(ni.stderr || ni.stdout || `exit ${ni.code}`).slice(0, 500)}`,
+      };
+    }
+  }
+  return { ok: true, action: "materialized" };
+}
+
 export const defaultExecutors: CheckExecutors = {
   tsc: async ({ repoRoot }) => {
     const r = await runCmd("npx", ["tsc", "--noEmit"], repoRoot);
@@ -447,6 +524,10 @@ export const defaultExecutors: CheckExecutors = {
     };
   },
   build: async ({ repoRoot }) => {
+    // Turbopack panics on a top-level node_modules symlink that points OUT of repoRoot —
+    // the exact shape our spec-test worktree uses. Materialize in-place before spawning.
+    const pre = await ensureRealTopLevelNodeModulesForBuild(repoRoot);
+    if (!pre.ok) return { ok: false, evidence: pre.evidence ?? "node_modules preflight failed" };
     const r = await runCmd("npx", ["next", "build"], repoRoot);
     if (r.error) return { ok: false, evidence: `spawn error: ${r.error}` };
     return {
