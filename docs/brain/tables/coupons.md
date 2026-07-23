@@ -48,6 +48,7 @@ The resolver normalizes a coupon into an entry on [[subscriptions]].`applied_dis
 
 ## Gotchas
 
+- **Coupons apply only to active subscriptions.** Both `subscriptionApplyCoupon` ([[../libraries/subscription-items]]) and `applyCouponToSub` ([[../libraries/coupons]]) check [[../tables/subscriptions]].`status` — refusing `'paused'`, `'cancelled'`, or null — via the `couponApplicableToSubStatus` guard. Discounts on non-active subs are structurally invalid: they silently discount a future renewal the customer didn't earn (ticket f9e28d57, SC135320 double-payout defect). The apply returns `{ success: false, error: 'subscription_not_active' }` on a non-active sub.
 - **Customer-scoped + single_use** coupons (legacy `mintCustomerCoupon` path) only resolve for their `customer_id` and only once. New popup leads use the **derived `WELCOME-{short_code}` master** instead (no per-row mint).
 - **Derived codes bind to the owner:** `resolveCoupon` rejects a `{PREFIX}-{short_code}` code unless `customerId` is passed AND equals the customer the suffix resolves to. Anonymous/unbound contexts can't redeem a derived code.
 - Tax is currently quoted on the **pre-discount** subtotal (Avalara); applying the discount to the taxable base is a documented refinement.
