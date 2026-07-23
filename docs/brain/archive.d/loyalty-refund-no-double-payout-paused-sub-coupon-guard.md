@@ -1,0 +1,1 @@
+- **Loyalty save-as-refund must never leave a dangling coupon + refuse coupon-apply on a non-active sub** · verified 2026-07-23 · → [[lifecycles/subscription-billing]]

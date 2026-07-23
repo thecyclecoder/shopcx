@@ -91,6 +91,14 @@ async function subUpdateLineItemPrice(workspaceId: string, contractId: string, v
 async function getLastOrderPrice(workspaceId: string, customerId: string, sku: string | null, variantId: string | null,) : Promise<number | null>
 ```
 
+### `couponApplicableToSubStatus` — function (pure guard)
+
+```ts
+function couponApplicableToSubStatus(status: string | null | undefined): boolean
+```
+
+Predicate that checks if a subscription is eligible for coupon application. Returns `true` only if the subscription status is `'active'`. Refuses to apply any loyalty/coupon discount to subscriptions with status `'paused'`, `'cancelled'`, or null — these statuses indicate the subscription cannot receive charges, so a discount is invalid. Wired into both `subscriptionApplyCoupon` (internal-aware dispatcher) and `applyCouponToSub` (coupons.ts), closing the SC135320 double-payout defect where a dangling coupon was applied to a paused subscription.
+
 ### `calcBasePrice` — function
 
 ```ts
@@ -125,7 +133,7 @@ async function subSwapVariant(workspaceId: string, contractId: string, oldVarian
 async function subscriptionApplyCoupon(workspaceId: string, contractId: string, code: string,) : Promise<{ success: boolean; error?: string }>
 ```
 
-Internal-aware coupon apply. Internal subs: `resolveCoupon` (internal wins → Shopify fallback) → `internalSubApplyDiscount` writes `subscriptions.applied_discounts`. Appstle subs: `healOnTouch` → `applyDiscountWithReplace`.
+Internal-aware coupon apply. Guarded by `couponApplicableToSubStatus` — refuses application to non-active subscriptions, returning `{ success: false, error: 'subscription_not_active' }`. For active subs: Internal subs: `resolveCoupon` (internal wins → Shopify fallback) → `internalSubApplyDiscount` writes `subscriptions.applied_discounts`. Appstle subs: `healOnTouch` → `applyDiscountWithReplace`. Closes SC135320 — a discount on a paused/cancelled sub is never valid and silently discounts a future renewal the customer didn't earn.
 
 ### `subscriptionRemoveCoupon` — function
 
@@ -147,6 +155,7 @@ Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount`. Appstl
 
 ## Gotchas
 
+- **`couponApplicableToSubStatus` guards both coupon-apply entry points.** `subscriptionApplyCoupon` and `applyCouponToSub` both check the subscription status before apply — refusing `'paused'`, `'cancelled'`, or null. Discounts on non-active subs silently discount a future renewal the customer didn't earn (ticket f9e28d57, Cora: $15 coupon + $15 cash payout from one 1,500-pt redemption). Both return `{ success: false, error: 'subscription_not_active' }` on a non-active sub.
 - `subUpdateLineItemPrice` has the 0.75 SubSave multiplier **baked in** — pass the visible MSRP, the helper applies × 0.75 before sending to Appstle. If you compute the SubSave price first, you'll end up at 0.5625 of MSRP.
 - Every helper checks `isInternalSubscription()` first. Internal subs bypass Appstle.
 - Variant ids must be Shopify variant ids when crossing into Appstle — internal UUIDs won't work.
