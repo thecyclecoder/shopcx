@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useBoxLive } from "@/lib/use-box-live";
 import { routedInboxHref } from "@/lib/agents/inbox";
 import type { AgentJob, JobStatus, PendingFold } from "@/lib/agent-jobs";
 import type { Phase, SpecStatus } from "@/lib/brain-roadmap";
@@ -40,7 +41,6 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   const [verifying, setVerifying] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [recoverNotice, setRecoverNotice] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
     try {
@@ -66,16 +66,11 @@ export default function BuildButton({ slug, initialJob, specStatus, initialFold,
   // job no longer maps 1:1 to a PR, so show "Folding…" and keep polling until the fold row clears.
   const folding = !!fold && (fold.status === "pending" || fold.status === "folding");
 
-  // Poll while the job is live OR a fold is in flight; stop on a terminal state.
-  useEffect(() => {
-    if (!(job && ACTIVE.includes(job.status)) && !folding) return;
-    timer.current = setInterval(poll, 4000);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
-  }, [job, folding, poll]);
-
   const active = !!job && ACTIVE.includes(job.status);
+  // roadmap-box-broadcast: was a 4s poll while the build job is live OR a fold is in flight. Now
+  // event-driven via useBoxLive — refetch this build on any agent_jobs change (while active/folding),
+  // with a 10s backstop for safety.
+  useBoxLive(poll, { enabled: active || folding, backstopMs: 10_000 });
 
   // spec-blockers: a spec with any uncleared Blocked-by prerequisite can't be built yet. The server gate
   // (queueRoadmapBuild) is the real enforcement; this disables the button + names what must ship first.
