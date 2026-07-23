@@ -57,6 +57,19 @@ async function claimRegenSpendSlot(
 
 Compare-and-set primitive that gates idempotent coupon regeneration for `apply_loyalty_coupon`. When a Shopify verify fails and the apply handler retries, the original redemption may already have been regenerated and minted to a new code by an earlier retry — this guard detects that and prevents a second spend. Atomically attempts to flip the original `loyalty_redemptions` row from `status='active'` → `status='expired'` (using `.eq('status','active')` as the predicate on the UPDATE itself), returning `true` only if the row was still active. If `false` is returned, the caller — who would have called `spendPoints` — instead routes to `replaySuccessorApply` to apply the successor code without re-spending. Exported for unit testing the atomic claim behavior.
 
+### `reconcileLoyaltyRefundCoupons` — function
+
+```ts
+async function reconcileLoyaltyRefundCoupons(
+  admin: Admin,
+  workspaceId: string,
+  memberId: string,
+  ticketId: string,
+): Promise<number>
+```
+
+Compare-and-set guard that closes the SC135320 double-payout class: a Tier-0 Loyalty Save turn issued `redeem_points` (minting an ACTIVE LOYALTY-* coupon, ~$15 spendable) AND a separate cash `partial_refund` — two payout vehicles for one 1,500-pt redemption; a later drifted turn then applied the dangling LOYALTY-* coupon to the customer's paused sub. Invoked from both loyalty cash-refund handlers (`redeem_points_as_refund` after the refund settles + new redemption row inserts, and the `partial_refund` handler after `r.success` — via a member lookup by `customer_id`). Atomically flips any `active` LOYALTY-* redemption for that member minted in the ticket window (`created_at >= ticket.created_at`) to `redeemed_as_refund` using `.eq('status','active')` as the predicate on the UPDATE — mirrors `claimRegenSpendSlot`. Ticket-window bounding means a routine shipping refund on an unrelated ticket cannot consume an older legit LOYALTY-* the customer earned in a prior session. Idempotent no-op on the common case (no LOYALTY-* minted). Returns the number of reconciled rows.
+
 ### `replaySuccessorApply` — function
 
 ```ts
