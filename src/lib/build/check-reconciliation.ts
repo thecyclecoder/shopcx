@@ -765,6 +765,112 @@ export async function defaultUpsertReconciledCheck(args: {
   await upsertPhaseChecks(args.phaseId, inputs);
 }
 
+/**
+ * Persist each reconciliation to the CEO-visible build-card audit surface — the shared
+ * `director_activity` feed EVERY autonomous build supervisor reads (Ada + the EOD recap +
+ * the #directors board). Called by `reconcileFailingGrepChecksForSpec` on every successful
+ * repair; the writer is best-effort + never throws (a director-activity blip must never mask
+ * a real reconciliation).
+ *
+ * The row's `action_kind='check_reconciled'` carries the full audit shape a reader needs to
+ * eyeball the auto-correction: old_pattern → new_pattern, the check description (intent),
+ * which STEP fired (normalized_case vs judge_proposal), the rationale, and the evidence
+ * string the deterministic gate produced. This is the "never silent" hard rule the Phase-2
+ * spec cites — a self-healing check that isn't surfaced is a proxy that optimizes itself.
+ */
+export async function defaultAuditReconciliation(audit: ReconciliationAudit): Promise<void> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    const admin = createAdminClient();
+    await recordDirectorActivity(admin, {
+      workspaceId: audit.workspaceId,
+      directorFunction: "platform",
+      actionKind: "check_reconciled",
+      specSlug: audit.slug,
+      reason: `phase ${audit.phasePosition} check '${audit.description.slice(0, 200)}' auto-corrected via ${audit.step}: '${audit.oldPattern}' → '${audit.newPattern}' — ${audit.rationale.slice(0, 400)}`.slice(0, 4000),
+      metadata: {
+        spec_slug: audit.slug,
+        phase_id: audit.phaseId,
+        phase_position: audit.phasePosition,
+        check_position: audit.checkPosition,
+        check_description: audit.description,
+        old_pattern: audit.oldPattern,
+        new_pattern: audit.newPattern,
+        step: audit.step,
+        rationale: audit.rationale,
+        evidence: audit.evidence,
+        autonomous: true,
+      },
+    });
+  } catch (e) {
+    // Best-effort — never throw. A director-activity blip is worse than the gap it records.
+    console.warn(
+      `[check-reconciliation] defaultAuditReconciliation threw (non-fatal): ${errText(e)}`,
+    );
+  }
+}
+
+/**
+ * Cap-reached / defer-with-un-reconcilable-list surface — the DEFERRING side of the audit
+ * (the reconciled side is `defaultAuditReconciliation` above). One row PER build whose
+ * `reconcileFailingGrepChecksForSpec` returned an unreconciled list, so the CEO sees WHICH
+ * checks the reconciler could not heal + the reasons (`no_normalized_match`, `judge_declined`,
+ * `cap_reached`, …) — the real-failure path is preserved, never silently masked. Emit-once
+ * from the worker after the batch reconciler returns.
+ */
+export async function recordCapReachedOrUnhealedDefer(input: {
+  workspaceId: string;
+  slug: string;
+  jobId: string | null;
+  cap: number;
+  reconciledCount: number;
+  unreconciled: BatchReconcileResult["unreconciled"];
+  capReached: boolean;
+}): Promise<void> {
+  try {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    const admin = createAdminClient();
+    const preview = input.unreconciled
+      .slice(0, 5)
+      .map((u) => `p${u.phasePosition}.c${u.checkPosition} '${u.description.slice(0, 60)}' → ${u.reason}`)
+      .join(" | ");
+    await recordDirectorActivity(admin, {
+      workspaceId: input.workspaceId,
+      directorFunction: "platform",
+      actionKind: "check_reconcile_cap_reached",
+      specSlug: input.slug,
+      reason:
+        `phase-verify reconciler: ${input.reconciledCount} check(s) auto-corrected, ` +
+        `${input.unreconciled.length} un-reconcilable ` +
+        `(cap=${input.cap}, cap_reached=${input.capReached}) — deferring build with real-failure list preserved. ` +
+        `First: ${preview.slice(0, 800)}`.slice(0, 4000),
+      metadata: {
+        job_id: input.jobId,
+        spec_slug: input.slug,
+        cap: input.cap,
+        reconciled_count: input.reconciledCount,
+        cap_reached: input.capReached,
+        unreconciled: input.unreconciled.map((u) => ({
+          phase_id: u.phaseId,
+          phase_position: u.phasePosition,
+          check_position: u.checkPosition,
+          description: u.description,
+          old_pattern: u.oldParams.pattern,
+          reason: u.reason,
+          evidence: u.evidence ?? null,
+        })),
+        autonomous: true,
+      },
+    });
+  } catch (e) {
+    console.warn(
+      `[check-reconciliation] recordCapReachedOrUnhealedDefer threw (non-fatal): ${errText(e)}`,
+    );
+  }
+}
+
 /** The default batch deps — a single import for the worker's verify path. */
 export const defaultBatchDeps: BatchReconcileDeps = {
   normalizedGrep: defaultNormalizedGrep,
@@ -773,4 +879,5 @@ export const defaultBatchDeps: BatchReconcileDeps = {
   runDeterministicGrep: defaultRunDeterministicGrep,
   loadPhaseGrepChecks: defaultLoadPhaseGrepChecks,
   upsertReconciledCheck: defaultUpsertReconciledCheck,
+  auditReconciliation: defaultAuditReconciliation,
 };

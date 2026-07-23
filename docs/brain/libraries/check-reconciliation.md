@@ -92,10 +92,42 @@ Every dep is injectable so tests drive the whole policy without touching shell/D
 
 `finalizeBuiltPhase` (in [[builder-worker]] `runBuildJob`), inside the `!acc.complete` branch, BEFORE the defer. On a successful reconcile the accumulation is re-read; if now complete, the PR opens instead of deferring. On no-reconcile the branch defers/escalates exactly as before.
 
+## Audit surface — never silent ([[../specs/build-verify-self-heals-stale-grep-checks-before-deferring]] Phase 2)
+
+A self-healing check that isn't visible is a proxy that optimizes itself — the exact "silent proxy-optimizer" the [[../operational-rules]] § North star forbids. Every reconciliation MUST land on the CEO-facing build-card feed so an auto-correction can be eyeballed, and a mis-guessed spec can't hide behind the reconciler.
+
+### Per-repair row — `director_activity.action_kind='check_reconciled'`
+
+`defaultAuditReconciliation` in `src/lib/build/check-reconciliation.ts` is the default `auditReconciliation` dep on `defaultBatchDeps`. It writes ONE [[../tables/director_activity]] row per successful repair via [[director-activity]] `recordDirectorActivity`:
+
+- `director_function`: `'platform'` (Ada's feed).
+- `action_kind`: `'check_reconciled'` (a new vocabulary entry on `DirectorActionKind` — see [[director-activity]]).
+- `spec_slug`: the spec whose check was repointed.
+- `reason`: one line — `phase N check '<description>' auto-corrected via <step>: 'old' → 'new' — <rationale>`.
+- `metadata`: `{ spec_slug, phase_id, phase_position, check_position, check_description, old_pattern, new_pattern, step: 'normalized_case' | 'judge_proposal', rationale, evidence, autonomous: true }`.
+
+Best-effort + never throws — a director-activity blip is worse than the gap it records. The row is what the EOD recap, Ada's activity feed, and the #directors board post read.
+
+### Cap-reached / defer-with-unhealed row — `director_activity.action_kind='check_reconcile_cap_reached'`
+
+`recordCapReachedOrUnhealedDefer` writes ONE row per build whose `reconcileFailingGrepChecksForSpec` returned an unreconciled list (whether from `cap_reached`, `judge_declined`, `no_normalized_match`, `not_present_grep`, or a DB write failure). Preserves the real-failure path: the build STILL defers via the existing `finalizeBuiltPhase` defer branch, and the redrive reason carries the unhealed preview so a `redriveDeferredBuildOrEscalate` cap-exhaustion escalates with the ACTUAL failing check descriptions.
+
+- `action_kind`: `'check_reconcile_cap_reached'`.
+- `reason`: `phase-verify reconciler: N auto-corrected, M un-reconcilable (cap=X, cap_reached=Y) — deferring build with real-failure list preserved. First: <preview>`.
+- `metadata`: `{ job_id, spec_slug, cap, reconciled_count, cap_reached, unreconciled: [{ phase_id, phase_position, check_position, description, old_pattern, reason, evidence }], autonomous: true }`.
+
+**Log-tail mirror.** The worker's `finalizeBuiltPhase` also carries the unhealed preview into the deferred build's `log_tail` (via `reconcileUnhealedListForDefer`) so a reader who's inspecting the `agent_jobs` row (not the director feed) still sees why the phase couldn't heal. Both surfaces show the SAME list — no split-brain.
+
+### Guarantees
+
+- **Never silent.** Every successful repair emits a `check_reconciled` row (via the default hook on `defaultBatchDeps`). Every defer with un-healed checks emits a `check_reconcile_cap_reached` row.
+- **Real-failure path preserved.** The cap-reached case does NOT force a pass. The unhealed checks still fail their deterministic grep → `isSpecAccumulationComplete` still reports `complete=false` → the defer/escalate branch fires as before, just with the unhealed list surfaced through both the log_tail and the director-activity row.
+- **Best-effort.** A director-activity write failure never blocks the reconciliation or the build; a warning is logged and the flow continues.
+
 ## North star
 
-The reconciler is a bounded proxy (make the pattern match reality); the deterministic grep still owns the objective (is the code actually present). Same shape as every other autonomous tool per [[../operational-rules]] § North star — the tool PROPOSES, a deterministic check CONFIRMS. A judge that fabricates a literal is caught by the final grep and never lands.
+The reconciler is a bounded proxy (make the pattern match reality); the deterministic grep still owns the objective (is the code actually present). Same shape as every other autonomous tool per [[../operational-rules]] § North star — the tool PROPOSES, a deterministic check CONFIRMS. A judge that fabricates a literal is caught by the final grep and never lands. And the CEO — the ultimate objective-owner — sees every auto-correction via the audit rows above, so the reconciler cannot silently drift.
 
 ## Related
 
-[[spec-check-runner]] · [[spec-phase-checks-table]] · [[specs-table]] · [[builder-worker]] · [[ai-models]] · [[../specs/build-verify-self-heals-stale-grep-checks-before-deferring]] · [[../specs/merge-gate-verifies-real-phase-checks-not-status-flags]] · [[../operational-rules]]
+[[spec-check-runner]] · [[spec-phase-checks-table]] · [[specs-table]] · [[builder-worker]] · [[director-activity]] · [[../tables/director_activity]] · [[ai-models]] · [[../specs/build-verify-self-heals-stale-grep-checks-before-deferring]] · [[../specs/merge-gate-verifies-real-phase-checks-not-status-flags]] · [[../operational-rules]]

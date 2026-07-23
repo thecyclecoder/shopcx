@@ -25664,9 +25664,12 @@ async function dispatchJob(job: Job) {
       // ONLY when a real deterministic grep of the corrected pattern passes (no bypass, no phantom-ship).
       // On no-reconcile the branch below defers/escalates exactly as before — a real code-missing signal is
       // never masked. Best-effort: a thrown reconciler falls through to the existing defer path unchanged.
+      // Phase 2 — carried out to the defer path below so the `check_reconcile_cap_reached`
+      // surface (and the log_tail annotation) fires even after we re-read `acc`.
+      let reconcileUnhealedListForDefer: string | null = null;
       if (!acc.complete) {
         try {
-          const { reconcileFailingGrepChecksForSpec, defaultBatchDeps } = await import("../src/lib/build/check-reconciliation");
+          const { reconcileFailingGrepChecksForSpec, defaultBatchDeps, recordCapReachedOrUnhealedDefer } = await import("../src/lib/build/check-reconciliation");
           const branchRefForReconcile = branch ?? `claude/build-${slug}`;
           const rec = await reconcileFailingGrepChecksForSpec({
             workspaceId: job.workspace_id,
@@ -25676,8 +25679,10 @@ async function dispatchJob(job: Job) {
             deps: defaultBatchDeps,
           });
           if (rec.reconciled.length) {
-            // Never silent — Phase 2 wires this same audit hook to the build-card surface so the CEO sees
-            // what was auto-corrected. Phase 1 logs each repair to console (the run log tail).
+            // Never silent — `defaultBatchDeps.auditReconciliation` (defaultAuditReconciliation)
+            // already wrote one `director_activity check_reconciled` row per repair, carrying
+            // old → new pattern + description + step + rationale + evidence — the build-card
+            // audit surface the CEO reads. This log line is the run-tail mirror.
             for (const a of rec.reconciled) {
               console.log(`${tag} check-reconciled: phase ${a.phasePosition} check '${a.description.slice(0, 80)}' (${a.step}): '${a.oldPattern}' → '${a.newPattern}' — ${a.rationale.slice(0, 200)}`);
             }
@@ -25690,7 +25695,24 @@ async function dispatchJob(job: Job) {
             }
           }
           if (rec.unreconciled.length) {
-            console.log(`${tag} check-reconcile: ${rec.unreconciled.length} check(s) could not be reconciled (deferring): ${rec.unreconciled.slice(0, 3).map((u) => `p${u.phasePosition} ${u.description.slice(0, 60)} — ${u.reason}`).join(" | ")}`);
+            // ⭐ Phase 2 — never silently pass on cap-reached / un-reconcilable checks. Record
+            // ONE `check_reconcile_cap_reached` director_activity row with the FULL unhealed
+            // list so the CEO sees exactly which patterns the reconciler could not heal + the
+            // reasons (real code-missing, judge_declined, cap_reached). The build STILL defers
+            // via the branch below — the real-failure path is preserved, not masked.
+            void recordCapReachedOrUnhealedDefer({
+              workspaceId: job.workspace_id,
+              slug,
+              jobId: job.id,
+              cap: rec.totalGrepChecks,
+              reconciledCount: rec.reconciled.length,
+              unreconciled: rec.unreconciled,
+              capReached: rec.capReached,
+            });
+            const preview = rec.unreconciled.slice(0, 3).map((u) => `p${u.phasePosition} ${u.description.slice(0, 60)} — ${u.reason}`).join(" | ");
+            reconcileUnhealedListForDefer =
+              `un-reconcilable checks (${rec.unreconciled.length}${rec.capReached ? ", cap-reached" : ""}): ${preview}`;
+            console.log(`${tag} check-reconcile: ${rec.unreconciled.length} check(s) could not be reconciled (deferring)${rec.capReached ? " — CAP REACHED" : ""}: ${preview}`);
           }
         } catch (e) {
           console.error(`${tag} check-reconcile threw (non-fatal — proceeding to defer):`, e instanceof Error ? e.message : e);
@@ -25708,12 +25730,17 @@ async function dispatchJob(job: Job) {
       if (!acc.complete) {
         // PR DEFERRED (no-pr-during-accumulation): more phases remain → complete on the branch, advance the
         // chain, surface NO PR. Carry any pre-existing PR untouched (normally null — no pause opens one).
-        console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
+        // ⭐ Phase 2 — the un-reconcilable list (if any) is carried into the log_tail + the redrive reason
+        // so the real-failure signal is preserved on the build card, never silently masked.
+        const deferReason = reconcileUnhealedListForDefer
+          ? `${acc.reason} — ${reconcileUnhealedListForDefer}`
+          : acc.reason;
+        console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${deferReason})`);
         await update(job.id, {
           status: "completed",
           pr_url: job.pr_url ?? null,
           pr_number: job.pr_number ?? null,
-          log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${acc.reason}`.slice(-2000),
+          log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${deferReason}`.slice(-2000),
         });
         // Phase 2 — a deferred build that reached completion means the prior needs_input parks are
         // no longer live; close any orphaned open spans so `getTimecard.open_waits` reflects reality.
@@ -25734,7 +25761,14 @@ async function dispatchJob(job: Job) {
         // other build is in-flight), the redrive skips. Never throws.
         try {
           const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
-          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, acc.reason, job.id);
+          // Phase 2 — carry the un-reconcilable list into the redrive reason so a cap-reached defer
+          // escalates to the CEO with the ACTUAL failing check descriptions, not the coarse "not
+          // accumulated" reason. The reconciler's per-check director_activity row is the durable
+          // audit; this string is the human-readable signal on the redrive card.
+          const redriveReason = reconcileUnhealedListForDefer
+            ? `${acc.reason} — ${reconcileUnhealedListForDefer}`
+            : acc.reason;
+          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, redriveReason, job.id);
           console.log(`${tag} deferred-redrive: ${outcome.action} — ${outcome.reason}`);
         } catch (e) {
           console.error(`${tag} deferred-redrive threw (non-fatal, deferred build remains completed):`, e instanceof Error ? e.message : e);
