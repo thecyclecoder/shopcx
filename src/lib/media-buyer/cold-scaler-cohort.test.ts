@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import {
   getEffectiveMediaBuyerColdScalerCohort,
   listActiveColdScalerCohorts,
+  provisionColdScalerCohort,
   setColdScalerCampaignId,
 } from "./cold-scaler-cohort";
 
@@ -224,6 +225,135 @@ test("setColdScalerCampaignId — stamps when column is null, no-ops when someon
   });
   assert.equal(second.stamped, 0, "second call must no-op because column is no longer null");
   assert.equal(row.scaler_meta_campaign_id, "meta-camp-1", "must not overwrite the first stamp");
+});
+
+// ── provisionColdScalerCohort — sanctioned retire+insert writer ──────────────
+
+type ProvisionerState = {
+  mode: "update" | "insert" | null;
+  filters: Record<string, unknown>;
+  isNulls: string[];
+  patch: Row | null;
+  insertRow: Row | null;
+};
+
+interface ProvisionerCapture {
+  retires: Array<{ filters: Record<string, unknown>; isNulls: string[]; patch: Row }>;
+  inserts: Row[];
+}
+
+function makeProvisionerAdmin(): {
+  admin: Parameters<typeof provisionColdScalerCohort>[0];
+  capture: ProvisionerCapture;
+} {
+  const capture: ProvisionerCapture = { retires: [], inserts: [] };
+  let idCounter = 0;
+  const admin = {
+    from(_t: string) {
+      const state: ProvisionerState = { mode: null, filters: {}, isNulls: [], patch: null, insertRow: null };
+      const chain = {
+        update(v: Row) { state.mode = "update"; state.patch = v; return chain; },
+        insert(r: Row) { state.mode = "insert"; state.insertRow = r; return chain; },
+        eq(k: string, v: unknown) { state.filters[k] = v; return chain; },
+        is(k: string, _v: null) { state.isNulls.push(k); return chain; },
+        select(_cols?: string) {
+          if (state.mode === "insert" && state.insertRow) {
+            idCounter += 1;
+            const row: Row = { id: `mock-${idCounter}`, ...state.insertRow };
+            capture.inserts.push(row);
+            return {
+              single: async () => ({ data: { id: row.id }, error: null as null }),
+            };
+          }
+          return { single: async () => ({ data: null, error: null as null }) };
+        },
+        then(onFulfilled: (v: { data: null; error: null }) => unknown) {
+          if (state.mode === "update" && state.patch) {
+            capture.retires.push({
+              filters: { ...state.filters },
+              isNulls: [...state.isNulls],
+              patch: { ...state.patch },
+            });
+          }
+          return Promise.resolve({ data: null, error: null as null }).then(onFulfilled);
+        },
+      };
+      return chain;
+    },
+  } as unknown as Parameters<typeof provisionColdScalerCohort>[0];
+  return { admin, capture };
+}
+
+test("provisionColdScalerCohort — inserts an active row with the ceiling and returns cohortId", async () => {
+  const { admin, capture } = makeProvisionerAdmin();
+  const result = await provisionColdScalerCohort(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_A,
+    dailyScalerCeilingCents: 250000,
+    notes: "seed",
+  });
+  assert.equal(result.cohortId, "mock-1");
+  assert.equal(result.dailyScalerCeilingCents, 250000);
+  assert.equal(result.metaAdAccountId, ACCT);
+  assert.equal(result.productId, PRODUCT_A);
+  assert.equal(capture.inserts.length, 1);
+  const row = capture.inserts[0];
+  assert.equal(row.workspace_id, WS);
+  assert.equal(row.meta_ad_account_id, ACCT);
+  assert.equal(row.product_id, PRODUCT_A);
+  assert.equal(row.daily_scaler_ceiling_cents, 250000);
+  assert.equal(row.is_active, true);
+  assert.equal(row.notes, "seed");
+});
+
+test("provisionColdScalerCohort — retires ANY prior active row for the same scope (partial-unique-index guard)", async () => {
+  const { admin, capture } = makeProvisionerAdmin();
+  await provisionColdScalerCohort(admin, {
+    workspaceId: WS,
+    metaAdAccountId: ACCT,
+    productId: PRODUCT_A,
+    dailyScalerCeilingCents: 300000,
+  });
+  assert.equal(capture.retires.length, 1);
+  const retire = capture.retires[0];
+  assert.equal(retire.filters.workspace_id, WS);
+  assert.equal(retire.filters.meta_ad_account_id, ACCT);
+  assert.equal(retire.filters.product_id, PRODUCT_A);
+  assert.equal(retire.filters.is_active, true);
+  assert.equal(retire.patch.is_active, false);
+});
+
+test("provisionColdScalerCohort — workspace-wide (null scope) uses .is() so the unique index compares as-null", async () => {
+  const { admin, capture } = makeProvisionerAdmin();
+  const r = await provisionColdScalerCohort(admin, {
+    workspaceId: WS,
+    dailyScalerCeilingCents: 100000,
+  });
+  assert.equal(r.metaAdAccountId, null);
+  assert.equal(r.productId, null);
+  assert.equal(capture.inserts[0].meta_ad_account_id, null);
+  assert.equal(capture.inserts[0].product_id, null);
+  assert.ok(capture.retires[0].isNulls.includes("meta_ad_account_id"));
+  assert.ok(capture.retires[0].isNulls.includes("product_id"));
+});
+
+test("provisionColdScalerCohort — throws when daily_scaler_ceiling_cents ≤ 0 (never seed an unbounded ceiling)", async () => {
+  const { admin } = makeProvisionerAdmin();
+  await assert.rejects(
+    provisionColdScalerCohort(admin, {
+      workspaceId: WS,
+      dailyScalerCeilingCents: 0,
+    }),
+    /daily_scaler_ceiling_cents_must_be_positive/,
+  );
+  await assert.rejects(
+    provisionColdScalerCohort(admin, {
+      workspaceId: WS,
+      dailyScalerCeilingCents: -1,
+    }),
+    /daily_scaler_ceiling_cents_must_be_positive/,
+  );
 });
 
 test("listActiveColdScalerCohorts — returns active rows for the account, product_id ASC, nulls last", async () => {
