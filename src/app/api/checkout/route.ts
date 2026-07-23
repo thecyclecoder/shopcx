@@ -48,7 +48,7 @@ import {
   vaultPaymentMethod,
   savePaymentMethod,
 } from "@/lib/integrations/braintree-customer";
-import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { inngest } from "@/lib/inngest/client";
 import { generateOrderNumber } from "@/lib/order-number";
 import { logCheckoutError, type CheckoutErrorStage } from "@/lib/checkout-error-log";
@@ -1118,13 +1118,16 @@ export async function POST(request: NextRequest) {
           .update({
             amplifier_order_id: amplifierRes.amplifier_order_id,
             amplifier_received_at: new Date().toISOString(),
+            amplifier_last_error: null,
           })
           .eq("id", order.id);
       } else {
         console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
+        await stampAmplifierImportFailure(admin, order.id as string, amplifierRes.error, amplifierRes.details);
       }
     } catch (err) {
       console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
+      await stampAmplifierImportFailure(admin, order.id as string, "amplifier_threw", err instanceof Error ? err.message : String(err));
     }
   }
 

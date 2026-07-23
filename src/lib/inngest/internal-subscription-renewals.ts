@@ -20,7 +20,7 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat, emitRenewalOutcomeHeartbeat, aggregateRenewalOutcomes } from "@/lib/control-tower/heartbeat";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
-import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import {
   checkRenewalOverchargeGuard,
@@ -416,10 +416,12 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
             .update({
               amplifier_order_id: amplifierRes.amplifier_order_id,
               amplifier_received_at: new Date().toISOString(),
+              amplifier_last_error: null,
             })
             .eq("id", compOrder.id);
         } else {
           console.warn(`[comp-renewal] Amplifier order create failed for ${compOrder.order_number}:`, amplifierRes.error, amplifierRes.details);
+          await stampAmplifierImportFailure(admin, compOrder.id as string, amplifierRes.error, amplifierRes.details);
         }
       });
 
@@ -950,10 +952,12 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           .update({
             amplifier_order_id: amplifierRes.amplifier_order_id,
             amplifier_received_at: new Date().toISOString(),
+            amplifier_last_error: null,
           })
           .eq("id", newOrder.id);
       } else {
         console.warn(`[renewal] Amplifier order create failed for ${newOrder.order_number}:`, amplifierRes.error, amplifierRes.details);
+        await stampAmplifierImportFailure(admin, newOrder.id as string, amplifierRes.error, amplifierRes.details);
       }
     });
 

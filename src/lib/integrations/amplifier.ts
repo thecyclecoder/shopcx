@@ -326,3 +326,36 @@ export async function createAmplifierOrder(input: CreateAmplifierOrderInput): Pr
     return { success: false, error: "amplifier_fetch_failed", details: errText(err) };
   }
 }
+
+/**
+ * Durable trace of a failed createAmplifierOrder call on the order row.
+ * Phase 1 of the import-reliability rail (Phase 2 sweep + Phase 3 escalation
+ * both read these columns). Increments the attempt counter, records the
+ * error, and stamps the attempt timestamp. Non-fatal: a stamp failure logs
+ * but never bubbles — the original caller's failure is what matters.
+ */
+export async function stampAmplifierImportFailure(
+  admin: ReturnType<typeof createAdminClient>,
+  orderId: string,
+  error: string | undefined,
+  details: string | undefined,
+): Promise<void> {
+  try {
+    const { data } = await admin
+      .from("orders")
+      .select("amplifier_import_attempts")
+      .eq("id", orderId)
+      .maybeSingle();
+    const prev = (data?.amplifier_import_attempts as number | null) ?? 0;
+    await admin
+      .from("orders")
+      .update({
+        amplifier_import_attempts: prev + 1,
+        amplifier_last_error: `${error ?? "unknown"}: ${details ?? ""}`.slice(0, 1000),
+        amplifier_last_attempt_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
+  } catch (e) {
+    console.warn(`[amplifier] stampAmplifierImportFailure failed for order ${orderId}:`, e instanceof Error ? e.message : e);
+  }
+}

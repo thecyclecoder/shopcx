@@ -35,6 +35,28 @@ async function createAmplifierOrder(input: CreateAmplifierOrderInput) : Promise<
 
 ### `CreateAmplifierOrderResult` — interface
 
+### `stampAmplifierImportFailure(admin, orderId, error, details)` — durable failure trace
+
+```ts
+async function stampAmplifierImportFailure(
+  admin: ReturnType<typeof createAdminClient>,
+  orderId: string,
+  error: string | undefined,
+  details: string | undefined,
+): Promise<void>
+```
+
+Phase 1 of the import-reliability rail ([[../specs/amplifier-import-reliability-rail]]).
+Called by every `createAmplifierOrder` caller on a `!res.success` result (in addition
+to the existing `console.warn`), so a failed import is queryable off the order row.
+Reads current `amplifier_import_attempts` and writes `attempts+1`, `amplifier_last_error`
+(`${error}: ${details}`, capped at 1000 chars), and `amplifier_last_attempt_at = now()`.
+Non-fatal — a stamp failure is logged and swallowed so it never bubbles into a caller
+that's already handling a downstream failure. The success paths (checkout, comp
+renewal, paid renewal) additionally clear `amplifier_last_error = null` alongside
+the existing `amplifier_order_id` / `amplifier_received_at` stamp. The Phase 2
+reconcile-sweep cron and Phase 3 CEO-inbox escalation both read these columns.
+
 ### `applyVariantSkus(lineItems, skuById)` — pure SKU-resolution core
 
 **Invariant: `product_variants` is the source of truth for a line's SKU at import
@@ -92,8 +114,12 @@ curly quotes, accents) before sending.
 - **Failures are returned, not thrown — and checkout/renewal callers only
   `console.warn` them with no retry.** A transient Amplifier error therefore
   drops a paid order permanently and invisibly. Any new caller MUST surface a
-  non-success result (escalate / re-queue), not swallow it. (Follow-up: a
-  durable retry/escalation rail for the two swallowing callers.)
+  non-success result (escalate / re-queue), not swallow it. Phase 1 of
+  [[../specs/amplifier-import-reliability-rail]] now stamps a durable trace
+  on the order row (`amplifier_import_attempts` / `amplifier_last_error` /
+  `amplifier_last_attempt_at`) via `stampAmplifierImportFailure` at every
+  swallowing call site (checkout + comp/paid internal renewal), so the
+  failure is queryable even before the Phase 2 reconcile sweep is live.
 
 ---
 
