@@ -49,7 +49,51 @@ export interface CreativeSkeleton {
    *  carry the SAME shape as LANE-A's AdLibrary tags. `{ angle, archetype, why_it_works, cialdini_lever,
    *  awareness_stage }` — the axes Max grades Dahlia on. `format` here mirrors AdLibrary's `static_image`. */
   concept_tags: ConceptTags | null;
+  /** v3 agnostic wireframe (skeleton-agnostic-wireframe-redesign): array of scaffold elements
+   *  {zone, role, prominence}. This is the STRUCTURAL wireframe the M4 decision engine's reuse
+   *  verdict + substitution reads — `computeReuseVerdict` in [[./creative-skeleton-reuse]] and
+   *  `SkeletonForDecision.elements` in [[./ads/decision-engine]]. Shape gated at DB by the
+   *  `creative_skeletons_elements_shape_trigger` (migration 20261130120001). Nullable — the
+   *  legacy 4-slot substance columns still carry the raw phrases; the wireframe is additive. */
+  elements: SkeletonElement[] | null;
+  /** How the product is shown in the creative — vision-emitted tags. Free-form array, but Claude
+   *  is prompted with the canonical tag set: packshot | lifestyle | founder | none. Empty array
+   *  when vision omits it (the DB default is also `{}`). */
+  product_presentation: string[];
+  /** Copy cadence tags — vision-emitted. Canonical set: short_line | pattern_interrupt | number
+   *  | contrast. Empty array when vision omits it (DB default is `{}`). */
+  punchiness: string[];
 }
+
+/** One wireframe element — mirror of the shape gated by `creative_skeletons_elements_shape_trigger`
+ *  (migration 20261130120001) and consumed by [[./creative-skeleton-reuse]] `computeReuseVerdict` +
+ *  [[./ads/decision-engine]] `SkeletonForDecision.elements`. */
+export interface SkeletonElement {
+  zone: "header" | "hero" | "body" | "footer" | "cta";
+  role: "hook" | "mechanism" | "proof" | "offer" | "risk_reversal" | "social_proof" | "price";
+  prominence: number;
+}
+
+/** Zone whitelist (kept in sync with the DB trigger + the decision engine's SkeletonElement). */
+export const SKELETON_ZONES = ["header", "hero", "body", "footer", "cta"] as const;
+/** Role whitelist (kept in sync with the DB trigger + the decision engine's SkeletonElement). */
+export const SKELETON_ROLES = [
+  "hook",
+  "mechanism",
+  "proof",
+  "offer",
+  "risk_reversal",
+  "social_proof",
+  "price",
+] as const;
+/** Canonical product_presentation tag set — vision is prompted with these; unknown tags are
+ *  dropped by the parser (kept vs `text[]`-in-DB so an off-vocab hallucination never lands). */
+export const PRODUCT_PRESENTATION_TAGS = ["packshot", "lifestyle", "founder", "none"] as const;
+/** Canonical punchiness tag set — same tag-vocabulary contract as product_presentation. */
+export const PUNCHINESS_TAGS = ["short_line", "pattern_interrupt", "number", "contrast"] as const;
+
+type ZoneT = (typeof SKELETON_ZONES)[number];
+type RoleT = (typeof SKELETON_ROLES)[number];
 
 /** The unified strategic breakdown (both lanes). LANE A fills it from AdLibrary; LANE B + backfill from OUR
  *  vision. Keys mirror `WinnerConcept['tags']` in [[./adlibrary-winners]] so Dahlia + Max read one schema. */
@@ -135,10 +179,19 @@ Return ONLY a JSON object, no prose, with these keys:
     "why_it_works": one sentence on WHY this stops the scroll and converts (the psychological read),
     "cialdini_lever": the dominant persuasion lever — one of "reciprocity" | "commitment" | "social_proof" | "authority" | "liking" | "scarcity" | "unity",
     "awareness_stage": the Schwartz awareness stage this ad targets — one of "unaware" | "problem_aware" | "solution_aware" | "product_aware" | "most_aware"
-  }
+  },
+  "elements": REQUIRED — an array describing the ad's agnostic WIREFRAME. One entry per distinct visible element (badge, headline block, hero image, proof strip, offer stripe, CTA button, …). Each entry is an object with EXACTLY these keys:
+    {
+      "zone": WHERE the element sits — one of "header" | "hero" | "body" | "footer" | "cta",
+      "role": WHAT the element does — one of "hook" | "mechanism" | "proof" | "offer" | "risk_reversal" | "social_proof" | "price",
+      "prominence": a NUMBER in [0, 1] estimating how strongly the element competes for attention (1 = the dominant element, 0 = incidental).
+    }
+    Return [] only if the creative genuinely has no distinguishable structure. Never return null for "elements".
+  "product_presentation": an array of tags describing HOW the product is shown. Prefer these tokens: "packshot" (front-of-pack shot), "lifestyle" (in-use / in-scene), "founder" (person holding it / talking to camera), "none" (no product visible). Use [] when none apply.
+  "punchiness": an array of tags describing the COPY CADENCE. Prefer these tokens: "short_line" (staccato phrases), "pattern_interrupt" (unexpected word / visual break), "number" (a statistic / count), "contrast" (X vs Y framing). Use [] when none apply.
 }
 Keep each slot concise (a phrase, not a paragraph). Use null for a slot that is genuinely absent.
-The "concept_tags" object is the STRATEGIC read (angle + psychology); the top-level slots are the STRUCTURAL read. Fill both. Never return null for concept_tags — always infer the closest strategic read.`;
+The "concept_tags" object is the STRATEGIC read (angle + psychology); the top-level slots are the STRUCTURAL read; the "elements" array is the AGNOSTIC WIREFRAME (zone × role × prominence) — the M4 decision engine reads it to decide reuse tightness per element. Fill all three. Never return null for concept_tags OR elements — always infer the closest read.`;
 
 /** Run Claude vision on the creative bytes → the four-slot skeleton.
  *  `contentType` is accepted for signature compatibility but no longer trusted (AdLibrary mislabels
@@ -321,10 +374,54 @@ function parseSkeleton(text: string): CreativeSkeleton | null {
       proof: str(o.proof),
       offer: str(o.offer),
       concept_tags: conceptTags,
+      elements: parseElements(o.elements),
+      product_presentation: parseTagArray(o.product_presentation, PRODUCT_PRESENTATION_TAGS),
+      punchiness: parseTagArray(o.punchiness, PUNCHINESS_TAGS),
     };
   } catch {
     return null;
   }
+}
+
+/** Parse + whitelist-validate the vision-emitted `elements` array. Any element failing the
+ *  zone/role/prominence shape (mirrors the DB trigger's rules) is DROPPED — a malformed
+ *  entry never lands in the row (better than throwing: keep the well-formed elements). A
+ *  non-array (or missing) input yields `null` so the DB column stays NULL (the legacy shape). */
+function parseElements(raw: unknown): SkeletonElement[] | null {
+  if (!Array.isArray(raw)) return null;
+  const zoneSet = new Set<string>(SKELETON_ZONES);
+  const roleSet = new Set<string>(SKELETON_ROLES);
+  const out: SkeletonElement[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const zone = typeof rec.zone === "string" ? rec.zone.trim().toLowerCase() : "";
+    const role = typeof rec.role === "string" ? rec.role.trim().toLowerCase() : "";
+    if (!zoneSet.has(zone) || !roleSet.has(role)) continue;
+    const p = typeof rec.prominence === "number" ? rec.prominence : Number(rec.prominence);
+    if (!Number.isFinite(p) || p < 0 || p > 1) continue;
+    out.push({ zone: zone as ZoneT, role: role as RoleT, prominence: p });
+  }
+  return out;
+}
+
+/** Parse a vision-emitted tag array, filtering against the canonical vocabulary. An off-vocab
+ *  hallucination is DROPPED — the DB column is a bare `text[]`, and an unbounded write would
+ *  leak model noise into downstream aggregations (`punchiness` powers copy-cadence rollups).
+ *  A non-array (or missing) input yields `[]` (matches the DB column default of `{}`). */
+function parseTagArray(raw: unknown, vocab: readonly string[]): string[] {
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set<string>(vocab);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of raw) {
+    if (typeof v !== "string") continue;
+    const t = v.trim().toLowerCase();
+    if (!allowed.has(t) || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
 }
 
 export interface IngestResult {
@@ -631,6 +728,14 @@ export async function ingestAd(
     // consistent schema. AdLibrary's own LANE-A tags were dropped: mislabeled (angle="solution_aware",
     // awareness_stage="warm" — a temperature), so mixing them into our keys broke uniformity (founder 2026-07-17).
     concept_tags: skeleton?.concept_tags ?? null,
+    // v3 agnostic wireframe (skeleton-agnostic-wireframe-redesign / creative-skeleton-wireframe-extractor-
+    // and-backfill-actually-built Phase 2). The M4 decision engine reads `elements` for its per-element
+    // reuse verdict; `product_presentation` + `punchiness` are copy-cadence rollups. Nulls are legal on
+    // `elements` (legacy shape); the tag arrays default to `{}` in the DB so an empty-array write is a
+    // no-op. Shape gated at DB by `creative_skeletons_elements_shape_trigger` (migration 20261130120001).
+    elements: skeleton?.elements ?? null,
+    product_presentation: skeleton?.product_presentation ?? [],
+    punchiness: skeleton?.punchiness ?? [],
     // LONGITUDINAL winner signal (OURS, not AdLibrary's): this is the ad's FIRST observation, so persistence
     // is 0 days and the tier is "new". Future sweeps re-observe via reobserveAd and grow winner_score.
     our_first_seen: nowIso,
