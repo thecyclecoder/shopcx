@@ -115,7 +115,8 @@ async function main() {
   let cursor: string | null = null;
 
   // Cursor-paginate by id so a partial run resumes cleanly. Both the selector and
-  // every UPDATE filter on `elements IS NULL`, so a re-run touches only the tail
+  // every UPDATE filter on `elements IS NULL` (the `.is("elements", null)` / SQL
+  // `is null` compare-and-set), so a re-run touches only the still-empty tail
   // even if the last cursor was lost.
   // eslint-disable-next-line no-constant-condition
   while (true) {
