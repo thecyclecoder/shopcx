@@ -482,10 +482,15 @@ export async function reconcileLoyaltyRefundCoupons(
   memberId: string,
   ticketId: string,
 ): Promise<number> {
+  // SECURITY: reassert the tenant boundary on this service-role read. Without
+  // `.eq("workspace_id", workspaceId)` a mismatched / cross-tenant ticketId would
+  // become the timestamp authority for the reconciliation window below. The
+  // fail-closed `if (!since) return 0` makes a non-matching ticket a safe no-op.
   const { data: ticket } = await admin
     .from("tickets")
     .select("created_at")
     .eq("id", ticketId)
+    .eq("workspace_id", workspaceId)
     .maybeSingle();
   const since = (ticket as { created_at?: string } | null)?.created_at;
   if (!since) return 0;
