@@ -1,8 +1,8 @@
 # inngest/amplifier-import-reconcile
 
-The **reconcile sweep** for paid orders the 3PL never received — Phase 2 of the [[../specs/amplifier-import-reliability-rail]] reliability rail. Reads the durable failure state Phase 1 persists on `public.orders` (`amplifier_import_attempts` / `amplifier_last_error` / `amplifier_last_attempt_at`) and re-submits any paid, un-imported, un-fraud-held order past a short grace window, under the retry cap. Turns "a transient Amplifier failure permanently drops a paid order" into "a self-healing sweep the next 15-minute tick catches."
+The **reconcile sweep** for paid orders the 3PL never received — Phase 2 of the amplifier-import-reliability-rail reliability rail. Reads the durable failure state Phase 1 persists on `public.orders` (`amplifier_import_attempts` / `amplifier_last_error` / `amplifier_last_attempt_at`) and re-submits any paid, un-imported, un-fraud-held order past a short grace window, under the retry cap. Turns "a transient Amplifier failure permanently drops a paid order" into "a self-healing sweep the next 15-minute tick catches."
 
-**File:** `src/lib/inngest/amplifier-import-reconcile.ts` · See [[../tables/orders]], [[../libraries/integrations__amplifier]], [[../specs/amplifier-import-reliability-rail]].
+**File:** `src/lib/inngest/amplifier-import-reconcile.ts` · See [[../tables/orders]], [[../libraries/integrations__amplifier]].
 
 ## Functions
 
@@ -31,7 +31,7 @@ Registered in the [[../libraries/control-tower]] `MONITORED_LOOPS` cron registry
 - **Owner:** [[../functions/logistics]]
 - **Expected cadence:** every 15 min (`*/15 * * * *`)
 - **Liveness window:** 30 minutes (one missed tick + jitter grace)
-- **Registered:** 2026-07-23 — [[../specs/amplifier-import-reliability-rail]] Phase 2 launch.
+- **Registered:** 2026-07-23 — amplifier-import-reliability-rail Phase 2 launch.
 
 ## Gotchas
 
@@ -43,4 +43,4 @@ Registered in the [[../libraries/control-tower]] `MONITORED_LOOPS` cron registry
 
 ---
 
-[[../README]] · [[../tables/orders]] · [[../libraries/integrations__amplifier]] · [[../specs/amplifier-import-reliability-rail]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/orders]] · [[../libraries/integrations__amplifier]] · [[../../CLAUDE]]
