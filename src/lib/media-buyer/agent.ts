@@ -45,6 +45,7 @@ import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import { recordCrownedWinner } from "@/lib/media-buyer/crowned-winners";
 import { stampCreativeOutcome } from "@/lib/ads/creative-learning";
 import { listReadyToTest, type ReadyToTestRow } from "@/lib/ads/ready-to-test";
 import { readCopyVariants } from "@/lib/ads/ad-copy-variants";
@@ -1434,6 +1435,37 @@ export async function runMediaBuyerLoop(
       .in("meta_ad_id", winnerAdIds);
     for (const a of (adsForWinners || []) as Array<{ meta_ad_id: string; meta_adset_id: string }>) {
       metaAdIdToAdsetId.set(a.meta_ad_id, a.meta_adset_id);
+    }
+  }
+
+  // ── Persist the crown fact ────────────────────────────────────────────────
+  // For every detected winner, record a durable crown marker on
+  // [[docs/brain/tables/media_buyer_crowned_winners]]. The write is idempotent
+  // (upsert on `(workspace_id, test_meta_adset_id)`), so replaying the same
+  // pass is a no-op and never clobbers a later graduate-flow write of
+  // `graduated_at` / `scaler_meta_*`.
+  //
+  // This is the source-of-truth ledger the Phase-2 reactivation guard reads
+  // via `listCrownedWinnerAdsetIds` to REFUSE unpausing a crowned/graduated
+  // winner regardless of who paused it or how well its recovered CPA looks —
+  // a crown's CPA at/below crown IS the reactivation threshold. Best-effort:
+  // a marker-write failure is logged but never fails the pass.
+  const cohortProductIdForCrown = cohort?.productId ?? opts.productId ?? null;
+  for (const w of winners) {
+    const testAdsetId = metaAdIdToAdsetId.get(w.metaAdId);
+    if (!testAdsetId) continue; // parent adset not resolved — no crown fact to record
+    try {
+      await recordCrownedWinner(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        productId: cohortProductIdForCrown,
+        testMetaAdsetId: testAdsetId,
+        winningMetaAdId: w.metaAdId,
+      });
+    } catch (err) {
+      // Never fail a Media Buyer pass on a marker-write miss — the next pass
+      // will retry (idempotent). Kept as an audit trace only.
+      console.warn("recordCrownedWinner failed", { workspaceId: opts.workspaceId, testAdsetId, err: errText(err) });
     }
   }
 
