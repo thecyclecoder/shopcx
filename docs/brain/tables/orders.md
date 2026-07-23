@@ -41,6 +41,9 @@ Server-side RPCs for list queries + late-tracking + cart recovery:
 | `amplifier_tracking_number` | `text` | ✓ |  |
 | `amplifier_carrier` | `text` | ✓ |  |
 | `amplifier_status` | `text` | ✓ |  |
+| `amplifier_import_attempts` | `int4` | — | default: `0`. Count of failed `createAmplifierOrder` calls for this order. Stamped by `stampAmplifierImportFailure` in [[../libraries/integrations__amplifier]] at every call site (checkout + comp/paid internal renewal) alongside the existing console.warn — a failed import is now queryable, not swallowed. Substrate for the Phase 2 reconcile sweep + Phase 3 CEO escalation ([[../specs/amplifier-import-reliability-rail]]). |
+| `amplifier_last_error` | `text` | ✓ | Last `${res.error}: ${res.details}` string from a failed `createAmplifierOrder` call, capped at 1000 chars. Cleared to `null` on the success stamp. |
+| `amplifier_last_attempt_at` | `timestamptz` | ✓ | When the last failed `createAmplifierOrder` call was recorded. Not touched on success (the truthy signal there is `amplifier_received_at`). |
 | `sync_resolved_at` | `timestamptz` | ✓ |  |
 | `sync_resolved_note` | `text` | ✓ |  |
 | `delivery_status` | `text` | ✓ |  |

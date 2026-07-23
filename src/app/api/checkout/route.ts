@@ -1118,13 +1118,42 @@ export async function POST(request: NextRequest) {
           .update({
             amplifier_order_id: amplifierRes.amplifier_order_id,
             amplifier_received_at: new Date().toISOString(),
+            amplifier_last_error: null,
           })
           .eq("id", order.id);
       } else {
         console.warn(`[checkout] Amplifier order create failed for ${orderNumber}:`, amplifierRes.error, amplifierRes.details);
+        const { data: prev } = await admin
+          .from("orders")
+          .select("amplifier_import_attempts")
+          .eq("id", order.id)
+          .maybeSingle();
+        const prevAttempts = (prev?.amplifier_import_attempts as number | null) ?? 0;
+        await admin
+          .from("orders")
+          .update({
+            amplifier_import_attempts: prevAttempts + 1,
+            amplifier_last_error: `${amplifierRes.error ?? "unknown"}: ${amplifierRes.details ?? ""}`.slice(0, 1000),
+            amplifier_last_attempt_at: new Date().toISOString(),
+          })
+          .eq("id", order.id);
       }
     } catch (err) {
-      console.warn(`[checkout] Amplifier order create threw for ${orderNumber}:`, err);
+      console.warn(`[checkout] Amplifier order create threw for ${orderNumber}: ${errText(err)}`);
+      const { data: prev } = await admin
+        .from("orders")
+        .select("amplifier_import_attempts")
+        .eq("id", order.id)
+        .maybeSingle();
+      const prevAttempts = (prev?.amplifier_import_attempts as number | null) ?? 0;
+      await admin
+        .from("orders")
+        .update({
+          amplifier_import_attempts: prevAttempts + 1,
+          amplifier_last_error: `amplifier_threw: ${errText(err)}`.slice(0, 1000),
+          amplifier_last_attempt_at: new Date().toISOString(),
+        })
+        .eq("id", order.id);
     }
   }
 

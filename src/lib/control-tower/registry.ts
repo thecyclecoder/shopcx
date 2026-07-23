@@ -678,6 +678,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-15-min crons (window ~45 min) ─
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
+  // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
+  // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window
+  // satisfies assertRegistryInvariants (cadenceMs * 1.2). registeredAt claims the new-cron grace.
+  { id: "amplifier-import-reconcile", kind: "cron", owner: "logistics", label: "Amplifier import reconcile", description: "Every 15 min sweep — re-submits paid orders the 3PL import swallowed (financial_status='paid' + amplifier_order_id null + past 10-min grace + under retry cap of 5), skipping fraud-held orders. SKU-safe via #2246's applyVariantSkus.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 30 * MIN, registeredAt: "2026-07-23T00:00:00Z" },
   // retire-vale-spec-review-becomes-deterministic-authoring-gate Phase 3 — the legacy 15-min
   // `spec-review-cron` is retired. Vale's LLM lane is gone; the deterministic authoring gate replaces
   // it (registered as the reactive `spec-review-gate` entry further below). Kept the Inngest fn as a
