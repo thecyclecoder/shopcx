@@ -1,0 +1,1 @@
+- **Bianca slow-kills over-CPA converters (spend ≥ $600 & CAC > $300 = dud)** · verified 2026-07-23 · → [[../reference/meta-scaling-methodology]]
