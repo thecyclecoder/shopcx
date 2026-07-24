@@ -1,0 +1,1 @@
+- **closeReturn honors its documented no-op contract on internal-path returns** · verified 2026-07-24 · → [[../libraries/shopify-returns]] · [[../inngest/returns]]

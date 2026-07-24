@@ -59,6 +59,12 @@ Design notes:
     type). The pipeline never re-derives it — if it's missing or
     zero, that's a creation-time bug, surfaced as a dashboard
     notification.
+  - closeReturn honors its documented no-op contract: internal-order
+    returns (shopify_return_gid=null) return success:true without
+    calling Shopify since createFullReturn never creates a Shopify
+    RETURN for internal orders. Only missing rows return success:false.
+    The Inngest step (line 355–360) tolerates both via console.error,
+    reducing log noise for the no-op case.
   - Refund idempotency (Phase 2): Inngest step retries (this function
     has retries: 2) compute a stable request_key from the return_id
     and pass it to refundOrder, so a retried refund reuses the same
