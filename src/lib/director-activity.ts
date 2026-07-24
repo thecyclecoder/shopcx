@@ -272,7 +272,22 @@ export type DirectorActionKind =
   // description, exec_kind }], repair_passes, resolved_in_session, autonomous:true }. A weekly
   // rollup (caught / repaired-in-session / escaped-to-fix-phase) reads this kind — see the brain
   // note next to the Phase-1 build-lane page.
-  | "build_self_verify_caught";
+  | "build_self_verify_caught"
+  // build-verify-self-heals-stale-grep-checks-before-deferring Phase 2 — one row PER auto-corrected
+  // spec_phase_checks pattern by the phase-verify reconciler ([[../libraries/check-reconciliation]])
+  // so a self-healing check can't mask a genuinely-wrong spec: the CEO sees WHAT was auto-corrected
+  // + WHY. Emitted from `scripts/builder-worker.ts` `runBuildJob` `finalizeBuiltPhase` via
+  // `defaultAuditReconciliation`. Owned by Platform (director_function='platform'). metadata:
+  // { job_id, spec_slug, phase_position, check_position, check_description, old_pattern, new_pattern,
+  //   step: 'normalized_case' | 'judge_proposal', rationale, evidence, autonomous:true }.
+  | "check_reconciled"
+  // Cap-reached / defer-with-un-reconcilable-list — the reconciler's cap fired (or the remaining
+  // checks did NOT reconcile), so the deferring branch runs with the un-healed list surfaced. Emitted
+  // ONCE per build that ended with `unreconciled.length > 0` — the CEO sees the real-failure path
+  // preserved instead of a silent pass. metadata: { job_id, spec_slug, cap, reconciled_count,
+  //   unreconciled: [{ phase_position, check_position, description, old_pattern, reason }],
+  //   cap_reached: boolean, autonomous:true }.
+  | "check_reconcile_cap_reached";
 
 export interface DirectorActivityInput {
   workspaceId: string;

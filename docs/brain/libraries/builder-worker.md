@@ -221,6 +221,26 @@ Invariants (see [[mario]] — this is Mario's durable pipeline-reliability fix s
 
 Layers with the surrounding protections in `runBuildJob`: the fresh + resume paths (both) do an explicit `git fetch origin <branch>` before the worktree add (Phase 1 above) so the branch tip is fresh; this rebase then advances that tip's BASE to current main; the claude run + tsc + `_check-table-refs-have-migrations.ts` (see `scripts/_check-table-refs-have-migrations.ts`) run on the advanced tree; the phase push at end still has the Phase 2 rebase-retry for the sibling-push race.
 
+## Phase-verify self-heals a stale grep check before deferring — `reconcileFailingGrepChecksForSpec`
+
+`finalizeBuiltPhase` (in `runBuildJob`) reads `isSpecAccumulationComplete` to decide whether every phase's grep checks pass on the build branch. Historically, if `acc.complete=false` (any phase's real grep check missed on the branch), the branch immediately deferred the PR and enqueued a redrive — a false negative burned the redrive budget when the code was genuinely present under a different literal than the spec author had guessed.
+
+**The self-heal** — [[check-reconciliation]] `reconcileFailingGrepChecksForSpec` — runs INSIDE the `!acc.complete` branch, **before** the defer. Two ordered steps per failing `expect: 'present'` grep check:
+
+1. **STEP A — normalized re-match.** A case-insensitive, whitespace-tolerant ripgrep against the same path. If it matches, the ONLY drift was casing or a formatter-inserted line break — the check's pattern is repointed to the actually-present literal.
+2. **STEP B — bounded intent judge.** Only if step A misses. Reads the check's `description` (the INTENT the author wrote in prose) + the phase's branch DIFF for the check's path (`git diff origin/main...<branch> -- <path>`, bounded to 16 KB). A bounded box-side Claude Sonnet judge decides whether the diff satisfies the described intent under a DIFFERENT literal and, if so, returns the exact literal present in the diff (e.g. a renamed `export async function <name>`). Fail-closed on any API / parse error → no reconcile.
+
+**No bypass, no phantom-ship.** Even a step-A hit MUST pass a real deterministic ripgrep of the new pattern before it lands. The judge NEVER decides the phase passes — it only proposes a literal, and the deterministic grep of that proposal is the final gate. On a successful reconcile the row is repointed via [[spec-phase-checks-table]] `upsertPhaseChecks` (same replace-by-position semantics as the author path, stable id preserved); accumulation is re-read and, if now complete, the PR opens.
+
+**Guardrails** (mirror the spec's invariants):
+- `expect: 'present'` ONLY. An `expect: 'absent'` miss is a real signal (the code SHOULDN'T be there and IS) — never reconciled.
+- The repoint MUST pass a real deterministic grep. A judge that fabricates a literal not on the branch is caught by the final grep and never reconciles.
+- Capped at (total grep-check count in the spec) reconciliations per build. Exceeded → any remaining unhealed checks report `cap_reached` and the caller defers as before.
+- Best-effort: a thrown reconciler falls through to the existing defer path unchanged.
+- Every reconciliation is logged (Phase 1 log tail); Phase 2 surfaces each repair on the build-card audit surface so the CEO sees what was auto-corrected — never silent.
+
+**North star.** The reconciler is a bounded proxy (make the pattern match reality); the deterministic grep still owns the objective (is the code actually present). Same shape as every other autonomous tool per [[../operational-rules]] § North star — the tool proposes, a deterministic check confirms.
+
 ## The shared `update(id, patch)` — the `agent_jobs` write chokepoint
 
 Every job kind funnels its status/error/log_tail transitions through `update(id, patch)`. The function is the single seam where a queue-state PATCH becomes real, so both invariants below sit here — no per-lane plumbing.
@@ -233,4 +253,4 @@ After a successful write the `needs_attention` classifier fan-out (`stampNeedsAt
 
 ## Related
 
-[[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[../operational-rules]]
+[[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[check-reconciliation]] · [[../operational-rules]]

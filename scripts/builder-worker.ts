@@ -13786,20 +13786,48 @@ async function runMarioJob(job: Job) {
       parsed = extractJson<Record<string, unknown>>(resultText);
       verdict = normalizeMarioVerdict(parsed);
     }
+
+    // Attempt 3 — FRESH-SESSION fallback. A poisoned first session (attempt 1 wandered off-shape
+    // AND attempt 2's same-session --resume inherited the same broken state) can't self-recover:
+    // both prior attempts share the same in-context findings + the same model tendency that
+    // flubbed the envelope. A fresh session eliminates that state and lets the model re-approach
+    // the brief clean — the exact recovery the parked spec-test regression (mario_verdict_missing
+    // after parse-repair on build-verify-self-heals-stale-grep-checks-before-deferring) needed to
+    // clear on its own instead of parking + auto-authoring a Fix N phase for a false-negative tool
+    // failure. Bounded to ONE extra call (the runBoxLane failover picks a healthy account so we
+    // also drop the account state along with the session), and only fires on the tail path where
+    // both cheap attempts already failed. If this ALSO fails, the fail-safe below still parks
+    // needs_attention — never a silent pass, never a fabricated verdict.
+    if (!verdict) {
+      console.warn(`${tag} still unparseable after parse-repair — fresh third attempt (new session, full prompt)`);
+      const fresh = await runBoxLane(
+        (cfg, sid) => runMarioClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      );
+      const freshDir = fresh.configDir;
+      await meterAgentJob(job, freshDir ?? undefined, fresh.usage, fresh.model);
+      if (fresh.session) await update(job.id, { claude_session_id: fresh.session, claude_session_config_dir: freshDir });
+      session = fresh.session ?? session;
+      resultText = fresh.resultText;
+      raw = fresh.raw;
+      isError = fresh.isError;
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeMarioVerdict(parsed);
+    }
+
     console.log(`${tag} claude finished — trigger_accurate=${verdict?.trigger_accurate ?? "(none)"} · live_fix=${verdict?.live_fix?.action ?? "(none)"} · isError=${isError}`);
 
     if (!verdict) {
-      // Phase-1 fail-safe: no parseable verdict AFTER repair. Park the job needs_attention +
-      // write the mario_failsafe director_activity row. Never execute any live fix (absence of
-      // judgment ≠ evidence to act — the same conservative default Reva uses).
-      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Mario box session (after parse-repair)" });
+      // Phase-1 fail-safe: no parseable verdict AFTER repair AND the fresh third attempt. Park the
+      // job needs_attention + write the mario_failsafe director_activity row. Never execute any
+      // live fix (absence of judgment ≠ evidence to act — the same conservative default Reva uses).
+      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Mario box session (after parse-repair + fresh retry)" });
       const fsLine = fs.stamped ? "fail-safe: job stamped needs_attention + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`;
       // If the fail-safe stamp lost the CAS (row already terminal) we STILL update the log_tail so a
       // human can see what happened — but never re-transition a terminal row.
       if (!fs.stamped) {
         await update(job.id, { log_tail: `${fsLine}\n\n${raw}`.slice(-2000) });
       }
-      console.warn(`${tag} unparseable verdict (after parse-repair) — ${fsLine}`);
+      console.warn(`${tag} unparseable verdict (after parse-repair + fresh retry) — ${fsLine}`);
       return;
     }
 
@@ -25720,6 +25748,72 @@ async function dispatchJob(job: Job) {
       } catch (e) {
         acc = { complete: true, reason: `accumulation check threw — fail open: ${e instanceof Error ? e.message : e}` };
       }
+      // ⭐ build-verify-self-heals-stale-grep-checks-before-deferring Phase 1 — a failing expect: 'present'
+      // grep check on an otherwise-complete build is very often a false negative: the code is on the branch
+      // under a DIFFERENT literal (renamed symbol / case drift / rewording) than the pattern the spec author
+      // guessed BEFORE the code existed. Before treating `acc.complete=false` as truth and deferring the PR,
+      // call the per-check reconciler `reconcileStaleGrepCheck` (src/lib/build/check-reconciliation.ts) —
+      // step A a normalized re-match, step B a bounded intent judge over the phase branch DIFF — via the
+      // batch wrapper `reconcileFailingGrepChecksForSpec` which iterates every failing check on the spec
+      // and delegates each one to `reconcileStaleGrepCheck`. A successful reconcile repoints the check's
+      // pattern via upsertPhaseChecks — the phase then verifies ONLY when a real deterministic grep of the
+      // corrected pattern passes (no bypass, no phantom-ship). On no-reconcile the branch below defers/
+      // escalates exactly as before — a real code-missing signal is never masked. Best-effort: a thrown
+      // reconciler falls through to the existing defer path unchanged.
+      // Phase 2 — carried out to the defer path below so the `check_reconcile_cap_reached`
+      // surface (and the log_tail annotation) fires even after we re-read `acc`.
+      let reconcileUnhealedListForDefer: string | null = null;
+      if (!acc.complete) {
+        try {
+          const { reconcileFailingGrepChecksForSpec, defaultBatchDeps, recordCapReachedOrUnhealedDefer } = await import("../src/lib/build/check-reconciliation");
+          const branchRefForReconcile = branch ?? `claude/build-${slug}`;
+          const rec = await reconcileFailingGrepChecksForSpec({
+            workspaceId: job.workspace_id,
+            slug,
+            branchRef: branchRefForReconcile,
+            repoRoot: wt,
+            deps: defaultBatchDeps,
+          });
+          if (rec.reconciled.length) {
+            // Never silent — `defaultBatchDeps.auditReconciliation` (defaultAuditReconciliation)
+            // already wrote one `director_activity check_reconciled` row per repair, carrying
+            // old → new pattern + description + step + rationale + evidence — the build-card
+            // audit surface the CEO reads. This log line is the run-tail mirror.
+            for (const a of rec.reconciled) {
+              console.log(`${tag} check-reconciled: phase ${a.phasePosition} check '${a.description.slice(0, 80)}' (${a.step}): '${a.oldPattern}' → '${a.newPattern}' — ${a.rationale.slice(0, 200)}`);
+            }
+            // Re-read accumulation now that the check patterns reflect the branch reality.
+            try {
+              const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
+              acc = await isSpecAccumulationComplete(job.workspace_id, slug);
+            } catch (e) {
+              acc = { complete: true, reason: `accumulation re-check (post-reconcile) threw — fail open: ${e instanceof Error ? e.message : e}` };
+            }
+          }
+          if (rec.unreconciled.length) {
+            // ⭐ Phase 2 — never silently pass on cap-reached / un-reconcilable checks. Record
+            // ONE `check_reconcile_cap_reached` director_activity row with the FULL unhealed
+            // list so the CEO sees exactly which patterns the reconciler could not heal + the
+            // reasons (real code-missing, judge_declined, cap_reached). The build STILL defers
+            // via the branch below — the real-failure path is preserved, not masked.
+            void recordCapReachedOrUnhealedDefer({
+              workspaceId: job.workspace_id,
+              slug,
+              jobId: job.id,
+              cap: rec.totalGrepChecks,
+              reconciledCount: rec.reconciled.length,
+              unreconciled: rec.unreconciled,
+              capReached: rec.capReached,
+            });
+            const preview = rec.unreconciled.slice(0, 3).map((u) => `p${u.phasePosition} ${u.description.slice(0, 60)} — ${u.reason}`).join(" | ");
+            reconcileUnhealedListForDefer =
+              `un-reconcilable checks (${rec.unreconciled.length}${rec.capReached ? ", cap-reached" : ""}): ${preview}`;
+            console.log(`${tag} check-reconcile: ${rec.unreconciled.length} check(s) could not be reconciled (deferring)${rec.capReached ? " — CAP REACHED" : ""}: ${preview}`);
+          }
+        } catch (e) {
+          console.error(`${tag} check-reconcile threw (non-fatal — proceeding to defer):`, e instanceof Error ? e.message : e);
+        }
+      }
       const chain = async () => {
         try {
           const { queueNextChainedPhase } = await import("../src/lib/agent-jobs");
@@ -25732,12 +25826,17 @@ async function dispatchJob(job: Job) {
       if (!acc.complete) {
         // PR DEFERRED (no-pr-during-accumulation): more phases remain → complete on the branch, advance the
         // chain, surface NO PR. Carry any pre-existing PR untouched (normally null — no pause opens one).
-        console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${acc.reason})`);
+        // ⭐ Phase 2 — the un-reconcilable list (if any) is carried into the log_tail + the redrive reason
+        // so the real-failure signal is preserved on the build card, never silently masked.
+        const deferReason = reconcileUnhealedListForDefer
+          ? `${acc.reason} — ${reconcileUnhealedListForDefer}`
+          : acc.reason;
+        console.log(`${tag} ✓ phase complete on branch — PR DEFERRED (accumulation not complete: ${deferReason})`);
         await update(job.id, {
           status: "completed",
           pr_url: job.pr_url ?? null,
           pr_number: job.pr_number ?? null,
-          log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${acc.reason}`.slice(-2000),
+          log_tail: `${opts.noChangeNote ? opts.noChangeNote + "; " : ""}phase built; PR deferred — ${deferReason}`.slice(-2000),
         });
         // Phase 2 — a deferred build that reached completion means the prior needs_input parks are
         // no longer live; close any orphaned open spans so `getTimecard.open_waits` reflects reality.
@@ -25758,7 +25857,14 @@ async function dispatchJob(job: Job) {
         // other build is in-flight), the redrive skips. Never throws.
         try {
           const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
-          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, acc.reason, job.id);
+          // Phase 2 — carry the un-reconcilable list into the redrive reason so a cap-reached defer
+          // escalates to the CEO with the ACTUAL failing check descriptions, not the coarse "not
+          // accumulated" reason. The reconciler's per-check director_activity row is the durable
+          // audit; this string is the human-readable signal on the redrive card.
+          const redriveReason = reconcileUnhealedListForDefer
+            ? `${acc.reason} — ${reconcileUnhealedListForDefer}`
+            : acc.reason;
+          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, redriveReason, job.id);
           console.log(`${tag} deferred-redrive: ${outcome.action} — ${outcome.reason}`);
         } catch (e) {
           console.error(`${tag} deferred-redrive threw (non-fatal, deferred build remains completed):`, e instanceof Error ? e.message : e);
