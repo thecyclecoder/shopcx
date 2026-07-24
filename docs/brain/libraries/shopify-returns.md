@@ -89,6 +89,7 @@ Thrown by `createShopifyReturn` when the Shopify-side mirror comes back null (no
 - `net_refund_cents` is set at creation and is the contract. Never re-derive at refund time.
 - `freeLabel: true` = we eat the EasyPost cost; net_refund = order_total_cents.
 - `createShopifyReturn` throws `RecoverableShopifyReturnError` for caller-handled failures (null Shopify mirror, Shopify userErrors). `createFullReturn` catches that class and returns `{ success: false, error }` WITHOUT `console.error` so a healthy recovery doesn't churn the Control Tower error feed (signature `vercel:314ca8c785aff3eb`). Unexpected throws still log.
+- `closeReturn` splits two cases: if the return row is missing (`!ret`), it returns `{ success: false }` (genuine failure); if the row exists but `shopify_return_gid` is null (internal-order path), it returns `{ success: true }` immediately without calling Shopify — documented no-op since `createFullReturn` never creates a Shopify RETURN for internal orders. The Inngest caller in `returns-issue-refund` tolerates both outcomes via console.error; this reduces log noise for the internal-path case.
 
 ---
 
