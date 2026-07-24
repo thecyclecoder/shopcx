@@ -1,0 +1,1 @@
+- **Stop segment-coverage stale-tail alerts for subscribers created after the cron ran** · verified 2026-07-24 · → [[lifecycles/control-tower]]
