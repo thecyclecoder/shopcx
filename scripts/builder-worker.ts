@@ -13785,20 +13785,48 @@ async function runMarioJob(job: Job) {
       parsed = extractJson<Record<string, unknown>>(resultText);
       verdict = normalizeMarioVerdict(parsed);
     }
+
+    // Attempt 3 — FRESH-SESSION fallback. A poisoned first session (attempt 1 wandered off-shape
+    // AND attempt 2's same-session --resume inherited the same broken state) can't self-recover:
+    // both prior attempts share the same in-context findings + the same model tendency that
+    // flubbed the envelope. A fresh session eliminates that state and lets the model re-approach
+    // the brief clean — the exact recovery the parked spec-test regression (mario_verdict_missing
+    // after parse-repair on build-verify-self-heals-stale-grep-checks-before-deferring) needed to
+    // clear on its own instead of parking + auto-authoring a Fix N phase for a false-negative tool
+    // failure. Bounded to ONE extra call (the runBoxLane failover picks a healthy account so we
+    // also drop the account state along with the session), and only fires on the tail path where
+    // both cheap attempts already failed. If this ALSO fails, the fail-safe below still parks
+    // needs_attention — never a silent pass, never a fabricated verdict.
+    if (!verdict) {
+      console.warn(`${tag} still unparseable after parse-repair — fresh third attempt (new session, full prompt)`);
+      const fresh = await runBoxLane(
+        (cfg, sid) => runMarioClaude(prompt, sid, REPO_DIR, cfg, job.id),
+      );
+      const freshDir = fresh.configDir;
+      await meterAgentJob(job, freshDir ?? undefined, fresh.usage, fresh.model);
+      if (fresh.session) await update(job.id, { claude_session_id: fresh.session, claude_session_config_dir: freshDir });
+      session = fresh.session ?? session;
+      resultText = fresh.resultText;
+      raw = fresh.raw;
+      isError = fresh.isError;
+      parsed = extractJson<Record<string, unknown>>(resultText);
+      verdict = normalizeMarioVerdict(parsed);
+    }
+
     console.log(`${tag} claude finished — trigger_accurate=${verdict?.trigger_accurate ?? "(none)"} · live_fix=${verdict?.live_fix?.action ?? "(none)"} · isError=${isError}`);
 
     if (!verdict) {
-      // Phase-1 fail-safe: no parseable verdict AFTER repair. Park the job needs_attention +
-      // write the mario_failsafe director_activity row. Never execute any live fix (absence of
-      // judgment ≠ evidence to act — the same conservative default Reva uses).
-      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Mario box session (after parse-repair)" });
+      // Phase-1 fail-safe: no parseable verdict AFTER repair AND the fresh third attempt. Park the
+      // job needs_attention + write the mario_failsafe director_activity row. Never execute any
+      // live fix (absence of judgment ≠ evidence to act — the same conservative default Reva uses).
+      const fs = await failsafeStampMarioUnsure(db, { ...failsafeArgs, reason: "no parseable verdict from Mario box session (after parse-repair + fresh retry)" });
       const fsLine = fs.stamped ? "fail-safe: job stamped needs_attention + escalated" : `fail-safe no-op (${fs.reason ?? "unknown"})`;
       // If the fail-safe stamp lost the CAS (row already terminal) we STILL update the log_tail so a
       // human can see what happened — but never re-transition a terminal row.
       if (!fs.stamped) {
         await update(job.id, { log_tail: `${fsLine}\n\n${raw}`.slice(-2000) });
       }
-      console.warn(`${tag} unparseable verdict (after parse-repair) — ${fsLine}`);
+      console.warn(`${tag} unparseable verdict (after parse-repair + fresh retry) — ${fsLine}`);
       return;
     }
 
