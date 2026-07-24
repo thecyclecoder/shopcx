@@ -159,7 +159,7 @@
     "html-to-text": "^9.0.5",
     "inngest": "^4.0.5",
     "marked": "^18.0.5",
-    "next": "16.2.9",
+    "next": "16.2.11",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "remotion": "4.0.471",
@@ -187,6 +187,7 @@
   },
   "overrides": {
     "ws": "8.21.0",
-    "postcss": "^8.5.10"
+    "postcss": "^8.5.10",
+    "@opentelemetry/propagator-jaeger": "^2.9.0"
   }
 }
