@@ -450,6 +450,86 @@ export async function claimRegenSpendSlot(
   return Array.isArray(data) && data.length > 0;
 }
 
+// ── Phase-2 order/sub-scoped loyalty-ceiling guards
+// (spec: loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates)
+//
+// The Phase-1 $15 ceiling bounds a SINGLE redemption, but the double-dip and
+// stacking vectors remain: refunding $15 against an order that already consumed
+// a loyalty reward, or stacking a second LOYALTY-* code onto a sub/order that
+// already carries one — either combines otherwise-in-cap actions past the
+// ceiling. These pure predicates test in-memory shapes the handlers already
+// have on hand (orders.discount_codes JSONB, subscriptions.applied_discounts
+// JSONB) so callers stay cheap and the rule is unit-testable.
+//
+// Interaction note: `reconcileLoyaltyRefundCoupons` (below) is the AFTER-the-
+// fact reconciliation for the separate SC135320 paused-sub double-payout — it
+// flips a dangling minted LOYALTY-* row to redeemed_as_refund AFTER a cash
+// refund settles. These are UPFRONT guards that refuse the action before it
+// fires; the two do not duplicate each other.
+
+/**
+ * True when an `orders.discount_codes` JSONB blob already carries a LOYALTY-*
+ * (or legacy `smile-`) code — the marker that this order already consumed a
+ * loyalty reward. Tolerant of nulls, non-arrays, and non-string entries so a
+ * malformed row can never crash the handler; matches only string codes.
+ *
+ * Callers: `redeem_points_as_refund` — refuse a loyalty cash refund on an order
+ * that already had loyalty applied (a loyalty save is for an order that did
+ * NOT already carry loyalty).
+ *
+ * Exported for unit tests.
+ */
+export function hasLoyaltyCodeApplied(
+  discountCodes: unknown,
+): boolean {
+  if (!Array.isArray(discountCodes)) return false;
+  for (const entry of discountCodes) {
+    const code =
+      typeof entry === "string"
+        ? entry
+        : typeof (entry as { code?: unknown } | null)?.code === "string"
+          ? ((entry as { code?: string }).code as string)
+          : null;
+    if (!code) continue;
+    const upper = code.toUpperCase();
+    if (upper.startsWith("LOYALTY-") || upper.startsWith("SMILE-")) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a `subscriptions.applied_discounts` JSONB blob already carries a
+ * LOYALTY-* discount — the marker that this contract already has an active
+ * loyalty coupon attached. Tolerant of nulls / mixed shapes: matches on `title`,
+ * `code`, or a bare string, matches case-insensitively on the LOYALTY-* /
+ * legacy `smile-` prefix. See `src/lib/research/probes/subscription.ts` which
+ * projects a subscription's applied_discounts using `.title` — same shape.
+ *
+ * Callers: `apply_loyalty_coupon` — refuse a second LOYALTY-* coupon on a
+ * contract already carrying one, so the ceiling can't be exceeded by stacking.
+ *
+ * Exported for unit tests.
+ */
+export function subscriptionHasLoyaltyCoupon(
+  appliedDiscounts: unknown,
+): boolean {
+  if (!Array.isArray(appliedDiscounts)) return false;
+  for (const entry of appliedDiscounts) {
+    let label: string | null = null;
+    if (typeof entry === "string") {
+      label = entry;
+    } else if (entry && typeof entry === "object") {
+      const rec = entry as { title?: unknown; code?: unknown };
+      if (typeof rec.title === "string") label = rec.title;
+      else if (typeof rec.code === "string") label = rec.code;
+    }
+    if (!label) continue;
+    const upper = label.toUpperCase();
+    if (upper.startsWith("LOYALTY-") || upper.startsWith("SMILE-")) return true;
+  }
+  return false;
+}
+
 /**
  * Loyalty-refund coupon reconciliation guard (spec: loyalty-refund-no-double-
  * payout-paused-sub-coupon-guard Phase 2). Closes the SC135320 double-payout
@@ -1465,6 +1545,32 @@ export const directActionHandlers: Record<
     if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
     if (!p.contract_id) return { success: false, error: "apply_loyalty_coupon missing contract_id" };
 
+    // Phase-2 stacking guard (spec:
+    // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
+    // Refuse a second LOYALTY-* coupon on a contract already carrying one —
+    // two stacked $15 loyalty coupons combine past the single-$15 ceiling.
+    // Runs BEFORE the 2s Shopify propagation delay so a stacking attempt
+    // fails fast without minting a duplicate discount code. Not duplicated
+    // with `reconcileLoyaltyRefundCoupons` (that reconciles AFTER a cash
+    // refund settles; this refuses UPFRONT).
+    const { data: subForStacking } = await ctx.admin
+      .from("subscriptions")
+      .select("applied_discounts")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("shopify_contract_id", p.contract_id)
+      .maybeSingle();
+    if (
+      subForStacking &&
+      subscriptionHasLoyaltyCoupon(
+        (subForStacking as { applied_discounts?: unknown }).applied_discounts,
+      )
+    ) {
+      return {
+        success: false,
+        error: `Subscription ${p.contract_id} already has a loyalty coupon applied — no stacking (single-$15 ceiling)`,
+      };
+    }
+
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -1913,10 +2019,23 @@ export const directActionHandlers: Record<
     if (!validation.valid) return { success: false, error: validation.error };
 
     const { data: order } = await ctx.admin.from("orders")
-      .select("id, order_number, total_cents, financial_status")
+      .select("id, order_number, total_cents, financial_status, discount_codes")
       .eq("workspace_id", ctx.workspaceId).eq("shopify_order_id", p.shopify_order_id).single();
     if (!order) return { success: false, error: "Order not found" };
     if (order.financial_status === "refunded") return { success: false, error: "Order already fully refunded" };
+
+    // Phase-2 double-payout guard (spec:
+    // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
+    // A loyalty save is for an order that did NOT already carry loyalty —
+    // if the order already consumed a loyalty coupon at checkout, a $15
+    // cash refund on top would combine two loyalty benefits on one order
+    // and blow past the $15 ceiling. Refuse before any refund fires.
+    if (hasLoyaltyCodeApplied((order as { discount_codes?: unknown }).discount_codes)) {
+      return {
+        success: false,
+        error: `Order #${order.order_number} already had a loyalty reward applied — no second loyalty refund (single-$15 ceiling)`,
+      };
+    }
 
     const amountCents = tier.discount_value * 100;
     const reason = `Loyalty redemption — ${tier.points_cost} points for $${tier.discount_value} partial refund on renewal order #${order.order_number}`;
