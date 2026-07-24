@@ -22,15 +22,42 @@
  * the objective-owner (the founder) rather than executing silently. See [[../operational-rules]].
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/** The remedy action types that MOVE MONEY / issue a credit — the class the founder gate covers. */
+/**
+ * The remedy action types that MOVE MONEY / issue a credit — the class the founder gate covers.
+ *
+ * `apply_loyalty_coupon` + `redeem_points` are in the set (spec:
+ * loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates Phase 3) so the founder
+ * approval gate is aware of every loyalty-derived spend. Combined with the sibling
+ * `planNeedsLoyaltyRefusal` guard below, this closes the pre-Phase-3 blind-spot where a $150
+ * loyalty make-whole could be proposed, parked, and approved — a loyalty benefit is now capped
+ * upfront by `LOYALTY_REMEDY_MAX_CENTS`, refused hard when over cap, never routed to the founder
+ * for a make-whole ask.
+ */
 export const MONEY_ACTION_TYPES = new Set<string>([
   "partial_refund",
   "redeem_points_as_refund",
   "create_replacement_order",
   "dollar_replacement",
+  "apply_loyalty_coupon",
+  "redeem_points",
+]);
+
+/**
+ * The loyalty-derived action types the ceiling guard applies to (spec:
+ * loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates Phase 3). A superset of
+ * every action whose value is a loyalty payout — coupon mint (`redeem_points`), coupon apply
+ * (`apply_loyalty_coupon`), or cash refund via a redemption (`redeem_points_as_refund`). Kept
+ * separate from `MONEY_ACTION_TYPES` because the founder gate SUMS money across the batch, while
+ * this set is scanned per-action for the hard-cap ceiling.
+ */
+export const LOYALTY_ACTION_TYPES = new Set<string>([
+  "apply_loyalty_coupon",
+  "redeem_points",
+  "redeem_points_as_refund",
 ]);
 
 /** The `tool_name` on the god_mode_approvals card that carries a parked June remedy. */
@@ -53,14 +80,65 @@ export interface MoneyActionLine {
 }
 
 /**
+ * Pull the loyalty-derived payout value (cents) from a loyalty action's payload — used by both
+ * the founder gate SUM (so a $15 loyalty coupon shows as 1500 cents alongside a partial_refund)
+ * and by `planNeedsLoyaltyRefusal` (the hard-cap check). Signals, in preference order:
+ *
+ *   1. Explicit `amount_cents` (Sonnet sometimes emits it on `redeem_points_as_refund`).
+ *   2. `discount_value` as dollars (present on many redemption payloads).
+ *   3. A `LOYALTY-<N>-*` coupon code parsed from `code` / `coupon_code`
+ *      (`apply_loyalty_coupon` shape). Both `LOYALTY-15-XYZ` (integer dollars) and
+ *      `LOYALTY-15.50-XYZ` (decimal) are parsed; a legacy `smile-*` code is not sized here
+ *      (no dollar amount embedded — returns null → falls through to the founder-gate
+ *      unknown-collapse-to-null path).
+ *
+ * Returns null when no signal is present (so the founder gate correctly gates on unknown).
+ * Pure.
+ */
+function extractLoyaltyPayloadValueCents(
+  actionType: string,
+  payload: Record<string, unknown>,
+): number | null {
+  const rawAmount = payload.amount_cents;
+  if (typeof rawAmount === "number" && Number.isFinite(rawAmount)) {
+    return Math.round(rawAmount);
+  }
+  const discountValue = payload.discount_value;
+  if (typeof discountValue === "number" && Number.isFinite(discountValue)) {
+    return Math.round(discountValue * 100);
+  }
+  if (actionType === "apply_loyalty_coupon") {
+    const codeRaw = payload.code ?? payload.coupon_code;
+    if (typeof codeRaw === "string") {
+      const m = codeRaw.toUpperCase().match(/^LOYALTY-([0-9]+(?:\.[0-9]+)?)-/);
+      if (m) {
+        const dollars = Number(m[1]);
+        if (Number.isFinite(dollars)) return Math.round(dollars * 100);
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Pull the money amount (cents) from ONE payload object — the shared shape used by both a legacy
  * single-action remedy (`{action_type, payload}`) and each step in a multi-action remedy's
- * `actions[]`. Checks `amount_cents` first, then `replacement_amount_cents` (dollar_replacement).
- * Returns null when the field is missing / non-finite. Pure.
+ * `actions[]`. Checks `amount_cents` first, then `replacement_amount_cents` (dollar_replacement),
+ * then — for a loyalty action type — the loyalty-derived signals in
+ * `extractLoyaltyPayloadValueCents` (so a $15 LOYALTY-* coupon SUMS into the founder gate as
+ * 1500 cents instead of collapsing the batch to an unsizeable/unknown-gate result).
+ * Returns null when no signal is present. Pure.
  */
-function extractPayloadAmountCents(payload: Record<string, unknown>): number | null {
+function extractPayloadAmountCents(
+  payload: Record<string, unknown>,
+  actionType?: string,
+): number | null {
   const raw = payload.amount_cents ?? payload.replacement_amount_cents;
-  return typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : null;
+  if (typeof raw === "number" && Number.isFinite(raw)) return Math.round(raw);
+  if (actionType && LOYALTY_ACTION_TYPES.has(actionType)) {
+    return extractLoyaltyPayloadValueCents(actionType, payload);
+  }
+  return null;
 }
 
 /**
@@ -92,7 +170,7 @@ export function extractRemedyMoneyLines(
       step.payload && typeof step.payload === "object" && !Array.isArray(step.payload)
         ? (step.payload as Record<string, unknown>)
         : {};
-    lines.push({ actionType, amountCents: extractPayloadAmountCents(payload) });
+    lines.push({ actionType, amountCents: extractPayloadAmountCents(payload, actionType) });
   }
   return lines;
 }
@@ -190,7 +268,7 @@ export function planNeedsFounderApproval(
     if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
     moneyLines.push({
       actionType: step.actionType,
-      amountCents: extractPayloadAmountCents(step.actionParams),
+      amountCents: extractPayloadAmountCents(step.actionParams, step.actionType),
     });
   }
   if (moneyLines.length === 0) {
@@ -213,6 +291,61 @@ export function planNeedsFounderApproval(
     amountCents,
     moneyLines,
   };
+}
+
+/**
+ * Verdict of the loyalty-ceiling refusal predicate. `refused=true` means the CS Director's runner
+ * must NOT execute this plan AND must NOT route it to the founder — the CEO's absolute rail says
+ * a loyalty-derived benefit above `LOYALTY_REMEDY_MAX_CENTS` is out of scope entirely (no cash-out,
+ * make-whole, or expiry-extension). The runner surfaces the refusal as a needs_attention verdict
+ * so the ticket goes to a human, never as a founder-approval ask.
+ */
+export interface LoyaltyRefusalDecision {
+  refused: boolean;
+  actionType: string | null;
+  valueCents: number | null;
+  reason: string | null;
+}
+
+/**
+ * Hard-cap refusal check on a normalized planned batch (spec:
+ * loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates Phase 3).
+ *
+ * Scans every loyalty-typed action in the plan (`redeem_points`, `apply_loyalty_coupon`,
+ * `redeem_points_as_refund`) — extracts the loyalty payout value via
+ * `extractLoyaltyPayloadValueCents` — and REFUSES the whole plan the first time a known value
+ * exceeds `LOYALTY_REMEDY_MAX_CENTS`. This is the sibling guard the cs-director runner calls
+ * BEFORE `planNeedsFounderApproval`, so an over-cap loyalty make-whole is refused hard (not
+ * parked for founder approval — the whole point of Phase 3).
+ *
+ * When the loyalty payload has no sizeable signal (unknown value), the founder gate still gates
+ * on it via the unknown-collapse-to-null rule (that already-existing conservative behavior). The
+ * refusal predicate itself only fires on a KNOWN over-cap value — a payload we couldn't size
+ * doesn't get a false-positive refuse.
+ *
+ * Pure. Exported for unit tests.
+ */
+export function planNeedsLoyaltyRefusal(
+  actions: readonly PlannedActionForGate[],
+): LoyaltyRefusalDecision {
+  for (const step of actions) {
+    if (!LOYALTY_ACTION_TYPES.has(step.actionType)) continue;
+    const valueCents = extractLoyaltyPayloadValueCents(step.actionType, step.actionParams);
+    if (valueCents !== null && valueCents > LOYALTY_REMEDY_MAX_CENTS) {
+      const dollars = (valueCents / 100).toFixed(2);
+      const cap = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(2);
+      return {
+        refused: true,
+        actionType: step.actionType,
+        valueCents,
+        reason:
+          `loyalty benefit $${dollars} (action ${step.actionType}) exceeds the absolute $${cap} ` +
+          `loyalty ceiling — cash-out / make-whole / expiry-extension are categorically out of scope, ` +
+          `never escalate to the founder to ask`,
+      };
+    }
+  }
+  return { refused: false, actionType: null, valueCents: null, reason: null };
 }
 
 /**

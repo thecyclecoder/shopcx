@@ -106,7 +106,7 @@ export const CATEGORY_COPY: Record<string, LeashLine> = {
   // ── CS (June) ──
   approve_remedy_within_ceiling: {
     title: "Approve a customer remedy inside our refund ceiling",
-    detail: "A bounded make-good — a coupon, a partial refund, a subscription pause, or resending a lost order — inside the refund ceiling you already approved, fired through the same executor a rep would use.",
+    detail: "A bounded make-good — a coupon, a partial refund, a subscription pause, or resending a lost order — inside the refund ceiling you already approved, fired through the same executor a rep would use. A LOYALTY-derived benefit is capped absolutely at $15 (no cash-out, no make-whole, no expiry-extension) — over that, I refuse the ticket rather than ask you to grant more.",
   },
   author_derived_from_ticket_spec: {
     title: "Author a derived-from-ticket spec for a product fix",
