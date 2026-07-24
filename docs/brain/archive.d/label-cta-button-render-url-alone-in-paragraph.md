@@ -1,0 +1,1 @@
+- **Return-label CTA button must render when the label URL is alone in a paragraph** · verified 2026-07-24 · → [[../libraries/label-cta]]
