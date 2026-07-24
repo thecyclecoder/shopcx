@@ -1,0 +1,1 @@
+- **Phase-verify self-heals a stale grep check instead of parking a done build** · verified 2026-07-24 · → [[../libraries/check-reconciliation]]
