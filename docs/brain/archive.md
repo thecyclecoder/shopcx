@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Phase-verify self-heals a stale grep check instead of parking a done build** · verified 2026-07-24 · → [[../libraries/check-reconciliation]]
+- **Security fix auto-author must emit ≥1 typed machine check per phase** · verified 2026-07-24 · → [[../libraries/security-agent]]
+- **Stop segment-coverage stale-tail alerts for subscribers created after the cron ran** · verified 2026-07-24 · → [[lifecycles/control-tower]]
+- **Amplifier import failures must be visible, retried, and escalated (no silent drops)** · verified 2026-07-23 · → [[../inngest/amplifier-import-reconcile]]
+- **Build lane requeues expired OAuth 401 as transient instead of terminal fail** · verified 2026-07-23 · → [[../recipes/build-box-setup]]
+- **checkout/client-token endpoint returns a generic error, not raw errText diagnostics** · verified 2026-07-23 · → [[../libraries/error-text]]
+- **Actually build the skeleton wireframe: vision extractor emits elements/product_presentation/punchiness + idempotent backfill + fix the invalid CHECK migration** · verified 2026-07-23 · → [[../libraries/creative-skeleton]]
+- **Graduate crowned winners into the cold scaler — mint the CBO scaler campaign + duplicate** · verified 2026-07-23 · → [[../libraries/media-buyer-graduate-scaler]]
+- **Iteration Engine excludes media-buyer test cohorts from budget scaling** · verified 2026-07-23 · → [[../libraries/meta__decision-engine]]
+- **Loyalty save-as-refund must never leave a dangling coupon + refuse coupon-apply on a non-active sub** · verified 2026-07-23 · → [[lifecycles/subscription-billing]]
+- **Explore/exploit split: crown flips Dahlia to 2 explore / 2 exploit** · verified 2026-07-23 · → [[../libraries/media-buyer-agent]]
+- **Persist crowned winners + never reactivate/re-test a graduate** · verified 2026-07-23 · → [[../libraries/media-buyer-agent]]
+- **Bianca slow-kills over-CPA converters (spend ≥ $600 & CAC > $300 = dud)** · verified 2026-07-23 · → [[../reference/meta-scaling-methodology]]
+- **Patch the non-major vulnerable deps flagged by dep-watch (otel-jaeger DoS HIGH + esbuild/body-parser lows)** · verified 2026-07-23 · → [[../libraries/spec-check-runner]] § Turbopack node_modules preflight
 - **Declining the author_fix_spec action must persist the real-vuln verdict — never clear a real-vuln review to completed-clean** · verified 2026-07-23 · → [[../libraries/security-agent]]
 - **A build that finishes 'completed' with a DEFERRED PR must auto-redrive or escalate, not silently stall** · verified 2026-07-22 · → [[../lifecycles/roadmap-build-console]]
 - **Checkout route returns generic error responses to the client — never raw err.message (payment-path info-disclosure)** · verified 2026-07-22 · → [[../lifecycles/storefront-checkout]]
