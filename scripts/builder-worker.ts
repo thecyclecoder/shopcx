@@ -19,6 +19,7 @@ import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
+import type { SpecPhaseCheckInput } from "../src/lib/spec-phase-checks-table"; // security-fix-autoauthor-machine-check — typed check payload for authorSecurityFixSpec
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
 // lossless-error-diagnostics-no-object-object Phase 2 — the shared lossless error renderer every
 // diagnostic-persisting catch site funnels through. Kills `[object Object]` on a supabase-js
@@ -23406,7 +23407,30 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
       source.kind === "diff"
         ? `Re-review the merged diff (git show ${source.mergeSha}) → the flagged vulnerability is closed.`
         : `Re-review the branch diff (git diff origin/main...origin/${source.branch}) → the flagged vulnerability is closed.`;
-    const verificationBody = (vBullets.length ? vBullets : [defaultBullet]).map((b) => `- ${b.trim()}`).join("\n");
+    const verificationBullets = vBullets.length ? vBullets : [defaultBullet];
+    const verificationBody = verificationBullets.map((b) => `- ${b.trim()}`).join("\n");
+    // security-fix-autoauthor-machine-check Phase 1 — attach a typed `checks[]` array so the author
+    // chokepoint's every-phase-needs-a-machine-check gate (src/lib/author-spec.ts MissingMachineCheckError)
+    // accepts this phase. The phase body already gates on `npx tsc --noEmit`, so a `tsc` machine check is
+    // the natural + required floor. The reviewer's advisory bullets survive as `needs_human` checks so
+    // the human eyeball ("confirm the flagged vuln is closed") is not lost. Without this, every real
+    // security finding parked at needs-human with "seed authoring failed" and had to be rescued by hand.
+    const phaseChecks: SpecPhaseCheckInput[] = [
+      {
+        position: 1,
+        description: "tsc clean on the fix branch (`npx tsc --noEmit`)",
+        kind: "auto",
+        exec_kind: "tsc",
+        params: null,
+      },
+      ...verificationBullets.map<SpecPhaseCheckInput>((b, i) => ({
+        position: i + 2,
+        description: b.trim(),
+        kind: "human",
+        exec_kind: "needs_human",
+        params: null,
+      })),
+    ];
     const sourceLine =
       source.kind === "diff"
         ? `Security-of-merge: \`${source.mergeSha}\` · Fixes: [[${parentSlug}]]`
@@ -23436,6 +23460,7 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
               title: "Phase 1 — close the vulnerability",
               body: phaseBody,
               verification: verificationBody,
+              checks: phaseChecks,
               why: `The ${whereDiff} diff introduced a vulnerability that this phase must close before merge/promotion.`,
               what: "The specific scoped code change that closes the vulnerability, gated on tsc.",
               status: "planned",
