@@ -1,0 +1,1 @@
+- **Security fix auto-author must emit ≥1 typed machine check per phase** · verified 2026-07-24 · → [[../libraries/security-agent]]
