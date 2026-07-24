@@ -177,7 +177,10 @@ This is the locked-in creative pipeline, confirmed by building a real Amazing Co
 
 **✅ Verified live (2026-06-05):** an in-app render (Inngest → Lambda) produced both **video** formats — `reels_9x16` + `feed_4x5`, valid MP4s (HTTP 200, ~18-24 MB, 16s, captions + b-roll + music) in ~1 min. (Vercel auto-deploys production on push to `main` — no manual `vercel deploy --prod` needed.)
 
+**✅ Overlay render path — Phase 1 (dahlia-competitor-ad-adaptation-overlay-render):** the 3-layer overlay (text-free scene → font-engine copy overlay) is wired behind `DAHLIA_RENDER_MODE=overlay`. When the flag names `overlay`, [[../libraries/creative-generate]] `generateCreative` composes a `buildTextFreeScenePrompt` (imitation-aware: FIRST image = proven competitor reference, swap product/drink/props to OUR flavor's real variant, RE-LIGHT to match the scene, keep pack fully in frame, NO third-party brands) and prompts Nano Banana Pro for a scene with **absolutely ZERO added text** — no headline, no sub-headline, no benefit words, no flavor caption (e.g. `CINNAMON LATTE`), no CTA, no watermark; only the product's OWN pack label may render. The returned bytes are then piped through [[../libraries/creative-overlay]] `compositeCopyOverlay(baseImage, copy, ratio, opts)` — a deterministic SVG-over-sharp compositor with headline/regret/benefit-stack/payoff/CTA slots and legibility scrims — which guarantees spelling is exact by construction (a real font engine, not a diffusion model). Legacy model-draws-text path stays default until proven-before-default against Bianca's realized cold-audience CAC/CTR (mirrors `DAHLIA_COPY_MODE`). See [[../reference/competitor-ad-adaptation]] Part 2 (3-layer overlay) + Part 3 (compositor).
+
 **⏳ Open:**
+- Phase 2 (copy adaptation instincts — verify-then-reword against `product_benefit_selections`), Phase 3 (compositor typography + per-ratio safe zones + fit-to-box), Phase 4 (side-by-side QC gate against the source), Phase 5 (land copy at the angle `copy_pack`/`copyVariants` source + renders as `ad_videos` per-ratio rows). See `docs/brain/specs/dahlia-competitor-ad-adaptation-overlay-render.md`.
 - **Static formats fail on Lambda** — `AdStatic` (`stories_9x16` + `feed_4x5` static) errors with "Error loading image" for the hero (signed Supabase URL). `renderStillOnLambda` can't fetch/decode it within Remotion's `delayRender` window. Video is unaffected. Fix: pass the hero as a longer-TTL/public URL or preload it. The two **video** formats are the priority and work.
 - **Static path** still renders the hero+headline `AdStatic` (unchanged); only the video path uses the VO-spine composition.
 - **B-roll/music refresh** — only talking beats are refreshable via the UI; b-roll + music are reused as-is. Regenerating the hero does NOT auto-refresh existing talking clips (regenerate those to pick up the new hero).
@@ -196,6 +199,7 @@ Verification scripts: `scripts/test-ad-validator.ts`, `scripts/generate-amazing-
 | `src/lib/ad-avatar-proposals.ts` | Demographic archetype proposals (read-only) + write-through archetype cache (5 default) |
 | `src/app/api/ads/avatars/candidates/route.ts` | Generate/list/delete saved avatar faces (Soul text-to-image → [[../tables/ad_avatar_candidates]]) |
 | `src/lib/ad-render.ts` | Caption grouping, credibility, cut plan, safe-zone, Remotion invocation |
+| `src/lib/ads/creative-overlay.ts` | 3-layer overlay compositor: SVG text layer + sharp composite (Phase 1 of the flag-gated overlay render path) |
 | `src/lib/ad-transcribe.ts` | Whisper word-level transcription |
 | `src/lib/ad-storage.ts` | Private `ad-tool` bucket upload + signed URLs |
 | `src/lib/higgsfield.ts` | Higgsfield client (Soul/DoP/Speak/TTS/character) + `ad_jobs` logging |
