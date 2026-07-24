@@ -144,6 +144,15 @@ The rule is enforced at three points (spec, brief, rubric) so it can't drift:
 
 **What DOESN'T change.** `escalate_founder` remains the right verdict when the customer clears NO tier, a disqualifier fires (`previous_exception`, `has_chargeback`, `has_chargeback_on_order`), OR the call is a genuine out-of-leash / storyline / precedent judgment (full refund past the CS ceiling, cancel-with-refund on a legacy sub, identity merge, changing a `sonnet_prompts` rule, comping a promoter). The rule narrows a specific miss (sanctioned tier-eligible saves), never the third rung's real judgment surface.
 
+### Loyalty ceiling — June NEVER escalates a make-whole (hard-refuse, not park)
+
+[[../specs/loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates]] Phase 3 closes the DECISION layer of the loyalty $15 rail: any loyalty-derived benefit (`redeem_points` / `apply_loyalty_coupon` / `redeem_points_as_refund`) whose value exceeds [`LOYALTY_REMEDY_MAX_CENTS`](loyalty.md#loyalty_remedy_max_cents--constant) is CATEGORICALLY out of scope — not just off-leash.
+
+- **The guard** — `planNeedsLoyaltyRefusal(plan.actions)` (see [[june-remedy-approval]]) runs in `handleApproveRemedy` BEFORE `planNeedsFounderApproval`. When it returns `refused=true`, the runner returns `{ok:false, needs_attention:true, reason:'loyalty_ceiling_refused', error:…}` — the ticket goes to a human, NEVER to Dylan's founder-approval SMS card.
+- **The pre-Phase-3 failure mode** — the $50 founder-approval threshold PARKS (doesn't cap) and was blind to `apply_loyalty_coupon` / `redeem_points` entirely, so a $150 loyalty make-whole could be proposed, parked, and approved. That route is now structurally impossible.
+- **The rule** (encoded in [[../operational-rules]] § Loyalty ceiling, in `src/lib/agents/cs-director.ts` LEASH_CATEGORIES doc, and in `.claude/skills/cs-director-call/SKILL.md`): loyalty cash-out, make-whole, and expiry-extension are CATEGORICALLY out of scope. Resolve inside the $15 ceiling or HOLD FIRM. NEVER `escalate_founder` to ask for a loyalty make-whole — that is not a strategy call the CEO owns; the CEO's rail closed the question in advance.
+- **Motivating case — ticket `2ba3b665`.** A VIP self-redeemed ~18,000 points into eleven $15 codes she couldn't use before her stated November cancel and asked to cash them out. June computed a ~$150 loyalty "make-whole" and escalated to the founder ASKING whether to grant it. Per CEO ruling, that route must not exist.
+
 ## Where it's wired (org placement)
 
 - **Function:** `cs` ([[../functions/cs]] § Roles + approval names the CS Director seat alongside `cs_manager` + `admin`).

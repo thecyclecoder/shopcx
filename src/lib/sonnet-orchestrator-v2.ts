@@ -22,6 +22,7 @@ import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/prod
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
+import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -1335,17 +1336,34 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
       .single();
     const tiers = (loyaltyConfig?.redemption_tiers || []) as { label: string; points_cost: number; discount_value: number }[];
     if (tiers.length) {
-      const tierList = tiers.map(t => `${t.label} (${t.points_cost} pts → $${t.discount_value} off)`).join(", ");
-      parts.push(`Available redemption tiers: ${tierList}`);
+      // ⭐ ABSOLUTE LOYALTY CEILING (spec:
+      // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
+      // Filter the tier list surfaced to the LLM to only in-cap tiers — an
+      // over-$15 tier that a workspace mis-configured must NEVER be offered.
+      // The runtime cap is enforced deterministically in validateRedemption
+      // (Phase 1) and in the June ceiling refusal (Phase 3); this prompt
+      // filter keeps the LLM from proposing an over-cap redemption in the
+      // first place. LOYALTY_REMEDY_MAX_CENTS is the source of truth — the
+      // configurable top tier is NOT.
+      const capCents = LOYALTY_REMEDY_MAX_CENTS;
+      const capDollars = capCents / 100;
+      const inCapTiers = tiers.filter(t => t.discount_value * 100 <= capCents);
+      const tierList = inCapTiers.map(t => `${t.label} (${t.points_cost} pts → $${t.discount_value} off)`).join(", ");
+      parts.push(`Available redemption tiers: ${tierList || "(none within $" + capDollars + " ceiling)"}`);
       parts.push("IMPORTANT: Only offer these exact tiers — never invent other amounts.");
+      parts.push(`IMPORTANT — ABSOLUTE LOYALTY CEILING: $${capDollars} is the absolute maximum for any loyalty-derived benefit (single redemption, coupon, or partial refund via points). NEVER propose a loyalty cash-out, "make-whole" credit, or expiry-extension — loyalty exists to drive repeat purchases, never a large payout to a departing customer. If a customer asks to cash out unusable points, hold firm at the ceiling: offer the largest in-cap tier they can afford OR say plainly that loyalty points are not cashable. Do NOT propose to escalate the question to the founder — an over-cap loyalty ask is CATEGORICALLY out of scope.`);
       // One coupon per order. Redeeming many tiers at once just mints codes
       // the customer can never stack (only one applies per order/renewal), so
       // it's pointless — and offering "9 codes for all your points" reads as
       // absurd. When a customer asks to redeem ALL their points, do NOT offer
       // to generate multiple codes. Explain one-coupon-per-order and offer the
-      // single highest tier they can afford, then redeem just that one.
-      const topTier = tiers.reduce((a, b) => (b.points_cost > a.points_cost ? b : a), tiers[0]);
-      parts.push(`IMPORTANT: Only ONE coupon can be used per order (and one per subscription renewal). NEVER offer to redeem all of a customer's points into multiple codes — extra codes are useless. If they ask to "redeem all my points", say something like: one coupon per order, so there isn't much sense redeeming everything at once; the max single redemption is ${topTier.points_cost} points for $${topTier.discount_value} off — offer to redeem THAT one and send the code.`);
+      // single highest IN-CAP tier they can afford, then redeem just that one.
+      const affordableInCap = inCapTiers.filter(t => t.points_cost <= (loyaltyMember?.points_balance ?? 0));
+      const topInCapTier = (affordableInCap.length ? affordableInCap : inCapTiers)
+        .reduce((a, b) => (b.points_cost > a.points_cost ? b : a), inCapTiers[0] ?? tiers[0]);
+      if (topInCapTier) {
+        parts.push(`IMPORTANT: Only ONE coupon can be used per order (and one per subscription renewal). NEVER offer to redeem all of a customer's points into multiple codes — extra codes are useless. If they ask to "redeem all my points", say something like: one coupon per order, so there isn't much sense redeeming everything at once; the max single redemption inside the $${capDollars} ceiling is ${topInCapTier.points_cost} points for $${topInCapTier.discount_value} off — offer to redeem THAT one and send the code.`);
+      }
     }
 
     const { data: redemptions } = await admin.from("loyalty_redemptions")
