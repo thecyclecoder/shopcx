@@ -22,9 +22,13 @@ export function ctaButton(url: string, label: string): string {
 }
 
 // Bare EasyPost label URL NOT already inside an href/attribute. The negative
-// lookbehind skips URLs preceded by " ' = > (i.e. href="…" or an existing
-// button), so a properly-rendered CTA button is never double-wrapped.
-const BARE_LABEL_URL_RE = /(?<!["'=>])https?:\/\/easypost-files\.s3[^\s"'<>]+/gi;
+// lookbehind skips URLs preceded by " ' or = (i.e. href="…" / href='…' /
+// href=…), so a properly-rendered CTA button (ctaButton emits a quoted href)
+// is never double-wrapped. `>` is deliberately NOT in the lookbehind: a
+// button's URL only ever sits inside a quoted href, never right after a bare
+// `>`, so excluding `>` protected nothing and instead skipped legitimate
+// body-text URLs that happen to sit alone in a `<p>…</p>` (ticket a00b0c22).
+const BARE_LABEL_URL_RE = /(?<!["'=])https?:\/\/easypost-files\.s3[^\s"'<>]+/gi;
 
 export function renderLabelUrlsAsButtons(html: string): string {
   if (!html || !BARE_LABEL_URL_RE.test(html)) return html;
