@@ -562,8 +562,15 @@ export async function closeReturn(
     .eq("workspace_id", workspaceId)
     .single();
 
-  if (!ret?.shopify_return_gid) {
-    return { success: false, error: "Return not found or missing Shopify GID" };
+  if (!ret) {
+    return { success: false, error: "Return not found" };
+  }
+
+  // Internal-order path: createFullReturn (see the comment above the returns
+  // insert) never creates a Shopify RETURN, so shopify_return_gid stays null
+  // by design. Documented no-op — nothing to close on Shopify's side.
+  if (!ret.shopify_return_gid) {
+    return { success: true };
   }
 
   try {
