@@ -1,0 +1,1 @@
+- **Remotion Lambda version drift caught at predeploy, not at runtime** · verified 2026-07-24 · → [[../integrations/remotion-lambda]]
