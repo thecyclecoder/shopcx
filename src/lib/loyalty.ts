@@ -244,6 +244,18 @@ export function getRedemptionTiers(settings: LoyaltySettings): RedemptionTier[] 
   return settings.redemption_tiers || DEFAULT_SETTINGS.redemption_tiers;
 }
 
+/**
+ * Absolute ceiling on any single loyalty-derived benefit (redemption tier
+ * dollar value → minted coupon OR redemption-as-refund cash amount). Both
+ * paths flow through {@link validateRedemption}, so this single constant
+ * caps both regardless of how a workspace configures loyalty_settings.redemption_tiers.
+ *
+ * CEO rail (loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates spec):
+ * loyalty points exist to drive repeat purchases, never a large cash payout to a
+ * departing customer — no cash-out, make-whole, or expiry-extension above this.
+ */
+export const LOYALTY_REMEDY_MAX_CENTS = 1500;
+
 export function validateRedemption(
   member: LoyaltyMember,
   tier: RedemptionTier,
@@ -252,6 +264,12 @@ export function validateRedemption(
     return {
       valid: false,
       error: `Insufficient points. Need ${tier.points_cost}, have ${member.points_balance}`,
+    };
+  }
+  if (tier.discount_value * 100 > LOYALTY_REMEDY_MAX_CENTS) {
+    return {
+      valid: false,
+      error: `Redemption value $${tier.discount_value} exceeds the $${LOYALTY_REMEDY_MAX_CENTS / 100} loyalty ceiling`,
     };
   }
   return { valid: true };
