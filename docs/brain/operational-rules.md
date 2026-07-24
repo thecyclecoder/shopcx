@@ -219,9 +219,9 @@ After editing files under `shopify-extension/portal-src/`:
 
 Skip either step and the customer-facing portal will be out of sync with what's in source. Note: the mini-site bundle (`public/`) only needs the Vercel deploy; only the **theme extension** needs `shopify app deploy`.
 
-## Remotion site deploy
+## Remotion site deploy + version pin
 
-After editing anything under `remotion/` (compositions, `ExampleAd`/`AdStatic`, fonts) **re-run `npx tsx scripts/deploy-remotion-lambda.ts`** to re-upload the bundle to the Lambda site. Production ad renders run on Remotion Lambda (Vercel serverless can't run Remotion) and use the *deployed* site — skip this and Lambda renders a stale composition. See [[integrations/remotion-lambda]]. Local dev (`REMOTION_RENDER_MODE` unset) renders in-process and doesn't need a redeploy.
+After editing anything under `remotion/` (compositions, `ExampleAd`/`AdStatic`, fonts) **re-run `npx tsx scripts/deploy-remotion-lambda.ts`** to re-upload the bundle to the Lambda site. Production ad renders run on Remotion Lambda (Vercel serverless can't run Remotion) and use the *deployed* site — skip this and Lambda renders a stale composition. See [[integrations/remotion-lambda]]. Local dev (`REMOTION_RENDER_MODE` unset) renders in-process and doesn't need a redeploy. If you bump any `@remotion/*` dep version in `package.json`, you **must** re-run the deploy script and update Vercel env vars — `npm run predeploy` will fail the PR with a version-mismatch error if the pinned version drifts from the deployed function (caught by `scripts/_check-remotion-lambda-in-sync.ts`).
 
 ## Gorgias
 
