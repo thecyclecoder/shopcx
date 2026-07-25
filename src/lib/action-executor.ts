@@ -578,7 +578,16 @@ export async function reconcileLoyaltyRefundCoupons(
 
   const { data } = await admin
     .from("loyalty_redemptions")
-    .update({ status: "redeemed_as_refund", used_at: new Date().toISOString() })
+    .update({
+      status: "redeemed_as_refund",
+      used_at: new Date().toISOString(),
+      // Phase 2 of loyalty-redemption-marked-used-when-consumed: mirror
+      // the consumption reason on reconciled rows. Status stays
+      // `redeemed_as_refund` (SC135320 semantics — must stay non-`used`
+      // to distinguish reconciled-out-from-under-a-refund from
+      // consumed-on-order); `consumed_via` captures the delivery kind.
+      consumed_via: "refund",
+    })
     .eq("workspace_id", workspaceId)
     .eq("member_id", memberId)
     .eq("status", "active")
@@ -2088,6 +2097,13 @@ export const directActionHandlers: Record<
       discount_value: tier.discount_value,
       status: "redeemed_as_refund",
       used_at: new Date().toISOString(),
+      // Phase 2 of loyalty-redemption-marked-used-when-consumed: record
+      // HOW the row was consumed at used_at time. Born used (REFUND-*
+      // mint-and-mark), so the chokepoint at src/lib/loyalty.ts
+      // consumeRedemption isn't applicable (its compare-and-set requires
+      // status IN ('active','applied')); stamping the column inline
+      // keeps the schema consistent with the order-ingest path.
+      consumed_via: "refund",
     });
 
     // Phase-2 reconcile: if the same session ALSO ran a `redeem_points`
