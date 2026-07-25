@@ -1,6 +1,9 @@
 /**
  * Shared Appstle discount helpers — single source of truth for coupon apply/remove.
- * RULE: Only 1 coupon per subscription. Always remove existing before applying new.
+ * RULE: Only ONE CODE discount per subscription. AUTOMATIC_DISCOUNT and MANUAL
+ * discounts stack on top of a code discount and are never touched. Two CODE
+ * discounts (two loyalty, two promo, or one of each) is the only illegal
+ * combination — replace-on-apply only clears the code half.
  *
  * Reads discount IDs from local DB (synced via webhook), not from Appstle API.
  * Writes to both Appstle (mutation) and local DB (immediate update, don't wait for webhook).
@@ -20,26 +23,35 @@ interface StoredDiscount {
 }
 
 /**
- * Remove all existing discounts from a subscription contract.
+ * Remove the CODE_DISCOUNT rows from a subscription contract's applied_discounts.
+ *
+ * AUTOMATIC_DISCOUNT ('Free Shipping on Subscriptions', 'Buy 2 Discount', …),
+ * MANUAL (cancel-flow retention), and any unknown/missing type are PRESERVED
+ * — never issued to `subscription-contracts-remove-discount` and never dropped
+ * from the local `applied_discounts` write-back. Only two CODE discounts are
+ * mutually exclusive; automatics + manuals stack on top of a code and must
+ * survive an apply-with-replace.
+ *
  * Reads discount IDs from local DB (not Appstle API).
  */
 export async function removeExistingDiscounts(
   apiKey: string,
   contractId: string,
-): Promise<{ removed: string[]; error?: string }> {
+): Promise<{ removed: string[]; preserved: StoredDiscount[]; error?: string }> {
   const removed: string[] = [];
   const admin = createAdminClient();
 
-  // Read from local DB
   const { data: sub } = await admin.from("subscriptions")
     .select("applied_discounts")
     .eq("shopify_contract_id", contractId)
     .single();
 
   const discounts = (sub?.applied_discounts as StoredDiscount[]) || [];
+  const codeDiscounts = discounts.filter(d => d.type === "CODE_DISCOUNT");
+  const preserved = discounts.filter(d => d.type !== "CODE_DISCOUNT");
 
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
-  for (const disc of discounts) {
+  for (const disc of codeDiscounts) {
     if (disc.id) {
       const url = `${APPSTLE_BASE}/api/external/v2/subscription-contracts-remove-discount?contractId=${contractId}&discountId=${encodeURIComponent(disc.id)}&api_key=${apiKey}`;
       const t0 = Date.now();
@@ -60,14 +72,13 @@ export async function removeExistingDiscounts(
     }
   }
 
-  // Update local DB immediately (don't wait for webhook)
   if (removed.length > 0) {
     await admin.from("subscriptions")
-      .update({ applied_discounts: [], updated_at: new Date().toISOString() })
+      .update({ applied_discounts: preserved, updated_at: new Date().toISOString() })
       .eq("shopify_contract_id", contractId);
   }
 
-  return { removed };
+  return { removed, preserved };
 }
 
 /**
@@ -94,11 +105,21 @@ export async function applyDiscountWithReplace(
       .maybeSingle();
     if (sub?.is_internal && sub.workspace_id) {
       const { internalSubApplyDiscount } = await import("@/lib/internal-subscription");
-      // Clear existing discounts first (idempotent if none) then add.
-      await admin
+      // Clear only the CODE_DISCOUNT rows before adding — AUTOMATIC_DISCOUNT
+      // and MANUAL rows stack on top of a code and must survive the replace.
+      const { data: existingSub } = await admin
         .from("subscriptions")
-        .update({ applied_discounts: [], updated_at: new Date().toISOString() })
-        .eq("shopify_contract_id", contractId);
+        .select("applied_discounts")
+        .eq("shopify_contract_id", contractId)
+        .single();
+      const existing = (existingSub?.applied_discounts as StoredDiscount[]) || [];
+      const preserved = existing.filter(d => d.type !== "CODE_DISCOUNT");
+      if (existing.length !== preserved.length) {
+        await admin
+          .from("subscriptions")
+          .update({ applied_discounts: preserved, updated_at: new Date().toISOString() })
+          .eq("shopify_contract_id", contractId);
+      }
       const r = await internalSubApplyDiscount(sub.workspace_id, contractId, discountCode);
       return { success: r.success, removed: [], error: r.error };
     }
