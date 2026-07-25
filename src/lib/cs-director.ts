@@ -70,12 +70,21 @@ export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_fo
  * scripts/builder-worker.ts (kept structurally compatible so the runner can pass its normalized
  * verdict verbatim). The runner is the sole normalization site (`normalizeCsDirectorVerdict`).
  *
- * - `remedy` — the AUTO-APPLY RemedyPlan on `approve_remedy` (Phase 2 fires it through
- *   `executeSonnetDecision`). Shape: `{ action_type, payload?, customer_message?, summary?, … }`.
+ * - `remedy` — the AUTO-APPLY RemedyPlan. On `approve_remedy` this is the whole fix. On
+ *   `escalate_founder` this is the PARTIAL fix June is authorized to do herself — the executor
+ *   fires it FIRST (same plan → executor → delivery path as approve_remedy, same money/loyalty
+ *   rails), then mints the founder card describing what June already did vs the residue. This
+ *   is the "a verdict can carry both an executable remedy and a founder escalation" contract
+ *   from june-does-the-in-leash-part-before-escalating-the-residue Phase 1 — an escalation must
+ *   NOT be a way to abandon the fix parts that ARE in leash.
+ *   Shape: `{ action_type, payload?, customer_message?, summary?, … }` OR the multi-action
+ *   `{ actions: [...], customer_message? }` form.
  * - `spec_seed` — the SpecSeed on `author_spec` (Phase 3 hands it to the specs SDK).
  * - `recommended_remedy` — a suggestion the CEO card carries on `escalate_founder` (kept
  *   distinct from `remedy` so a mis-typed verdict cannot silently upgrade a suggestion into an
- *   execution).
+ *   execution). Complements — not replaces — `remedy` on the escalate path: `remedy` names the
+ *   in-leash actions June IS firing, `recommended_remedy` names the out-of-leash action the CEO
+ *   should approve/adjust for the residue.
  */
 export interface CsDirectorVerdictInput {
   decision: CsDirectorDecision;
@@ -139,6 +148,55 @@ export interface ApplyBoxCsDirectorCallResult {
    * Same linkage-back purpose as `linkage_ticket_id` above.
    */
   linkage_triage_run_id?: string | null;
+  /**
+   * `escalate_founder` (june-does-the-in-leash-part-before-escalating-the-residue Phase 1): when
+   * the verdict carries a `remedy`, the executor fires the in-leash actions FIRST and returns a
+   * compact summary of WHAT LANDED / WHAT WAS REFUSED / WHAT FAILED so the runner can render the
+   * founder card body around the RESIDUE ("June already did X; the CEO still owns Y") instead of
+   * presenting the whole ticket as an unaddressed open item. Null when the verdict carried no
+   * `remedy` (the escalation is un-partial — every open item is CEO-facing).
+   */
+  partial_remedy_outcome?: PartialRemedyOutcome | null;
+}
+
+/**
+ * The compact per-remedy outcome the escalate_founder path returns so the runner can render the
+ * CEO card body with what June ALREADY DID vs the RESIDUE the founder still owns. Shape is small
+ * on purpose — the runner passes this into `buildEscalateFounderCard` verbatim and every field is
+ * either a bounded string or a bounded array, so a mis-shaped LLM verdict cannot inflate the
+ * card body.
+ *
+ * `status` names the terminal state of the in-leash execution:
+ *  - `landed`           — every action verified; customer message (when present) was delivered.
+ *  - `failed`           — the executor escalated (one or more actions failed run/verify). NO
+ *                         customer message was sent — the executor-suppress-then-deliver invariant
+ *                         still holds on the escalate path (a failed partial can't promise a fix).
+ *  - `loyalty_refused`  — the loyalty ceiling rejected the plan. Nothing fired.
+ *  - `threshold_gated`  — the founder-approval money gate said "over threshold". Nothing fired
+ *                         on this path (we're already escalating to the CEO — parking the same
+ *                         remedy on Eve's SMS surface would double-notify the same seat).
+ *  - `malformed`        — the plan couldn't be parsed / no ticket / no customer. Nothing fired.
+ *  - `delivery_failed`  — actions verified, but the customer message delivery threw. Rare.
+ *
+ * `landed_actions` / `failed_actions` name the per-action outcomes the executor's sysNote stream
+ * produced (`Action completed: …` / `Action failed: …`) so the CEO card can list them concretely
+ * instead of a vague "the fix failed".
+ */
+export interface PartialRemedyOutcome {
+  status:
+    | "landed"
+    | "failed"
+    | "loyalty_refused"
+    | "threshold_gated"
+    | "malformed"
+    | "delivery_failed";
+  summary: string;
+  landed_actions: string[];
+  failed_actions: Array<{ label: string; error?: string }>;
+  message_delivered: boolean;
+  planned_action_types: string[];
+  /** Machine-readable reason a refusal fired (e.g. `loyalty_ceiling_refused`), null on success. */
+  refusal_reason?: string | null;
 }
 
 // ── Pure planners (unit-tested) ────────────────────────────────────────────────────────────────
@@ -1123,20 +1181,279 @@ async function handleAuthorSpec(
 }
 
 /**
+ * Compose a one-line human summary of a `PartialRemedyOutcome`. Pure — the runner (and the CEO
+ * card builder) call this so a reader sees the same phrasing across the internal note + the
+ * dashboard card + the log_tail.
+ */
+export function summarizePartialRemedyOutcome(outcome: PartialRemedyOutcome): string {
+  const list = (arr: string[]) => (arr.length > 0 ? arr.join(", ") : "(none)");
+  switch (outcome.status) {
+    case "landed":
+      return `June already fired the in-leash actions: [${list(outcome.landed_actions)}]${outcome.message_delivered ? " · customer notified" : ""}.`;
+    case "failed":
+      return `June attempted the in-leash actions [${list(outcome.planned_action_types)}] but the executor escalated — landed: [${list(outcome.landed_actions)}]; failed: [${outcome.failed_actions.map((f) => (f.error ? `${f.label} — ${f.error}` : f.label)).join("; ") || "(unspecified)"}]. No customer message sent.`;
+    case "loyalty_refused":
+      return `June's proposed in-leash actions [${list(outcome.planned_action_types)}] were REFUSED by the loyalty ceiling — the CEO decides the whole ticket.`;
+    case "threshold_gated":
+      return `June's proposed in-leash actions [${list(outcome.planned_action_types)}] are ABOVE the founder-approval money threshold — not auto-fired; the CEO decides the whole ticket.`;
+    case "delivery_failed":
+      return `June's in-leash actions [${list(outcome.landed_actions)}] LANDED but the customer message delivery failed — the CEO card and residue still stand.`;
+    case "malformed":
+    default:
+      return `June proposed a partial remedy that could not be executed (${outcome.refusal_reason ?? "malformed"}) — the CEO decides the whole ticket.`;
+  }
+}
+
+/**
+ * Run June's `verdict.remedy` on the `escalate_founder` path as the IN-LEASH partial fix. Shares
+ * the same primitives `handleApproveRemedy` uses (plan → resolve ticket → facts → sandbox →
+ * loyalty ceiling → money-threshold gate → executor → deliver-after-success) so a partial remedy
+ * never bypasses a rail the approve_remedy path enforces (loyalty ceiling, money threshold, the
+ * execute-then-message ordering). The differences from approve_remedy:
+ *
+ *  - On loyalty-ceiling or money-threshold REJECT, we do NOT park via Eve's SMS — we're already
+ *    escalating to the CEO, and parking the same remedy on the founder's phone would double-notify
+ *    the same seat. We return `loyalty_refused` / `threshold_gated` so the founder card carries
+ *    the whole picture (June proposed X, ceiling/threshold refused it, CEO now decides).
+ *  - On executor failure, we don't park `needs_attention` — the whole ticket is already escalated,
+ *    and the CEO card carries "attempted, failed" concretely. The founder is the human who eyeballs.
+ *  - The result is a compact `PartialRemedyOutcome` (not a full ApplyBoxCsDirectorCallResult) that
+ *    the runner passes to `buildEscalateFounderCard` verbatim to render the "already did / residue"
+ *    body sections.
+ *
+ * Never throws — a thrown executor / delivery caller returns a `failed` / `delivery_failed`
+ * outcome so the caller can proceed to mint the founder card.
+ */
+export async function runPartialRemedyForEscalation(
+  admin: Admin,
+  jobId: string,
+  workspaceId: string,
+  verdict: CsDirectorVerdictInput,
+  deps: ApproveRemedyDeps = defaultApproveRemedyDeps,
+): Promise<PartialRemedyOutcome> {
+  const tag = `[cs-director:${jobId.slice(0, 8)}]`;
+  const planned = planRemedyExecution(verdict.remedy);
+  if (!planned.ok) {
+    console.warn(`${tag} escalate_founder partial-remedy: plan malformed (${planned.reason}) — no action fired`);
+    return {
+      status: "malformed",
+      summary: `partial remedy plan malformed (${planned.reason})`,
+      landed_actions: [],
+      failed_actions: [],
+      message_delivered: false,
+      planned_action_types: [],
+      refusal_reason: planned.reason,
+    };
+  }
+  const plannedActionTypes = planned.plan.actions.map((a) => a.actionType);
+
+  const { data: jobRow } = await admin
+    .from("agent_jobs")
+    .select("instructions")
+    .eq("id", jobId)
+    .maybeSingle();
+  let ticketId: string | null = null;
+  if (jobRow) {
+    try {
+      const inst = (jobRow as { instructions: string | null }).instructions;
+      const parsed = inst ? (JSON.parse(inst) as { ticket_id?: string }) : null;
+      if (parsed?.ticket_id) ticketId = String(parsed.ticket_id);
+    } catch {
+      /* fall through */
+    }
+  }
+  if (!ticketId) {
+    console.warn(`${tag} escalate_founder partial-remedy: ticket_id not resolvable — nothing fired`);
+    return {
+      status: "malformed",
+      summary: "partial remedy could not resolve ticket_id",
+      landed_actions: [],
+      failed_actions: [],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "ticket_id_unresolved",
+    };
+  }
+
+  const facts = await deps.loadTicketFacts(admin, ticketId);
+  if (!facts || !facts.customer_id) {
+    console.warn(`${tag} escalate_founder partial-remedy: ticket ${ticketId.slice(0, 8)} has no customer_id — nothing fired`);
+    return {
+      status: "malformed",
+      summary: "partial remedy could not resolve customer",
+      landed_actions: [],
+      failed_actions: [],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "ticket_missing_customer",
+    };
+  }
+  const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
+
+  // Loyalty ceiling — same hard-refusal as handleApproveRemedy. An over-cap loyalty benefit stays
+  // out of scope on the escalate path too; we surface it as `loyalty_refused` so the founder card
+  // names the refusal (never a silent skip).
+  const { planNeedsLoyaltyRefusal, getRefundApprovalThresholdCents, planNeedsFounderApproval } =
+    await import("@/lib/june-remedy-approval");
+  const loyaltyRefusal = planNeedsLoyaltyRefusal(planned.plan.actions);
+  if (loyaltyRefusal.refused) {
+    console.warn(`${tag} escalate_founder partial-remedy: ${loyaltyRefusal.reason}`);
+    return {
+      status: "loyalty_refused",
+      summary: loyaltyRefusal.reason ?? "loyalty ceiling refused the partial remedy",
+      landed_actions: [],
+      failed_actions: [],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "loyalty_ceiling_refused",
+    };
+  }
+
+  // Money-threshold gate — same sum-across-batch semantics as approve_remedy. On the escalate
+  // path we do NOT park via Eve's SMS: the CEO is already the target of the escalation, and
+  // double-notifying the same seat would be noise. `threshold_gated` on the outcome carries the
+  // whole picture into the founder card body.
+  const threshold = await getRefundApprovalThresholdCents(admin, workspaceId);
+  const gate = planNeedsFounderApproval(planned.plan.actions, threshold);
+  if (gate.gated) {
+    console.warn(`${tag} escalate_founder partial-remedy: money-threshold gate refused (amount=${gate.amountCents ?? "unknown"} threshold=${threshold})`);
+    return {
+      status: "threshold_gated",
+      summary: `partial remedy exceeds the $${(threshold / 100).toFixed(2)} founder-approval threshold${gate.amountCents != null ? ` (sum $${(gate.amountCents / 100).toFixed(2)})` : " (unknown amount)"} — not auto-fired`,
+      landed_actions: [],
+      failed_actions: [],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "threshold_gated",
+    };
+  }
+
+  const decision = buildRemedySonnetDecision(planned.plan, verdict.reasoning);
+  const suppressedSend = async (_msg: string, _sb: boolean): Promise<void> => {
+    /* no-op — customer message is delivered by deliverTicketMessage below, only after success */
+  };
+  const batchEvents: BatchActionEvent[] = [];
+  const sysNote = async (msg: string): Promise<void> => {
+    const parsed = parseBatchEvent(msg);
+    if (parsed) batchEvents.push(parsed);
+    try {
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `[cs-director/escalate_founder/partial] ${msg}`,
+      });
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  const ctx: ActionContext = {
+    admin,
+    workspaceId,
+    ticketId,
+    customerId: facts.customer_id,
+    channel: facts.channel || "email",
+    sandbox,
+  };
+
+  let executorResult: { messageSent: boolean; escalated: boolean; closed: boolean; statusManaged: boolean };
+  try {
+    executorResult = await deps.runExecutor(ctx, decision, suppressedSend, sysNote);
+  } catch (e) {
+    const errMsg = errText(e);
+    console.warn(`${tag} escalate_founder partial-remedy: executor threw (${errMsg})`);
+    return {
+      status: "failed",
+      summary: `partial remedy executor threw: ${errMsg}`,
+      landed_actions: [],
+      failed_actions: [{ label: plannedActionTypes[0] ?? "(unknown)", error: errMsg }],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "executor_threw",
+    };
+  }
+
+  const rollup = summarizeRemedyBatchOutcome(plannedActionTypes, batchEvents);
+  if (executorResult.escalated) {
+    console.warn(`${tag} escalate_founder partial-remedy: executor escalated (${rollup.oneLine}) — no customer message sent`);
+    await sysNote(`Partial remedy batch escalated — ${rollup.oneLine}. No customer message sent (CEO card carries the residue).`);
+    return {
+      status: "failed",
+      summary: `executor escalated — ${rollup.oneLine}`,
+      landed_actions: rollup.landed,
+      failed_actions: rollup.failed,
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: "remedy_action_escalated",
+    };
+  }
+
+  const customerMessage = planned.plan.customerMessage;
+  if (customerMessage) {
+    try {
+      const { substituteActionPlaceholders } = await import("@/lib/action-executor");
+      const filledMessage = substituteActionPlaceholders(customerMessage, ctx._lastActionResults ?? []);
+      await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, filledMessage, sandbox);
+      console.log(`${tag} escalate_founder partial-remedy landed · customer message delivered (residue → CEO)`);
+      return {
+        status: "landed",
+        summary: `landed: [${rollup.landed.join(", ") || plannedActionTypes.join(", ")}]`,
+        landed_actions: rollup.landed.length > 0 ? rollup.landed : plannedActionTypes,
+        failed_actions: [],
+        message_delivered: true,
+        planned_action_types: plannedActionTypes,
+        refusal_reason: null,
+      };
+    } catch (e) {
+      const errMsg = errText(e);
+      console.warn(`${tag} escalate_founder partial-remedy: actions verified but delivery threw (${errMsg})`);
+      return {
+        status: "delivery_failed",
+        summary: `actions landed but customer message delivery threw: ${errMsg}`,
+        landed_actions: rollup.landed.length > 0 ? rollup.landed : plannedActionTypes,
+        failed_actions: [],
+        message_delivered: false,
+        planned_action_types: plannedActionTypes,
+        refusal_reason: "delivery_threw_after_success",
+      };
+    }
+  }
+
+  console.log(`${tag} escalate_founder partial-remedy landed · no customer message on remedy`);
+  return {
+    status: "landed",
+    summary: `landed: [${rollup.landed.join(", ") || plannedActionTypes.join(", ")}] (no customer message)`,
+    landed_actions: rollup.landed.length > 0 ? rollup.landed : plannedActionTypes,
+    failed_actions: [],
+    message_delivered: false,
+    planned_action_types: plannedActionTypes,
+    refusal_reason: null,
+  };
+}
+
+/**
  * Phase 3 executor for `escalate_founder` (docs/brain/specs/cs-director-call-phase-2-executor-fires-
- * june-verdicts.md § Phase 3). FORMALIZES THE LINKAGE-BACK CONTRACT — the runner is the SOLE WRITER
- * of the CEO `dashboard_notifications` card per [[../../docs/brain/specs/escalate-founder-reliably-
- * creates-the-ceo-inbox-card-with-diagnosis-and-recommendation]] (minted after this executor
- * returns), and this handler NEVER mints a second card (a duplicate would page the CEO twice).
+ * june-verdicts.md § Phase 3 · extended by june-does-the-in-leash-part-before-escalating-the-residue
+ * Phase 1). FORMALIZES THE LINKAGE-BACK CONTRACT — the runner is the SOLE WRITER of the CEO
+ * `dashboard_notifications` card per [[../../docs/brain/specs/escalate-founder-reliably-creates-the-
+ * ceo-inbox-card-with-diagnosis-and-recommendation]] (minted after this executor returns), and this
+ * handler NEVER mints a second card (a duplicate would page the CEO twice).
  *
  * What the executor DOES on Phase 3:
  *  - Resolves the ticket_id + triage_run_id from `job.instructions` — the same values the runner
  *    reads to stamp the card's metadata (`metadata.ticket_id` / `metadata.triage_run_id`), so the
  *    two writers agree on the linkage.
- *  - Returns them on the result as `linkage_ticket_id` + `linkage_triage_run_id` so the runner's
- *    `log_tail` names the linkage in a machine-readable form. This IS the "record the linkage back
- *    to the originating ticket / triage_run" verification bullet — a bounce-back handler / audit
- *    join can pull the linkage off the result without re-reading the CEO card's JSON metadata blob.
+ *  - When `verdict.remedy` is present (the june-does-the-in-leash-part contract): fires the
+ *    in-leash actions FIRST via `runPartialRemedyForEscalation` — same plan → executor → deliver
+ *    primitives approve_remedy uses, same loyalty + money-threshold rails. The compact
+ *    `PartialRemedyOutcome` returns on the result so the runner threads it into the CEO card body
+ *    ("June already did X; the CEO owns Y") instead of presenting settled work as an open item.
+ *  - Returns linkage as `linkage_ticket_id` + `linkage_triage_run_id` so the runner's `log_tail`
+ *    names the linkage in a machine-readable form. This IS the "record the linkage back to the
+ *    originating ticket / triage_run" verification bullet — a bounce-back handler / audit join can
+ *    pull the linkage off the result without re-reading the CEO card's JSON metadata blob.
  *
  * A missing ticket_id here is NOT a needs_attention — it's the same shape drift class the runner's
  * Phase-1 guard already caught at enqueue time, so we log a warning and return `ok:true` with a
@@ -1147,9 +1464,21 @@ async function handleEscalateFounder(
   jobId: string,
   workspaceId: string,
   verdict: CsDirectorVerdictInput,
+  deps: ApproveRemedyDeps = defaultApproveRemedyDeps,
 ): Promise<ApplyBoxCsDirectorCallResult> {
   const tag = `[cs-director:${jobId.slice(0, 8)}]`;
   try {
+    // Fire the in-leash partial remedy FIRST when the verdict carried one — the residue described
+    // on the CEO card must reflect what June already did, not the whole ticket. Same rails as
+    // approve_remedy (loyalty ceiling, money-threshold gate, execute-then-deliver); a refusal on
+    // either rail surfaces as `loyalty_refused` / `threshold_gated` on the outcome so the CEO card
+    // still names both June's proposal and why nothing fired.
+    let partialOutcome: PartialRemedyOutcome | null = null;
+    if (verdict.remedy && typeof verdict.remedy === "object" && !Array.isArray(verdict.remedy)) {
+      partialOutcome = await runPartialRemedyForEscalation(admin, jobId, workspaceId, verdict, deps);
+      console.log(`${tag} escalate_founder partial-remedy status=${partialOutcome.status}`);
+    }
+
     const linkage = await resolveLinkageFromJob(admin, jobId);
     if (!linkage.ticketId) {
       console.warn(`${tag} escalate_founder: no ticket_id in job.instructions — linkage payload will be null`);
@@ -1182,6 +1511,8 @@ async function handleEscalateFounder(
       handler: "escalate_founder",
       linkage_ticket_id: linkage.ticketId,
       linkage_triage_run_id: linkage.triageRunId,
+      partial_remedy_outcome: partialOutcome,
+      message_delivered: partialOutcome?.message_delivered ?? false,
     };
   } catch (e) {
     const errMsg = errText(e);
@@ -1268,7 +1599,9 @@ export async function applyBoxCsDirectorCall(
     if (verdict.decision === "author_spec") {
       return handleAuthorSpec(admin, jobId, job.workspace_id, verdict, authorSpecDeps);
     }
-    if (verdict.decision === "escalate_founder") return handleEscalateFounder(admin, jobId, job.workspace_id, verdict);
+    if (verdict.decision === "escalate_founder") {
+      return handleEscalateFounder(admin, jobId, job.workspace_id, verdict, approveRemedyDeps);
+    }
 
     // close_no_action — nothing to execute here. The runner's `decideCsDirectorTicketTransition`
     // closes + de-escalates the ticket; June already reasoned it's a correctly-handled no-op with no
