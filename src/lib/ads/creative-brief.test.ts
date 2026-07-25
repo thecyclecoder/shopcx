@@ -438,6 +438,64 @@ test("buildCreativeBrief — own-brand angle never carries leadBenefitWeave (the
   assert.ok(!brief.guardrails.some((g) => /RIFF/.test(g)));
 });
 
+// ── buildCreativeBrief: Phase 2 — verify-then-reword catalog (confirmedBenefits) ──────────
+// dahlia-competitor-ad-adaptation-overlay-render Phase 2 — every brief carries the CATALOG of
+// customer-confirmed benefits (role ∈ {lead, supporting} + customer_confirmed=true), each with
+// its real customer_phrases for grounded rewording. This is the source of truth Dahlia's
+// IMITATE-DEBRANDED VERIFY-THEN-REWORD rule checks against — for each competitor benefit,
+// look up the analogous confirmed benefit (keep+reword) or, when absent, substitute a different
+// confirmed one (never reinvent, never invent).
+
+test("buildCreativeBrief — Phase 2: confirmedBenefits catalog populates from pi.benefits where customer_confirmed=true", async () => {
+  const pi = AMAZING_COFFEE_PI(); // lead 'Weight loss' + supporting 'No jitters' — the lead row carries customer_confirmed=true
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  assert.ok(Array.isArray(brief.confirmedBenefits), "confirmedBenefits must be an array on every brief");
+  const names = brief.confirmedBenefits!.map((b) => b.benefitName);
+  assert.ok(names.includes("Weight loss"), `expected lead 'Weight loss' in the confirmed catalog; got ${JSON.stringify(names)}`);
+  const weightRow = brief.confirmedBenefits!.find((b) => b.benefitName === "Weight loss");
+  assert.equal(weightRow?.role, "lead");
+  assert.deepEqual(weightRow?.softPhrasings, ["feel lighter", "lost weight", "curbs my appetite"], "customer_phrases carry through verbatim as softPhrasings");
+});
+
+test("buildCreativeBrief — Phase 2: an uncurated (customer_confirmed=false) benefit is EXCLUDED from confirmedBenefits", async () => {
+  const pi = makePi({
+    product: { title: "Amazing Coffee" },
+    benefits: [
+      { benefit_name: "Weight loss", role: "lead", customer_phrases: ["feel lighter"], customer_confirmed: true },
+      { benefit_name: "Speculative benefit", role: "lead", customer_phrases: ["hopeful"], customer_confirmed: false },
+    ],
+  });
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  const names = brief.confirmedBenefits!.map((b) => b.benefitName);
+  assert.deepEqual(names, ["Weight loss"], "only customer_confirmed=true benefits reach the catalog — a speculative benefit stays out");
+});
+
+test("buildCreativeBrief — Phase 2: a competitor-source brief with confirmedBenefits gets a verify-then-reword guardrail", async () => {
+  const pi = AMAZING_COFFEE_PI();
+  const brief = await buildCreativeBrief(pi, COMPETITOR_ANGLE());
+  assert.ok(
+    brief.guardrails.some((g) => /verify-then-reword/.test(g)),
+    `expected a verify-then-reword guardrail on a competitor imitation with a confirmed catalog; got ${JSON.stringify(brief.guardrails)}`,
+  );
+});
+
+test("buildCreativeBrief — Phase 2: an own-brand angle carries the confirmed catalog but NO verify-then-reword guardrail (the rule is imitation-only)", async () => {
+  const pi = AMAZING_COFFEE_PI();
+  const ownAngle: ScoredAngle = {
+    hook: "Lost 15 lbs",
+    source: "transformation",
+    leadBenefit: "Weight loss",
+    acquisitionPower: 10,
+    retentionTruth: 6,
+    commodity: false,
+    hasRealPhoto: false,
+    reasons: [],
+  };
+  const brief = await buildCreativeBrief(pi, ownAngle);
+  assert.ok(brief.confirmedBenefits && brief.confirmedBenefits.length > 0, "own-brand briefs still get the catalog for grounded rewording elsewhere");
+  assert.ok(!brief.guardrails.some((g) => /verify-then-reword/.test(g)), "the verify-then-reword guardrail fires only on competitor imitations");
+});
+
 test("buildCreativeBrief — competitor angle with NO role='lead' benefit degrades gracefully (leadBenefitWeave=null)", async () => {
   const pi = makePi({
     product: { title: "Amazing Coffee" },
