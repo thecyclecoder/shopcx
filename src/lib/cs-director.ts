@@ -623,6 +623,31 @@ async function handleApproveRemedy(
     }
     const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
 
+    // 3a. LOYALTY-CEILING HARD-REFUSAL (spec:
+    //     loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates Phase 3). A loyalty
+    //     benefit ABOVE `LOYALTY_REMEDY_MAX_CENTS` (default $15) is the CEO's absolute rail — no
+    //     cash-out, make-whole, or expiry-extension. Runs BEFORE the founder-approval gate so an
+    //     over-cap loyalty make-whole is REFUSED (needs_attention → human), never parked as a
+    //     "may I grant this?" ask to the founder (the pre-Phase-3 failure mode on ticket 2ba3b665
+    //     where June computed a ~$150 make-whole and escalated the question). Refuses only on a
+    //     KNOWN over-cap value — an unsized loyalty payload falls through to the founder gate's
+    //     unknown-collapse-to-null rule (pre-existing conservative gating).
+    if (verdict.remedy) {
+      const { planNeedsLoyaltyRefusal } = await import("@/lib/june-remedy-approval");
+      const loyaltyRefusal = planNeedsLoyaltyRefusal(planned.plan.actions);
+      if (loyaltyRefusal.refused) {
+        const error = `approve_remedy: ${loyaltyRefusal.reason}`;
+        console.warn(`${tag} ${error}`);
+        return {
+          ok: false,
+          handler: "approve_remedy",
+          needs_attention: true,
+          reason: "loyalty_ceiling_refused",
+          error,
+        };
+      }
+    }
+
     // 3b. FOUNDER-APPROVAL GATE (Cora/June dial-in). A refund/credit over the workspace threshold is
     //     NOT auto-executed — June parks it, raises a plain-language card into Eve's cockpit, and texts
     //     the founder for a yes/no/ask decision. The deferred sweep (executeApprovedJuneRemedies, box

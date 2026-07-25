@@ -23,7 +23,9 @@ North star ([[../operational-rules]] § supervisable autonomy): June optimizes a
 
 | Export | Kind | What |
 |---|---|---|
-| `MONEY_ACTION_TYPES` | `Set<string>` | The remedy action types the gate covers: `partial_refund`, `redeem_points_as_refund`, `create_replacement_order`, `dollar_replacement`. |
+| `MONEY_ACTION_TYPES` | `Set<string>` | The remedy action types the gate covers: `partial_refund`, `redeem_points_as_refund`, `create_replacement_order`, `dollar_replacement`, `apply_loyalty_coupon`, `redeem_points`. Loyalty coupon-mint + coupon-apply are in the set (spec [[../specs/loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates]] Phase 3) so a loyalty $15 sizes into the founder-gate SUM instead of collapsing it to unknown; over-cap loyalty is refused hard by `planNeedsLoyaltyRefusal` BEFORE the founder gate ever parks. |
+| `LOYALTY_ACTION_TYPES` | `Set<string>` | The loyalty-derived action types the ceiling guard applies to: `apply_loyalty_coupon`, `redeem_points`, `redeem_points_as_refund`. Iterated per-action by `planNeedsLoyaltyRefusal`. |
+| `planNeedsLoyaltyRefusal(actions)` | pure | `{ refused, actionType, valueCents, reason }`. Scans loyalty-typed actions in the plan, extracts the loyalty payout value (parses `LOYALTY-<N>-*` codes / reads `discount_value*100` / reads `amount_cents`), and refuses HARD the first time a KNOWN value exceeds [`LOYALTY_REMEDY_MAX_CENTS`](loyalty.md#loyalty_remedy_max_cents--constant). Unsized loyalty payloads fall through to the founder gate's unknown-collapse-to-null path. Called by `handleApproveRemedy` ([[cs-director]]) BEFORE `planNeedsFounderApproval` — so an over-cap loyalty make-whole returns `needs_attention` (→ human), NEVER parks for founder approval. |
 | `JUNE_REMEDY_TOOL` | `"june_remedy"` | The `tool_name` on the [[../tables/god_mode_approvals]] card that carries a parked remedy. |
 | `JUNE_REFUND_CATEGORY` | `"june_refund"` | The decision `category` — drives standing "don't ask again" grants ([[../tables/god_mode_standing_grants]]). |
 | `DEFAULT_REFUND_APPROVAL_THRESHOLD_CENTS` | `5000` | Fallback threshold ($50) when the workspace column is missing/unreadable. |

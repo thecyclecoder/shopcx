@@ -27,6 +27,16 @@
  *
  * Anything outside this — anything destructive / irreversible / new-goal-touching, and any escalated
  * ticket that needs the CEO — flows through the generic escalation rails, not this array.
+ *
+ * ⭐ ABSOLUTE LOYALTY RAIL (spec:
+ * loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates). A loyalty-derived benefit
+ * (`redeem_points` / `apply_loyalty_coupon` / `redeem_points_as_refund`) whose value exceeds
+ * `LOYALTY_REMEDY_MAX_CENTS` (default $15) is CATEGORICALLY out of scope — not just off-leash. Any
+ * loyalty cash-out, make-whole, or expiry-extension is refused hard by
+ * `planNeedsLoyaltyRefusal` in the cs-director runner and NEVER routed to the founder as a
+ * "may I grant this?" ask. Resolve inside the $15 ceiling or hold firm; do not escalate the
+ * question. This closes the ticket-2ba3b665 class where June computed a ~$150 make-whole and
+ * paged the founder to approve it.
  */
 export type LeashCategory =
   | "approve_remedy_within_ceiling"

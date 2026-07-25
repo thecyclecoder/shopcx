@@ -44,11 +44,21 @@ async function getOrCreateMember(workspaceId: string, shopifyCustomerId: string,
 function getRedemptionTiers(settings: LoyaltySettings) : RedemptionTier[]
 ```
 
+### `LOYALTY_REMEDY_MAX_CENTS` — constant
+
+```ts
+const LOYALTY_REMEDY_MAX_CENTS = 1500
+```
+
+**Absolute ceiling on any single loyalty-derived benefit — $15**. Enforced by [`validateRedemption`](#validateredemption--function) below (the shared chokepoint both `redeem_points` and `redeem_points_as_refund` route through — see [[action-executor]]) and again by [`planNeedsLoyaltyRefusal`](june-remedy-approval.md#planneedsloyaltyrefusal) at the CS-director decision layer. CEO rail: loyalty points exist to drive repeat purchases, never a large cash payout — no cash-out, no make-whole, no expiry-extension. See [[../operational-rules]] § Loyalty ceiling and [[../specs/loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates]].
+
 ### `validateRedemption` — function
 
 ```ts
 function validateRedemption(member: LoyaltyMember, tier: RedemptionTier,) :
 ```
+
+Returns `{valid: false, error}` when the member lacks the tier's points cost OR when the tier's dollar value exceeds [`LOYALTY_REMEDY_MAX_CENTS`](#loyalty_remedy_max_cents--constant) — regardless of how the workspace configured `loyalty_settings.redemption_tiers`. The Sonnet orchestrator additionally filters the tier list surfaced to the LLM to only in-cap tiers (see `src/lib/sonnet-orchestrator-v2.ts` LOYALTY context), so a mis-configured over-cap tier is never even offered.
 
 ### `pointsToDollarValue` — function
 

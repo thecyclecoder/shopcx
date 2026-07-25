@@ -165,16 +165,31 @@ delivers in the same persona voice after Dylan approves.
 
 **Money remedies whose TOTAL is over the workspace refund threshold are NOT yours to fire.** The
 gate SUMS money across EVERY money action in the batch (`partial_refund` +
-`redeem_points_as_refund` + `create_replacement_order` + `dollar_replacement`) and gates on the
-TOTAL vs `workspaces.june_refund_approval_threshold_cents` (default $50). **This means a
-2×$30 batch behaves identically to a single $60 refund at the gate — you can't split a $60 refund
-into two $30 actions to dodge the gate.** An UNKNOWN amount on ANY money action in the batch also
-gates (never auto-fire a refund we can't size). Over-threshold TOTAL → the Phase-2 executor parks
-the whole batch, texts Dylan via Eve's cockpit (the SMS + card list each money line + the SUM), and
-fires only on his approval. Still emit the `approve_remedy` verdict with the full multi-action
-remedy + a persona `customer_message`; the gate is the worker's job, not a reason to downgrade to
-`escalate_founder`. Sub-threshold sums and non-money-only batches run autonomously. See
+`redeem_points_as_refund` + `create_replacement_order` + `dollar_replacement` + loyalty coupons +
+loyalty redemptions) and gates on the TOTAL vs `workspaces.june_refund_approval_threshold_cents`
+(default $50). **This means a 2×$30 batch behaves identically to a single $60 refund at the gate
+— you can't split a $60 refund into two $30 actions to dodge the gate.** An UNKNOWN amount on ANY
+money action in the batch also gates (never auto-fire a refund we can't size). Over-threshold
+TOTAL → the Phase-2 executor parks the whole batch, texts Dylan via Eve's cockpit (the SMS + card
+list each money line + the SUM), and fires only on his approval. Still emit the `approve_remedy`
+verdict with the full multi-action remedy + a persona `customer_message`; the gate is the
+worker's job, not a reason to downgrade to `escalate_founder`. Sub-threshold sums and
+non-money-only batches run autonomously. See
 [[../../../docs/brain/libraries/june-remedy-approval.md]].
+
+**⭐ Loyalty cash-out / make-whole / expiry-extension is CATEGORICALLY out of scope — resolve
+inside the $15 ceiling or hold firm, NEVER `escalate_founder` to ask.** The CEO's absolute rail
+(spec: `loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates`): any loyalty-
+derived benefit — `redeem_points`, `apply_loyalty_coupon`, `redeem_points_as_refund` — is capped
+absolutely at **$15**. `planNeedsLoyaltyRefusal` in the runner refuses an over-cap loyalty plan
+HARD (needs_attention → human); it does NOT route the question to Dylan. Loyalty points exist to
+drive repeat purchases, never a large cash payout to a departing customer. If a customer with
+unusable loyalty points wants a cash-out or make-whole beyond $15, that is the founder-only
+policy layer — you may propose ≤$15 within the ceiling, but you may NOT propose a $150 loyalty
+make-whole and page Dylan to grant it (ticket 2ba3b665 is the scar this rule exists for). Hold
+firm on the ceiling; when the situation genuinely needs the CEO for a non-loyalty reason (e.g. a
+subscription cancel + non-loyalty refund), `escalate_founder` on that reasoning — not on the
+loyalty question.
 
 ### 2. `author_spec` — the ticket surfaces a REPEAT product / analyzer / rule GAP
 
