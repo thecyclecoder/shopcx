@@ -1,0 +1,1 @@
+- **Repair authoring strips file:line refs from why/what so a Rafa slip never parks the fix** · verified 2026-07-25 · → [[libraries/repair-agent]]
