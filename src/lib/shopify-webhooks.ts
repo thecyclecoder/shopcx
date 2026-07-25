@@ -8,7 +8,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { normalizeShopifyShippingAddress, resolveOrderAddresses } from "@/lib/address-normalize";
 import { inngest } from "@/lib/inngest/client";
-import { getMemberByCustomerId, deductPoints, getOrCreateMember, calculateEarningPoints, earnPoints, getLoyaltySettings } from "@/lib/loyalty";
+import { getMemberByCustomerId, deductPoints, getOrCreateMember, calculateEarningPoints, earnPoints, getLoyaltySettings, consumeRedemption } from "@/lib/loyalty";
 
 // ── HMAC verification ──
 
@@ -1015,6 +1015,29 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         // Non-fatal — the order is recorded; loyalty failures shouldn't
         // block the webhook. Surface in logs so we notice if it breaks.
         console.error("Loyalty earn on order create error:", e);
+      }
+
+      // ── Loyalty redemption consumption (Phase 2 wire, spec:
+      // loyalty-redemption-marked-used-when-consumed) ──
+      // A LOYALTY-* code on this order is the marker that a redemption was
+      // genuinely delivered — stamp its `used_at` via the single chokepoint
+      // in src/lib/loyalty.ts (`consumeRedemption`) so the orchestrator's
+      // unused-rewards list stops surfacing an already-honored reward.
+      // Covers subscription renewals too: renewal orders flow through this
+      // same webhook (source_name contains "subscription", see the
+      // subscription-linkage block above), so no separate renewal path
+      // is needed. Compare-and-set on `used_at IS NULL` makes a webhook
+      // replay idempotent — even if `isNewOrder` were somehow racey.
+      try {
+        const raw = (payload.discount_codes as { code?: string }[]) || [];
+        const loyaltyCodes = raw
+          .map((dc) => (typeof dc?.code === "string" ? dc.code : ""))
+          .filter((code) => code.toUpperCase().startsWith("LOYALTY-"));
+        for (const code of loyaltyCodes) {
+          await consumeRedemption(workspaceId, code, "order");
+        }
+      } catch (e) {
+        console.error("Loyalty consumeRedemption on order create error:", e);
       }
     }
 
