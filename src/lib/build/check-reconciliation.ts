@@ -20,20 +20,37 @@
  *
  *   STEP B (bounded judge, only if A misses): read the check's `description` (its INTENT) +
  *     the phase's branch DIFF for `params.path`. A bounded box-side judge PROPOSES a literal
- *     it thinks satisfies the intent. SECURITY: the judge reads the UNTRUSTED branch diff, so a
- *     prompt-injection there could steer it to an unrelated-but-present literal — and a
- *     deterministic grep of that literal only proves it EXISTS, not that it satisfies intent.
- *     So step B NEVER auto-reconciles: the proposal is recorded as an UNRECONCILED human-review
- *     diagnostic (reason='judge_proposal_needs_human'); the caller defers/escalates as for any
- *     un-healed check and a human decides whether to repoint the pattern by hand.
+ *     it thinks satisfies the intent. A CONFIDENT proposal — the judge returned a non-null
+ *     literal that ALSO passes the runner's real deterministic grep on the branch — is now
+ *     AUTO-APPLIED (step='judge_repoint_auto_applied'): the caller repoints the pattern via
+ *     `upsertPhaseChecks` and the phase verifies on that same deterministic grep. The
+ *     deterministic grep IS the safety gate — a proposal that doesn't actually match the
+ *     branch never lands. A judge that declines (null literal) or a proposal that fails the
+ *     final grep falls through to step C — see below. The residual prompt-injection risk (a
+ *     crafted diff steers the judge to an unrelated but present literal) is bounded by (a)
+ *     the `maxReconciliationsPerBuild` cap and (b) the `check_reconciled` director_activity
+ *     audit surface that lands EVERY repoint on the CEO's build card — never silent (see
+ *     [[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 1).
+ *
+ *   STEP C (moved-symbol fallback, only if B misses at the check's path): the check's
+ *     declared `params.path` may be wrong because the symbol moved to a different file. Load
+ *     the WHOLE phase branch diff (all changed files) and ask a bounded whole-diff judge for
+ *     the intent's literal + the file that carries it. If the judge returns a literal + a
+ *     DIFFERENT file AND the runner's deterministic grep of {literal, newFile} passes, the
+ *     caller repoints BOTH `params.pattern` AND `params.path` via `upsertPhaseChecks`
+ *     (step='judge_repoint_moved_symbol'). Same safety gate + cap + audit as step B (the
+ *     audit rationale contains `moved_symbol`, and the row surfaces `old_path` + `new_path`
+ *     so the CEO sees the file move too). Closes the false-negative wedge where the spec
+ *     author guessed the wrong file for a symbol
+ *     ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2).
  *
  * INVARIANTS (mirror the spec's guardrails):
  *   1. `expect: 'present'` ONLY. An `expect: 'absent'` miss is a different, real signal
  *      (the code SHOULDN'T be there and IS) — never reconcile it.
- *   2. Only step A (deterministic normalized re-match) auto-reconciles, and its repointed
- *      pattern MUST still pass a real deterministic grep. The LLM judge never clears a check.
- *   3. The judge NEVER decides the phase passes and NEVER auto-reconciles — it only surfaces a
- *      candidate literal for a human to review.
+ *   2. Every repoint (step A OR step B) MUST still pass a real deterministic grep of the new
+ *      pattern before it lands. The final grep is the safety gate — no bypass, no phantom-ship.
+ *   3. A judge that declines OR a judge whose candidate fails the final deterministic grep
+ *      NEVER auto-reconciles — the check surfaces as unhealed and the caller defers as before.
  *   4. Every dep is injectable (grep / diff / judge / upsert / real-grep) so unit tests drive
  *      policy without touching shell/DB/network.
  *
@@ -94,6 +111,28 @@ export interface ReconcileDeps {
     repoRoot: string;
     params: GrepCheckParams;
   }) => Promise<{ ok: boolean; evidence: string }>;
+  /**
+   * STEP C (moved-symbol fallback): load the ENTIRE phase branch diff (all changed files, not
+   * just `params.path`). Only invoked when the per-path judge (step B) declines — the check's
+   * declared path may be wrong because the symbol moved to a DIFFERENT file. Bounded so a
+   * pathological diff can't blow the judge's context. Returns "" on read failure.
+   * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+   */
+  loadFullPhaseDiff: (args: { branchRef: string; repoRoot: string }) => Promise<string>;
+  /**
+   * STEP C (moved-symbol judge): reads {description, oldPattern, oldPath, diff (whole phase
+   * diff, multi-file)} and returns the literal + the file path present in the diff that
+   * satisfies the described intent — a symbol that MOVED to a different file. `file` MUST be
+   * a path present in the diff and MUST NOT equal `oldPath` (or the caller falls through to
+   * the "not moved" defer path). Fail-closed on API/parse error → `{literal: null, file:
+   * null}` so a broken judge never masks a real code-missing failure.
+   */
+  intentJudgeMovedSymbol: (input: {
+    description: string;
+    oldPattern: string;
+    oldPath: string;
+    diff: string;
+  }) => Promise<{ literal: string | null; file: string | null; rationale: string }>;
 }
 
 export interface ReconcileArgs {
@@ -108,19 +147,36 @@ export type ReconcileOutcome =
       reconciled: true;
       newPattern: string;
       /**
-       * ONLY 'normalized_case' (step A, deterministic). The LLM intent judge
-       * (step B) NEVER autonomously reconciles — a judge proposal is recorded as
-       * an unreconciled human-review diagnostic (reason='judge_proposal_needs_human')
-       * so a prompt-injection in the branch diff can't steer it to clear a
-       * required check under an unrelated-but-present literal.
+       * When set, the check's `params.path` moved too — the caller MUST upsert BOTH
+       * `params.pattern` (→ `newPattern`) AND `params.path` (→ `newPath`) so the next
+       * verify pass greps the correct file. Only set for `step='judge_repoint_moved_symbol'`
+       * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2).
        */
-      step: "normalized_case";
+      newPath?: string;
+      /**
+       * 'normalized_case' — step A (deterministic case/whitespace re-match).
+       * 'judge_repoint_auto_applied' — step B: the bounded judge returned a literal
+       *   AND the runner's real deterministic grep of that literal on the branch
+       *   passed. The deterministic grep is the safety gate; a proposal that
+       *   doesn't ACTUALLY match never lands. Every judge repoint is surfaced on
+       *   the CEO-facing `check_reconciled` director_activity feed
+       *   ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 1).
+       * 'judge_repoint_moved_symbol' — step C: the check's declared path was wrong
+       *   (symbol moved to a different file). The whole-diff judge proposed a literal
+       *   + a DIFFERENT file; the runner's deterministic grep of {literal, newFile}
+       *   passed. Caller repoints BOTH pattern AND path via upsertPhaseChecks
+       *   ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2).
+       */
+      step:
+        | "normalized_case"
+        | "judge_repoint_auto_applied"
+        | "judge_repoint_moved_symbol";
       rationale: string;
       evidence: string;
     }
   | {
       reconciled: false;
-      /** 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'judge_proposal_needs_human' | 'proposal_did_not_match' | 'harness_error'. */
+      /** 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'proposal_did_not_match' | 'harness_error'. */
       reason: string;
       evidence?: string;
     };
@@ -210,45 +266,184 @@ export async function reconcileStaleGrepCheck(args: ReconcileArgs): Promise<Reco
     };
   }
   if (!judged.literal || !judged.literal.trim()) {
-    return {
-      reconciled: false,
-      reason: "judge_declined — intent NOT satisfied by the diff (or judge returned no literal)",
-      evidence: `judge rationale: ${judged.rationale || "(none)"}; stepA: ${stepAEvidence}`,
-    };
+    // The per-path judge declined — the symbol may have MOVED to a different file. Fall
+    // through to step C (whole-diff moved-symbol) before deferring.
+    return await tryMovedSymbolReconcile({
+      check,
+      branchRef,
+      repoRoot,
+      deps,
+      oldPath: path,
+      stepAEvidence,
+      perPathJudgeRationale: judged.rationale || "(none)",
+      perPathJudgeDeclined: true,
+    });
   }
 
   const proposedPattern = judged.literal;
-  // SECURITY (prompt-injection, high — security review of this spec): the LLM
-  // intent judge reads the UNTRUSTED branch diff, so a crafted / accidental
-  // prompt-injection comment can steer it to return an unrelated-but-PRESENT
-  // literal. The deterministic re-grep below only proves that literal EXISTS on
-  // the branch — NOT that it satisfies the check's intent — so acting on the
-  // judge here could clear a required check without the intended implementation.
+  // Step B AUTO-APPLIES a confident judge proposal now: on a non-null literal
+  // whose deterministic re-grep on the branch passes, repoint the pattern (the
+  // CALLER upserts params.pattern via `upsertPhaseChecks` on our `reconciled:
+  // true` return). The deterministic grep IS the safety gate — a proposal that
+  // doesn't actually match the branch never lands. This closes the false-negative
+  // wedge that used to park real, fully-built specs (renamed symbol → hand
+  // repoint) — see
+  // [[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 1.
   //
-  // Therefore the judge NEVER autonomously reconciles. Only step A (deterministic
-  // normalized re-match) auto-heals. A judge proposal is recorded as an
-  // UNRECONCILED, human-review diagnostic: the caller defers/escalates exactly as
-  // it would for any un-healed check (a real code-missing signal is never masked),
-  // and a human sees the judge's candidate literal + rationale to decide whether
-  // to repoint the check by hand.
+  // The residual prompt-injection risk (a crafted diff steers the judge to an
+  // unrelated but present literal that DOES grep on the branch) is bounded by:
+  //   (a) the `maxReconciliationsPerBuild` cap in `reconcileFailingGrepChecksForSpec`
+  //       — a pathological spec whose EVERY grep check is stale can't silently pass;
+  //   (b) the `check_reconciled` director_activity audit row emitted by
+  //       `defaultAuditReconciliation` for EVERY repoint — every auto-correction is
+  //       surfaced on the CEO's build card, never silent. A mis-guessed spec can't
+  //       hide behind the reconciler.
   //
-  // We still run the deterministic grep purely to enrich the diagnostic (does the
-  // candidate even exist on the branch?) — its result never gates a reconcile.
-  let candidateExists = false;
+  // A judge that returns null OR a proposal whose final grep fails still defers/
+  // escalates unchanged — a real code-missing signal is never masked.
+  let finalGrepEvidence = "";
   try {
     const finalCheck = await deps.runDeterministicGrep({
       branchRef,
       repoRoot,
       params: { ...check.params, pattern: proposedPattern },
     });
-    candidateExists = finalCheck.ok;
-  } catch {
-    candidateExists = false;
+    finalGrepEvidence = finalCheck.evidence;
+    if (finalCheck.ok) {
+      return {
+        reconciled: true,
+        newPattern: proposedPattern,
+        step: "judge_repoint_auto_applied",
+        rationale: `judge_repoint_auto_applied — bounded intent judge mapped '${check.params.pattern}' → '${proposedPattern}' (${judged.rationale || "no rationale"}); deterministic grep of the new literal passes on the branch`,
+        evidence: `judge proposed '${proposedPattern}' rationale: ${judged.rationale}; deterministic re-grep of new pattern: ${finalGrepEvidence}; stepA: ${stepAEvidence}`,
+      };
+    }
+  } catch (e) {
+    finalGrepEvidence = `runDeterministicGrep threw: ${errText(e)}`;
+  }
+  // Per-path judge proposed a literal but the deterministic grep at `path` failed. The
+  // symbol may have MOVED to a different file (the proposed literal exists elsewhere in
+  // the diff). Fall through to step C before deferring.
+  return await tryMovedSymbolReconcile({
+    check,
+    branchRef,
+    repoRoot,
+    deps,
+    oldPath: path,
+    stepAEvidence,
+    perPathJudgeRationale: `perPath judge proposed '${proposedPattern}' but final grep at '${path}' failed: ${finalGrepEvidence || "(no evidence)"}; rationale: ${judged.rationale}`,
+    perPathJudgeDeclined: false,
+  });
+}
+
+/**
+ * Step C — moved-symbol reconcile. The check's declared `params.path` was wrong: the symbol
+ * moved to a different file. Load the WHOLE phase diff, ask the whole-diff judge for the
+ * literal + the file that carries it, then run the runner's deterministic grep at the NEW
+ * path. On pass, return `reconciled: true` with `newPath` set so the caller upserts BOTH
+ * `params.pattern` AND `params.path`; on fail, the caller defers as before.
+ *
+ * The deterministic grep at the new path is the safety gate — a whole-diff judge proposal
+ * that doesn't actually match on the branch never lands. Same residual prompt-injection
+ * mitigations as step B (per-build cap + `check_reconciled` audit surface).
+ * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+ */
+async function tryMovedSymbolReconcile(input: {
+  check: FailingGrepCheck;
+  branchRef: string;
+  repoRoot: string;
+  deps: ReconcileDeps;
+  oldPath: string;
+  stepAEvidence: string;
+  perPathJudgeRationale: string;
+  perPathJudgeDeclined: boolean;
+}): Promise<ReconcileOutcome> {
+  const { check, branchRef, repoRoot, deps, oldPath, stepAEvidence, perPathJudgeRationale, perPathJudgeDeclined } = input;
+  const perPathTag = perPathJudgeDeclined ? "judge_declined_at_path" : "proposal_did_not_match_at_path";
+  let fullDiff = "";
+  try {
+    fullDiff = await deps.loadFullPhaseDiff({ branchRef, repoRoot });
+  } catch (e) {
+    return {
+      reconciled: false,
+      reason: `${perPathTag} + harness_error — could not load full phase diff for moved-symbol judge`,
+      evidence: `loadFullPhaseDiff threw: ${errText(e)}; perPath: ${perPathJudgeRationale}; stepA: ${stepAEvidence}`,
+    };
+  }
+  if (!fullDiff || !fullDiff.trim()) {
+    return {
+      reconciled: false,
+      reason: perPathJudgeDeclined
+        ? "judge_declined — per-path judge declined and full phase diff is empty (nothing to search for a moved symbol)"
+        : "proposal_did_not_match — per-path proposal failed and full phase diff is empty (no other files to search for a moved symbol)",
+      evidence: `perPath: ${perPathJudgeRationale}; loadFullPhaseDiff returned empty; stepA: ${stepAEvidence}`,
+    };
+  }
+
+  let movedJudged: { literal: string | null; file: string | null; rationale: string };
+  try {
+    movedJudged = await deps.intentJudgeMovedSymbol({
+      description: check.description,
+      oldPattern: check.params.pattern,
+      oldPath,
+      diff: fullDiff,
+    });
+  } catch (e) {
+    return {
+      reconciled: false,
+      reason: `${perPathTag} + harness_error — moved-symbol judge threw`,
+      evidence: `intentJudgeMovedSymbol threw: ${errText(e)}; perPath: ${perPathJudgeRationale}; stepA: ${stepAEvidence}`,
+    };
+  }
+  const proposedLiteral = movedJudged.literal?.trim() || "";
+  const proposedFile = movedJudged.file?.trim() || "";
+  if (!proposedLiteral || !proposedFile) {
+    return {
+      reconciled: false,
+      reason: perPathJudgeDeclined
+        ? "judge_declined — per-path judge declined and whole-diff moved-symbol judge also declined"
+        : "proposal_did_not_match — per-path proposal failed and whole-diff moved-symbol judge did not find the intent under a different file",
+      evidence: `perPath: ${perPathJudgeRationale}; moved-symbol rationale: ${movedJudged.rationale || "(none)"}; stepA: ${stepAEvidence}`,
+    };
+  }
+  if (proposedFile === oldPath) {
+    // The whole-diff judge pointed back at the same path — the per-path judge already
+    // covered that; nothing new to try.
+    return {
+      reconciled: false,
+      reason: `${perPathTag} — moved-symbol judge proposed the same path '${oldPath}' (not a MOVED symbol); deferring`,
+      evidence: `perPath: ${perPathJudgeRationale}; moved-symbol proposed '${proposedLiteral}' @ '${proposedFile}' (== oldPath) rationale: ${movedJudged.rationale}; stepA: ${stepAEvidence}`,
+    };
+  }
+
+  // Safety gate: run the runner's real deterministic grep at the NEW path. A proposal that
+  // doesn't actually match on the branch never lands.
+  let finalGrepEvidence = "";
+  try {
+    const finalCheck = await deps.runDeterministicGrep({
+      branchRef,
+      repoRoot,
+      params: { ...check.params, pattern: proposedLiteral, path: proposedFile },
+    });
+    finalGrepEvidence = finalCheck.evidence;
+    if (finalCheck.ok) {
+      return {
+        reconciled: true,
+        newPattern: proposedLiteral,
+        newPath: proposedFile,
+        step: "judge_repoint_moved_symbol",
+        rationale: `judge_repoint_moved_symbol — bounded whole-diff judge mapped '${check.params.pattern}' @ '${oldPath}' → '${proposedLiteral}' @ '${proposedFile}' (${movedJudged.rationale || "no rationale"}); deterministic grep of the new (literal, path) passes on the branch`,
+        evidence: `moved-symbol proposed '${proposedLiteral}' @ '${proposedFile}' rationale: ${movedJudged.rationale}; deterministic re-grep at new path: ${finalGrepEvidence}; perPath: ${perPathJudgeRationale}; stepA: ${stepAEvidence}`,
+      };
+    }
+  } catch (e) {
+    finalGrepEvidence = `runDeterministicGrep threw: ${errText(e)}`;
   }
   return {
     reconciled: false,
-    reason: "judge_proposal_needs_human — intent judge proposed a literal; recorded as a human-review diagnostic, NOT auto-reconciled (prompt-injection guard)",
-    evidence: `judge proposed '${proposedPattern}' (present-on-branch=${candidateExists}) rationale: ${judged.rationale}; stepA: ${stepAEvidence}`,
+    reason:
+      "proposal_did_not_match — moved-symbol judge proposed a (literal, file) but the deterministic grep at the new path failed; not reconciled",
+    evidence: `moved-symbol proposed '${proposedLiteral}' @ '${proposedFile}' rationale: ${movedJudged.rationale}; final grep at new path: ${finalGrepEvidence || "(no evidence)"}; perPath: ${perPathJudgeRationale}; stepA: ${stepAEvidence}`,
   };
 }
 
@@ -256,13 +451,15 @@ export async function reconcileStaleGrepCheck(args: ReconcileArgs): Promise<Reco
 //
 // Iterates every phase's grep checks on the branch, runs the deterministic grep, and calls
 // `reconcileStaleGrepCheck` on every failing `expect: 'present'` check. On a successful
-// reconcile, upserts the new pattern via `upsertPhaseChecks` (preserves stable id — same
-// replace-by-position semantics as the author path).
+// reconcile, upserts the new pattern (and, on a moved-symbol repoint, the new path too) via
+// `upsertPhaseChecks` (preserves stable id — same replace-by-position semantics as the author
+// path). ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2 wires
+// the moved-symbol path repoint alongside the pattern repoint.)
 //
-// CAP — `maxReconciliationsPerBuild` bounds the number of pattern repoints per build so a
-// pathological spec whose EVERY grep check is stale can't silently pass. Default is the total
-// number of grep checks in the spec (i.e. every check may reconcile once). Exceeded → any
-// remaining unreconciled checks are reported un-healed and the caller defers as before.
+// CAP — `maxReconciliationsPerBuild` bounds the number of pattern/path repoints per build so
+// a pathological spec whose EVERY grep check is stale can't silently pass. Default is the
+// total number of grep checks in the spec (i.e. every check may reconcile once). Exceeded →
+// any remaining unreconciled checks are reported un-healed and the caller defers as before.
 
 export interface BatchReconcileDeps extends ReconcileDeps {
   /**
@@ -304,8 +501,29 @@ export interface ReconciliationAudit {
   description: string;
   oldPattern: string;
   newPattern: string;
-  /** Only 'normalized_case' — a reconcile is always the deterministic step A now. */
-  step: "normalized_case";
+  /**
+   * Present when the check's declared path moved too (step C — moved-symbol reconcile).
+   * The audit row surfaces BOTH the old path (where the spec author guessed) and the new
+   * path (where the whole-diff judge + deterministic grep confirmed the symbol lives).
+   * Absent for step A / step B — the path was correct, only the pattern moved.
+   * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+   */
+  oldPath?: string;
+  newPath?: string;
+  /**
+   * 'normalized_case' — step A (deterministic case/whitespace re-match).
+   * 'judge_repoint_auto_applied' — step B: bounded judge proposal that passed the runner's
+   *   real deterministic grep on the branch. See
+   *   [[../../../docs/brain/libraries/check-reconciliation.md]] § step B.
+   * 'judge_repoint_moved_symbol' — step C: whole-diff judge proposed a literal + a DIFFERENT
+   *   file than the check's declared path; deterministic grep at the new path passed. Caller
+   *   repointed BOTH `params.pattern` AND `params.path` via `upsertPhaseChecks`. See
+   *   [[../../../docs/brain/libraries/check-reconciliation.md]] § step C.
+   */
+  step:
+    | "normalized_case"
+    | "judge_repoint_auto_applied"
+    | "judge_repoint_moved_symbol";
   rationale: string;
   evidence: string;
 }
@@ -416,7 +634,13 @@ export async function reconcileFailingGrepChecksForSpec(
         });
         continue;
       }
-      const newParams: GrepCheckParams = { ...check.params, pattern: outcome.newPattern };
+      // Phase 2 — on a moved-symbol outcome, upsert BOTH pattern AND path so the next verify
+      // pass greps the correct file. On step A / step B, path is unchanged.
+      const newParams: GrepCheckParams = {
+        ...check.params,
+        pattern: outcome.newPattern,
+        ...(outcome.newPath ? { path: outcome.newPath } : {}),
+      };
       try {
         await deps.upsertReconciledCheck({
           phaseId: phase.phaseId,
@@ -447,6 +671,11 @@ export async function reconcileFailingGrepChecksForSpec(
         description: check.description,
         oldPattern: check.params.pattern,
         newPattern: outcome.newPattern,
+        // Phase 2 — surface both old + new path on a moved-symbol repoint so the CEO
+        // sees the file too, not just the literal.
+        ...(outcome.newPath
+          ? { oldPath: check.params.path ?? ".", newPath: outcome.newPath }
+          : {}),
         step: outcome.step,
         rationale: outcome.rationale,
         evidence: outcome.evidence,
@@ -476,6 +705,10 @@ export async function reconcileFailingGrepChecksForSpec(
 
 const DEFAULT_CMD_TIMEOUT_MS = 30_000;
 const DEFAULT_DIFF_MAX_BYTES = 16_384;
+// Whole-diff cap is higher — the moved-symbol judge (step C) must see multiple changed files
+// to spot a symbol that migrated. Still bounded so a pathological branch can't blow the
+// judge's context. ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+const DEFAULT_FULL_DIFF_MAX_BYTES = 48_000;
 
 async function runCmd(
   bin: string,
@@ -620,6 +853,30 @@ export async function defaultLoadPhaseDiff(args: {
 }
 
 /**
+ * Read the ENTIRE branch diff (all changed files, not just one path) — the moved-symbol
+ * judge's input in step C. Bounded to `DEFAULT_FULL_DIFF_MAX_BYTES` so a pathological diff
+ * can't blow the judge's context. Returns "" on any git failure (the reconciler treats an
+ * empty diff as "nothing to search for a moved symbol" and defers).
+ * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+ */
+export async function defaultLoadFullPhaseDiff(args: {
+  branchRef: string;
+  repoRoot: string;
+}): Promise<string> {
+  const refTrim = args.branchRef.trim();
+  if (!refTrim || refTrim.startsWith("-") || refTrim.includes("\0") || /\s/.test(refTrim)) {
+    return ""; // unsafe ref — defer.
+  }
+  // `git diff origin/main...<branchRef>` — no path arg = whole phase diff.
+  const argv = ["diff", `origin/main...${refTrim}`];
+  const r = await runCmd("git", argv, args.repoRoot);
+  if (r.error || (r.code !== 0 && r.code !== null)) {
+    return "";
+  }
+  return r.stdout.slice(0, DEFAULT_FULL_DIFF_MAX_BYTES);
+}
+
+/**
  * Bounded box-side intent judge — asks Claude Sonnet whether the diff satisfies the described
  * check intent under a DIFFERENT literal, and if so what the exact literal is. The judge's
  * output is JSON: `{ literal: <string|null>, rationale: <string> }`. Fails CLOSED on any
@@ -688,6 +945,86 @@ export async function defaultIntentJudge(input: {
     return { literal, rationale };
   } catch (e) {
     return { literal: null, rationale: `judge threw: ${errText(e)}` };
+  }
+}
+
+/**
+ * Bounded box-side moved-symbol judge — step C. Reads the WHOLE phase diff (all changed files)
+ * and asks Claude Sonnet to find the check's INTENT under a DIFFERENT literal in a DIFFERENT
+ * file than the spec author guessed. Returns `{literal, file, rationale}` — the literal is a
+ * substring the caller can grep verbatim, the file is a path present in the diff (and NOT the
+ * check's declared `oldPath`). Strict JSON, max 500 tokens. Fails CLOSED on any network /
+ * parse / API error (returns `{literal: null, file: null}`) so a broken judge NEVER masks a
+ * real code-missing failure — the caller defers unchanged.
+ * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
+ */
+export async function defaultIntentJudgeMovedSymbol(input: {
+  description: string;
+  oldPattern: string;
+  oldPath: string;
+  diff: string;
+}): Promise<{ literal: string | null; file: string | null; rationale: string }> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) {
+    return {
+      literal: null,
+      file: null,
+      rationale: "ANTHROPIC_API_KEY unset — moved-symbol judge skipped (fail-closed)",
+    };
+  }
+  const { SONNET_MODEL } = await import("@/lib/ai-models");
+  const system =
+    "You are a bounded verification judge for a MOVED symbol. A spec's grep check declared a " +
+    "PATH for a symbol, but the runner found no match at that path. Your job is to search the " +
+    "phase's WHOLE branch diff (multiple changed files) and decide whether the check's described " +
+    "INTENT is satisfied by a literal that lives in a DIFFERENT file than the declared oldPath — " +
+    "i.e. the symbol moved. If YES, return the EXACT literal (a substring the caller can grep " +
+    "verbatim) AND the exact file path from the diff that contains it (as it appears in the diff " +
+    "header, e.g. `src/lib/foo.ts` not `a/src/lib/foo.ts`). The file MUST NOT equal the oldPath. " +
+    "If NO, return {literal:null, file:null}. NEVER fabricate a literal or file. Be conservative: " +
+    "when in doubt, return null. Respond with strict JSON: " +
+    '{"literal":"<string or null>","file":"<string or null>","rationale":"<one sentence>"}.';
+  const user = [
+    `CHECK DESCRIPTION (the INTENT): ${input.description}`,
+    `ORIGINAL PATTERN (what the check greps for, and MISSED on the branch): ${input.oldPattern}`,
+    `ORIGINAL PATH (where the spec author expected the symbol; the code is NOT here): ${input.oldPath}`,
+    `WHOLE PHASE BRANCH DIFF (bounded, multiple files):`,
+    "```diff",
+    input.diff,
+    "```",
+    "",
+    "Return JSON only. If the intent is genuinely satisfied under a different literal in a DIFFERENT file (present in this diff), return that literal + that file. Otherwise return null for both.",
+  ].join("\n");
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: SONNET_MODEL,
+        max_tokens: 500,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+    if (!res.ok) {
+      return { literal: null, file: null, rationale: `moved_symbol_judge_http_${res.status}` };
+    }
+    const data = (await res.json()) as { content?: Array<{ text?: string }> };
+    const text = (data.content?.[0]?.text ?? "").trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return { literal: null, file: null, rationale: "moved-symbol judge returned no JSON" };
+    const parsed = JSON.parse(m[0]) as { literal?: unknown; file?: unknown; rationale?: unknown };
+    const literal =
+      typeof parsed.literal === "string" && parsed.literal.trim().length ? parsed.literal : null;
+    const file = typeof parsed.file === "string" && parsed.file.trim().length ? parsed.file : null;
+    const rationale = typeof parsed.rationale === "string" ? parsed.rationale : "";
+    return { literal, file, rationale };
+  } catch (e) {
+    return { literal: null, file: null, rationale: `moved-symbol judge threw: ${errText(e)}` };
   }
 }
 
@@ -761,10 +1098,12 @@ export async function defaultLoadPhaseGrepChecks(
 }
 
 /**
- * Repoint one check row's params.pattern to the reconciled literal. Uses the SDK
- * `upsertPhaseChecks` (replace-by-position preserves stable ids) — we upsert JUST the one
- * position with new params, matching the SDK's semantics. The other positions on the phase
- * are re-read + carried through so a single-check repoint doesn't clear the others.
+ * Repoint one check row's params to the reconciled shape — `pattern` always, and (on a
+ * moved-symbol step-C repoint) `path` too. Uses the SDK `upsertPhaseChecks` (replace-by-
+ * position preserves stable ids) — we upsert JUST the one position with new params, matching
+ * the SDK's semantics. The other positions on the phase are re-read + carried through so a
+ * single-check repoint doesn't clear the others.
+ * ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2.)
  */
 export async function defaultUpsertReconciledCheck(args: {
   phaseId: string;
@@ -794,22 +1133,30 @@ export async function defaultUpsertReconciledCheck(args: {
  *
  * The row's `action_kind='check_reconciled'` carries the full audit shape a reader needs to
  * eyeball the auto-correction: old_pattern → new_pattern, the check description (intent),
- * the STEP that fired (always `normalized_case` — the deterministic step A; the LLM judge
- * never auto-reconciles), the rationale, and the evidence string the deterministic gate
- * produced. This is the "never silent" hard rule the Phase-2
- * spec cites — a self-healing check that isn't surfaced is a proxy that optimizes itself.
+ * the STEP that fired (`normalized_case` — the deterministic step A, or
+ * `judge_repoint_auto_applied` — a bounded judge proposal that survived the runner's real
+ * deterministic grep on the branch, or `judge_repoint_moved_symbol` — the whole-diff judge
+ * repointed BOTH pattern AND path because the symbol moved to a different file), the
+ * rationale, and the evidence string the deterministic gate produced. On a moved-symbol
+ * repoint the row also carries `old_path` + `new_path`. This is the "never silent" hard
+ * rule the audit-surface spec cites — a self-healing check that isn't surfaced is a proxy
+ * that optimizes itself.
  */
 export async function defaultAuditReconciliation(audit: ReconciliationAudit): Promise<void> {
   try {
     const { createAdminClient } = await import("@/lib/supabase/admin");
     const { recordDirectorActivity } = await import("@/lib/director-activity");
     const admin = createAdminClient();
+    // Phase 2 — surface the path move on the human-facing reason line too (not just metadata).
+    const pathMove = audit.newPath && audit.oldPath && audit.newPath !== audit.oldPath
+      ? ` @ path '${audit.oldPath}' → '${audit.newPath}' (moved_symbol)`
+      : "";
     await recordDirectorActivity(admin, {
       workspaceId: audit.workspaceId,
       directorFunction: "platform",
       actionKind: "check_reconciled",
       specSlug: audit.slug,
-      reason: `phase ${audit.phasePosition} check '${audit.description.slice(0, 200)}' auto-corrected via ${audit.step}: '${audit.oldPattern}' → '${audit.newPattern}' — ${audit.rationale.slice(0, 400)}`.slice(0, 4000),
+      reason: `phase ${audit.phasePosition} check '${audit.description.slice(0, 200)}' auto-corrected via ${audit.step}: '${audit.oldPattern}' → '${audit.newPattern}'${pathMove} — ${audit.rationale.slice(0, 400)}`.slice(0, 4000),
       metadata: {
         spec_slug: audit.slug,
         phase_id: audit.phaseId,
@@ -818,6 +1165,9 @@ export async function defaultAuditReconciliation(audit: ReconciliationAudit): Pr
         check_description: audit.description,
         old_pattern: audit.oldPattern,
         new_pattern: audit.newPattern,
+        // Phase 2 — moved-symbol path move (only set for step='judge_repoint_moved_symbol').
+        ...(audit.oldPath ? { old_path: audit.oldPath } : {}),
+        ...(audit.newPath ? { new_path: audit.newPath } : {}),
         step: audit.step,
         rationale: audit.rationale,
         evidence: audit.evidence,
@@ -898,6 +1248,8 @@ export const defaultBatchDeps: BatchReconcileDeps = {
   loadPhaseDiff: defaultLoadPhaseDiff,
   intentJudge: defaultIntentJudge,
   runDeterministicGrep: defaultRunDeterministicGrep,
+  loadFullPhaseDiff: defaultLoadFullPhaseDiff,
+  intentJudgeMovedSymbol: defaultIntentJudgeMovedSymbol,
   loadPhaseGrepChecks: defaultLoadPhaseGrepChecks,
   upsertReconciledCheck: defaultUpsertReconciledCheck,
   auditReconciliation: defaultAuditReconciliation,
