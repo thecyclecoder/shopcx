@@ -8,6 +8,8 @@
  */
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
+import { compositeCopyOverlay, type OverlayCopy } from "@/lib/ads/creative-overlay";
+import { buildSideBySide } from "@/lib/ads/creative-side-by-side";
 
 // ── Render-side no-competitor-leak guard ────────────────────────────────────
 // The copy-side no-competitor-leak gate only inspects TEXT; a leak that lives in the pixels
@@ -159,6 +161,15 @@ export interface GeneratedCreative {
   prompt: string;
   /** The exact copy strings the QA pass must verify render correctly (no garble). */
   expectedCopy: { headline: string; offer: string | null; trust: string };
+  /** dahlia-competitor-ad-adaptation-overlay-render Phase 4 — the [competitor | ours]
+   *  side-by-side composite the vision judge grades for (a) energy match-or-surpass and
+   *  (b) preserved psychological structure. Present ONLY on the overlay path when a
+   *  competitor design reference was supplied (the only path where the prime-directive
+   *  side-by-side is meaningful — an own-brand angle has no source to grade against).
+   *  Consumed by [[creative-agent]] `stockProduct`'s regen loop: hands the buffer to the
+   *  vision judge, calls `sideBySideGate` on the verdict, revises in-session on fail
+   *  (mirrors the existing MAX_QA_ATTEMPTS bounce). See [[creative-side-by-side]]. */
+  sideBySide?: { buffer: Buffer; mimeType: string };
 }
 
 export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
@@ -274,9 +285,130 @@ HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and 
   return { prompt, expectedCopy: { headline: isImitation ? "" : headline, offer: offerHeadline, trust } };
 }
 
+/** Sentinel constant naming the flag that gates the 3-layer overlay render path. Mirrors
+ *  `DAHLIA_COPY_MODE` — flip to `"overlay"` to enable the text-free scene + font-engine copy
+ *  overlay branch (dahlia-competitor-ad-adaptation-overlay-render Phase 1). Any other value
+ *  (including unset) keeps the legacy model-draws-text render as the default. */
+export const OVERLAY_RENDER_MODE_FLAG = "overlay";
+
+/** True iff the DAHLIA_RENDER_MODE env flag names the overlay path. Extracted so tests can
+ *  assert the gate is a pure env read (no side effects) without stubbing process.env at read time. */
+export function isOverlayRenderModeEnabled(): boolean {
+  return (process.env.DAHLIA_RENDER_MODE || "").trim() === OVERLAY_RENDER_MODE_FLAG;
+}
+
+/** Build the TEXT-FREE scene prompt for Nano Banana Pro on the overlay path. Reproduces the
+ *  competitor reference's composition/lighting with OUR product, ZERO added text — the copy
+ *  is composited afterwards by `compositeCopyOverlay` with a real font engine. See
+ *  [[../../../docs/brain/reference/competitor-ad-adaptation]] Part 2 for the exact rules
+ *  (Nano Banana will otherwise sneak in a flavor caption like "CINNAMON LATTE"). Deterministic
+ *  + pure. */
+export function buildTextFreeScenePrompt(brief: CreativeBrief, hasDesignRef: boolean, compositionTransfer?: boolean): string {
+  const isImitation = !!compositionTransfer && hasDesignRef;
+  const refClause = isImitation
+    ? "The FIRST image is a PROVEN, high-performing competitor ad. REUSE ITS WINNING COMPOSITION — the visual hierarchy, focal structure, where the product sits, the negative space, the lighting, the mood. But REPLACE its product with OUR product (from the other provided images) and its drink / props / garnish with what fits OUR flavor. Change everything that identifies the competitor (their brand name, product, logo, claims); copy the STRUCTURE, never their words or marks."
+    : hasDesignRef
+    ? "Match the FIRST image's design language (layout energy, lighting, mood, color system) — the product images follow it."
+    : "Clean, premium direct-response e-commerce scene; high contrast; mobile-thumb-legible.";
+
+  return `Design a text-free product scene for ${brief.productTitle}. ${refClause}
+
+TEXT-FREE (hard rule — this is the WHOLE POINT of this render path): absolutely ZERO added text ANYWHERE in the image — no headline, no sub-headline, no benefit words, no callout, no badge, no CTA, no flavor caption (e.g. never render "CINNAMON LATTE", "COFFEE", "PROTEIN", or any flavor / product-name floating in the scene), no price, no percent-off, no reviewer name, no star-rating, no watermark, no logo overlay. The ONLY legible text may be the product's OWN printed pack label as it naturally appears on the packaging — nothing else. The copy is composited afterwards with a real font engine; if you add ANY text, the composited copy will collide with it and the render is unusable.
+
+PRODUCT / SCENE (Part 2 rules from the competitor-ad-adaptation reference):
+- Swap product + drink + props to OUR flavor's REAL variant. Use the product image PROVIDED — its real pack, real wordmark, real color. Never fabricate a flavor variant you don't have a real image for.
+- RE-LIGHT the product to match the scene: warm rim light + deep shadow falloff + cast shadow + reflection so it looks PHOTOGRAPHED IN the environment, not photoshopped-in. A bright, flat, evenly-lit product on a moody scene is a defect — regenerate.
+- Keep the lead packaging FULLY IN FRAME — no clipping at any edge, clear margin around the hero pack. A half-cropped pack reads noob and is a defect.
+- Reproduce the pack label faithfully (main brand wordmark + product name crisp), but render the small ingredient icons / supplement-facts panel as a softly-defocused surface (as a real product photo's fine print looks at ad size). Fine-print gibberish is a defect.
+- Cluster the product to one side so the scene leaves an L-shaped clean dark zone (top band + a side column) for the copy overlay that lands on top of this base.
+
+NO THIRD-PARTY BRANDS (hard rule): the ONLY branded product, package, logo, wordmark, or label anywhere in the image is OUR own ${brief.productTitle}. NEVER paint, render, or depict any OTHER company's product, can, bottle, box, logo, or recognizable branded item — not the competitor whose composition you are reusing.
+
+Output ${"4:5"}, no watermark.`;
+}
+
+/** Fetch the raw bytes behind a design-reference URL (a signed competitor skeleton URL or a
+ *  data: URI). Returns null on any non-2xx / empty payload so the caller can proceed without
+ *  the side-by-side (an audit artifact, not a blocker of the overlay path). Deterministic
+ *  small helper — extracted so the side-by-side build path is straightforward and the retry
+ *  paths in the fetch don't leak into `generateCreative`. */
+async function fetchDesignReferenceBytes(url: string): Promise<Buffer | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const arr = await res.arrayBuffer();
+    if (!arr.byteLength) return null;
+    return Buffer.from(arr);
+  } catch {
+    return null;
+  }
+}
+
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
+  const aspectRatio = opts.aspectRatio ?? "4:5";
+  // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
+  // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
+  const imageUrls = [
+    ...(opts.designReferenceUrl ? [opts.designReferenceUrl] : []),
+    ...brief.imageRefs.map((r) => r.url),
+  ].filter((u) => typeof u === "string" && /^(https?:|data:)/.test(u));
+
+  // ── Overlay render mode (dahlia-competitor-ad-adaptation-overlay-render Phase 1) ────────
+  // Flag-gated 3-layer render path: TEXT-FREE scene from Nano Banana → font-engine copy
+  // overlay via `compositeCopyOverlay`. See [[../../../docs/brain/reference/competitor-ad-adaptation]]
+  // Part 2. Kept opt-in exactly like `DAHLIA_COPY_MODE`: proved-before-default against Bianca's
+  // realized cold-audience CAC/CTR, never a rip-and-replace of the legacy model-draws-text
+  // path. `expectedCopy` still drives the caller's QA — but on the overlay path spelling is
+  // guaranteed exact by construction (a real font engine, not a diffusion model).
+  if (isOverlayRenderModeEnabled()) {
+    const textFreePrompt = buildTextFreeScenePrompt(brief, hasRef, opts.compositionTransfer);
+    const isImitation = !!opts.compositionTransfer && hasRef;
+    const headline = isImitation ? stripCompetitorOfferArtifacts(brief.angle.hook) : brief.angle.hook;
+    const trust = brief.proofStack.slice(0, 4).join(" · ");
+    const expectedCopy: GeneratedCreative["expectedCopy"] = {
+      headline: isImitation ? "" : headline,
+      offer: brief.offer?.headline ?? null,
+      trust,
+    };
+    const { buffer: baseBuffer } = await generateNanoBananaProCombine({
+      workspaceId,
+      prompt: textFreePrompt,
+      imageUrls,
+      aspectRatio,
+    });
+    const overlayCopy: OverlayCopy = {
+      headline: headline || brief.productTitle,
+      benefitStack: brief.supportingBenefits.slice(0, 4).join(", ") || undefined,
+      payoff: trust || undefined,
+      cta: brief.offer?.headline || undefined,
+    };
+    const { buffer, mimeType } = await compositeCopyOverlay(baseBuffer, overlayCopy, aspectRatio);
+
+    // dahlia-competitor-ad-adaptation-overlay-render Phase 4 — the SIDE-BY-SIDE QC gate.
+    // "Adapt against a live side-by-side of the competitor ad, never in isolation" (prime
+    // directive from [[../../../docs/brain/reference/competitor-ad-adaptation]]). When the
+    // caller supplied a `designReferenceUrl` (a signed competitor skeleton via
+    // signCreativeShot), fetch it and hand a [competitor | ours] composite back to the outer
+    // regen loop so the vision judge can grade energy match-or-surpass + preserved
+    // psychological structure via `sideBySideGate`. A fetch failure is non-fatal — the
+    // adapted render still lands; the side-by-side is an audit + gate, not a blocker of
+    // the overlay path (the outer loop skips the gate when sideBySide is absent).
+    let sideBySide: GeneratedCreative["sideBySide"];
+    if (opts.designReferenceUrl) {
+      try {
+        const competitorBuffer = await fetchDesignReferenceBytes(opts.designReferenceUrl);
+        if (competitorBuffer) {
+          sideBySide = await buildSideBySide(competitorBuffer, buffer, { ratio: aspectRatio });
+        }
+      } catch (err) {
+        console.warn("overlay_side_by_side_build_failed", { err: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };
+  }
+
   const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason);
   // Render-side no-competitor-leak deterministic guard (Phase 1) — after the strip
   // helper scrubbed the imitation headline AND the NO COMPETITOR OFFER hard rule was
@@ -288,17 +420,11 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
   if (opts.compositionTransfer && renderPromptHasCompetitorOffer(prompt)) {
     throw new RenderPromptCompetitorOfferError(prompt);
   }
-  // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
-  // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
-  const imageUrls = [
-    ...(opts.designReferenceUrl ? [opts.designReferenceUrl] : []),
-    ...brief.imageRefs.map((r) => r.url),
-  ].filter((u) => typeof u === "string" && /^(https?:|data:)/.test(u));
   const { buffer, mimeType } = await generateNanoBananaProCombine({
     workspaceId,
     prompt,
     imageUrls,
-    aspectRatio: opts.aspectRatio ?? "4:5",
+    aspectRatio,
   });
   return { buffer, mimeType, prompt, expectedCopy };
 }

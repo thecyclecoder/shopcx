@@ -24,6 +24,7 @@ import { hasAnyLf8 } from "@/lib/ads/lf8";
 import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
 import { competitorFocalIsWarmHot, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import type { ConceptTags } from "@/lib/creative-skeleton";
+import { selectConfirmedBenefits, type ConfirmedBenefit } from "@/lib/ads/creative-imitation";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -351,6 +352,20 @@ export interface CreativeBrief {
     softPhrasings: string[];
   } | null;
   /**
+   * dahlia-competitor-ad-adaptation-overlay-render Phase 2 — the CATALOG of every
+   * CUSTOMER-CONFIRMED benefit on OUR product (`product_benefit_selections` rows with
+   * `customer_confirmed=true`, role ∈ {lead, supporting}), each with the row's real
+   * `customer_phrases` for grounded rewording. Populated on EVERY brief (not just competitor
+   * imitations) so an own-brand angle also has the confirmed catalog visible. This is the
+   * verify-then-reword surface for [[../../../.claude/skills/dahlia-copy-author/SKILL.md]]'s
+   * IMITATE-DEBRANDED rule: for each competitor benefit, VERIFY the analogous benefit is here
+   * (never reinvent, never invent) and REWORD from a real `customer_phrase`. When we
+   * genuinely LACK the competitor's benefit, SUBSTITUTE a different confirmed benefit from
+   * this list. Sourced pure via [[creative-imitation]] `selectConfirmedBenefits`. See
+   * [[../../../docs/brain/reference/competitor-ad-adaptation]] Part 1 (Copy adaptation).
+   */
+  confirmedBenefits?: ConfirmedBenefit[];
+  /**
    * swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 —
    * derived product features (ingredient count, format) surfaced as the LAST-RESORT substitute
    * pool for `chooseGroundedSubstitute` when the competitor's offer slot needs swapping and the
@@ -631,7 +646,20 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, productFeatures };
+  // dahlia-competitor-ad-adaptation-overlay-render Phase 2 — surface the CATALOG of every
+  // CUSTOMER-CONFIRMED benefit (role ∈ {lead, supporting}) so Dahlia's IMITATE-DEBRANDED
+  // rule can VERIFY that each competitor benefit is analogous to one we actually deliver
+  // (never reinvent, never invent) and REWORD from a real `customer_phrase`. Populated on
+  // EVERY brief — an own-brand angle benefits from having the confirmed catalog visible too.
+  // Empty array when no benefit rows carry customer_confirmed=true (degrades gracefully).
+  const confirmedBenefits = selectConfirmedBenefits(pi);
+  if (confirmedBenefits.length && angle.source === "competitor") {
+    guardrails.push(
+      `verify-then-reword: ${confirmedBenefits.length} customer-confirmed benefit(s) on product; substitute only for a genuinely-lacked competitor benefit`,
+    );
+  }
+
+  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, confirmedBenefits, productFeatures };
 }
 
 /**
