@@ -14351,11 +14351,25 @@ async function runCsDirectorCallJob(job: Job) {
     // the generic verdict note so the thread doesn't read as if June already executed the refund.
     if (!applyResult?.awaiting_founder_approval) try {
       const { buildCsDirectorVerdictNote } = await import("../src/lib/cs-director-verdict-note");
+      // Phase 1 of cs-director-spec-claim-must-match-the-actual-write — derive the author outcome
+      // from applyResult (populated above by applyBoxCsDirectorCall → handleAuthorSpec) so the note
+      // renders `Authored spec: {slug}` ONLY when the specs SDK confirmed the write, and renders an
+      // explicit `author_spec FAILED ({reason}) — no spec was written` line otherwise. Before this
+      // shipped, the note surfaced the LLM's claim (verdict.spec_seed) — a phantom spec on ticket
+      // 2b7ea029 read as authored though no spec_slug was ever written to the specs table.
+      const authorOutcome = verdict.decision === "author_spec"
+        ? {
+            ok: applyResult?.ok === true && applyResult?.needs_attention !== true,
+            spec_slug: applyResult?.spec_slug,
+            reason: applyResult?.reason,
+          }
+        : undefined;
       const noteBody = buildCsDirectorVerdictNote({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         spec_seed: verdict.spec_seed ?? null,
+        author_outcome: authorOutcome,
         // Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-
         // recommendation — thread June's suggested remedy through the internal note so the ticket
         // thread carries the SAME recommendation the CEO card carries. Silent when absent.

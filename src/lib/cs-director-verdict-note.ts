@@ -23,11 +23,41 @@
 
 export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
 
+/**
+ * Phase 1 of cs-director-spec-claim-must-match-the-actual-write — the OUTCOME `handleAuthorSpec`
+ * returned for an `author_spec` verdict, threaded through to the note builder so the receipt names
+ * the write, not the claim. Before this shipped, `summarizeSpecSeed` rendered
+ * `Authored spec: {slug}` off `verdict.spec_seed` (the LLM's claim) with no reference to the
+ * executor's result — a phantom spec (ticket 2b7ea029) still read as authored on the ticket thread.
+ *
+ *  - `ok: true` + `spec_slug` (the slug the specs SDK actually landed, which the handler may have
+ *    normalized away from June's seed) → the note renders the CONFIRMED-write line.
+ *  - `ok: false` + `reason` (`spec_seed_missing_*`, `ticket_id_unresolved`,
+ *    `author_spec_write_returned_false`, `author_spec_threw`, `handler_threw`) → the note renders
+ *    an explicit FAILED line naming the reason, so the audit trail never reads as if the spec
+ *    landed.
+ *  - `undefined` (`author_spec` decision but no outcome threaded) → the builder falls back to the
+ *    legacy claim-only line so a stale caller doesn't crash. This shape MUST NOT be introduced by
+ *    the shipped call site — it exists only for back-compat with an unrelated test that predates
+ *    the outcome argument.
+ */
+export interface CsDirectorAuthorSpecOutcome {
+  ok: boolean;
+  spec_slug?: string;
+  reason?: string;
+}
+
 export interface CsDirectorNoteInput {
   decision: CsDirectorDecision;
   reasoning: string;
   remedy?: Record<string, unknown> | null;
   spec_seed?: Record<string, unknown> | null;
+  /**
+   * Phase 1 of cs-director-spec-claim-must-match-the-actual-write — the outcome of the
+   * `handleAuthorSpec` executor call. Only meaningful for `decision='author_spec'`; ignored for the
+   * other decisions.
+   */
+  author_outcome?: CsDirectorAuthorSpecOutcome | null;
   /**
    * Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation —
    * June's OPTIONAL suggested remedy on an `escalate_founder` verdict (RemedyPlan-shaped: kind +
@@ -57,8 +87,35 @@ function pickString(source: Record<string, unknown> | null | undefined, key: str
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
 }
 
-function summarizeSpecSeed(seed: Record<string, unknown> | null | undefined): string {
-  const slug = pickString(seed, "slug");
+/**
+ * Phase 1 of cs-director-spec-claim-must-match-the-actual-write — render the author_spec line from
+ * the executor's OUTCOME, not from the LLM's claim.
+ *
+ *  - Confirmed write (`author_outcome.ok === true` + `spec_slug`): render `Authored spec: {slug}`
+ *    using the slug the specs SDK actually landed. The SDK may have normalized June's seed slug, so
+ *    we PREFER the outcome's slug over the seed's slug. When the seed carried a title we still
+ *    surface it for readability (title is descriptive metadata, not the identifying key).
+ *  - Failed write (`author_outcome.ok === false`): render `author_spec FAILED ({reason}) — no spec
+ *    was written`. NEVER surface a slug on a failed write — the whole point of Phase 1 is that a
+ *    receipt can never assert a spec landed when none did (the ticket 2b7ea029 regression class).
+ *  - Missing outcome (undefined author_outcome — the legacy shape a pre-Phase-1 caller could pass):
+ *    fall back to the claim-only line so a stale test caller doesn't crash. The shipped call site
+ *    ALWAYS threads the outcome; this path exists only for back-compat with unit tests that
+ *    exercise the note builder without an executor.
+ */
+function summarizeSpecSeed(
+  seed: Record<string, unknown> | null | undefined,
+  outcome: CsDirectorAuthorSpecOutcome | null | undefined,
+): string {
+  if (outcome && outcome.ok === false) {
+    const reason = outcome.reason && outcome.reason.trim().length > 0 ? outcome.reason.trim() : "unknown_reason";
+    return `author_spec FAILED (${reason}) — no spec was written`;
+  }
+  const outcomeSlug = outcome && outcome.ok === true && typeof outcome.spec_slug === "string" && outcome.spec_slug.trim().length > 0
+    ? outcome.spec_slug.trim()
+    : null;
+  const seedSlug = pickString(seed, "slug");
+  const slug = outcomeSlug ?? seedSlug;
   const title = pickString(seed, "title");
   if (slug && title) return `Authored spec: ${slug} — "${title}"`;
   if (slug) return `Authored spec: ${slug}`;
@@ -108,7 +165,7 @@ export function buildCsDirectorVerdictNote(verdict: CsDirectorNoteInput): string
   const lines: string[] = [header, reasoningLine];
   switch (verdict.decision) {
     case "author_spec":
-      lines.push(summarizeSpecSeed(verdict.spec_seed));
+      lines.push(summarizeSpecSeed(verdict.spec_seed, verdict.author_outcome));
       break;
     case "approve_remedy":
       lines.push(summarizeRemedy(verdict.remedy));

@@ -148,3 +148,122 @@ test("Phase 3 — escalate_founder with an empty recommended_remedy object is tr
   });
   assert.doesNotMatch(note, /Recommended remedy:/, "empty object == no recommendation, note stays quiet");
 });
+
+// ── Phase 1 of cs-director-spec-claim-must-match-the-actual-write ──
+// The audit-visible receipt must name what the specs SDK actually wrote — never what June claimed.
+// On ticket 2b7ea029 the pre-Phase-1 builder rendered `Authored spec: {slug}` off `verdict.spec_seed`
+// though no `director_activity` row existed and no spec landed. These tests prove the note now
+// consults the author OUTCOME threaded through from `handleAuthorSpec`.
+
+test("Phase 1 — confirmed write: note renders the slug the SDK actually landed (from author_outcome), not June's seed slug", () => {
+  // The specs SDK normalized the seed slug from the LLM's proposal to a shorter form — the note
+  // MUST name the slug that actually landed, not the pre-normalization seed. This is the exact
+  // handler-vs-claim divergence the spec's Phase 1 calls out (cs-director.ts line ~125).
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Analyzer never routed repeat-coupon tickets to the remedy path.",
+    spec_seed: {
+      slug: "cs-analyzer-original-june-proposed-slug",
+      title: "Analyzer routes repeat-coupon tickets to the remedy path",
+    },
+    author_outcome: {
+      ok: true,
+      spec_slug: "cs-analyzer-normalized-slug",
+    },
+  });
+  assert.match(note, /Decision: author_spec/);
+  assert.match(note, /Authored spec: cs-analyzer-normalized-slug/);
+  assert.doesNotMatch(note, /cs-analyzer-original-june-proposed-slug/, "the LLM's claim slug must not leak into the receipt");
+});
+
+test("Phase 1 — confirmed write with matching seed: note surfaces slug + title exactly like the legacy shape", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Analyzer gap.",
+    spec_seed: {
+      slug: "cs-analyzer-coupon-routing-gap",
+      title: "Analyzer routes repeat-coupon tickets to the remedy path",
+    },
+    author_outcome: {
+      ok: true,
+      spec_slug: "cs-analyzer-coupon-routing-gap",
+    },
+  });
+  assert.match(note, /Authored spec: cs-analyzer-coupon-routing-gap — "Analyzer routes repeat-coupon tickets to the remedy path"/);
+});
+
+test("Phase 1 — failed write (author_spec_write_returned_false): note renders explicit FAILED line naming the reason, never a slug", () => {
+  // The exact regression from ticket 2b7ea029 — the SDK's chokepoint guard rejected the write, so
+  // the note must not read as if the spec landed. The reason names the concrete failure class so a
+  // CS agent glancing at the thread can trace what went wrong.
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified, structural fix needed.",
+    spec_seed: {
+      slug: "appstle-discount-replace-atomic-and-preserve-manual-discounts",
+      title: "Preserve manual discounts across Appstle discount replace",
+    },
+    author_outcome: {
+      ok: false,
+      reason: "author_spec_write_returned_false",
+    },
+  });
+  assert.match(note, /Decision: author_spec/);
+  assert.match(note, /author_spec FAILED \(author_spec_write_returned_false\) — no spec was written/);
+  assert.doesNotMatch(note, /appstle-discount-replace-atomic-and-preserve-manual-discounts/, "the phantom slug must NOT appear on a failed write");
+  assert.doesNotMatch(note, /^Authored spec:/m, "the confirmed-write line must not render on a failed write");
+});
+
+test("Phase 1 — failed write with spec_seed_missing_slug reason renders the same explicit FAILED line", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    spec_seed: { title: "just a title" },
+    author_outcome: { ok: false, reason: "spec_seed_missing_slug" },
+  });
+  assert.match(note, /author_spec FAILED \(spec_seed_missing_slug\) — no spec was written/);
+});
+
+test("Phase 1 — failed write with ticket_id_unresolved reason (Derived-from linkage would be blank)", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    spec_seed: { slug: "some-slug", title: "some title" },
+    author_outcome: { ok: false, reason: "ticket_id_unresolved" },
+  });
+  assert.match(note, /author_spec FAILED \(ticket_id_unresolved\) — no spec was written/);
+  assert.doesNotMatch(note, /Authored spec: some-slug/);
+});
+
+test("Phase 1 — failed write with author_spec_threw reason (SDK threw)", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    spec_seed: { slug: "some-slug", title: "some title" },
+    author_outcome: { ok: false, reason: "author_spec_threw" },
+  });
+  assert.match(note, /author_spec FAILED \(author_spec_threw\) — no spec was written/);
+});
+
+test("Phase 1 — failed write with an empty reason string still renders a FAILED line (fallback reason token)", () => {
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    spec_seed: { slug: "some-slug" },
+    author_outcome: { ok: false, reason: "" },
+  });
+  assert.match(note, /author_spec FAILED \(unknown_reason\) — no spec was written/);
+});
+
+test("Phase 1 — missing author_outcome (legacy caller) falls back to the claim-only line — back-compat shape", () => {
+  // A stale caller that omits `author_outcome` still gets a rendered note (the claim-only line);
+  // this is the exact back-compat behavior every pre-Phase-1 test in this file exercises. The
+  // shipped call site in builder-worker.ts ALWAYS threads the outcome — this path exists only for
+  // callers that predate the outcome argument.
+  const note = buildCsDirectorVerdictNote({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    spec_seed: { slug: "legacy-slug" },
+  });
+  assert.match(note, /Authored spec: legacy-slug/);
+});
