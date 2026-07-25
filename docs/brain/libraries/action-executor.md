@@ -45,6 +45,19 @@ function pickChargeableVaultedPm(rows: CustomerPaymentMethodRow[] | null | undef
 
 Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM guard (assisted-purchase-playbook spec Phase 1). Picks the customer's chargeable vaulted PM from a set of [[../tables/customer_payment_methods]] rows — prefers `is_default=true` among rows with `status='active'`, else any active row; returns null when no chargeable row exists. Exported so tests can pin the fail-closed branch without a live DB.
 
+### `refuseLoyaltyCouponIfCustomerMismatch` — function
+
+```ts
+async function refuseLoyaltyCouponIfCustomerMismatch(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<ActionResult | null>
+```
+
+Phase-1 upfront guard for `apply_loyalty_coupon` (spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen). A loyalty code is minted with `customerSelection.customers.add`, so it's locked to ONE Shopify customer; points combine across a link group but a code does not. Resolves the contract's owning Shopify customer (`subscriptions.customer_id` → `customers.shopify_customer_id`) and the code's owning Shopify customer (`loyalty_redemptions.member_id` → `loyalty_members.shopify_customer_id`); a definite mismatch returns a refusal `ActionResult` naming both. The refusal fires BEFORE the 2s Shopify propagation delay and BEFORE the apply→regen self-heal so Appstle is never called (its apply path strips existing automatic discounts first, so a doomed apply is worse than a no-op) and regen never mints a second doomed code. When the link group carries a sibling reward of the same `discount_value` whose member IS the contract owner, the error also suggests that code. Either side unresolvable ⇒ returns null; the ordinary apply path runs and the existing verify+retry surfaces the failure — a resolvable ambiguity must never become a refusal. Precedent: ticket 2b7ea029 (Sandra Lutz). Tests: `src/lib/action-executor.apply-loyalty-coupon-owner-mismatch.test.ts`.
+
 ### `claimRegenSpendSlot` — function
 
 ```ts

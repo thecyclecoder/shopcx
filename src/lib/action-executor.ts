@@ -451,6 +451,141 @@ export async function claimRegenSpendSlot(
   return Array.isArray(data) && data.length > 0;
 }
 
+/**
+ * Phase-1 guard for `apply_loyalty_coupon` (spec:
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
+ *
+ * A loyalty code is minted with `customerSelection.customers.add`, so it is
+ * locked to ONE Shopify customer. Points combine across a link group; a code
+ * does not. Applying a code whose owning Shopify customer is not the one that
+ * owns the target subscription contract can never succeed — and the Appstle
+ * apply path removes the contract's existing automatic discounts before it
+ * tries, so a doomed apply is worse than a no-op. Refuse upfront, before the
+ * 2-second Shopify propagation delay, so no Appstle call fires and the regen
+ * branch is never entered (regen today mints against the same wrong customer,
+ * reproducing the mismatch — Phase 2 rewires that end).
+ *
+ * Returns a well-formed refusal `ActionResult` when a definite mismatch is
+ * detected. Returns `null` when both sides can't be resolved (missing sub row,
+ * missing customer, missing redemption, missing member, or either side
+ * lacking a `shopify_customer_id`) — in that case the handler proceeds and
+ * lets the existing apply/verify path surface the failure, so this guard
+ * never turns a resolvable ambiguity into a refusal.
+ *
+ * The error names both Shopify customer ids. When the caller's link group
+ * carries a sibling redemption of the same `discount_value` whose member IS
+ * the contract's owner, the error also suggests that code.
+ *
+ * Exported for unit tests.
+ */
+export async function refuseLoyaltyCouponIfCustomerMismatch(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<ActionResult | null> {
+  const { data: subRow } = await admin
+    .from("subscriptions")
+    .select("customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  const contractCustomerId =
+    (subRow as { customer_id?: string | null } | null)?.customer_id ?? null;
+  if (!contractCustomerId) return null;
+
+  const { data: custRow } = await admin
+    .from("customers")
+    .select("shopify_customer_id")
+    .eq("id", contractCustomerId)
+    .maybeSingle();
+  const contractOwnerShopifyId =
+    (custRow as { shopify_customer_id?: string | null } | null)?.shopify_customer_id ?? null;
+  if (!contractOwnerShopifyId) return null;
+
+  const { data: redRow } = await admin
+    .from("loyalty_redemptions")
+    .select("member_id, discount_value")
+    .eq("workspace_id", workspaceId)
+    .eq("discount_code", code)
+    .maybeSingle();
+  const codeMemberId =
+    (redRow as { member_id?: string | null } | null)?.member_id ?? null;
+  const codeDiscountValue =
+    (redRow as { discount_value?: number | null } | null)?.discount_value ?? null;
+  if (!codeMemberId) return null;
+
+  const { data: memberRow } = await admin
+    .from("loyalty_members")
+    .select("shopify_customer_id")
+    .eq("id", codeMemberId)
+    .maybeSingle();
+  const codeOwnerShopifyId =
+    (memberRow as { shopify_customer_id?: string | null } | null)?.shopify_customer_id ?? null;
+  if (!codeOwnerShopifyId) return null;
+
+  if (String(contractOwnerShopifyId) === String(codeOwnerShopifyId)) return null;
+
+  // Definite mismatch. Look for a sibling reward in the link group whose
+  // owning member IS the contract owner and whose discount_value matches.
+  let workingSuggestion = "";
+  try {
+    const { data: linkRow } = await admin
+      .from("customer_links")
+      .select("group_id")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", contractCustomerId)
+      .maybeSingle();
+    const groupIds = new Set<string>([contractCustomerId]);
+    const groupId = (linkRow as { group_id?: string | null } | null)?.group_id ?? null;
+    if (groupId) {
+      const { data: peers } = await admin
+        .from("customer_links")
+        .select("customer_id")
+        .eq("workspace_id", workspaceId)
+        .eq("group_id", groupId);
+      for (const peer of (peers ?? []) as Array<{ customer_id?: string | null }>) {
+        if (peer.customer_id) groupIds.add(peer.customer_id);
+      }
+    }
+
+    const { data: siblingMembers } = await admin
+      .from("loyalty_members")
+      .select("id, shopify_customer_id")
+      .eq("workspace_id", workspaceId)
+      .in("customer_id", [...groupIds]);
+    const contractOwnerMemberIds =
+      ((siblingMembers ?? []) as Array<{ id: string; shopify_customer_id?: string | null }>)
+        .filter((m) => String(m.shopify_customer_id) === String(contractOwnerShopifyId))
+        .map((m) => m.id);
+
+    if (contractOwnerMemberIds.length && codeDiscountValue != null) {
+      const { data: workingRewards } = await admin
+        .from("loyalty_redemptions")
+        .select("discount_code")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "active")
+        .eq("discount_value", codeDiscountValue)
+        .is("used_at", null)
+        .in("member_id", contractOwnerMemberIds);
+      const workingCode = ((workingRewards ?? []) as Array<{ discount_code?: string }>)[0]?.discount_code;
+      if (workingCode) {
+        workingSuggestion = ` — apply ${workingCode} instead (same $${codeDiscountValue}, minted for the sub's owner)`;
+      }
+    }
+  } catch {
+    // Suggestion is best-effort — never let it swallow the refusal.
+  }
+
+  return {
+    success: false,
+    error:
+      `Loyalty code ${code} is minted for Shopify customer ${codeOwnerShopifyId}, ` +
+      `but subscription ${contractId} is owned by Shopify customer ${contractOwnerShopifyId} ` +
+      `— codes don't cross the link group${workingSuggestion}`,
+  };
+}
+
 // ── Phase-2 order/sub-scoped loyalty-ceiling guards
 // (spec: loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates)
 //
@@ -1581,6 +1716,21 @@ export const directActionHandlers: Record<
         error: `Subscription ${p.contract_id} already has a loyalty coupon applied — no stacking (single-$${capDollars} ceiling)`,
       };
     }
+
+    // Phase-1 owner-mismatch guard (spec:
+    // loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
+    // A code minted for one Shopify customer cannot land on a contract owned
+    // by another — points combine across a link group, codes do not. Runs
+    // BEFORE the 2s propagation delay and BEFORE the apply→regen self-heal so
+    // Appstle is never called (its apply path removes automatic discounts
+    // first) and regen never mints a second doomed code.
+    const mismatch = await refuseLoyaltyCouponIfCustomerMismatch(
+      ctx.admin,
+      ctx.workspaceId,
+      p.contract_id,
+      code,
+    );
+    if (mismatch) return mismatch;
 
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
