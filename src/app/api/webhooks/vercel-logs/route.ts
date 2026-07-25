@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignBraintreeVaultProcessorDecline,
   isForeignEasyPostReturnsSweepRateLimit,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -127,6 +128,17 @@ function isError(log: VercelLog): boolean {
   // `Appstle unskip order failed` catch-branch throw carry different markers and stay
   // captured / paged.
   if (isForeignAppstleUnskipUpstream500(path, message)) return false;
+  // Drop foreign Braintree processor-decline noise on the portal vault path:
+  // `src/lib/portal/handlers/payment-method-update.ts` logs
+  // `[portal/payment-method-update] vault failed: <msg>` and returns HTTP 502 when
+  // `vaultAndMigratePaymentMethod` throws. When the customer's own issuer declines
+  // the card (e.g. `Cannot Authorize at this time (Life cycle)`, `Do Not Honor`,
+  // `Insufficient Funds`), that decline body + 502 status trip `isError` on both
+  // channels and mint a paged Control Tower incident for what is a per-customer
+  // issuer decision the code can never prevent. Non-decline vault failures (SDK
+  // broken, connectivity, auth misconfig) carry different marker text and stay
+  // captured / paged.
+  if (isForeignBraintreeVaultProcessorDecline(path, message)) return false;
   return true;
 }
 

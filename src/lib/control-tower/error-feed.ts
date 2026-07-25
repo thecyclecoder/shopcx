@@ -482,6 +482,68 @@ export function isForeignAppstleUnskipUpstream500(
 }
 
 /**
+ * Foreign-app noise — Braintree's own gateway declining a customer's card at
+ * vault time on the portal payment-method-update flow
+ * ([[../specs/error-feed-drop-braintree-portal-vault-processor-decline-noise]]).
+ *
+ * `src/lib/portal/handlers/payment-method-update.ts` calls
+ * `vaultAndMigratePaymentMethod` inside a try/catch and, on any throw from the
+ * vault helper, logs
+ * `console.error(\`[portal/payment-method-update] vault failed: ${msg}\`)` then
+ * responds `502 { error: 'vault_failed' }`. Braintree's gateway sits at the top
+ * of that vault call: when the customer's own issuer declines the card, the
+ * SDK throws with a processor-decline body (`Cannot Authorize at this time
+ * (Life cycle)`, `Do Not Honor`, `Insufficient Funds`, `Pick Up Card`,
+ * `Expired Card`, `Invalid Card Number`, `Card Not Activated`,
+ * `Restricted Card`, `Declined`). That body plus the 502 status trip Vercel's
+ * log-drain `isError` gate on BOTH channels (level='error' AND status>=500),
+ * minting a paged Control Tower incident for what is a per-customer issuer
+ * decision — nothing on our side to repair and no code change can prevent it.
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/portal` — the portal payment-method-update handler
+ *      is the only surface that reaches this call site today; a different
+ *      caller would fire on a different path and stays captured / paged,
+ *   2. the trimmed message begins with the exact
+ *      `[portal/payment-method-update] vault failed: ` prefix (the handler's
+ *      console.error label — not any other portal log), AND
+ *   3. the tail matches a case-insensitive allow-list of known Braintree
+ *      processor-decline text families.
+ *
+ * A non-decline vault failure (SDK broken, connectivity, auth misconfig, or
+ * any other Braintree gateway error class) carries different marker text —
+ * e.g. `paymentMethod.create failed`, `Braintree API timeout`,
+ * `no_braintree_customer` — and stays captured / paged. Wired in
+ * `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP — the log is
+ * skipped before it becomes a group, so `recordError` never sees it and a
+ * chronic burst of issuer declines cannot mint a paged incident on a surface
+ * we can't fix.
+ */
+const BRAINTREE_PROCESSOR_DECLINE_MARKERS = [
+  "cannot authorize at this time",
+  "do not honor",
+  "insufficient funds",
+  "pick up card",
+  "expired card",
+  "invalid card number",
+  "card not activated",
+  "restricted card",
+  "declined",
+];
+
+export function isForeignBraintreeVaultProcessorDecline(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/portal") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("[portal/payment-method-update] vault failed: ")) return false;
+  const lower = text.toLowerCase();
+  return BRAINTREE_PROCESSOR_DECLINE_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/**
  * Foreign-app noise — EasyPost's account-level rate limit surfacing on the
  * returns-reconcile-sweep's `lookupTracking` call
  * ([[../specs/error-feed-scope-easypost-returns-sweep-rate-limit-noise]]).
