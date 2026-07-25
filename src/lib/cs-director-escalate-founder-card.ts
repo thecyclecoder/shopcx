@@ -47,6 +47,34 @@ export interface EscalateFounderCardInput {
    * the action" line so the surface stays consistent and never reads as a bare "needs human review".
    */
   recommendedRemedy?: Record<string, unknown> | null;
+  /**
+   * june-does-the-in-leash-part-before-escalating-the-residue Phase 1 — the compact outcome of
+   * the IN-LEASH partial remedy the executor fired BEFORE minting this card. When present, the
+   * card body prepends a "June already did:" section so the founder sees settled work as settled
+   * (not re-decided) and the escalation reads only about the RESIDUE. `null` on a plain escalation
+   * (June carried no `remedy`). See [[../../docs/brain/libraries/cs-director]] for the flow.
+   */
+  partialRemedyOutcome?: PartialRemedyCardInput | null;
+}
+
+/**
+ * The subset of `PartialRemedyOutcome` (from src/lib/cs-director.ts) the card body needs to
+ * render the "June already did" section. Kept local so this module stays pure with no import
+ * from cs-director.ts (avoids a circular type dep — the runtime shape is duck-typed).
+ */
+export interface PartialRemedyCardInput {
+  status:
+    | "landed"
+    | "failed"
+    | "loyalty_refused"
+    | "threshold_gated"
+    | "malformed"
+    | "delivery_failed";
+  landed_actions: string[];
+  failed_actions: Array<{ label: string; error?: string }>;
+  planned_action_types: string[];
+  message_delivered: boolean;
+  refusal_reason?: string | null;
 }
 
 export interface EscalateFounderCardRow {
@@ -76,6 +104,13 @@ export interface EscalateFounderCardRow {
      * "absent" from "unread").
      */
     recommended_remedy: Record<string, unknown> | null;
+    /**
+     * june-does-the-in-leash-part-before-escalating-the-residue Phase 1 — the compact outcome of
+     * the in-leash partial remedy the executor fired BEFORE this card was minted. `null` when the
+     * verdict carried no `remedy` (the escalation has no partial pre-work). The runner and any
+     * downstream approver/replay can read the settled work here without re-parsing the body.
+     */
+    partial_remedy_outcome: PartialRemedyCardInput | null;
   };
 }
 
@@ -109,6 +144,43 @@ export function summarizeRecommendedRemedy(remedy: Record<string, unknown> | nul
 }
 
 /**
+ * Render the "June already did" section for the CEO card body from a `PartialRemedyOutcome`. Pure.
+ * The returned string is a single labeled line ("Already done: ..." / "Attempted but failed: ..." /
+ * "Proposed partial remedy REFUSED: ...") — the founder reads one line to see the settled work
+ * OR why the partial did not land, without opening the ticket.
+ *
+ * On the `landed` status the line names the exact action types the executor verified so the CEO
+ * sees what changed on the customer's account. On `failed` it names both what landed AND what
+ * failed so the residue is complete. On the refusal statuses (loyalty/threshold/malformed) the
+ * line names the reason so the founder knows June considered the partial but the rails refused it.
+ */
+export function summarizePartialRemedyForCard(outcome: PartialRemedyCardInput): string {
+  const list = (arr: string[]) => (arr.length > 0 ? arr.join(", ") : "(none)");
+  switch (outcome.status) {
+    case "landed": {
+      const actions = outcome.landed_actions.length > 0 ? outcome.landed_actions : outcome.planned_action_types;
+      const suffix = outcome.message_delivered ? " · customer already notified" : "";
+      return `Already done by June: [${list(actions)}]${suffix}.`;
+    }
+    case "failed": {
+      const failedTxt = outcome.failed_actions
+        .map((f) => (f.error ? `${f.label} — ${f.error}` : f.label))
+        .join("; ");
+      return `Attempted but the executor escalated — landed: [${list(outcome.landed_actions)}]; failed: [${failedTxt || "(unspecified)"}]. No customer message sent.`;
+    }
+    case "loyalty_refused":
+      return `Proposed partial remedy [${list(outcome.planned_action_types)}] REFUSED by the loyalty ceiling — nothing fired.`;
+    case "threshold_gated":
+      return `Proposed partial remedy [${list(outcome.planned_action_types)}] EXCEEDS the founder-approval threshold — nothing fired (you decide the whole ticket).`;
+    case "delivery_failed":
+      return `Actions landed [${list(outcome.landed_actions)}] but customer message delivery failed — the customer has NOT been notified yet.`;
+    case "malformed":
+    default:
+      return `Proposed partial remedy could not be executed (${outcome.refusal_reason ?? "malformed"}) — nothing fired.`;
+  }
+}
+
+/**
  * Pure builder — returns the `dashboard_notifications` row shape (title/body/link/metadata) for the
  * CEO inbox card an escalate_founder verdict mints. Deterministic in its inputs — the same inputs
  * always yield the same title/body/metadata, so the test suite can exercise it end-to-end.
@@ -116,9 +188,24 @@ export function summarizeRecommendedRemedy(remedy: Record<string, unknown> | nul
  * Title is the human-facing chip in the approvals feed. Body carries the reasoning so the CEO can
  * read the finding without opening the ticket, and the deep-link takes them to the ticket for the
  * full context.
+ *
+ * june-does-the-in-leash-part-before-escalating-the-residue Phase 1: when `partialRemedyOutcome`
+ * is present, the body prepends "Already done by June: ..." so the founder sees SETTLED WORK as
+ * settled (not re-decided) and the escalation reads only about the RESIDUE. A `failed` /
+ * `delivery_failed` outcome renders as "Attempted but…" so the founder is not misled that the
+ * partial landed cleanly.
  */
 export function buildEscalateFounderCard(input: EscalateFounderCardInput): EscalateFounderCardRow {
-  const { ticketId, reasoning, jobId, triageRunId, blackSwanClass, blackSwanSource, recommendedRemedy } = input;
+  const {
+    ticketId,
+    reasoning,
+    jobId,
+    triageRunId,
+    blackSwanClass,
+    blackSwanSource,
+    recommendedRemedy,
+    partialRemedyOutcome,
+  } = input;
   const normalizedReason = normalizeReasoning(reasoning);
   const link = `/dashboard/tickets/${ticketId}`;
 
@@ -129,9 +216,17 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
   // action, or an explicit "CEO to decide" line when absent). The founder can approve/adjust in
   // one read rather than re-investigating; the surface stays the same shape whether or not June
   // proposed a concrete remedy (never a bare "needs human review").
+  //
+  // june-does-the-in-leash Phase 1 — when June also fired an in-leash partial remedy before
+  // escalating, prepend a labeled "Already done by June" line so the founder sees settled work as
+  // settled and the "Diagnosis:" / "Recommended remedy:" lines read as the RESIDUE.
+  const alreadyDoneLine = partialRemedyOutcome
+    ? `Already done by June: ${summarizePartialRemedyForCard(partialRemedyOutcome)}`
+    : null;
   const diagnosisLine = `Diagnosis: ${normalizedReason}`;
   const remedyLine = `Recommended remedy: ${summarizeRecommendedRemedy(recommendedRemedy)}`;
-  const body = [diagnosisLine, remedyLine].join("\n").slice(0, 4000);
+  const bodyLines = [alreadyDoneLine, diagnosisLine, remedyLine].filter((v): v is string => v !== null);
+  const body = bodyLines.join("\n").slice(0, 4000);
 
   // The structured recommendation persists on metadata verbatim so a downstream approver can
   // pick it up without re-parsing the body — null (not omitted) so the caller can distinguish
@@ -158,6 +253,7 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
       autonomous: true,
       agent_job_id: jobId,
       recommended_remedy: recommendedRemedyMeta,
+      partial_remedy_outcome: partialRemedyOutcome ?? null,
     },
   };
 }

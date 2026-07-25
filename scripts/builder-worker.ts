@@ -14625,6 +14625,11 @@ async function runCsDirectorCallJob(job: Job) {
       // bare "needs human review".
       try {
         const { buildEscalateFounderCard } = await import("../src/lib/cs-director-escalate-founder-card");
+        // june-does-the-in-leash-part-before-escalating-the-residue Phase 1 — thread the compact
+        // partial-remedy outcome (from applyBoxCsDirectorCall above) into the card so the body
+        // reads "Already done by June: …" for the settled work and the Diagnosis/Recommended remedy
+        // lines describe the RESIDUE the founder still owns. Null when the verdict carried no
+        // `remedy` (plain escalation).
         const row = buildEscalateFounderCard({
           ticketId,
           reasoning: verdict.reasoning,
@@ -14633,6 +14638,7 @@ async function runCsDirectorCallJob(job: Job) {
           blackSwanClass: cls.isBlackSwan ? (cls.class_key ?? null) : null,
           blackSwanSource: cls.isBlackSwan ? (cls.source ?? null) : null,
           recommendedRemedy: verdict.recommended_remedy ?? null,
+          partialRemedyOutcome: applyResult?.partial_remedy_outcome ?? null,
         });
         const { error: notifErr } = await db.from("dashboard_notifications").insert({
           workspace_id: job.workspace_id,
