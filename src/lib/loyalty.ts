@@ -463,3 +463,52 @@ export async function deductPoints(
     .eq("id", member.id);
   member.points_balance = curBal - actualDeduction;
 }
+
+export type RedemptionConsumedVia =
+  | "order"
+  | "subscription_renewal"
+  | "refund";
+
+/**
+ * The single chokepoint that stamps `loyalty_redemptions.used_at` when a
+ * redemption is genuinely delivered — its discount code appears on a paid
+ * order, the subscription contract it's applied to renews, or it's paid
+ * out as a refund. Owns the transition off `active`/`applied` → `used` so
+ * the orchestrator's unused-rewards list ([[../libraries/sonnet-orchestrator-v2]])
+ * is true.
+ *
+ * Idempotent by construction: the UPDATE is compare-and-set on
+ * `used_at IS NULL`, so a second concurrent call is a no-op and can
+ * never fire a second side-effect (e.g. double-refund). Callers can
+ * branch on the returned `consumed` flag to detect that they lost the
+ * race and skip any consumer-facing follow-up.
+ *
+ * A row that's already `rolled_back` (points re-credited via the atomic
+ * redeem→apply contract, see [[../libraries/action-executor]]) still has
+ * `used_at IS NULL` and is intentionally OUT OF SCOPE — the guard also
+ * requires `status IN ('active', 'applied')` so a rolled-back redemption
+ * that somehow reappears on an order cannot be marked used.
+ */
+export async function consumeRedemption(
+  workspaceId: string,
+  discountCode: string,
+  how: RedemptionConsumedVia,
+): Promise<{ consumed: boolean; redemptionId: string | null }> {
+  const admin = createAdminClient();
+
+  const { data } = await admin
+    .from("loyalty_redemptions")
+    .update({
+      used_at: new Date().toISOString(),
+      status: "used",
+      consumed_via: how,
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("discount_code", discountCode)
+    .is("used_at", null)
+    .in("status", ["active", "applied"])
+    .select("id");
+
+  const row = data?.[0];
+  return { consumed: !!row, redemptionId: row?.id ?? null };
+}

@@ -94,6 +94,26 @@ Deduct points from a member's balance and record a `spending`-type transaction. 
 async function deductPoints(member: LoyaltyMember, points: number, orderId: string | null, type: "refund" | "chargeback", description: string,) : Promise<void>
 ```
 
+### `consumeRedemption` — function
+
+```ts
+async function consumeRedemption(workspaceId: string, discountCode: string, how: RedemptionConsumedVia,) : Promise<{ consumed: boolean; redemptionId: string | null }>
+```
+
+**The single chokepoint that stamps `loyalty_redemptions.used_at`** when a redemption is genuinely delivered — its discount code lands on a paid order, its subscription contract renews, or it's paid out as a refund. Owns the transition off `active` / `applied` → `used` and records how the reward was delivered on the same UPDATE (`consumed_via` — see [[../tables/loyalty_redemptions]]).
+
+- **Idempotent by construction.** The UPDATE is compare-and-set on `used_at IS NULL` AND `status IN ('active','applied')`, so a second concurrent call is a no-op and can never fire a second consumer-facing side-effect (e.g. double-refund). The returned `consumed` flag tells the caller whether THIS call was the one that stamped it — branch on it to gate any downstream action.
+- **Rolled-back rows are out of scope.** A `rolled_back` redemption (points already re-credited via the atomic redeem→apply contract — see [[action-executor]]) still has `used_at IS NULL`, but the `status IN ('active','applied')` guard prevents it being marked used if it somehow surfaces on an order later.
+- **Everything else only reads `used_at`.** The orchestrator's unused-rewards list ([`src/lib/sonnet-orchestrator-v2.ts:1369`](../../src/lib/sonnet-orchestrator-v2.ts)), the `/api/loyalty/redemptions` projection, and the loyalty dashboard's display column all trust this field — write to it only through `consumeRedemption`. Phase 2 of the spec wires the actual consumption points (order ingest, `redeem_points_as_refund`, subscription renewal) to call this function; Phase 1 only ships the chokepoint.
+
+### `RedemptionConsumedVia` — type
+
+```ts
+type RedemptionConsumedVia = "order" | "subscription_renewal" | "refund"
+```
+
+Values the caller passes as `consumeRedemption`'s `how` argument. Persisted verbatim to `loyalty_redemptions.consumed_via` on the winning compare-and-set write.
+
 ### `LoyaltyMember` — interface
 
 ### `RedemptionTier` — interface
