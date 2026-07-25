@@ -17,7 +17,8 @@ Points redemption events — coupon issued, used, expired.
 | `shopify_discount_id` | `text` | ✓ |  |
 | `discount_value` | `numeric` | — |  |
 | `status` | `text` | — | default: `'active'` |
-| `used_at` | `timestamptz` | ✓ |  |
+| `used_at` | `timestamptz` | ✓ | Stamped by [[../libraries/loyalty]] `consumeRedemption` when the reward is genuinely delivered (order landed, subscription renewed, refund paid). Compare-and-set on `used_at IS NULL` so a double-call is a no-op — never sprinkle raw writes to this column. |
+| `consumed_via` | `text` | ✓ | How the row was consumed at `used_at` time. Values: `order` · `subscription_renewal` · `refund`. Written on the same UPDATE as `used_at` by `consumeRedemption`; NULL while `used_at IS NULL`. |
 | `expires_at` | `timestamptz` | ✓ |  |
 | `created_at` | `timestamptz` | ✓ | default: `now()` |
 
@@ -60,7 +61,12 @@ const { count } = await admin.from("loyalty_redemptions")
 ## Gotchas
 
 - **`status` column values:** `active` (ready to apply), `applied` (landed on subscription, waiting for next charge), `used` (consumed on an order), `expired` (past expiry date or superseded by a regen), `rolled_back` (re-credited after apply failed — Phase 1 of the atomic redeem→apply contract). No CHECK constraint; values are documented in [[../libraries/loyalty]]. The `expired` status is set atomically via `claimRegenSpendSlot` ([[../libraries/action-executor]]) when a regen is about to mint a successor code — this is the compare-and-set guard that gates idempotent `spendPoints` on `apply_loyalty_coupon` retry.
-- **Never mutate `status` directly.** All status changes route through [[../libraries/loyalty]] helpers (`rollbackLoyaltyRedemptionOnApplyFailure` for rollback) or the atomic guard (`claimRegenSpendSlot` for regen). Raw updates bypass the idempotency/atomicity contracts and leave the ledger in drift.
+- **Never mutate `status` directly.** All status changes route through [[../libraries/loyalty]] helpers (`consumeRedemption` for the active/applied → used transition, `rollbackLoyaltyRedemptionOnApplyFailure` for rollback) or the atomic guard (`claimRegenSpendSlot` for regen). Raw updates bypass the idempotency/atomicity contracts and leave the ledger in drift.
+- **`used_at` writers and their consumption kinds:**
+  - `order` — [[../libraries/loyalty]] `consumeRedemption` called from the Shopify order-ingest webhook ([`src/lib/shopify-webhooks.ts`](../../src/lib/shopify-webhooks.ts) `handleOrderEvent`, inside `isNewOrder`). Fires per LOYALTY-* code in `payload.discount_codes`. Compare-and-set on `used_at IS NULL` so a webhook replay is idempotent. Covers subscription renewals — they flow through the same webhook.
+  - `refund` — the loyalty cash-refund path in [[../libraries/action-executor]]. Two writers: (a) the `redeem_points_as_refund` handler stamps `consumed_via='refund'` inline on the born-used REFUND-* row it mints (status=`redeemed_as_refund`, `used_at=now`); (b) `reconcileLoyaltyRefundCoupons` stamps `consumed_via='refund'` on every active LOYALTY-* row it flips to `redeemed_as_refund` in the ticket window (SC135320 dangling-coupon reconciliation). Neither routes through `consumeRedemption` — its compare-and-set is scoped to `status IN ('active','applied') → 'used'`; the refund path uses `redeemed_as_refund` for the SC135320 semantic.
+  - `subscription_renewal` — reserved for a future direct writer if renewal delivery ever needs a distinct code path. The `RedemptionConsumedVia` type declares it so callers can pass it through `consumeRedemption`; nothing writes it today (renewals ride the `order` path via the shared webhook).
+- **The rest of the codebase only READS `used_at`** — the ticket orchestrator's unused-rewards list ([[../libraries/sonnet-orchestrator-v2]]), the `/api/loyalty/redemptions` projection, and the loyalty dashboard's display column. Any NEW consumption point MUST either call `consumeRedemption` (transitioning an existing `active`/`applied` row) or stamp `consumed_via` inline on a mint-and-use insert; never issue a raw `.update({used_at})` — that bypasses the chokepoint and the SC135320 status contract.
 
 ---
 
