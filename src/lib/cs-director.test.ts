@@ -46,6 +46,7 @@ import {
   type CsDirectorApplyDeps,
   type CsDirectorVerdictInput,
 } from "./cs-director";
+import { decideCsDirectorTicketTransition } from "./cs-director-ticket-transition";
 import type { StructuredSpecInput } from "./author-spec";
 
 type Admin = Parameters<typeof applyBoxCsDirectorCall>[0];
@@ -1291,6 +1292,58 @@ test("Phase 3 — author_spec parks needs_attention when the SDK returns false (
   assert.equal(result.ok, false);
   assert.equal(result.needs_attention, true);
   assert.equal(result.reason, "author_spec_write_returned_false");
+});
+
+// ── Phase 2 of cs-director-spec-claim-must-match-the-actual-write ──
+// Alongside the malformed-remedy park test above, cover the failed-write path end-to-end: an
+// author_spec verdict whose SDK write fails MUST park needs_attention AND, when composed with the
+// ticket transition, MUST NOT close + de-escalate the ticket. Ticket 2b7ea029 was closed on a
+// phantom spec because the transition ran unconditionally on `decision='author_spec'`; the
+// close was the irreversible half that hid the miss for a day.
+
+test("Phase 2 — a FAILED author_spec write parks needs_attention AND the composed ticket transition keeps the ticket open+escalated (ticket 2b7ea029 shape)", async () => {
+  const authorDeps: AuthorSpecDeps = {
+    authorSpec: async () => false, // chokepoint guard rejected — same shape as the ticket-2b7ea029 miss
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "author_spec",
+    reasoning: "Bug identified — appstle discount replace clobbers manual discounts.",
+    spec_seed: {
+      slug: "appstle-discount-replace-atomic-and-preserve-manual-discounts",
+      title: "Preserve manual discounts across Appstle discount replace",
+      intent: "why",
+      problem: "what",
+    },
+  };
+  const admin = authorSpecAdmin("ticket-2b7ea029");
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, { authorSpec: authorDeps });
+
+  // The executor half — a failed write parks needs_attention with the concrete reason.
+  assert.equal(result.ok, false);
+  assert.equal(result.needs_attention, true);
+  assert.equal(result.reason, "author_spec_write_returned_false");
+  assert.equal(result.spec_slug, undefined, "no spec landed → no spec_slug surfaced");
+
+  // The transition half — the runner threads the result into `decideCsDirectorTicketTransition`;
+  // the ticket MUST NOT close on a failed write. (`result.ok` was asserted `false` above; TS narrows
+  // to that literal, so the runner's `ok===true && needs_attention!==true` predicate resolves to
+  // `false` here without re-computing it.)
+  const transition = decideCsDirectorTicketTransition({
+    decision: verdict.decision,
+    reasoning: verdict.reasoning,
+    remedy: null,
+    authorSpecOutcome: { ok: false, reason: result.reason },
+    now: "2026-07-25T12:00:00.000Z",
+  });
+  assert.equal(transition.action_key, "keep_escalated_needs_attention");
+  assert.equal(transition.patch.status, undefined, "MUST NOT close on a phantom author_spec");
+  assert.equal(transition.patch.closed_at, undefined);
+  assert.equal(transition.patch.escalated_at, undefined, "escalation MUST NOT be cleared on a failed write");
+  assert.match(
+    String(transition.patch.escalation_reason),
+    /author_spec FAILED \(author_spec_write_returned_false\) — no spec was written/,
+    "escalation_reason MUST name the failure so a CS agent sees WHY the ticket is back in-queue",
+  );
 });
 
 test("Phase 3 — author_spec parks needs_attention when the SDK throws", async () => {

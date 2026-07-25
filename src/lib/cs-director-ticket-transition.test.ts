@@ -221,3 +221,90 @@ test("escalate_founder does NOT touch the active playbook (defer, not resolve)",
   assert.equal(t.patch.playbook_step, undefined);
   assert.equal(t.patch.playbook_exceptions_used, undefined);
 });
+
+// ── Phase 2 of cs-director-spec-claim-must-match-the-actual-write ──
+// The irreversible half of ticket 2b7ea029: the ticket was CLOSED + DE-ESCALATED on a phantom
+// `author_spec` verdict, and nobody revisits a closed ticket — so the missing spec was invisible
+// for a day. The transition must close ONLY on a CONFIRMED write. A failed write leaves the
+// ticket OPEN + ESCALATED + escalation_reason stamped with the failure reason so it lands back
+// in the queue for a human, not on the "resolved" pile.
+
+test("Phase 2 — author_spec with a CONFIRMED write (outcome ok:true) still closes + de-escalates + clears the playbook", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Analyzer gap.",
+    authorSpecOutcome: { ok: true },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.escalated_at, null);
+  assert.equal(t.patch.active_playbook_id, null);
+});
+
+test("Phase 2 — author_spec with a FAILED write (outcome ok:false) leaves the ticket OPEN + ESCALATED + needs_attention", () => {
+  // The exact regression class from ticket 2b7ea029 — the SDK's chokepoint guard rejected the
+  // write. The transition MUST NOT close: the ticket stays open, escalation is not cleared, and
+  // escalation_reason names the failure so a CS agent scanning the queue immediately sees WHY
+  // the ticket is back in-queue instead of resolved.
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Bug identified, structural fix needed.",
+    authorSpecOutcome: { ok: false, reason: "author_spec_write_returned_false" },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  // MUST NOT close — the phantom-close was the irreversible half of the miss.
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.closed_at, undefined);
+  assert.equal(t.patch.resolved_at, undefined);
+  // MUST NOT clear the escalation — the ticket lands back in-queue.
+  assert.equal(t.patch.escalated_at, undefined);
+  assert.equal(t.patch.escalated_to, undefined);
+  // MUST stamp the escalation_reason with the failure so the queue reader sees WHY.
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(author_spec_write_returned_false\)/);
+  assert.match(String(t.patch.escalation_reason), /no spec was written/);
+  assert.match(String(t.patch.escalation_reason), /needs human review/);
+  assert.equal(t.patch.updated_at, NOW);
+  // MUST NOT clear the pre-escalation playbook — the structural fix never landed; a customer
+  // follow-up may still legitimately resume the pre-escalation lane after a human resolves this.
+  assert.equal(t.patch.active_playbook_id, undefined);
+  assert.equal(t.patch.playbook_step, undefined);
+  assert.equal(t.patch.playbook_exceptions_used, undefined);
+});
+
+test("Phase 2 — author_spec failed write with ticket_id_unresolved reason renders the same needs-attention shape", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Analyzer gap identified.",
+    authorSpecOutcome: { ok: false, reason: "ticket_id_unresolved" },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  assert.equal(t.patch.status, undefined);
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(ticket_id_unresolved\)/);
+});
+
+test("Phase 2 — author_spec failed write with an empty reason still stamps a needs-attention reason (unknown_reason fallback)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "x",
+    authorSpecOutcome: { ok: false },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(unknown_reason\)/);
+});
+
+test("Phase 2 — author_spec without an outcome (legacy back-compat) still closes + de-escalates (unchanged shipped behavior)", () => {
+  // A stale caller that predates Phase 2 (or a unit test above that doesn't thread the outcome)
+  // gets the original close_and_deescalate shape so nothing regresses. The shipped
+  // runCsDirectorCallJob call site ALWAYS threads the outcome; this path exists only for back-compat.
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "x",
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+});
