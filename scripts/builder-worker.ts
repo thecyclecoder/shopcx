@@ -1151,7 +1151,7 @@ function accountLabel(_dir: string, idx: number): string {
 // heartbeat so the Control Tower / box-health view shows WHY load shifted (a cap, a failover, an
 // all-capped park, a reset recovery), not just the current per-account numbers. In-memory: a restart
 // re-derives state from live failures, and these are operational breadcrumbs, not a durable audit log.
-type AccountEvent = { at: string; type: "cap" | "failover" | "all_capped" | "recovered"; account: string; detail: string };
+type AccountEvent = { at: string; type: "cap" | "failover" | "all_capped" | "recovered" | "auth_expired"; account: string; detail: string };
 const accountEvents: AccountEvent[] = [];
 const ACCOUNT_EVENTS_MAX = 12;
 function recordAccountEvent(type: AccountEvent["type"], dir: string, detail: string) {
@@ -1347,6 +1347,88 @@ function markAccountCapped(dir: string, now: number, errorText?: string) {
     });
   }
 }
+// ── Auth-expiry eject + CEO alert ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 2) ─
+// When a session's account rejects its OAuth token as expired (isTransientAuthError-signature), pull that
+// account from rotation (same cap machinery as a usage wall, one full weekly window so a re-probe can't
+// spam alerts) and raise a CEO card naming the config dir + the exact `CLAUDE_CONFIG_DIR=<dir> claude
+// auth login` command. Reactive backstop for the case a token is rejected as expired even when local
+// `.credentials.json` metadata still looks valid (the class Phase 1's proactive selection guard can't
+// catch). Called from `withAccountFailover` (the shared session chokepoint every non-build lane routes
+// through) so a dead account is ejected + the ticket re-routes to a healthy account in the SAME turn.
+function markAccountAuthExpired(dir: string, now: number, detail: string) {
+  const a = accountByDir.get(dir);
+  if (!a) return;
+  // A pool account's dead-token window: hold it out for a FULL weekly window so we don't re-probe (and
+  // re-alert) every ~20 min while the CEO is asleep. On the next boot the restore path clamps to the
+  // weekly ceiling too, so the ejection survives a restart without escalating past that ceiling.
+  a.cappedUntil = Math.max(a.cappedUntil, now + WEEKLY_CAP_MAX_MS);
+  if (!a.capEventLogged) {
+    a.capEventLogged = true;
+    recordAccountEvent("auth_expired", dir, `OAuth token rejected as expired — pulled from rotation until ${astTime(a.cappedUntil)} (needs CEO re-login)`);
+    console.warn(`[multi-account] ${dir} auth-expired → pulled from rotation until ${astTime(a.cappedUntil)}: ${detail.slice(0, 200)}`);
+    // Fire-and-forget the CEO card. An alert-write failure must never interfere with account
+    // management or the hop-to-healthy path that just re-routed the ticket.
+    void emitCeoAuthExpiryAlertBestEffort(dir);
+  }
+}
+
+const AUTH_EXPIRED_ALERT_TYPE = "box_account_auth_expired";
+// Insert a CEO dashboard_notifications card naming the pool account (config dir) whose OAuth token
+// was rejected as expired, plus the exact re-login command. Deduped by config-dir so a persistently-
+// expired account (repeated re-probes) doesn't spam the inbox — one open card per account at a time.
+// Best-effort: called via `void` from `markAccountAuthExpired`; a failure logs + returns, never throws.
+async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const idx = accounts.findIndex((a) => a.configDir === configDir);
+    const label = accountLabel(configDir, idx < 0 ? 0 : idx);
+    const dedupeKey = `box_account_auth_expired:${configDir}`;
+    const { data: open, error: openErr } = await db
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("type", AUTH_EXPIRED_ALERT_TYPE)
+      .eq("metadata->>dedupe_key", dedupeKey)
+      .eq("dismissed", false)
+      .limit(1);
+    if (openErr) {
+      console.warn(`[multi-account] auth-expired dedupe lookup failed for ${configDir}: ${openErr.message}`);
+      return;
+    }
+    if ((open ?? []).length > 0) return; // one open card per account — nothing to add.
+    const loginCmd = `CLAUDE_CONFIG_DIR=${configDir} claude auth login`;
+    const title = `Box pool account ${label} needs a new login`;
+    const body =
+      `The box pool account ${label} (config dir ${configDir}) rejected its OAuth token as expired ` +
+      `and was pulled from rotation. Sessions have re-routed to a healthy account, but the pool is one ` +
+      `account down until you re-login. Run: ${loginCmd}`;
+    const { error: notifErr } = await db.from("dashboard_notifications").insert({
+      workspace_id: workspaceId,
+      type: AUTH_EXPIRED_ALERT_TYPE,
+      title: title.slice(0, 200),
+      body,
+      link: "/dashboard/developer/control-tower",
+      metadata: {
+        dedupe_key: dedupeKey,
+        config_dir: configDir,
+        account_label: label,
+        login_command: loginCmd,
+        autonomous: true,
+      },
+      read: false,
+      dismissed: false,
+    });
+    if (notifErr) {
+      console.warn(`[multi-account] CEO auth-expired alert insert failed for ${configDir}: ${notifErr.message}`);
+    } else {
+      console.warn(`[multi-account] CEO auth-expired alert minted for ${label} (${configDir}) — awaiting re-login`);
+    }
+  } catch (e) {
+    console.warn(`[multi-account] CEO auth-expired alert threw (swallowed) for ${configDir}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 // ── fleet-usage-cockpit Phase 1: per-account snapshots + wall-event discovery ─────────────────────
 // Resolve the owner workspace the box operates against. Mirrors coverage-register's resolveWorkspace:
 // the newest agent_jobs row's workspace, else the oldest workspaces row. Memoized (workspace id is
@@ -1623,6 +1705,23 @@ async function withAccountFailover<T extends { isError: boolean; raw: string; re
       const next = pickNewSessionAccount(Date.now());
       if (!next) return { result: null, configDir, allCapped: true };
       recordAccountEvent("failover", configDir, `failing over — re-running on ${accountLabel(next.configDir, accounts.indexOf(next))}`);
+      sessionId = null; // a fresh account can't --resume the prior account's session
+      configDir = next.configDir;
+      continue;
+    }
+    // ── Auth-expiry eject + hop ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 2)
+    // Mirrors the usage-cap branch above — same "pull-then-hop" shape, but for the OAuth-expiry class the
+    // in-session retry loop in `runBoxSession` (Phase 1) already exhausted for. Ejecting via
+    // `markAccountAuthExpired` (long window + CEO card) so a dead pool account can't keep eating sessions,
+    // then hopping to a healthy account so the ticket is HANDLED on this same turn — never dropped as
+    // 'errored with no direction'. `isTransientAuthError` explicitly rules out `isUsageCapError`, and the
+    // usage-cap branch above returns before this check, so a genuine usage wall still takes the wall/hop
+    // path and never mis-fires an auth-expired ejection.
+    if (r.isError && isTransientAuthError(`${r.resultText ?? ""}\n${r.raw}`)) {
+      markAccountAuthExpired(configDir, Date.now(), `${r.resultText ?? ""}\n${r.raw}`);
+      const next = pickNewSessionAccount(Date.now());
+      if (!next) return { result: null, configDir, allCapped: true };
+      recordAccountEvent("failover", configDir, `auth-expired — re-running on ${accountLabel(next.configDir, accounts.indexOf(next))}`);
       sessionId = null; // a fresh account can't --resume the prior account's session
       configDir = next.configDir;
       continue;
@@ -12334,6 +12433,44 @@ async function runTicketHandleJob(job: Job) {
         log_tail: raw.slice(-2000),
       });
       return;
+    }
+    // ── Auth-expiry backstop ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 2) ──
+    // The shared session path (`withAccountFailover`) already ejects + hops on an auth-expired 401 before
+    // this branch runs, so reaching here with an auth-expiry signature means EVERY pool account was
+    // unavailable this turn (all capped + all expired) OR the failover ran out. Either way the honest
+    // action is NOT to fail the ticket — the token/account problem is not the customer's fault. Ensure
+    // the ejection + CEO alert fired (idempotent) and requeue the job so a fresh worker picks it up once
+    // an account is healthy again. Compare-and-set on status='in_progress' so a concurrent transition
+    // can't overwrite a resolved row.
+    if (isTransientAuthError(`${resultText ?? ""}\n${raw}`)) {
+      if (handleDir) markAccountAuthExpired(handleDir, Date.now(), `${resultText ?? ""}\n${raw}`);
+      await stampAgentSessionNote(
+        ticketId,
+        `Sol's session ${sessShort} deferred: every pool account's OAuth token is currently expired — requeued for a healthy account (CEO re-login needed).`,
+      );
+      const { data: requeued, error: requeueErr } = await db
+        .from("agent_jobs")
+        .update({
+          status: "queued",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: "TRANSIENT_AUTH_REQUEUE: every pool account's OAuth token is expired — awaiting a healthy account (CEO re-login)",
+          log_tail: raw.slice(-2000),
+        })
+        .eq("id", job.id)
+        .eq("workspace_id", job.workspace_id)
+        .eq("status", "in_progress")
+        .select("id");
+      if (requeueErr) {
+        console.warn(`${tag} auth-expired requeue failed (${requeueErr.message}) — falling through to failed`);
+      } else if (!requeued || requeued.length === 0) {
+        console.warn(`${tag} auth-expired requeue matched 0 rows (concurrent transition) — leaving state as-is`);
+        return;
+      } else {
+        console.warn(`${tag} auth-expired: ticket ${ticketId} requeued instead of failed — CEO alert emitted for ${handleDir ?? "(unknown dir)"}`);
+        return;
+      }
     }
     await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: the box session errored with no direction.`);
     await update(job.id, { status: "failed", error: "Sol first-touch errored with no direction", log_tail: raw.slice(-2000) });
