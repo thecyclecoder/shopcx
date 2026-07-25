@@ -279,7 +279,9 @@ export type DirectorActionKind =
   // + WHY. Emitted from `scripts/builder-worker.ts` `runBuildJob` `finalizeBuiltPhase` via
   // `defaultAuditReconciliation`. Owned by Platform (director_function='platform'). metadata:
   // { job_id, spec_slug, phase_position, check_position, check_description, old_pattern, new_pattern,
-  //   step: 'normalized_case' | 'judge_proposal', rationale, evidence, autonomous:true }.
+  //   step: 'normalized_case' | 'judge_repoint_auto_applied', rationale, evidence, autonomous:true }.
+  //   ([[../specs/build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 1 widens the
+  //   step vocabulary to include the judge-repoint auto-apply — the deterministic grep is the gate.)
   | "check_reconciled"
   // Cap-reached / defer-with-un-reconcilable-list — the reconciler's cap fired (or the remaining
   // checks did NOT reconcile), so the deferring branch runs with the un-healed list surfaced. Emitted

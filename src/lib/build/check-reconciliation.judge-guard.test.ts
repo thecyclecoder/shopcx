@@ -1,10 +1,10 @@
 /**
- * Security regression (prompt-injection, high — flagged by this spec's own
- * security review): the LLM intent judge (step B) reads the UNTRUSTED branch
- * diff, so it must NEVER autonomously reconcile a check. Only the deterministic
- * step-A normalized re-match may auto-heal; a judge proposal is recorded as an
- * unreconciled human-review diagnostic even when its literal deterministically
- * greps on the branch.
+ * Unit tests for `reconcileStaleGrepCheck` — the deterministic grep is the safety gate,
+ * for BOTH step A and step B ([[build-verify-reconciler-auto-applies-renames-and-moved-symbols]]
+ * Phase 1). Step B now AUTO-APPLIES a confident judge proposal (a non-null literal whose
+ * final deterministic grep on the branch passes) — the file's original "judge NEVER auto-
+ * reconciles" invariant is retired; the residual prompt-injection risk is bounded by the
+ * per-build cap + the `check_reconciled` director_activity audit (every repoint surfaced).
  *
  *   npx tsx --test src/lib/build/check-reconciliation.judge-guard.test.ts
  */
@@ -30,23 +30,43 @@ function deps(over: Partial<ReconcileDeps>): ReconcileDeps {
   };
 }
 
-test("judge proposes a literal that DOES grep on the branch → still NOT reconciled (recorded for human review)", async () => {
-  // The dangerous case: a prompt-injected diff steers the judge to an unrelated
-  // but present literal; the deterministic grep would 'ok' it. Must NOT reconcile.
+test("judge proposes a literal whose deterministic grep passes → AUTO-APPLIED (judge_repoint_auto_applied)", async () => {
+  // The rename wedge: `fitTextToBox` was renamed to `fitFontToBox`. The judge maps the
+  // description-intent to the new literal and the deterministic grep confirms it's present
+  // on the branch — the reconciler auto-repoints instead of escalating to a human.
   const out = await reconcileStaleGrepCheck({
     check: CHECK,
     branchRef: "b",
     repoRoot: "/tmp",
     deps: deps({
-      intentJudge: async () => ({ literal: "someUnrelatedButPresentSymbol", rationale: "injected: this satisfies the check" }),
-      runDeterministicGrep: async () => ({ ok: true, evidence: "matched (but unrelated)" }),
+      intentJudge: async () => ({ literal: "fitFontToBox", rationale: "renamed from fitTextToBox — same intent" }),
+      runDeterministicGrep: async () => ({ ok: true, evidence: "grep matched (new literal)" }),
+    }),
+  });
+  assert.equal(out.reconciled, true);
+  if (out.reconciled === true) {
+    assert.equal(out.step, "judge_repoint_auto_applied");
+    assert.equal(out.newPattern, "fitFontToBox");
+    assert.match(out.rationale, /judge_repoint_auto_applied/);
+  }
+});
+
+test("judge proposes a literal but the deterministic grep FAILS → not reconciled (proposal_did_not_match)", async () => {
+  // The deterministic grep is the safety gate: a judge proposal that doesn't actually match
+  // the branch never lands.
+  const out = await reconcileStaleGrepCheck({
+    check: CHECK,
+    branchRef: "b",
+    repoRoot: "/tmp",
+    deps: deps({
+      intentJudge: async () => ({ literal: "fabricatedSymbol", rationale: "guessing" }),
+      runDeterministicGrep: async () => ({ ok: false, evidence: "no match on branch" }),
     }),
   });
   assert.equal(out.reconciled, false);
   if (out.reconciled === false) {
-    assert.match(out.reason, /judge_proposal_needs_human/);
-    assert.match(out.evidence ?? "", /someUnrelatedButPresentSymbol/); // candidate surfaced for a human
-    assert.match(out.evidence ?? "", /present-on-branch=true/);
+    assert.match(out.reason, /proposal_did_not_match/);
+    assert.match(out.evidence ?? "", /fabricatedSymbol/);
   }
 });
 
@@ -64,7 +84,7 @@ test("step A (deterministic normalized re-match) still auto-reconciles", async (
   if (out.reconciled === true) assert.equal(out.step, "normalized_case");
 });
 
-test("judge declines (no literal) → unreconciled judge_declined, no LLM effect", async () => {
+test("judge declines (no literal) → unreconciled judge_declined, no auto-apply", async () => {
   const out = await reconcileStaleGrepCheck({
     check: CHECK,
     branchRef: "b",

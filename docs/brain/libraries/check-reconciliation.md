@@ -27,7 +27,7 @@ A case-insensitive + whitespace-tolerant ripgrep against the same path on the br
 
 This catches the vast majority of the wedge — case / whitespace drift — with no LLM call.
 
-### Step B — bounded intent judge (only if A misses)
+### Step B — bounded intent judge (only if A misses) — AUTO-APPLIES a confident proposal
 
 Reads:
 - The check's `description` — the INTENT the author wrote in prose (e.g. "reconciler defined").
@@ -35,15 +35,17 @@ Reads:
 
 Asks Claude Sonnet (`SONNET_MODEL` from [[ai-models]]) to decide whether the diff satisfies the described intent under a DIFFERENT literal and, if so, return the EXACT literal present in the diff. Strict-JSON output: `{literal: string|null, rationale: string}`. Max 400 output tokens. Fail-closed on any API / parse error → `literal: null`.
 
-**SECURITY — the judge NEVER auto-reconciles.** The judge reads the UNTRUSTED branch diff, so a prompt-injection comment in that diff could steer it to an unrelated-but-present literal; a deterministic grep of that literal only proves it EXISTS, not that it satisfies the check's intent. So step B is **advisory only**: a judge proposal is recorded as an UNRECONCILED, human-review diagnostic (`reconciled: false, reason: 'judge_proposal_needs_human'`, with the candidate literal + `present-on-branch=<bool>` in `evidence`). The caller defers/escalates exactly as for any un-healed check — a real code-missing signal is never masked, and a human decides whether to repoint the pattern by hand. **Only step A (deterministic normalized re-match) auto-heals.** (Security review of `build-verify-self-heals-stale-grep-checks-before-deferring`, 2026-07-23.)
+**AUTO-APPLIES a confident proposal** ([[../specs/build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 1). When the judge returns a non-null literal AND the runner's real deterministic grep of that literal on the branch passes, the caller repoints the pattern via `upsertPhaseChecks` (`{reconciled: true, step: 'judge_repoint_auto_applied', newPattern, rationale, evidence}`) — same replace-by-position semantics as step A. **The deterministic grep IS the safety gate** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`): a judge proposal that doesn't actually match the branch never lands. A judge that returns null → `{reconciled: false, reason: 'judge_declined'}`; a proposal whose final grep fails → `{reconciled: false, reason: 'proposal_did_not_match'}` — the caller defers/escalates exactly as before (a real code-missing signal is never masked). The previous "advisory only / needs-human" path is retired: parking real, fully-built specs on a rename was itself the wedge this spec closes.
+
+**Residual prompt-injection risk** — a crafted diff can steer the judge to an unrelated but present literal that DOES grep. Bounded by (a) `maxReconciliationsPerBuild` in `reconcileFailingGrepChecksForSpec` (a pathological spec whose EVERY grep check is stale can't silently pass) and (b) the `check_reconciled` [[../tables/director_activity]] row emitted for EVERY repoint (`step='judge_repoint_auto_applied'`) — every auto-correction lands on the CEO-facing build card, never silent. A mis-guessed spec can't hide behind the reconciler.
 
 ## Invariants
 
 1. **`expect: 'present'` ONLY.** An `expect: 'absent'` miss is a different, real signal (the code SHOULDN'T be there and IS) — never reconciled.
-2. **Only step A (deterministic normalized re-match) auto-reconciles, and its repointed pattern MUST still pass a real deterministic grep** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`) — no bypass, no phantom-ship. The LLM judge never clears a check.
-3. **The judge NEVER decides pass/fail and NEVER auto-reconciles — it only surfaces a candidate literal for a human to review.** (Prompt-injection guard — see Step B above.)
+2. **Every repoint (step A OR step B) MUST still pass a real deterministic grep of the new pattern before it lands** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`) — no bypass, no phantom-ship. The final grep is the safety gate.
+3. **A judge that returns null OR whose candidate fails the final deterministic grep NEVER auto-reconciles** — the check surfaces as unhealed and the caller defers/escalates exactly as before. A real code-missing signal is never masked.
 4. **Capped per build.** `reconcileFailingGrepChecksForSpec` accepts `maxReconciliationsPerBuild` (default: total grep-check count in the spec). Exceeded → any remaining unhealed checks report `cap_reached` and the caller defers as before.
-5. **Every reconciliation is surfaced — never silent.** Phase 1 logs each repair to the run log tail (`check-reconciled: phase N check 'D' (step): 'old' → 'new' — rationale`); Phase 2 wires the same audit hook to the build-card surface so the CEO sees what was auto-corrected.
+5. **Every reconciliation is surfaced — never silent.** Each successful repair (step A OR step B) writes a `director_activity.action_kind='check_reconciled'` row carrying the `step` that fired (`normalized_case` | `judge_repoint_auto_applied`); the worker mirrors it into the run log tail.
 6. **Best-effort** — a thrown reconciler falls through to the existing defer path unchanged. The reconciler NEVER masks a real code-missing failure.
 
 ## Contract
@@ -58,8 +60,10 @@ export interface FailingGrepCheck {
 }
 
 reconcileStaleGrepCheck({ check, branchRef, repoRoot, deps })
-  → { reconciled: true, newPattern, step: 'normalized_case', rationale, evidence }  // step B never auto-reconciles
+  → { reconciled: true, newPattern, step: 'normalized_case' | 'judge_repoint_auto_applied', rationale, evidence }
   | { reconciled: false, reason, evidence? }
+  // step B auto-applies a confident proposal — the deterministic grep is the safety gate.
+  // reason ∈ 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'proposal_did_not_match' | 'harness_error'.
 
 reconcileFailingGrepChecksForSpec({ workspaceId, slug, branchRef, repoRoot, deps, maxReconciliationsPerBuild? })
   → {
@@ -104,13 +108,13 @@ A self-healing check that isn't visible is a proxy that optimizes itself — the
 - `action_kind`: `'check_reconciled'` (a new vocabulary entry on `DirectorActionKind` — see [[director-activity]]).
 - `spec_slug`: the spec whose check was repointed.
 - `reason`: one line — `phase N check '<description>' auto-corrected via <step>: 'old' → 'new' — <rationale>`.
-- `metadata`: `{ spec_slug, phase_id, phase_position, check_position, check_description, old_pattern, new_pattern, step: 'normalized_case' | 'judge_proposal', rationale, evidence, autonomous: true }`.
+- `metadata`: `{ spec_slug, phase_id, phase_position, check_position, check_description, old_pattern, new_pattern, step: 'normalized_case' | 'judge_repoint_auto_applied', rationale, evidence, autonomous: true }`.
 
 Best-effort + never throws — a director-activity blip is worse than the gap it records. The row is what the EOD recap, Ada's activity feed, and the #directors board post read.
 
 ### Cap-reached / defer-with-unhealed row — `director_activity.action_kind='check_reconcile_cap_reached'`
 
-`recordCapReachedOrUnhealedDefer` writes ONE row per build whose `reconcileFailingGrepChecksForSpec` returned an unreconciled list (whether from `cap_reached`, `judge_declined`, `no_normalized_match`, `not_present_grep`, or a DB write failure). Preserves the real-failure path: the build STILL defers via the existing `finalizeBuiltPhase` defer branch, and the redrive reason carries the unhealed preview so a `redriveDeferredBuildOrEscalate` cap-exhaustion escalates with the ACTUAL failing check descriptions.
+`recordCapReachedOrUnhealedDefer` writes ONE row per build whose `reconcileFailingGrepChecksForSpec` returned an unreconciled list (whether from `cap_reached`, `judge_declined`, `proposal_did_not_match`, `no_normalized_match`, `not_present_grep`, or a DB write failure). Preserves the real-failure path: the build STILL defers via the existing `finalizeBuiltPhase` defer branch, and the redrive reason carries the unhealed preview so a `redriveDeferredBuildOrEscalate` cap-exhaustion escalates with the ACTUAL failing check descriptions.
 
 - `action_kind`: `'check_reconcile_cap_reached'`.
 - `reason`: `phase-verify reconciler: N auto-corrected, M un-reconcilable (cap=X, cap_reached=Y) — deferring build with real-failure list preserved. First: <preview>`.
