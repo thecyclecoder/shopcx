@@ -1242,8 +1242,20 @@ function soonestReset(now: number): number {
 // Least-recently-used / round-robin: among HEALTHY accounts pick the one with the fewest in-flight
 // builds, tie-broken by least-recently-assigned. NEW sessions only (never reassigns a pinned resume).
 function pickNewSessionAccount(now: number): AccountState | null {
+  // ── Phase 1 proactive-expiry sweep ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]]) ──
+  // Before the pick, drop any account whose stored OAuth token is already expired via the shared eject
+  // path (long cap window + one CEO card per account). Sweep is cheap: cached per-account stat with a
+  // 30s TTL, dedupe'd on capEventLogged. If EVERY account is now capped (usage or expiry), the ALL-CAPPED
+  // branch below logs it — the dispatcher's usual `blocked_on_usage` park handles the block downstream.
+  sweepExpiredCredentials(now);
   const healthy = healthyAccounts(now);
-  if (!healthy.length) return null;
+  if (!healthy.length) {
+    if (allAccountsCapped(now)) {
+      const anyExpired = accounts.some((a) => a.capEventLogged && cachedCredentialsExpiresAt(a.configDir, now) > 0 && cachedCredentialsExpiresAt(a.configDir, now) <= now);
+      if (anyExpired) console.warn("[multi-account] every pool account is unavailable (usage-capped or OAuth-expired) — awaiting soonest reset or CEO re-login");
+    }
+    return null;
+  }
   // Floor at 0: the reconcile can briefly leave a counter negative when both decrements of a just-ended
   // double-counted lane land after a heartbeat reconciled it to the ground truth — a negative must not make
   // an account look "emptiest". Self-heals on the next reconcile tick regardless.
@@ -1426,6 +1438,59 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void
     }
   } catch (e) {
     console.warn(`[multi-account] CEO auth-expired alert threw (swallowed) for ${configDir}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// ── Proactive credentials-expiry sweep ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 1) ─
+// The cheapest fix for a dead pool account: never route a session to it in the first place. Each Max
+// account's config dir holds a `.credentials.json` whose `claudeAiOauth.expiresAt` is authoritative — if
+// it's already ≤ now, the account is guaranteed to 401 on the next `claude -p` and drop whatever ticket
+// lands on it. So before picking an account, treat any account whose STORED token is already expired as
+// unavailable via the same eject machinery as a usage cap (markAccountAuthExpired: long cap window +
+// dedupe'd CEO card naming the re-login command). Reactive backstop (Phase 2, at withAccountFailover /
+// runTicketHandleJob) still catches the rarer case where the file looks fresh but the server rejects the
+// token as expired anyway. Read is cached briefly per account so the pick hot-path doesn't stat on every
+// call — a stale entry is harmless: a re-login rewrites the file, the cache expires within seconds, and
+// the reactive backstop covers the interim.
+const CRED_EXPIRY_CACHE_MS = 30_000; // 30s TTL — token expiry is a slow-moving fact
+const credentialsCache = new Map<string, { expiresAt: number; checkedAt: number }>();
+// Read `$configDir/.credentials.json` and return the `claudeAiOauth.expiresAt` (ms). Returns 0 on any
+// error (missing file, malformed JSON, missing field) so a malformed credential can NEVER cause a
+// silent proactive eject — the reactive 401 path stays in charge for those. A number ≤ 0 means "no
+// signal, don't decide"; a positive number is authoritative.
+function readCredentialsExpiresAt(configDir: string): number {
+  try {
+    const p = join(configDir, ".credentials.json");
+    if (!existsSync(p)) return 0;
+    const raw = readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: { expiresAt?: number | string | null } } | null;
+    const v = parsed?.claudeAiOauth?.expiresAt;
+    if (v == null) return 0;
+    const n = typeof v === "string" ? parseInt(v, 10) : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+// Cached wrapper — refresh once per account per CRED_EXPIRY_CACHE_MS so the pick hot-path doesn't stat.
+function cachedCredentialsExpiresAt(configDir: string, now: number): number {
+  const cached = credentialsCache.get(configDir);
+  if (cached && now - cached.checkedAt < CRED_EXPIRY_CACHE_MS) return cached.expiresAt;
+  const expiresAt = readCredentialsExpiresAt(configDir);
+  credentialsCache.set(configDir, { expiresAt, checkedAt: now });
+  return expiresAt;
+}
+// Iterate the pool; for every account whose stored OAuth expiry is a positive value ≤ now, eject it via
+// the shared markAccountAuthExpired path (cap window + CEO re-login card). No-op for accounts already
+// out of rotation (markAccountAuthExpired only records the event once per cap window via capEventLogged).
+// Called before every pick so a newly-expired account drops out of rotation on the NEXT selection, not
+// on the failed run. Best-effort — a read/parse failure returns 0 above, which is treated as "no signal".
+function sweepExpiredCredentials(now: number): void {
+  for (const a of accounts) {
+    const expiresAt = cachedCredentialsExpiresAt(a.configDir, now);
+    if (expiresAt > 0 && expiresAt <= now) {
+      markAccountAuthExpired(a.configDir, now, `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now — proactive eject before dispatch`);
+    }
   }
 }
 
