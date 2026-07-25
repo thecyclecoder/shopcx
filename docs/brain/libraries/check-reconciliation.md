@@ -39,13 +39,25 @@ Asks Claude Sonnet (`SONNET_MODEL` from [[ai-models]]) to decide whether the dif
 
 **Residual prompt-injection risk** — a crafted diff can steer the judge to an unrelated but present literal that DOES grep. Bounded by (a) `maxReconciliationsPerBuild` in `reconcileFailingGrepChecksForSpec` (a pathological spec whose EVERY grep check is stale can't silently pass) and (b) the `check_reconciled` [[../tables/director_activity]] row emitted for EVERY repoint (`step='judge_repoint_auto_applied'`) — every auto-correction lands on the CEO-facing build card, never silent. A mis-guessed spec can't hide behind the reconciler.
 
+### Step C — moved-symbol fallback (only if B misses at `params.path`) — repoints BOTH pattern AND path
+
+Reads:
+- The check's `description` — same INTENT source as step B.
+- The WHOLE phase branch diff (all changed files, not just `params.path`), bounded to 48 KB via `git diff origin/main...<branchRef>` (no path arg), so the judge can spot a symbol that migrated to a different file.
+
+Asks Claude Sonnet (same `SONNET_MODEL`, max 500 tokens) to decide whether the intent is satisfied in a DIFFERENT file than the check's declared `oldPath`, and if so return the EXACT literal + the file path from the diff. Strict-JSON output: `{literal: string|null, file: string|null, rationale: string}`. Same fail-closed semantics.
+
+**AUTO-APPLIES a confident moved-symbol proposal** ([[../specs/build-verify-reconciler-auto-applies-renames-and-moved-symbols]] Phase 2). When the whole-diff judge returns a non-null `literal` + a `file` that (a) is NOT equal to `oldPath` AND (b) the runner's real deterministic grep of `{pattern: literal, path: file}` on the branch passes, the caller repoints BOTH `params.pattern` AND `params.path` via `upsertPhaseChecks` (`{reconciled: true, step: 'judge_repoint_moved_symbol', newPattern, newPath, rationale, evidence}`). **The deterministic grep at the NEW path is the safety gate.** A whole-diff judge that returns null, or a proposal whose grep at the new path fails, or a `file` equal to `oldPath` all defer/escalate unchanged — a real code-missing signal is never masked. Same per-build cap + `check_reconciled` audit surface (the audit rationale contains `moved_symbol`, and the row carries `old_path` + `new_path` so the CEO sees the file move too).
+
+**When step C fires.** Two triggers, both from step B: (i) the per-path judge declined (`judge_declined_at_path`) — the symbol may live in a different file entirely; (ii) the per-path judge proposed a literal but the deterministic grep at `params.path` failed (`proposal_did_not_match_at_path`) — the literal may live elsewhere. In both, step C loads the whole phase diff and tries the moved-symbol judge before deferring. Closes the wrong-file wedge (the spec author guessed `customer_confirmed` lives in `creative-agent.ts` but it moved to `creative-imitation.ts`).
+
 ## Invariants
 
 1. **`expect: 'present'` ONLY.** An `expect: 'absent'` miss is a different, real signal (the code SHOULDN'T be there and IS) — never reconciled.
-2. **Every repoint (step A OR step B) MUST still pass a real deterministic grep of the new pattern before it lands** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`) — no bypass, no phantom-ship. The final grep is the safety gate.
-3. **A judge that returns null OR whose candidate fails the final deterministic grep NEVER auto-reconciles** — the check surfaces as unhealed and the caller defers/escalates exactly as before. A real code-missing signal is never masked.
-4. **Capped per build.** `reconcileFailingGrepChecksForSpec` accepts `maxReconciliationsPerBuild` (default: total grep-check count in the spec). Exceeded → any remaining unhealed checks report `cap_reached` and the caller defers as before.
-5. **Every reconciliation is surfaced — never silent.** Each successful repair (step A OR step B) writes a `director_activity.action_kind='check_reconciled'` row carrying the `step` that fired (`normalized_case` | `judge_repoint_auto_applied`); the worker mirrors it into the run log tail.
+2. **Every repoint (step A / step B / step C) MUST still pass a real deterministic grep of the new (`pattern`, `path`) before it lands** (`defaultRunDeterministicGrep`, identical argv to the runner's `defaultExecutors.grep`) — no bypass, no phantom-ship. The final grep is the safety gate; step C runs it at the NEW path.
+3. **A judge that returns null OR whose candidate fails the final deterministic grep NEVER auto-reconciles** — the check surfaces as unhealed and the caller defers/escalates exactly as before. A real code-missing signal is never masked. Step C's judge must also propose a file that DIFFERS from `oldPath` (a same-path answer is treated as "not moved").
+4. **Capped per build.** `reconcileFailingGrepChecksForSpec` accepts `maxReconciliationsPerBuild` (default: total grep-check count in the spec). Exceeded → any remaining unhealed checks report `cap_reached` and the caller defers as before. The cap counts step A + step B + step C repoints together.
+5. **Every reconciliation is surfaced — never silent.** Each successful repair writes a `director_activity.action_kind='check_reconciled'` row carrying the `step` that fired (`normalized_case` | `judge_repoint_auto_applied` | `judge_repoint_moved_symbol`); the worker mirrors it into the run log tail. A moved-symbol row also carries `old_path` + `new_path` in metadata AND appends ` @ path 'old' → 'new' (moved_symbol)` to the human-facing reason line.
 6. **Best-effort** — a thrown reconciler falls through to the existing defer path unchanged. The reconciler NEVER masks a real code-missing failure.
 
 ## Contract
@@ -60,9 +72,11 @@ export interface FailingGrepCheck {
 }
 
 reconcileStaleGrepCheck({ check, branchRef, repoRoot, deps })
-  → { reconciled: true, newPattern, step: 'normalized_case' | 'judge_repoint_auto_applied', rationale, evidence }
+  → { reconciled: true, newPattern, newPath?, step: 'normalized_case' | 'judge_repoint_auto_applied' | 'judge_repoint_moved_symbol', rationale, evidence }
   | { reconciled: false, reason, evidence? }
   // step B auto-applies a confident proposal — the deterministic grep is the safety gate.
+  // step C repoints BOTH pattern AND path when the symbol moved to a different file
+  //   (newPath is set only for step='judge_repoint_moved_symbol').
   // reason ∈ 'not_present_grep' | 'no_normalized_match' | 'judge_declined' | 'proposal_did_not_match' | 'harness_error'.
 
 reconcileFailingGrepChecksForSpec({ workspaceId, slug, branchRef, repoRoot, deps, maxReconciliationsPerBuild? })
@@ -75,7 +89,7 @@ reconcileFailingGrepChecksForSpec({ workspaceId, slug, branchRef, repoRoot, deps
     }
 ```
 
-`ReconciliationAudit` carries every field the audit surface needs: workspace, slug, phase, check description, `oldPattern`, `newPattern`, `step`, `rationale`, `evidence`.
+`ReconciliationAudit` carries every field the audit surface needs: workspace, slug, phase, check description, `oldPattern`, `newPattern`, `oldPath?`, `newPath?` (Phase 2 — set on step C moved-symbol repoints), `step`, `rationale`, `evidence`.
 
 ## DI + defaults
 
@@ -87,8 +101,10 @@ Every dep is injectable so tests drive the whole policy without touching shell/D
 | `loadPhaseDiff` | `defaultLoadPhaseDiff` — `git diff origin/main...<branchRef> -- <path>`, bounded to 16 KB. |
 | `intentJudge` | `defaultIntentJudge` — Sonnet (`SONNET_MODEL`), max 400 tokens, strict JSON, fail-closed on API/parse error. `ANTHROPIC_API_KEY` unset → `{literal: null}`. |
 | `runDeterministicGrep` | `defaultRunDeterministicGrep` — identical argv shape to `defaultExecutors.grep` in [[spec-check-runner]] (`-e <pattern> -- <path>`). |
+| `loadFullPhaseDiff` (Phase 2) | `defaultLoadFullPhaseDiff` — `git diff origin/main...<branchRef>` (no path arg), bounded to 48 KB. Input to step C's moved-symbol judge. |
+| `intentJudgeMovedSymbol` (Phase 2) | `defaultIntentJudgeMovedSymbol` — Sonnet, max 500 tokens, strict JSON `{literal, file, rationale}`, fail-closed. Judges whether the intent lives in a DIFFERENT file than the check's declared `oldPath`. |
 | `loadPhaseGrepChecks` (batch) | `defaultLoadPhaseGrepChecks` — [[specs-table]] `getSpec` → [[spec-phase-checks-table]] `listPhaseChecks` filtered to `exec_kind='grep'`. |
-| `upsertReconciledCheck` (batch) | `defaultUpsertReconciledCheck` — re-reads the phase's full check list, replaces the single position's params, calls [[spec-phase-checks-table]] `upsertPhaseChecks` (replace-by-position preserves ids). |
+| `upsertReconciledCheck` (batch) | `defaultUpsertReconciledCheck` — re-reads the phase's full check list, replaces the single position's params (Phase 2: `params.path` too on a moved-symbol repoint, not just `params.pattern`), calls [[spec-phase-checks-table]] `upsertPhaseChecks` (replace-by-position preserves ids). |
 
 `defaultBatchDeps` bundles all defaults so [[builder-worker]] calls the batch helper with a single import.
 
@@ -107,8 +123,8 @@ A self-healing check that isn't visible is a proxy that optimizes itself — the
 - `director_function`: `'platform'` (Ada's feed).
 - `action_kind`: `'check_reconciled'` (a new vocabulary entry on `DirectorActionKind` — see [[director-activity]]).
 - `spec_slug`: the spec whose check was repointed.
-- `reason`: one line — `phase N check '<description>' auto-corrected via <step>: 'old' → 'new' — <rationale>`.
-- `metadata`: `{ spec_slug, phase_id, phase_position, check_position, check_description, old_pattern, new_pattern, step: 'normalized_case' | 'judge_repoint_auto_applied', rationale, evidence, autonomous: true }`.
+- `reason`: one line — `phase N check '<description>' auto-corrected via <step>: 'old' → 'new'[ @ path 'oldPath' → 'newPath' (moved_symbol)] — <rationale>`.
+- `metadata`: `{ spec_slug, phase_id, phase_position, check_position, check_description, old_pattern, new_pattern, old_path?, new_path?, step: 'normalized_case' | 'judge_repoint_auto_applied' | 'judge_repoint_moved_symbol', rationale, evidence, autonomous: true }` — `old_path` + `new_path` are only set on a moved-symbol repoint (step C).
 
 Best-effort + never throws — a director-activity blip is worse than the gap it records. The row is what the EOD recap, Ada's activity feed, and the #directors board post read.
 
