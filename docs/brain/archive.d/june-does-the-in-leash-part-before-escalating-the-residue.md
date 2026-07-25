@@ -1,0 +1,1 @@
+- **Partial in-leash remedy on escalate_founder** · verified 2026-07-25 · → [[lifecycles/ticket-lifecycle]]
