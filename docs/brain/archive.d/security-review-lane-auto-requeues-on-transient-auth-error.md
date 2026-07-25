@@ -1,0 +1,1 @@
+- **Security-review lane auto-requeues on transient auth error** · verified 2026-07-25 · → [[../libraries/security-agent]]
