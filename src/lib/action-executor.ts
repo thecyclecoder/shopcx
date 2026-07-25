@@ -586,6 +586,96 @@ export async function refuseLoyaltyCouponIfCustomerMismatch(
   };
 }
 
+/**
+ * Phase-2 constants + helpers (spec:
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
+ *
+ * `MAX_LOYALTY_REGEN_ATTEMPTS` bounds how many times the regen branch of
+ * `apply_loyalty_coupon` retries the mint+apply's APPLY step before giving
+ * up — a defensive ceiling so a persistently rejecting upstream can never
+ * loop indefinitely. Points ledger is unaffected: `claimRegenSpendSlot`
+ * still fires the single spend once (Phase 2 of
+ * loyalty-coupon-apply-self-heal-must-not-double-deduct-points).
+ */
+export const MAX_LOYALTY_REGEN_ATTEMPTS = 2;
+
+/**
+ * Resolve the contract-owning Shopify customer id for a subscription
+ * contract. Regen mints a Shopify discount with
+ * `customerSelection.customers.add` locked to ONE customer, so this MUST
+ * be the customer that owns the target contract — points combine across a
+ * link group but a code cannot. Returns null when the sub row, customer
+ * row, or `shopify_customer_id` is missing so the regen branch can fall
+ * back to the loyalty member's own Shopify id (unchanged behavior for
+ * unknown-provenance contracts). Exported for unit tests.
+ */
+export async function resolveContractOwnerShopifyCustomerId(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+): Promise<string | null> {
+  const { data: subRow } = await admin
+    .from("subscriptions")
+    .select("customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  const contractCustomerId =
+    (subRow as { customer_id?: string | null } | null)?.customer_id ?? null;
+  if (!contractCustomerId) return null;
+
+  const { data: custRow } = await admin
+    .from("customers")
+    .select("shopify_customer_id")
+    .eq("id", contractCustomerId)
+    .maybeSingle();
+  const shopifyId =
+    (custRow as { shopify_customer_id?: string | null } | null)?.shopify_customer_id ?? null;
+  return shopifyId ? String(shopifyId) : null;
+}
+
+/**
+ * Verify a loyalty discount code is present on a subscription's
+ * `applied_discounts` JSONB. Shopify's apply-response `success` is not the
+ * same as the code actually being on the contract — a race with a
+ * concurrent apply/remove or an Appstle sync lag can report success on a
+ * request that didn't stick. Re-reads the sub row and matches the code
+ * case-insensitively across the tolerant shape family used by
+ * `subscriptionHasLoyaltyCoupon` (bare string · `{title}` · `{code}`).
+ * Returns false on a missing sub row so the caller treats "unknown" as
+ * "didn't land" (Phase 2 of
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
+ * Exported for unit tests.
+ */
+export async function verifyLoyaltyCouponAppliedToContract(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<boolean> {
+  const { data } = await admin
+    .from("subscriptions")
+    .select("applied_discounts")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  const arr = (data as { applied_discounts?: unknown } | null)?.applied_discounts;
+  if (!Array.isArray(arr)) return false;
+  const target = code.toUpperCase();
+  for (const entry of arr) {
+    let label: string | null = null;
+    if (typeof entry === "string") label = entry;
+    else if (entry && typeof entry === "object") {
+      const rec = entry as { title?: unknown; code?: unknown };
+      if (typeof rec.code === "string") label = rec.code;
+      else if (typeof rec.title === "string") label = rec.title;
+    }
+    if (!label) continue;
+    if (label.toUpperCase().includes(target)) return true;
+  }
+  return false;
+}
+
 // ── Phase-2 order/sub-scoped loyalty-ceiling guards
 // (spec: loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates)
 //
@@ -1791,6 +1881,21 @@ export const directActionHandlers: Record<
       for (let i = 0; i < 6; i++) random += chars[Math.floor(Math.random() * chars.length)];
       const newCode = `LOYALTY-${orig.discount_value}-${random}`;
 
+      // Phase-2 (spec: loyalty-coupon-apply-resolves-contract-owning-member-
+      // no-doomed-regen). Mint against the CONTRACT-OWNING Shopify customer,
+      // not the canonical aggregate member — points combine across a link
+      // group but a code cannot, so a code minted for a sibling member is a
+      // guaranteed apply failure on this contract. Fall back to
+      // member.shopify_customer_id only when the contract-owner is not
+      // resolvable (unknown-provenance sub row); the fallback preserves the
+      // pre-fix behavior on rows where we have nothing better.
+      const resolvedContractOwner = await resolveContractOwnerShopifyCustomerId(
+        ctx.admin,
+        ctx.workspaceId,
+        p.contract_id,
+      );
+      const mintForShopifyCustomerId = resolvedContractOwner ?? member.shopify_customer_id;
+
       // Create new Shopify discount
       const gqlRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
         method: "POST",
@@ -1801,7 +1906,7 @@ export const directActionHandlers: Record<
             title: `Loyalty $${orig.discount_value} (${newCode})`, code: newCode,
             startsAt: new Date().toISOString(), endsAt: expiresAt.toISOString(),
             usageLimit: 1, appliesOncePerCustomer: true,
-            customerSelection: { customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] } },
+            customerSelection: { customers: { add: [`gid://shopify/Customer/${mintForShopifyCustomerId}`] } },
             combinesWith: { productDiscounts: settings.coupon_combines_product, shippingDiscounts: settings.coupon_combines_shipping, orderDiscounts: settings.coupon_combines_order },
             customerGets: { appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription", appliesOnSubscription: settings.coupon_applies_to !== "one_time", items: { all: true }, value: { discountAmount: { amount: orig.discount_value, appliesOnEachItem: false } } },
           }},
@@ -1840,12 +1945,63 @@ export const directActionHandlers: Record<
         expires_at: expiresAt.toISOString(),
       });
 
-      // Now apply the fresh coupon
-      const r2 = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, newCode);
-      if (r2.success) {
-        return { success: true, summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})`, couponCode: newCode };
+      // Phase-2 (spec: loyalty-coupon-apply-resolves-contract-owning-member-
+      // no-doomed-regen). Apply the fresh coupon with a bounded retry
+      // ceiling + verify-landed. Points are already spent above (guarded by
+      // `claimRegenSpendSlot` — one spend per orig no matter how many apply
+      // retries fire), so this loop only touches Shopify/Appstle and the
+      // sub's applied_discounts read. `subscriptionApplyCoupon` returning
+      // success is not the same as the code being present on the contract;
+      // re-read applied_discounts before we report success back to the
+      // caller so an ambiguous upstream "ok" can't leak past.
+      let lastError: string | undefined;
+      for (let attempt = 1; attempt <= MAX_LOYALTY_REGEN_ATTEMPTS; attempt++) {
+        const r2 = await subscriptionApplyCoupon(ctx.workspaceId, p.contract_id, newCode);
+        if (r2.success) {
+          const landed = await verifyLoyaltyCouponAppliedToContract(
+            ctx.admin,
+            ctx.workspaceId,
+            p.contract_id,
+            newCode,
+          );
+          if (landed) {
+            return {
+              success: true,
+              summary: `Applied loyalty coupon $${orig.discount_value} off (regenerated: ${newCode})`,
+              couponCode: newCode,
+            };
+          }
+          lastError = `apply reported success but ${newCode} is not present on ${p.contract_id}.applied_discounts (attempt ${attempt}/${MAX_LOYALTY_REGEN_ATTEMPTS})`;
+        } else {
+          lastError = r2.error;
+        }
+        if (attempt < MAX_LOYALTY_REGEN_ATTEMPTS) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
-      return { success: false, error: `Regenerated coupon also failed: ${r2.error}` };
+      // Exhaustion — distinguish customer-restriction (mint fell back to the
+      // member's Shopify id because we could not resolve the contract owner)
+      // from repeated upstream rejection (mint went to the resolved contract
+      // owner but Appstle/Shopify still said no across every attempt).
+      // Phase 1's upfront guard catches the ordinary restriction case for
+      // rows with full provenance; this is the tail path where the guard
+      // couldn't get a read.
+      if (resolvedContractOwner == null) {
+        return {
+          success: false,
+          error:
+            `Regenerated coupon ${newCode} minted for loyalty member ${member.shopify_customer_id} ` +
+            `did not land on ${p.contract_id} after ${MAX_LOYALTY_REGEN_ATTEMPTS} attempts — ` +
+            `contract-owner Shopify id could not be resolved, likely a customer-restriction mismatch: ${lastError ?? "unknown"}`,
+        };
+      }
+      return {
+        success: false,
+        error:
+          `Regenerated coupon ${newCode} minted for contract owner ${resolvedContractOwner} ` +
+          `did not land on ${p.contract_id} after ${MAX_LOYALTY_REGEN_ATTEMPTS} apply attempts — ` +
+          `upstream rejected: ${lastError ?? "unknown"}`,
+      };
     } catch (e) {
       return { success: false, error: `Coupon regeneration failed: ${errText(e)}` };
     }

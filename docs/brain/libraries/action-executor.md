@@ -45,6 +45,39 @@ function pickChargeableVaultedPm(rows: CustomerPaymentMethodRow[] | null | undef
 
 Pure predicate wired into the `create_order` / `create_subscription` vaulted-PM guard (assisted-purchase-playbook spec Phase 1). Picks the customer's chargeable vaulted PM from a set of [[../tables/customer_payment_methods]] rows — prefers `is_default=true` among rows with `status='active'`, else any active row; returns null when no chargeable row exists. Exported so tests can pin the fail-closed branch without a live DB.
 
+### `MAX_LOYALTY_REGEN_ATTEMPTS` — const
+
+```ts
+const MAX_LOYALTY_REGEN_ATTEMPTS: number
+```
+
+Phase-2 defensive ceiling on how many times the `apply_loyalty_coupon` regen branch retries the mint's APPLY step before giving up (spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen). Points ledger is unaffected — `claimRegenSpendSlot` still fires the single spend once, so the retry loop only touches Shopify/Appstle and re-reads the sub's `applied_discounts`. A persistently-rejecting upstream can never infinite-loop inside the regen branch.
+
+### `resolveContractOwnerShopifyCustomerId` — function
+
+```ts
+async function resolveContractOwnerShopifyCustomerId(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+): Promise<string | null>
+```
+
+Phase-2 helper (spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen). Resolves the target contract's owning Shopify customer id: `subscriptions.customer_id` → `customers.shopify_customer_id`, workspace-scoped on both reads. The regen mint uses this instead of the aggregate loyalty member's `shopify_customer_id` — points combine across a link group but a code cannot, so a code minted for a sibling member (the canonical high-balance identity that `aggregateLinkedMembers` returns) is a guaranteed apply failure on this contract. Returns null when the sub row / customer row / `shopify_customer_id` is missing so the regen falls back to `member.shopify_customer_id` — behavior is unchanged on unknown-provenance sub rows.
+
+### `verifyLoyaltyCouponAppliedToContract` — function
+
+```ts
+async function verifyLoyaltyCouponAppliedToContract(
+  admin: Admin,
+  workspaceId: string,
+  contractId: string,
+  code: string,
+): Promise<boolean>
+```
+
+Phase-2 predicate (spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen). Re-reads `subscriptions.applied_discounts` and returns true only when `code` is actually present — case-insensitive match across the tolerant shape family used by `subscriptionHasLoyaltyCoupon` (bare string · `{title}` · `{code}`). Called in the regen branch AFTER `subscriptionApplyCoupon` returns success, before the handler reports success back to the caller: Shopify's "success" is not the same as the code landing on the contract (a race with a concurrent apply/remove or an Appstle sync lag can report success on a request that didn't stick). Missing sub row ⇒ false — unknown-provenance is treated as "didn't land" so the caller retries or exhausts, rather than trusting an ambiguous upstream ack.
+
 ### `refuseLoyaltyCouponIfCustomerMismatch` — function
 
 ```ts
