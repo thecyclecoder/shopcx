@@ -1,0 +1,1 @@
+- **Applying a coupon must never strip an automatic/manual discount — filter the replace to CODE_DISCOUNT, and roll back when the apply fails** · verified 2026-07-25 · → [[../libraries/appstle-discount]]
