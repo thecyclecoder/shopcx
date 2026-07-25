@@ -1,0 +1,1 @@
+- **Dahlia adapts competitor ads herself: 3-layer overlay render + copy fidelity + side-by-side QC** · verified 2026-07-25 · → [[../lifecycles/ad-render]]
