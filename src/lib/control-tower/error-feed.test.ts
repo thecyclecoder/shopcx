@@ -16,6 +16,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignBraintreeVaultProcessorDecline,
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
@@ -1129,6 +1130,138 @@ test("capture-time drop keeps adjacent Appstle unskip failures (Not Found / Unau
     false,
     "kept: sibling catch-branch throw log (different prefix)",
   );
+});
+
+// ── isForeignBraintreeVaultProcessorDecline (error-feed-drop-braintree-portal-vault-processor-decline-noise) ──
+// `src/lib/portal/handlers/payment-method-update.ts` calls
+// `vaultAndMigratePaymentMethod` in a try/catch and, on any throw, logs
+// `console.error(\`[portal/payment-method-update] vault failed: ${msg}\`)` then
+// returns HTTP 502 `{ error: 'vault_failed' }`. When the customer's own issuer
+// declines the card, the Braintree SDK throws with a processor-decline body — a
+// per-customer issuer decision the code can never prevent. Wired in
+// `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP for the
+// allow-listed processor-decline text families. Non-decline vault failures (SDK
+// broken, connectivity, auth misconfig) carry different marker text and stay
+// captured / paged.
+
+test("isForeignBraintreeVaultProcessorDecline drops the captured 'Life cycle' issuer decline", () => {
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Cannot Authorize at this time (Life cycle)",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultProcessorDecline drops other allow-listed processor-decline bodies", () => {
+  const path = "/api/portal";
+  for (const body of [
+    "Insufficient Funds",
+    "Do Not Honor",
+    "Pick Up Card",
+    "Expired Card",
+    "Invalid Card Number",
+    "Card Not Activated",
+    "Restricted Card",
+    "Declined",
+  ]) {
+    assert.equal(
+      isForeignBraintreeVaultProcessorDecline(path, `[portal/payment-method-update] vault failed: ${body}`),
+      true,
+      `dropped: ${body}`,
+    );
+  }
+});
+
+test("isForeignBraintreeVaultProcessorDecline KEEPS an unknown-tail vault failure (paged)", () => {
+  // A real Braintree SDK / integration fault carries a different body (e.g. the
+  // SDK's own `paymentMethod.create failed`, an auth misconfig, a connectivity
+  // throw). Same prefix, different tail — stays captured / paged.
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: paymentMethod.create failed",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: no_braintree_customer",
+    ),
+    false,
+  );
+});
+
+test("isForeignBraintreeVaultProcessorDecline KEEPS a non-allowlisted path even with the decline body", () => {
+  // Only `/api/portal` (the portal payment-method-update handler) reaches this
+  // call site today. Any other path carrying the same body is a different
+  // caller / signature and stays captured / paged.
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/journey/token/submit-payment",
+      "[portal/payment-method-update] vault failed: Cannot Authorize at this time (Life cycle)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/inngest",
+      "[portal/payment-method-update] vault failed: Insufficient Funds",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      null,
+      "[portal/payment-method-update] vault failed: Do Not Honor",
+    ),
+    false,
+  );
+});
+
+test("isForeignBraintreeVaultProcessorDecline KEEPS an unrelated console.error on /api/portal", () => {
+  // Any other portal log without the vault-failed prefix is a different
+  // signature and stays captured / paged.
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/some-other-handler] failed: Cannot Authorize at this time (Life cycle)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "Some unrelated 500",
+    ),
+    false,
+  );
+});
+
+test("isForeignBraintreeVaultProcessorDecline is case-insensitive on the tail marker", () => {
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: cannot authorize at this time (life cycle)",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: INSUFFICIENT FUNDS",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultProcessorDecline returns false on empty / nullish input", () => {
+  assert.equal(isForeignBraintreeVaultProcessorDecline(null, null), false);
+  assert.equal(isForeignBraintreeVaultProcessorDecline(undefined, undefined), false);
+  assert.equal(isForeignBraintreeVaultProcessorDecline("", ""), false);
+  assert.equal(isForeignBraintreeVaultProcessorDecline("/api/portal", ""), false);
 });
 
 // ── isForeignEasyPostReturnsSweepRateLimit (error-feed-scope-easypost-returns-sweep-rate-limit-noise) ──
