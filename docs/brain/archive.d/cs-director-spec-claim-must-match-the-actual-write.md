@@ -1,0 +1,1 @@
+- **June must not report — or close a ticket on — a spec she didn't actually write** · verified 2026-07-25 · → [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../tables/director_activity]]
