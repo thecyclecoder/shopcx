@@ -215,6 +215,86 @@ rail 2. If any of the debranded slots is empty (the worker's strip removed every
 skeleton row had a null column), treat that slot as absent and fall back to OUR brief's
 own supporting benefit for that surface — never invent a slot value.
 
+### VERIFY-THEN-REWORD — the positive-adaptation instinct (dahlia-competitor-ad-adaptation-overlay-render Phase 2)
+
+When `COMPETITOR_DNA` is present, the winning ad's **STRUCTURE is the asset** (the mock-apology
+frame, the objection→answer, the transformation arc). **KEEP the proven device verbatim.** Only
+the specifics inside it change to fit our product. The firewall (rail 1 above) stops fabrication;
+this rule adds the DO-KEEP instinct so the imitation preserves what actually made the winner
+convert — not "borrow the words and toss the structure" and not "toss the words AND the structure
+and write a generic benefit line."
+
+**How to verify a competitor benefit before you carry it over — use `brief.confirmedBenefits`.**
+Every brief now carries a `confirmedBenefits: [{ benefitName, softPhrasings, role }]` array — the
+catalog of every benefit on OUR product where `product_benefit_selections.customer_confirmed=true`
+(role ∈ `lead` / `supporting`), each with the row's real `customer_phrases` for grounded rewording.
+This is the source of truth for the verify-then-reword decision. Per competitor benefit in the
+`COMPETITOR_DNA` `hook` / `mechanism_claim` / `proof`:
+
+1. **VERIFY** — is there an ANALOGOUS entry in `brief.confirmedBenefits`? An analogous entry
+   shares the same OUTCOME DIMENSION (skin, hair, weight, appetite, digestion, sleep, focus,
+   energy, immunity, mood, joint) OR literally matches on a customer phrase. The competitor's
+   "smooth wrinkles" ↔ our `Skin Health` (dim `skin`); "your pants size might shrink" ↔ our
+   `Weight Management` (dim `weight`); "curb cravings" ↔ our `Appetite Control` (dim `appetite`);
+   "reduce bloating" ↔ our `Digestive Health` (dim `digestion`). The **worked example** from
+   [[../../../docs/brain/reference/competitor-ad-adaptation]] Part 1: SpoiledChild's four benefits
+   (`skin · skin · appetite · digestion`) mapped 1:1 onto Amazing Creamer's confirmed catalog
+   (`Skin Health · Hair Health · Weight Management · Digestive Health`) via the analogous-dimension
+   check — every SpoiledChild beat had a confirmed match, so every beat was KEPT and REWORDED.
+2. **REWORD from a `customer_phrase`** — never lift the competitor's line verbatim. Pick a
+   phrase from the matched `confirmedBenefits[i].softPhrasings` array — it's a real customer
+   sentence from the `customer_phrases` column, so grounded by construction. `smooth skin` (their
+   word) → `skin is smoother` (our real customer phrasing). `curb cravings` → `helps with appetite`.
+   `reduce bloating` → `no more bloating`. Even an APPLICABLE line gets reworded — "the compliments
+   you are about to receive" → "the double-takes headed your way." Same meaning, our words. A
+   verbatim lift of even an applicable line is a **fabricated-testimonial-shape** miss.
+3. **SUBSTITUTE only for a genuinely-lacked benefit.** When VERIFY comes back `null` (no
+   analogous entry in `confirmedBenefits`), do NOT carry the competitor's claim over unverified —
+   pick a DIFFERENT `confirmedBenefits` entry (a real benefit of ours the competitor didn't
+   mention) and slot it in. This is what stops the collagen-creamer ad from carrying Bloom's
+   `gut / immunity` promise: those aren't in our `confirmedBenefits`, so we substitute one that
+   is. Never invent, never carry a benefit we lack.
+
+**Anti-pattern this rule closes (the #1 miss):** reinventing benefits you happen to like
+(energy/taste) when the proven ad already told you which benefits convert (skin/weight). The
+firewall already had the DON'T-fabricate side; this rule adds the DO-keep-the-winning-structure
+side. Read [[../../../docs/brain/reference/competitor-ad-adaptation]] Part 1 (Copy adaptation)
+first — it carries the worked SpoiledChild → Amazing Creamer trace this rule generalizes.
+
+### DIVERSE BENEFIT STACK — no two beats on one dimension
+
+Part 1 § "Diverse benefit stack" rule: **don't spend two of four beats on the same dimension.**
+SpoiledChild's stack was `skin · skin · appetite · digestion` (two skin beats); ours is stronger
+as `skin · hair · appetite · digestion` — four distinct dimensions, each confirmed. The pure
+predicate `hasDiverseBenefitStack` in [[../../../src/lib/ads/creative-imitation.ts]] runs the
+same dimension classifier this SKILL uses; a stack that fails means at least two beats share a
+dimension (`skin` × 2, `energy` × 2, etc.). Rewrite one beat onto a different confirmed
+`benefitDimensionOf` bucket before shipping — grade Sugarman on scroll-stop and Cialdini on
+proof, not on repeated benefit surface area.
+
+### OFFER FIDELITY — substitute our real 'risk-free' when the competitor implies something we don't offer
+
+Part 1 § "Offer fidelity" rule: verify the competitor's CTA against what we ACTUALLY offer. If
+they promise `Try Before You Buy` (a no-payment trial we don't run) / `Free Trial` /
+`Free Sample` / `BOGO` / a `Free Tote` GWP — **substitute our real equivalent**: our 30-day
+money-back guarantee, phrased as **`Try It Risk-Free`**. It's a company-wide `proofStack` fact
+(always in `brief.proofStack`) and `try it risk-free` is sanctioned verbiage. Never carry a
+competitor offer we can't honor — a `Try Before You Buy` badge on our ad without a matching
+program is a fabricated-offer defect. The pure `enforceOfferFidelity` helper in
+[[../../../src/lib/ads/creative-imitation.ts]] enumerates the exact offers-we-don't-run patterns
++ names our verbatim substitute (`OFFER_SUBSTITUTE_RISK_FREE = "Try It Risk-Free — 30-day
+money-back guarantee"`) so the substitute string never drifts.
+
+### ANCHOR TO CORE VALIDATED BENEFITS — never chase off-core (a creamer isn't an energy angle)
+
+Part 1 § "the product's CORE validated benefits" rule: a collagen creamer LEADS with
+`skin / hair / weight / digestion` (its `product_benefit_selections` role='lead'), NEVER a
+generic `energy` angle just because the competitor's ad happened to touch it. Cross-check the
+angle against `brief.confirmedBenefits.filter(b => b.role === 'lead')` — the LEAD benefit(s)
+are the anchor. A supporting-only benefit can appear as a beat in the stack, but a headline
+that drops the LEAD benefit entirely for a supporting one is a regression (the same failure
+mode the RIFF rule closes, applied to the whole benefit stack rather than just the hook).
+
 ### RIFF — weave in the lead benefit (dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2)
 
 When `COMPETITOR_DNA` is present AND the brief carries a `leadBenefitWeave` field, you MUST

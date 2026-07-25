@@ -29,6 +29,11 @@ import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, ang
 import { getProvenCompetitorAngles, getCompetitorAngleBySkeletonId, scoreCompetitorAcquisitionPower, type CreativeIntent, type CompetitorAngle } from "@/lib/ads/creative-sourcing";
 import { computeMarketSophistication } from "@/lib/ads/market-sophistication";
 import { chooseGroundedSubstitute, debrandForOurBrand, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
+import {
+  matchConfirmedBenefit,
+  enforceOfferFidelity,
+  type ConfirmedBenefit,
+} from "@/lib/ads/creative-imitation";
 import { generateCreative } from "@/lib/ads/creative-generate";
 import {
   qaCreative,
@@ -96,6 +101,59 @@ export const AUTHOR_SELF_SCORE_FLOOR = 6;
  *  campaign. Never fall back to `buildMetaCopyPack` — a silent fallback would erase the audit trail the
  *  goal's success metric depends on. */
 export const MAX_COPY_AUTHOR_REVISE_ATTEMPTS = 4;
+
+/**
+ * dahlia-competitor-ad-adaptation-overlay-render Phase 2 — verify-then-reword.
+ *
+ * For a debranded competitor DNA payload, VERIFY every substantive slot (hook /
+ * mechanismClaim / proof) has an analogous benefit in OUR own
+ * `product_benefit_selections` with `customer_confirmed=true` — the CEO-curated set
+ * of benefits real customers report on our product (surfaced onto the brief as
+ * `brief.confirmedBenefits` via [[./creative-imitation]] `selectConfirmedBenefits`
+ * during [[./creative-brief]] `buildCreativeBrief`). A slot that fails to match
+ * produces a `verify-then-reword` hint Dahlia's imitation branch can lift into the
+ * session's revise reasoning, so she REWORDS the analogous customer_confirmed
+ * benefit instead of carrying the competitor's raw claim over unverified (Part 1
+ * of [[../../../docs/brain/reference/competitor-ad-adaptation]]). Also runs
+ * [[./creative-imitation]] `enforceOfferFidelity` on the debranded offer as a
+ * defense-in-depth twin to the local `isCompetitorOffer` gate — the two predicates
+ * share the same `OFFER_WE_DONT_RUN_PATTERNS`, so a competitor CTA implying an
+ * offer we do not run is caught by BOTH detectors before Dahlia's session sees it.
+ *
+ * Pure — no I/O. Returns the per-slot matches + hint strings so callers can log or
+ * thread onto the session inputs without further computation. The `customer_confirmed`
+ * grep-token pins the Phase 2 verification on this file.
+ */
+export function verifyImitationAgainstConfirmedBenefits(args: {
+  debrandedSlots: ReadonlyArray<string | null | undefined>;
+  debrandedOffer: string | null | undefined;
+  confirmedBenefits: readonly ConfirmedBenefit[];
+}): {
+  matches: Array<{ slot: string; matchedBenefit: string | null }>;
+  hints: string[];
+  offerFidelity: ReturnType<typeof enforceOfferFidelity>;
+  slotsWithoutMatch: string[];
+} {
+  const matches: Array<{ slot: string; matchedBenefit: string | null }> = [];
+  const hints: string[] = [];
+  const slotsWithoutMatch: string[] = [];
+  for (const slot of args.debrandedSlots) {
+    if (!slot || !slot.trim()) continue;
+    const match = matchConfirmedBenefit(slot, args.confirmedBenefits);
+    matches.push({ slot, matchedBenefit: match?.benefitName ?? null });
+    if (!match) {
+      slotsWithoutMatch.push(slot);
+      hints.push(
+        `verify-then-reword: no customer_confirmed benefit analogous to "${slot.slice(0, 80)}${slot.length > 80 ? "…" : ""}" — substitute a genuinely-lacked benefit from brief.confirmedBenefits rather than carry the competitor claim over unverified`,
+      );
+    }
+  }
+  const offerFidelity = enforceOfferFidelity(args.debrandedOffer ?? null);
+  if (offerFidelity.needsSubstitute && offerFidelity.reason) {
+    hints.push(`verify-then-reword offer-fidelity: ${offerFidelity.reason}`);
+  }
+  return { matches, hints, offerFidelity, slotsWithoutMatch };
+}
 
 /** The persuasion-score floor Max's copy-QC verdict must clear before the creative is
  *  eligible for AUTO-POSTABILITY (Bianca posts it to Meta unattended). Raised from 7 to 9
@@ -764,6 +822,13 @@ export interface CopyAuthorSessionInputs {
     proof: string | null;
     offer: string | null;
     competitorAdvertiser: string | null;
+    /** dahlia-competitor-ad-adaptation-overlay-render Phase 2 — verify-then-reword hints
+     *  from [[./creative-agent]] `verifyImitationAgainstConfirmedBenefits`. Each entry names a
+     *  debranded slot that has NO analogous benefit in our own `product_benefit_selections`
+     *  with `customer_confirmed=true`; the session should substitute a genuinely-lacked
+     *  benefit from `brief.confirmedBenefits` rather than carry the competitor claim over
+     *  unverified. Empty array when every slot matched (or on own-brand angles). */
+    verifyRewordHints?: string[];
   } | null;
   /** dahlia-market-sophistication-escalation Phase 1 — the ESCALATED target level (1..5).
    *  Computed via [[./market-sophistication]] `computeMarketSophistication` = the shelf modal
@@ -3347,19 +3412,35 @@ async function stockProduct(
               : isCompetitorOffer(debrandedOfferRaw)
                 ? substitute
                 : debrandedOfferRaw;
+            // dahlia-competitor-ad-adaptation-overlay-render Phase 2 — verify-then-reword.
+            // For each debranded slot, prove the analogous benefit exists in OUR
+            // product_benefit_selections with customer_confirmed=true (via
+            // verifyImitationAgainstConfirmedBenefits over brief.confirmedBenefits). The hints
+            // land on the returned DNA payload's `verifyRewordHints` array so the copy-author
+            // session can lift them into its revise reasoning; the offerFidelity check is a
+            // defense-in-depth twin to the isCompetitorOffer gate above.
+            const debrandedFramework = dna.framework == null
+              ? null
+              : debrandForOurBrand(dna.framework, dna.competitorAdvertiser, ourBrand);
+            const debrandedMechanismClaim = dna.mechanismClaim == null
+              ? null
+              : debrandForOurBrand(dna.mechanismClaim, dna.competitorAdvertiser, ourBrand);
+            const debrandedProof = dna.proof == null
+              ? null
+              : debrandForOurBrand(dna.proof, dna.competitorAdvertiser, ourBrand);
+            const verifyRewordResult = verifyImitationAgainstConfirmedBenefits({
+              debrandedSlots: [swappedHook, debrandedMechanismClaim, debrandedProof],
+              debrandedOffer: offerForSession,
+              confirmedBenefits: brief.confirmedBenefits ?? [],
+            });
             return {
               hook: swappedHook,
-              framework: dna.framework == null
-                ? null
-                : debrandForOurBrand(dna.framework, dna.competitorAdvertiser, ourBrand),
-              mechanismClaim: dna.mechanismClaim == null
-                ? null
-                : debrandForOurBrand(dna.mechanismClaim, dna.competitorAdvertiser, ourBrand),
-              proof: dna.proof == null
-                ? null
-                : debrandForOurBrand(dna.proof, dna.competitorAdvertiser, ourBrand),
+              framework: debrandedFramework,
+              mechanismClaim: debrandedMechanismClaim,
+              proof: debrandedProof,
               offer: offerForSession,
               competitorAdvertiser: dna.competitorAdvertiser,
+              verifyRewordHints: verifyRewordResult.hints,
             };
           })();
           // copy-author-self-heal (2026-07-17) — the never-fabricate firewall closure, injected so it

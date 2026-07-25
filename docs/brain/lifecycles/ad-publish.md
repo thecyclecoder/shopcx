@@ -49,6 +49,7 @@ The Growth director can now queue ready-to-test creatives ([[../libraries/ready-
 
 ## Status / open work (2026-06-30)
 
+- **Overlay-path landing targets (dahlia-competitor-ad-adaptation-overlay-render Phase 5, 2026-07-25):** the publisher reads copy from THREE surfaces the overlay-path landing writes: `ad_creative_copy_variants` (primary, via [[../libraries/ad-copy-variants]] `readCopyVariants`), `product_ad_angles.metadata.copy_pack` (4×4 pack fallback when the campaign carries an `angle_id`), and `ad_campaigns.metadata.copy_pack` (final fallback the `insertReadyCreative` broadcast writes). Renders re-sign from `ad_videos.meta.storage_path` for `format ∈ feed_4x5 | stories_9x16 | right_column_1x1`. The overlay-path writer [[../libraries/creative-overlay-landing]] `landOverlayCreativePack` lands the adapted copy + per-ratio composited renders to those exact targets with compare-and-set guards on every mutation.
 - Shipped: client + copy gen + job table + routes + Inngest + UI; typechecks; read-side (accounts/campaigns/adsets/pages) verified live; ready-to-test promotion + Director approval + outcome lineage.
 - Open: multi-format placement customization (upload 4:5 too); per-placement creative; saving/reusing copy on the job; the destination URL default (currently manual — could default to the storefront/product URL).
 
