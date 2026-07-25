@@ -1,0 +1,1 @@
+- **Box account pool: skip/eject an OAuth-expired Max account, re-route the session, and alert the CEO to re-login** · verified 2026-07-25 · → [[../libraries/builder-worker]]
