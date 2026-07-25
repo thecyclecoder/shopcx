@@ -167,7 +167,7 @@ test("Phase 1 — confirmed write: note renders the slug the SDK actually landed
       title: "Analyzer routes repeat-coupon tickets to the remedy path",
     },
     author_outcome: {
-      ok: true,
+      specWritten: true,
       spec_slug: "cs-analyzer-normalized-slug",
     },
   });
@@ -185,7 +185,7 @@ test("Phase 1 — confirmed write with matching seed: note surfaces slug + title
       title: "Analyzer routes repeat-coupon tickets to the remedy path",
     },
     author_outcome: {
-      ok: true,
+      specWritten: true,
       spec_slug: "cs-analyzer-coupon-routing-gap",
     },
   });
@@ -204,7 +204,7 @@ test("Phase 1 — failed write (author_spec_write_returned_false): note renders 
       title: "Preserve manual discounts across Appstle discount replace",
     },
     author_outcome: {
-      ok: false,
+      specWritten: false,
       reason: "author_spec_write_returned_false",
     },
   });
@@ -219,7 +219,7 @@ test("Phase 1 — failed write with spec_seed_missing_slug reason renders the sa
     decision: "author_spec",
     reasoning: "Bug identified.",
     spec_seed: { title: "just a title" },
-    author_outcome: { ok: false, reason: "spec_seed_missing_slug" },
+    author_outcome: { specWritten: false, reason: "spec_seed_missing_slug" },
   });
   assert.match(note, /author_spec FAILED \(spec_seed_missing_slug\) — no spec was written/);
 });
@@ -229,7 +229,7 @@ test("Phase 1 — failed write with ticket_id_unresolved reason (Derived-from li
     decision: "author_spec",
     reasoning: "Bug identified.",
     spec_seed: { slug: "some-slug", title: "some title" },
-    author_outcome: { ok: false, reason: "ticket_id_unresolved" },
+    author_outcome: { specWritten: false, reason: "ticket_id_unresolved" },
   });
   assert.match(note, /author_spec FAILED \(ticket_id_unresolved\) — no spec was written/);
   assert.doesNotMatch(note, /Authored spec: some-slug/);
@@ -240,7 +240,7 @@ test("Phase 1 — failed write with author_spec_threw reason (SDK threw)", () =>
     decision: "author_spec",
     reasoning: "Bug identified.",
     spec_seed: { slug: "some-slug", title: "some title" },
-    author_outcome: { ok: false, reason: "author_spec_threw" },
+    author_outcome: { specWritten: false, reason: "author_spec_threw" },
   });
   assert.match(note, /author_spec FAILED \(author_spec_threw\) — no spec was written/);
 });
@@ -250,7 +250,7 @@ test("Phase 1 — failed write with an empty reason string still renders a FAILE
     decision: "author_spec",
     reasoning: "Bug identified.",
     spec_seed: { slug: "some-slug" },
-    author_outcome: { ok: false, reason: "" },
+    author_outcome: { specWritten: false, reason: "" },
   });
   assert.match(note, /author_spec FAILED \(unknown_reason\) — no spec was written/);
 });

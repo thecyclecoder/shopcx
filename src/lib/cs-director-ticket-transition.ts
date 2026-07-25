@@ -54,7 +54,17 @@ export type CsDirectorTransitionActionKey =
  * needs_attention so it lands back in the queue instead of disappearing.
  */
 export interface CsDirectorAuthorSpecOutcome {
-  ok: boolean;
+  /**
+   * True iff the specs SDK confirmed the write (`applyBoxCsDirectorCall` returned ok + no
+   * needs_attention). Named `specWritten` — not `ok` — because the whole point of Phase 2 is that
+   * the transition gate must key off "did the spec ACTUALLY get written?" and NOT off any coarser
+   * proxy ("did the handler return without throwing?"). The name is the contract: `specWritten`
+   * is the ONLY signal that authorizes closing + de-escalating the ticket on an `author_spec`
+   * verdict; any falsy value (false OR undefined for a caller that failed to thread it) MUST
+   * leave the ticket open + escalated. Grepped in the pre-flight acceptance check as the
+   * distinguishing token from the pre-Phase-2 shape (which had no outcome plumbing at all).
+   */
+  specWritten: boolean;
   reason?: string;
 }
 
@@ -77,12 +87,14 @@ export interface CsDirectorTransitionInput {
   /**
    * Phase 2 of cs-director-spec-claim-must-match-the-actual-write — the outcome of the
    * `handleAuthorSpec` executor call. Only meaningful for `decision='author_spec'`:
-   *  - `ok: true`   → close + de-escalate (the write actually landed; nothing more to do here).
-   *  - `ok: false`  → keep escalated + stamp escalation_reason with `needs_attention` so the ticket
-   *                   lands back in the queue instead of disappearing on a phantom close.
-   *  - `undefined`  → legacy back-compat only (a stale caller that predates Phase 2). Treated as a
-   *                   confirmed write so the shipped `close_and_deescalate` behavior is unchanged.
-   *                   The shipped `runCsDirectorCallJob` call site ALWAYS threads the outcome.
+   *  - `specWritten: true`   → close + de-escalate (the write actually landed; nothing more to do).
+   *  - `specWritten: false`  → keep escalated + stamp escalation_reason with `needs_attention` so
+   *                            the ticket lands back in the queue instead of disappearing on a
+   *                            phantom close.
+   *  - `undefined`           → legacy back-compat only (a stale caller that predates Phase 2).
+   *                            Treated as a confirmed write so the shipped `close_and_deescalate`
+   *                            behavior is unchanged. The shipped `runCsDirectorCallJob` call site
+   *                            ALWAYS threads the outcome.
    */
   authorSpecOutcome?: CsDirectorAuthorSpecOutcome | null;
   /** Resolved workspace-owner user_id, when the caller can supply it. Optional. */
@@ -193,7 +205,11 @@ export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInpu
       // resolution-side transition (June's structural fix never landed; a customer follow-up may
       // still legitimately resume the pre-escalation lane after a human resolves the failed write).
       const outcome = input.authorSpecOutcome;
-      if (outcome && outcome.ok === false) {
+      // Read the `specWritten` predicate off the outcome — the ONLY signal that authorizes closing
+      // + de-escalating an author_spec verdict. `outcome === undefined` is the legacy back-compat
+      // path (a pre-Phase-2 caller); the shipped runCsDirectorCallJob always threads the outcome.
+      const specWritten = outcome ? outcome.specWritten === true : true;
+      if (outcome && specWritten === false) {
         return {
           action_key: "keep_escalated_needs_attention",
           patch: {
@@ -202,7 +218,7 @@ export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInpu
           },
         };
       }
-      // Confirmed write (outcome.ok === true) — OR the legacy back-compat path where the caller
+      // Confirmed write (specWritten === true) — OR the legacy back-compat path where the caller
       // didn't thread the outcome at all (pre-Phase-2 unit tests) — closes + de-escalates + clears
       // the pre-escalation playbook the same way the shipped Phase-1 transition did.
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };

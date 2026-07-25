@@ -30,9 +30,9 @@ export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_fo
  * `Authored spec: {slug}` off `verdict.spec_seed` (the LLM's claim) with no reference to the
  * executor's result — a phantom spec (ticket 2b7ea029) still read as authored on the ticket thread.
  *
- *  - `ok: true` + `spec_slug` (the slug the specs SDK actually landed, which the handler may have
- *    normalized away from June's seed) → the note renders the CONFIRMED-write line.
- *  - `ok: false` + `reason` (`spec_seed_missing_*`, `ticket_id_unresolved`,
+ *  - `specWritten: true` + `spec_slug` (the slug the specs SDK actually landed, which the handler
+ *    may have normalized away from June's seed) → the note renders the CONFIRMED-write line.
+ *  - `specWritten: false` + `reason` (`spec_seed_missing_*`, `ticket_id_unresolved`,
  *    `author_spec_write_returned_false`, `author_spec_threw`, `handler_threw`) → the note renders
  *    an explicit FAILED line naming the reason, so the audit trail never reads as if the spec
  *    landed.
@@ -42,7 +42,15 @@ export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_fo
  *    the outcome argument.
  */
 export interface CsDirectorAuthorSpecOutcome {
-  ok: boolean;
+  /**
+   * True iff the specs SDK confirmed the write (`applyBoxCsDirectorCall` returned ok + no
+   * needs_attention). Named `specWritten` — not `ok` — because the whole point of Phase 1 is that
+   * the receipt line must key off "did the spec ACTUALLY get written?" and NOT off a coarser
+   * proxy ("did the handler return without throwing?"). Kept in sync with the same-named field on
+   * the transition's [[./cs-director-ticket-transition]] `CsDirectorAuthorSpecOutcome` so the
+   * runner derives ONE outcome and threads it into BOTH the note builder + the transition gate.
+   */
+  specWritten: boolean;
   spec_slug?: string;
   reason?: string;
 }
@@ -91,13 +99,15 @@ function pickString(source: Record<string, unknown> | null | undefined, key: str
  * Phase 1 of cs-director-spec-claim-must-match-the-actual-write — render the author_spec line from
  * the executor's OUTCOME, not from the LLM's claim.
  *
- *  - Confirmed write (`author_outcome.ok === true` + `spec_slug`): render `Authored spec: {slug}`
- *    using the slug the specs SDK actually landed. The SDK may have normalized June's seed slug, so
- *    we PREFER the outcome's slug over the seed's slug. When the seed carried a title we still
- *    surface it for readability (title is descriptive metadata, not the identifying key).
- *  - Failed write (`author_outcome.ok === false`): render `author_spec FAILED ({reason}) — no spec
- *    was written`. NEVER surface a slug on a failed write — the whole point of Phase 1 is that a
- *    receipt can never assert a spec landed when none did (the ticket 2b7ea029 regression class).
+ *  - Confirmed write (`author_outcome.specWritten === true` + `spec_slug`): render `Authored
+ *    spec: {slug}` using the slug the specs SDK actually landed. The SDK may have normalized
+ *    June's seed slug, so we PREFER the outcome's slug over the seed's slug. When the seed
+ *    carried a title we still surface it for readability (title is descriptive metadata, not the
+ *    identifying key).
+ *  - Failed write (`author_outcome.specWritten === false`): render `author_spec FAILED ({reason})
+ *    — no spec was written`. NEVER surface a slug on a failed write — the whole point of Phase 1
+ *    is that a receipt can never assert a spec landed when none did (the ticket 2b7ea029
+ *    regression class).
  *  - Missing outcome (undefined author_outcome — the legacy shape a pre-Phase-1 caller could pass):
  *    fall back to the claim-only line so a stale test caller doesn't crash. The shipped call site
  *    ALWAYS threads the outcome; this path exists only for back-compat with unit tests that
@@ -107,11 +117,11 @@ function summarizeSpecSeed(
   seed: Record<string, unknown> | null | undefined,
   outcome: CsDirectorAuthorSpecOutcome | null | undefined,
 ): string {
-  if (outcome && outcome.ok === false) {
+  if (outcome && outcome.specWritten === false) {
     const reason = outcome.reason && outcome.reason.trim().length > 0 ? outcome.reason.trim() : "unknown_reason";
     return `author_spec FAILED (${reason}) — no spec was written`;
   }
-  const outcomeSlug = outcome && outcome.ok === true && typeof outcome.spec_slug === "string" && outcome.spec_slug.trim().length > 0
+  const outcomeSlug = outcome && outcome.specWritten === true && typeof outcome.spec_slug === "string" && outcome.spec_slug.trim().length > 0
     ? outcome.spec_slug.trim()
     : null;
   const seedSlug = pickString(seed, "slug");

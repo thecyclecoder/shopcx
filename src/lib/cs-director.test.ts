@@ -1332,7 +1332,7 @@ test("Phase 2 — a FAILED author_spec write parks needs_attention AND the compo
     decision: verdict.decision,
     reasoning: verdict.reasoning,
     remedy: null,
-    authorSpecOutcome: { ok: false, reason: result.reason },
+    authorSpecOutcome: { specWritten: false, reason: result.reason },
     now: "2026-07-25T12:00:00.000Z",
   });
   assert.equal(transition.action_key, "keep_escalated_needs_attention");

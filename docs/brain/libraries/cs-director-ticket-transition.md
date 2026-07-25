@@ -9,8 +9,8 @@ The **pure patch builder** for the per-verdict `tickets` state transition that P
 Decides the ticket state patch to apply after a CS Director verdict, enforcing the invariant: **never leave a ruled-on ticket in the `open+escalated+no-owner` limbo**. Phase 1 wrote an internal note; this phase closes the structural gap where a ticket could remain open + escalated after being reviewed.
 
 The per-verdict behavior:
-- **`author_spec`** (CONFIRMED write — `authorSpecOutcome.ok === true` OR missing outcome for legacy back-compat) → close + de-escalate + unassign. The customer side is complete; the structural fix is tracked on the authored spec.
-- **`author_spec`** (FAILED write — `authorSpecOutcome.ok === false`) → **`keep_escalated_needs_attention`**. Leave the ticket OPEN + ESCALATED and stamp `escalation_reason` with `"author_spec FAILED ({reason}) — no spec was written; ticket needs human review"` so it lands back in the queue instead of disappearing on a phantom close. See [[../specs/cs-director-spec-claim-must-match-the-actual-write]] Phase 2.
+- **`author_spec`** (CONFIRMED write — `authorSpecOutcome.specWritten === true` OR missing outcome for legacy back-compat) → close + de-escalate + unassign. The customer side is complete; the structural fix is tracked on the authored spec.
+- **`author_spec`** (FAILED write — `authorSpecOutcome.specWritten === false`) → **`keep_escalated_needs_attention`**. Leave the ticket OPEN + ESCALATED and stamp `escalation_reason` with `"author_spec FAILED ({reason}) — no spec was written; ticket needs human review"` so it lands back in the queue instead of disappearing on a phantom close. See [[../specs/cs-director-spec-claim-must-match-the-actual-write]] Phase 2.
 - **`approve_remedy`** (with customer reply pending) → de-escalate only. Status stays `open` so the Phase-2 executor can ship the customer reply without the ticket being stranded on the escalation queue.
 - **`approve_remedy`** (no customer reply needed) → close + de-escalate + unassign. Same as a confirmed `author_spec`.
 - **`escalate_founder`** → keep escalated but record that it now awaits the CEO. When the caller resolves the workspace owner's `user_id`, it is stamped on `escalated_to` so the ticket is owned by the founder rather than stranded on the routine's default lane.
@@ -21,7 +21,7 @@ The per-verdict behavior:
 
 - **`decideCsDirectorTicketTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition`** — pure function that builds the patch. Takes the decision, reasoning, optional remedy plan, optional `authorSpecOutcome`, optional CEO user_id, and a timestamp. Returns `{patch, action_key}` where `patch` is the `tickets` row update and `action_key` names the applied logic for audit/logging.
 - **`CsDirectorDecision`** — type alias for the four verdict shapes.
-- **`CsDirectorAuthorSpecOutcome`** — interface for the `authorSpecOutcome` field: `{ ok, reason? }`. Only meaningful for `decision='author_spec'`.
+- **`CsDirectorAuthorSpecOutcome`** — interface for the `authorSpecOutcome` field: `{ specWritten, reason? }`. Only meaningful for `decision='author_spec'`. `specWritten` (not the coarser `ok`) is the ONLY signal that authorizes closing + de-escalating; the name is the contract.
 - **`CsDirectorTransitionInput`** — interface for the input (decision, reasoning, remedy, authorSpecOutcome, ceoUserId, now timestamp).
 - **`CsDirectorTicketTransition`** — return type with `patch` (record of column updates) and `action_key` (one of `close_and_deescalate`, `deescalate_only`, `keep_escalated_ceo_owned`, `keep_escalated_needs_attention`, `noop`).
 - **`CsDirectorTransitionActionKey`** — enum of the five possible actions.

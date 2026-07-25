@@ -14590,7 +14590,10 @@ async function runCsDirectorCallJob(job: Job) {
           author_outcome:
             verdict.decision === "author_spec"
               ? {
-                  ok: authorOutcomeOk,
+                  // `specWritten` is the field the note builder + transition gate both key off; the
+                  // audit row mirrors it so a reader can trace the same predicate the runtime used
+                  // (see [[../src/lib/cs-director-ticket-transition]] docstring on the field).
+                  specWritten: authorOutcomeOk,
                   spec_slug: authoredSpecSlug,
                   reason: authorFailureReason,
                 }
@@ -14634,7 +14637,7 @@ async function runCsDirectorCallJob(job: Job) {
       // Uses the SAME derived outcome that populates the audit row + gates the transition below.
       const noteAuthorOutcome = verdict.decision === "author_spec"
         ? {
-            ok: authorOutcomeOk === true,
+            specWritten: authorOutcomeOk === true,
             spec_slug: authoredSpecSlug ?? undefined,
             reason: authorFailureReason ?? undefined,
           }
@@ -14715,7 +14718,7 @@ async function runCsDirectorCallJob(job: Job) {
         // landing back in the queue instead of disappearing on a phantom close (ticket 2b7ea029).
         authorSpecOutcome:
           verdict.decision === "author_spec"
-            ? { ok: authorOutcomeOk === true, reason: authorFailureReason ?? undefined }
+            ? { specWritten: authorOutcomeOk === true, reason: authorFailureReason ?? undefined }
             : null,
         ceoUserId,
         now: new Date().toISOString(),

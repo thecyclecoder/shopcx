@@ -229,11 +229,11 @@ test("escalate_founder does NOT touch the active playbook (defer, not resolve)",
 // ticket OPEN + ESCALATED + escalation_reason stamped with the failure reason so it lands back
 // in the queue for a human, not on the "resolved" pile.
 
-test("Phase 2 — author_spec with a CONFIRMED write (outcome ok:true) still closes + de-escalates + clears the playbook", () => {
+test("Phase 2 — author_spec with a CONFIRMED write (outcome specWritten:true) still closes + de-escalates + clears the playbook", () => {
   const t = decideCsDirectorTicketTransition({
     decision: "author_spec",
     reasoning: "Analyzer gap.",
-    authorSpecOutcome: { ok: true },
+    authorSpecOutcome: { specWritten: true },
     now: NOW,
   });
   assert.equal(t.action_key, "close_and_deescalate");
@@ -242,7 +242,7 @@ test("Phase 2 — author_spec with a CONFIRMED write (outcome ok:true) still clo
   assert.equal(t.patch.active_playbook_id, null);
 });
 
-test("Phase 2 — author_spec with a FAILED write (outcome ok:false) leaves the ticket OPEN + ESCALATED + needs_attention", () => {
+test("Phase 2 — author_spec with a FAILED write (outcome specWritten:false) leaves the ticket OPEN + ESCALATED + needs_attention", () => {
   // The exact regression class from ticket 2b7ea029 — the SDK's chokepoint guard rejected the
   // write. The transition MUST NOT close: the ticket stays open, escalation is not cleared, and
   // escalation_reason names the failure so a CS agent scanning the queue immediately sees WHY
@@ -250,7 +250,7 @@ test("Phase 2 — author_spec with a FAILED write (outcome ok:false) leaves the 
   const t = decideCsDirectorTicketTransition({
     decision: "author_spec",
     reasoning: "Bug identified, structural fix needed.",
-    authorSpecOutcome: { ok: false, reason: "author_spec_write_returned_false" },
+    authorSpecOutcome: { specWritten: false, reason: "author_spec_write_returned_false" },
     now: NOW,
   });
   assert.equal(t.action_key, "keep_escalated_needs_attention");
@@ -277,7 +277,7 @@ test("Phase 2 — author_spec failed write with ticket_id_unresolved reason rend
   const t = decideCsDirectorTicketTransition({
     decision: "author_spec",
     reasoning: "Analyzer gap identified.",
-    authorSpecOutcome: { ok: false, reason: "ticket_id_unresolved" },
+    authorSpecOutcome: { specWritten: false, reason: "ticket_id_unresolved" },
     now: NOW,
   });
   assert.equal(t.action_key, "keep_escalated_needs_attention");
@@ -289,7 +289,7 @@ test("Phase 2 — author_spec failed write with an empty reason still stamps a n
   const t = decideCsDirectorTicketTransition({
     decision: "author_spec",
     reasoning: "x",
-    authorSpecOutcome: { ok: false },
+    authorSpecOutcome: { specWritten: false },
     now: NOW,
   });
   assert.equal(t.action_key, "keep_escalated_needs_attention");
