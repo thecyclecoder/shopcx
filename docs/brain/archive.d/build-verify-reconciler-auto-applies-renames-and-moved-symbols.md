@@ -1,0 +1,1 @@
+- **Check-reconciler auto-applies renamed + moved-symbol repoints (not just case/whitespace)** · verified 2026-07-25 · → [[../libraries/check-reconciliation]]
