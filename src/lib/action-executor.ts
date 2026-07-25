@@ -16,6 +16,7 @@ import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
 import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@/lib/selective-clarify";
 import { usageCostCents } from "@/lib/ai-usage";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
+import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 
 // ── Types ──
 
@@ -1548,11 +1549,11 @@ export const directActionHandlers: Record<
     // Phase-2 stacking guard (spec:
     // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
     // Refuse a second LOYALTY-* coupon on a contract already carrying one —
-    // two stacked $15 loyalty coupons combine past the single-$15 ceiling.
-    // Runs BEFORE the 2s Shopify propagation delay so a stacking attempt
-    // fails fast without minting a duplicate discount code. Not duplicated
-    // with `reconcileLoyaltyRefundCoupons` (that reconciles AFTER a cash
-    // refund settles; this refuses UPFRONT).
+    // two stacked loyalty coupons combine past the single-LOYALTY_REMEDY_MAX_CENTS
+    // ceiling. Runs BEFORE the 2s Shopify propagation delay so a stacking
+    // attempt fails fast without minting a duplicate discount code. Not
+    // duplicated with `reconcileLoyaltyRefundCoupons` (that reconciles AFTER
+    // a cash refund settles; this refuses UPFRONT).
     const { data: subForStacking } = await ctx.admin
       .from("subscriptions")
       .select("applied_discounts")
@@ -1565,9 +1566,10 @@ export const directActionHandlers: Record<
         (subForStacking as { applied_discounts?: unknown }).applied_discounts,
       )
     ) {
+      const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
       return {
         success: false,
-        error: `Subscription ${p.contract_id} already has a loyalty coupon applied — no stacking (single-$15 ceiling)`,
+        error: `Subscription ${p.contract_id} already has a loyalty coupon applied — no stacking (single-$${capDollars} ceiling)`,
       };
     }
 
@@ -2027,13 +2029,15 @@ export const directActionHandlers: Record<
     // Phase-2 double-payout guard (spec:
     // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
     // A loyalty save is for an order that did NOT already carry loyalty —
-    // if the order already consumed a loyalty coupon at checkout, a $15
-    // cash refund on top would combine two loyalty benefits on one order
-    // and blow past the $15 ceiling. Refuse before any refund fires.
+    // if the order already consumed a loyalty coupon at checkout, a
+    // second cash refund on top would combine two loyalty benefits on one
+    // order and blow past the LOYALTY_REMEDY_MAX_CENTS ceiling. Refuse
+    // before any refund fires.
     if (hasLoyaltyCodeApplied((order as { discount_codes?: unknown }).discount_codes)) {
+      const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
       return {
         success: false,
-        error: `Order #${order.order_number} already had a loyalty reward applied — no second loyalty refund (single-$15 ceiling)`,
+        error: `Order #${order.order_number} already had a loyalty reward applied — no second loyalty refund (single-$${capDollars} ceiling)`,
       };
     }
 
