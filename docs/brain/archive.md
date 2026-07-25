@@ -12,7 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Hard cap on loyalty-derived remedies ($15 max) — no cash-out / make-whole / expiry-extension, and June never escalates one** · verified 2026-07-25 · → [[../operational-rules#loyalty-ceiling--15-absolute-no-cash-out--make-whole--expiry-extension]]
 - **Phase-verify self-heals a stale grep check instead of parking a done build** · verified 2026-07-24 · → [[../libraries/check-reconciliation]]
+- **closeReturn honors its documented no-op contract on internal-path returns** · verified 2026-07-24 · → [[../libraries/shopify-returns]] · [[../inngest/returns]]
+- **Return-label CTA button must render when the label URL is alone in a paragraph** · verified 2026-07-24 · → [[../libraries/label-cta]]
+- **Remotion Lambda version drift caught at predeploy, not at runtime** · verified 2026-07-24 · → [[../integrations/remotion-lambda]]
 - **Security fix auto-author must emit ≥1 typed machine check per phase** · verified 2026-07-24 · → [[../libraries/security-agent]]
 - **Stop segment-coverage stale-tail alerts for subscribers created after the cron ran** · verified 2026-07-24 · → [[lifecycles/control-tower]]
 - **Amplifier import failures must be visible, retried, and escalated (no silent drops)** · verified 2026-07-23 · → [[../inngest/amplifier-import-reconcile]]
