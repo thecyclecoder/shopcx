@@ -1,0 +1,1 @@
+- **Drop Braintree portal-vault processor-decline noise from the Vercel error feed** · verified 2026-07-25 · → [[lifecycles/control-tower]]
