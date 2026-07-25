@@ -41,7 +41,32 @@ export type CsDirectorTransitionActionKey =
   | "close_and_deescalate"
   | "deescalate_only"
   | "keep_escalated_ceo_owned"
+  | "keep_escalated_needs_attention"
   | "noop";
+
+/**
+ * Phase 2 of cs-director-spec-claim-must-match-the-actual-write — the OUTCOME `handleAuthorSpec`
+ * returned, threaded through the transition decision so an `author_spec` verdict CLOSES the ticket
+ * only when the specs SDK confirmed the write. On ticket 2b7ea029 the pre-Phase-2 transition
+ * unconditionally closed + de-escalated on `author_spec`, and the phantom-spec close was the
+ * irreversible half: nobody revisits a closed, de-escalated ticket, so the missing spec was
+ * invisible for a day. When the write failed the ticket must stay OPEN + ESCALATED + flagged
+ * needs_attention so it lands back in the queue instead of disappearing.
+ */
+export interface CsDirectorAuthorSpecOutcome {
+  /**
+   * True iff the specs SDK confirmed the write (`applyBoxCsDirectorCall` returned ok + no
+   * needs_attention). Named `specWritten` — not `ok` — because the whole point of Phase 2 is that
+   * the transition gate must key off "did the spec ACTUALLY get written?" and NOT off any coarser
+   * proxy ("did the handler return without throwing?"). The name is the contract: `specWritten`
+   * is the ONLY signal that authorizes closing + de-escalating the ticket on an `author_spec`
+   * verdict; any falsy value (false OR undefined for a caller that failed to thread it) MUST
+   * leave the ticket open + escalated. Grepped in the pre-flight acceptance check as the
+   * distinguishing token from the pre-Phase-2 shape (which had no outcome plumbing at all).
+   */
+  specWritten: boolean;
+  reason?: string;
+}
 
 export interface CsDirectorTransitionInput {
   decision: CsDirectorDecision;
@@ -59,6 +84,19 @@ export interface CsDirectorTransitionInput {
    * remedy must never auto-close).
    */
   remedyResolved?: boolean;
+  /**
+   * Phase 2 of cs-director-spec-claim-must-match-the-actual-write — the outcome of the
+   * `handleAuthorSpec` executor call. Only meaningful for `decision='author_spec'`:
+   *  - `specWritten: true`   → close + de-escalate (the write actually landed; nothing more to do).
+   *  - `specWritten: false`  → keep escalated + stamp escalation_reason with `needs_attention` so
+   *                            the ticket lands back in the queue instead of disappearing on a
+   *                            phantom close.
+   *  - `undefined`           → legacy back-compat only (a stale caller that predates Phase 2).
+   *                            Treated as a confirmed write so the shipped `close_and_deescalate`
+   *                            behavior is unchanged. The shipped `runCsDirectorCallJob` call site
+   *                            ALWAYS threads the outcome.
+   */
+  authorSpecOutcome?: CsDirectorAuthorSpecOutcome | null;
   /** Resolved workspace-owner user_id, when the caller can supply it. Optional. */
   ceoUserId?: string | null;
   /** ISO timestamp used for `updated_at` / `closed_at` / `resolved_at` — passed in so tests are deterministic. */
@@ -136,6 +174,21 @@ function ceoOwnedEscalationReason(reasoning: string): string {
 }
 
 /**
+ * Phase 2 of cs-director-spec-claim-must-match-the-actual-write — build the escalation_reason a
+ * FAILED author_spec write stamps on the ticket. Names the concrete failure class from
+ * `handleAuthorSpec` (`spec_seed_missing_*`, `ticket_id_unresolved`,
+ * `author_spec_write_returned_false`, `author_spec_threw`, `handler_threw`) so a CS agent scanning
+ * the queue immediately sees WHY the ticket is back in-queue instead of resolved. Caps at 400 chars
+ * to fit the free-text column; the full reasoning lives on `director_activity` + the Phase-1
+ * internal note the runner already dropped.
+ */
+function needsAttentionEscalationReason(reason: string | undefined): string {
+  const cleaned = (reason ?? "").trim();
+  const token = cleaned.length > 0 ? cleaned : "unknown_reason";
+  return `author_spec FAILED (${token}) — no spec was written; ticket needs human review`.slice(0, 400);
+}
+
+/**
  * Decide the per-verdict patch to apply to the ticket. The runner then executes it as a compare-
  * and-set (`.eq("id", ticketId).eq("workspace_id", …).select("id")`) so an async race can't
  * overwrite a ticket that has moved on. Never throws; unknown decisions become a `noop` patch so
@@ -143,8 +196,33 @@ function ceoOwnedEscalationReason(reasoning: string): string {
  */
 export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition {
   switch (input.decision) {
-    case "author_spec":
+    case "author_spec": {
+      // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — close ONLY on a confirmed
+      // write. Ticket 2b7ea029 was closed + de-escalated though no spec landed, and the
+      // irreversibility of the close hid the missing spec for a day. A failed write leaves the
+      // ticket OPEN + ESCALATED + escalation_reason stamped with the failure reason so it lands
+      // back in the queue instead of disappearing. Playbook fields are NOT cleared — this is not a
+      // resolution-side transition (June's structural fix never landed; a customer follow-up may
+      // still legitimately resume the pre-escalation lane after a human resolves the failed write).
+      const outcome = input.authorSpecOutcome;
+      // Read the `specWritten` predicate off the outcome — the ONLY signal that authorizes closing
+      // + de-escalating an author_spec verdict. `outcome === undefined` is the legacy back-compat
+      // path (a pre-Phase-2 caller); the shipped runCsDirectorCallJob always threads the outcome.
+      const specWritten = outcome ? outcome.specWritten === true : true;
+      if (outcome && specWritten === false) {
+        return {
+          action_key: "keep_escalated_needs_attention",
+          patch: {
+            escalation_reason: needsAttentionEscalationReason(outcome.reason),
+            updated_at: input.now,
+          },
+        };
+      }
+      // Confirmed write (specWritten === true) — OR the legacy back-compat path where the caller
+      // didn't thread the outcome at all (pre-Phase-2 unit tests) — closes + de-escalates + clears
+      // the pre-escalation playbook the same way the shipped Phase-1 transition did.
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
+    }
     // close_no_action — June investigated, the handling was already correct, and there is NO
     // in-leash remedy AND no genuine founder judgment to make (a phantom charge we can't locate
     // and the customer was already asked for identifying info; a "nothing to do" ticket). Close +

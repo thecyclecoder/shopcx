@@ -14510,13 +14510,64 @@ async function runCsDirectorCallJob(job: Job) {
       linkage_ticket_id?: string | null;
       linkage_triage_run_id?: string | null;
     } = { ok: true, handler: "not_run" };
+
+    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor.
+    // Called ONCE per cs-director-call job. Reordered to run BEFORE `recordDirectorActivity` per
+    // Phase 2 of cs-director-spec-claim-must-match-the-actual-write so the audit row records the
+    // WRITE OUTCOME (spec_slug the SDK actually landed, or the failure reason), not the LLM's
+    // claim. `applyBoxCsDirectorCall` routes `approve_remedy` / `author_spec` / `escalate_founder`
+    // to their per-decision handlers (see src/lib/cs-director.ts + docs/brain/libraries/cs-director.md
+    // § Phase-2 executor); any other value (a shape drift out of `normalizeCsDirectorVerdict`,
+    // which defensively falls back to `escalate_founder`) is a clean logged no-op. Never throws —
+    // a `{ ok:false, reason }` result surfaces on the job's `log_tail` without rolling back the
+    // completed job. Same never-throws contract `applyBoxDeployReview` uses.
+    try {
+      const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
+      applyResult = await applyBoxCsDirectorCall(db, job.id, verdict);
+      console.log(
+        `${tag} applyBoxCsDirectorCall → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` reason=${applyResult.reason}` : ""}`,
+      );
+    } catch (e) {
+      // Defensive belt: the mutator swallows its own throws, so this only catches a dynamic-import
+      // failure or a truly unexpected re-throw. director_activity is still written below with the
+      // captured failure reason so the audit trail never drops a session.
+      console.warn(`${tag} applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
+      applyResult = { ok: false, reason: errText(e) };
+    }
+
+    // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — derive the author outcome
+    // once so BOTH the director_activity row and the ticket transition (below) read the SAME
+    // authoritative signal. On ticket 2b7ea029 the audit table had no row for any of the three
+    // sessions AND the ticket was closed on a phantom author_spec; recording the outcome here (and
+    // gating the transition on it below) closes both halves of the miss.
+    const authorOutcomeOk =
+      verdict.decision === "author_spec"
+        ? applyResult.ok === true && applyResult.needs_attention !== true
+        : null;
+    const authoredSpecSlug: string | null =
+      verdict.decision === "author_spec" && authorOutcomeOk === true && typeof applyResult.spec_slug === "string" && applyResult.spec_slug.trim().length > 0
+        ? applyResult.spec_slug
+        : null;
+    const authorFailureReason: string | null =
+      verdict.decision === "author_spec" && authorOutcomeOk === false
+        ? (applyResult.reason ?? "unknown_reason")
+        : null;
+
+    // Phase 1 of cs-director-third-rung-hard-calls-above-triage-quorum: record the verdict to
+    // `director_activity` (director_function='cs', action_kind='cs_director_call'). The CEO/audit
+    // trail shows WHAT the CS Director decided + WHY. Phase 2 of
+    // cs-director-spec-claim-must-match-the-actual-write — `specSlug` reports the SDK-landed slug
+    // on a confirmed write, and NULL on a failed write; the failure `reason` lands in metadata as
+    // `author_outcome.reason` so a grader / audit reader can trace WHY no spec landed without
+    // re-scanning log_tail. Ordering: this runs AFTER `applyBoxCsDirectorCall` so `applyResult` is
+    // populated. `recordDirectorActivity` never throws (best-effort per its own contract).
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
         workspaceId: job.workspace_id,
         directorFunction: "cs",
         actionKind: "cs_director_call",
-        specSlug: verdict.decision === "author_spec" && typeof verdict.spec_seed?.slug === "string" ? String(verdict.spec_seed.slug) : null,
+        specSlug: authoredSpecSlug,
         reason: verdict.reasoning.slice(0, 4000),
         metadata: {
           job_id: job.id,
@@ -14533,9 +14584,24 @@ async function runCsDirectorCallJob(job: Job) {
           // Phase 2) carry the first review's id so the audit feed can pair the two verdicts.
           // Null on the default primary June review.
           second_opinion_of: secondOpinionOfRunId,
+          // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — record the executor's
+          // OUTCOME on the audit row so a reader can trace whether the claimed write actually
+          // landed WITHOUT re-parsing the log_tail. Null when the verdict was not author_spec.
+          author_outcome:
+            verdict.decision === "author_spec"
+              ? {
+                  // `specWritten` is the field the note builder + transition gate both key off; the
+                  // audit row mirrors it so a reader can trace the same predicate the runtime used
+                  // (see [[../src/lib/cs-director-ticket-transition]] docstring on the field).
+                  specWritten: authorOutcomeOk,
+                  spec_slug: authoredSpecSlug,
+                  reason: authorFailureReason,
+                }
+              : null,
           // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor
-          // (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) runs immediately after this record
-          // and materializes the verdict. `phase:2` reflects that the executor tier is in-chain;
+          // (`applyBoxCsDirectorCall` in src/lib/cs-director.ts) ran IMMEDIATELY BEFORE this record
+          // (reordered per cs-director-spec-claim-must-match-the-actual-write Phase 2) so the row
+          // reflects the write outcome. `phase:2` reflects that the executor tier is in-chain;
           // `autonomous:true` reflects that the runner hands the verdict to a deterministic mutator
           // without waiting on the CEO. approve_remedy fires via `executeSonnetDecision` then
           // delivers the customer message via `deliverTicketMessage`; author_spec writes through the
@@ -14549,29 +14615,6 @@ async function runCsDirectorCallJob(job: Job) {
       // recordDirectorActivity is best-effort + never-throws, so this only catches a dynamic-import
       // failure. The verdict still lands on the log_tail so an operator can recover it.
       console.warn(`${tag} director_activity write failed:`, e instanceof Error ? e.message : e);
-    }
-
-    // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor.
-    // Called ONCE per cs-director-call job, IMMEDIATELY after the director_activity audit record
-    // above so the mutator sees the SAME normalized verdict the audit trail carries.
-    // `applyBoxCsDirectorCall` routes `approve_remedy` / `author_spec` / `escalate_founder` to
-    // their per-decision handlers (see src/lib/cs-director.ts + docs/brain/libraries/cs-director.md
-    // § Phase-2 executor); any other value (a shape drift out of `normalizeCsDirectorVerdict`,
-    // which defensively falls back to `escalate_founder`) is a clean logged no-op. Never throws —
-    // a `{ ok:false, reason }` result surfaces on the job's `log_tail` without rolling back the
-    // completed job. Same never-throws contract `applyBoxDeployReview` uses.
-    try {
-      const { applyBoxCsDirectorCall } = await import("../src/lib/cs-director");
-      applyResult = await applyBoxCsDirectorCall(db, job.id, verdict);
-      console.log(
-        `${tag} applyBoxCsDirectorCall → ok=${applyResult.ok} handler=${applyResult.handler ?? "(none)"}${applyResult.reason ? ` reason=${applyResult.reason}` : ""}`,
-      );
-    } catch (e) {
-      // Defensive belt: the mutator swallows its own throws, so this only catches a dynamic-import
-      // failure or a truly unexpected re-throw. The audit row above is the primary trail; a stub-
-      // routing failure never rolls back the completed job.
-      console.warn(`${tag} applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
-      applyResult = { ok: false, reason: errText(e) };
     }
 
     // Phase 1 of cs-director-call-closes-the-ticket-loop-note-and-resolution-per-verdict — write
@@ -14588,11 +14631,23 @@ async function runCsDirectorCallJob(job: Job) {
     // the generic verdict note so the thread doesn't read as if June already executed the refund.
     if (!applyResult?.awaiting_founder_approval) try {
       const { buildCsDirectorVerdictNote } = await import("../src/lib/cs-director-verdict-note");
+      // Phase 1 of cs-director-spec-claim-must-match-the-actual-write — the note renders
+      // `Authored spec: {slug}` ONLY when the specs SDK confirmed the write (using the SDK-landed
+      // slug); on a failed write it renders an explicit `author_spec FAILED ({reason})` line.
+      // Uses the SAME derived outcome that populates the audit row + gates the transition below.
+      const noteAuthorOutcome = verdict.decision === "author_spec"
+        ? {
+            specWritten: authorOutcomeOk === true,
+            spec_slug: authoredSpecSlug ?? undefined,
+            reason: authorFailureReason ?? undefined,
+          }
+        : undefined;
       const noteBody = buildCsDirectorVerdictNote({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         spec_seed: verdict.spec_seed ?? null,
+        author_outcome: noteAuthorOutcome,
         // Phase 3 of escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-
         // recommendation — thread June's suggested remedy through the internal note so the ticket
         // thread carries the SAME recommendation the CEO card carries. Silent when absent.
@@ -14657,6 +14712,14 @@ async function runCsDirectorCallJob(job: Job) {
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         remedyResolved,
+        // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — gate the author_spec
+        // close on a CONFIRMED write. A failed write returns `keep_escalated_needs_attention` so
+        // the ticket stays open + escalated + escalation_reason stamped with the failure reason,
+        // landing back in the queue instead of disappearing on a phantom close (ticket 2b7ea029).
+        authorSpecOutcome:
+          verdict.decision === "author_spec"
+            ? { specWritten: authorOutcomeOk === true, reason: authorFailureReason ?? undefined }
+            : null,
         ceoUserId,
         now: new Date().toISOString(),
       });
