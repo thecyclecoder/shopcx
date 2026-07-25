@@ -22,7 +22,7 @@ import { formatSupplementFactsText, type SupplementFactsShape } from "@/lib/prod
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
-import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
+import { LOYALTY_REMEDY_MAX_CENTS, getMemberByCustomerId, getMembersInLinkGroup } from "@/lib/loyalty";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -1028,7 +1028,8 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   const [
     { data: subs },
     { data: orders },
-    { data: loyaltyMember },
+    loyaltyMember,
+    loyaltyMembersInGroup,
     { data: profile },
   ] = await Promise.all([
     admin.from("subscriptions")
@@ -1054,17 +1055,19 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(25),
-    // Loyalty record may live on ANY of the linked customer profiles.
-    // Bug we fixed: previously this used .eq("customer_id", custId)
-    // and missed records belonging to a sibling profile (e.g. ticket
-    // from tbaxtel@hotmail.com but loyalty on tbaxtel@me.com).
-    admin.from("loyalty_members")
-      .select("id, points_balance")
-      .eq("workspace_id", wsId)
-      .in("customer_id", allCustIds)
-      .order("points_balance", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+    // Loyalty — route through the [[../../docs/brain/libraries/loyalty]]
+    // SDK chokepoint (spec: loyalty-coupon-apply-resolves-contract-owning-
+    // member-no-doomed-regen Phase 3). `getMemberByCustomerId` expands the
+    // link group and SUMS `points_balance` across sibling member rows —
+    // the prior raw `.in(customer_id, allCustIds).order(points_balance,
+    // desc).limit(1)` was a MAX-PICK that reported the largest single
+    // profile's balance instead of the aggregate, so a two-member group
+    // with a SPLIT balance (e.g. 100 + 51) was reported as 100 instead of
+    // 151 (Sandra Lutz, ticket 2b7ea029). `getMembersInLinkGroup` returns
+    // the full member list — used below to scope unused-redemption reads
+    // to the whole group instead of the canonical member's id.
+    getMemberByCustomerId(wsId, custId),
+    getMembersInLinkGroup(wsId, custId),
     // Marketing consent — surface so AI knows whether to fire
     // unsubscribe_email_marketing / unsubscribe_sms_marketing actions
     // when the customer asks to be removed from lists. Pulled on the
@@ -1366,16 +1369,41 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
       }
     }
 
-    const { data: redemptions } = await admin.from("loyalty_redemptions")
-      .select("discount_code, discount_value, expires_at")
-      .eq("member_id", loyaltyMember.id).eq("status", "active").is("used_at", null);
+    // Phase 3 (spec: loyalty-coupon-apply-resolves-contract-owning-member-
+    // no-doomed-regen): span every member in the link group, not just the
+    // canonical aggregated one. A loyalty code is minted for the specific
+    // Shopify customer the earning profile owns (customerSelection.customers.add
+    // is locked to ONE customer), so a group with unused rewards on multiple
+    // sibling profiles must surface ALL of them — the prior `.eq('member_id',
+    // loyaltyMember.id)` scope hid the two rewards that would have actually
+    // worked on Sandra's sub (ticket 2b7ea029). Label each with the owning
+    // profile's email so the agent + human reviewer can tell which sub/order
+    // each coupon actually applies to.
+    const memberIdsInGroup = loyaltyMembersInGroup.map((m) => m.id).filter(Boolean);
+    const emailByMemberId = new Map<string, string | null>(
+      loyaltyMembersInGroup.map((m) => [m.id, m.email ?? null]),
+    );
+    const { data: redemptions } = memberIdsInGroup.length
+      ? await admin.from("loyalty_redemptions")
+          .select("discount_code, discount_value, expires_at, member_id")
+          .in("member_id", memberIdsInGroup).eq("status", "active").is("used_at", null)
+      : { data: null as { discount_code: string; discount_value: number; expires_at?: string; member_id: string }[] | null };
     if (redemptions?.length) {
-      const coupons = redemptions.map((r: { discount_code: string; discount_value: number; expires_at?: string }) => {
+      const coupons = redemptions.map((r: { discount_code: string; discount_value: number; expires_at?: string; member_id: string }) => {
         const exp = r.expires_at ? new Date(r.expires_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "no exp";
-        return `${r.discount_code} ($${r.discount_value}, expires ${exp})`;
+        const owningEmail = emailByMemberId.get(r.member_id) ?? null;
+        const ownerTag = owningEmail ? ` — owner: ${owningEmail}` : "";
+        return `${r.discount_code} ($${r.discount_value}, expires ${exp}${ownerTag})`;
       }).join(", ");
       parts.push(`Unused coupons: ${coupons}`);
     }
+    // Points combine across a link group but a code cannot — codes are
+    // minted for the specific Shopify customer the earning profile owns,
+    // so applying a coupon on a subscription/order belonging to a
+    // different profile in the group is a guaranteed no-op. Spell it out
+    // for the LLM so it never offers a sibling profile's code on the
+    // wrong sub (Sandra's exact failure mode; ticket 2b7ea029).
+    parts.push("NOTE: points are combined across every linked profile above, but a loyalty CODE only works on orders and subscriptions belonging to the profile that earned it. When offering an existing unused coupon, match it to a sub/order on the SAME profile — the 'owner' tag on each coupon is that profile's email.");
   }
 
   // Marketing consent — explicit so AI knows whether to fire an

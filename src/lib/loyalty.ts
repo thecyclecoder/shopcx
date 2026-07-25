@@ -124,14 +124,45 @@ async function expandLinkedCustomerIds(
  * another), so the balance is the SUM across the group. The "canonical" member —
  * the biggest current holder — is the identity that writes (earn/spend) target,
  * which also consolidates future activity onto one row.
+ *
+ * Exported for regression tests (spec:
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 3)
+ * — a two-member link group with a SPLIT balance (e.g. 100 + 51) must report
+ * 151, not the max-pick 100 (Sandra Lutz fingerprint; ticket 2b7ea029).
  */
-function aggregateLinkedMembers(rows: LoyaltyMember[]): LoyaltyMember | null {
+export function aggregateLinkedMembers(rows: LoyaltyMember[]): LoyaltyMember | null {
   if (!rows.length) return null;
   if (rows.length === 1) return rows[0];
   const canonical = rows.reduce((a, b) => (Number(b.points_balance || 0) > Number(a.points_balance || 0) ? b : a));
   const points_balance = rows.reduce((s, m) => s + Number(m.points_balance || 0), 0);
   const points_earned = rows.reduce((s, m) => s + Number(m.points_earned || 0), 0);
   return { ...canonical, points_balance, points_earned };
+}
+
+/**
+ * Return every `loyalty_members` row in the link group for a customer_id.
+ * The aggregated canonical member (from `getMemberByCustomerId` /
+ * `aggregateLinkedMembers`) is the identity for balance/spend, but a linked
+ * group can carry redemptions and transactions on sibling rows too — a
+ * broader read scoped by `.in('member_id', ids)` needs the full list, not
+ * just the canonical one. Chokepoint for callers that walk ledger rows or
+ * list redemptions across the whole group (spec:
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen
+ * Phase 3). Returns an empty array when nothing in the group has a member
+ * row.
+ */
+export async function getMembersInLinkGroup(
+  workspaceId: string,
+  customerId: string,
+): Promise<LoyaltyMember[]> {
+  const admin = createAdminClient();
+  const linkedIds = await expandLinkedCustomerIds(workspaceId, customerId);
+  const { data: rows } = await admin
+    .from("loyalty_members")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", linkedIds);
+  return (rows ?? []) as LoyaltyMember[];
 }
 
 export async function getMember(

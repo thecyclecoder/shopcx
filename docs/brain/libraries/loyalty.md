@@ -32,6 +32,24 @@ async function getMember(workspaceId: string, shopifyCustomerId: string,) : Prom
 async function getMemberByCustomerId(workspaceId: string, customerId: string,) : Promise<LoyaltyMember | null>
 ```
 
+Expands the link group and returns the aggregated canonical member — `points_balance` / `points_earned` SUMMED across every sibling row (via `aggregateLinkedMembers`), identity taken from the highest-balance row so future earn/spend consolidate onto one row. Every loyalty balance reader in the codebase routes through this chokepoint — including `getLoyaltyBalance` ([[commerce__loyalty]]) and `getCustomerAccount`'s LOYALTY block ([[sonnet-orchestrator-v2]]). Precedent: ticket 2b7ea029 (Sandra Lutz) — a two-member group with a split 100 + 51 balance had been reported as 100 (max-pick) via a raw `.order('points_balance', desc).limit(1)`. Spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 3.
+
+### `getMembersInLinkGroup` — function
+
+```ts
+async function getMembersInLinkGroup(workspaceId: string, customerId: string,) : Promise<LoyaltyMember[]>
+```
+
+Returns every `loyalty_members` row in the link group for a customer_id — the counterpart to `getMemberByCustomerId` for callers that need to scope a BROADER read across the whole group (e.g. `.in('member_id', allIdsInGroup)` on `loyalty_redemptions` or `loyalty_transactions`), not just the canonical aggregated row. `getCustomerAccount`'s unused-coupon list ([[sonnet-orchestrator-v2]]) and `listLoyaltyLedger`'s cursor walk ([[commerce__loyalty]]) both route through this — the prior `.eq('member_id', canonical.id)` scope missed redemptions and transactions that lived on a sibling member row. Empty array on unknown customer. Spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 3.
+
+### `aggregateLinkedMembers` — function
+
+```ts
+function aggregateLinkedMembers(rows: LoyaltyMember[]) : LoyaltyMember | null
+```
+
+Pure primitive: SUMS `points_balance` + `points_earned` across a member array and returns a canonical identity (the highest-balance row) with the summed totals folded in. Empty array → null; single-row array returns that row verbatim (no allocation). Exported for the split-balance regression test in `src/lib/loyalty.linked-aggregate.test.ts` — a 100 + 51 group MUST report 151, not the max-pick 100.
+
 ### `getOrCreateMember` — function
 
 ```ts
@@ -161,6 +179,7 @@ Values the caller passes as `consumeRedemption`'s `how` argument. Persisted verb
 ## Gotchas
 
 - **Never mutate `loyalty_redemptions.status` directly except via the exported helpers or `claimRegenSpendSlot`.** The atomic contract flow (`rollbackLoyaltyRedemptionOnApplyFailure`) re-credits points AND flips status to `rolled_back` in the same helper. The idempotency guard (`claimRegenSpendSlot` in [[../libraries/action-executor]]) atomically flips status to `expired` via compare-and-set. Raw updates bypass these atomic contracts and leave the ledger in drift (points owed but not re-credited, or duplicate spends on retry). The `apply_loyalty_coupon` self-heal regen branch (in action-executor.ts) is the ONLY caller that mutates to `expired`; every other status change routes through the helpers.
+- **A regenerated loyalty coupon is minted for the CONTRACT-OWNING Shopify customer, not the aggregate loyalty member's Shopify id.** Points combine across a link group (via `aggregateLinkedMembers`) but a code cannot — `customerSelection.customers.add` locks a Shopify discount to ONE customer. The `apply_loyalty_coupon` regen branch calls `resolveContractOwnerShopifyCustomerId` ([[../libraries/action-executor]]) — `subscriptions.customer_id → customers.shopify_customer_id` — and mints against that id; only when the sub or customer row is missing does it fall back to `member.shopify_customer_id`. Paired with a bounded `MAX_LOYALTY_REGEN_ATTEMPTS` ceiling on the apply retries and a `verifyLoyaltyCouponAppliedToContract` re-read of `applied_discounts` before reporting success, so an upstream "success" that didn't actually stick and a persistently-rejecting Appstle can no longer produce a doomed regen loop. Precedent: ticket 2b7ea029 (Sandra Lutz). Spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 2.
 - **`earnPoints` instantiates its own admin client**, which is fine in production but breaks in-memory fake-admin tests. When you need a re-credit inline from a code path that must be unit-testable (the rollback helper), write the `adjustment` transaction + the balance update directly against the caller's admin. Same live-read pattern (`select points_balance, points_earned` before the update), just no `createAdminClient()` call.
 
 ---
