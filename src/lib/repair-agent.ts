@@ -826,6 +826,28 @@ function stripLeadingPhasePrefix(name: string): string {
 }
 
 /**
+ * Strip file-path-and-line tokens (`src/lib/x.ts:42`, `x.ts:42-45`) from an intent field so a
+ * benign Rafa formatting slip never parks the authoring chokepoint. The [[author-spec]]
+ * `assertIntentIsPlainLanguage` gate rejects the SAME shape (any `.ts|tsx|js|jsx|sql|md|json|yml|yaml`
+ * filename followed by `:<digits>`) — mirror that regex so the strip is exactly the sanitize the
+ * chokepoint would otherwise reject on. The file/line detail is already preserved in the phase body
+ * (target + proposed change), so no diagnostic information is lost.
+ *
+ * Kept intentionally narrow — only the specific token the chokepoint rejects gets removed; the
+ * surrounding plain-language intent survives. Whitespace collapses to single spaces + a bare stray
+ * `()` left behind by ripping the token out of `(path.ts:42)` is trimmed.
+ */
+export function stripIntentFileRefs(text: string | null | undefined): string {
+  if (!text) return "";
+  return String(text)
+    .replace(/\b[\w./-]+\.(?:ts|tsx|js|jsx|sql|md|json|yml|yaml)\b:\d+(?:-\d+)?/g, "")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:])/g, "$1")
+    .trim();
+}
+
+/**
  * Build the [[author-spec]] `StructuredSpecInput` from Rafa's proposal — the ONE typed door
  * `runRepairJob` hands to `authorSpecRowStructured`. Deterministic + pure (no DB / no LLM). Every
  * emitted phase carries `exec_kind`-typed machine checks per the retire-md-spec-writers-db-is-sole-
@@ -852,13 +874,21 @@ export function buildRepairSpecInput(
         ? proposal.related_spec
         : "";
 
+  // Sanitize file:line refs out of the plain-language intent fields — the [[author-spec]]
+  // `assertIntentIsPlainLanguage` chokepoint rejects a `why`/`what` that carries a `path.ts:42`
+  // token, and a benign Rafa formatting slip was parking the entire diagnosed fix
+  // (repair-author-sanitizes-file-line-refs-from-intent-fields). The file/line detail is already
+  // preserved in the phase body (target + proposed change).
+  const cleanedWhy = stripIntentFileRefs(proposal.why);
+  const cleanedWhat = stripIntentFileRefs(proposal.what);
+  const cleanedIntent = stripIntentFileRefs(proposal.intent);
   const specWhy =
-    (proposal.why && proposal.why.trim()) ||
+    cleanedWhy ||
     `The Control Tower signature \`${ctx.signature}\` (verdict: ${ctx.verdict}) is recurring; ` +
       `without a durable fix, the same error keeps re-firing and the parked repair job never clears.`;
   const specWhat =
-    (proposal.what && proposal.what.trim()) ||
-    (proposal.intent && proposal.intent.trim()) ||
+    cleanedWhat ||
+    cleanedIntent ||
     `When this fix ships, the originating condition behind signature \`${ctx.signature}\` stops ` +
       `re-firing and the Control Tower tile stays green on the next re-trigger.`;
 
@@ -884,8 +914,9 @@ export function buildRepairSpecInput(
             : (p.body && p.body.trim()) || `Phase ${idx + 1} body.`;
         const verification =
           (p.verification && p.verification.trim()) || legacyPhaseVerification(ctx.signature);
-        const why = (p.why && p.why.trim()) || specWhy;
-        const what = (p.what && p.what.trim()) || specWhat;
+        // Per-phase intent fields ride the same sanitize as the top-level why/what.
+        const why = stripIntentFileRefs(p.why) || specWhy;
+        const what = stripIntentFileRefs(p.what) || specWhat;
         return { title, body, verification, why, what, status: "planned" as const, checks };
       })
     : [
