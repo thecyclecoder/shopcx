@@ -1,0 +1,1 @@
+- **Linked accounts are ONE loyalty wallet — route every reader through the SDK, and mint each coupon for the customer that can actually use it** · verified 2026-07-25 · → [[lifecycles/commerce-sdk]]
