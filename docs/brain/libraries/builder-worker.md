@@ -241,6 +241,14 @@ Layers with the surrounding protections in `runBuildJob`: the fresh + resume pat
 
 **North star.** The reconciler is a bounded proxy (make the pattern match reality); the deterministic grep still owns the objective (is the code actually present). Same shape as every other autonomous tool per [[../operational-rules]] § North star — the tool proposes, a deterministic check confirms.
 
+## `runBoxSession` retries a transient expired-OAuth 401 ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]])
+
+Every box lane funnels through `runBoxSession(prompt, sessionId, cwd, opts)` — the shared `claude -p` spawn. The box runs several sessions concurrently sharing one OAuth credentials file with no proactive refresh, so when one session refreshes the ~8h token and rewrites the shared file, a concurrent session that starts at that instant reads a stale/expired token and dies with `401 OAuth access token has expired — re-authenticate to continue` inside its ~1.9s headless run. Pre-fix, the Sol ticket-handle lane treated that as "errored with no direction", marked the job failed, and the ticket fell through to "needs a human" (7 of 36 ticket-handle jobs in 72h dropped this way; the workspace ran near 0 open tickets for weeks, then on 2026-07-24 open tickets + CEO escalations piled up as the race started firing).
+
+The fix lives at the shared chokepoint so every lane recovers, not just Sol: after the `shAsync("claude", …)` spawn returns non-zero, `isTransientAuthError(out+err)` (the same classifier the build-lane requeue at ~L26243 uses) tests for the structured 401 + auth-expired signature; on a match, sleep `BOX_AUTH_RETRY_BACKOFF_MS` (7000 ms) and re-invoke the same spawn, up to `BOX_AUTH_RETRY_MAX` (3) retries. Only the transient auth-expired signature triggers a retry — a genuine no-direction / over-run / hardcap kill / crash still fails the same as today (the classifier explicitly rules out `isUsageCapError` so a capped account still hops accounts on the requeue path, not here). Account tracking (`stampLaneAccount` / `acctHere.inFlight++/--`) lives inside the loop so each iteration balances — the counter never leaks across retries.
+
+The build lane's slower requeue (Phase 26243 `TRANSIENT_AUTH_REQUEUE[N]` counter, up to `TRANSIENT_AUTH_MAX_ATTEMPTS`) stays in place as the fallback for a persistently-broken token that survives every in-session retry — the two layers compose (fast in-session first, slow requeue on exhaustion).
+
 ## The shared `update(id, patch)` — the `agent_jobs` write chokepoint
 
 Every job kind funnels its status/error/log_tail transitions through `update(id, patch)`. The function is the single seam where a queue-state PATCH becomes real, so both invariants below sit here — no per-lane plumbing.

@@ -1519,6 +1519,23 @@ function isTransientAuthError(text: string): boolean {
 // it survives worker restarts without a schema change.
 const TRANSIENT_AUTH_MAX_ATTEMPTS = 3;
 
+// In-session retry on a transient expired-OAuth 401 at the shared `runBoxSession` chokepoint. This is
+// the FAST recovery layer that catches the exact race the build-lane requeue above was authored for,
+// but applied UNIVERSALLY to every non-build lane (ticket-handle / ad-creative / grading / triage / …)
+// that lacks a requeue path of its own. Root cause: the build box runs several `claude -p` sessions
+// concurrently sharing one OAuth credentials file with no proactive refresh; when one session refreshes
+// the ~8h token and rewrites the shared file, a concurrent session that starts at that instant reads
+// a stale/expired token and dies with `401 OAuth access token has expired` inside its ~1.9s headless
+// run. The Sol ticket-handle lane treated that as "errored with no direction", marked the job failed,
+// and the ticket fell through to "needs a human" — 7 of 36 ticket-handle jobs in 72h dropped this way.
+// The token itself is valid and refreshable moments later, so a short backoff + re-invocation catches
+// the refreshed token and the ticket is handled instead of dropped. Only the transient auth-expired
+// signature triggers this retry (`isTransientAuthError`) — a genuine no-direction / over-run / crash
+// still fails the same as today. The build lane's requeue path stays in place as the SLOW fallback for
+// a persistently-broken token that survives every in-session retry.
+const BOX_AUTH_RETRY_MAX = 3;
+const BOX_AUTH_RETRY_BACKOFF_MS = 7000;
+
 // The account decision for a job at dispatch time. `run` → use this config dir (and this session, which
 // is null when starting fresh); `blocked` → every account is capped, park `blocked_on_usage`.
 type AccountDecision =
@@ -2329,19 +2346,37 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // the account AND the per-account in-flight count includes it (not just builds).
   const tracksAccountHere = opts.kind !== "build" && !!opts.jobId && !!opts.configDir;
   const acctHere = opts.configDir ? accountByDir.get(opts.configDir) : null;
-  if (tracksAccountHere) { stampLaneAccount(opts.jobId!, opts.configDir!); if (acctHere) acctHere.inFlight++; }
   let r: Awaited<ReturnType<typeof shAsync>>;
-  try {
-    r = await shAsync("claude", args, {
-      cwd,
-      env,
-      idleTimeout: opts.idleTimeout,
-      timeout: opts.timeout,
-      onLine,
-      input: promptViaStdin ? augmentedPrompt : undefined,
-    });
-  } finally {
-    if (tracksAccountHere && acctHere) acctHere.inFlight--; // release the account slot when the session ends
+  // In-session retry on a transient expired-OAuth 401. Every lane funnels through this spawn, so the
+  // retry loop lives HERE — a shared-token refresh race that dropped a Sol ticket now transparently
+  // retries after a short backoff so the refreshed token is picked up. See BOX_AUTH_RETRY_MAX above.
+  // The stampLaneAccount / inFlight++ live inside the loop so each iteration balances with the
+  // finally's decrement (a retry re-stamps + re-increments; the counter never leaks).
+  let authRetries = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (tracksAccountHere) { stampLaneAccount(opts.jobId!, opts.configDir!); if (acctHere) acctHere.inFlight++; }
+    try {
+      r = await shAsync("claude", args, {
+        cwd,
+        env,
+        idleTimeout: opts.idleTimeout,
+        timeout: opts.timeout,
+        onLine,
+        input: promptViaStdin ? augmentedPrompt : undefined,
+      });
+    } finally {
+      if (tracksAccountHere && acctHere) acctHere.inFlight--; // release the account slot when the session ends
+    }
+    if (r.code === 0) break;
+    if (authRetries >= BOX_AUTH_RETRY_MAX) break;
+    const combined = (r.out || "") + (r.err || "");
+    if (!isTransientAuthError(combined)) break;
+    authRetries++;
+    console.warn(
+      `[runBoxSession:${opts.kind}] transient expired-OAuth 401 (attempt ${authRetries}/${BOX_AUTH_RETRY_MAX}) — sleeping ${BOX_AUTH_RETRY_BACKOFF_MS}ms for token refresh, then retrying`,
+    );
+    await new Promise((res) => setTimeout(res, BOX_AUTH_RETRY_BACKOFF_MS));
   }
   if (writer) await writer.flush();
   let session = sessionId;
