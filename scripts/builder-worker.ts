@@ -24100,6 +24100,9 @@ async function applySecurityVerdictToJob(
     parsed: Record<string, unknown> | null;
     verdict: string;
     raw: string;
+    // Full result-text stream from the claude run (may carry the auth-expired signature that
+    // `raw` alone omits — same shape `withAccountFailover` combines for `isTransientAuthError`).
+    resultText?: string;
     isError: boolean;
     fallbackReason: string | null;
     source: SecurityFixSource;
@@ -24119,6 +24122,7 @@ async function applySecurityVerdictToJob(
   },
 ): Promise<void> {
   const { parsed, verdict, raw, isError, fallbackReason, source, specLabel, activityReason, activityMetadata, parentSlug, instr, mode, tag, recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION } = args;
+  const resultText = args.resultText ?? "";
   const emittedThisSession = args.emittedThisSession ?? new Set<string>();
   // spec-timecard-chokepoint-instrumentation Phase 2 — a single per-job security_verdict at the
   // shared applier's terminal write. Fires here (once) regardless of the verdict branch below, so
@@ -24215,6 +24219,48 @@ async function applySecurityVerdictToJob(
     return;
   }
   if (isError && !parsed) {
+    // ⭐ TRANSIENT EXPIRED-OAUTH 401 REQUEUE (security-review lane)
+    // ([[../docs/brain/specs/security-review-lane-auto-requeues-on-transient-auth-error]] Phase 1).
+    // Mirrors the build-lane requeue below (~L26486) for the SAME class of failure: a `claude -p`
+    // whose OAuth token expires mid-run comes back with api_error_status:401 + authentication_failed
+    // / 'OAuth access token has expired' / 're-authenticate to continue'. Pre-fix, this branch
+    // marked the security-review job `status:'failed'` — and because a merge gate reads
+    // security-review as blocking, a fully-built + spec-tested PR then sat blocked until a human
+    // hand-re-drove the review (observed twice in one night on dahlia-competitor-ad-adaptation
+    // -overlay-render and error-feed-drop-braintree-portal-vault-processor-decline-noi, both
+    // cleared by a manual re-drive — transient, not a real finding). The build lane already
+    // self-heals this same class via TRANSIENT_AUTH_REQUEUE; the security-review lane now shares
+    // that behavior so an account-expiry never parks a clean PR.
+    //
+    // Bounded by TRANSIENT_AUTH_MAX_ATTEMPTS via a counter encoded on the `error` field (same
+    // convention the build lane uses, so a persistently-broken token still fails terminally after
+    // the cap — no infinite loop). `isTransientAuthError` explicitly rules out `isUsageCapError`,
+    // so a genuine wall/hop still takes the account-failover path — this requeue only fires for
+    // the pure expired-token class. Real-vuln / needs-human / clean / false-positive branches
+    // above are untouched.
+    if (isTransientAuthError(`${resultText}\n${raw}`)) {
+      const prior = /TRANSIENT_AUTH_REQUEUE\[(\d+)\]/.exec(job.error || "");
+      const attempt = (prior ? parseInt(prior[1], 10) : 0) + 1;
+      if (attempt < TRANSIENT_AUTH_MAX_ATTEMPTS) {
+        console.log(`${tag} transient expired-OAuth 401 (attempt ${attempt}/${TRANSIENT_AUTH_MAX_ATTEMPTS}) → requeuing security-review for a fresh worker/token`);
+        // Requeue as 'queued' (NOT queued_resume) — a fresh account can't `--resume` the prior
+        // account's expired session; the security-review lane is idempotent (mode/branch/diff are
+        // re-derived on re-claim from `instructions`). Drop the session so resolveAccountForJob
+        // picks a healthy account fresh at re-claim.
+        await update(job.id, {
+          status: "queued",
+          claimed_at: null,
+          claude_session_id: null,
+          claude_session_config_dir: null,
+          error: `TRANSIENT_AUTH_REQUEUE[${attempt}]: security_review_auth_requeue — expired OAuth token, re-running with a fresh session`,
+          log_tail: raw.slice(-2000),
+        });
+        // Do NOT emit security_verdict on a requeue — this session never reached a verdict; the
+        // re-run's applier fires it. Emitting here would double-count on the timecard.
+        return;
+      }
+      console.error(`${tag} transient expired-OAuth 401 exceeded ${TRANSIENT_AUTH_MAX_ATTEMPTS}× → terminal fail (persistently-broken token)`);
+    }
     await update(job.id, { status: "failed", error: "security review errored", log_tail: raw.slice(-2000) });
     await emitVerdict();
     return;
@@ -24466,10 +24512,10 @@ async function runSecurityReviewJob(job: Job) {
         if (r.session) await update(job.id, { claude_session_id: r.session, claude_session_config_dir: securityDir });
       },
     });
-    const { isError, raw } = run;
+    const { isError, raw, resultText } = run;
     console.log(`${tag} claude finished (${contextLabel}) — verdict: ${verdict || "(none)"} isError=${isError}`);
     await applySecurityVerdictToJob(job, {
-      parsed, verdict, raw, isError, fallbackReason,
+      parsed, verdict, raw, resultText, isError, fallbackReason,
       source, specLabel, activityReason, activityMetadata,
       parentSlug, instr, mode, tag,
       recordDirectorActivity, SECURITY_DIRECTOR_FUNCTION,
