@@ -32,6 +32,24 @@ async function getMember(workspaceId: string, shopifyCustomerId: string,) : Prom
 async function getMemberByCustomerId(workspaceId: string, customerId: string,) : Promise<LoyaltyMember | null>
 ```
 
+Expands the link group and returns the aggregated canonical member — `points_balance` / `points_earned` SUMMED across every sibling row (via `aggregateLinkedMembers`), identity taken from the highest-balance row so future earn/spend consolidate onto one row. Every loyalty balance reader in the codebase routes through this chokepoint — including `getLoyaltyBalance` ([[commerce__loyalty]]) and `getCustomerAccount`'s LOYALTY block ([[sonnet-orchestrator-v2]]). Precedent: ticket 2b7ea029 (Sandra Lutz) — a two-member group with a split 100 + 51 balance had been reported as 100 (max-pick) via a raw `.order('points_balance', desc).limit(1)`. Spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 3.
+
+### `getMembersInLinkGroup` — function
+
+```ts
+async function getMembersInLinkGroup(workspaceId: string, customerId: string,) : Promise<LoyaltyMember[]>
+```
+
+Returns every `loyalty_members` row in the link group for a customer_id — the counterpart to `getMemberByCustomerId` for callers that need to scope a BROADER read across the whole group (e.g. `.in('member_id', allIdsInGroup)` on `loyalty_redemptions` or `loyalty_transactions`), not just the canonical aggregated row. `getCustomerAccount`'s unused-coupon list ([[sonnet-orchestrator-v2]]) and `listLoyaltyLedger`'s cursor walk ([[commerce__loyalty]]) both route through this — the prior `.eq('member_id', canonical.id)` scope missed redemptions and transactions that lived on a sibling member row. Empty array on unknown customer. Spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen Phase 3.
+
+### `aggregateLinkedMembers` — function
+
+```ts
+function aggregateLinkedMembers(rows: LoyaltyMember[]) : LoyaltyMember | null
+```
+
+Pure primitive: SUMS `points_balance` + `points_earned` across a member array and returns a canonical identity (the highest-balance row) with the summed totals folded in. Empty array → null; single-row array returns that row verbatim (no allocation). Exported for the split-balance regression test in `src/lib/loyalty.linked-aggregate.test.ts` — a 100 + 51 group MUST report 151, not the max-pick 100.
+
 ### `getOrCreateMember` — function
 
 ```ts

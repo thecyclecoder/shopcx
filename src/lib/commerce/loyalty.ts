@@ -11,6 +11,7 @@
  * any surface migrates.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getMemberByCustomerId, getMembersInLinkGroup } from "@/lib/loyalty";
 import type {
   LoyaltyView,
   LoyaltyRedemptionTierView,
@@ -18,17 +19,6 @@ import type {
 } from "./types";
 
 export type { LoyaltyView, LoyaltyRedemptionTierView, LoyaltyLedgerEntryView } from "./types";
-
-interface RawMemberRow {
-  id: string;
-  workspace_id: string;
-  customer_id: string | null;
-  points_balance: number | null;
-  points_earned: number | null;
-  points_spent: number | null;
-  source: string | null;
-  needs_points_backfill: boolean | null;
-}
 
 interface RawLedgerRow {
   id: string;
@@ -61,22 +51,21 @@ function dollarValueFor(points: number): number {
  * Fetch the loyalty balance for one customer, hydrated with redemption tiers
  * they qualify for and their dollar value. Returns an empty (zero-balance)
  * view when the customer is not enrolled.
+ *
+ * Routes through the [[../../docs/brain/libraries/loyalty]] SDK chokepoint —
+ * `getMemberByCustomerId` expands the link group and SUMS `points_balance`
+ * across every sibling member row (spec: loyalty-coupon-apply-resolves-
+ * contract-owning-member-no-doomed-regen Phase 3). The prior raw
+ * `.eq('customer_id', customerId).maybeSingle()` bypassed the aggregation
+ * and reported zero for a profile whose sibling held the balance —
+ * Sandra's fingerprint (ticket 2b7ea029).
  */
 export async function getLoyaltyBalance(
   workspaceId: string,
   customerId: string,
 ): Promise<LoyaltyView> {
-  const admin = createAdminClient();
-  const { data, error } = await admin
-    .from("loyalty_members")
-    .select(
-      "id, workspace_id, customer_id, points_balance, points_earned, points_spent, source, needs_points_backfill",
-    )
-    .eq("workspace_id", workspaceId)
-    .eq("customer_id", customerId)
-    .maybeSingle();
-  if (error) throw error;
-  if (!data) {
+  const member = await getMemberByCustomerId(workspaceId, customerId);
+  if (!member) {
     return {
       member_id: "",
       workspace_id: workspaceId,
@@ -90,19 +79,23 @@ export async function getLoyaltyBalance(
       source: "native",
     };
   }
-  const row = data as RawMemberRow;
-  const balance = Number(row.points_balance ?? 0);
+  // The SDK's SELECT * returns `needs_points_backfill` even though the typed
+  // shape omits it — read defensively.
+  const needsBackfill = Boolean(
+    (member as { needs_points_backfill?: boolean | null }).needs_points_backfill,
+  );
+  const balance = Number(member.points_balance ?? 0);
   return {
-    member_id: row.id,
-    workspace_id: row.workspace_id,
-    customer_id: row.customer_id,
+    member_id: member.id,
+    workspace_id: member.workspace_id,
+    customer_id: member.customer_id,
     points_balance: balance,
-    points_earned: Number(row.points_earned ?? 0),
-    points_spent: Number(row.points_spent ?? 0),
+    points_earned: Number(member.points_earned ?? 0),
+    points_spent: Number(member.points_spent ?? 0),
     dollar_value_cents: dollarValueFor(balance),
     redemption_tiers: tiersFor(balance),
-    needs_points_backfill: Boolean(row.needs_points_backfill),
-    source: (row.source ?? "native") as LoyaltyView["source"],
+    needs_points_backfill: needsBackfill,
+    source: (member.source ?? "native") as LoyaltyView["source"],
   };
 }
 
@@ -116,25 +109,27 @@ export interface LoyaltyLedgerFilters {
 
 /**
  * Walk one customer's loyalty ledger, cursor-paginated on
- * `(created_at DESC, id DESC)`. Direct match on the customer's member row —
- * the caller supplies either a member id (fast) or a customer id (extra
- * round-trip to look up the member).
+ * `(created_at DESC, id DESC)`. When the caller supplies a `member_id` the
+ * walk is scoped to that single row; a `customer_id` expands via the
+ * [[../../docs/brain/libraries/loyalty]] SDK chokepoint `getMembersInLinkGroup`
+ * so transactions on sibling member rows are included (spec:
+ * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen
+ * Phase 3). The prior raw `.eq('customer_id', customerId).maybeSingle()`
+ * missed the linked-siblings walk entirely — a linked customer whose
+ * transactions lived on a sibling row saw an empty ledger.
  */
 export async function listLoyaltyLedger(
   workspaceId: string,
   filters: LoyaltyLedgerFilters = {},
 ): Promise<LoyaltyLedgerEntryView[]> {
   const admin = createAdminClient();
-  let memberId: string | undefined = filters.member_id;
-  if (!memberId && filters.customer_id) {
-    const { data: mem } = await admin
-      .from("loyalty_members")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("customer_id", filters.customer_id)
-      .maybeSingle();
-    memberId = (mem?.id as string | undefined) ?? undefined;
-    if (!memberId) return [];
+  let memberIds: string[] | undefined;
+  if (filters.member_id) {
+    memberIds = [filters.member_id];
+  } else if (filters.customer_id) {
+    const members = await getMembersInLinkGroup(workspaceId, filters.customer_id);
+    memberIds = members.map((m) => m.id).filter((id): id is string => Boolean(id));
+    if (memberIds.length === 0) return [];
   }
 
   const pageSize = Math.max(1, Math.min(1000, filters.page_size ?? 500));
@@ -151,7 +146,11 @@ export async function listLoyaltyLedger(
         "id, member_id, workspace_id, points_change, type, description, order_id, shopify_discount_id, created_at",
       )
       .eq("workspace_id", workspaceId);
-    if (memberId) q = q.eq("member_id", memberId);
+    if (memberIds && memberIds.length === 1) {
+      q = q.eq("member_id", memberIds[0]);
+    } else if (memberIds && memberIds.length > 1) {
+      q = q.in("member_id", memberIds);
+    }
     if (filters.type) q = q.eq("type", filters.type);
     if (cursorCreatedAt && cursorId) {
       q = q.or(
