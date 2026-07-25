@@ -9,6 +9,7 @@
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { compositeCopyOverlay, type OverlayCopy } from "@/lib/ads/creative-overlay";
+import { buildSideBySide } from "@/lib/ads/creative-side-by-side";
 
 // ── Render-side no-competitor-leak guard ────────────────────────────────────
 // The copy-side no-competitor-leak gate only inspects TEXT; a leak that lives in the pixels
@@ -160,6 +161,15 @@ export interface GeneratedCreative {
   prompt: string;
   /** The exact copy strings the QA pass must verify render correctly (no garble). */
   expectedCopy: { headline: string; offer: string | null; trust: string };
+  /** dahlia-competitor-ad-adaptation-overlay-render Phase 4 — the [competitor | ours]
+   *  side-by-side composite the vision judge grades for (a) energy match-or-surpass and
+   *  (b) preserved psychological structure. Present ONLY on the overlay path when a
+   *  competitor design reference was supplied (the only path where the prime-directive
+   *  side-by-side is meaningful — an own-brand angle has no source to grade against).
+   *  Consumed by [[creative-agent]] `stockProduct`'s regen loop: hands the buffer to the
+   *  vision judge, calls `sideBySideGate` on the verdict, revises in-session on fail
+   *  (mirrors the existing MAX_QA_ATTEMPTS bounce). See [[creative-side-by-side]]. */
+  sideBySide?: { buffer: Buffer; mimeType: string };
 }
 
 export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
@@ -317,6 +327,23 @@ NO THIRD-PARTY BRANDS (hard rule): the ONLY branded product, package, logo, word
 Output ${"4:5"}, no watermark.`;
 }
 
+/** Fetch the raw bytes behind a design-reference URL (a signed competitor skeleton URL or a
+ *  data: URI). Returns null on any non-2xx / empty payload so the caller can proceed without
+ *  the side-by-side (an audit artifact, not a blocker of the overlay path). Deterministic
+ *  small helper — extracted so the side-by-side build path is straightforward and the retry
+ *  paths in the fetch don't leak into `generateCreative`. */
+async function fetchDesignReferenceBytes(url: string): Promise<Buffer | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const arr = await res.arrayBuffer();
+    if (!arr.byteLength) return null;
+    return Buffer.from(arr);
+  } catch {
+    return null;
+  }
+}
+
 /** Generate one static from a brief. Returns the bytes + the exact copy the caller must QA for garble. */
 export async function generateCreative(workspaceId: string, brief: CreativeBrief, opts: GenerateCreativeOpts = {}): Promise<GeneratedCreative> {
   const hasRef = !!opts.designReferenceUrl;
@@ -358,7 +385,28 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
       cta: brief.offer?.headline || undefined,
     };
     const { buffer, mimeType } = await compositeCopyOverlay(baseBuffer, overlayCopy, aspectRatio);
-    return { buffer, mimeType, prompt: textFreePrompt, expectedCopy };
+
+    // dahlia-competitor-ad-adaptation-overlay-render Phase 4 — the SIDE-BY-SIDE QC gate.
+    // "Adapt against a live side-by-side of the competitor ad, never in isolation" (prime
+    // directive from [[../../../docs/brain/reference/competitor-ad-adaptation]]). When the
+    // caller supplied a `designReferenceUrl` (a signed competitor skeleton via
+    // signCreativeShot), fetch it and hand a [competitor | ours] composite back to the outer
+    // regen loop so the vision judge can grade energy match-or-surpass + preserved
+    // psychological structure via `sideBySideGate`. A fetch failure is non-fatal — the
+    // adapted render still lands; the side-by-side is an audit + gate, not a blocker of
+    // the overlay path (the outer loop skips the gate when sideBySide is absent).
+    let sideBySide: GeneratedCreative["sideBySide"];
+    if (opts.designReferenceUrl) {
+      try {
+        const competitorBuffer = await fetchDesignReferenceBytes(opts.designReferenceUrl);
+        if (competitorBuffer) {
+          sideBySide = await buildSideBySide(competitorBuffer, buffer, { ratio: aspectRatio });
+        }
+      } catch (err) {
+        console.warn("overlay_side_by_side_build_failed", { err: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };
   }
 
   const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason);
