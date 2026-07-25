@@ -1,0 +1,1 @@
+- **Hard cap on loyalty-derived remedies ($15 max) — no cash-out / make-whole / expiry-extension, and June never escalates one** · verified 2026-07-25 · → [[../operational-rules#loyalty-ceiling--15-absolute-no-cash-out--make-whole--expiry-extension]]
