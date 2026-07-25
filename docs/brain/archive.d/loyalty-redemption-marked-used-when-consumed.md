@@ -1,0 +1,1 @@
+- **A redeemed loyalty reward must be marked used when it's actually consumed** · verified 2026-07-25 · → [[../tables/loyalty_redemptions]]
