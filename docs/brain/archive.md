@@ -12,7 +12,18 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Applying a coupon must never strip an automatic/manual discount — filter the replace to CODE_DISCOUNT, and roll back when the apply fails** · verified 2026-07-25 · → [[../libraries/appstle-discount]]
+- **Box account pool: skip/eject an OAuth-expired Max account, re-route the session, and alert the CEO to re-login** · verified 2026-07-25 · → [[../libraries/builder-worker]]
+- **Check-reconciler auto-applies renamed + moved-symbol repoints (not just case/whitespace)** · verified 2026-07-25 · → [[../libraries/check-reconciliation]]
+- **June must not report — or close a ticket on — a spec she didn't actually write** · verified 2026-07-25 · → [[../libraries/cs-director-verdict-note]] · [[../libraries/cs-director-ticket-transition]] · [[../tables/director_activity]]
+- **Dahlia adapts competitor ads herself: 3-layer overlay render + copy fidelity + side-by-side QC** · verified 2026-07-25 · → [[../lifecycles/ad-render]]
+- **Drop Braintree portal-vault processor-decline noise from the Vercel error feed** · verified 2026-07-25 · → [[lifecycles/control-tower]]
+- **Partial in-leash remedy on escalate_founder** · verified 2026-07-25 · → [[lifecycles/ticket-lifecycle]]
+- **Linked accounts are ONE loyalty wallet — route every reader through the SDK, and mint each coupon for the customer that can actually use it** · verified 2026-07-25 · → [[lifecycles/commerce-sdk]]
+- **A redeemed loyalty reward must be marked used when it's actually consumed** · verified 2026-07-25 · → [[../tables/loyalty_redemptions]]
 - **Hard cap on loyalty-derived remedies ($15 max) — no cash-out / make-whole / expiry-extension, and June never escalates one** · verified 2026-07-25 · → [[../operational-rules#loyalty-ceiling--15-absolute-no-cash-out--make-whole--expiry-extension]]
+- **Repair authoring strips file:line refs from why/what so a Rafa slip never parks the fix** · verified 2026-07-25 · → [[libraries/repair-agent]]
+- **Security-review lane auto-requeues on transient auth error** · verified 2026-07-25 · → [[../libraries/security-agent]]
 - **Phase-verify self-heals a stale grep check instead of parking a done build** · verified 2026-07-24 · → [[../libraries/check-reconciliation]]
 - **closeReturn honors its documented no-op contract on internal-path returns** · verified 2026-07-24 · → [[../libraries/shopify-returns]] · [[../inngest/returns]]
 - **Return-label CTA button must render when the label URL is alone in a paragraph** · verified 2026-07-24 · → [[../libraries/label-cta]]
