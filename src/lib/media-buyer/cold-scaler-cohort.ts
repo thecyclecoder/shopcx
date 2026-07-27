@@ -19,6 +19,47 @@ import { getMetaUserToken, getOrCreateColdScalerCampaign } from "@/lib/meta-ads"
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/**
+ * The 7-day minimum-age grace before ANY cold-scaler adset pause.
+ *
+ * [[../../../docs/brain/specs/bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace]]
+ * Phase 2. A cold-scaler adset spends before it converts (cold-audience
+ * ramp-up), so a fresh scaler with $0 in early revenue LOOKS like a dud on
+ * any spend-vs-purchases predicate. CEO directive (2026-07-26): let a fresh
+ * scaler run at least 7 days before ANY pause path — Bianca's mis-scoped
+ * test decision-tree kill (removed in Phase 1) was one such path; this
+ * grace is the durable floor for any FUTURE cold-scaler pause path
+ * regardless of source (a graduate cleanup, an owner action, a future
+ * CAC:LTV-based scaler-pause loop). Documented in
+ * [[../../../docs/brain/reference/meta-scaling-methodology]] § scale.
+ */
+export const COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE = 7;
+
+/**
+ * Pure age-guard: is a cold-scaler adset old enough to pause? Returns TRUE
+ * when the adset has been alive for at least
+ * `COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE` days. Any consumer that would
+ * pause a cold-scaler adset MUST gate on this predicate first — the
+ * belt-and-suspenders guard even though no built path pauses a scaler
+ * today (Phase 1 removed the only one).
+ *
+ * `metaCreatedTime` is the adset's `meta_adsets.meta_created_time` (or the
+ * live Meta `created_time` when the row isn't cached yet). A `null` /
+ * unparseable timestamp returns FALSE — the SAFE default is "not old
+ * enough to pause" (never cut a scaler on missing age data). `nowMs` is
+ * overridable for tests.
+ */
+export function isColdScalerAdsetOldEnoughToPause(
+  metaCreatedTime: string | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!metaCreatedTime) return false;
+  const createdMs = Date.parse(metaCreatedTime);
+  if (!Number.isFinite(createdMs)) return false;
+  const ageMs = nowMs - createdMs;
+  return ageMs >= COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE * 24 * 3600 * 1000;
+}
+
 /** The TS shape of a `media_buyer_cold_scaler_cohorts` row (snake → camel; bigint → number). */
 export interface MediaBuyerColdScalerCohort {
   id: string;
