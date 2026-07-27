@@ -1,0 +1,1 @@
+- **An expired access token with a live refresh token is not a dead account — refresh before ejecting, label it honestly, and let it recover without a hand-edit** · verified 2026-07-27 · → [[lifecycles/roadmap-build-console]]
