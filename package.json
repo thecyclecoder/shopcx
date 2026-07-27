@@ -65,6 +65,7 @@
     "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
+    "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
     "test:cart-gifts": "tsx --test src/lib/cart-gifts.test.ts",
     "test:offers-renewal": "tsx --test src/lib/offers-renewal.test.ts",
     "test:bundle-cta": "tsx --test src/lib/bundle-cta.test.ts",
