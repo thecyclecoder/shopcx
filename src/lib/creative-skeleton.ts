@@ -29,12 +29,14 @@ import {
   isWinner,
   winnerScore,
   adMatchesCompetitor,
+  isRetryableCreativeFetchError,
   normalizeAd,
   type NormalizedAd,
   type Seed,
 } from "@/lib/adlibrary";
 import { resolveAdvertiser, scanWinners } from "@/lib/adlibrary-winners";
 import { normalizeBrand } from "@/lib/competitors";
+import { errText } from "@/lib/error-text";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -660,23 +662,40 @@ export async function ingestAd(
   let thumbPath: string | null = null;
 
   if (ad.media_type === "static" && ad.creative_url) {
+    // Split fetchCreative from the vision path: a RETRYABLE AdLibrary fetch failure (503/502/504/
+    // 429/408/500 or a `fetch` network hiccup — see `isRetryableCreativeFetchError`) must NOT
+    // persist a `creative_skeletons.status='failed'` row — that would let a single transient
+    // AdLibrary outage permanently poison a promising competitor ad (its dedup_key would then be
+    // filtered by `splitNewExisting` on every future sweep). Rethrow so `collectAndTrack` counts
+    // it as an attempted per-ad failure with a bounded warning, and the same ad_key stays eligible
+    // for the next sweep. Terminal fetch errors (401/403/404/400) and vision failures still fall
+    // through to the existing `status='failed'` write — those signals ARE per-ad, not sweep-transient.
+    let creative: { buffer: Buffer; contentType: string } | null = null;
     try {
-      const { buffer, contentType } = await fetchCreative(ad.creative_url);
-      // Host our own downscaled copy so the dashboard serves it (never live-proxies the full-res
-      // source — that 502'd). Best-effort: a failed upload must not fail the vision/ingest.
-      try {
-        await ensureCreativeShotsBucket();
-        const display = await toDisplayImage(buffer);
-        thumbPath = await uploadCreativeShot(`${workspaceId}/${ad.ad_key}.jpg`, display);
-      } catch (e) {
-        console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
-      }
-      skeleton = await visionDeconstruct(workspaceId, buffer, contentType);
-      visionedAt = new Date().toISOString();
-      if (!skeleton) status = "failed";
+      creative = await fetchCreative(ad.creative_url);
     } catch (err) {
-      console.error(`[creative-finder] vision failed for ${ad.ad_key}:`, err);
+      if (isRetryableCreativeFetchError(err)) throw err;
+      console.error(`[creative-finder] creative fetch failed for ${ad.ad_key}:`, err);
       status = "failed";
+    }
+    if (creative) {
+      try {
+        // Host our own downscaled copy so the dashboard serves it (never live-proxies the full-res
+        // source — that 502'd). Best-effort: a failed upload must not fail the vision/ingest.
+        try {
+          await ensureCreativeShotsBucket();
+          const display = await toDisplayImage(creative.buffer);
+          thumbPath = await uploadCreativeShot(`${workspaceId}/${ad.ad_key}.jpg`, display);
+        } catch (e) {
+          console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
+        }
+        skeleton = await visionDeconstruct(workspaceId, creative.buffer, creative.contentType);
+        visionedAt = new Date().toISOString();
+        if (!skeleton) status = "failed";
+      } catch (err) {
+        console.error(`[creative-finder] vision failed for ${ad.ad_key}:`, err);
+        status = "failed";
+      }
     }
   }
 
@@ -1025,6 +1044,18 @@ async function collectAndTrack(
       await ingestAd(workspaceId, ad, seed);
       result.inserted++;
     } catch (err) {
+      if (isRetryableCreativeFetchError(err)) {
+        // Transient AdLibrary creative-fetch outage (503, timeout, …) — `ingestAd` rethrew
+        // BEFORE any DB write, so no poisoned failed row exists and the same ad_key stays
+        // eligible for the next sweep. Log a bounded warning (not console.error) so the
+        // Vercel error feed doesn't page on a routine external hiccup. Still counted as a
+        // per-ad failure in the sweep totals — the sweep did attempt this ad.
+        console.warn(
+          `[creative-scout] retryable AdLibrary creative fetch skipped ${ad.ad_key} (${errText(err)}); no row persisted, will retry on next sweep`,
+        );
+        result.failed++;
+        continue;
+      }
       console.error(`[creative-scout] ingest failed for ${ad.ad_key}:`, err);
       result.failed++;
     }

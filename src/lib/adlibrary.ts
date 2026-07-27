@@ -274,6 +274,39 @@ export async function fetchCreative(
 }
 
 /**
+ * HTTP statuses `fetchCreative` throws as `adlibrary_creative_<status>` that we treat as TRANSIENT —
+ * the creative isn't bad, the AdLibrary edge just wasn't available this second. A single 503 during a
+ * sweep must not permanently poison a promising competitor ad by writing a `creative_skeletons` row
+ * with `status='failed'` (its `dedup_key` would then be filtered by `splitNewExisting` forever, so the
+ * next sweep couldn't retry it). Everything else (401/403 auth, 404 gone, 400 bad request) is terminal
+ * and does persist a failed row so the ad_key isn't re-fetched every sweep.
+ */
+export const RETRYABLE_CREATIVE_FETCH_STATUSES = new Set<number>([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * True when `err` is a retryable AdLibrary creative-fetch failure — either a transient HTTP status
+ * thrown by `fetchCreative` (`adlibrary_creative_<status>`) or a Node `fetch` network error (a
+ * `TypeError('fetch failed')` / `AbortError` — the runtime's connect-timeout / socket-reset shape).
+ *
+ * The caller ([[./creative-skeleton]] `ingestAd` + `collectAndTrack`) branches on this to SKIP writing
+ * a `creative_skeletons.status='failed'` row and log a bounded warning instead of a Vercel error-feed
+ * incident, so the same `ad_key` can be attempted again on a later sweep.
+ */
+export function isRetryableCreativeFetchError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof Error) {
+    const m = /^adlibrary_creative_(\d{3})$/.exec(err.message);
+    if (m) return RETRYABLE_CREATIVE_FETCH_STATUSES.has(Number.parseInt(m[1], 10));
+    // Node's global `fetch` surfaces network hiccups as a plain `TypeError('fetch failed')` (with a
+    // cause chain describing the underlying ECONNRESET / ETIMEDOUT / EAI_AGAIN); a request timeout
+    // via `AbortSignal` surfaces as `DOMException('AbortError')`. Both are transient by nature.
+    if (err.name === "AbortError") return true;
+    if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true;
+  }
+  return false;
+}
+
+/**
  * A "long-runner" is the ORIGINAL longevity-only winner heuristic. Kept for reference/back-compat;
  * `sweepSeed` now uses `isWinner` (below), which also credits reach + spend.
  */
