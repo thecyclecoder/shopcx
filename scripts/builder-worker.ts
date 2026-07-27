@@ -1109,6 +1109,13 @@ interface AccountState {
   lastAssignedAt: number; // tie-break: least-recently-used
   cappedUntil: number;    // 0 = healthy; else epoch-ms until which it's pulled from rotation
   capEventLogged: boolean; // a `cap` event was already recorded for the CURRENT cap window (so recovery logs once)
+  // ── box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 1 ────────
+  // Deadlock fix: an expired access token whose refresh token is live gets a REFRESH attempt before it
+  // is ejected. Fields track the in-progress refresh so a single sweep never eject-loops (in-flight
+  // + throttle) and a recently-attempted refresh that failed gets ejected on the next sweep.
+  authRefreshInFlight?: boolean;    // a `claude -p` refresh call is currently running for this account
+  lastAuthRefreshAttemptAt?: number; // epoch-ms of the last refresh attempt — throttles re-attempts
+  lastAuthRefreshFailed?: boolean;   // last completed refresh attempt did NOT renew expiresAt
 }
 const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
@@ -1452,25 +1459,42 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void
 // token as expired anyway. Read is cached briefly per account so the pick hot-path doesn't stat on every
 // call — a stale entry is harmless: a re-login rewrites the file, the cache expires within seconds, and
 // the reactive backstop covers the interim.
+//
+// box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 1:
+// An expired access token is the normal steady state of an OAuth credential — it is only fatal if the
+// refresh token is ALSO gone. So the sweep now reads `claudeAiOauth.refreshToken` alongside `expiresAt`;
+// an expired access token with a live refresh token triggers a REFRESH attempt (a minimal `claude -p`
+// against the config dir — the CLI rewrites the credentials file on a successful refresh) instead of the
+// long-window eject. Only a missing refresh_token, or a refresh attempt that did NOT renew `expiresAt`,
+// falls through to `markAccountAuthExpired`. This is what unwedges the pool-wide-expiry deadlock: on
+// 2026-07-25 every account expired within 45 min of the others, the sweep pulled all four, and nothing
+// could ever refresh them because nothing could ever run against them — 37 hours of downtime. See spec.
 const CRED_EXPIRY_CACHE_MS = 30_000; // 30s TTL — token expiry is a slow-moving fact
 const credentialsCache = new Map<string, { expiresAt: number; checkedAt: number }>();
-// Read `$configDir/.credentials.json` and return the `claudeAiOauth.expiresAt` (ms). Returns 0 on any
-// error (missing file, malformed JSON, missing field) so a malformed credential can NEVER cause a
-// silent proactive eject — the reactive 401 path stays in charge for those. A number ≤ 0 means "no
-// signal, don't decide"; a positive number is authoritative.
-function readCredentialsExpiresAt(configDir: string): number {
+// Read `$configDir/.credentials.json` and return the `claudeAiOauth.expiresAt` (ms) + whether a
+// refresh_token is present. Returns { expiresAt: 0, hasRefreshToken: false } on any error (missing file,
+// malformed JSON, missing field) so a malformed credential can NEVER cause a silent proactive eject — the
+// reactive 401 path stays in charge for those. A number ≤ 0 means "no signal, don't decide"; a positive
+// number is authoritative. hasRefreshToken is a boolean signal — a non-empty string in the JSON.
+function readCredentialsFields(configDir: string): { expiresAt: number; hasRefreshToken: boolean } {
   try {
     const p = join(configDir, ".credentials.json");
-    if (!existsSync(p)) return 0;
+    if (!existsSync(p)) return { expiresAt: 0, hasRefreshToken: false };
     const raw = readFileSync(p, "utf8");
-    const parsed = JSON.parse(raw) as { claudeAiOauth?: { expiresAt?: number | string | null } } | null;
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: { expiresAt?: number | string | null; refreshToken?: string | null } } | null;
     const v = parsed?.claudeAiOauth?.expiresAt;
-    if (v == null) return 0;
-    const n = typeof v === "string" ? parseInt(v, 10) : Number(v);
-    return Number.isFinite(n) && n > 0 ? n : 0;
+    const rt = parsed?.claudeAiOauth?.refreshToken;
+    const n = v == null ? 0 : (typeof v === "string" ? parseInt(v, 10) : Number(v));
+    const expiresAt = Number.isFinite(n) && n > 0 ? n : 0;
+    const hasRefreshToken = typeof rt === "string" && rt.length > 0;
+    return { expiresAt, hasRefreshToken };
   } catch {
-    return 0;
+    return { expiresAt: 0, hasRefreshToken: false };
   }
+}
+// Back-compat: `expiresAt` alone. Retained because the token-only signal is what most callers need.
+function readCredentialsExpiresAt(configDir: string): number {
+  return readCredentialsFields(configDir).expiresAt;
 }
 // Cached wrapper — refresh once per account per CRED_EXPIRY_CACHE_MS so the pick hot-path doesn't stat.
 function cachedCredentialsExpiresAt(configDir: string, now: number): number {
@@ -1480,17 +1504,122 @@ function cachedCredentialsExpiresAt(configDir: string, now: number): number {
   credentialsCache.set(configDir, { expiresAt, checkedAt: now });
   return expiresAt;
 }
-// Iterate the pool; for every account whose stored OAuth expiry is a positive value ≤ now, eject it via
-// the shared markAccountAuthExpired path (cap window + CEO re-login card). No-op for accounts already
-// out of rotation (markAccountAuthExpired only records the event once per cap window via capEventLogged).
-// Called before every pick so a newly-expired account drops out of rotation on the NEXT selection, not
-// on the failed run. Best-effort — a read/parse failure returns 0 above, which is treated as "no signal".
+
+// box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 1 — throttle a
+// per-account refresh attempt so a hard-failing account (e.g. revoked refresh_token, upstream 500) can't
+// spin refresh calls on every 30s sweep. 5 min is well under the shortest cap re-probe window and well
+// over a real refresh's wall time (a fresh `claude -p` refreshes in a few seconds).
+const AUTH_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
+// Hard cap on how long the refresh CLI call may run — a hung network shouldn't wedge the sweep. A real
+// refresh completes in seconds; 60s is generous enough for a slow-network case + short enough that a
+// hung call recovers well inside the next sweep tick.
+const AUTH_REFRESH_TIMEOUT_MS = 60 * 1000;
+
+// Fire an out-of-band `claude -p` against a specific config dir to force the CLI's automatic OAuth token
+// refresh (which rewrites `$configDir/.credentials.json` with a fresh `accessToken` + `expiresAt`).
+// Verified by hand on all four accounts 2026-07-27: a minimal `claude -p` on an account whose access
+// token was expired but whose refresh token was live rewrote the credentials file within seconds and
+// the account came back healthy without a re-login. Async / fire-and-forget from the sweep; the outcome
+// path is: on renewed expiresAt ⇒ leave the account healthy + log a `recovered` event; on unchanged
+// expiresAt ⇒ fall through to the normal `markAccountAuthExpired` eject path.
+async function attemptCredentialRefresh(configDir: string): Promise<void> {
+  const a = accountByDir.get(configDir);
+  if (!a) return;
+  a.authRefreshInFlight = true;
+  a.lastAuthRefreshAttemptAt = Date.now();
+  try {
+    console.warn(`[multi-account] ${configDir} access token expired — attempting refresh via CLI (refresh_token present)…`);
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
+    // Strip ANTHROPIC_API_KEY so the CLI honors the OAuth credentials in the config dir (rather than
+    // silently authing via the env-provided API key and NEVER touching the credentials file). The Max
+    // pool is OAuth-only; the API key exists on some environments and would win otherwise.
+    delete env.ANTHROPIC_API_KEY;
+    // Minimal prompt — the goal is CLI startup (which does the token refresh), not a real response.
+    const result = await shAsync("claude", ["-p", "noop"], {
+      env,
+      timeout: AUTH_REFRESH_TIMEOUT_MS,
+      idleTimeout: AUTH_REFRESH_TIMEOUT_MS,
+    });
+    // Invalidate the cached expiry — the 30s TTL would otherwise keep serving the pre-refresh timestamp
+    // on the NEXT sweep tick and re-eject the freshly-refreshed account.
+    credentialsCache.delete(configDir);
+    const now = Date.now();
+    const freshExpiresAt = readCredentialsExpiresAt(configDir);
+    if (freshExpiresAt > now) {
+      a.lastAuthRefreshFailed = false;
+      recordAccountEvent("recovered", configDir, `OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)}`);
+      console.warn(`[multi-account] ${configDir} OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)} (kept in rotation)`);
+    } else {
+      a.lastAuthRefreshFailed = true;
+      markAccountAuthExpired(
+        configDir,
+        now,
+        `credentials refresh via CLI did not renew expiresAt (exit=${result.code}${result.killed ? `,killed=${result.killed}` : ""}) — ejecting`,
+      );
+    }
+  } catch (e) {
+    a.lastAuthRefreshFailed = true;
+    markAccountAuthExpired(configDir, Date.now(), `credentials refresh via CLI threw: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    a.authRefreshInFlight = false;
+  }
+}
+
+// Iterate the pool; for every account whose stored OAuth expiry is a positive value ≤ now, either
+// attempt a refresh (refresh_token present + no attempt in-flight/throttled + last attempt didn't fail)
+// or eject via the shared markAccountAuthExpired path (cap window + CEO re-login card). Called before
+// every pick so a newly-expired account either drops out on the NEXT selection or gets refreshed in the
+// background before the deadlock ever forms. Best-effort — a read/parse failure returns { 0, false }
+// above, which is treated as "no signal".
+//
+// Deadlock guard (Phase 1 invariant): the sweep NEVER synchronously ejects an account that carries a
+// live refresh_token — it fires the refresh first, and only ejects if the refresh completed AND did
+// not renew `expiresAt`. This is the specific shape that produced 37 hours of downtime on 2026-07-25:
+// four accounts expired within 45 min of each other, the sweep pulled all four in one tick, and the
+// refresh could never happen because nothing could run. With refresh-before-eject, that scenario now
+// fires four refreshes in parallel and clears the pool.
 function sweepExpiredCredentials(now: number): void {
   for (const a of accounts) {
-    const expiresAt = cachedCredentialsExpiresAt(a.configDir, now);
-    if (expiresAt > 0 && expiresAt <= now) {
-      markAccountAuthExpired(a.configDir, now, `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now — proactive eject before dispatch`);
+    const { expiresAt, hasRefreshToken } = (() => {
+      const cached = credentialsCache.get(a.configDir);
+      // Fresh cache hit — trust the cached expiresAt, re-read hasRefreshToken cheaply (small file, hot).
+      if (cached && now - cached.checkedAt < CRED_EXPIRY_CACHE_MS) {
+        const fields = readCredentialsFields(a.configDir);
+        return { expiresAt: cached.expiresAt, hasRefreshToken: fields.hasRefreshToken };
+      }
+      const fields = readCredentialsFields(a.configDir);
+      credentialsCache.set(a.configDir, { expiresAt: fields.expiresAt, checkedAt: now });
+      return fields;
+    })();
+    if (expiresAt <= 0 || expiresAt > now) continue; // no signal, or token still valid
+    if (!hasRefreshToken) {
+      // Genuinely needs a CEO re-login — no way to auto-recover.
+      markAccountAuthExpired(
+        a.configDir,
+        now,
+        `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now, refresh_token missing — proactive eject before dispatch`,
+      );
+      continue;
     }
+    // A refresh is already running for this account — wait it out. Do NOT eject.
+    if (a.authRefreshInFlight) continue;
+    // A previous refresh attempt within the throttle window; if it FAILED, eject via the existing path;
+    // otherwise leave the account alone (the successful refresh already renewed the file — this branch
+    // usually shouldn't be reached, but defends against a between-sweep race where the refreshed
+    // credentials file was re-invalidated externally).
+    if (a.lastAuthRefreshAttemptAt && now - a.lastAuthRefreshAttemptAt < AUTH_REFRESH_MIN_INTERVAL_MS) {
+      if (a.lastAuthRefreshFailed) {
+        markAccountAuthExpired(
+          a.configDir,
+          now,
+          `credentials refresh attempted at ${new Date(a.lastAuthRefreshAttemptAt).toISOString()} did not renew expiresAt — ejecting`,
+        );
+      }
+      continue;
+    }
+    // Fire an async refresh; the account stays in rotation while the refresh runs (typical wall time is
+    // a few seconds — a race where a session lands on it in the interim is caught by the reactive path).
+    void attemptCredentialRefresh(a.configDir);
   }
 }
 
@@ -14509,6 +14638,15 @@ async function runCsDirectorCallJob(job: Job) {
       spec_slug?: string;
       linkage_ticket_id?: string | null;
       linkage_triage_run_id?: string | null;
+      // june-does-the-in-leash-part-before-escalating-the-residue Phase 1 — the compact partial-remedy
+      // outcome the escalate_founder path returns when the verdict carried a `remedy` (executor fired
+      // in-leash actions first). Consumed below by buildEscalateFounderCard so the CEO card body reads
+      // "Already done by June: …" for the settled work and the Diagnosis/Recommended remedy lines
+      // describe the RESIDUE the founder still owns. Null when the verdict carried no `remedy`
+      // (plain escalation). Kept as an unknown-typed sidecar here — the inline anonymous type in
+      // this file lags behind ApplyBoxCsDirectorCallResult in src/lib/cs-director.ts; the card
+      // builder validates the shape when it renders.
+      partial_remedy_outcome?: unknown;
     } = { ok: true, handler: "not_run" };
 
     // cs-director-call-phase-2-executor-fires-june-verdicts (shipped) — the Phase-2 executor.
@@ -14878,7 +15016,7 @@ async function runCsDirectorCallJob(job: Job) {
           blackSwanClass: cls.isBlackSwan ? (cls.class_key ?? null) : null,
           blackSwanSource: cls.isBlackSwan ? (cls.source ?? null) : null,
           recommendedRemedy: verdict.recommended_remedy ?? null,
-          partialRemedyOutcome: applyResult?.partial_remedy_outcome ?? null,
+          partialRemedyOutcome: (applyResult?.partial_remedy_outcome ?? null) as Parameters<typeof buildEscalateFounderCard>[0]["partialRemedyOutcome"],
         });
         const { error: notifErr } = await db.from("dashboard_notifications").insert({
           workspace_id: job.workspace_id,
