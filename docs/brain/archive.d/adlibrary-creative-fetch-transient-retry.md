@@ -1,0 +1,1 @@
+- **Retry transient AdLibrary creative downloads before marking ads failed** · verified 2026-07-27 · → [[../libraries/adlibrary]]
