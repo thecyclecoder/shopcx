@@ -18,6 +18,7 @@ import type { DetectedWinner, WinnerCampaign, WinnerAngle } from "@/lib/ads/winn
 import type { MediaBuyerLoser } from "@/lib/media-buyer/agent";
 import { tierForTest } from "@/lib/ads/testing-results-sdk";
 import { listCrownedWinnerAdsetIds } from "@/lib/media-buyer/crowned-winners";
+import { listActiveColdScalerCohorts } from "@/lib/media-buyer/cold-scaler-cohort";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -427,8 +428,38 @@ export async function detectMetaCpaLosers(admin: Admin, opts: MetaCpaLoserOption
       accountHasAtc,
     ),
   );
+
+  // Cold-scaler exclusion — bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace
+  // Phase 1. The test decision-tree kill NEVER governs a cold-scaler adset: a scaler
+  // spends before it converts, so the test early-dud rule (spend ≥ earlyTrim + 0 purchases)
+  // wrongly flags a brand-new scaler as a loser (live incident: Ashwavana Zen Relax scaler
+  // adset 120249611797950682 was paused twice on 2026-07-25/26 with 0 ROAS on $502 spend).
+  // Read every ACTIVE cold-scaler cohort for this (workspace, meta_ad_account), collect the
+  // set of `meta_adsets.meta_adset_id` under those `scaler_meta_campaign_id`s, and drop any
+  // loser whose `object_id` is in that set. Mirrors the iteration-engine test-cohort
+  // exclusion, opposite direction.
+  const cohorts = await listActiveColdScalerCohorts(admin, {
+    workspaceId: opts.workspaceId,
+    metaAdAccountId: opts.metaAdAccountId,
+  });
+  const scalerCampaignIds = cohorts
+    .map((c) => c.scalerMetaCampaignId)
+    .filter((id): id is string => id !== null);
+  const scalerAdsetIds = new Set<string>();
+  if (scalerCampaignIds.length > 0) {
+    const { data: scalerAdsets } = await admin
+      .from("meta_adsets")
+      .select("meta_adset_id")
+      .eq("workspace_id", opts.workspaceId)
+      .in("meta_campaign_id", scalerCampaignIds);
+    for (const r of (scalerAdsets ?? []) as Array<{ meta_adset_id: string | null }>) {
+      if (r.meta_adset_id) scalerAdsetIds.add(r.meta_adset_id);
+    }
+  }
+  const scoped = scalerAdsetIds.size > 0 ? losing.filter((r) => !scalerAdsetIds.has(r.object_id)) : losing;
+
   const losers: MediaBuyerLoser[] = [];
-  for (const r of losing) {
+  for (const r of scoped) {
     const sourceMetaAdId = await dominantChildAdId(admin, { workspaceId: opts.workspaceId, metaAdsetId: r.object_id });
     losers.push({
       sourceMetaAdId,
