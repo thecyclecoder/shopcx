@@ -64,6 +64,7 @@ If none matches → `null`. The consumer treats "no active row" as "scaler surfa
 - **`scaler_meta_campaign_id` is a BARE Meta id (text), not our UUID.** NULLABLE — a cohort can exist before the scaler campaign is minted (the follow-on graduate spec fills it in).
 - **`bigint` arrives as a string from PostgREST.** The SDK's `toColdScalerCohort` mapper normalizes `daily_scaler_ceiling_cents` to `number` so callers don't have to.
 - **Distinct from the test rail.** [[media_buyer_test_cohorts]] bounds the TEST ad set's daily budget at PUBLISH time (Media Buyer's autonomous go-live). This table bounds the SCALER campaign's daily budget for the M4 scaler rail. Different altitudes; do not conflate.
+- **7-day scaler ramp — no pause path may cut an adset < 7 days old.** [[../specs/bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace]] Phase 2 (CEO Dylan 2026-07-26). A cold-scaler adset spends before it converts and *must* run for at least `COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE=7` days before any pause path can fire on it. Enforced by [[../libraries/cold-scaler-cohort]] `isColdScalerAdsetOldEnoughToPause`; documented in [[../reference/meta-scaling-methodology]] § scale. Belt-and-suspenders — today no built path pauses a scaler (Phase 1 removed Bianca's mis-scoped test decision-tree kill), so this is the durable floor for future consumers.
 
 ## Migration
 

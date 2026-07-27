@@ -25,6 +25,8 @@ import {
   listActiveColdScalerCohorts,
   provisionColdScalerCohort,
   setColdScalerCampaignId,
+  COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE,
+  isColdScalerAdsetOldEnoughToPause,
 } from "./cold-scaler-cohort";
 
 type Row = Record<string, unknown>;
@@ -374,4 +376,38 @@ test("listActiveColdScalerCohorts — returns active rows for the account, produ
     rows.map((r) => r.id),
     ["prod-A", "prod-B", "acct-default"],
   );
+});
+
+// ── bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace Phase 2 ─────
+// COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE + isColdScalerAdsetOldEnoughToPause —
+// the 7-day scaler ramp-up floor. Belt-and-suspenders: no built path pauses
+// a scaler today (Phase 1 removed Bianca's mis-scoped test decision-tree
+// kill), so this guard governs any FUTURE scaler-pause consumer.
+
+test("Phase 2 — COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE is 7 (the CEO 2026-07-26 scaler ramp floor)", () => {
+  assert.equal(COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE, 7);
+});
+
+test("Phase 2 pin — isColdScalerAdsetOldEnoughToPause: a scaler adset that has been alive for LESS than 7 days (Ashwavana Zen Relax: created 2026-07-23, now 2026-07-27 = 4d) is NOT old enough to pause", () => {
+  // Live incident shape: adset 120249611797950682 was 4 days old when
+  // Bianca paused it. The age guard alone would have blocked the pause.
+  const NOW = Date.parse("2026-07-27T12:00:00Z");
+  const created4dAgo = "2026-07-23T12:00:00Z";
+  assert.equal(isColdScalerAdsetOldEnoughToPause(created4dAgo, NOW), false);
+});
+
+test("Phase 2 pin — isColdScalerAdsetOldEnoughToPause: a scaler adset ≥ 7 days old IS old enough to pause (grace has elapsed → downstream pause predicate is free to decide)", () => {
+  const NOW = Date.parse("2026-07-27T12:00:00Z");
+  const createdExactly7dAgo = "2026-07-20T12:00:00Z";
+  const created14dAgo = "2026-07-13T12:00:00Z";
+  assert.equal(isColdScalerAdsetOldEnoughToPause(createdExactly7dAgo, NOW), true);
+  assert.equal(isColdScalerAdsetOldEnoughToPause(created14dAgo, NOW), true);
+});
+
+test("Phase 2 safe default — isColdScalerAdsetOldEnoughToPause returns FALSE on missing / unparseable meta_created_time (never cut a scaler on missing age data)", () => {
+  const NOW = Date.parse("2026-07-27T12:00:00Z");
+  assert.equal(isColdScalerAdsetOldEnoughToPause(null, NOW), false);
+  assert.equal(isColdScalerAdsetOldEnoughToPause(undefined, NOW), false);
+  assert.equal(isColdScalerAdsetOldEnoughToPause("", NOW), false);
+  assert.equal(isColdScalerAdsetOldEnoughToPause("not a date", NOW), false);
 });

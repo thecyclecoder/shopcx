@@ -104,10 +104,26 @@ async function mintAndProvisionColdScalerCampaign(
 
 Composed execution helper — combines two pre-existing chokepoints so callers don't have to sequence them: (1) [[../meta-ads]] `getOrCreateColdScalerCampaign` mints (or finds) the cohort's CBO / Advantage+ Sales scaler campaign on Meta (`PAUSED`, new-customer-only, `daily_budget = cohort.daily_scaler_ceiling_cents`); (2) `setColdScalerCampaignId` compare-and-set-stamps the bare campaign id onto the cohort. Idempotent — a cohort whose `scaler_meta_campaign_id` is already set short-circuits and returns the existing id (no Meta call, `stampedNow=false`). Throws `cold_scaler_cohort_not_found_or_dormant` when the cohort is missing or `is_active=false` (fail-closed — a dormant cohort must never mint a campaign it can't own).
 
+### `COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE` — constant (`= 7`)
+
+The 7-day minimum-age grace before ANY cold-scaler adset pause ([[../specs/bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace]] Phase 2, CEO Dylan 2026-07-26). A cold-scaler adset spends before it converts (cold-audience ramp-up), so any spend-vs-purchases predicate that fires in the first week wrongly LOOKS like a dud. This constant is the durable temporal floor — matches the "7+ days before crowning" bar the [[../reference/meta-scaling-methodology]] decision tree uses for test adsets, applied to scaler adsets in the pause direction. Documented in the [[../reference/meta-scaling-methodology|methodology reference]] § scale.
+
+### `isColdScalerAdsetOldEnoughToPause` — function
+
+```ts
+function isColdScalerAdsetOldEnoughToPause(
+  metaCreatedTime: string | null | undefined,
+  nowMs?: number,
+): boolean
+```
+
+Pure age-guard used by any consumer that would pause a cold-scaler adset. Returns TRUE iff `metaCreatedTime` is set AND parses AND the adset is ≥ `COLD_SCALER_MIN_AGE_DAYS_BEFORE_PAUSE` days old. A `null` / unparseable timestamp returns FALSE — the SAFE default is "not old enough to pause" (never cut a scaler on missing age data). `nowMs` is overridable for tests. Belt-and-suspenders: no built path pauses a scaler today (Phase 1 removed Bianca's mis-scoped test decision-tree kill from `detectMetaCpaLosers` — see [[meta-cpa-signal]] § cold-scaler exclusion), so this predicate governs FUTURE scaler-pause consumers (a graduate cleanup, an owner action, a future CAC:LTV-based scaler-pause loop).
+
 ## Callers
 
 - Bianca M4 follow-on specs — arming gate, CAC:LTV sensor, graduate-crowned-winners — consume `getEffectiveMediaBuyerColdScalerCohort` to gate on "does a scaler cohort exist for this tuple, and what is its ceiling?"
 - Enumeration surfaces (dispatcher, admin editor) use `listActiveColdScalerCohorts` to iterate every scaler cohort for one account.
+- Any FUTURE cold-scaler pause consumer MUST call `isColdScalerAdsetOldEnoughToPause` before firing the pause (belt-and-suspenders per [[../specs/bianca-loser-kill-excludes-cold-scaler-adsets-plus-7day-grace]] Phase 2). Today no consumer exists — Phase 1 removed the only path; the predicate is the durable floor for the ones that come next.
 
 ## Gotchas
 
