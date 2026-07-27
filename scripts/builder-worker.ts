@@ -21738,7 +21738,39 @@ async function runMediaBuyerJob(job: Job) {
       plan: r.plan as import("../src/lib/media-buyer/agent").MediaBuyerPlan,
     }));
     if (plans.length) {
-      const digest = await deliverMediaBuyerDigest(a, job.workspace_id, plans);
+      // Phase 3 of bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently —
+      // per active meta ad account, roll up cold-scaler graduate heartbeats (last graduated + eligible
+      // winners) and fire the deduped CEO stall card for any cohort that is active + has eligible
+      // crowned winners + has not graduated inside GRADUATE_STALL_WINDOW_MS. The heartbeats then
+      // surface as an extra section on the digest — an unexercised autonomous rail becomes visible
+      // as unexercised instead of blending into a healthy quiet rail.
+      const { runColdScalerGraduateStallCheck } = await import(
+        "../src/lib/media-buyer/cold-scaler-graduate-heartbeat"
+      );
+      const accountIds = Array.from(new Set(okPasses.map((r) => r.account)));
+      const allHeartbeats: import("../src/lib/media-buyer/cold-scaler-graduate-heartbeat").CohortGraduateHeartbeat[] = [];
+      let totalEmitted = 0;
+      for (const accountId of accountIds) {
+        try {
+          const { heartbeats, emitted } = await runColdScalerGraduateStallCheck(a, {
+            workspaceId: job.workspace_id,
+            metaAdAccountId: accountId,
+          });
+          allHeartbeats.push(...heartbeats);
+          totalEmitted += emitted;
+        } catch (e) {
+          console.warn(
+            `${tag} cold-scaler graduate stall check failed for account=${accountId.slice(0, 8)} (non-fatal):`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+      if (totalEmitted > 0 || allHeartbeats.length > 0) {
+        console.log(
+          `${tag} cold-scaler graduate heartbeat → cohorts=${allHeartbeats.length} stall_cards=${totalEmitted}`,
+        );
+      }
+      const digest = await deliverMediaBuyerDigest(a, job.workspace_id, plans, allHeartbeats);
       console.log(`${tag} director digest → ${digest.posted ? `posted (${digest.ts})` : `skipped — ${digest.reason}`}`);
     }
   } catch (e) {
