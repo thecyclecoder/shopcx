@@ -76,6 +76,29 @@ export async function listAdSets(token: string, accountId: string, campaignId?: 
 }
 
 /**
+ * Read one ad set's `targeting` spec + `promoted_object.pixel_id` from Meta.
+ * The graduate flow ([[../media-buyer/graduate-scaler]]
+ * `graduateCrownedWinnerToScaler`) needs both to duplicate the winning ad set
+ * into the scaler campaign — Meta stores them per adset, not in our DB. Returns
+ * `null` when either is missing (a rare shape — a manually-created adset without
+ * a promoted_object; the caller then skips the graduate rather than propagating
+ * a partial payload).
+ * Introduced by [[../../docs/brain/specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]]
+ * Phase 1.
+ */
+export async function getAdSetTargetingAndPixel(
+  token: string,
+  adsetId: string,
+): Promise<{ targeting: Record<string, unknown>; pixelId: string } | null> {
+  const j = await metaGet(`${adsetId}?fields=targeting,promoted_object`, token);
+  const targeting = (j?.targeting ?? null) as Record<string, unknown> | null;
+  const pixelId =
+    (j?.promoted_object?.pixel_id ?? j?.promoted_object?.pixel ?? null) as string | null;
+  if (!targeting || !pixelId) return null;
+  return { targeting, pixelId };
+}
+
+/**
  * List ads under a campaign with each ad's linked creative id — the idempotency
  * source behind [[../media-buyer/graduate-scaler]] `graduateCrownedWinnerToScaler`.
  * Returns `{ adId, creativeId }` pairs (any ad whose `creative.id` is missing is
