@@ -1,0 +1,1 @@
+- **Do not permanently fail creative scout ads on retryable AdLibrary fetch errors** · verified 2026-07-27 · → [[../libraries/adlibrary]] + [[../libraries/creative-skeleton]]
