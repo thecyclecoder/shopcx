@@ -686,10 +686,29 @@ export interface CreateCampaignArgs {
   newCustomerBudgetPercentage?: number | null;
   /**
    * Advantage+ Sales campaign type — maps to Meta's `smart_promotion_type` field.
-   * `"AUTOMATED_SHOPPING_ADS"` mints an Advantage+ Sales campaign; `null` = leave
-   * the knob off entirely so the existing ABO test-campaign flow is untouched.
+   *
+   * ⚠️ **DEPRECATED BY META — do not set this.** Graph **v24.0+** rejects ASC creation
+   * outright: `(#100/2490568) ASC campaigns no longer supported: This error code will be
+   * thrown if advertisers tries to create ASC campaign with v24.0 and beyond` (observed
+   * 2026-07-27 minting the Superfood Tabs cold scaler). Kept on the type only so an
+   * existing caller fails at review rather than silently at runtime; `getOrCreateColdScalerCampaign`
+   * no longer sets it.
    */
   smartPromotionType?: string | null;
+  /**
+   * Campaign-level bid strategy. **CBO campaigns own the bid strategy and their ad sets
+   * INHERIT it** — so this has to be right at mint time.
+   *
+   * Default `LOWEST_COST_WITHOUT_CAP` (Meta auto-bid, no bid limit). Without an explicit
+   * value Meta applies the AD ACCOUNT's default, which on account 196487894712827 is
+   * `LOWEST_COST_WITH_BID_CAP` — and the subsequent `createAdSet` then fails with
+   * `(#100/1815857) Bid Amount Required For The Bid Strategy Provided` because the
+   * inherited strategy needs a `bid_amount` nobody supplied (observed 2026-07-27).
+   * Passing an explicit strategy is what makes the mint deterministic across accounts.
+   */
+  bidStrategy?: string | null;
+  /** Required when `bidStrategy` is a `*_WITH_BID_CAP` / `TARGET_COST` variant. Minor units. */
+  bidAmountCents?: number | null;
 }
 
 /**
@@ -717,6 +736,12 @@ export async function createCampaign(
   } else {
     if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
     if (args.lifetimeBudgetCents != null) body.lifetime_budget = Math.round(args.lifetimeBudgetCents);
+    // CBO owns the bid strategy for every ad set under it. Send it EXPLICITLY — an
+    // omitted strategy falls back to the ad account default, which is not uniform
+    // across our accounts and silently produced a bid-capped scaler (see the
+    // `bidStrategy` doc above). ABO campaigns leave it on the ad set as before.
+    body.bid_strategy = args.bidStrategy || "LOWEST_COST_WITHOUT_CAP";
+    if (args.bidAmountCents != null) body.bid_amount = Math.round(args.bidAmountCents);
   }
   if (args.newCustomerBudgetPercentage != null) {
     body.existing_customer_budget_percentage = args.newCustomerBudgetPercentage;
@@ -756,12 +781,23 @@ export function coldScalerCampaignName(cohortId: string): string {
  * ([[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1).
  *
  * Shape (per docs/brain/reference/meta-scaling-methodology.md § Account structure
- * "SCALING campaign (CBO / Advantage+ Sales) ~85% of budget"):
+ * "SCALING campaign (CBO) ~85% of budget"):
  *  - `OUTCOME_SALES` objective
  *  - CBO (`abo=false`) — campaign-level `daily_budget` is the cohort's ceiling
- *  - Advantage+ Sales (`smart_promotion_type='AUTOMATED_SHOPPING_ADS'`)
- *  - New-customer-only from the very first mint (`existing_customer_budget_percentage=0`)
+ *  - `LOWEST_COST_WITHOUT_CAP` — auto-bid, NO bid limit (CEO 2026-07-27). Explicit,
+ *    because CBO ad sets inherit the campaign strategy and the account default is
+ *    `LOWEST_COST_WITH_BID_CAP` on at least one of our accounts.
  *  - PAUSED at mint — an unmonitored campaign never goes live on its own
+ *
+ * ⚠️ **NOT an Advantage+ Sales (ASC) campaign.** This function used to set
+ * `smart_promotion_type='AUTOMATED_SHOPPING_ADS'` + `existing_customer_budget_percentage=0`.
+ * Meta removed ASC creation in Graph **v24.0**, so every call threw
+ * `(#100/2490568) ASC campaigns no longer supported` — meaning Bianca could not graduate a
+ * single crowned winner (found 2026-07-27 while minting the first Superfood Tabs scaler;
+ * the pre-existing Ashwavana Zen Relax scaler predates the version bump). New-customer-only
+ * is now enforced at the AD SET via `targeting.excluded_custom_audiences` (the all-customers
+ * audience), which is where the test rail already enforces it — see
+ * [[../media-buyer/provision-cohort]] `adset_template`.
  *
  * Idempotent by exact name match on `coldScalerCampaignName(cohortId)` via
  * `listCampaigns`. Returns the bare Meta campaign id; the caller
@@ -783,9 +819,8 @@ export async function getOrCreateColdScalerCampaign(
     objective: "OUTCOME_SALES",
     abo: false,
     dailyBudgetCents: opts.dailyCeilingCents,
+    bidStrategy: "LOWEST_COST_WITHOUT_CAP", // no bid limit — CEO 2026-07-27
     status: "PAUSED",
-    newCustomerBudgetPercentage: 0,
-    smartPromotionType: "AUTOMATED_SHOPPING_ADS",
   });
 }
 

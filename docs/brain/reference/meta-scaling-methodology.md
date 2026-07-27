@@ -17,14 +17,14 @@ The dollar CAC thresholds are **derived each cycle from live LTV**, not hardcode
 ## Account structure (two campaigns, feeder model)
 
 ```
-TESTING campaign (ABO)  ──promote winners──▶  SCALING campaign (CBO / Advantage+ Sales)
+TESTING campaign (ABO)  ──promote winners──▶  SCALING campaign (CBO, no bid limit)
 ~15% of budget                                ~85% of budget
 one creative-concept per ad set               broad, holds proven winners
 purchase-opt, equal ad-set budgets            purchase-opt
 ```
 
 - **Testing = ABO** (ad-set budgets) so each creative gets equal funded delivery → clean read. Under CBO the algorithm starves variants and you can't tell if the creative or the algorithm killed it.
-- **Scaling = CBO / Advantage+ Sales** — let Meta shift spend to the best performers.
+- **Scaling = CBO** (`LOWEST_COST_WITHOUT_CAP`) — let Meta shift spend to the best performers, unconstrained by a bid cap.
 - **Consolidate**: 1-3 campaigns total, not 10 fragmented ones. Any ad set that can't clear ~50 events/week gets consolidated (chronic "learning limited" is the #1 avoidable failure).
 
 **Live objects (created 2026-07-07, PAUSED):**
@@ -104,7 +104,7 @@ A **cold-scaler** adset (the [[../libraries/cold-scaler-cohort|SCALING campaign]
 
 - **Separate ABO test lab vs test-inside-Advantage+/ASC** — unresolved; majority runs a separate ABO lab (our choice). The consolidation-maximalist camp tests inside ASC and lets Meta arbitrate.
 - **Promote by duplicate vs raise-in-place** — both credible; we duplicate.
-- **ASC is NOT a mandate** — Tinuiti Q1'26 shows Advantage+ Sales *falling* to ~20% of retail spend (from a ~38% peak). Default scaler, not religion.
+- **ASC is GONE** — Meta removed Advantage+ Shopping Campaign *creation* in Graph v24.0 (`(#100/2490568) ASC campaigns no longer supported`, hit 2026-07-27). Pre-v24 ASC campaigns keep running; new scalers are plain CBO sales campaigns. Historical note: ASC was never a mandate anyway — Tinuiti Q1'26 shows Advantage+ Sales *falling* to ~20% of retail spend (from a ~38% peak). Default scaler, not religion.
 - **Directional-only numbers**: the freq 3.5/5.0 cliffs and broad-vs-lookalike ROAS splits are single-study; treat as starting points, recalibrate against our own data.
 - **Andromeda caveat (2026)**: Meta's algorithm exhausts audiences faster (fatigue in 2-3 wks, not 4-6) and **hides fatigue from frequency** — so CTR-decay + CPA-rise are co-equal signals, never frequency alone.
 
