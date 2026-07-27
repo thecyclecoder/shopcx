@@ -1044,10 +1044,25 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // a freshly-closed / freshly-handled ticket one full feeder cycle to be picked up
             // before we flag it, while a truly-stuck analyzer (a fully-settled ticket that's
             // survived a full cycle unprocessed) still trips the alert.
+            //
+            // June-decided cycle mirror (ticket-analyzer-workprobe-exclude-june-decided-cycles) —
+            // the ticket-analysis-cron's `passesCoraSelectionGate` (ticket-analysis-cron.ts § 81)
+            // ALSO skips a candidate when a `cs_director_call` `director_activity` row for that
+            // ticket landed at-or-after the current handling anchor (later(ai_handled_at,
+            // sol_handled_at)) — June's decision is the final word for the cycle, so Cora is
+            // NEVER expected to run again until a subsequent Sol handling bumps the anchor past
+            // that decision. Counting a June-decided-this-cycle ticket as awaited work is a
+            // monitor assertion bug (Control Tower reads the probe as unserviced demand and
+            // false-fires idle_while_work on loop:ai:ticket-analyzer). Mirror the cron's lookup
+            // here: batch-fetch `cs_director_call` rows for the candidate workspaces, key
+            // `latestJuneDecidedAtByTicket` on `metadata.ticket_id`, then skip a candidate
+            // whose June decision is at-or-after its handling anchor. A June decision from a
+            // PRIOR cycle (decided_at < handledAt) is inert — Sol re-handled past it, so this
+            // is a new, undecided cycle and the ticket still counts as awaited work.
             const nowMs = Date.now();
             const { data: candidates } = await admin
               .from("tickets")
-              .select("id, closed_at, ai_handled_at, sol_handled_at")
+              .select("id, workspace_id, closed_at, ai_handled_at, sol_handled_at")
               .eq("status", "closed")
               .eq("analyzer_locked", false)
               .contains("tags", ["ai"])
@@ -1057,6 +1072,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               .gte("updated_at", sinceIso);
             type Candidate = {
               id: string;
+              workspace_id: string;
               closed_at: string | null;
               ai_handled_at: string | null;
               sol_handled_at: string | null;
@@ -1079,6 +1095,27 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               const prev = latestCustomerMsgMs.get(m.ticket_id);
               if (prev == null || ms > prev) latestCustomerMsgMs.set(m.ticket_id, ms);
             }
+            // June-decided lookup: mirror ticket-analysis-cron.ts § 213-230. One batched read of
+            // `cs_director_call` `director_activity` rows scoped to the candidate workspaces
+            // (small set — the base filter caps volume), keyed on `metadata.ticket_id`. Keep the
+            // MAX(created_at) per ticket so the compare below sees the freshest decision.
+            const uniqueWorkspaces = Array.from(new Set(candidateRows.map((c) => c.workspace_id)));
+            const { data: verdictRows } = await admin
+              .from("director_activity")
+              .select("metadata, created_at")
+              .eq("action_kind", "cs_director_call")
+              .in("workspace_id", uniqueWorkspaces)
+              .gte("created_at", sinceIso);
+            const latestJuneDecidedAtByTicket = new Map<string, number>();
+            for (const v of ((verdictRows ?? []) as Array<{ metadata: Record<string, unknown> | null; created_at: string }>)) {
+              const ticketId =
+                v.metadata && typeof v.metadata.ticket_id === "string" ? v.metadata.ticket_id : null;
+              if (!ticketId) continue;
+              const ms = Date.parse(v.created_at);
+              if (!Number.isFinite(ms)) continue;
+              const prev = latestJuneDecidedAtByTicket.get(ticketId);
+              if (prev == null || ms > prev) latestJuneDecidedAtByTicket.set(ticketId, ms);
+            }
             let count = 0;
             for (const c of candidateRows) {
               const latestMs = latestCustomerMsgMs.get(c.id);
@@ -1097,6 +1134,19 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
               // Not old enough for a full feeder cycle to have legally picked it up → cron
               // would service on the next tick → don't count as awaited work.
               if (nowMs - readyAt < TICKET_ANALYSIS_FEEDER_GRACE_MS) continue;
+              // June-decided-this-cycle → cron skips (passesCoraSelectionGate § 111-116), so the
+              // probe skips too. Handling anchor = later(ai_handled_at, sol_handled_at) —
+              // matches the cron's `handledAt` from `laterTimestamp(ai_handled_at, sol_handled_at)`.
+              const juneMs = latestJuneDecidedAtByTicket.get(c.id);
+              if (juneMs != null) {
+                const aiMs = c.ai_handled_at ? Date.parse(c.ai_handled_at) : null;
+                const solMs = c.sol_handled_at ? Date.parse(c.sol_handled_at) : null;
+                const handledMs =
+                  aiMs != null && solMs != null
+                    ? Math.max(aiMs, solMs)
+                    : (aiMs ?? solMs);
+                if (handledMs != null && juneMs >= handledMs) continue;
+              }
               count++;
             }
             return count;
