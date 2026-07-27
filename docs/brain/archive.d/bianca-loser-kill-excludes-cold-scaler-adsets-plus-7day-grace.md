@@ -1,0 +1,1 @@
+- **Bianca's loser-kill excludes cold-scaler adsets + a 7-day min-age grace before cutting a scaler** · verified 2026-07-27 · → [[../libraries/meta-cpa-signal]]
