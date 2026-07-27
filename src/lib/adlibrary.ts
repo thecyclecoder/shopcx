@@ -256,21 +256,71 @@ export async function searchAds(params: AdLibrarySearchParams): Promise<Normaliz
 }
 
 /**
+ * HTTP statuses that mean "AdLibrary's creative CDN blipped, not our fault" — a
+ * bounded retry can recover before we mark the ad failed. 4xx-request-timeout
+ * and 429-rate-limited are included because both are recoverable on a short
+ * pause; the 5xx family covers the vendor-side outages we've actually seen.
+ * Anything else (401/403 credentials, 404 dead url, other 4xx) fails fast so we
+ * surface the real error instead of masking it with retries.
+ */
+export const TRANSIENT_ADLIBRARY_CREATIVE_STATUSES: ReadonlySet<number> = new Set([
+  408, 429, 500, 502, 503, 504,
+]);
+
+export function isTransientAdlibraryCreativeStatus(status: number): boolean {
+  return TRANSIENT_ADLIBRARY_CREATIVE_STATUSES.has(status);
+}
+
+export interface FetchCreativeOpts {
+  /** Total attempts (initial + retries). Default 3. */
+  maxAttempts?: number;
+  /** Base delay (ms) between retries; each retry waits `baseDelayMs * attempt`. Default 200. */
+  baseDelayMs?: number;
+  /** Injected fetch (testing). Default `globalThis.fetch`. */
+  fetchImpl?: typeof globalThis.fetch;
+  /** Injected sleep (testing). Default `setTimeout`. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+/**
  * Fetch a creative (image or video bytes). The preview/resource urls 403 without
  * the Bearer key, so this MUST be used (never a raw fetch). Returns the bytes +
  * content-type for vision (statics) or download (video, Phase 6).
+ *
+ * Retries a small bounded set of transient upstream statuses
+ * ({@link TRANSIENT_ADLIBRARY_CREATIVE_STATUSES}) before surfacing the terminal
+ * `adlibrary_creative_${status}` error — a one-off AdLibrary 503 no longer
+ * permanently poisons a competitor ad row via the scout's dedup key. Non-
+ * transient statuses (401/403/404/…) still fail on the first response so we do
+ * not mask credentials or dead-URL problems.
  */
 export async function fetchCreative(
   url: string,
+  opts: FetchCreativeOpts = {},
 ): Promise<{ buffer: Buffer; contentType: string }> {
   if (!ADLIBRARY_API_KEY) throw new Error("no_adlibrary_key");
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${ADLIBRARY_API_KEY}` },
-  });
-  if (!res.ok) throw new Error(`adlibrary_creative_${res.status}`);
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return { buffer, contentType };
+  const doFetch = opts.fetchImpl ?? globalThis.fetch;
+  const sleep =
+    opts.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? 3);
+  const baseDelayMs = Math.max(0, opts.baseDelayMs ?? 200);
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await doFetch(url, {
+      headers: { Authorization: `Bearer ${ADLIBRARY_API_KEY}` },
+    });
+    if (res.ok) {
+      const contentType = res.headers.get("content-type") || "application/octet-stream";
+      const buffer = Buffer.from(await res.arrayBuffer());
+      return { buffer, contentType };
+    }
+    lastStatus = res.status;
+    if (!isTransientAdlibraryCreativeStatus(res.status) || attempt >= maxAttempts) {
+      throw new Error(`adlibrary_creative_${res.status}`);
+    }
+    await sleep(baseDelayMs * attempt);
+  }
+  throw new Error(`adlibrary_creative_${lastStatus}`);
 }
 
 /**
