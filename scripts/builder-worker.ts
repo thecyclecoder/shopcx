@@ -1103,12 +1103,31 @@ function markCodexCapped(now: number, text?: string) {
   }
 }
 
+// ── box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 ────────
+// The typed reason a pool account is currently held out of rotation. Set at the ejection point
+// (markAccountCapped vs markAccountAuthExpired vs the refresh-failed path in attemptCredentialRefresh)
+// and consumed by (a) the parked job's `log_tail` and (b) the console line and (c) the CEO card body
+// so the same event never gets three different labels ("usage limit reached" / "OAuth-expired" /
+// "needs re-login" collapsed into one wall-hit string, the exact confusion that cost real diagnostic
+// time during the 2026-07-25 outage). Cleared on recovery.
+//   'usage_cap'      — a real usage wall (session or weekly). Clears itself at the reset time.
+//   'auth_expired'   — the OAuth token was rejected as expired AND we could NOT auto-refresh (no
+//                      refresh_token in `.credentials.json`, or the refresh attempt did not renew
+//                      `expiresAt`). Requires a CEO re-login.
+//   'refresh_failed' — a specific subclass of auth_expired: we DID attempt a refresh (refresh_token
+//                      was present) and it came back without a fresh expiresAt. The CEO card notes
+//                      this distinctly so the founder knows an auto-recovery was already tried.
+type AccountHoldReason = "usage_cap" | "auth_expired" | "refresh_failed";
 interface AccountState {
   configDir: string;
   inFlight: number;       // builds currently running on this account — least-loaded wins the round-robin
   lastAssignedAt: number; // tie-break: least-recently-used
   cappedUntil: number;    // 0 = healthy; else epoch-ms until which it's pulled from rotation
   capEventLogged: boolean; // a `cap` event was already recorded for the CURRENT cap window (so recovery logs once)
+  // Phase 2 — the typed cause of the current hold. Null when healthy. Never let two unrelated failures
+  // (usage-capped vs auth-expired) collapse into one string; the operator needs to know which is which
+  // (a cap clears itself; an auth expiry never does without action).
+  holdReason?: AccountHoldReason | null;
   // ── box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 1 ────────
   // Deadlock fix: an expired access token whose refresh token is live gets a REFRESH attempt before it
   // is ejected. Fields track the in-progress refresh so a single sweep never eject-loops (in-flight
@@ -1117,7 +1136,7 @@ interface AccountState {
   lastAuthRefreshAttemptAt?: number; // epoch-ms of the last refresh attempt — throttles re-attempts
   lastAuthRefreshFailed?: boolean;   // last completed refresh attempt did NOT renew expiresAt
 }
-const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false }));
+const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false, holdReason: null }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
 // Which round-robin account each in-flight job is running on (job.id → account index), so the box view's
 // build card can show "Round Robin N". Stamped when a lane's account is chosen, cleared when it ends.
@@ -1173,7 +1192,16 @@ function noteAccountRecoveries(now: number) {
   for (const a of accounts) {
     if (a.capEventLogged && a.cappedUntil <= now) {
       a.capEventLogged = false;
-      recordAccountEvent("recovered", a.configDir, "usage wall reset — back in rotation");
+      // Phase 2 — clear the typed hold reason when a hold aged out on its own (usage-wall reset).
+      // The recovery event's label reflects the reason we ejected for so a delayed auth-expired hold
+      // that ages out doesn't get relabeled as "usage wall reset".
+      const reason = a.holdReason ?? "usage_cap";
+      a.holdReason = null;
+      recordAccountEvent(
+        "recovered",
+        a.configDir,
+        reason === "usage_cap" ? "usage wall reset — back in rotation" : `${reason} hold aged out — back in rotation`,
+      );
     }
   }
 }
@@ -1190,6 +1218,10 @@ function accountsSnapshot(now: number) {
       in_flight: activeLaneCountForAccount(i),
       capped: a.cappedUntil > now,
       capped_until: a.cappedUntil > now ? new Date(a.cappedUntil).toISOString() : null,
+      // box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 —
+      // the typed hold reason ('usage_cap' | 'auth_expired' | 'refresh_failed') so the build box page
+      // renders 'auth expired' distinctly from 'usage capped'. Null when the account is healthy.
+      hold_reason: a.cappedUntil > now ? (a.holdReason ?? "usage_cap") : null,
     })),
     healthy: healthyAccounts(now).length,
     total: accounts.length,
@@ -1217,7 +1249,7 @@ function accountsSnapshot(now: number) {
 async function restoreAccountCapsOnBoot(): Promise<void> {
   try {
     const { data } = await db.from("worker_heartbeats").select("accounts").eq("id", WORKER_BOX_ID).maybeSingle();
-    const pool = (data?.accounts as { pool?: { capped_until?: string | null }[] } | null)?.pool;
+    const pool = (data?.accounts as { pool?: { capped_until?: string | null; hold_reason?: string | null }[] } | null)?.pool;
     if (!Array.isArray(pool)) return;
     const now = Date.now();
     let restored = 0;
@@ -1228,7 +1260,21 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
       // fresh cap (session clamped ≤ now+CAP_MAX_MS, weekly ≤ now+WEEKLY_CAP_MAX_MS by markAccountCapped) is
       // preserved so a self-update restart doesn't re-probe a known-good far-out weekly reset every time.
       const until = rawUntil > now && rawUntil <= now + WEEKLY_CAP_MAX_MS ? rawUntil : 0;
-      if (until > now) { accounts[i].cappedUntil = until; accounts[i].capEventLogged = true; restored++; }
+      if (until > now) {
+        accounts[i].cappedUntil = until;
+        accounts[i].capEventLogged = true;
+        // box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 —
+        // restore the typed hold reason so the pool snapshot after a restart doesn't degrade every
+        // held account to the pre-Phase-2 default of "usage_cap" (which is exactly the misreporting
+        // the 2026-07-25 incident's founder read on the box card). Unknown/legacy values default to
+        // "usage_cap" — the safe pre-Phase-2 label.
+        const rawReason = pool[i]?.hold_reason;
+        accounts[i].holdReason =
+          rawReason === "auth_expired" || rawReason === "refresh_failed" || rawReason === "usage_cap"
+            ? (rawReason as AccountHoldReason)
+            : "usage_cap";
+        restored++;
+      }
     }
     if (restored) console.log(`[multi-account] restored ${restored} capped account(s) from heartbeat — re-probe within ${Math.round(CAP_MAX_MS / 60000)}m`);
   } catch (e) {
@@ -1246,6 +1292,69 @@ function soonestReset(now: number): number {
   const capped = accounts.filter((a) => a.cappedUntil > now);
   return capped.length ? Math.min(...capped.map((a) => a.cappedUntil)) : now;
 }
+
+// box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 — summarize
+// the CURRENT mix of typed hold reasons across every held-out account, so a parked job's `log_tail`,
+// the ALL-CAPPED console line, and the CEO surface each name the ACTUAL cause + the ACTUAL remedy
+// instead of collapsing everything into one "usage limit reached" string. Every count is naive (a
+// hold with a missing reason is bucketed as "usage_cap" — the pre-Phase-2 default) so a downgraded
+// row never silently reads as "0 auth-expired accounts". Returns `null` when nothing is held.
+type PoolHoldSummary = {
+  totalHeld: number;
+  usageCap: number;
+  authExpired: number;
+  refreshFailed: number;
+  soonestResetAt: number | null;
+  // A single-line label suitable for a parked job's `log_tail` / a console line — starts with the
+  // dominant reason (never claims 'usage limit' when the majority are actually auth-expired).
+  label: string;
+  // The remedy phrase the operator should read — "wait for reset X" for usage, "re-login via …" for
+  // auth-expired, "check credentials" for refresh_failed. When mixed, both are listed.
+  remedy: string;
+};
+function summarizePoolHolds(now: number): PoolHoldSummary | null {
+  const held = accounts.filter((a) => a.cappedUntil > now);
+  if (!held.length) return null;
+  let usageCap = 0, authExpired = 0, refreshFailed = 0;
+  for (const a of held) {
+    const r = a.holdReason ?? "usage_cap";
+    if (r === "usage_cap") usageCap++;
+    else if (r === "auth_expired") authExpired++;
+    else if (r === "refresh_failed") refreshFailed++;
+  }
+  const soonestUsageResetAt = held
+    .filter((a) => (a.holdReason ?? "usage_cap") === "usage_cap")
+    .reduce<number | null>((acc, a) => acc == null || a.cappedUntil < acc ? a.cappedUntil : acc, null);
+  const authTotal = authExpired + refreshFailed;
+  // Label — a compact reason-count line. "3 auth-expired, 1 usage-capped (of 4)" is unambiguous.
+  const parts: string[] = [];
+  if (authExpired > 0) parts.push(`${authExpired} auth-expired`);
+  if (refreshFailed > 0) parts.push(`${refreshFailed} refresh-failed`);
+  if (usageCap > 0) parts.push(`${usageCap} usage-capped`);
+  const label = `${parts.join(", ")} (of ${accounts.length}) — Max pool held out of rotation`;
+  // Remedy — what to do about it, in the same line. A usage-cap wait time is included only when the
+  // usage_cap bucket is non-empty; an auth-shape hold does NOT clear at any reset time.
+  const remedyParts: string[] = [];
+  if (usageCap > 0) {
+    remedyParts.push(soonestUsageResetAt ? `usage caps clear at ${astTime(soonestUsageResetAt)}` : `usage caps clear at the soonest reset`);
+  }
+  if (authTotal > 0) {
+    remedyParts.push(
+      refreshFailed > 0
+        ? `auth-expired accounts need a CEO re-login (auto-refresh already failed for ${refreshFailed})`
+        : `auth-expired accounts need a CEO re-login`,
+    );
+  }
+  return {
+    totalHeld: held.length,
+    usageCap,
+    authExpired,
+    refreshFailed,
+    soonestResetAt: soonestUsageResetAt,
+    label,
+    remedy: remedyParts.join("; "),
+  };
+}
 // Least-recently-used / round-robin: among HEALTHY accounts pick the one with the fewest in-flight
 // builds, tie-broken by least-recently-assigned. NEW sessions only (never reassigns a pinned resume).
 function pickNewSessionAccount(now: number): AccountState | null {
@@ -1258,8 +1367,11 @@ function pickNewSessionAccount(now: number): AccountState | null {
   const healthy = healthyAccounts(now);
   if (!healthy.length) {
     if (allAccountsCapped(now)) {
-      const anyExpired = accounts.some((a) => a.capEventLogged && cachedCredentialsExpiresAt(a.configDir, now) > 0 && cachedCredentialsExpiresAt(a.configDir, now) <= now);
-      if (anyExpired) console.warn("[multi-account] every pool account is unavailable (usage-capped or OAuth-expired) — awaiting soonest reset or CEO re-login");
+      // Phase 2 — name the ACTUAL cause + remedy, so a founder reading the box log doesn't go hunting
+      // for a capacity problem when the real issue is four accounts whose refresh tokens are gone
+      // (the exact confusion that cost real diagnostic time during the 2026-07-25 outage).
+      const summary = summarizePoolHolds(now);
+      if (summary) console.warn(`[multi-account] Max pool empty — ${summary.label}. ${summary.remedy}.`);
     }
     return null;
   }
@@ -1347,6 +1459,10 @@ function markAccountCapped(dir: string, now: number, errorText?: string) {
   const estimate = (errorText && parseResetTime(errorText, now)) || now + USAGE_CAP_COOLDOWN_MS;
   const clampMax = isWeeklyWall(errorText || "") ? WEEKLY_CAP_MAX_MS : CAP_MAX_MS;
   a.cappedUntil = Math.min(estimate, now + clampMax);
+  // Phase 2 — typed hold-reason. `markAccountCapped` is only called on a real usage-wall signal
+  // (isUsageCapError caller-side), so the reason is unambiguously 'usage_cap' — never conflated with
+  // an auth expiry via a wall-shaped log substring.
+  a.holdReason = "usage_cap";
   if (!a.capEventLogged) {
     a.capEventLogged = true; // record the `cap` once per window; noteAccountRecoveries logs the matching `recovered`
     recordAccountEvent("cap", dir, `usage wall hit — pulled from rotation until ${astTime(a.cappedUntil)}`);
@@ -1381,13 +1497,24 @@ function markAccountAuthExpired(dir: string, now: number, detail: string) {
   // re-alert) every ~20 min while the CEO is asleep. On the next boot the restore path clamps to the
   // weekly ceiling too, so the ejection survives a restart without escalating past that ceiling.
   a.cappedUntil = Math.max(a.cappedUntil, now + WEEKLY_CAP_MAX_MS);
+  // Phase 2 — typed hold-reason. Prefer the more-specific `refresh_failed` when the ejection came from
+  // an actual refresh attempt (attemptCredentialRefresh sets `lastAuthRefreshFailed=true` before
+  // calling here); otherwise the account is auth-dead because no refresh_token was present at all.
+  const reason: AccountHoldReason = a.lastAuthRefreshFailed ? "refresh_failed" : "auth_expired";
+  a.holdReason = reason;
   if (!a.capEventLogged) {
     a.capEventLogged = true;
-    recordAccountEvent("auth_expired", dir, `OAuth token rejected as expired — pulled from rotation until ${astTime(a.cappedUntil)} (needs CEO re-login)`);
-    console.warn(`[multi-account] ${dir} auth-expired → pulled from rotation until ${astTime(a.cappedUntil)}: ${detail.slice(0, 200)}`);
+    recordAccountEvent(
+      "auth_expired",
+      dir,
+      reason === "refresh_failed"
+        ? `OAuth refresh attempted and failed — pulled from rotation until ${astTime(a.cappedUntil)} (needs CEO re-login)`
+        : `OAuth token rejected as expired (no refresh_token) — pulled from rotation until ${astTime(a.cappedUntil)} (needs CEO re-login)`,
+    );
+    console.warn(`[multi-account] ${dir} ${reason} → pulled from rotation until ${astTime(a.cappedUntil)}: ${detail.slice(0, 200)}`);
     // Fire-and-forget the CEO card. An alert-write failure must never interfere with account
     // management or the hop-to-healthy path that just re-routed the ticket.
-    void emitCeoAuthExpiryAlertBestEffort(dir);
+    void emitCeoAuthExpiryAlertBestEffort(dir, reason);
   }
 }
 
@@ -1396,7 +1523,14 @@ const AUTH_EXPIRED_ALERT_TYPE = "box_account_auth_expired";
 // was rejected as expired, plus the exact re-login command. Deduped by config-dir so a persistently-
 // expired account (repeated re-probes) doesn't spam the inbox — one open card per account at a time.
 // Best-effort: called via `void` from `markAccountAuthExpired`; a failure logs + returns, never throws.
-async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void> {
+//
+// box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 — the card
+// now names WHETHER a refresh was attempted and what it returned, so the founder knows before
+// re-authenticating whether an auto-recovery already failed (`refresh_failed`) or was never possible
+// (`auth_expired`, no refresh_token). The pre-Phase-2 body said "needs CEO re-login" for BOTH cases,
+// which during the 2026-07-25 incident would have sent Dylan to re-authenticate four healthy
+// accounts whose refresh tokens were live and only needed the CLI to run.
+async function emitCeoAuthExpiryAlertBestEffort(configDir: string, reason: AccountHoldReason = "auth_expired"): Promise<void> {
   try {
     const workspaceId = await resolveOwnerWorkspaceId();
     if (!workspaceId) return;
@@ -1417,11 +1551,18 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void
     }
     if ((open ?? []).length > 0) return; // one open card per account — nothing to add.
     const loginCmd = `CLAUDE_CONFIG_DIR=${configDir} claude auth login`;
-    const title = `Box pool account ${label} needs a new login`;
+    const refreshLine =
+      reason === "refresh_failed"
+        ? `Auto-refresh via \`claude -p\` was ATTEMPTED (a refresh_token was present) but did not renew the access token — a re-login is required.`
+        : `No refresh_token was present in the credentials file, so auto-refresh could not be attempted — a full re-login is required.`;
+    const title =
+      reason === "refresh_failed"
+        ? `Box pool account ${label}: auto-refresh failed — needs a new login`
+        : `Box pool account ${label} needs a new login`;
     const body =
       `The box pool account ${label} (config dir ${configDir}) rejected its OAuth token as expired ` +
       `and was pulled from rotation. Sessions have re-routed to a healthy account, but the pool is one ` +
-      `account down until you re-login. Run: ${loginCmd}`;
+      `account down until you re-login. ${refreshLine} Run: ${loginCmd}`;
     const { error: notifErr } = await db.from("dashboard_notifications").insert({
       workspace_id: workspaceId,
       type: AUTH_EXPIRED_ALERT_TYPE,
@@ -1433,6 +1574,10 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string): Promise<void
         config_dir: configDir,
         account_label: label,
         login_command: loginCmd,
+        // Phase 2 — surface the typed cause so the card can render distinct copy in the future
+        // without re-parsing the body, and the CEO inbox can filter for refresh-failed cards.
+        hold_reason: reason,
+        refresh_attempted: reason === "refresh_failed",
         autonomous: true,
       },
       read: false,
@@ -1547,6 +1692,9 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
     const freshExpiresAt = readCredentialsExpiresAt(configDir);
     if (freshExpiresAt > now) {
       a.lastAuthRefreshFailed = false;
+      // Phase 2 — a successful refresh clears any prior auth-shaped hold reason (defensive: the sweep
+      // only fires this while the account is healthy, but a rare between-tick race could see it held).
+      if (a.holdReason === "auth_expired" || a.holdReason === "refresh_failed") a.holdReason = null;
       recordAccountEvent("recovered", configDir, `OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)}`);
       console.warn(`[multi-account] ${configDir} OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)} (kept in rotation)`);
     } else {
@@ -2074,9 +2222,27 @@ async function requeueBlockedOnDependency() {
 async function handlePoolUsageCap(jobId: string, tag: string, configDir: string, hadSession: boolean, logTail: string): Promise<boolean> {
   markAccountCapped(configDir, Date.now(), logTail); // parse the real reset time from the wall message
   if (allAccountsCapped(Date.now())) {
-    recordAccountEvent("all_capped", configDir, "all Max accounts capped — job parked blocked_on_usage, auto-resumes at reset");
-    await update(jobId, { status: "blocked_on_usage", error: "Max usage wall hit on all accounts — auto-resumes at reset", log_tail: logTail });
-    console.warn(`${tag} usage cap on ${configDir} → all accounts capped → blocked_on_usage`);
+    // box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 —
+    // derive the parked row's `error` + `log_tail` from the pool's actual mix of hold reasons, not a
+    // hardcoded "Max usage wall hit on all accounts" string. During the 2026-07-25 outage 200+ jobs
+    // parked with a usage-wall label even though EVERY account was auth-expired — an operator hunting
+    // a capacity problem couldn't find one, because none existed. The wall-message logTail (this call
+    // site was reached BECAUSE of a real wall on `configDir`) is still surfaced so the auditor can
+    // see the triggering signal, but the row's `error` and the `all_capped` event now name the ACTUAL
+    // pool-wide cause + remedy.
+    const summary = summarizePoolHolds(Date.now());
+    const eventDetail = summary
+      ? `Max pool empty — ${summary.label}. ${summary.remedy}. Parking job blocked_on_usage.`
+      : "all Max accounts capped — job parked blocked_on_usage, auto-resumes at reset";
+    const parkedError = summary
+      ? `Max pool empty — ${summary.label}. ${summary.remedy}.`
+      : "Max usage wall hit on all accounts — auto-resumes at reset";
+    const parkedLogTail = summary
+      ? `${parkedError}\n(triggering wall on ${configDir})\n${logTail}`.slice(-4000)
+      : logTail;
+    recordAccountEvent("all_capped", configDir, eventDetail);
+    await update(jobId, { status: "blocked_on_usage", error: parkedError, log_tail: parkedLogTail });
+    console.warn(`${tag} usage cap on ${configDir} → ${summary ? summary.label : "all accounts capped"} → blocked_on_usage`);
   } else {
     recordAccountEvent("failover", configDir, `failing over — re-dispatching ${hadSession ? "resume" : "build"} on a healthy account`);
     await update(jobId, { status: hadSession ? "queued_resume" : "queued", error: null, log_tail: logTail });
@@ -9231,12 +9397,27 @@ async function runPlanJob(job: Job) {
   // start fresh — if its owning account is capped it WAITS (blocked_on_usage) for that account.
   const decision = resolveAccountForJob(job, isResume, /* canStartFresh */ false);
   if (decision.kind === "blocked") {
+    // box-account-auth-expiry-refreshes-before-eject-and-never-reports-as-usage-cap Phase 2 —
+    // name the specific hold reason (usage_cap vs auth_expired vs refresh_failed) on the pinned
+    // owning account, so an auth-expired hold on a plan resume never falsely reads "Max account
+    // capped" (which sends the operator to check usage rather than credentials).
+    const ownerDir = job.claude_session_config_dir ?? null;
+    const owner = ownerDir ? accountByDir.get(ownerDir) : null;
+    const reason = owner?.holdReason ?? "usage_cap";
+    const reasonLabel =
+      reason === "auth_expired" ? "auth-expired (no refresh_token)" :
+      reason === "refresh_failed" ? "auth-expired (auto-refresh failed — needs CEO re-login)" :
+      "usage-capped";
+    const remedy =
+      reason === "usage_cap"
+        ? `auto-resumes after ~${new Date(decision.resetAt).toISOString()}`
+        : `auto-resumes once the CEO re-logins the pinned account`;
     await update(job.id, {
       status: "blocked_on_usage",
-      error: `Max account capped — plan auto-resumes after ~${new Date(decision.resetAt).toISOString()}`,
-      log_tail: `parked blocked_on_usage; account reset ~${new Date(decision.resetAt).toISOString()}`,
+      error: `Pinned Max account ${reasonLabel} — plan ${remedy}`,
+      log_tail: `parked blocked_on_usage; pinned account ${reasonLabel}; ${remedy}`,
     });
-    console.warn(`${tag} owning account capped → blocked_on_usage (reset ~${new Date(decision.resetAt).toISOString()})`);
+    console.warn(`${tag} pinned account ${reasonLabel} → blocked_on_usage (${remedy})`);
     return;
   }
   const configDir = decision.configDir;
