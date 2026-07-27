@@ -47,6 +47,7 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
+import { applyRefreshOutcome, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -1690,20 +1691,21 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
     credentialsCache.delete(configDir);
     const now = Date.now();
     const freshExpiresAt = readCredentialsExpiresAt(configDir);
-    if (freshExpiresAt > now) {
-      a.lastAuthRefreshFailed = false;
-      // Phase 2 — a successful refresh clears any prior auth-shaped hold reason (defensive: the sweep
-      // only fires this while the account is healthy, but a rare between-tick race could see it held).
-      if (a.holdReason === "auth_expired" || a.holdReason === "refresh_failed") a.holdReason = null;
-      recordAccountEvent("recovered", configDir, `OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)}`);
-      console.warn(`[multi-account] ${configDir} OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)} (kept in rotation)`);
-    } else {
-      a.lastAuthRefreshFailed = true;
+    // a-test-that-no-runner-executes Phase 1 — the outcome reconciliation is a pure function in
+    // ./builder-worker.auth-refresh; the test file pins the recovery + did-not-renew branches
+    // (cases 1 + 3b) against the same predicate the production code calls here.
+    const outcome = applyRefreshOutcome({ freshExpiresAt, now, holdReasonBefore: a.holdReason });
+    a.lastAuthRefreshFailed = outcome.lastAuthRefreshFailed;
+    if (outcome.markAuthExpired) {
       markAccountAuthExpired(
         configDir,
         now,
         `credentials refresh via CLI did not renew expiresAt (exit=${result.code}${result.killed ? `,killed=${result.killed}` : ""}) — ejecting`,
       );
+    } else {
+      if (outcome.clearHold) a.holdReason = null;
+      recordAccountEvent("recovered", configDir, `OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)}`);
+      console.warn(`[multi-account] ${configDir} OAuth token refreshed via CLI — expires ${astTime(freshExpiresAt)} (kept in rotation)`);
     }
   } catch (e) {
     a.lastAuthRefreshFailed = true;
@@ -1739,35 +1741,34 @@ function sweepExpiredCredentials(now: number): void {
       credentialsCache.set(a.configDir, { expiresAt: fields.expiresAt, checkedAt: now });
       return fields;
     })();
-    if (expiresAt <= 0 || expiresAt > now) continue; // no signal, or token still valid
-    if (!hasRefreshToken) {
-      // Genuinely needs a CEO re-login — no way to auto-recover.
-      markAccountAuthExpired(
-        a.configDir,
-        now,
-        `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now, refresh_token missing — proactive eject before dispatch`,
-      );
+    // a-test-that-no-runner-executes Phase 1 — the per-account decision is a pure function in
+    // ./builder-worker.auth-refresh so scripts/builder-worker.auth-refresh.test.ts can pin the
+    // four cases the outage named (recovery, genuinely-dead, refresh-failed, whole-pool guard)
+    // without mocking the sweep body.
+    const action = decideSweepAction({
+      expiresAt,
+      hasRefreshToken,
+      now,
+      authRefreshInFlight: Boolean(a.authRefreshInFlight),
+      lastAuthRefreshAttemptAt: a.lastAuthRefreshAttemptAt,
+      lastAuthRefreshFailed: a.lastAuthRefreshFailed,
+      refreshThrottleMs: AUTH_REFRESH_MIN_INTERVAL_MS,
+    });
+    if (action.kind === "skip") continue;
+    if (action.kind === "refresh") {
+      // Fire an async refresh; the account stays in rotation while the refresh runs (typical wall time is
+      // a few seconds — a race where a session lands on it in the interim is caught by the reactive path).
+      void attemptCredentialRefresh(a.configDir);
       continue;
     }
-    // A refresh is already running for this account — wait it out. Do NOT eject.
-    if (a.authRefreshInFlight) continue;
-    // A previous refresh attempt within the throttle window; if it FAILED, eject via the existing path;
-    // otherwise leave the account alone (the successful refresh already renewed the file — this branch
-    // usually shouldn't be reached, but defends against a between-sweep race where the refreshed
-    // credentials file was re-invalidated externally).
-    if (a.lastAuthRefreshAttemptAt && now - a.lastAuthRefreshAttemptAt < AUTH_REFRESH_MIN_INTERVAL_MS) {
-      if (a.lastAuthRefreshFailed) {
-        markAccountAuthExpired(
-          a.configDir,
-          now,
-          `credentials refresh attempted at ${new Date(a.lastAuthRefreshAttemptAt).toISOString()} did not renew expiresAt — ejecting`,
-        );
-      }
-      continue;
-    }
-    // Fire an async refresh; the account stays in rotation while the refresh runs (typical wall time is
-    // a few seconds — a race where a session lands on it in the interim is caught by the reactive path).
-    void attemptCredentialRefresh(a.configDir);
+    // action.kind === "eject" — either a missing refresh_token (auth_expired) or a throttled tick after a
+    // failed refresh (refresh_failed). markAccountAuthExpired reads a.lastAuthRefreshFailed to pick the
+    // typed reason; the branches here just supply the human-readable detail for the console + CEO card.
+    const detail =
+      action.holdReason === "refresh_failed"
+        ? `credentials refresh attempted at ${new Date(a.lastAuthRefreshAttemptAt ?? 0).toISOString()} did not renew expiresAt — ejecting`
+        : `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now, refresh_token missing — proactive eject before dispatch`;
+    markAccountAuthExpired(a.configDir, now, detail);
   }
 }
 
