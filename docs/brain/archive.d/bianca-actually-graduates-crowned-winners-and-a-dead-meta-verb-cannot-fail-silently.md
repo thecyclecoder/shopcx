@@ -1,0 +1,1 @@
+- **Bianca wires the graduate verb to scale winners, classifies removed Meta APIs as permanent, and surfaces unexercised autonomous rails** · verified 2026-07-28 · → [[../libraries/media-buyer-graduate-scaler]], [[../libraries/meta__dead-verb-escalation]], [[../libraries/cold-scaler-graduate-heartbeat]]

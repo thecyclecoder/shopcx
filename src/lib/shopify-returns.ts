@@ -33,6 +33,79 @@ async function shopifyGraphQL(
   return res.json();
 }
 
+// ── Pure return-refund-ceiling helper (Phase 2 of a-money-remedy-must-read-the-live-remedy-state-first) ──
+
+/**
+ * Terminal statuses on `public.order_refunds` mirror rows that MOVED (or authoritatively will move)
+ * money. Same set the CX SDK's `getOrderRemedyState` sums for the remaining-refundable-value
+ * computation — kept in one place so the return-creation and refund-time paths agree with the
+ * money-remedy hard-reject on which refunds count against the ceiling.
+ */
+export const RETURN_REFUND_LEDGER_TERMINAL_STATUSES = new Set(["succeeded", "settled"]);
+
+/**
+ * Compute a return row's `net_refund_cents` — the CONTRACT the downstream refund pipeline
+ * ([[../inngest/returns]] `returnsIssueRefund`) reads to know how much to refund on delivery.
+ *
+ * Phase 2 of [[../../docs/brain/specs/a-money-remedy-must-read-the-live-remedy-state-first]]:
+ * BEFORE this helper existed, the return creator computed `orderTotalCents - labelCostCents` and
+ * IGNORED any refund the customer had already received on the same order. Derived-from ticket
+ * `86043da0` (Jan Bloom): a $182.95 order had a $15 refund fired 36 minutes before the return was
+ * created, and the return stored `net_refund_cents = 18295` — the pipeline was one delivery away
+ * from over-refunding by $15 silently (corrected by a human before it fired). The fix nets the
+ * ledger's succeeded refunds into the ceiling: **`total - Σ succeeded refunds - label`**, floored
+ * at 0. A `label` cost of 0 (crisis-return / `freeLabel: true`) leaves the label term unchanged;
+ * the caller decides that policy and passes the resulting `labelCostCents`.
+ *
+ * Pure — the test suite pins the Jan Bloom shape explicitly ($182.95 - $15 - $0 = $167.95). The
+ * inputs are pre-summed cents; the async ledger fetch lives at the caller (creator +
+ * refund-time re-check) so this stays deterministic and cheap to test.
+ */
+export function computeReturnNetRefundCents(input: {
+  orderTotalCents: number;
+  labelCostCents: number;
+  refundsSucceededCents: number;
+}): number {
+  const total = Number.isFinite(input.orderTotalCents) ? Math.max(0, Math.round(input.orderTotalCents)) : 0;
+  const label = Number.isFinite(input.labelCostCents) ? Math.max(0, Math.round(input.labelCostCents)) : 0;
+  const refunded = Number.isFinite(input.refundsSucceededCents) ? Math.max(0, Math.round(input.refundsSucceededCents)) : 0;
+  return Math.max(0, total - refunded - label);
+}
+
+/**
+ * Sum every `order_refunds` mirror row for the given internal `orders.id` UUID that is in a
+ * terminal state (`succeeded` or `settled` — the same set the CX SDK's `getOrderRemedyState`
+ * counts). Scoped to the workspace on every read (learning #6). Returns 0 on any read error so a
+ * transient Supabase blip cannot make the return over-refund — the alternative (throw) would
+ * silently fall back to the buggier "ignore prior refunds" path.
+ *
+ * Not pure — depends on `admin`. The pure computation is `computeReturnNetRefundCents` above; this
+ * is the async ledger reader the return-creation + refund-time paths both call.
+ */
+export async function sumSucceededOrderRefundsCents(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  orderId: string,
+): Promise<number> {
+  try {
+    const { data } = await admin
+      .from("order_refunds")
+      .select("amount_cents, status")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", orderId);
+    const rows = (data ?? []) as Array<{ amount_cents: number | null; status: string }>;
+    let sum = 0;
+    for (const r of rows) {
+      if (RETURN_REFUND_LEDGER_TERMINAL_STATUSES.has(String(r.status))) {
+        sum += r.amount_cents ?? 0;
+      }
+    }
+    return sum;
+  } catch {
+    return 0;
+  }
+}
+
 // ── Recoverable-error class ──
 
 /**
@@ -923,6 +996,7 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     //   - labelCostCents: what EasyPost actually charged us
     //   - params.freeLabel: policy decision the caller made
     //   - order.total_cents: what the customer paid
+    //   - order_refunds succeeded/settled: refunds ALREADY on this order
     //
     // The downstream pipeline reads net_refund_cents as the contract
     // and never re-derives. Storing it here keeps the math local to
@@ -931,12 +1005,26 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       .select("total_cents").eq("id", params.orderId).maybeSingle();
     const orderTotalCents = orderRow?.total_cents || 0;
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
+    // Phase 2 of [[../../docs/brain/specs/a-money-remedy-must-read-the-live-remedy-state-first]] —
+    // net out refunds ALREADY succeeded on this order (`public.order_refunds` mirror). Before this
+    // shipped the ceiling was `orderTotal - label` and any prior refund silently over-paid on
+    // delivery (Jan Bloom / SC135494 / ticket 86043da0: $15 already refunded at 19:56, return
+    // created at 20:32 with `net_refund_cents = 18295` = full $182.95 — one delivery away from a
+    // silent $15 over-refund). Reading the local mirror here is symmetric with the money-remedy
+    // hard-reject in [[cs-director]] (Phase 1 of the same spec) and with the refund-time re-check
+    // in [[../inngest/returns]] `returnsIssueRefund` (Phase 2 § bullet 2).
+    const refundsSucceededCents = await sumSucceededOrderRefundsCents(admin, params.workspaceId, params.orderId);
     // We synthesize the return from EVERY line on the order (see above), so this is by construction
-    // a FULL return — refund the full order total (tax + shipping included) minus our label cost.
-    // The old `itemsSubtotal >= 95% of order total` heuristic mis-fired here: itemsSubtotal is the
-    // pre-tax line subtotal, so a ~6%-tax order (Kim SC134360: $125.92 lines / $133.80 total = 94%)
-    // read as a PARTIAL return and shorted the customer their $7.88 tax. All-lines → full order back.
-    const netRefundCents = Math.max(0, orderTotalCents - finalLabelCostCents);
+    // a FULL return — refund the full order total (tax + shipping included) minus our label cost
+    // minus refunds already succeeded on this order. The old `itemsSubtotal >= 95% of order total`
+    // heuristic mis-fired here: itemsSubtotal is the pre-tax line subtotal, so a ~6%-tax order
+    // (Kim SC134360: $125.92 lines / $133.80 total = 94%) read as a PARTIAL return and shorted
+    // the customer their $7.88 tax. All-lines → full order back, net of prior refunds.
+    const netRefundCents = computeReturnNetRefundCents({
+      orderTotalCents,
+      labelCostCents: finalLabelCostCents,
+      refundsSucceededCents,
+    });
 
     // Update our DB with EasyPost details + the refund commitment.
     // Status advances to label_created independently of

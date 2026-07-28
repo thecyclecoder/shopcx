@@ -185,8 +185,20 @@ export const returnsIssueRefund = inngest.createFunction(
     let refundShortfallCents = 0;
     let outOfBandRefundedCents = 0;
     let stampedOutOfBand = false;
+    let localMirrorCapCents: number | null = null;
 
     if (!isStoreCredit) {
+      // Phase 2 of [[../../../docs/brain/specs/a-money-remedy-must-read-the-live-remedy-state-first]]
+      // § bullet 2 — RE-CHECK against live refunds immediately before the refund fires. Time passes
+      // between label creation (when `net_refund_cents` was snapshotted) and EasyPost delivery
+      // (when this step runs); a fresh `partial_refund` can land in between (Sonnet's turn / June's
+      // approve_remedy / a founder cockpit approval). We cap payout at the LOCAL `order_refunds`
+      // ceiling: `orders.total_cents - Σ succeeded/settled order_refunds`. This composes with the
+      // Phase-1 Shopify-gateway-ledger cap below (whichever produces the SMALLER remaining wins) —
+      // the local mirror covers internal orders + Braintree refunds the Shopify transactions API
+      // may not surface cleanly. Guard is read-only + fail-open (any read failure leaves the stored
+      // contract as the ceiling — we still won't over-refund because the gateway-ledger step below
+      // will catch a Shopify-side movement).
       if (!orderIdForRefund && ret.shopify_order_gid) {
         orderIdForRefund = await step.run("repair-null-order-id", async (): Promise<string | null> => {
           const match = String(ret.shopify_order_gid).match(/(\d+)\s*$/);
@@ -210,17 +222,59 @@ export const returnsIssueRefund = inngest.createFunction(
       }
 
       if (orderIdForRefund) {
+        // Phase 2 § bullet 2 — LOCAL `order_refunds` re-check. Sum every succeeded/settled refund
+        // on the target order and cap the payout at `orders.total_cents - Σ succeeded refunds`.
+        // Runs BEFORE the Shopify-gateway ledger step so both caps compose (the SMALLER remaining
+        // ceiling wins downstream). Records the shortfall on `refund_shortfall_cents` so the
+        // audit surface names WHY the payout was capped, not just that it was.
+        const localCap = await step.run("read-local-refund-mirror", async (): Promise<{
+          orderTotalCents: number;
+          refundsSucceededCents: number;
+          remainingRefundableCents: number;
+        } | null> => {
+          const { sumSucceededOrderRefundsCents } = await import("@/lib/shopify-returns");
+          const { data: orderRow } = await admin
+            .from("orders")
+            .select("total_cents")
+            .eq("id", orderIdForRefund!)
+            .eq("workspace_id", workspace_id)
+            .maybeSingle();
+          if (!orderRow) return null;
+          const orderTotalCents = (orderRow as { total_cents: number | null }).total_cents ?? 0;
+          const refundsSucceededCents = await sumSucceededOrderRefundsCents(
+            admin,
+            workspace_id,
+            orderIdForRefund!,
+          );
+          return {
+            orderTotalCents,
+            refundsSucceededCents,
+            remainingRefundableCents: Math.max(0, orderTotalCents - refundsSucceededCents),
+          };
+        });
+        if (localCap && localCap.remainingRefundableCents < amountCents) {
+          localMirrorCapCents = localCap.remainingRefundableCents;
+          refundCapCents = localMirrorCapCents;
+          refundShortfallCents = amountCents - localMirrorCapCents;
+        }
+
         const decision = await step.run("read-refund-ledger", async () => {
           const { getOrderRefundLedger, decideRefundReconcile } = await import("@/lib/refund-ledger");
           const ledger = await getOrderRefundLedger(workspace_id, orderIdForRefund!);
-          return decideRefundReconcile(ledger, amountCents);
+          // Reconcile against the SMALLER of the stored contract and the local-mirror cap so the
+          // Shopify-gateway step never authorizes MORE than the local mirror already narrowed to.
+          return decideRefundReconcile(ledger, Math.min(amountCents, refundCapCents));
         });
         if (decision.branch === "stamp_out_of_band") {
           stampedOutOfBand = true;
           outOfBandRefundedCents = decision.refundedCents;
         } else if (decision.branch === "cap_to_ledger") {
           refundCapCents = decision.refundCents;
-          refundShortfallCents = decision.shortfallCents;
+          // Shortfall is always vs the ORIGINAL stored contract (amountCents), not vs the
+          // intermediate local-mirror-narrowed value we passed into the decider. Both caps compose
+          // (either can fire in isolation, both can fire together); the audit surface names the
+          // total delta so a human can reconcile.
+          refundShortfallCents = amountCents - refundCapCents;
         }
         // "refund_full_contract" (ledger ok+enough, OR ledger unreadable)
         // is the no-op case. Phase 2 will make the underlying failure
@@ -315,7 +369,16 @@ export const returnsIssueRefund = inngest.createFunction(
         const requestKey = hashActionRefundKey("return", return_id, oid, refundCapCents, refundReason);
         return refundOrder(workspace_id, oid, refundCapCents, refundReason, {
           source: "inngest",
-          eventProperties: { return_id, resolution_type: ret.resolution_type, refund_shortfall_cents: refundShortfallCents || undefined },
+          eventProperties: {
+            return_id,
+            resolution_type: ret.resolution_type,
+            refund_shortfall_cents: refundShortfallCents || undefined,
+            // Phase 2 § bullet 2 — audit which rail narrowed the payout: the local `order_refunds`
+            // mirror (a fresh partial_refund landed between label creation and delivery) OR the
+            // Shopify-gateway ledger (money moved out-of-band on the vendor side). Both can fire
+            // together; the field is included only when the local-mirror cap fired.
+            local_mirror_cap_cents: localMirrorCapCents ?? undefined,
+          },
           requestKey,
         });
       });

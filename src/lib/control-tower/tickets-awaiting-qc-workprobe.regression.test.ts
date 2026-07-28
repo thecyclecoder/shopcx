@@ -259,3 +259,92 @@ test("ticket-analysis cron keeps the last-customer-message settle gate at the so
     "ticket-analysis-cron.ts must keep the last_customer_message_at settle key — if this moves, the probe's ticket_messages/customer join is stale.",
   );
 });
+
+// ── ticket-analyzer-workprobe-exclude-june-decided-cycles ───────────────────────────────────
+// The cron's `passesCoraSelectionGate` (ticket-analysis-cron.ts § 81) skips a candidate when a
+// `cs_director_call` `director_activity` row for the ticket landed at-or-after the current
+// handling anchor (later(ai_handled_at, sol_handled_at)). The work probe must mirror that lookup
+// or a healthy analyzer whose only in-window ticket was already ruled on by June flips red
+// (false idle_while_work on loop:ai:ticket-analyzer). These pins guard the four moving parts:
+// the director_activity table read, the cs_director_call action_kind filter, the
+// metadata.ticket_id mapping, and the same-cycle comparison against the handling anchor.
+
+test("tickets-awaiting-qc probe queries director_activity (June-decided cycle mirror)", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /\.from\(\s*"director_activity"\s*\)/,
+    "`tickets-awaiting-qc` probe must query the director_activity table — the cron's `passesCoraSelectionGate` skips tickets June already decided this cycle; keying the probe on the same lookup keeps it from flagging a June-ruled ticket as awaited work (a monitor-false-positive on a healthy analyzer).",
+  );
+});
+
+test("tickets-awaiting-qc probe filters director_activity on action_kind='cs_director_call'", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /\.eq\(\s*"action_kind"\s*,\s*"cs_director_call"\s*\)/,
+    "`tickets-awaiting-qc` probe must filter director_activity on action_kind='cs_director_call' — the June-decision audit uses that action_kind (see cs-director.ts + ticket-analysis-cron.ts § 221), so any other kind is unrelated activity and must not gate the probe.",
+  );
+});
+
+test("tickets-awaiting-qc probe scopes director_activity to the candidate workspaces", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /\.in\(\s*"workspace_id"\s*,/,
+    "`tickets-awaiting-qc` probe must scope the director_activity lookup with .in('workspace_id', …) over the candidate workspaces — mirrors the cron's per-workspace scoping (ticket-analysis-cron.ts § 218-223) and keeps the query bounded.",
+  );
+  assert.match(
+    block,
+    /\.select\(\s*"[^"]*workspace_id[^"]*"\s*\)/,
+    "`tickets-awaiting-qc` candidate select must include workspace_id — the director_activity scope needs the unique workspaces to filter on.",
+  );
+});
+
+test("tickets-awaiting-qc probe keys the June-decided map on metadata.ticket_id", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  assert.match(
+    block,
+    /metadata\.ticket_id/,
+    "`tickets-awaiting-qc` probe must read `metadata.ticket_id` off each director_activity row — that's where the runner (scripts/builder-worker.ts) records the ticket this cs_director_call verdict was about. Keying on anything else would silently drop the entire lookup.",
+  );
+  assert.match(
+    block,
+    /latestJuneDecidedAtByTicket/,
+    "`tickets-awaiting-qc` probe must build a `latestJuneDecidedAtByTicket` map (the same name the spec's Phase 1 vocabulary uses) so the compare below reads the freshest June decision per ticket, not a stale earlier one.",
+  );
+});
+
+test("tickets-awaiting-qc probe skips a candidate when June's decision is at-or-after the handling anchor", () => {
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  // The compare must be against `handledMs` (the later of ai_handled_at / sol_handled_at) — a
+  // June decision from a PRIOR cycle (decidedMs < handledMs) is inert. A `juneMs >= handledMs`
+  // shape is what tells the probe "current cycle already decided → cron skips → we skip too".
+  assert.match(
+    block,
+    /juneMs\s*>=\s*handledMs/,
+    "`tickets-awaiting-qc` probe must compare `juneMs >= handledMs` (later of ai_handled_at + sol_handled_at) and `continue` on match — mirrors `passesCoraSelectionGate`'s `decidedMs >= handledMs` skip (ticket-analysis-cron.ts § 111-116). Any weaker predicate (e.g. `juneMs != null` alone, or comparing against `closed_at`) either over-skips genuine work OR keeps flagging a June-ruled ticket.",
+  );
+  assert.match(
+    block,
+    /Math\.max\(\s*aiMs\s*,\s*solMs\s*\)|Math\.max\(\s*solMs\s*,\s*aiMs\s*\)/,
+    "`tickets-awaiting-qc` probe must derive the handling anchor as `Math.max(aiMs, solMs)` when both stamps are present — matches the cron's `laterTimestamp(ai_handled_at, sol_handled_at)`. Picking only one stamp would misclassify a ticket whose OTHER handler stamped later.",
+  );
+});
+
+test("ticket-analysis cron continues to gate on the June-decided lookup at the source (probe target)", () => {
+  // Sanity — if the cron's own gate ever drops the `cs_director_call` skip or the metadata-based
+  // per-ticket map, the probe's mirror would legitimately need re-thinking. Pin the cron's shape
+  // here so a relaxation red-lights this test with a clear message.
+  const cron = read(CRON);
+  assert.match(
+    cron,
+    /\.eq\(\s*"action_kind"\s*,\s*"cs_director_call"\s*\)/,
+    "ticket-analysis-cron find-tickets must keep the cs_director_call director_activity lookup — if this is dropped the probe's June-decided mirror comment is stale.",
+  );
+  assert.match(
+    cron,
+    /metadata\.ticket_id/,
+    "ticket-analysis-cron find-tickets must keep the metadata.ticket_id key on the June-decided map — if this moves, the probe's key is stale.",
+  );
+});

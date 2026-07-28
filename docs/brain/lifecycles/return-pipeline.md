@@ -28,7 +28,7 @@ Past pain points the rewrite addressed:
 
 - `shopify_order_gid` = the order's gid for a Shopify order, `null` for an internal SHOPCX* order (it's the ORDER gid, never a return gid). We create **no** Shopify RETURN, so `shopify_return_gid` / `shopify_reverse_fulfillment_order_gid` stay null and `return_line_items` carry no `shopify_rfo_line_item_id`.
 - `closeReturn` + item disposal ([[../inngest/returns]]) no-op gracefully on a null return gid — already true for internal orders.
-- **`net_refund_cents` = `order_total_cents − label_cost_cents`** — a full refund incl. tax + shipping. Because we synthesize from EVERY line, a return is a full return by construction; the old `itemsSubtotal ≥ 95% of order total` heuristic mis-fired on tax-heavy orders (Kim: $125.92 lines / $133.80 total = 94% → read as partial → shorted the $7.88 tax).
+- **`net_refund_cents` = `order_total_cents − Σ succeeded/settled order_refunds − label_cost_cents`** — a full refund incl. tax + shipping, NET OF refunds already issued on the order. Because we synthesize from EVERY line, a return is a full return by construction; the old `itemsSubtotal ≥ 95% of order total` heuristic mis-fired on tax-heavy orders (Kim: $125.92 lines / $133.80 total = 94% → read as partial → shorted the $7.88 tax). Phase 2 of [[../specs/a-money-remedy-must-read-the-live-remedy-state-first]] added the ledger-net term (pure `computeReturnNetRefundCents` + async `sumSucceededOrderRefundsCents` in `src/lib/shopify-returns.ts`) — before it shipped a return authored after a prior partial refund silently stored the full order total (Jan Bloom / SC135494: $182.95 order + $15 refund at 19:56 + return created at 20:32 → `net_refund_cents=18295` = one delivery from a silent $15 over-refund).
 - **Downstream refund** ([[../inngest/returns]] `issue-refund`) reads `net_refund_cents` + `order_id` → [[../libraries/commerce__refund]] `refundOrder` (gateway-routed: Shopify Payments / PayPal / Braintree) — it never touches the Shopify return object.
 
 > Legacy note: `getReturnableItems` + `createShopifyReturn` (the old Shopify-return path) still exist but are no longer called by `createFullReturn`. Step 5 (Shopify `returnCreate`) below is retained for historical context — it is now skipped.
@@ -42,9 +42,10 @@ Steps:
    - Select USPS rates first; fall back to other carriers only if USPS has none.
    - Buy the rate → returns `tracking_code`, `label_url`, `selected_rate.rate` (the cost we paid).
    - If `freeLabel=true`, we eat the cost → `label_cost_cents = 0`. Otherwise → `label_cost_cents = selected_rate.rate * 100`.
-4. **Compute `net_refund_cents`**:
-   - `refund_return` / `store_credit_return` → `order_total_cents - label_cost_cents`.
-   - `refund_no_return` / `store_credit_no_return` → `order_total_cents` (no label, customer keeps the item).
+4. **Compute `net_refund_cents`** (via `computeReturnNetRefundCents`):
+   - `refund_return` / `store_credit_return` → `order_total_cents - Σ succeeded/settled order_refunds - label_cost_cents`.
+   - `refund_no_return` / `store_credit_no_return` → `order_total_cents - Σ succeeded/settled order_refunds` (no label, customer keeps the item).
+   - The Σ term reads from the local [[../tables/order_refunds]] mirror via `sumSucceededOrderRefundsCents`; a read failure fails-open to 0 (the refund-time re-check in Phase 4 covers the same rail with the Shopify-gateway ledger, so a transient miss here can't ship an over-refund downstream).
 5. **Call Shopify** `returnCreate` mutation → creates the Shopify-side return record. Stores the `returnGid` as `shopify_return_gid` on our row.
 6. **Insert [[../tables/returns]]** with:
    - `status='label_created'` (or `'open'` if no label was bought)
@@ -91,12 +92,14 @@ This step is intentionally thin — it exists so the webhook handler stays fast,
 2. **Read `net_refund_cents`.** If missing or zero:
    - Insert [[../tables/dashboard_notifications]] "Return needs manual review — no refund amount stored."
    - Stop. Don't refund.
-2b. **Reconcile against the live gateway ledger (money-refund path only).** Before dispatching the refund, `returnsIssueRefund` calls `getOrderRefundLedger(workspace_id, order_id)` from [[../libraries/refund-ledger]] and branches:
+2b. **Reconcile against BOTH live-refund ceilings (money-refund path only).** Before dispatching the refund, `returnsIssueRefund` runs two composable caps — the SMALLER remaining wins. Phase 2 of [[../specs/a-money-remedy-must-read-the-live-remedy-state-first]] added the local-mirror leg so a fresh refund landing between label creation and delivery can't over-pay (the Jan Bloom case in reverse: a partial_refund fired via Sonnet's turn / June's approve_remedy / a founder cockpit approval between label at t0 and delivery at t+N).
    - **Null `returns.order_id`** — resolve it from `returns.shopify_order_gid` (trailing numeric id → `orders.shopify_order_id`, workspace-scoped), persist via a compare-and-set on `.is('order_id', null)`, then continue. (SC131156.)
-   - **`refundableCents === 0` AND `refundedCents ≥ net_refund_cents`** — money already moved out of band. STAMP the return `status='refunded'`, `refund_id='out_of_band_shopify'`, `refunded_at=now()` with a compare-and-set on `.is('refunded_at', null)`. Fire NO refund. (SC130193.)
-   - **`0 < refundableCents < net_refund_cents`** — refund `refundableCents` (the CAP) and record `refund_shortfall_cents = net_refund_cents - refundableCents` on the return row for audit. (SC133086 / SC129432.)
-   - **`refundableCents ≥ net_refund_cents`** — refund the full contract (unchanged behaviour).
-   > **Contract vs ceiling.** `net_refund_cents` remains the intent (set at return creation; the pipeline never re-derives it — see § "Why this design" #3). The live ledger is only ever the CEILING — the reconcile lowers what the rail dispatches, never raises it. Store-credit issuance does not touch the gateway and skips this branch.
+   - **Local `order_refunds` mirror re-check** — sum every succeeded/settled refund on the target order via `sumSucceededOrderRefundsCents` in `src/lib/shopify-returns.ts`; the ceiling is `orders.total_cents - Σ`. If `< amountCents`, cap `refundCapCents` at the ceiling and set `refund_shortfall_cents = amountCents - cap`. Fires BEFORE the Shopify-gateway step so both compose; the local mirror covers internal SHOPCX* orders and Braintree refunds the Shopify transactions API may miss. Fail-open on read error (the gateway step still catches a Shopify-side movement).
+   - Then `getOrderRefundLedger(workspace_id, order_id)` from [[../libraries/refund-ledger]] with `Math.min(amountCents, refundCapCents)` — the gateway step can never authorize more than the local mirror narrowed to:
+     - **`refundableCents === 0` AND `refundedCents ≥ net_refund_cents`** — money already moved out of band. STAMP the return `status='refunded'`, `refund_id='out_of_band_shopify'`, `refunded_at=now()` with a compare-and-set on `.is('refunded_at', null)`. Fire NO refund. (SC130193.)
+     - **`0 < refundableCents < netRefundCents_after_local_cap`** — refund `refundableCents` (the CAP) and record `refund_shortfall_cents = amountCents - refundCapCents` on the return row (delta is vs the ORIGINAL stored contract, sum-safe when BOTH caps fire together). (SC133086 / SC129432.)
+     - **`refundableCents ≥ netRefundCents_after_local_cap`** — refund the (possibly-locally-capped) amount.
+   > **Contract vs ceiling.** `net_refund_cents` remains the intent (set at return creation; the pipeline never re-derives it — see § "Why this design" #3). Both live ceilings only ever LOWER what the rail dispatches, never raise it. Store-credit issuance does not touch the gateway and skips both branches.
 3. **Branch on `resolution_type`**:
    - `refund_return` → `partialRefundByAmount(orderId, net_refund_cents)`.
    - `store_credit_return` → `issueStoreCredit(customerId, net_refund_cents)`.

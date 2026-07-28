@@ -1,0 +1,1 @@
+- **Read what has already been done for this customer before proposing to spend more on them** · verified 2026-07-28 · → [[../lifecycles/return-pipeline]] · also [[../libraries/cs-director]], [[../libraries/cx-agent-sdk]], [[../tables/returns]]

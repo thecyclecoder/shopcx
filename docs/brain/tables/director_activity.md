@@ -29,6 +29,15 @@ Written via [[../libraries/director-activity]] `recordDirectorActivity` (best-ef
 - `director_activity_function_idx` on `(director_function, created_at desc)` — per-director slice.
 - `director_activity_spec_idx` on `(spec_slug)` — per-spec audit slice.
 
+## Cold-scaler graduate audit trail (Bianca — Phase 1 + Phase 3)
+
+The media-buyer graduate flow ([[../libraries/media-buyer-graduate-scaler]]) writes exactly one row per crown-to-scaler decision as the READ-BACK the Phase-3 heartbeat + digest surfaces both consume:
+
+- `cold_scaler_graduated` — the winning creative was duplicated into the cohort's scaler campaign. `metadata: { source_meta_ad_id, source_meta_adset_id, source_meta_creative_id, cohort_id, scaler_campaign_id, scaler_adset_id, scaler_ad_id, meta_ad_account_id, product_id, daily_scaler_ceiling_cents, arming_authorization_id, autonomous:true }`. `director_function='growth'`.
+- `cold_scaler_graduate_skipped` — one of the four graduate gates blocked the write. `metadata: { skip_reason:'no_cohort'|'no_campaign'|'not_armed'|'already_graduated', cohort_id?, scaler_campaign_id?, arming_authorization_id?, arming_allowed?, arming_expires_at?, ... }`. `director_function='growth'`.
+
+[[../libraries/cold-scaler-graduate-heartbeat]] Phase 3 reads these `cohort_id`-scoped rows to compute a per-cohort `lastGraduatedAt` / `lastSkippedAt` / `lastSkipReason` heartbeat (surfaced on [[../libraries/media-buyer-director-digest]]) and to raise a deduped CEO card when an active cohort has ≥1 eligible crowned winner and no successful graduate inside a 7-day window — the "silently dead autonomous rail" signal the 2026-07-27 incident exposed.
+
 ## Related
 
 [[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../specs/security-dependency-agent]] · [[../libraries/security-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/agent-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]] · [[../libraries/deploy-guardian]] · [[deploy_watches]] · [[../specs/deploy-health-rollback-guardian]] · [[../specs/needs-attention-triage-and-verdict-robustness]]

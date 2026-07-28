@@ -1,0 +1,1 @@
+- **A regression test nothing runs is decoration — register the orphans, guard new ones, and write the box auth-refresh test that never landed** · verified 2026-07-27 · → [[../libraries/control-tower]]

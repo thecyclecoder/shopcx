@@ -2024,6 +2024,14 @@ function reconcileTitle(escalationKind: string, specSlug: string | null, meta: R
 }
 
 /**
+ * Max cards `reconcileSwallowedEscalations` may re-emit in ONE pass. A legitimate swallowed-card
+ * backlog is small; hundreds means the surfaced-set lookup is broken, not that the founder missed
+ * hundreds of escalations. Ships with the 2026-07-28 fix that replaced a blind `.limit(5000)` sample
+ * with a keyed lookup — the ceiling is the belt to that fix's braces.
+ */
+const SWALLOWED_REEMIT_CEILING = 25;
+
+/**
  * The Phase-2 backstop. Find every `escalated` director_activity row (the escalation ledger) whose CEO
  * notification is MISSING from the live inbox (matched by `dedupe_key`) and re-emit that notification ONCE,
  * reusing the SAME shape the live path emits. Reconciles the NOTIFICATION ONLY — the `escalated` activity row
@@ -2049,15 +2057,35 @@ export async function reconcileSwallowedEscalations(admin: Admin): Promise<Escal
   // The CEO-routed escalation notifications that ACTUALLY EXIST, keyed by dedupe_key (survives a dismissed/read
   // one — same "an actually-existing notification" rule Phase 1's dedupe uses). A logged escalation whose key is
   // absent here is the swallowed bug.
-  const { data: notifs } = await admin
-    .from("dashboard_notifications")
-    .select("metadata")
-    .eq("type", APPROVAL_REQUEST_TYPE)
-    .limit(5000);
+  // Look up EXACTLY the keys we're about to check, in chunks — never a blind sample of the table.
+  //
+  // This was `.limit(5000)` with no key filter, which is a correctness bug that gets WORSE as the
+  // table grows and is self-reinforcing: on 2026-07-28 there were 416,562 approval-request rows, so
+  // the sample covered 1.2% of them, ~all 1000 ledger keys looked "swallowed", and each pass
+  // re-emitted ~600 cards — which grew the table, which shrank the effective sample, which
+  // re-emitted more. 320k+ founder cards in a few hours. The set must be built from the keys under
+  // test, so its accuracy is independent of how large the table is.
+  const wantedKeys = [...new Set(escalations.map((a) => String((a.metadata as Record<string, unknown>)["dedupe_key"])))];
   const surfaced = new Set<string>();
-  for (const n of notifs ?? []) {
-    const k = (n.metadata as Record<string, unknown> | null)?.["dedupe_key"];
-    if (typeof k === "string") surfaced.add(k);
+  const KEY_CHUNK = 200; // keeps the PostgREST query string bounded
+  for (let i = 0; i < wantedKeys.length; i += KEY_CHUNK) {
+    const chunk = wantedKeys.slice(i, i + KEY_CHUNK);
+    const { data: notifs, error } = await admin
+      .from("dashboard_notifications")
+      .select("metadata")
+      .eq("type", APPROVAL_REQUEST_TYPE)
+      .in("metadata->>dedupe_key", chunk);
+    // FAIL CLOSED: a read error must NOT be read as "nothing surfaced" — that is precisely the
+    // shape that re-emits the world. Treat the chunk as surfaced and let the next pass retry.
+    if (error) {
+      console.warn(`[platform-director] swallowed-escalation lookup failed for a chunk — skipping re-emit for those keys: ${error.message}`);
+      for (const k of chunk) surfaced.add(k);
+      continue;
+    }
+    for (const n of notifs ?? []) {
+      const k = (n.metadata as Record<string, unknown> | null)?.["dedupe_key"];
+      if (typeof k === "string") surfaced.add(k);
+    }
   }
 
   // One re-emit per missing dedupe_key. Rows are newest-first, so the FIRST row for a key carries the freshest
@@ -2070,6 +2098,19 @@ export async function reconcileSwallowedEscalations(admin: Admin): Promise<Escal
     if (handled.has(dedupeKey)) continue;
     handled.add(dedupeKey);
     if (surfaced.has(dedupeKey)) continue; // already in the inbox — nothing swallowed
+
+    // BLAST-RADIUS CEILING. A backstop that re-emits a genuinely-swallowed card is doing its job; a
+    // backstop that re-emits HUNDREDS in one pass is not reconciling, it is malfunctioning — the
+    // 2026-07-28 incident emitted ~600 per pass for hours and nothing stopped it. Bail loudly at the
+    // ceiling and leave the rest for the next pass: a real backlog still drains, a runaway cannot
+    // reach the founder's phone at volume.
+    if (reEmitted.length >= SWALLOWED_REEMIT_CEILING) {
+      console.error(
+        `[platform-director] swallowed-escalation reconcile hit the ceiling (${SWALLOWED_REEMIT_CEILING}) in a single pass — ` +
+        `${escalations.length} ledger rows, ${surfaced.size} surfaced. Suspect the surfaced-set lookup, not the backlog. Stopping this pass.`,
+      );
+      break;
+    }
 
     const workspaceId = a.workspace_id as string;
     const specSlug = (a.spec_slug as string | null) ?? null;

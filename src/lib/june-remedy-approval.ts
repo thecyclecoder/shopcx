@@ -23,6 +23,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
+import type { CxOrderRemedyState } from "@/lib/cx-agent-sdk";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -358,6 +359,70 @@ export function planNeedsLoyaltyRefusal(
  *    without opening the tool_input.
  * Pure.
  */
+/**
+ * One order's remedy-state summary the founder card renders (Phase 1 of
+ * a-money-remedy-must-read-the-live-remedy-state-first § bullet 4). A LIVE open return on the
+ * target order surfaces at the top of the preview so the founder sees "existing return:
+ * label_created, refund on receipt" without having to open the ticket — the exact "so even a
+ * proposal that slips through is obvious on sight" surface the spec calls for. The remedy-state
+ * hard-reject in cs-director.ts is supposed to catch the double-pay class UPSTREAM, but this line
+ * is the defense-in-depth surface for any proposal that gets past it.
+ */
+export interface RemedyStateForFounderCard {
+  orderKey: string;
+  totalCents: number;
+  refundsSucceededCents: number;
+  remainingRefundableCents: number;
+  openReturns: Array<{ status: string; netRefundCents: number }>;
+}
+
+/**
+ * Render a compact founder-card line for the remedy state of the money remedy's target orders.
+ * Empty (`[]`) → returns null (nothing to surface). Non-empty → returns a labeled block the
+ * preview builder appends BEFORE the "Why:" reasoning. Pure.
+ */
+export function renderRemedyStatesForCard(states: readonly RemedyStateForFounderCard[]): string | null {
+  if (states.length === 0) return null;
+  const lines: string[] = ["Live remedy state:"];
+  for (const s of states) {
+    const totalD = (s.totalCents / 100).toFixed(2);
+    const refundedD = (s.refundsSucceededCents / 100).toFixed(2);
+    const remainingD = (s.remainingRefundableCents / 100).toFixed(2);
+    lines.push(
+      `  • order ${s.orderKey}: total $${totalD} · refunded_so_far $${refundedD} · REMAINING REFUNDABLE $${remainingD}`,
+    );
+    for (const r of s.openReturns) {
+      const netD = (r.netRefundCents / 100).toFixed(2);
+      lines.push(`    ⚠ existing return: ${r.status}, refund $${netD} on receipt`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Convert a `CxOrderRemedyState` map to the card-render shape. Kept as a thin adapter so
+ * `raiseJuneRemedyApproval` + `raiseFounderApproval` share the same rendering path. Pure.
+ */
+export function remedyStatesForCardFromMap(
+  states: ReadonlyMap<string, CxOrderRemedyState>,
+): RemedyStateForFounderCard[] {
+  const out: RemedyStateForFounderCard[] = [];
+  for (const [key, s] of states) {
+    if (!s.found) continue;
+    out.push({
+      orderKey: s.order_number ?? s.shopify_order_id ?? key,
+      totalCents: s.total_cents,
+      refundsSucceededCents: s.refunds_succeeded_cents,
+      remainingRefundableCents: s.remaining_refundable_cents,
+      openReturns: s.open_returns.map((r) => ({
+        status: r.status,
+        netRefundCents: r.net_refund_cents,
+      })),
+    });
+  }
+  return out;
+}
+
 export function buildJuneApprovalPreview(input: {
   actionType: string;
   /** The SUMMED money amount in cents (or null when unknown). */
@@ -367,10 +432,19 @@ export function buildJuneApprovalPreview(input: {
   customerName?: string | null;
   ticketSubject?: string | null;
   reasoning?: string | null;
+  /**
+   * Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — live remedy
+   * state for each target order surfaced on the founder card. A LIVE open return renders as
+   * "existing return: label_created, refund on receipt" so an anomaly is visible without opening
+   * the ticket. Empty / omitted → nothing rendered.
+   */
+  remedyStates?: RemedyStateForFounderCard[];
 }): string {
   const dollars = input.amountCents != null ? `$${(input.amountCents / 100).toFixed(2)}` : "an unspecified amount";
   const who = input.customerName?.trim() ? ` to ${input.customerName.trim()}` : "";
   const subj = input.ticketSubject?.trim() ? ` on "${input.ticketSubject.trim()}"` : "";
+  const remedyStateBlock = renderRemedyStatesForCard(input.remedyStates ?? []);
+  const remedyStateSuffix = remedyStateBlock ? `\n\n${remedyStateBlock}` : "";
   const why = input.reasoning?.trim() ? `\n\nWhy: ${input.reasoning.trim().slice(0, 400)}` : "";
 
   const lines = input.moneyLines ?? [];
@@ -385,14 +459,14 @@ export function buildJuneApprovalPreview(input: {
         return `  • ${line.actionType}: ${lineDollars}`;
       })
       .join("\n");
-    return `Approve ${dollars} in refunds/credits${who}${subj}?\n${bullets}${why}`;
+    return `Approve ${dollars} in refunds/credits${who}${subj}?\n${bullets}${remedyStateSuffix}${why}`;
   }
 
   const verb =
     input.actionType === "create_replacement_order" || input.actionType === "dollar_replacement"
       ? "Send a replacement worth"
       : "Refund";
-  return `${verb} ${dollars}${who}${subj}?${why}`;
+  return `${verb} ${dollars}${who}${subj}?${remedyStateSuffix}${why}`;
 }
 
 /** Read the workspace's refund-approval threshold (cents). Best-effort; falls back to $50. */
@@ -456,6 +530,13 @@ export async function raiseJuneRemedyApproval(
      * spend. When omitted / length ≤ 1, the preview renders the legacy single-action string.
      */
     moneyLines?: MoneyActionLine[];
+    /**
+     * Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — live remedy
+     * state for the money remedy's target orders. Rendered on the SMS/cockpit preview and stashed
+     * on `tool_input.remedy_states` so the CEO card carries the full context (existing return,
+     * remaining refundable) that the executor's hard-reject already read.
+     */
+    remedyStates?: RemedyStateForFounderCard[];
   },
 ): Promise<RaiseJuneRemedyResult> {
   // Best-effort enrich the preview with the customer's first name + ticket subject so the founder can
@@ -480,6 +561,7 @@ export async function raiseJuneRemedyApproval(
   // future callsite that has the raw remedy but not the FounderApprovalDecision yet).
   const moneyLines: MoneyActionLine[] =
     input.moneyLines && input.moneyLines.length > 0 ? input.moneyLines : extractRemedyMoneyLines(input.remedy);
+  const remedyStates = input.remedyStates ?? [];
   const preview = buildJuneApprovalPreview({
     actionType: input.actionType,
     amountCents: input.amountCents,
@@ -487,6 +569,7 @@ export async function raiseJuneRemedyApproval(
     customerName,
     ticketSubject,
     reasoning: input.reasoning,
+    remedyStates,
   });
   const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
 
@@ -548,6 +631,11 @@ export async function raiseJuneRemedyApproval(
         // audit surfaces can show the split (2×$30) alongside the SUM without re-walking
         // remedy.actions[]. JSONB — no schema change on god_mode_approvals.
         money_lines: moneyLines,
+        // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — the live
+        // remedy state per target order (remaining refundable, live open returns) the executor
+        // read to run its hard-reject guard. Stashed on the card so a bounce-back / audit reader
+        // sees the exact state the founder had when they tapped Approve.
+        remedy_states: remedyStates,
         raised_at: now,
       },
       preview,
@@ -581,6 +669,7 @@ export function buildFounderApprovalPreview(input: {
   reasoning?: string | null;
   customerName?: string | null;
   ticketSubject?: string | null;
+  remedyStates?: RemedyStateForFounderCard[];
 }): string {
   const remedy = input.remedy || {};
   const actionType = typeof remedy.action_type === "string" ? remedy.action_type.trim() : "";
@@ -603,8 +692,10 @@ export function buildFounderApprovalPreview(input: {
     action = `June's recommended action${who}`;
   }
   const subj = input.ticketSubject?.trim() ? ` (re: "${input.ticketSubject.trim()}")` : "";
+  const remedyStateBlock = renderRemedyStatesForCard(input.remedyStates ?? []);
+  const remedyStateSuffix = remedyStateBlock ? `\n\n${remedyStateBlock}` : "";
   const why = input.reasoning?.trim() ? `\n\nJune: ${input.reasoning.trim().slice(0, 500)}` : "";
-  return `${action}${subj}?${why}`;
+  return `${action}${subj}?${remedyStateSuffix}${why}`;
 }
 
 /**
@@ -628,6 +719,12 @@ export async function raiseFounderApproval(
     reasoning: string;
     customerName?: string | null;
     ticketSubject?: string | null;
+    /**
+     * Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — live remedy
+     * state for the recommended remedy's target orders. Rendered on the founder preview + stashed
+     * on `tool_input.remedy_states` so the CEO card carries the full state at approval time.
+     */
+    remedyStates?: RemedyStateForFounderCard[];
   },
 ): Promise<RaiseJuneRemedyResult> {
   let customerName = input.customerName ?? null;
@@ -646,7 +743,8 @@ export async function raiseFounderApproval(
       /* best-effort */
     }
   }
-  const preview = buildFounderApprovalPreview({ remedy: input.remedy, reasoning: input.reasoning, customerName, ticketSubject });
+  const remedyStates = input.remedyStates ?? [];
+  const preview = buildFounderApprovalPreview({ remedy: input.remedy, reasoning: input.reasoning, customerName, ticketSubject, remedyStates });
   const actionType = typeof input.remedy.action_type === "string" ? input.remedy.action_type.trim() : null;
   const amountCents = remedyMoneyAmountCents(input.remedy);
   const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
@@ -709,7 +807,18 @@ export async function raiseFounderApproval(
       sessionId: session.id,
       workspaceId: input.workspaceId,
       toolName: JUNE_REMEDY_TOOL,
-      toolInput: { ticket_id: input.ticketId, remedy: input.remedy, reasoning: input.reasoning, action_type: actionType, amount_cents: amountCents, raised_at: now },
+      toolInput: {
+        ticket_id: input.ticketId,
+        remedy: input.remedy,
+        reasoning: input.reasoning,
+        action_type: actionType,
+        amount_cents: amountCents,
+        // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — the live
+        // remedy state at approval time, so a bounce-back / audit reader sees the same state the
+        // founder had (never a silent stashless card).
+        remedy_states: remedyStates,
+        raised_at: now,
+      },
       preview,
       risk: "decision",
       category: JUNE_FOUNDER_ESCALATION_CATEGORY,

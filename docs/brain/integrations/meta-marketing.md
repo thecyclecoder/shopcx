@@ -43,6 +43,7 @@ System User token (long-lived, no expiry) preferred over admin user token for CA
 - Marketing API uses **Business Use Case** rate limits, exposed via `X-Business-Use-Case-Usage` header per ad account. Format: `{ act_id: { call_count, total_cputime, estimated_time_to_regain_access }}`.
 - Throttling kicks in around 80% of any budget. Back off aggressively when `estimated_time_to_regain_access > 0`.
 - CAPI has separate per-pixel limits. 429 → exponential backoff via Inngest retries.
+- **Permanent / api-removed** — a class distinct from transient (retry-able) and fatal (caller-fixable): Meta has REMOVED the endpoint we depended on and it will not come back. Retrying only burns quota. Classified by [[../libraries/meta__graph-retry]] `isPermanentGraphError` on code `100` subcode `2490568` (the seed signature — "ASC campaigns no longer supported") plus messages matching `/no longer supported|deprecated|not supported with v\d+/i` on HTTP 400. `graphFetchJson` short-circuits the retry loop and tags the throw with `metaClass='permanent_api_removed'`; the CEO card is raised through [[../libraries/meta__dead-verb-escalation]] `escalateDeadMetaVerb` (deduped per capability signature per UTC day). Introduced by **[[../specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]] Phase 2** — the CEO discovered the ASC removal on 2026-07-27 when the cold-scaler mint failed in his face; there had been no signal that a whole autonomous capability had gone silent.
 
 ## Gotchas
 

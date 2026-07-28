@@ -1,0 +1,1 @@
+- **Stop AI ticket analyzer false alerts for tickets June already decided** · verified 2026-07-27 · → [[../libraries/control-tower]]
