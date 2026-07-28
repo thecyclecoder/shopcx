@@ -15,6 +15,10 @@ import type { MediaBuyerPlan } from "@/lib/media-buyer/agent";
 import { getSlackToken, postAsGrowthDirector } from "@/lib/slack";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { getPersona } from "@/lib/agents/personas";
+import {
+  formatCohortGraduateHeartbeatsForDigest,
+  type CohortGraduateHeartbeat,
+} from "./cold-scaler-graduate-heartbeat";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -69,8 +73,16 @@ export async function resolveProductTitlesForWorkspace(
 }
 
 /** Compose the Growth-Director-voice digest text from the per-account plans. Plain text (director voice).
- * Exported for test coverage of the "label by product" and "suppress no-op" gates. */
-export function composeDigest(accountPlans: AccountPlan[]): { text: string; hasRecommendations: boolean } {
+ * Exported for test coverage of the "label by product" and "suppress no-op" gates.
+ *
+ * `cohortHeartbeats` (Phase 3 of the bianca-actually-graduates spec) adds an extra "Cold-scaler
+ * graduates" section under the header — one line per active cold-scaler cohort showing when it
+ * last graduated a crowned winner and how many eligible winners are still waiting. An active
+ * autonomous rail that has never graduated stops looking identical to a healthy quiet rail. */
+export function composeDigest(
+  accountPlans: AccountPlan[],
+  cohortHeartbeats: readonly CohortGraduateHeartbeat[] = [],
+): { text: string; hasRecommendations: boolean } {
   let promote = 0, kill = 0, replenish = 0, fatigue = 0, cohorts = 0;
   const lines: string[] = [];
   for (const { account, productTitle, plan } of accountPlans) {
@@ -90,7 +102,14 @@ export function composeDigest(accountPlans: AccountPlan[]): { text: string; hasR
   const header = total > 0
     ? `${mb.emoji} ${mb.name} (Media Buyer) — ${promote} to scale, ${kill} to pause, ${replenish} replenish, ${fatigue} refresh across ${cohorts} cohort${cohorts === 1 ? "" : "s"}.`
     : `${mb.emoji} ${mb.name} (Media Buyer) — no changes recommended this cycle across ${cohorts} cohort${cohorts === 1 ? "" : "s"} (all within policy).`;
-  return { text: [header, ...lines].join("\n"), hasRecommendations: total > 0 };
+  const heartbeatLines = formatCohortGraduateHeartbeatsForDigest(cohortHeartbeats);
+  const heartbeatSection = heartbeatLines.length
+    ? ["Cold-scaler graduates:", ...heartbeatLines]
+    : [];
+  return {
+    text: [header, ...lines, ...heartbeatSection].join("\n"),
+    hasRecommendations: total > 0,
+  };
 }
 
 /**
@@ -103,6 +122,7 @@ export async function deliverMediaBuyerDigest(
   admin: Admin,
   workspaceId: string,
   accountPlans: AccountPlan[],
+  cohortHeartbeats: readonly CohortGraduateHeartbeat[] = [],
 ): Promise<DigestResult> {
   const { data: ws } = await admin
     .from("workspaces")
@@ -129,7 +149,7 @@ export async function deliverMediaBuyerDigest(
   // active cohort — when the total is zero the digest carries no actionable recommendation, so we skip
   // the post entirely (per media-buyer-digest-consolidate-product-names-suppress-noop Phase 1: don't
   // spam Slack every 2h with "no changes recommended this cycle").
-  const { text, hasRecommendations } = composeDigest(accountPlans);
+  const { text, hasRecommendations } = composeDigest(accountPlans, cohortHeartbeats);
   if (!hasRecommendations) {
     return { posted: false, reason: "no actionable recommendations this pass" };
   }

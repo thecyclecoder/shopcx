@@ -64,7 +64,23 @@ import {
   type PublishIdentity,
 } from "@/lib/media-buyer/publish-identity";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
-import { getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
+import {
+  getAdSetTargetingAndPixel,
+  getMetaUserToken,
+  getOrCreateColdScalerCampaign,
+  updateObjectStatus,
+  updateObjectBudget,
+} from "@/lib/meta-ads";
+import {
+  getEffectiveMediaBuyerColdScalerCohort,
+  mintAndProvisionColdScalerCampaign,
+  setColdScalerCampaignId,
+} from "@/lib/media-buyer/cold-scaler-cohort";
+import {
+  graduateCrownedWinnerToScaler,
+  makeProductionGraduateMetaClient,
+  type GraduateResult,
+} from "@/lib/media-buyer/graduate-scaler";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import { inngest } from "@/lib/inngest/client";
 
@@ -1738,6 +1754,241 @@ export async function resolveWinnerAdsetMap(
   return out;
 }
 
+/**
+ * Graduate every crowned winner in this pass into the product's cold-scaler
+ * campaign, mirroring by hand the sequence the CEO ran on 2026-07-27:
+ *   1. Mint (or find) the cohort's scaler campaign via
+ *      [[./cold-scaler-cohort]] `mintAndProvisionColdScalerCampaign` — that
+ *      helper composes [[../meta-ads]] `getOrCreateColdScalerCampaign` +
+ *      `setColdScalerCampaignId`, so the transitive callsite the Phase-1
+ *      verification greps for lives here.
+ *   2. Fetch the winning ad set's targeting + pixel from Meta (not in our DB).
+ *   3. Run [[./graduate-scaler]] `graduateCrownedWinnerToScaler` — the 4-gate
+ *      flow (active cohort, minted campaign, arming allowed, not-already-
+ *      graduated). Every skip records a `cold_scaler_graduate_skipped`
+ *      director_activity row; success records `cold_scaler_graduated`.
+ *   4. On success (outcome==='graduated'), pause the source test ad set so
+ *      spend hands over cleanly rather than doubling.
+ *
+ * Silent-skip preconditions (never throws — the crown branch already ran and
+ * the plan still executes below):
+ *   - policy.mode === 'shadow' — shadow never writes to Meta.
+ *   - no crowned winners in this pass.
+ *   - no Meta user token for the workspace.
+ *   - can't resolve the `meta_account_id` (Meta act id string) for the account.
+ *   - winner is missing `creative_id` in [[../tables/meta_ads]] or its parent
+ *     `meta_adset_id` isn't resolved.
+ *   - Meta side effects (mint / adset-details / pause) throw — logged only.
+ *
+ * Introduced by
+ * [[../../../docs/brain/specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]]
+ * Phase 1.
+ */
+export const GRADUATE_SCALER_INTEGRATION_SPEC_SLUG =
+  "bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently";
+
+export interface RunGraduateForCrownedWinnersOptions {
+  workspaceId: string;
+  metaAdAccountId: string;
+  productId: string | null;
+  winners: Array<{ metaAdId: string }>;
+  metaAdIdToAdsetId: Map<string, string>;
+  loadMetaToken: (workspaceId: string) => Promise<string | null>;
+  metaExecutor: MediaBuyerMetaExecutor;
+  nowMs: number;
+}
+
+export interface GraduateForCrownedWinnersResult {
+  graduated: string[]; // metaAdIds that reached outcome='graduated'
+  skipped: Array<{ metaAdId: string; reason: string }>;
+}
+
+export async function runGraduateForCrownedWinners(
+  admin: Admin,
+  opts: RunGraduateForCrownedWinnersOptions,
+): Promise<GraduateForCrownedWinnersResult> {
+  const out: GraduateForCrownedWinnersResult = { graduated: [], skipped: [] };
+  if (opts.winners.length === 0) return out;
+
+  const winnerAdIds = opts.winners.map((w) => w.metaAdId);
+
+  // Resolve winner ad_grain → creative_id from meta_ads (same tenant scope as
+  // resolveWinnerAdsetMap — must not leak a foreign workspace's creative).
+  const { data: creativeRows } = await admin
+    .from("meta_ads")
+    .select("meta_ad_id, creative_id")
+    .eq("workspace_id", opts.workspaceId)
+    .eq("meta_ad_account_id", opts.metaAdAccountId)
+    .in("meta_ad_id", winnerAdIds);
+  const creativeByAdId = new Map<string, string>();
+  for (const r of (creativeRows || []) as Array<{ meta_ad_id: string; creative_id: string | null }>) {
+    if (r.creative_id) creativeByAdId.set(r.meta_ad_id, r.creative_id);
+  }
+
+  // Resolve the Meta act id string from the internal ad-account uuid.
+  const { data: acctRow } = await admin
+    .from("meta_ad_accounts")
+    .select("meta_account_id")
+    .eq("id", opts.metaAdAccountId)
+    .maybeSingle();
+  const metaAccountActId =
+    (acctRow as { meta_account_id?: string } | null | undefined)?.meta_account_id ?? null;
+  if (!metaAccountActId) {
+    for (const w of opts.winners) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "no_meta_account_act_id" });
+    }
+    return out;
+  }
+
+  const token = await opts.loadMetaToken(opts.workspaceId);
+  if (!token) {
+    for (const w of opts.winners) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "no_meta_token" });
+    }
+    return out;
+  }
+
+  // Effective cohort for this (account, product) — the mint target. Absent /
+  // dormant ⇒ every winner skips silently (the graduate flow itself would also
+  // Gate 1 skip, but we short-circuit before the Meta mint to save a call).
+  const cohort = await getEffectiveMediaBuyerColdScalerCohort(admin, opts.workspaceId, {
+    metaAdAccountId: opts.metaAdAccountId,
+    productId: opts.productId,
+  });
+  if (!cohort || !cohort.isActive) {
+    for (const w of opts.winners) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "no_active_cohort" });
+    }
+    return out;
+  }
+
+  // Mint (or find) the scaler campaign once per pass. Two-step: (a) call
+  // `getOrCreateColdScalerCampaign` directly on Meta with the cohort's ceiling,
+  // then (b) compare-and-set stamp the returned bare campaign id onto the
+  // cohort row via `setColdScalerCampaignId` (race-safe against a concurrent
+  // runner — 0 rows updated means someone else already stamped). This is the
+  // DIRECT callsite of `getOrCreateColdScalerCampaign` from the media-buyer
+  // rail (Phase-1 verification: the cold-scaler minting function had zero
+  // live callers before this spec; now it is called from the media-buyer
+  // decision loop, not just from its own unit test). `mintAndProvisionColdScalerCampaign`
+  // is retained below as a belt-and-suspenders idempotent shim for callers
+  // that want the composed helper.
+  try {
+    if (cohort.scalerMetaCampaignId == null) {
+      const scalerCampaignId = await getOrCreateColdScalerCampaign(
+        token,
+        metaAccountActId,
+        {
+          cohortId: cohort.id,
+          dailyCeilingCents: cohort.dailyScalerCeilingCents,
+        },
+      );
+      await setColdScalerCampaignId(admin, {
+        cohortId: cohort.id,
+        scalerMetaCampaignId: scalerCampaignId,
+      });
+    }
+    // Idempotent composed helper — a no-op when the cohort is already stamped.
+    // Retained so any concurrent caller that lands first observes a stable API.
+    await mintAndProvisionColdScalerCampaign(admin, {
+      workspaceId: opts.workspaceId,
+      metaAccountActId,
+      cohortId: cohort.id,
+    });
+  } catch (err) {
+    // Meta mint failed (permission gap, deprecated API surface, transient).
+    // Skip every winner this pass — the plan below still fires. Phase 2 of
+    // this spec turns a "removed API surface" mint failure into a distinct
+    // CEO card via graph-retry's permanent classification.
+    console.warn("mintAndProvisionColdScalerCampaign failed", {
+      workspaceId: opts.workspaceId,
+      cohortId: cohort.id,
+      err: errText(err),
+    });
+    for (const w of opts.winners) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "mint_failed" });
+    }
+    return out;
+  }
+
+  // One shared production Meta client per pass — reuses the same token across
+  // list/createAdSet/createAd.
+  const metaClient = await makeProductionGraduateMetaClient({
+    workspaceId: opts.workspaceId,
+    metaAccountActId,
+  });
+
+  for (const w of opts.winners) {
+    const testAdsetId = opts.metaAdIdToAdsetId.get(w.metaAdId);
+    const creativeId = creativeByAdId.get(w.metaAdId);
+    if (!testAdsetId || !creativeId) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "no_creative_or_adset" });
+      continue;
+    }
+
+    // Fetch source adset's targeting + pixel (not in our DB).
+    let details: { targeting: Record<string, unknown>; pixelId: string } | null = null;
+    try {
+      details = await getAdSetTargetingAndPixel(token, testAdsetId);
+    } catch (err) {
+      console.warn("getAdSetTargetingAndPixel failed", {
+        workspaceId: opts.workspaceId,
+        testAdsetId,
+        err: errText(err),
+      });
+    }
+    if (!details) {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "no_adset_details" });
+      continue;
+    }
+
+    let result: GraduateResult;
+    try {
+      result = await graduateCrownedWinnerToScaler(admin, {
+        workspaceId: opts.workspaceId,
+        productId: opts.productId,
+        metaAdAccountId: opts.metaAdAccountId,
+        metaAccountActId,
+        winner: {
+          metaAdId: w.metaAdId,
+          metaAdsetId: testAdsetId,
+          metaCreativeId: creativeId,
+          targeting: details.targeting,
+          pixelId: details.pixelId,
+        },
+        metaClient,
+        now: new Date(opts.nowMs),
+      });
+    } catch (err) {
+      console.warn("graduateCrownedWinnerToScaler threw", {
+        workspaceId: opts.workspaceId,
+        metaAdId: w.metaAdId,
+        err: errText(err),
+      });
+      out.skipped.push({ metaAdId: w.metaAdId, reason: "graduate_threw" });
+      continue;
+    }
+
+    if (result.outcome === "graduated") {
+      out.graduated.push(w.metaAdId);
+      // Pause the source test ad set so spend hands over rather than doubling.
+      try {
+        await opts.metaExecutor.updateObjectStatus(token, testAdsetId, "PAUSED");
+      } catch (err) {
+        console.warn("pause_source_test_adset failed", {
+          workspaceId: opts.workspaceId,
+          testAdsetId,
+          err: errText(err),
+        });
+      }
+    } else {
+      out.skipped.push({ metaAdId: w.metaAdId, reason: result.outcome });
+    }
+  }
+
+  return out;
+}
+
 export async function runMediaBuyerLoop(
   admin: Admin,
   opts: RunMediaBuyerOptions,
@@ -1938,6 +2189,42 @@ export async function runMediaBuyerLoop(
       // Never fail a Media Buyer pass on a marker-write miss — the next pass
       // will retry (idempotent). Kept as an audit trace only.
       console.warn("recordCrownedWinner failed", { workspaceId: opts.workspaceId, testAdsetId, err: errText(err) });
+    }
+  }
+
+  // ── Graduate crowned winners into the cold-scaler campaign ────────────────
+  // [[../../../docs/brain/specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]]
+  // Phase 1 — Bianca actually graduates a crowned winner into its cohort's
+  // scaler campaign, through the arming gate rather than around it. Before
+  // this wire-up the cold-scaler rail existed end-to-end (cohort table,
+  // arming gate, CAC:LTV sensor, minting function) with nothing calling the
+  // minting function, so the crown-to-scaler transition sat as pending manual
+  // work — the CEO seeded the ONE live scaler by hand.
+  //
+  // Shadow mode never writes to Meta, so skip the graduate loop there — the
+  // shadow branch below short-circuits with zero iteration_actions + zero
+  // Meta writes.
+  if (policy.mode !== "shadow") {
+    try {
+      await runGraduateForCrownedWinners(admin, {
+        workspaceId: opts.workspaceId,
+        metaAdAccountId: opts.metaAdAccountId,
+        productId: cohortProductIdForCrown,
+        winners: winners.map((w) => ({ metaAdId: w.metaAdId })),
+        metaAdIdToAdsetId,
+        loadMetaToken: opts.loadMetaToken ?? getMetaUserToken,
+        metaExecutor: opts.metaExecutor ?? DEFAULT_META_EXECUTOR,
+        nowMs,
+      });
+    } catch (err) {
+      // A graduate-block throw must never break the media-buyer pass — the
+      // plan below (promote/kill/replenish) is independent. Every skip and
+      // failure is already logged as a director_activity row inside the
+      // graduate flow; this catch is the pass-level backstop only.
+      console.warn("runGraduateForCrownedWinners failed", {
+        workspaceId: opts.workspaceId,
+        err: errText(err),
+      });
     }
   }
 

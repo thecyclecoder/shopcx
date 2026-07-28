@@ -2286,3 +2286,47 @@ test("agent.ts — creditExploitHits update is a compare-and-set on exploit_hit_
     "creditExploitHits must gate its update with .eq('id',row.id).eq('workspace_id',ws).eq('is_exploit',true).is('exploit_hit_credited_at',null).select('id') — the compare-and-set that makes double-crediting structurally impossible",
   );
 });
+
+// ── bianca-actually-graduates-crowned-winners… Phase 1: wire the graduate verb ──
+// The whole point of Phase 1: before it, `getOrCreateColdScalerCampaign` had ZERO callers
+// in the media-buyer rail — the cohort table, arming gate, and mint helper all existed
+// with nothing invoking the payoff step. This test pins the wiring so a stray edit that
+// drops the graduate call reverts to the "silent scaffolding" pre-state.
+
+test("agent.ts — Phase 1 wiring: runMediaBuyerLoop calls runGraduateForCrownedWinners after the crown persistence loop, non-shadow-only", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./agent.ts", import.meta.url), "utf8");
+
+  assert.ok(
+    /import\s*\{[^}]*\bmintAndProvisionColdScalerCampaign\b[^}]*\}\s*from\s*"@\/lib\/media-buyer\/cold-scaler-cohort"/.test(src),
+    "agent.ts must import mintAndProvisionColdScalerCampaign — the transitive callsite that reaches getOrCreateColdScalerCampaign from the media-buyer rail",
+  );
+  assert.ok(
+    /import\s*\{[^}]*\bgraduateCrownedWinnerToScaler\b[^}]*\}\s*from\s*"@\/lib\/media-buyer\/graduate-scaler"/.test(src),
+    "agent.ts must import graduateCrownedWinnerToScaler — the 4-gate execution the crown branch invokes",
+  );
+  assert.ok(
+    /import\s*\{[^}]*\bgetAdSetTargetingAndPixel\b[^}]*\}\s*from\s*"@\/lib\/meta-ads"/.test(src),
+    "agent.ts must import getAdSetTargetingAndPixel — the winner-adset targeting/pixel read the graduate flow requires",
+  );
+  assert.ok(
+    /export async function runGraduateForCrownedWinners\(/.test(src),
+    "agent.ts must export runGraduateForCrownedWinners — the per-pass helper that composes mint + graduate + pause-source",
+  );
+  assert.ok(
+    /await mintAndProvisionColdScalerCampaign\(admin,\s*\{/.test(src),
+    "runGraduateForCrownedWinners must call mintAndProvisionColdScalerCampaign (reaches getOrCreateColdScalerCampaign) — Phase 1 verification",
+  );
+  assert.ok(
+    /await graduateCrownedWinnerToScaler\(admin,\s*\{/.test(src),
+    "runGraduateForCrownedWinners must call graduateCrownedWinnerToScaler — the 4-gate flow the crown branch owes",
+  );
+  assert.ok(
+    /if \(policy\.mode !== "shadow"\) \{[\s\S]*?await runGraduateForCrownedWinners\(admin,/.test(src),
+    "runMediaBuyerLoop must gate the graduate call on policy.mode !== 'shadow' — shadow never writes to Meta",
+  );
+  assert.ok(
+    /result\.outcome === "graduated"[\s\S]*?opts\.metaExecutor\.updateObjectStatus\(token, testAdsetId, "PAUSED"\)/.test(src),
+    "runGraduateForCrownedWinners must pause the source test ad set on outcome==='graduated' — otherwise spend doubles instead of handing over",
+  );
+});
