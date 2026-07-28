@@ -95,7 +95,6 @@ pattern is consistent across every autonomous rail.
 
 [[meta__graph-retry]] · [[../tables/dashboard_notifications]] ·
 [[media-buyer-agent]] (sibling escalation pattern) ·
-[[../specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]] ·
 [[../functions/growth]]
 
 ---

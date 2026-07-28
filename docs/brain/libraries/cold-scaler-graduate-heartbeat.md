@@ -1,7 +1,5 @@
 # `src/lib/media-buyer/cold-scaler-graduate-heartbeat.ts`
 
-Phase 3 of [[../specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]].
-
 The deepest cause of the 2026-07-27 incident was not the ASC endpoint removal. It was that an autonomous rail could exist for weeks, never fire once, and look identical to a healthy rail that had no work to do. This module makes an unexercised cold-scaler rail **visible as unexercised** — by reading the durable activity ledger the Phase-1 graduate flow already writes ([[media-buyer-graduate-scaler]] emits `cold_scaler_graduated` on success and `cold_scaler_graduate_skipped` on any skip into [[../tables/director_activity]]) and turning it into (a) a per-cohort line on the [[media-buyer-director-digest|Growth Director digest]] and (b) a deduped CEO card when a cohort has an eligible crowned winner and no successful graduate inside a bounded window.
 
 ## Escalation predicate — precise on purpose
