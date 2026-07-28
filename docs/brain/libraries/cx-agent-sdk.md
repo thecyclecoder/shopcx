@@ -53,6 +53,17 @@ getCxBundle(admin, workspaceId, customerId | null) → Promise<CxBundle>
 One-shot `Promise.all` of all five getters. Returns typed data (see below); the plain-text rendering is `formatCxBundle`.
 
 ```typescript
+getOrderRemedyState(admin, workspaceId, ref: { orderId?, shopifyOrderId?, orderNumber? }) → Promise<CxOrderRemedyState>
+```
+**Phase 1 of [[../specs/a-money-remedy-must-read-the-live-remedy-state-first]]** — the mandatory read before any money remedy. Returns the live remedy state of a SINGLE order: `financial_status`, `total_cents`, sum of **succeeded/settled** [[../tables/order_refunds|order_refunds]] mirror rows (`refunds_succeeded_cents`), the derived `remaining_refundable_cents` ceiling (`total - refunds_succeeded_cents`, floored at 0), every non-cancelled row in [[../tables/returns|returns]] (`returns[]`), and the LIVE subset (`open_returns[]`) — returns whose `refunded_at IS NULL` AND `status != 'cancelled'`, i.e. the refund will fire on receipt via the [[../lifecycles/return-pipeline|return pipeline]].
+- Resolution: pass any of `orderId` (internal UUID) / `shopifyOrderId` / `orderNumber` — most-specific wins so the executor (which already resolves the internal UUID up-front for `partial_refund`) can pass `orderId` and skip a second lookup.
+- Missing order → `found:false` with empty arrays (fail-safe — a caller cannot mistake it for "clean state").
+- Rendered by `formatOrderRemedyState` — a labeled block the founder card + the box session both read (`⚠ LIVE (refund will fire on delivery)` marker on any open return; `⚠ N live return(s) will refund $X on receipt — a fresh money remedy on this order will DOUBLE-PAY.` on any state with `open_returns.length > 0`).
+- Called deterministically before every money-action executor step via `loadRemedyStatesForPlan` / `verifyPlanAgainstRemedyStates` in [[cs-director]]; a proposer that would double-pay is rejected before the executor fires.
+
+Derived-from ticket 86043da0 (Jan Bloom): SC135494 $182.95 with a live `label_created` return covering the whole order and June proposing another $167.95 refund seventeen times. Everything needed was one query away; the proposer just never looked.
+
+```typescript
 listActionableOutcomes(admin, workspaceId, intent, opts?: { channel?: string | null }) → Promise<CxActionableOutcomes>
 ```
 Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]] — deterministic catalog reader Sol's first-touch box session consults before authoring the Direction. Returns the workspace's **ACTIVE** [[../tables/journey_definitions|journeys]] (matched by `trigger_intent`), [[../tables/playbooks|playbooks]] (matched by `trigger_intents[]`), and [[../tables/workflows|workflows]] (matched by `trigger_tag`) for the resolved `intent`. Optional `opts.channel` narrows journeys + workflows to those whose `channels[]` includes the ticket's channel (an empty `channels[]` on the mechanism means broad-match — always passes).
@@ -83,11 +94,14 @@ POLICIES: (active sonnet_prompts)
 ```typescript
 runCxSdkVerb(admin, verb: CxSdkVerb, workspaceId, customerId | null) → Promise<string>
 ```
-Dispatch a verb (`"customer"` | `"orders"` | `"subscriptions"` | `"products"` | `"policies"` | `"bundle"`) to its formatted text output. Wrapped by `scripts/cx-agent-sdk-tool.ts` CLI:
+Dispatch a verb (`"customer"` | `"orders"` | `"subscriptions"` | `"products"` | `"policies"` | `"bundle"` | `"remedy_state"`) to its formatted text output. Wrapped by `scripts/cx-agent-sdk-tool.ts` CLI:
 ```bash
 npx tsx scripts/cx-agent-sdk-tool.ts customer <ticket_id>
 npx tsx scripts/cx-agent-sdk-tool.ts bundle <ticket_id>
 npx tsx scripts/cx-agent-sdk-tool.ts products <ticket_id>
+# a-money-remedy-must-read-the-live-remedy-state-first Phase 1 — MANDATORY before any money remedy:
+npx tsx scripts/cx-agent-sdk-tool.ts remedy_state <ticket_id> '{"order_number":"SC135494"}'
+npx tsx scripts/cx-agent-sdk-tool.ts remedy_state <ticket_id> '{"shopify_order_id":"…"}'
 ```
 
 ### Ticket-id UUID guard

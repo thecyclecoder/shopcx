@@ -60,6 +60,8 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
+import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
+import { MONEY_ACTION_TYPES } from "@/lib/june-remedy-approval";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -491,6 +493,273 @@ export function summarizeRemedyBatchOutcome(
   return { landed, failed, oneLine: parts.join("; ") };
 }
 
+// ── Live remedy-state hard-reject guard (Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first) ──
+
+/**
+ * The order reference a single money action targets — extracted from its payload and normalized so
+ * the guard can look up the live remedy state via [[cx-agent-sdk]] `getOrderRemedyState`. `key` is
+ * a deterministic string used to dedupe money actions that share the same target order (a batch
+ * with two partial_refunds on the same order needs ONE state read + ONE combined amount check).
+ */
+export interface RemedyOrderRef {
+  key: string;
+  orderId: string | null;
+  shopifyOrderId: string | null;
+  orderNumber: string | null;
+}
+
+/**
+ * Extract the order reference off a normalized money action's `actionParams`. Money remedy
+ * handlers (`partial_refund`, `redeem_points_as_refund`, `dollar_replacement`) all name the target
+ * order via one of `shopify_order_id` / `order_number` (per action-executor.ts). `create_replacement_order`
+ * uses `order_number` when present (the refund half of a dollar_replacement lives there too).
+ *
+ * Returns null when the step names no identifiable order — the guard's caller treats that as a
+ * fail-closed condition (a money action we can't tie to a specific order cannot prove
+ * non-double-pay against a specific order's remaining refundable value). Pure.
+ */
+export function extractRemedyOrderRefFromStep(params: Record<string, unknown>): RemedyOrderRef | null {
+  const shopifyOrderIdRaw = params.shopify_order_id;
+  const orderNumberRaw = params.order_number;
+  const orderIdRaw = params.order_id;
+  const shopifyOrderId =
+    typeof shopifyOrderIdRaw === "string" && shopifyOrderIdRaw.trim().length > 0 ? shopifyOrderIdRaw.trim() : null;
+  const orderNumber =
+    typeof orderNumberRaw === "string" && orderNumberRaw.trim().length > 0 ? orderNumberRaw.trim() : null;
+  const orderId =
+    typeof orderIdRaw === "string" && orderIdRaw.trim().length > 0 ? orderIdRaw.trim() : null;
+  if (!shopifyOrderId && !orderNumber && !orderId) return null;
+  // partial_refund / dollar_replacement resolve `shopify_order_id` against BOTH the
+  // `orders.shopify_order_id` (all-digit) and `orders.order_number` columns (action-executor.ts:2227
+  // + :3275). Normalize a mixed-shape shopify_order_id-that-is-really-an-order-number into
+  // orderNumber so the state read matches what the executor will actually resolve.
+  const canonicalShopifyOrderId =
+    shopifyOrderId && /^\d+$/.test(shopifyOrderId) ? shopifyOrderId : null;
+  const canonicalOrderNumber =
+    orderNumber ??
+    (shopifyOrderId && !/^\d+$/.test(shopifyOrderId) ? shopifyOrderId : null);
+  const key =
+    orderId ??
+    canonicalShopifyOrderId ??
+    canonicalOrderNumber ??
+    shopifyOrderId ??
+    "(unknown)";
+  return {
+    key,
+    orderId: orderId ?? null,
+    shopifyOrderId: canonicalShopifyOrderId,
+    orderNumber: canonicalOrderNumber,
+  };
+}
+
+/** Reference converted to the `CxOrderRemedyStateRef` shape `getOrderRemedyState` accepts. */
+export function remedyOrderRefToState(ref: RemedyOrderRef): CxOrderRemedyStateRef {
+  return {
+    orderId: ref.orderId ?? undefined,
+    shopifyOrderId: ref.shopifyOrderId ?? undefined,
+    orderNumber: ref.orderNumber ?? undefined,
+  };
+}
+
+/**
+ * One violation from `verifyPlanAgainstRemedyStates` — names WHICH action, on WHICH order, hit
+ * WHICH rail. The whole plan fails on the first violation; the surface exists so the failure
+ * message can be precise on the founder card + the `agent_jobs.error` line.
+ */
+export interface RemedyStateViolation {
+  actionIndex: number;
+  actionType: string;
+  orderKey: string;
+  reason:
+    | "order_not_found"
+    | "live_return_would_double_pay"
+    | "amount_exceeds_remaining_refundable"
+    | "missing_order_reference";
+  detail: string;
+}
+
+/**
+ * Verdict of `verifyPlanAgainstRemedyStates`. `ok:true` means every money action in the plan
+ * survives the live remedy-state guard — no live un-refunded return covers the target order, and
+ * the combined refund amount per order fits inside `remaining_refundable_cents`. `ok:false` names
+ * the first violation so the executor's needs_attention reason is specific + auditable.
+ */
+export type RemedyStateVerdict =
+  | { ok: true }
+  | { ok: false; violation: RemedyStateViolation };
+
+/**
+ * Pure hard-reject guard (Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first §
+ * bullet 3). Enforces the two invariants a proposer must respect when a customer's order carries
+ * money already in motion:
+ *
+ *  1. NO LIVE UN-REFUNDED RETURN. A `returns` row on the target order with `refunded_at IS NULL`
+ *     AND `status != 'cancelled'` will refund on receipt via the returns pipeline
+ *     ([[../lifecycles/return-pipeline]]). A fresh money remedy on the SAME order double-pays that
+ *     refund. Derived-from ticket 86043da0 (Jan Bloom): SC135494 $182.95 with a live label_created
+ *     return covering the whole order and June proposing another $167.95 refund seventeen times.
+ *  2. AMOUNT DOES NOT EXCEED REMAINING REFUNDABLE. `orders.total_cents - sum(order_refunds
+ *     succeeded/settled)` is the CEILING for any new money remedy. Two money actions on the same
+ *     order are SUMMED against the ceiling so a 2×$100 partial_refund can't slip through by
+ *     splitting a $200 refund below a $150 per-line remaining balance.
+ *
+ * The guard is pure — the caller (Phase-2 handler / partial-remedy runner) is responsible for
+ * doing the async state reads FIRST and passing the pre-fetched `CxOrderRemedyState` per unique
+ * `RemedyOrderRef.key`. Non-money actions are ignored. A step that names no identifiable order
+ * fails with `missing_order_reference` (fail-closed — a money action we can't tie to a specific
+ * order cannot prove non-double-pay). Same fail-closed shape the founder-approval unknown-amount
+ * gate uses.
+ *
+ * Ordering: this runs BEFORE the loyalty-ceiling refusal + BEFORE the money-threshold founder gate
+ * (both in handleApproveRemedy) so a proposer targeting a double-pay is REJECTED, not parked for
+ * the CEO's approval — the whole point of the spec (parking a double-pay is a UX regression: the
+ * CEO would be asked to sign off on a spend the rails should block outright).
+ */
+export function verifyPlanAgainstRemedyStates(
+  actions: readonly RemedyActionStep[],
+  remedyStates: Map<string, CxOrderRemedyState>,
+): RemedyStateVerdict {
+  const sumByOrder = new Map<string, number>();
+  const orderKeysWithUnknownAmount = new Set<string>();
+
+  for (let i = 0; i < actions.length; i++) {
+    const step = actions[i];
+    if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    const ref = extractRemedyOrderRefFromStep(step.actionParams);
+    if (!ref) {
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: "(unresolvable)",
+          reason: "missing_order_reference",
+          detail: `money action '${step.actionType}' names no shopify_order_id / order_number / order_id — cannot verify remaining refundable`,
+        },
+      };
+    }
+    const state = remedyStates.get(ref.key);
+    if (!state) {
+      // The caller is supposed to prefetch a state for EVERY unique ref.key before calling — this
+      // branch fires only on a caller bug. Fail-closed so a missed prefetch never authorizes a
+      // money action against an unread order.
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: ref.key,
+          reason: "order_not_found",
+          detail: `remedy state for order ${ref.key} was not prefetched — refusing to execute a money action we cannot verify against live remedy state`,
+        },
+      };
+    }
+    if (!state.found) {
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: ref.key,
+          reason: "order_not_found",
+          detail: `money action targets order ${ref.key} which does not exist in this workspace`,
+        },
+      };
+    }
+    if (state.open_returns.length > 0) {
+      const first = state.open_returns[0];
+      const netDollars = ((first.net_refund_cents ?? 0) / 100).toFixed(2);
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: ref.key,
+          reason: "live_return_would_double_pay",
+          detail: `existing return status=${first.status} · net_refund $${netDollars} · refund will fire on receipt — a fresh ${step.actionType} on order ${ref.key} would double-pay`,
+        },
+      };
+    }
+
+    // Track the sum of THIS order's money amounts across the batch. A step without a resolvable
+    // amount flags the order as unsizeable — the founder-approval gate already handles unknown
+    // amounts (collapses the batch to null → gates), but we treat an unknown amount here as
+    // "cannot verify the ceiling" and skip the arithmetic check. The unsizeable case falls
+    // through to the founder gate which will still refuse to auto-execute it.
+    const rawAmount = step.actionParams.amount_cents ?? step.actionParams.replacement_amount_cents;
+    if (typeof rawAmount !== "number" || !Number.isFinite(rawAmount)) {
+      orderKeysWithUnknownAmount.add(ref.key);
+      continue;
+    }
+    const prev = sumByOrder.get(ref.key) ?? 0;
+    const next = prev + Math.round(rawAmount);
+    sumByOrder.set(ref.key, next);
+  }
+
+  for (const [key, sum] of sumByOrder) {
+    if (orderKeysWithUnknownAmount.has(key)) continue;
+    const state = remedyStates.get(key);
+    if (!state?.found) continue;
+    if (sum > state.remaining_refundable_cents) {
+      const sumDollars = (sum / 100).toFixed(2);
+      const remainingDollars = (state.remaining_refundable_cents / 100).toFixed(2);
+      // Find the first money action targeting this key so the violation names a real actionIndex.
+      let violatingIndex = -1;
+      let violatingType = "";
+      for (let i = 0; i < actions.length; i++) {
+        const step = actions[i];
+        if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+        const ref = extractRemedyOrderRefFromStep(step.actionParams);
+        if (ref?.key === key) {
+          violatingIndex = i;
+          violatingType = step.actionType;
+          break;
+        }
+      }
+      return {
+        ok: false,
+        violation: {
+          actionIndex: violatingIndex,
+          actionType: violatingType,
+          orderKey: key,
+          reason: "amount_exceeds_remaining_refundable",
+          detail: `money remedy sums to $${sumDollars} on order ${key} but remaining refundable is $${remainingDollars} — refuses to double-pay`,
+        },
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Prefetch the live remedy state for every UNIQUE money-action order reference in the plan.
+ * Non-money actions are ignored; money actions with no resolvable order ref are skipped (the pure
+ * guard flags them with `missing_order_reference`). Deduped by `RemedyOrderRef.key` so N actions
+ * on the same order cost ONE state read, not N. Same shape the pure guard consumes.
+ */
+export async function loadRemedyStatesForPlan(
+  admin: Admin,
+  workspaceId: string,
+  actions: readonly RemedyActionStep[],
+): Promise<Map<string, CxOrderRemedyState>> {
+  const refs = new Map<string, RemedyOrderRef>();
+  for (const step of actions) {
+    if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    const ref = extractRemedyOrderRefFromStep(step.actionParams);
+    if (ref && !refs.has(ref.key)) refs.set(ref.key, ref);
+  }
+  if (refs.size === 0) return new Map();
+  const { getOrderRemedyState } = await import("@/lib/cx-agent-sdk");
+  const entries = await Promise.all(
+    [...refs.values()].map(async (ref) => {
+      const state = await getOrderRemedyState(admin, workspaceId, remedyOrderRefToState(ref));
+      return [ref.key, state] as const;
+    }),
+  );
+  return new Map(entries);
+}
+
 // ── Injectable dependency surface (real defaults + test overrides) ─────────────────────────────
 
 /**
@@ -520,6 +789,17 @@ export interface ApproveRemedyDeps {
     message: string,
     sandbox: boolean,
   ) => Promise<void>;
+  /**
+   * Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — prefetch live remedy state
+   * per unique target order for the § 3⁰ hard-reject guard. Injectable so tests can bypass the
+   * Supabase read + seed states directly. Default resolves to `loadRemedyStatesForPlan`, which
+   * does the real deduped `getOrderRemedyState` fan-out.
+   */
+  loadRemedyStates?: (
+    admin: Admin,
+    workspaceId: string,
+    actions: readonly RemedyActionStep[],
+  ) => Promise<Map<string, CxOrderRemedyState>>;
 }
 
 async function defaultLoadTicketFacts(
@@ -572,6 +852,7 @@ const defaultApproveRemedyDeps: ApproveRemedyDeps = {
   loadWorkspaceSandbox: defaultLoadWorkspaceSandbox,
   runExecutor: defaultRunExecutor,
   deliverMessage: defaultDeliverMessage,
+  loadRemedyStates: loadRemedyStatesForPlan,
 };
 
 // ── Handlers ───────────────────────────────────────────────────────────────────────────────────
@@ -681,6 +962,41 @@ async function handleApproveRemedy(
     }
     const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
 
+    // 3⁰. LIVE REMEDY-STATE HARD-REJECT (spec:
+    //     a-money-remedy-must-read-the-live-remedy-state-first Phase 1 § bullet 3). Reads
+    //     [[../tables/returns]] + [[../tables/order_refunds]] + [[../tables/orders]] for every
+    //     money action's target order via `loadRemedyStatesForPlan`, then runs the pure
+    //     `verifyPlanAgainstRemedyStates` guard. A LIVE un-refunded return on the target order OR
+    //     a summed money amount above remaining refundable value fails CLOSED (needs_attention →
+    //     human) — NEVER parks for founder approval (parking a double-pay would ask the CEO to
+    //     sign off on a spend the rails should block outright, which is the exact UX regression the
+    //     Jan Bloom ticket exposed). Non-money-only batches are a no-op — the guard runs the empty
+    //     verdict path. Ordering: BEFORE loyalty ceiling + BEFORE founder gate so a proposer
+    //     targeting a double-pay is refused before either rail sees it.
+    //
+    //     The prefetched states are also THREADED into the founder-approval gate below (§ 3b) so
+    //     the SMS/cockpit preview carries "existing return: label_created, refund on receipt" for
+    //     any proposal that survives this rail — the "surface on the founder card" bullet.
+    let remedyStatesForCard: import("@/lib/june-remedy-approval").RemedyStateForFounderCard[] = [];
+    if (verdict.remedy) {
+      const loadStates = deps.loadRemedyStates ?? loadRemedyStatesForPlan;
+      const remedyStates = await loadStates(admin, workspaceId, planned.plan.actions);
+      const guard = verifyPlanAgainstRemedyStates(planned.plan.actions, remedyStates);
+      if (!guard.ok) {
+        const error = `approve_remedy: remedy state guard rejected — ${guard.violation.reason} (${guard.violation.detail})`;
+        console.warn(`${tag} ${error}`);
+        return {
+          ok: false,
+          handler: "approve_remedy",
+          needs_attention: true,
+          reason: `remedy_state_${guard.violation.reason}`,
+          error,
+        };
+      }
+      const { remedyStatesForCardFromMap } = await import("@/lib/june-remedy-approval");
+      remedyStatesForCard = remedyStatesForCardFromMap(remedyStates);
+    }
+
     // 3a. LOYALTY-CEILING HARD-REFUSAL (spec:
     //     loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates Phase 3). A loyalty
     //     benefit ABOVE `LOYALTY_REMEDY_MAX_CENTS` (default $15) is the CEO's absolute rail — no
@@ -731,6 +1047,11 @@ async function handleApproveRemedy(
           // preview lists each line + SUM, and the card's tool_input surfaces the split.
           moneyLines: gate.moneyLines,
           reasoning: verdict.reasoning,
+          // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — the
+          // live remedy state we already read for the § 3⁰ hard-reject, threaded onto the
+          // founder card preview so any proposal that survives the rail is visibly grounded in
+          // the order's real refunded_so_far + open-return state.
+          remedyStates: remedyStatesForCard,
         });
         console.log(`${tag} approve_remedy: refund/credit over threshold → parked for founder approval (via ${raised.via})`);
         return {
@@ -1290,6 +1611,29 @@ export async function runPartialRemedyForEscalation(
   }
   const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
 
+  // LIVE REMEDY-STATE HARD-REJECT (Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first
+  // § bullet 3, escalate-path). Same guard handleApproveRemedy runs — a partial remedy on the
+  // escalate_founder path must not double-pay a live return either. Rejection surfaces as a
+  // `failed` outcome with the specific reason so the CEO card body names why the partial did not
+  // land, and no customer message is sent.
+  const loadStates = deps.loadRemedyStates ?? loadRemedyStatesForPlan;
+  const remedyStates = await loadStates(admin, workspaceId, planned.plan.actions);
+  const remedyStateGuard = verifyPlanAgainstRemedyStates(planned.plan.actions, remedyStates);
+  if (!remedyStateGuard.ok) {
+    const v = remedyStateGuard.violation;
+    const summary = `remedy state guard refused: ${v.reason} on order ${v.orderKey} (${v.detail})`;
+    console.warn(`${tag} escalate_founder partial-remedy: ${summary}`);
+    return {
+      status: "failed",
+      summary,
+      landed_actions: [],
+      failed_actions: [{ label: v.actionType || "(unknown)", error: v.reason }],
+      message_delivered: false,
+      planned_action_types: plannedActionTypes,
+      refusal_reason: `remedy_state_${v.reason}`,
+    };
+  }
+
   // Loyalty ceiling — same hard-refusal as handleApproveRemedy. An over-cap loyalty benefit stays
   // out of scope on the escalate path too; we surface it as `loyalty_refused` so the founder card
   // names the refusal (never a silent skip).
@@ -1493,12 +1837,28 @@ async function handleEscalateFounder(
       const recommended = verdict.recommended_remedy;
       if (recommended && typeof recommended === "object" && !Array.isArray(recommended)) {
         try {
-          const { raiseFounderApproval } = await import("@/lib/june-remedy-approval");
+          const { raiseFounderApproval, remedyStatesForCardFromMap } = await import("@/lib/june-remedy-approval");
+          // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 4 — read
+          // the live remedy state for the recommended remedy's target orders so the founder-card
+          // preview surfaces "existing return: label_created, refund on receipt" (or the clean
+          // remaining refundable) at approval time. Best-effort — a state-read failure leaves the
+          // card intact.
+          let recommendedRemedyStates: import("@/lib/june-remedy-approval").RemedyStateForFounderCard[] = [];
+          try {
+            const recommendedPlanned = planRemedyExecution(recommended as Record<string, unknown>);
+            if (recommendedPlanned.ok) {
+              const states = await loadRemedyStatesForPlan(admin, workspaceId, recommendedPlanned.plan.actions);
+              recommendedRemedyStates = remedyStatesForCardFromMap(states);
+            }
+          } catch {
+            /* best-effort — the founder card renders without the state block on failure */
+          }
           const raised = await raiseFounderApproval(admin, {
             workspaceId,
             ticketId: linkage.ticketId,
             remedy: recommended as Record<string, unknown>,
             reasoning: verdict.reasoning || "June escalated this to you for a call.",
+            remedyStates: recommendedRemedyStates,
           });
           console.log(`${tag} escalate_founder: founder SMS approval ${raised.via} (${raised.approvalId ? raised.approvalId.slice(0, 8) : "no-card"})`);
         } catch (e) {

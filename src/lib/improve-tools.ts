@@ -73,6 +73,30 @@ export default async function executeToolCallImprove(
       .join("\n\n");
   }
 
+  // Live remedy state for a single order (Phase 1 of
+  // a-money-remedy-must-read-the-live-remedy-state-first). Delegates to the CX SDK's
+  // `getOrderRemedyState` + `formatOrderRemedyState` so Sol / June / any Improve session
+  // sees the same shape the CS Director executor's hard-reject reads. Input:
+  // `{shopify_order_id?|order_number?|order_id?}` — any one resolves. This is the
+  // MANDATORY precondition for any money remedy per the same spec's § bullet 2 (mirrors
+  // the `get_policies` fail-closed pattern above).
+  if (name === "get_remedy_state") {
+    const admin = createAdminClient();
+    const shopifyOrderId = typeof input.shopify_order_id === "string" ? input.shopify_order_id.trim() : "";
+    const orderNumber = typeof input.order_number === "string" ? input.order_number.trim() : "";
+    const orderId = typeof input.order_id === "string" ? input.order_id.trim() : "";
+    if (!shopifyOrderId && !orderNumber && !orderId) {
+      return "get_remedy_state: pass one of {shopify_order_id, order_number, order_id}";
+    }
+    const { getOrderRemedyState, formatOrderRemedyState } = await import("@/lib/cx-agent-sdk");
+    const state = await getOrderRemedyState(admin, workspaceId, {
+      orderId: orderId || undefined,
+      shopifyOrderId: shopifyOrderId || undefined,
+      orderNumber: orderNumber || undefined,
+    });
+    return formatOrderRemedyState(state);
+  }
+
   // Admin-side tool: latest ticket analysis. Doesn't need a customer
   // resolved (some analyses run on tickets without customers).
   if (name === "get_ticket_analysis") {
