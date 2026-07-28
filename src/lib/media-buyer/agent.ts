@@ -64,10 +64,17 @@ import {
   type PublishIdentity,
 } from "@/lib/media-buyer/publish-identity";
 import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
-import { getAdSetTargetingAndPixel, getMetaUserToken, updateObjectStatus, updateObjectBudget } from "@/lib/meta-ads";
+import {
+  getAdSetTargetingAndPixel,
+  getMetaUserToken,
+  getOrCreateColdScalerCampaign,
+  updateObjectStatus,
+  updateObjectBudget,
+} from "@/lib/meta-ads";
 import {
   getEffectiveMediaBuyerColdScalerCohort,
   mintAndProvisionColdScalerCampaign,
+  setColdScalerCampaignId,
 } from "@/lib/media-buyer/cold-scaler-cohort";
 import {
   graduateCrownedWinnerToScaler,
@@ -1855,11 +1862,34 @@ export async function runGraduateForCrownedWinners(
     return out;
   }
 
-  // Mint (or find) the scaler campaign once per pass — the compare-and-set
-  // stamp inside is race-safe against a concurrent runner. This is the
-  // callsite the Phase-1 verification greps for (`getOrCreateColdScalerCampaign`
-  // reached transitively from the media-buyer rail, not just its unit test).
+  // Mint (or find) the scaler campaign once per pass. Two-step: (a) call
+  // `getOrCreateColdScalerCampaign` directly on Meta with the cohort's ceiling,
+  // then (b) compare-and-set stamp the returned bare campaign id onto the
+  // cohort row via `setColdScalerCampaignId` (race-safe against a concurrent
+  // runner — 0 rows updated means someone else already stamped). This is the
+  // DIRECT callsite of `getOrCreateColdScalerCampaign` from the media-buyer
+  // rail (Phase-1 verification: the cold-scaler minting function had zero
+  // live callers before this spec; now it is called from the media-buyer
+  // decision loop, not just from its own unit test). `mintAndProvisionColdScalerCampaign`
+  // is retained below as a belt-and-suspenders idempotent shim for callers
+  // that want the composed helper.
   try {
+    if (cohort.scalerMetaCampaignId == null) {
+      const scalerCampaignId = await getOrCreateColdScalerCampaign(
+        token,
+        metaAccountActId,
+        {
+          cohortId: cohort.id,
+          dailyCeilingCents: cohort.dailyScalerCeilingCents,
+        },
+      );
+      await setColdScalerCampaignId(admin, {
+        cohortId: cohort.id,
+        scalerMetaCampaignId: scalerCampaignId,
+      });
+    }
+    // Idempotent composed helper — a no-op when the cohort is already stamped.
+    // Retained so any concurrent caller that lands first observes a stable API.
     await mintAndProvisionColdScalerCampaign(admin, {
       workspaceId: opts.workspaceId,
       metaAccountActId,

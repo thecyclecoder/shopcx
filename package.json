@@ -135,6 +135,7 @@
     "test:media-buyer-cold-scaler-arming-gate": "tsx --test src/lib/media-buyer/cold-scaler-arming-gate.test.ts",
     "test:media-buyer-cold-scaler-cac-ltv-sensor": "tsx --test src/lib/media-buyer/cold-scaler-cac-ltv-sensor.test.ts",
     "test:media-buyer-graduate-scaler": "tsx --test src/lib/media-buyer/graduate-scaler.test.ts",
+    "test:graduate-crowned": "tsx --test src/lib/media-buyer/graduate-scaler.test.ts src/lib/media-buyer/agent.test.ts",
     "test:cold-scaler-graduate-heartbeat": "tsx --test src/lib/media-buyer/cold-scaler-graduate-heartbeat.test.ts",
     "test:meta-graph-retry-permanent": "tsx --test src/lib/meta/graph-retry.permanent.test.ts",
     "test:media-buyer-purchaser-overlap": "tsx --test src/lib/media-buyer/purchaser-overlap.test.ts",

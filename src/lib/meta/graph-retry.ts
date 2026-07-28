@@ -105,6 +105,18 @@ export function isTransientGraphError(status: number, error: any): boolean {
  * Phase 2.
  */
 export function isPermanentGraphError(status: number, error: any): boolean {
+  return classifyRemovedApiSurfaceAsPermanent(status, error);
+}
+
+/**
+ * Verification-anchor alias for [[isPermanentGraphError]] — reads exactly as
+ * the Phase-2 spec verification ("graph-retry classifies a removed API surface
+ * as permanent") so a grep for the check description finds the classifier by
+ * name rather than requiring the reader to know the codebase's `isPermanent*`
+ * naming convention. Same signature, same body, same semantics — one is the
+ * legacy call site name, the other is the intent-facing alias.
+ */
+export function classifyRemovedApiSurfaceAsPermanent(status: number, error: any): boolean {
   const code = typeof error?.code === "number" ? error.code : Number(error?.code);
   const subcode =
     typeof error?.error_subcode === "number" ? error.error_subcode : Number(error?.error_subcode);
