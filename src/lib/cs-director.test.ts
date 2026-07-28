@@ -39,13 +39,17 @@ import {
   buildRemedySonnetDecision,
   canOfferOneTapApproval,
   extractRemedyCustomerMessage,
+  extractRemedyOrderRefFromStep,
   planAuthorSpec,
   planRemedyExecution,
+  verifyPlanAgainstRemedyStates,
   type ApproveRemedyDeps,
   type AuthorSpecDeps,
   type CsDirectorApplyDeps,
   type CsDirectorVerdictInput,
+  type RemedyActionStep,
 } from "./cs-director";
+import type { CxOrderRemedyState } from "./cx-agent-sdk";
 import { decideCsDirectorTicketTransition } from "./cs-director-ticket-transition";
 import type { StructuredSpecInput } from "./author-spec";
 
@@ -861,6 +865,29 @@ test("Phase 2 — a 2-action batch runs both actions in ORDER, then delivers the
   const deps: ApproveRemedyDeps = {
     loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
     loadWorkspaceSandbox: async () => false,
+    // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — the executor's guard
+    // reads live remedy state per money action target order; stub it as a clean $200 order with
+    // nothing refunded + no live returns so the guard passes and the batch reaches the executor.
+    loadRemedyStates: async () =>
+      new Map<string, CxOrderRemedyState>([
+        [
+          "SC131156",
+          {
+            found: true,
+            workspace_id: "ws-1",
+            order_id: "order-uuid-SC131156",
+            order_number: "SC131156",
+            shopify_order_id: null,
+            financial_status: "paid",
+            total_cents: 20000,
+            refunds_succeeded_cents: 0,
+            remaining_refundable_cents: 20000,
+            succeeded_refunds: [],
+            returns: [],
+            open_returns: [],
+          },
+        ],
+      ]),
     runExecutor: async (_ctx, decision, _send, sysNote) => {
       executorCalls += 1;
       seenDecisions.push(decision);
@@ -962,6 +989,29 @@ test("Phase 2 — a 2-action batch whose 2nd action fails: NO customer message, 
   const deps: ApproveRemedyDeps = {
     loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
     loadWorkspaceSandbox: async () => false,
+    // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — stub the executor's
+    // guard state read as clean so the failure surface asserted below is the EXECUTOR'S
+    // per-action failure, not the state guard's up-front reject.
+    loadRemedyStates: async () =>
+      new Map<string, CxOrderRemedyState>([
+        [
+          "SC131156",
+          {
+            found: true,
+            workspace_id: "ws-1",
+            order_id: "order-uuid-SC131156",
+            order_number: "SC131156",
+            shopify_order_id: null,
+            financial_status: "paid",
+            total_cents: 20000,
+            refunds_succeeded_cents: 0,
+            remaining_refundable_cents: 20000,
+            succeeded_refunds: [],
+            returns: [],
+            open_returns: [],
+          },
+        ],
+      ]),
     runExecutor: async (_ctx, _decision, _send, sysNote) => {
       // Simulate handleDirectAction's success + failure sysNote lines: action #1 landed, action
       // #2 failed → escalated (see the else-branch at src/lib/action-executor.ts:~3247).
@@ -978,7 +1028,7 @@ test("Phase 2 — a 2-action batch whose 2nd action fails: NO customer message, 
     reasoning: "in-leash",
     remedy: {
       actions: [
-        { action_type: "partial_refund", payload: { amount_cents: 3000 } },
+        { action_type: "partial_refund", payload: { amount_cents: 3000, order_number: "SC131156" } },
         { action_type: "change_next_date", payload: { next_billing_date: "2026-10-06", contract_id: "c1" } },
       ],
       customer_message: "This message must NOT ship — the 2nd action failed.",
@@ -1453,4 +1503,153 @@ test("Phase 2/3 back-compat — passing a bare ApproveRemedyDeps still routes ap
   assert.equal(result.ok, true);
   assert.equal(result.handler, "approve_remedy");
   assert.equal(executorCalled, true);
+});
+
+// ── Live remedy-state hard-reject guard (spec: a-money-remedy-must-read-the-live-remedy-state-first Phase 1) ──
+//
+// Test-first for the NAMED failing state (ticket 86043da0, Jan Bloom): SC135494 $182.95 order,
+// $15 already refunded, a live `returns` row with `refunded_at IS NULL` — June proposing another
+// $167.95 refund would DOUBLE-PAY. The guard MUST reject on `live_return_would_double_pay` first,
+// then on `amount_exceeds_remaining_refundable` when no live return but the amount is too high,
+// and pass cleanly when neither rail trips.
+
+/** Baseline: a $200 order (20000 cents) with nothing refunded and no returns → clean. */
+function cleanState(): CxOrderRemedyState {
+  return {
+    found: true,
+    workspace_id: "ws-1",
+    order_id: "order-uuid-1",
+    order_number: "SC135494",
+    shopify_order_id: null,
+    financial_status: "paid",
+    total_cents: 20000,
+    refunds_succeeded_cents: 0,
+    remaining_refundable_cents: 20000,
+    succeeded_refunds: [],
+    returns: [],
+    open_returns: [],
+  };
+}
+
+test("verifyPlanAgainstRemedyStates — REJECTS when a live un-refunded return covers the target order (Jan Bloom shape)", () => {
+  // Reproduces ticket 86043da0: SC135494 $182.95, prior $15 refund, and a live `returns` row
+  // with refunded_at=null. Even if the proposed refund is ONLY the residual $167.95, the return
+  // is going to fire on receipt — so a fresh refund double-pays.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    total_cents: 18295,
+    refunds_succeeded_cents: 1500,
+    remaining_refundable_cents: 16795,
+    succeeded_refunds: [
+      { id: "r1", vendor: "braintree", vendor_refund_id: "txn-1", amount_cents: 1500, status: "succeeded", requested_at: "2026-07-27T19:56:00Z" },
+    ],
+    returns: [
+      {
+        id: "ret-1",
+        status: "label_created",
+        resolution_type: "refund_return",
+        net_refund_cents: 18295,
+        label_cost_cents: 700,
+        refunded_at: null,
+        delivered_at: null,
+        shipped_at: null,
+        created_at: "2026-07-27T20:32:00Z",
+        refund_id: null,
+        tracking_number: null,
+      },
+    ],
+    open_returns: [
+      {
+        id: "ret-1",
+        status: "label_created",
+        resolution_type: "refund_return",
+        net_refund_cents: 18295,
+        label_cost_cents: 700,
+        refunded_at: null,
+        delivered_at: null,
+        shipped_at: null,
+        created_at: "2026-07-27T20:32:00Z",
+        refund_id: null,
+        tracking_number: null,
+      },
+    ],
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494", amount_cents: 16795 })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 16795, reason: "requested refund" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "live_return_would_double_pay");
+  assert.equal(verdict.violation.actionType, "partial_refund");
+});
+
+test("verifyPlanAgainstRemedyStates — REJECTS when summed amount exceeds remaining refundable (no live return)", () => {
+  // $200 order, $50 already refunded → $150 remaining refundable. A batch of 2×$100 partial_refund
+  // sums to $200 > $150 and must be refused even without a live return.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    total_cents: 20000,
+    refunds_succeeded_cents: 5000,
+    remaining_refundable_cents: 15000,
+    succeeded_refunds: [
+      { id: "r1", vendor: "braintree", vendor_refund_id: "txn-1", amount_cents: 5000, status: "succeeded", requested_at: "2026-07-27T19:56:00Z" },
+    ],
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 10000, reason: "part A" } },
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 10000, reason: "part B" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "amount_exceeds_remaining_refundable");
+});
+
+test("verifyPlanAgainstRemedyStates — PASSES a clean state with amount ≤ remaining refundable and no live return", () => {
+  const state = cleanState();
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, true);
+});
+
+test("verifyPlanAgainstRemedyStates — non-money actions never trip the guard (a batch with change_next_date + resume is a no-op here)", () => {
+  const plan: RemedyActionStep[] = [
+    { actionType: "change_next_date", actionParams: { subscription_id: "sub-1", next_date: "2026-08-15" } },
+    { actionType: "resume", actionParams: { contract_id: "contract-1" } },
+  ];
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, true);
+});
+
+test("verifyPlanAgainstRemedyStates — a money step with no resolvable order reference fails closed (missing_order_reference)", () => {
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { amount_cents: 5000, reason: "no order id" } },
+  ];
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "missing_order_reference");
+});
+
+test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled into shopify_order_id", () => {
+  // partial_refund's executor resolves a non-digit shopify_order_id against the order_number column
+  // (action-executor.ts:2227). The extractor mirrors that so the state lookup matches what the
+  // executor will fire against.
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494", amount_cents: 100 });
+  assert.notEqual(ref, null);
+  assert.equal(ref!.orderNumber, "SC135494");
+  assert.equal(ref!.shopifyOrderId, null);
+  assert.equal(ref!.key, "SC135494");
 });

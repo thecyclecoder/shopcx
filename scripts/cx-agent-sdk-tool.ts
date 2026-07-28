@@ -35,7 +35,10 @@ if (existsSync(envPath)) {
 }
 
 async function main() {
-  const [, , verb, ticketId] = process.argv;
+  // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — `remedy_state` takes an
+  // extra order reference as an optional 4th argv: a JSON object like
+  // `{"order_number":"SC135494"}` or `{"shopify_order_id":"6…"}` or `{"order_id":"<uuid>"}`.
+  const [, , verb, ticketId, orderRefJson] = process.argv;
   const {
     CX_SDK_VERBS,
     isCxSdkVerb,
@@ -45,7 +48,7 @@ async function main() {
   } = await import("../src/lib/cx-agent-sdk");
   if (!verb || !ticketId) {
     console.error(
-      `usage: cx-agent-sdk-tool.ts <verb> <ticket_id>\nverbs: ${CX_SDK_VERBS.join(" · ")}`,
+      `usage: cx-agent-sdk-tool.ts <verb> <ticket_id> [json_input]\nverbs: ${CX_SDK_VERBS.join(" · ")}\n(remedy_state json_input: {"order_number":"…"} | {"shopify_order_id":"…"} | {"order_id":"…"})`,
     );
     process.exit(2);
   }
@@ -61,6 +64,25 @@ async function main() {
   if (!isValidCxTicketId(ticketId)) {
     console.error(invalidCxTicketIdMessage(ticketId));
     process.exit(2);
+  }
+
+  let orderRef: { orderId?: string; shopifyOrderId?: string; orderNumber?: string } | undefined;
+  if (orderRefJson) {
+    try {
+      const parsed = JSON.parse(orderRefJson) as {
+        order_id?: string;
+        shopify_order_id?: string;
+        order_number?: string;
+      };
+      orderRef = {
+        orderId: typeof parsed.order_id === "string" ? parsed.order_id : undefined,
+        shopifyOrderId: typeof parsed.shopify_order_id === "string" ? parsed.shopify_order_id : undefined,
+        orderNumber: typeof parsed.order_number === "string" ? parsed.order_number : undefined,
+      };
+    } catch {
+      console.error(`refused: json_input must be a JSON object (got: ${orderRefJson.slice(0, 80)})`);
+      process.exit(2);
+    }
   }
 
   const { createAdminClient } = await import("../src/lib/supabase/admin");
@@ -79,6 +101,7 @@ async function main() {
     verb,
     ticket.workspace_id as string,
     (ticket.customer_id as string | null) ?? null,
+    { orderRef },
   );
   process.stdout.write(result);
 }

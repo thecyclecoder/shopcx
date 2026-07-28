@@ -46,6 +46,11 @@ const READ_TOOLS = new Set([
   // superseded_by IS NULL). Optional json_input `{"slug":"<slug>"}` narrows to
   // one policy; the argless form lists every active policy for the workspace.
   "get_policies",
+  // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — the live remedy state for
+  // ONE order (returns / order_refunds / financial_status / remaining_refundable_cents). MANDATORY
+  // precondition for any money remedy the CS Director proposes. Input JSON:
+  // `{"shopify_order_id":"…"}` | `{"order_number":"…"}` | `{"order_id":"…"}`.
+  "get_remedy_state",
   // Account linking is FUNDAMENTAL to ticket handling. get_link_candidates surfaces graded unlinked
   // siblings (address/phone-corroborated = high) so Sol/June catch a same-person second account before
   // concluding "no such account/charge"; search_orders reconciles a disputed "$X on <date>" charge

@@ -202,6 +202,294 @@ export interface CxActionableOutcomes {
   workflows: CxActionableWorkflow[];
 }
 
+// ── Live remedy state for a single order (Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first) ──
+
+/**
+ * One `returns` row surfaced to a money-remedy proposer / executor guard. Focused on the fields
+ * that decide whether a NEW money remedy would double-pay an already-committed refund path:
+ *
+ *  - `status` — `open` / `label_created` / `in_transit` / `delivered` / `refunded` / `cancelled` / `closed`
+ *    (per [[../tables/returns]]). Anything with `refunded_at IS NULL` AND `status != 'cancelled'` is
+ *    LIVE — the return refund is either pending EasyPost delivery or already fired but pending
+ *    reconciliation; either way a fresh money remedy on the same order would be a second payout.
+ *  - `refunded_at` — the terminal timestamp on a return that already paid out. NULL == live.
+ *  - `net_refund_cents` — the amount the return will refund on receipt (the [[../tables/returns]]
+ *    contract; the ledger caps it downward at fire time but never raises it).
+ *  - `resolution_type` — `refund_return` / `store_credit_return` / `refund_no_return` / `store_credit_no_return`.
+ *    A store-credit resolution moves no money on the CARD side but still commits value.
+ */
+export interface CxRemedyReturnRow {
+  id: string;
+  status: string;
+  resolution_type: string | null;
+  net_refund_cents: number;
+  label_cost_cents: number;
+  refunded_at: string | null;
+  delivered_at: string | null;
+  shipped_at: string | null;
+  created_at: string;
+  refund_id: string | null;
+  tracking_number: string | null;
+}
+
+/**
+ * One `order_refunds` mirror row for a succeeded/settled refund on the order. Written by the
+ * refund chokepoint at [[../libraries/refund]] `refundOrder` (see [[../tables/order_refunds]]).
+ * We surface only the fields a proposer / guard needs to reason about remaining refundable value.
+ */
+export interface CxRemedyRefundRow {
+  id: string;
+  vendor: string;
+  vendor_refund_id: string | null;
+  amount_cents: number;
+  status: string;
+  requested_at: string;
+}
+
+/**
+ * The live remedy state of a SINGLE order. Read-only snapshot the CS Director's proposer + the
+ * executor's hard-reject guard both consume — the WHOLE point (spec:
+ * a-money-remedy-must-read-the-live-remedy-state-first Phase 1) is that a money remedy proposer
+ * MUST see this before proposing a refund. Ticket 86043da0 (Jan Bloom): SC135494 $182.95 order,
+ * $15 already refunded, a live `returns` row with `refunded_at IS NULL` and
+ * `net_refund_cents=18295` — a proposal for another $167.95 refund would have double-paid the
+ * whole order.
+ */
+export interface CxOrderRemedyState {
+  /** True when we resolved a row in `orders`. Everything else is null-safe on `found=false`. */
+  found: boolean;
+  workspace_id: string;
+  order_id: string | null;
+  order_number: string | null;
+  shopify_order_id: string | null;
+  financial_status: string | null;
+  total_cents: number;
+  /**
+   * Sum of `order_refunds.amount_cents` where `status IN ('succeeded','settled')`. The
+   * "already succeeded" number the remaining-refundable computation subtracts from `total_cents`.
+   */
+  refunds_succeeded_cents: number;
+  /**
+   * `total_cents - refunds_succeeded_cents` (floored at 0). The CEILING for any NEW money remedy
+   * on this order — a partial_refund whose `amount_cents` exceeds this is a double-pay.
+   */
+  remaining_refundable_cents: number;
+  /** Every succeeded/settled refund mirror row, most-recent-first. */
+  succeeded_refunds: CxRemedyRefundRow[];
+  /** Every non-cancelled return on the order, most-recent-first. */
+  returns: CxRemedyReturnRow[];
+  /**
+   * The subset of `returns` that are LIVE — the return refund has not fired yet and the return is
+   * not cancelled. `refunded_at IS NULL` AND `status != 'cancelled'`. A money remedy proposer that
+   * finds ANY live open return on the target order must ACCOUNT for it — the refund pipeline will
+   * fire the return's refund on EasyPost delivery, and a separate proposer refund is a double-pay.
+   */
+  open_returns: CxRemedyReturnRow[];
+}
+
+/** Reference the caller passes to identify the order — any one of the three columns resolves it. */
+export interface CxOrderRemedyStateRef {
+  orderId?: string | null;
+  shopifyOrderId?: string | null;
+  orderNumber?: string | null;
+}
+
+const REMEDY_STATE_TERMINAL_REFUND_STATUSES = new Set(["succeeded", "settled"]);
+const REMEDY_STATE_LIVE_RETURN_EXCLUDED_STATUSES = new Set(["cancelled"]);
+
+/**
+ * Live remedy state for a single order. Reads-only from [[../tables/orders]] + [[../tables/returns]]
+ * + [[../tables/order_refunds]]; scoped to the workspace on every query (learning #6 — workspace
+ * scope is re-asserted on every read, not inferred). A missing order returns `found:false` with
+ * empty arrays so a caller can't mistake it for "clean state" — the guard MUST fail-safe.
+ *
+ * Resolution: the caller can pass any of `orderId` (internal `orders.id` UUID),
+ * `shopifyOrderId`, or `orderNumber`. We try the most-specific first (orderId → shopifyOrderId
+ * → orderNumber) so the executor's `partial_refund` handler (which resolves the internal UUID
+ * up-front) can pass `orderId` and skip a second lookup. Read-only; safe to call from a Sonnet
+ * tool or the box CX SDK.
+ */
+export async function getOrderRemedyState(
+  admin: Admin,
+  workspaceId: string,
+  ref: CxOrderRemedyStateRef,
+): Promise<CxOrderRemedyState> {
+  const empty: CxOrderRemedyState = {
+    found: false,
+    workspace_id: workspaceId,
+    order_id: null,
+    order_number: ref.orderNumber ?? null,
+    shopify_order_id: ref.shopifyOrderId ?? null,
+    financial_status: null,
+    total_cents: 0,
+    refunds_succeeded_cents: 0,
+    remaining_refundable_cents: 0,
+    succeeded_refunds: [],
+    returns: [],
+    open_returns: [],
+  };
+
+  let query = admin
+    .from("orders")
+    .select("id, order_number, shopify_order_id, total_cents, financial_status")
+    .eq("workspace_id", workspaceId)
+    .limit(1);
+  if (ref.orderId) query = query.eq("id", ref.orderId);
+  else if (ref.shopifyOrderId) query = query.eq("shopify_order_id", ref.shopifyOrderId);
+  else if (ref.orderNumber) query = query.eq("order_number", ref.orderNumber);
+  else return empty;
+
+  const { data: orderRows } = await query;
+  const order = (orderRows?.[0] as {
+    id: string;
+    order_number: string | null;
+    shopify_order_id: string | null;
+    total_cents: number | null;
+    financial_status: string | null;
+  } | undefined) ?? null;
+  if (!order) return empty;
+
+  const [refundsRes, returnsRes] = await Promise.all([
+    admin
+      .from("order_refunds")
+      .select("id, vendor, vendor_refund_id, amount_cents, status, requested_at")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .order("requested_at", { ascending: false }),
+    admin
+      .from("returns")
+      .select(
+        "id, status, resolution_type, net_refund_cents, label_cost_cents, refunded_at, delivered_at, shipped_at, created_at, refund_id, tracking_number",
+      )
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .order("created_at", { ascending: false }),
+  ]);
+
+  const refundsRaw = (refundsRes.data ?? []) as Array<{
+    id: string;
+    vendor: string;
+    vendor_refund_id: string | null;
+    amount_cents: number | null;
+    status: string;
+    requested_at: string;
+  }>;
+  const succeeded_refunds: CxRemedyRefundRow[] = refundsRaw
+    .filter((r) => REMEDY_STATE_TERMINAL_REFUND_STATUSES.has(String(r.status)))
+    .map((r) => ({
+      id: r.id,
+      vendor: r.vendor,
+      vendor_refund_id: r.vendor_refund_id ?? null,
+      amount_cents: r.amount_cents ?? 0,
+      status: r.status,
+      requested_at: r.requested_at,
+    }));
+  const refunds_succeeded_cents = succeeded_refunds.reduce((acc, r) => acc + (r.amount_cents ?? 0), 0);
+
+  const returnsRaw = (returnsRes.data ?? []) as Array<{
+    id: string;
+    status: string;
+    resolution_type: string | null;
+    net_refund_cents: number | null;
+    label_cost_cents: number | null;
+    refunded_at: string | null;
+    delivered_at: string | null;
+    shipped_at: string | null;
+    created_at: string;
+    refund_id: string | null;
+    tracking_number: string | null;
+  }>;
+  const returns: CxRemedyReturnRow[] = returnsRaw.map((r) => ({
+    id: r.id,
+    status: r.status,
+    resolution_type: r.resolution_type ?? null,
+    net_refund_cents: r.net_refund_cents ?? 0,
+    label_cost_cents: r.label_cost_cents ?? 0,
+    refunded_at: r.refunded_at ?? null,
+    delivered_at: r.delivered_at ?? null,
+    shipped_at: r.shipped_at ?? null,
+    created_at: r.created_at,
+    refund_id: r.refund_id ?? null,
+    tracking_number: r.tracking_number ?? null,
+  }));
+  const open_returns: CxRemedyReturnRow[] = returns.filter(
+    (r) => !r.refunded_at && !REMEDY_STATE_LIVE_RETURN_EXCLUDED_STATUSES.has(String(r.status)),
+  );
+
+  const totalCents = order.total_cents ?? 0;
+  const remaining = Math.max(0, totalCents - refunds_succeeded_cents);
+
+  return {
+    found: true,
+    workspace_id: workspaceId,
+    order_id: order.id,
+    order_number: order.order_number ?? null,
+    shopify_order_id: order.shopify_order_id ?? null,
+    financial_status: order.financial_status ?? null,
+    total_cents: totalCents,
+    refunds_succeeded_cents,
+    remaining_refundable_cents: remaining,
+    succeeded_refunds,
+    returns,
+    open_returns,
+  };
+}
+
+/**
+ * Plain-text rendering of `getOrderRemedyState` — the shape the CS Director's session reads on the
+ * mandatory precondition tool call AND the shape the founder card renders on `remedy_state`. Every
+ * line is deterministic (no clock, no locale-dependent formatting) so a snapshot test can pin the
+ * exact wording. A `found:false` state renders explicitly so a caller can tell "no order matched"
+ * from "the order is clean" — never a silent empty snapshot.
+ */
+export function formatOrderRemedyState(state: CxOrderRemedyState): string {
+  const parts: string[] = [];
+  const label = state.order_number
+    ? `#${state.order_number}`
+    : state.shopify_order_id
+      ? `shopify:${state.shopify_order_id}`
+      : state.order_id
+        ? `id:${state.order_id.slice(0, 8)}`
+        : "(unresolved)";
+  if (!state.found) {
+    parts.push(`ORDER REMEDY STATE for ${label}: (order not found in this workspace)`);
+    return parts.join("\n");
+  }
+  parts.push(
+    `ORDER REMEDY STATE for ${label}: total ${DOLLARS(state.total_cents)} · financial_status=${state.financial_status ?? "?"} · refunded_so_far ${DOLLARS(state.refunds_succeeded_cents)} · REMAINING REFUNDABLE ${DOLLARS(state.remaining_refundable_cents)}`,
+  );
+  if (state.succeeded_refunds.length === 0) {
+    parts.push("  refunds: (none)");
+  } else {
+    parts.push("  refunds:");
+    for (const r of state.succeeded_refunds) {
+      parts.push(
+        `    - ${DOLLARS(r.amount_cents)} · ${r.vendor}${r.vendor_refund_id ? ` (txn ${r.vendor_refund_id})` : ""} · ${r.status} · ${r.requested_at.slice(0, 19)}`,
+      );
+    }
+  }
+  if (state.returns.length === 0) {
+    parts.push("  returns: (none)");
+  } else {
+    parts.push("  returns:");
+    for (const r of state.returns) {
+      const live = !r.refunded_at && !REMEDY_STATE_LIVE_RETURN_EXCLUDED_STATUSES.has(String(r.status));
+      const flag = live ? " ⚠ LIVE (refund will fire on delivery)" : "";
+      const refundedAt = r.refunded_at ? ` · refunded_at=${r.refunded_at.slice(0, 19)}` : "";
+      parts.push(
+        `    - status=${r.status} · resolution=${r.resolution_type ?? "?"} · net_refund ${DOLLARS(r.net_refund_cents)}${refundedAt}${flag}`,
+      );
+    }
+  }
+  if (state.open_returns.length > 0) {
+    const returnRefunds = state.open_returns.reduce((acc, r) => acc + (r.net_refund_cents ?? 0), 0);
+    parts.push(
+      `  ⚠ ${state.open_returns.length} live return(s) will refund ${DOLLARS(returnRefunds)} on receipt — a fresh money remedy on this order will DOUBLE-PAY.`,
+    );
+  }
+  return parts.join("\n");
+}
+
 // ── Ticket id UUID guard ──────────────────────────────────────────────────────
 
 /**
@@ -835,6 +1123,12 @@ export const CX_SDK_VERBS = [
   "products",
   "policies",
   "bundle",
+  // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first — the live remedy state for
+  // ONE order. Takes an extra order reference (order_number / shopify_order_id / order_id) and is
+  // the mandatory precondition for any money remedy the CS Director proposes (mirrors the
+  // get_policies precondition pattern that already gates Sol's non-money asks). See
+  // `formatOrderRemedyState` above for the text shape the founder card + the box session both read.
+  "remedy_state",
 ] as const;
 export type CxSdkVerb = (typeof CX_SDK_VERBS)[number];
 
@@ -846,12 +1140,18 @@ export function isCxSdkVerb(v: string): v is CxSdkVerb {
  * Dispatch a verb to its formatted text output. The CLI (scripts/cx-agent-sdk-
  * tool.ts) is a very thin wrapper around this — one place tests can exercise
  * the SDK's read + render surface without shelling to node.
+ *
+ * `remedy_state` requires an extra order reference via `opts.orderRef` — any one of
+ * `orderNumber` / `shopifyOrderId` / `orderId`. When none of the three is provided we return an
+ * explicit "no order reference" message rather than falling through to a bare snapshot (a silent
+ * empty state would look like "clean order" — the exact class the Phase-1 spec closes).
  */
 export async function runCxSdkVerb(
   admin: Admin,
   verb: CxSdkVerb,
   workspaceId: string,
   customerId: string | null,
+  opts?: { orderRef?: CxOrderRemedyStateRef },
 ): Promise<string> {
   switch (verb) {
     case "customer": {
@@ -880,6 +1180,14 @@ export async function runCxSdkVerb(
     case "bundle": {
       const b = await getCxBundle(admin, workspaceId, customerId);
       return formatCxBundle(b);
+    }
+    case "remedy_state": {
+      const ref = opts?.orderRef ?? {};
+      if (!ref.orderId && !ref.shopifyOrderId && !ref.orderNumber) {
+        return "REMEDY STATE: (no order reference — pass order_number / shopify_order_id / order_id)";
+      }
+      const s = await getOrderRemedyState(admin, workspaceId, ref);
+      return formatOrderRemedyState(s);
     }
   }
 }

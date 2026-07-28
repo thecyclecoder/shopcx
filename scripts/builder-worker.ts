@@ -14496,6 +14496,42 @@ interface CsDirectorVerdict {
 // Any missing/invalid `decision` becomes 'escalate_founder' — the shape-safe conservative default: a
 // runner that can't parse the verdict must NEVER silently upgrade to auto-approve/auto-author. Same
 // rule the deploy-review runner uses for its unparseable-verdict fallback.
+/**
+ * Return true when the CS Director verdict proposes at least one MONEY action — the fail-closed
+ * predicate for the `remedy_state` mandatory-precondition rail (Phase 1 of
+ * a-money-remedy-must-read-the-live-remedy-state-first § bullet 2). Reads BOTH `remedy` (the
+ * auto-execute plan on approve_remedy / the in-leash partial on escalate_founder) and
+ * `recommended_remedy` (the CEO-approves-on-tap plan on escalate_founder) — either can carry a
+ * money type that requires the state read. Mirrors the MONEY_ACTION_TYPES set in
+ * src/lib/june-remedy-approval.ts (kept literal here to avoid a runtime import from the box
+ * runner's top-of-file surface).
+ */
+function verdictProposesMoneyAction(verdict: CsDirectorVerdict): boolean {
+  const MONEY = new Set([
+    "partial_refund",
+    "redeem_points_as_refund",
+    "create_replacement_order",
+    "dollar_replacement",
+    "apply_loyalty_coupon",
+    "redeem_points",
+  ]);
+  const bags: Array<Record<string, unknown> | undefined> = [verdict.remedy, verdict.recommended_remedy];
+  for (const bag of bags) {
+    if (!bag || typeof bag !== "object" || Array.isArray(bag)) continue;
+    const topType = typeof bag.action_type === "string" ? bag.action_type : "";
+    if (topType && MONEY.has(topType)) return true;
+    const actions = Array.isArray(bag.actions) ? (bag.actions as unknown[]) : [];
+    for (const step of actions) {
+      if (!step || typeof step !== "object" || Array.isArray(step)) continue;
+      const stepType = typeof (step as Record<string, unknown>).action_type === "string"
+        ? String((step as Record<string, unknown>).action_type)
+        : "";
+      if (stepType && MONEY.has(stepType)) return true;
+    }
+  }
+  return false;
+}
+
 function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -14725,7 +14761,9 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     brief,
     ``,
     `DETERMINISTIC READ-ONLY CX DATA — call the shared SDK for customer + merged identity, orders w/ per-unit, subscriptions w/ realized pricing + applied_discounts, active products, and active policies (never improvise SQL):`,
-    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
+    `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id> [json_input]   (verbs: customer · orders · subscriptions · products · policies · bundle · remedy_state)`,
+    ``,
+    `LIVE REMEDY STATE IS MANDATORY BEFORE ANY MONEY REMEDY (a-money-remedy-must-read-the-live-remedy-state-first Phase 1): if your verdict carries a money action — partial_refund, redeem_points_as_refund, create_replacement_order, or dollar_replacement — you are REQUIRED, for EACH target order, to run \`npx tsx scripts/cx-agent-sdk-tool.ts remedy_state <ticket_id> '{"order_number":"…"}'\` (or shopify_order_id) and reason AGAINST what it returns. The tool surfaces the order's succeeded refunds, remaining refundable value, and any LIVE open return whose refund fires on receipt. Your \`reasoning\` MUST name the remaining refundable value + acknowledge any live open return, and your money amount MUST fit inside remaining refundable AND MUST NOT be proposed on an order with a live open return. A verdict with a money remedy from a session that never called remedy_state on the target order is BLOCKED and escalated to needs_attention — the executor's hard-reject will refuse it deterministically regardless, but a proposal that ignores the state fails the audit trail too. This mirrors the mandatory-precondition shape get_policies already uses for Sol's non-money asks.`,
     `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder"|"close_no_action","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
@@ -14789,6 +14827,33 @@ async function runCsDirectorCallJob(job: Job) {
         log_tail: raw.slice(-2000),
       });
       console.warn(`${tag} unparseable verdict — needs_attention`);
+      return;
+    }
+
+    // Phase 1 of a-money-remedy-must-read-the-live-remedy-state-first § bullet 2 — MANDATORY
+    // PRECONDITION on money verdicts. A verdict whose remedy or recommended_remedy carries a
+    // money action MUST have invoked `remedy_state` on the session's raw transcript before
+    // proposing (mirrors the `get_policies` fail-closed pattern above). A verdict that skipped
+    // the read is BLOCKED: we escalate to needs_attention rather than dispatch the executor. The
+    // executor's `verifyPlanAgainstRemedyStates` guard also rejects a double-pay deterministically,
+    // but this rail also catches proposals that HAPPEN to be non-double-pay but were made without
+    // reading the state — the process gap the Jan Bloom ticket exposed. Same regex-on-log_tail
+    // fail-closed shape the get_policies MANDATORY block uses.
+    const proposedMoney = verdictProposesMoneyAction(verdict);
+    const remedyStateWasRead = /cx-agent-sdk-tool\.ts\s+remedy_state/.test(raw);
+    if (proposedMoney && !remedyStateWasRead) {
+      const skipReason =
+        "cs-director-call proposed a money remedy without calling remedy_state (a-money-remedy-must-read-the-live-remedy-state-first § bullet 2) — needs_attention; the executor's hard-reject would refuse it anyway.";
+      console.warn(`${tag} ${skipReason}`);
+      await stampAgentSessionNote(
+        ticketId,
+        `June's session ${sessShort}: money remedy proposed without reading live remedy state — escalated to needs_attention for CX review.`,
+      );
+      await update(job.id, {
+        status: "needs_attention",
+        error: skipReason,
+        log_tail: raw.slice(-2000),
+      });
       return;
     }
 
