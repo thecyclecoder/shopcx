@@ -93,6 +93,7 @@ The spec slug surfaced on every `director_activity.spec_slug` this module writes
 
 - [[media-buyer-agent]] `runMediaBuyerPass` action runner — after crown detection (via [[media-buyer__meta-cpa-signal]] `detectMetaCpaWinners`), the runner invokes `graduateCrownedWinnerToScaler` for each fresh crown. The graduate is a SIBLING of the existing `scale_up` verb on the test rail — the crown's parent adset still gets its `+step_pct` scale under the test campaign; the graduate additionally seeds the scaler campaign with the same creative.
 - [[../recipes/graduate-a-crowned-winner]] (future) — the human-run runbook when a workspace owner wants to explicitly graduate one winner (e.g. testing a fresh scaler crown after a mint).
+- [[cold-scaler-graduate-heartbeat]] — Phase 3 monitoring that reads the `cold_scaler_graduated` and `cold_scaler_graduate_skipped` audit rows this module writes, turns them into cohort heartbeats, and escalates when a cohort has eligible winners but no successful graduate in the past 7 days.
 
 ## Gotchas
 
