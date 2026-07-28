@@ -1909,6 +1909,10 @@ export async function escalateApprovalRequestToCeo(
  * escalate path (`escalateDiagnosisToCeo`) AND the Phase-2 reconcile backstop (`reconcileSwallowedEscalations`),
  * so a re-emitted notification is BYTE-FOR-BYTE the shape the inbox already renders — no inline approve (it
  * deep-links the CEO to the spec/goal to decide), `routed_to_function=CEO`, and the `dedupe_key` the dedupe holds on.
+ *
+ * one-open-escalation-per-thing Phase 1: the freshly-minted card carries `escalation_seen_count=1` and
+ * `escalation_last_seen_at=now()`. Every subsequent re-mint attempt for the same dedupe_key against this OPEN
+ * card TOUCHES those two fields instead of inserting a duplicate ([[../specs/one-open-escalation-per-thing]]).
  */
 function ceoEscalationNotification(args: {
   workspaceId: string;
@@ -1920,6 +1924,7 @@ function ceoEscalationNotification(args: {
   escalationKind: string;
 }) {
   const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
+  const nowIso = new Date().toISOString();
   return {
     workspace_id: args.workspaceId,
     type: APPROVAL_REQUEST_TYPE,
@@ -1935,34 +1940,261 @@ function ceoEscalationNotification(args: {
       spec_slug: args.specSlug ?? null,
       deep_link: args.deepLink,
       approve_action_id: null,
+      // one-open-escalation-per-thing Phase 1 — the persistent-vs-transient signal the duplicates
+      // used to convey with volume. The counter starts at 1 on first mint; every re-mint attempt for
+      // the same OPEN dedupe_key bumps it in-place instead of inserting.
+      escalation_seen_count: 1,
+      escalation_first_seen_at: nowIso,
+      escalation_last_seen_at: nowIso,
     },
     read: false,
     dismissed: false,
   };
 }
 
+/**
+ * The hourly per-dedupe-key mint ceiling. Above this, a runaway loop is emitting for the same
+ * condition — bumping the counter forever teaches the CEO to ignore the card. Instead we STOP
+ * touching the original card and emit ONE `escalation_loop_detected` card (keyed on
+ * `escalation_loop:{originalKey}` so it too dedupes to one). one-open-escalation-per-thing Phase 1.
+ */
+export const ESCALATION_MINT_CEILING_PER_HOUR = 60;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * The escalation-loop card the ceiling emits ONCE per original dedupe_key when the mint rate blows
+ * past `ESCALATION_MINT_CEILING_PER_HOUR`. Prefixed dedupe_key (`escalation_loop:{originalKey}`) so
+ * the same unique-open-card constraint applies to the loop-detected card itself — a loop-of-loops
+ * cannot re-amplify past one card.
+ */
+function escalationLoopCard(args: {
+  workspaceId: string;
+  originalDedupeKey: string;
+  originalTitle: string;
+  originalCount: number;
+  windowMs: number;
+  deepLink: string;
+}) {
+  const nowIso = new Date().toISOString();
+  const rate = Math.max(1, Math.round(args.originalCount / Math.max(1, args.windowMs / ONE_HOUR_MS)));
+  const body =
+    `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n` +
+    `An escalation loop was detected for "${args.originalTitle}" — the emitter tried to mint the same card ` +
+    `${args.originalCount} times in the last ${Math.max(1, Math.round(args.windowMs / (60 * 1000)))} minutes ` +
+    `(~${rate}/hr), past the ${ESCALATION_MINT_CEILING_PER_HOUR}/hr ceiling. The original card is left intact; ` +
+    `resolving the underlying condition (or dismissing that card) is what stops the emitter — this one is the ` +
+    `safety valve so a bug in a future caller cannot re-produce the 2026-07-28 320k-card storm.`.slice(0, 4000);
+  return {
+    workspace_id: args.workspaceId,
+    type: APPROVAL_REQUEST_TYPE,
+    title: `Escalation loop detected: ${args.originalTitle}`.slice(0, 200),
+    body,
+    link: args.deepLink,
+    metadata: {
+      routed_to_function: CEO,
+      escalated_by_director: PLATFORM,
+      escalation_kind: "escalation_loop_detected",
+      escalation_reason: body.slice(0, 2000),
+      dedupe_key: `escalation_loop:${args.originalDedupeKey}`,
+      original_dedupe_key: args.originalDedupeKey,
+      spec_slug: null,
+      deep_link: args.deepLink,
+      approve_action_id: null,
+      escalation_seen_count: 1,
+      escalation_first_seen_at: nowIso,
+      escalation_last_seen_at: nowIso,
+    },
+    read: false,
+    dismissed: false,
+  };
+}
+
+/** Postgres unique-violation code returned by PostgREST when the unique open-card index rejects a concurrent insert. */
+const UNIQUE_VIOLATION_CODE = "23505";
+
+/** The shape returned by `bumpOpenEscalationCard` — the caller uses `bumped` to decide whether to fall through to insert. */
+interface EscalationUpsertOutcome {
+  bumped: boolean;
+  ceilingHit: boolean;
+  seenCount: number;
+  firstSeenIso: string | null;
+  cardId: string | null;
+}
+
+/**
+ * one-open-escalation-per-thing Phase 1 — bump the open card for `dedupeKey` in-place (increment
+ * `escalation_seen_count`, refresh `escalation_last_seen_at`) so the founder can tell a persistent
+ * problem from a transient one WITHOUT the volume. Returns `bumped:false` when no open card exists
+ * (the caller inserts a fresh one), or `ceilingHit:true` when the hourly mint ceiling for this key
+ * has been crossed (the caller emits the escalation-loop card instead of touching this one further).
+ * Best-effort — a Supabase hiccup returns `bumped:false` so the caller still tries to insert (a rare
+ * duplicate is better than a suppressed escalation; the DB unique index catches that duplicate).
+ */
+async function bumpOpenEscalationCard(
+  admin: Admin,
+  workspaceId: string,
+  dedupeKey: string,
+): Promise<EscalationUpsertOutcome> {
+  const { data: existing, error: readErr } = await admin
+    .from("dashboard_notifications")
+    .select("id, metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("dismissed", false)
+    .eq("metadata->>dedupe_key", dedupeKey)
+    .limit(1);
+  if (readErr) return { bumped: false, ceilingHit: false, seenCount: 0, firstSeenIso: null, cardId: null };
+  const row = (existing ?? [])[0] as { id: string; metadata: Record<string, unknown> | null; created_at: string } | undefined;
+  if (!row) return { bumped: false, ceilingHit: false, seenCount: 0, firstSeenIso: null, cardId: null };
+
+  const meta = row.metadata ?? {};
+  const priorCount = Number((meta as Record<string, unknown>)["escalation_seen_count"] ?? 1) || 1;
+  const firstSeenIso =
+    (typeof (meta as Record<string, unknown>)["escalation_first_seen_at"] === "string"
+      ? String((meta as Record<string, unknown>)["escalation_first_seen_at"])
+      : null) ?? row.created_at;
+  const nextCount = priorCount + 1;
+
+  // Rolling-hour ceiling: how long ago the window opened (first_seen_at, or created_at as fallback).
+  // A card older than one hour whose count is still small is fine — reset the window rather than
+  // punishing a slow-persistent condition. We reset by keeping the same card but restamping
+  // first_seen_at to the current bump, and dropping the counter back to 1 for the fresh window.
+  const windowMs = Math.max(0, Date.now() - new Date(firstSeenIso).getTime());
+  const nowIso = new Date().toISOString();
+
+  if (windowMs > ONE_HOUR_MS) {
+    const { error: resetErr } = await admin
+      .from("dashboard_notifications")
+      .update({
+        read: false,
+        metadata: {
+          ...meta,
+          escalation_seen_count: 1,
+          escalation_first_seen_at: nowIso,
+          escalation_last_seen_at: nowIso,
+        },
+      })
+      .eq("id", row.id);
+    if (resetErr) return { bumped: false, ceilingHit: false, seenCount: priorCount, firstSeenIso, cardId: row.id };
+    return { bumped: true, ceilingHit: false, seenCount: 1, firstSeenIso: nowIso, cardId: row.id };
+  }
+
+  if (nextCount > ESCALATION_MINT_CEILING_PER_HOUR) {
+    // Do NOT bump the counter above the ceiling — leave the original card at exactly the ceiling
+    // value so the founder sees "this exceeded N/hr" instead of an ever-growing counter that also
+    // burdens the log. The caller emits the escalation-loop card (one, deduped) as the safety valve.
+    return { bumped: false, ceilingHit: true, seenCount: priorCount, firstSeenIso, cardId: row.id };
+  }
+
+  const { error: bumpErr } = await admin
+    .from("dashboard_notifications")
+    .update({
+      // read=false: a fresh signal reopens the card in the bell.
+      read: false,
+      metadata: {
+        ...meta,
+        escalation_seen_count: nextCount,
+        escalation_first_seen_at: firstSeenIso,
+        escalation_last_seen_at: nowIso,
+      },
+    })
+    .eq("id", row.id);
+  if (bumpErr) return { bumped: false, ceilingHit: false, seenCount: priorCount, firstSeenIso, cardId: row.id };
+  return { bumped: true, ceilingHit: false, seenCount: nextCount, firstSeenIso, cardId: row.id };
+}
+
+/**
+ * one-open-escalation-per-thing Phase 1 — the pure decision helper the emitter runs after
+ * `bumpOpenEscalationCard`. Kept unit-testable so the "bump-in-place vs insert-fresh vs
+ * emit-loop-card" fork can be exercised without a Supabase seam.
+ */
+export type EscalationMintDecision =
+  | { action: "insert" } // no OPEN card; caller inserts a fresh one
+  | { action: "bumped"; seenCount: number } // existing OPEN card touched in-place
+  | { action: "loop_detected"; originalCount: number; windowMs: number }; // ceiling hit; caller emits loop card
+
+export function decideEscalationMint(outcome: EscalationUpsertOutcome, nowMs: number): EscalationMintDecision {
+  if (outcome.ceilingHit) {
+    const windowMs = outcome.firstSeenIso ? Math.max(0, nowMs - new Date(outcome.firstSeenIso).getTime()) : ONE_HOUR_MS;
+    return { action: "loop_detected", originalCount: outcome.seenCount, windowMs };
+  }
+  if (outcome.bumped) return { action: "bumped", seenCount: outcome.seenCount };
+  return { action: "insert" };
+}
+
 export async function escalateDiagnosisToCeo(
   admin: Admin,
   args: { workspaceId: string; specSlug: string | null; title: string; diagnosis: string; dedupeKey: string; deepLink: string; escalationKind: string; metadata?: Record<string, unknown> },
-): Promise<{ emitted: boolean; error?: PostgrestError }> {
-  // Dedup on a notification that ACTUALLY EXISTS — one CEO-routed notification per dedupeKey, ever (survives
-  // a dismissed/read one). We key on dashboard_notifications, NOT the director_activity ledger: a
-  // logged-but-unsurfaced escalation (an `escalated` activity row with no matching notification — the exact
-  // bug this spec fixes) must NOT suppress the retry. If the notification is missing, this re-emits it.
-  const { data: prior } = await admin
-    .from("dashboard_notifications")
-    .select("id")
-    .eq("workspace_id", args.workspaceId)
-    .eq("type", APPROVAL_REQUEST_TYPE)
-    .eq("metadata->>dedupe_key", args.dedupeKey)
-    .limit(1);
-  if ((prior ?? []).length > 0) return { emitted: false };
+): Promise<{ emitted: boolean; bumped?: boolean; loopDetected?: boolean; error?: PostgrestError }> {
+  // one-open-escalation-per-thing Phase 1 — an escalation is a STATE (one open card), not an event.
+  // First, try to touch an existing OPEN card for this dedupe_key (bump counter + last_seen_at). Three
+  // outcomes drive the fork below:
+  //   - bumped: the OPEN card was updated in place — return {emitted:false, bumped:true}, no insert.
+  //   - loop_detected: the mint rate crossed the hourly ceiling — emit ONE 'escalation loop detected'
+  //     card (its own dedupe_key so IT too dedupes) instead of continuing to bump the original.
+  //   - insert: no OPEN card exists — fall through to the insert path below (the mint).
+  // The DB-level unique partial index on ((metadata->>'dedupe_key')) WHERE dismissed=false is the
+  // last-resort backstop for a concurrent race: the insert below will fail with 23505 and we quietly
+  // treat it as "another sweep won the race, the card is up" — the correct STATE either way.
+  const upsertOutcome = await bumpOpenEscalationCard(admin, args.workspaceId, args.dedupeKey);
+  const decision = decideEscalationMint(upsertOutcome, Date.now());
 
+  if (decision.action === "bumped") {
+    // No new activity ledger row on a bump — the ORIGINAL `escalated` row already documents the
+    // reasoning; inflating the audit trail per re-mint would defeat the counter's purpose.
+    return { emitted: false, bumped: true };
+  }
+
+  if (decision.action === "loop_detected") {
+    const loopCard = escalationLoopCard({
+      workspaceId: args.workspaceId,
+      originalDedupeKey: args.dedupeKey,
+      originalTitle: args.title,
+      originalCount: decision.originalCount,
+      windowMs: decision.windowMs,
+      deepLink: args.deepLink,
+    });
+    const { error: loopErr } = await admin.from("dashboard_notifications").insert(loopCard);
+    if (loopErr && loopErr.code === UNIQUE_VIOLATION_CODE) {
+      // The loop card is already up — the safety valve fired on a prior pass. That IS the correct STATE.
+      return { emitted: false, loopDetected: true };
+    }
+    if (loopErr) return { emitted: false, loopDetected: true, error: loopErr };
+    // Activity ledger for the loop-detected event — ONCE per key, so recap/board see it exactly once.
+    await recordDirectorActivity(admin, {
+      workspaceId: args.workspaceId,
+      directorFunction: PLATFORM,
+      actionKind: "escalated",
+      specSlug: args.specSlug,
+      reason: `Escalation loop detected on "${args.title}" — ceiling ${ESCALATION_MINT_CEILING_PER_HOUR}/hr crossed. Original diagnosis: ${args.diagnosis}`.slice(0, 4000),
+      metadata: {
+        ...(args.metadata ?? {}),
+        escalation_kind: "escalation_loop_detected",
+        dedupe_key: `escalation_loop:${args.dedupeKey}`,
+        original_dedupe_key: args.dedupeKey,
+        autonomous: true,
+      },
+    });
+    return { emitted: true, loopDetected: true };
+  }
+
+  // decision.action === "insert" — no OPEN card, mint a fresh one.
   // Notification FIRST, checked — a surface nobody can see is worse than none. If the insert fails (constraint/
   // RLS/shape), do NOT silently proceed: surface the error and do NOT write a phantom `escalated` activity row
   // (so the dedupe ledger never marks a never-surfaced escalation as done). The caller logs a hard warning.
   const { error: notifError } = await admin.from("dashboard_notifications").insert(ceoEscalationNotification(args));
-  if (notifError) return { emitted: false, error: notifError };
+  if (notifError) {
+    // one-open-escalation-per-thing Phase 1 — a concurrent sweep won the race and inserted an OPEN
+    // card for the same dedupe_key between our read and this insert. The DB constraint caught it.
+    // The correct STATE (one open card) is now in place, so we treat this as a benign no-op and
+    // BUMP the winning card so the counter still reflects this attempt — matches the "state, not
+    // event" contract even under contention.
+    if (notifError.code === UNIQUE_VIOLATION_CODE) {
+      await bumpOpenEscalationCard(admin, args.workspaceId, args.dedupeKey);
+      return { emitted: false, bumped: true };
+    }
+    return { emitted: false, error: notifError };
+  }
 
   // Activity SECOND — only once the notification row actually landed. Now the audit ledger and the inbox agree.
   await recordDirectorActivity(admin, {
