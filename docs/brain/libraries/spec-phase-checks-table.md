@@ -26,6 +26,12 @@ The typed `spec_phase_checks` rows — NOT the `spec_phases.verification` TEXT c
 
 `validateExecutableCheck` (exported by this module) enforces the typed params shape before DB write: grep needs `{pattern, path?, expect}`, http_get needs `{url, expect_status}`, db_probe_readonly names a probe from the [[spec-check-db-probes]] registry, unit_test names a real package.json script. A check with no exec_kind or with exec_kind='needs_human' never auto-runs — safe default during the prose→executable migration window.
 
+### Builder-chosen-name reject: detectBuilderChosenNameInGrep
+
+[[../specs/a-verification-check-must-not-demand-a-name-the-builder-has-to-guess]] Phase 1 — `validateExecutableCheck` rejects a `grep` whose `pattern` pins an exact literal for a name the IMPLEMENTATION gets to invent (an npm script name, a `*.test.ts` filename, a kebab-case slug, a camelCase symbol) when the spec body does not itself pin that name. Fires at the author chokepoint only — [[author-spec]] `assertEveryPhaseHasMachineCheck` threads a per-phase `specText` (spec-level why+what + phase title/why/what/body for the structured path, whole markdown for the markdown path) so a literal named anywhere in the spec is spec-pinned and passes. A caller that omits `specText` (the [[spec-check-runner]] runtime path) is unchanged — the guard never retroactively fails an already-authored check; defense-in-depth belongs at authoring, where a rejection is actionable.
+
+Message shape: `<diagnosis>. Try grep.pattern: <corrected pattern>`. Examples: `test:graduate-crowned` → `test:.*crowned` (npm script); `quant-desk` → `(?i)\bquant\b` (kebab-case; case-insensitive since `Quant-desk` ≠ `quant-desk`); `scaler.test.ts` → `scaler\.test\.` (test filename); `handleRedemption` → same string plus advice to pin in the spec body. Author sees the fix — a rejection that hides it just moves the guessing.
+
 ### Grep path security: validateGrepPath
 
 Grep checks treat `params.path` as a spec-authored capability boundary. `validateGrepPath` (co-exported, called by `validateExecutableCheck` for every grep check) rejects paths that are absolute, empty, NUL-embedded, traverse outside the repo with `..` segments, or start with `'-'` (would be parsed as an option/preprocessor by ripgrep). The runner also passes the value after an argv `--` separator (see [[spec-check-runner]] `defaultExecutors.grep`), but this validator is the primary gate: a rejected path never reaches spawn at all.
