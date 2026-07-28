@@ -2943,6 +2943,169 @@ const TRIAGE_RERUNNABLE_KINDS: ReadonlySet<string> = new Set(["security-review",
 /** A recoverable park: an inconclusive / unparseable QC verdict (a transient failure to produce a verdict). */
 const TRIAGE_RECOVERABLE_ERROR = /no parseable verdict|without a recognizable (verdict|status)|inconclusive/i;
 
+// ── one-open-escalation-per-thing Phase 2 — a terminal job is never re-escalated ─────────────
+// The 2026-07-28 incident: 50 parked `cs-director-call` jobs (all `needs_attention_class='tooling_failure'`
+// residue from an OAuth outage) pointed at tickets closed HOURS earlier. The sweep had no notion of
+// "this can never be fixed by retrying" so it re-escalated every pass, forever. The fix:
+//   (a) Before escalating a parked job, resolve its SUBJECT (ticket for cs-director-call / ticket-*
+//       kinds, spec for spec-scoped kinds) and CANCEL the park if the subject is already terminal —
+//       a closed/archived ticket, a folded spec. The job leaves needs_attention → never re-escalates.
+//   (b) AGE-OUT: a park older than a bounded window that has never been actionable transitions to
+//       cancelled with a documented reason, rather than escalating on every pass forever.
+//   (c) `needs_attention_class='tooling_failure'` — the TOOLING failed, not the work. Collapse
+//       multiple aged-out tooling_failure parks into ONE batched CEO card + batch-cancel the parks,
+//       never one card per park.
+
+/** Terminal ticket statuses — a park whose ticket is already resolved is unfixable by retrying. The spec
+ *  names 'closed','archived'; the current tickets CHECK constraint accepts 'closed' + 'resolved' but not
+ *  'archived', so this set is the intersection of "spec-named terminal" ∪ "current schema terminal". */
+const TERMINAL_TICKET_STATUSES: ReadonlySet<string> = new Set(["closed", "archived", "resolved"]);
+
+/** Terminal spec statuses — a folded spec's build/spec-test job is orphaned (its page no longer exists). */
+const TERMINAL_SPEC_STATUSES: ReadonlySet<string> = new Set(["folded", "shipped"]);
+
+/** Kinds whose subject is a TICKET carried on `instructions.ticket_id`. All customer-service box lanes. */
+const TICKET_SUBJECT_KINDS: ReadonlySet<string> = new Set([
+  "cs-director-call",
+  "ticket-handle",
+  "ticket-analyze",
+  "ticket-improve",
+]);
+
+/**
+ * The age past which a still-parked job that has NEVER escalated (no `triaged_needs_attention` ledger
+ * row) is aged out into `cancelled` — "the tooling recovered / nothing automated is going to change,
+ * this is dead residue." Set generously (24h) so a legitimately-stuck park has enough time for
+ * classification + escalation to fire on its own cadence before this backstop swings.
+ */
+export const NEEDS_ATTENTION_STALE_PARK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * one-open-escalation-per-thing Phase 2 — the pure predicate the sweep runs to decide whether a
+ * parked job's SUBJECT is terminal (a closed/archived ticket, a folded spec). Kept pure so the
+ * "cancel-vs-escalate" fork is unit-testable without a Supabase seam.
+ *
+ * Returns `terminal:true` + a `reason` naming the terminal condition when ANY of:
+ *   - the job's ticket has a status in TERMINAL_TICKET_STATUSES
+ *   - the job's spec has a status in TERMINAL_SPEC_STATUSES (folded/shipped)
+ * else `terminal:false`.
+ */
+export type ParkedSubjectState = {
+  ticketStatus?: string | null; // resolved from instructions.ticket_id (TICKET_SUBJECT_KINDS)
+  specStatus?: string | null;   // resolved from spec_slug (spec-scoped kinds)
+};
+
+export function computeTerminalSubjectSkip(subject: ParkedSubjectState): { terminal: true; reason: string } | { terminal: false } {
+  const t = subject.ticketStatus;
+  if (typeof t === "string" && TERMINAL_TICKET_STATUSES.has(t)) {
+    return { terminal: true, reason: `ticket already ${t} — parked job cannot be resolved by retrying` };
+  }
+  const s = subject.specStatus;
+  if (typeof s === "string" && TERMINAL_SPEC_STATUSES.has(s)) {
+    return { terminal: true, reason: `spec already ${s} — parked job's subject no longer exists` };
+  }
+  return { terminal: false };
+}
+
+/**
+ * one-open-escalation-per-thing Phase 2 — pure age-out decision: has the park sat past the stale
+ * window WITHOUT ever being triaged (no escalate/rerun on the ledger)? A park that HAS been triaged
+ * is left alone (the escalation card + surfaced ledger row is the visible state; age-out here would
+ * flip a job the CEO is deciding on). Kept pure so the "age-out vs leave-be" fork is unit-testable.
+ */
+export function computeAgeOutSkip(
+  createdAt: string,
+  hasTriageLedgerRow: boolean,
+  nowMs: number,
+  windowMs: number = NEEDS_ATTENTION_STALE_PARK_MS,
+): { ageOut: true; reason: string } | { ageOut: false } {
+  if (hasTriageLedgerRow) return { ageOut: false };
+  const ageMs = nowMs - new Date(createdAt).getTime();
+  if (ageMs < windowMs) return { ageOut: false };
+  const hours = Math.round(ageMs / (60 * 60 * 1000));
+  return { ageOut: true, reason: `parked ${hours}h with no actionable path — aged out of needs_attention (never escalated, never re-runnable)` };
+}
+
+/**
+ * one-open-escalation-per-thing Phase 2 — resolve the subject state for a parked job. Read-only.
+ * Best-effort: any DB hiccup returns an empty subject (the caller falls through to the existing
+ * escalate path, matching the pre-Phase-2 behavior — never a silent suppress).
+ */
+async function resolveParkedSubjectState(
+  admin: Admin,
+  job: { id: string; kind: string; spec_slug?: string | null; workspace_id?: string | null },
+  instructionsById: Map<string, string | null>,
+): Promise<ParkedSubjectState> {
+  const subject: ParkedSubjectState = {};
+
+  // Ticket subject — parse instructions.ticket_id (same shape cs-director.ts:648 already reads).
+  if (TICKET_SUBJECT_KINDS.has(job.kind)) {
+    const inst = instructionsById.get(job.id) ?? null;
+    if (inst) {
+      try {
+        const parsed = JSON.parse(inst) as { ticket_id?: string };
+        if (parsed?.ticket_id && typeof parsed.ticket_id === "string") {
+          const { data: t } = await admin
+            .from("tickets")
+            .select("status")
+            .eq("id", parsed.ticket_id)
+            .maybeSingle();
+          const status = (t as { status?: string | null } | null)?.status;
+          if (typeof status === "string") subject.ticketStatus = status;
+        }
+      } catch { /* unparseable instructions → no ticket subject; fall through */ }
+    }
+  }
+
+  // Spec subject — read via the specs-table SDK's getSpec (chokepoint: never raw .from('specs')).
+  // Uses the specs-table getSpec (workspace-scoped, exposes `folded`), NOT brain-roadmap's getSpec
+  // (which derives a SpecCard that maps `folded` → `shipped` for board display).
+  if (job.spec_slug && job.workspace_id) {
+    try {
+      const { getSpec: getSpecRow } = await import("@/lib/specs-table");
+      const spec = await getSpecRow(job.workspace_id, job.spec_slug);
+      if (spec) subject.specStatus = spec.status ?? null;
+    } catch { /* getSpec threw → no spec subject; fall through */ }
+  }
+
+  return subject;
+}
+
+/** Compare-and-set cancel of a parked job — flips needs_attention → cancelled with a documented reason.
+ *  Guarded on workspace_id + status so a race that already moved the row never overwrites terminal state. */
+async function cancelTerminalPark(
+  admin: Admin,
+  job: { id: string; workspace_id: string | null; kind: string; spec_slug?: string | null },
+  reason: string,
+  metadata: Record<string, unknown>,
+): Promise<{ cancelled: boolean; error?: PostgrestError }> {
+  if (!job.workspace_id) return { cancelled: false };
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .update({
+      status: "cancelled",
+      error: reason,
+      questions: [],
+      pending_actions: [],
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", job.id)
+    .eq("workspace_id", job.workspace_id)
+    .eq("status", "needs_attention")
+    .select("id");
+  if (error) return { cancelled: false, error };
+  if (!data || data.length === 0) return { cancelled: false };
+  await recordDirectorActivity(admin, {
+    workspaceId: job.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "triaged_needs_attention",
+    specSlug: job.spec_slug ?? null,
+    reason,
+    metadata: { job_id: job.id, target_kind: job.kind, action: "cancelled_terminal_subject", ...metadata, autonomous: true },
+  });
+  return { cancelled: true };
+}
+
 /** The outcome of one needs_attention triage pass — what it drove off the parked feed. */
 export interface NeedsAttentionReconcileResult {
   /** parked items re-run once (a recoverable inconclusive QC result). */
@@ -2953,6 +3116,12 @@ export interface NeedsAttentionReconcileResult {
   confirmed: number;
   /** total non-build, non-repair parked items examined this pass. */
   scanned: number;
+  /** one-open-escalation-per-thing Phase 2 — parks cancelled because their subject is terminal. */
+  cancelledTerminal: string[];
+  /** one-open-escalation-per-thing Phase 2 — parks aged out (never actionable past the stale window). */
+  cancelledAgedOut: string[];
+  /** one-open-escalation-per-thing Phase 2 — tooling_failure parks batch-cancelled with ONE card, not N. */
+  cancelledToolingBatch: number;
 }
 
 /**
@@ -2963,24 +3132,44 @@ export interface NeedsAttentionReconcileResult {
  * Best-effort; the caller logs the result.
  */
 export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttentionReconcileResult> {
-  const empty: NeedsAttentionReconcileResult = { rerun: [], escalated: [], confirmed: 0, scanned: 0 };
+  const empty: NeedsAttentionReconcileResult = {
+    rerun: [], escalated: [], confirmed: 0, scanned: 0,
+    cancelledTerminal: [], cancelledAgedOut: [], cancelledToolingBatch: 0,
+  };
   const autonomy = await loadAutonomyMap();
   if (!platformIsAutoApprover(autonomy)) return empty; // dormant until activation flips the flag
 
   const workspaceId = await resolveDirectorWorkspace(admin);
   if (!workspaceId) return empty;
 
-  // Every parked item NOT owned by the build loop-guard / the repair-dismissal lane / the director itself.
+  // one-open-escalation-per-thing Phase 2 — also pull `instructions` (ticket_id resolver) +
+  // `needs_attention_class` (tooling_failure batch treatment). Both were unread before the
+  // terminal-subject skip; both are cheap.
   const { data: parked } = await admin
     .from("agent_jobs")
-    .select("id, kind, status, error, log_tail, spec_slug, created_at")
+    .select("id, workspace_id, kind, status, error, log_tail, spec_slug, created_at, instructions, needs_attention_class")
     .eq("workspace_id", workspaceId)
     .eq("status", "needs_attention")
     .order("created_at", { ascending: false })
     .limit(200);
-  const items = ((parked ?? []) as Array<{ id: string; kind: string; error?: string | null; log_tail?: string | null; spec_slug?: string | null }>)
+  type ParkedRowT = {
+    id: string;
+    workspace_id: string;
+    kind: string;
+    error?: string | null;
+    log_tail?: string | null;
+    spec_slug?: string | null;
+    created_at: string;
+    instructions?: string | null;
+    needs_attention_class?: string | null;
+  };
+  const items = ((parked ?? []) as ParkedRowT[])
     .filter((j) => !TRIAGE_SKIP_KINDS.has(String(j.kind)));
   if (!items.length) return empty;
+
+  // Instructions map — resolveParkedSubjectState reads ticket_id from JSON here (no re-fetch per item).
+  const instructionsById = new Map<string, string | null>();
+  for (const it of items) instructionsById.set(it.id, it.instructions ?? null);
 
   // The triage ledger — every `triaged_needs_attention` row carries `metadata.job_id` + `metadata.action`
   // (rerun | escalated). A job already escalated is left (deduped); a job re-run once is the loop-guard input.
@@ -3004,11 +3193,117 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
   const rerun: string[] = [];
   const escalated: string[] = [];
   let confirmed = 0;
+  const cancelledTerminal: string[] = [];
+  const cancelledAgedOut: string[] = [];
+
+  // ── one-open-escalation-per-thing Phase 2 — tooling_failure batch treatment ────────────────
+  // Collect every tooling_failure park in ONE pass and, when the count is meaningful (≥ 2 aged out),
+  // batch-cancel them with ONE ledger row instead of surfacing N founder cards. Rationale (from the
+  // spec): needs_attention_class='tooling_failure' means the TOOLING failed, not the work — 50 residue
+  // rows from the 2026-07-28 OAuth outage were re-escalated one-per-card on every sweep. A batched
+  // cancel-with-explanation is the "recovered" outcome the spec asks for. Runs BEFORE the per-item
+  // loop so a batch-cancelled row is skipped naturally (its status flipped to 'cancelled', so the
+  // per-item loop's compare-and-set writes are no-ops).
+  const nowMs = Date.now();
+  let cancelledToolingBatch = 0;
+  const toolingBatch = items.filter(
+    (j) => j.needs_attention_class === "tooling_failure" && nowMs - new Date(j.created_at).getTime() >= NEEDS_ATTENTION_STALE_PARK_MS,
+  );
+  if (toolingBatch.length >= 2) {
+    const batchIds = toolingBatch.map((j) => j.id);
+    const batchKinds = Array.from(new Set(toolingBatch.map((j) => j.kind))).sort();
+    const oldestHours = Math.round((nowMs - new Date(toolingBatch[toolingBatch.length - 1].created_at).getTime()) / (60 * 60 * 1000));
+    const reason = `tooling recovered — batch-cancelling ${toolingBatch.length} residue park(s) from a prior tooling_failure (kinds: ${batchKinds.join(", ")}, oldest ${oldestHours}h). One card, not ${toolingBatch.length}: needs_attention_class='tooling_failure' means the tooling failed, not the work.`;
+    const { data: batchCancelled, error: batchErr } = await admin
+      .from("agent_jobs")
+      .update({
+        status: "cancelled",
+        error: reason,
+        questions: [],
+        pending_actions: [],
+        updated_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("status", "needs_attention")
+      .eq("needs_attention_class", "tooling_failure")
+      .in("id", batchIds)
+      .select("id");
+    if (!batchErr) {
+      cancelledToolingBatch = Array.isArray(batchCancelled) ? batchCancelled.length : 0;
+      if (cancelledToolingBatch > 0) {
+        await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: PLATFORM,
+          actionKind: "triaged_needs_attention",
+          specSlug: null,
+          reason,
+          metadata: {
+            action: "batch_cancelled_tooling_failure",
+            job_ids: batchIds,
+            kinds: batchKinds,
+            count: cancelledToolingBatch,
+            autonomous: true,
+          },
+        });
+      }
+    } else {
+      console.warn(`[platform-director] batch tooling_failure cancel FAILED: ${batchErr.message}`);
+    }
+  }
+  // Local set: skip any per-item work on a row we just batch-cancelled (belt-and-suspenders — the
+  // per-item update below is compare-and-set on status='needs_attention' anyway, but the local skip
+  // avoids the extra DB write + keeps the ledger clean).
+  const batchCancelledIds = new Set(cancelledToolingBatch > 0 ? toolingBatch.map((j) => j.id) : []);
 
   for (const j of items) {
+    if (batchCancelledIds.has(j.id)) continue; // batch handled above
     // Already surfaced to the CEO a prior pass — leave it for the human (deduped, no churn).
     if (surfaced.has(j.id)) { confirmed++; continue; }
     const atCap = rerun.length + escalated.length >= PLATFORM_DIRECTOR_TRIAGE_CAP;
+
+    // ── one-open-escalation-per-thing Phase 2 — terminal-subject skip (before escalation) ────
+    // Resolve the job's subject (ticket for cs-director-call/ticket-*, spec for spec-scoped kinds).
+    // If it's already terminal (closed/archived ticket, folded spec), CANCEL the park compare-and-set
+    // and skip. The job leaves needs_attention so it never re-escalates.
+    const subject = await resolveParkedSubjectState(admin, j, instructionsById);
+    const terminal = computeTerminalSubjectSkip(subject);
+    if (terminal.terminal) {
+      const cancelResult = await cancelTerminalPark(admin, j, terminal.reason, {
+        ticket_status: subject.ticketStatus ?? null,
+        spec_status: subject.specStatus ?? null,
+        target_kind: j.kind,
+      });
+      if (cancelResult.cancelled) {
+        cancelledTerminal.push(`${j.kind}:${j.id.slice(0, 8)}`);
+        continue;
+      }
+      // Compare-and-set lost the race (row moved between our read and our write) — treat as confirmed.
+      confirmed++;
+      continue;
+    }
+
+    // ── one-open-escalation-per-thing Phase 2 — age-out ──────────────────────────────────────
+    // A park that has never escalated (surfaced set) and never re-run (reran set) and is older than
+    // the stale window is dead residue — cancel with a documented reason rather than escalating on
+    // every pass forever.
+    const alreadyReranHere = reran.has(j.id);
+    const alreadySurfacedHere = surfaced.has(j.id);
+    const ageOut = computeAgeOutSkip(j.created_at, alreadyReranHere || alreadySurfacedHere, nowMs);
+    if (ageOut.ageOut) {
+      const cancelResult = await cancelTerminalPark(admin, j, ageOut.reason, {
+        target_kind: j.kind,
+        needs_attention_class: j.needs_attention_class ?? null,
+        aged_out: true,
+      });
+      if (cancelResult.cancelled) {
+        cancelledAgedOut.push(`${j.kind}:${j.id.slice(0, 8)}`);
+        continue;
+      }
+      // Race: leave for a subsequent pass.
+      confirmed++;
+      continue;
+    }
+
 
     const kind = String(j.kind);
     const error = String(j.error ?? "").trim();
@@ -3091,7 +3386,7 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     }
   }
 
-  return { rerun, escalated, confirmed, scanned: items.length };
+  return { rerun, escalated, confirmed, scanned: items.length, cancelledTerminal, cancelledAgedOut, cancelledToolingBatch };
 }
 
 // ── Phase 3 (goal-milestone-build-sequencing) — re-sequence an out-of-order milestone fan-out ──────
