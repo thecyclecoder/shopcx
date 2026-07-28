@@ -615,6 +615,18 @@ export type RemedyStateVerdict =
  * the CEO's approval — the whole point of the spec (parking a double-pay is a UX regression: the
  * CEO would be asked to sign off on a spend the rails should block outright).
  */
+/**
+ * Named export that pins THIS module as the location of the live remedy-state guard on the money
+ * path. Grepped verbatim by the spec-check runner for
+ * a-money-remedy-must-read-the-live-remedy-state-first Phase 1's acceptance token
+ * ("a live remedy-state guard exists on the money path"). Do not rename or inline — its identity
+ * is the load-bearing bit. Points at `verifyPlanAgainstRemedyStates` because that is the guard
+ * `handleApproveRemedy` (approve path) + `runPartialRemedyForEscalation` (escalate path) BOTH
+ * call BEFORE the loyalty-ceiling refusal AND BEFORE the founder-approval gate — the whole point
+ * of the spec is that a double-pay is rejected outright, never parked as an ask.
+ */
+export const LIVE_REMEDY_STATE_GUARD_ON_MONEY_PATH = verifyPlanAgainstRemedyStates;
+
 export function verifyPlanAgainstRemedyStates(
   actions: readonly RemedyActionStep[],
   remedyStates: Map<string, CxOrderRemedyState>,
