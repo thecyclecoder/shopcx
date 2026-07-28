@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A regression test nothing runs is decoration — register the orphans, guard new ones, and write the box auth-refresh test that never landed** · verified 2026-07-27 · → [[../libraries/control-tower]]
+- **Retry transient AdLibrary creative downloads before marking ads failed** · verified 2026-07-27 · → [[../libraries/adlibrary]]
+- **Bianca's loser-kill excludes cold-scaler adsets + a 7-day min-age grace before cutting a scaler** · verified 2026-07-27 · → [[../libraries/meta-cpa-signal]]
+- **An expired access token with a live refresh token is not a dead account — refresh before ejecting, label it honestly, and let it recover without a hand-edit** · verified 2026-07-27 · → [[lifecycles/roadmap-build-console]]
+- **Do not permanently fail creative scout ads on retryable AdLibrary fetch errors** · verified 2026-07-27 · → [[../libraries/adlibrary]] + [[../libraries/creative-skeleton]]
+- **Stop AI ticket analyzer false alerts for tickets June already decided** · verified 2026-07-27 · → [[../libraries/control-tower]]
 - **Applying a coupon must never strip an automatic/manual discount — filter the replace to CODE_DISCOUNT, and roll back when the apply fails** · verified 2026-07-25 · → [[../libraries/appstle-discount]]
 - **Box account pool: skip/eject an OAuth-expired Max account, re-route the session, and alert the CEO to re-login** · verified 2026-07-25 · → [[../libraries/builder-worker]]
 - **Check-reconciler auto-applies renamed + moved-symbol repoints (not just case/whitespace)** · verified 2026-07-25 · → [[../libraries/check-reconciliation]]
