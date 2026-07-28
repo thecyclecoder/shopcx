@@ -26435,6 +26435,19 @@ async function dispatchJob(job: Job) {
       // Phase 2 — carried out to the defer path below so the `check_reconcile_cap_reached`
       // surface (and the log_tail annotation) fires even after we re-read `acc`.
       let reconcileUnhealedListForDefer: string | null = null;
+      // a-verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 2 — promoted out
+      // of the try block so the deferred-redrive call below can hand the structured failing-check
+      // list (description + pattern + evidence + phase position) to `redriveDeferredBuildOrEscalate`,
+      // which persists the check_keys into director_activity.metadata and runs `detectSuspectCheck`
+      // on the escalate branch to relabel "phase-accumulation checks failed" → "check X of phase Y
+      // has failed N builds — the check is the likely defect".
+      const failingChecksForRedrive: Array<{
+        description: string;
+        pattern?: string;
+        evidence?: string;
+        phasePosition?: number;
+        checkPosition?: number;
+      }> = [];
       if (!acc.complete) {
         try {
           const { reconcileFailingGrepChecksForSpec, defaultBatchDeps, recordCapReachedOrUnhealedDefer } = await import("../src/lib/build/check-reconciliation");
@@ -26477,6 +26490,21 @@ async function dispatchJob(job: Job) {
               unreconciled: rec.unreconciled,
               capReached: rec.capReached,
             });
+            // a-verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 2 —
+            // structured payload for `redriveDeferredBuildOrEscalate` (below): description +
+            // failing grep pattern + branch near-miss evidence + phase/check position. The
+            // escalate branch reads this to (a) persist check_keys, (b) run detectSuspectCheck,
+            // (c) render "check X of phase Y has failed N builds — the check is the likely
+            // defect" alongside a loosen-the-check remedy.
+            for (const u of rec.unreconciled) {
+              failingChecksForRedrive.push({
+                description: u.description,
+                pattern: typeof u.oldParams?.pattern === "string" ? u.oldParams.pattern : undefined,
+                evidence: u.evidence,
+                phasePosition: u.phasePosition,
+                checkPosition: u.checkPosition,
+              });
+            }
             const preview = rec.unreconciled.slice(0, 3).map((u) => `p${u.phasePosition} ${u.description.slice(0, 60)} — ${u.reason}`).join(" | ");
             reconcileUnhealedListForDefer =
               `un-reconcilable checks (${rec.unreconciled.length}${rec.capReached ? ", cap-reached" : ""}): ${preview}`;
@@ -26536,7 +26564,15 @@ async function dispatchJob(job: Job) {
           const redriveReason = reconcileUnhealedListForDefer
             ? `${acc.reason} — ${reconcileUnhealedListForDefer}`
             : acc.reason;
-          const outcome = await redriveDeferredBuildOrEscalate(job.workspace_id, slug, redriveReason, job.id);
+          // Phase 2 — hand the structured failing-check list through so the escalate branch can
+          // relabel the diagnosis as a suspect check (see `detectSuspectCheck` in the callee).
+          const outcome = await redriveDeferredBuildOrEscalate(
+            job.workspace_id,
+            slug,
+            redriveReason,
+            job.id,
+            failingChecksForRedrive,
+          );
           console.log(`${tag} deferred-redrive: ${outcome.action} — ${outcome.reason}`);
         } catch (e) {
           console.error(`${tag} deferred-redrive threw (non-fatal, deferred build remains completed):`, e instanceof Error ? e.message : e);

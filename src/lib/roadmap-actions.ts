@@ -20,6 +20,13 @@ import {
   type PendingAction,
 } from "@/lib/agent-jobs";
 import { getSpec, getSpecBlockers, phaseEmoji } from "@/lib/brain-roadmap";
+import {
+  detectSuspectCheck,
+  formatSuspectCheckSummary,
+  type PriorRunFailure,
+} from "@/lib/build/suspect-check";
+import { checkKey } from "@/lib/spec-test-runs";
+import { detectBuilderChosenNameInGrep } from "@/lib/spec-phase-checks-table";
 import { routingOwnerForJobAsync, mirrorWebDecisionToAdaSlack } from "@/lib/agents/approval-inbox";
 import { resolveApproverLive, CEO } from "@/lib/agents/approval-router";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
@@ -230,6 +237,26 @@ export interface DeferredRedriveOutcome {
 }
 
 /**
+ * a-verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 2 — one entry in the
+ * caller-supplied failing-checks payload. Each entry names the check that failed on THIS build so
+ * the escalation can (a) record structured failing-check keys into `director_activity.metadata`,
+ * (b) run the suspect-check detector over the spec's prior redrive history, and (c) surface the
+ * near-miss remedy alongside the existing reclaim_stuck_build approval.
+ */
+export interface DeferredRedriveFailingCheck {
+  /** The check bullet text — becomes the check_key via [[../spec-test-runs]] `checkKey`. */
+  description: string;
+  /** For a `grep`, the failing pattern the check pins. Used to compute the loosen-the-check remedy. */
+  pattern?: string;
+  /** For a `grep`, a short substring the branch DOES contain that the failing pattern narrowly missed. */
+  evidence?: string;
+  /** Phase position (1-based) — surfaced in the escalation as "check X of phase Y". */
+  phasePosition?: number;
+  /** Check position within the phase (1-based) — surfaced as "check X of phase Y". */
+  checkPosition?: number;
+}
+
+/**
  * `redriveDeferredBuildOrEscalate` — the single decision point invoked at the "PR DEFERRED" completion
  * of a build lane in `scripts/builder-worker.ts`. A DEFERRED PR means `isSpecAccumulationComplete` (the
  * merge gate's per-phase real-checks verifier) reported `complete:false`: 1+ phases were stamped built
@@ -260,9 +287,19 @@ export async function redriveDeferredBuildOrEscalate(
   slug: string,
   unverifiedReason: string,
   sourceJobId: string,
+  failingChecks: DeferredRedriveFailingCheck[] = [],
 ): Promise<DeferredRedriveOutcome> {
   try {
     const admin = createAdminClient();
+    // a-verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 2 — stable check_keys
+    // for every failing check on THIS run. Persisted into `director_activity.metadata.failing_check_keys`
+    // so a subsequent redrive/escalate can walk history and detect the "same lone check keeps failing"
+    // pattern. Empty when the caller didn't supply structured failing checks (older paths — the detector
+    // stays inert on that history and behaves exactly as before).
+    const currentFailingKeys = failingChecks
+      .map((c) => c.description?.trim())
+      .filter((s): s is string => Boolean(s))
+      .map((text) => checkKey(text));
 
     // Dedupe: another surface may already have redriven this spec (e.g. a manual Rebuild tap between
     // our completion and this call, or a Mario reclaim), or the current resume path opened a fresh
@@ -310,12 +347,92 @@ export async function redriveDeferredBuildOrEscalate(
 
     const shouldEscalate = unclearedBlockers.length > 0 || priorCount >= cap;
     if (shouldEscalate) {
+      // a-verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 2 — before
+      // rendering the escalation, walk this spec's prior redrive rows and check whether the SAME
+      // lone check has been the ONLY failing check across the streak. If so, replace the coarse
+      // 'phase-accumulation checks failed' diagnosis with 'check X of phase Y has failed N builds
+      // while every other check passed — the check is the likely defect', include the near-miss
+      // evidence, and offer a loosen-the-check remedy alongside the existing reclaim action.
+      // Best-effort — a read blip or missing metadata falls through to the original diagnosis.
+      let suspectSummaryOverride: string | null = null;
+      let loosenRemedyAction: {
+        id: string;
+        type: string;
+        status: "pending";
+        spec_slug: string;
+        summary: string;
+        old_pattern?: string;
+        new_pattern?: string;
+      } | null = null;
+      try {
+        const { data: priorRows } = await admin
+          .from("director_activity")
+          .select("created_at, metadata")
+          .eq("workspace_id", workspaceId)
+          .eq("action_kind", "redrive_deferred_build")
+          .eq("spec_slug", slug)
+          .gte("created_at", since)
+          .order("created_at", { ascending: false })
+          .limit(cap * 2);
+        const priorRuns: PriorRunFailure[] = (priorRows ?? [])
+          .map((r) => {
+            const md = (r as { metadata?: Record<string, unknown> }).metadata ?? {};
+            const keys = Array.isArray(md.failing_check_keys)
+              ? (md.failing_check_keys as unknown[]).filter((k): k is string => typeof k === "string")
+              : [];
+            return { at: String((r as { created_at?: string }).created_at ?? ""), failingKeys: keys };
+          })
+          .filter((p) => p.at);
+        const suspect = detectSuspectCheck({ currentFailingKeys, priorRuns });
+        if (suspect) {
+          // Prefer the CURRENT run's structured failing check for the summary text (we have its
+          // description, pattern, evidence, and phase position). Falls back gracefully otherwise.
+          const suspectEntry = failingChecks.find((c) => checkKey(c.description) === suspect.checkKey)
+            ?? failingChecks[0];
+          const pattern = suspectEntry?.pattern;
+          // Reuse Phase-1's detector to compute a "loosen to this" suggestion — free actionable
+          // remedy from the same predicate the author gate uses.
+          const loosen = pattern ? detectBuilderChosenNameInGrep(pattern) : null;
+          suspectSummaryOverride = formatSuspectCheckSummary({
+            slug,
+            suspect,
+            checkDescription: suspectEntry?.description ?? "(no description)",
+            phasePosition: suspectEntry?.phasePosition ?? 0,
+            checkPosition: suspectEntry?.checkPosition ?? 0,
+            failingPattern: pattern,
+            suggestedPattern: loosen?.suggested,
+            nearMissEvidence: suspectEntry?.evidence,
+          });
+          if (pattern && loosen?.suggested) {
+            loosenRemedyAction = {
+              id: `deferred-redrive-loosen-check-${Date.now()}`,
+              type: "loosen_check",
+              status: "pending",
+              spec_slug: slug,
+              summary:
+                `Loosen phase ${suspectEntry?.phasePosition ?? "?"} check ${suspectEntry?.checkPosition ?? "?"} ` +
+                `grep.pattern "${pattern}" → "${loosen.suggested}" — 1-command remedy for the suspect check`,
+              old_pattern: pattern,
+              new_pattern: loosen.suggested,
+            };
+          }
+        }
+      } catch (e) {
+        console.warn(`[deferred-redrive] suspect-check detection read failed (best-effort): ${errText(e)}`);
+      }
       const reason = unclearedBlockers.length > 0
         ? `blockers still uncleared: ${unclearedBlockers.join(", ")}. Unverified phases: ${unverifiedReason}`
         : `redrive-count guard fired: ${priorCount} prior redrive(s) in 24h ≥ BUILDER_DEFERRED_REDRIVE_MAX=${cap}. Unverified phases: ${unverifiedReason}`;
       const actionId = `deferred-redrive-escalate-${Date.now()}`;
-      const summary =
+      const defaultSummary =
         `Reclaim spec ${slug} — build completed with a DEFERRED PR because phase-accumulation checks failed. ${reason}`.slice(0, 500);
+      const summary = suspectSummaryOverride
+        ? suspectSummaryOverride.slice(0, 500)
+        : defaultSummary;
+      const pendingActions: unknown[] = [
+        { id: actionId, type: "reclaim_stuck_build", status: "pending", spec_slug: slug, summary },
+      ];
+      if (loosenRemedyAction) pendingActions.push(loosenRemedyAction);
       const { error: insErr } = await admin.from("agent_jobs").insert({
         workspace_id: workspaceId,
         spec_slug: slug,
@@ -323,10 +440,8 @@ export async function redriveDeferredBuildOrEscalate(
         status: "needs_approval",
         created_by: null,
         instructions:
-          `Deferred-PR escalation (from build job ${sourceJobId}): the build completed with unverified phases and no auto-redrive path. ${reason}`.slice(0, 4000),
-        pending_actions: [
-          { id: actionId, type: "reclaim_stuck_build", status: "pending", spec_slug: slug, summary },
-        ],
+          `Deferred-PR escalation (from build job ${sourceJobId}): the build completed with unverified phases and no auto-redrive path. ${suspectSummaryOverride ?? reason}`.slice(0, 4000),
+        pending_actions: pendingActions,
       });
       if (insErr) {
         return { action: "skip", reason: `escalate insert failed: ${insErr.message}` };
@@ -336,16 +451,18 @@ export async function redriveDeferredBuildOrEscalate(
         directorFunction: DEFERRED_REDRIVE_DIRECTOR_FUNCTION,
         actionKind: "redrive_deferred_build_escalated",
         specSlug: slug,
-        reason,
+        reason: suspectSummaryOverride ?? reason,
         metadata: {
           source_job_id: sourceJobId,
           unverified_reason: unverifiedReason,
           uncleared_blockers: unclearedBlockers,
           prior_count: priorCount,
           cap,
+          failing_check_keys: currentFailingKeys,
+          suspect_check_key: suspectSummaryOverride ? currentFailingKeys[0] : null,
         },
       });
-      return { action: "escalate", reason };
+      return { action: "escalate", reason: suspectSummaryOverride ?? reason };
     }
 
     // Redrive via the sanctioned enqueue chokepoint — owner-gated, blocker-gated, active-build-gated.
@@ -375,6 +492,9 @@ export async function redriveDeferredBuildOrEscalate(
         unverified_reason: unverifiedReason,
         prior_count: priorCount + 1,
         cap,
+        // Phase 2 — per-run failing-check keys the next redrive/escalate reads back to detect
+        // whether the SAME lone check keeps failing (the suspect-check pattern).
+        failing_check_keys: currentFailingKeys,
       },
     });
     return { action: "redrive", reason: `redrove build for ${slug} (attempt ${priorCount + 1}/${cap})` };
