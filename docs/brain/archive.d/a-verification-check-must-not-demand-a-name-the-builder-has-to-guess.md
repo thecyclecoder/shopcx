@@ -1,0 +1,1 @@
+- **Stop stranding good builds on a spelling: a check may not require an exact literal the builder invents** · verified 2026-07-28 · → [[recipes/what-makes-a-buildable-spec]]
