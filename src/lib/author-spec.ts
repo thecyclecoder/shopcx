@@ -562,7 +562,7 @@ export class MissingMachineCheckError extends Error {
  */
 export function assertEveryPhaseHasMachineCheck(
   slug: string,
-  phases: { title: string; checks: SpecPhaseCheckInput[] }[],
+  phases: { title: string; checks: SpecPhaseCheckInput[]; specText?: string }[],
   ctx?: { packageScripts?: ReadonlySet<string> },
 ): void {
   const failures = phases
@@ -576,7 +576,13 @@ export function assertEveryPhaseHasMachineCheck(
           // be the sole verification, so keep looking.
           continue;
         }
-        const v = validateExecutableCheck({ exec_kind: kind, params: c.params ?? null }, ctx);
+        // verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — per-phase
+        // `specText` opts the grep author-time guard on. A caller that doesn't pass it (or passes
+        // "") stays exactly as-is: the guard fires only when the chokepoint threads spec text.
+        const v = validateExecutableCheck(
+          { exec_kind: kind, params: c.params ?? null },
+          { ...ctx, specText: p.specText },
+        );
         if (v.valid) { ok = true; break; }
         reasons.push(`check ${c.position}: ${v.reason}`);
       }
@@ -1191,7 +1197,15 @@ export async function authorSpecRowStructured(
   // runner cannot execute. `needs_human` rows may be present as EXTRA but never the sole verification.
   assertEveryPhaseHasMachineCheck(
     slug,
-    spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
+    spec.phases.map((p, i) => ({
+      title: p.title,
+      checks: phaseChecks[i],
+      // verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — pass the
+      // spec-level why + what + this phase's title + why + what + body so a grep whose bare literal
+      // is spec-pinned (`consumeRedemption` named in the body) still passes, while a builder-invented
+      // artifact (`test:graduate-crowned` never named) rejects with the corrected pattern.
+      specText: [spec.why, spec.what, p.title, p.why, p.what, p.body].filter(Boolean).join("\n"),
+    })),
   );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
@@ -1564,7 +1578,14 @@ export async function authorSpecRowFromMarkdown(
     const mdPhaseChecks = phaseBodies.map((p) => parseVerificationBlobToChecks(p.verification));
     assertEveryPhaseHasMachineCheck(
       slug,
-      phaseBodies.map((p, i) => ({ title: p.title, checks: mdPhaseChecks[i] })),
+      phaseBodies.map((p, i) => ({
+        title: p.title,
+        checks: mdPhaseChecks[i],
+        // verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — the whole
+        // markdown source is the spec text a builder-chosen-name guard consults; a literal named
+        // anywhere in the spec body (top-level why/what OR any phase body) is spec-pinned.
+        specText: [markdown, p.title, p.body].filter(Boolean).join("\n"),
+      })),
     );
   }
 

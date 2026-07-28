@@ -396,9 +396,109 @@ export function validateGrepPath(path: unknown): ExecutableCheckValidation {
   return { valid: true };
 }
 
+/**
+ * verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — reject a `grep` whose
+ * `pattern` pins an EXACT LITERAL for a name the implementation gets to invent (an npm script name, a
+ * `*.test.ts` filename, a kebab-case slug, a camelCase symbol) when the spec body does NOT itself pin
+ * that name. Two specs each burned 5 builds on this shape: a check for `test:graduate-crowned` in
+ * `package.json` while the correct implementation registered `test:media-buyer-graduate-scaler`, and a
+ * check for `quant-desk` where the lifecycle page was authored as `Quant-desk`. No LLM pass will guess
+ * one specific kebab string — the check is a lottery, not a verification, so it must fail at authoring.
+ *
+ * Returns `null` when the pattern is fine (regex-flavored, spec-pinned, or not a builder-invented shape);
+ * a suggestion otherwise. Callers surface `reason` (the diagnosis) with `suggested` (the fix) so the
+ * author sees the corrected pattern — a rejection that hides the fix just moves the guessing.
+ *
+ * Case-sensitivity is the same trap: `quant-desk` vs `Quant-desk`. The suggested pattern for a bare
+ * kebab-case literal is case-insensitive so a downstream author defaulting to it stays right when the
+ * downstream artifact is capitalized.
+ */
+const GREP_REGEX_METACHARS = /[.*|[\]\\+?(){}^$]/;
+
+export function detectBuilderChosenNameInGrep(
+  pattern: string,
+  specText?: string,
+): { reason: string; suggested: string } | null {
+  const p = pattern.trim();
+  if (!p) return null;
+  // Spec-pinned escape valve: when the spec body (why / what / phase text) literally names this string,
+  // the author has FIXED the name, not guessed it. Case-insensitive match — `consumeRedemption` in the
+  // spec body still pins a grep for `consumeRedemption` regardless of how the body typed it. Runs
+  // FIRST so a spec-pinned filename (which carries `.` as a "regex metachar") still opts out.
+  if (specText && specText.toLowerCase().includes(p.toLowerCase())) return null;
+
+  // test-file name — `<base>.test.ts` / `.spec.ts` / etc. Matched BEFORE the metachar guard: the `.`
+  // in `scaler.test.ts` is intent-literal (the author wants the exact filename) even though `.`
+  // reads as any-char in regex, and that discrepancy is itself part of the bug — the check pins a
+  // specific basename regardless. Builder gets to choose the basename.
+  const testFile = /^([a-z0-9][a-z0-9\-_]*)\.(test|spec)\.(ts|tsx|js|mjs|cjs)$/i.exec(p);
+  if (testFile) {
+    const tokens = testFile[1].split(/[-_.]/).filter(Boolean);
+    const distinctive = tokens[tokens.length - 1] || testFile[1];
+    return {
+      reason:
+        `grep.pattern "${p}" pins a test filename the builder gets to invent — the correct ` +
+        `implementation may pick any equivalent basename. Use a regex on the distinctive token, ` +
+        `or name the exact filename in the spec body so the check is spec-pinned`,
+      suggested: `${distinctive}\\.${testFile[2]}\\.`,
+    };
+  }
+
+  // A pattern that already carries any regex metacharacter (beyond the filename shape above) is
+  // not a bare literal — treat it as a pattern and stop.
+  if (GREP_REGEX_METACHARS.test(p)) return null;
+
+  // npm script name — `test:<slug>`. The exact shape that stranded 5 builds on
+  // `bianca-actually-graduates-crowned-winners-...`. Suggest a regex on the distinctive tail token.
+  const npm = /^test:([a-z0-9]+(?:[-_][a-z0-9]+)+)$/i.exec(p);
+  if (npm) {
+    const tokens = npm[1].split(/[-_]/).filter(Boolean);
+    const distinctive = tokens[tokens.length - 1] || npm[1];
+    return {
+      reason:
+        `grep.pattern "${p}" pins an npm script name the builder gets to invent — a correct ` +
+        `build may register an equivalent name (e.g. "test:media-buyer-${distinctive}") and no LLM ` +
+        `pass will guess this exact string. Use a regex on the distinctive token, or name the ` +
+        `exact script in the spec body so the check is spec-pinned rather than author-guessed`,
+      suggested: `test:.*${distinctive}`,
+    };
+  }
+
+  // kebab-case multi-token slug — the `quant-desk` class. Casing alone breaks the match
+  // ("Quant-desk" ≠ "quant-desk"); loosen with a case-insensitive regex on the distinctive token.
+  if (/^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/i.test(p)) {
+    const tokens = p.split("-").filter(Boolean);
+    const distinctive = tokens.reduce((a, b) => (b.length > a.length ? b : a), tokens[0]);
+    return {
+      reason:
+        `grep.pattern "${p}" is a bare kebab-case name the builder chooses — casing alone breaks ` +
+        `the match ("${p.charAt(0).toUpperCase() + p.slice(1)}" ≠ "${p}"), and equivalent naming ` +
+        `(underscore / space / synonym) fails the same way. Loosen the pattern with a ` +
+        `case-insensitive regex on a distinctive token, or name the exact string in the spec body`,
+      suggested: `(?i)\\b${distinctive}\\b`,
+    };
+  }
+
+  // camelCase / PascalCase multi-word symbol — legitimate ONLY when the spec body pins it as required
+  // API. Requires a real lowercase→uppercase transition ("handleRedemption", "HandleRedemption",
+  // "chunkSize123") so ALL-CAPS constants ("SELECT", "MAX_ATTEMPTS") and single PascalCase words
+  // ("Phase", "Redemption") stay unflagged — those are not builder-invented multi-word symbols.
+  if (/^[a-zA-Z][a-z0-9]+[A-Z][a-zA-Z0-9]*$/.test(p)) {
+    return {
+      reason:
+        `grep.pattern "${p}" is a camelCase symbol the builder chooses — the spec body does not ` +
+        `pin this exact identifier, so a correct implementation may use an equivalent name. Name ` +
+        `the exact symbol in the spec body if it is required API, or loosen the pattern`,
+      suggested: p,
+    };
+  }
+
+  return null;
+}
+
 export function validateExecutableCheck(
   check: { exec_kind: SpecPhaseCheckExecKind | null | undefined; params?: unknown },
-  ctx?: { packageScripts?: ReadonlySet<string> },
+  ctx?: { packageScripts?: ReadonlySet<string>; specText?: string },
 ): ExecutableCheckValidation {
   const kind = check.exec_kind;
   if (!kind) return { valid: false, reason: "exec_kind is required" };
@@ -433,6 +533,17 @@ export function validateExecutableCheck(
       }
       if (expect !== "present" && expect !== "absent") {
         return { valid: false, reason: "grep.expect must be 'present' or 'absent'" };
+      }
+      // verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — reject a bare
+      // literal that pins a name the builder invents unless the spec body pins it. Fires only when
+      // `specText` is provided (author-time chokepoint); the runner path passes no specText and
+      // therefore never retroactively fails an already-authored check on this basis (defense-in-depth
+      // lives at authoring, where a rejection is actionable).
+      if (typeof ctx?.specText === "string") {
+        const guess = detectBuilderChosenNameInGrep(pattern, ctx.specText);
+        if (guess) {
+          return { valid: false, reason: `${guess.reason}. Try grep.pattern: ${guess.suggested}` };
+        }
       }
       return { valid: true };
     }

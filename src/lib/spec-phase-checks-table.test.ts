@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   validateExecutableCheck,
   isPlainReadonlySql,
+  detectBuilderChosenNameInGrep,
   type SpecPhaseCheckExecKind,
 } from "./spec-phase-checks-table";
 
@@ -219,6 +220,95 @@ test("unit_test rejects a script that is not in package.json (closes the cs-dire
     validateExecutableCheck({ exec_kind: "unit_test", params: { script: "anything" } }).valid,
     true,
   );
+});
+
+// ── verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 ──────────────────
+//
+// The bar: an author cannot pin an exact literal for a name the BUILDER invents. Two specs each
+// burned five builds — `test:graduate-crowned` (npm script name; the correct build registered
+// `test:media-buyer-graduate-scaler`) and `quant-desk` (a lifecycle page authored as `Quant-desk`
+// — a case-sensitive miss). No LLM pass guesses one specific kebab-case string, so the check must
+// fail at authoring, not at build time.
+
+test("detectBuilderChosenNameInGrep flags test:<slug> npm-script literal + suggests a regex", () => {
+  const g = detectBuilderChosenNameInGrep("test:graduate-crowned");
+  assert.ok(g, "test:graduate-crowned must flag as builder-chosen");
+  assert.match(g!.reason, /npm script name/i);
+  assert.equal(g!.suggested, "test:.*crowned");
+});
+
+test("detectBuilderChosenNameInGrep flags kebab-case names + suggests case-insensitive regex", () => {
+  const g = detectBuilderChosenNameInGrep("quant-desk");
+  assert.ok(g, "quant-desk must flag (the case-sensitivity trap)");
+  assert.match(g!.reason, /kebab-case/i);
+  assert.match(g!.suggested, /\(\?i\)/, "suggested pattern must be case-insensitive");
+});
+
+test("detectBuilderChosenNameInGrep flags *.test.ts filename literals", () => {
+  const g = detectBuilderChosenNameInGrep("scaler.test.ts");
+  assert.ok(g, "scaler.test.ts must flag as builder-chosen filename");
+  assert.match(g!.reason, /test filename/i);
+  assert.match(g!.suggested, /\\\.test\\\./);
+});
+
+test("detectBuilderChosenNameInGrep flags camelCase symbols the spec does NOT pin", () => {
+  const g = detectBuilderChosenNameInGrep("handleRedemption");
+  assert.ok(g, "camelCase symbol not in spec text must flag");
+  assert.match(g!.reason, /camelCase symbol/i);
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS a literal the spec body pins (case-insensitive)", () => {
+  const spec = "Phase 1 wires `consumeRedemption` at the redemption chokepoint (see specs-table).";
+  assert.equal(
+    detectBuilderChosenNameInGrep("consumeRedemption", spec),
+    null,
+    "a spec-pinned symbol must NOT flag — the author fixed the name",
+  );
+  // Case-insensitive match: spec says `Quant-Desk`, check greps `quant-desk` — still spec-pinned.
+  const capd = "The Quant-Desk lifecycle wires the review reader.";
+  assert.equal(detectBuilderChosenNameInGrep("quant-desk", capd), null);
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS a pattern with regex metacharacters (already a pattern)", () => {
+  for (const p of ["test:.*graduate", "quant.desk", "foo|bar", "run\\w+Checks", "consume\\(", "^Phase 1"]) {
+    assert.equal(detectBuilderChosenNameInGrep(p), null, `metachar pattern "${p}" must NOT flag`);
+  }
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS bare single-word identifiers with no camelCase transition", () => {
+  for (const p of ["Phase", "runner", "hero", "SELECT", "test", "graduate"]) {
+    assert.equal(detectBuilderChosenNameInGrep(p), null, `bare word "${p}" must NOT flag`);
+  }
+});
+
+test("validateExecutableCheck rejects a builder-chosen grep pattern when specText is provided", () => {
+  // The exact shape that stranded 5 builds: a `test:*` literal in package.json with no spec-body pin.
+  const specText = "Phase 1 registers a test that graduates crowned winners. Verify with tsc + grep.";
+  const rejected = validateExecutableCheck(
+    { exec_kind: "grep", params: { pattern: "test:graduate-crowned", path: "package.json", expect: "present" } },
+    { specText },
+  );
+  assert.equal(rejected.valid, false, "builder-chosen npm script name must reject at author time");
+  assert.match((rejected as { reason: string }).reason, /Try grep\.pattern: test:\.\*crowned/);
+});
+
+test("validateExecutableCheck accepts a builder-chosen literal that the spec body pins", () => {
+  const specText = "Phase 1 registers `test:graduate-crowned` as the graduation smoke test.";
+  const ok = validateExecutableCheck(
+    { exec_kind: "grep", params: { pattern: "test:graduate-crowned", path: "package.json", expect: "present" } },
+    { specText },
+  );
+  assert.equal(ok.valid, true, "spec-pinned literal must pass — the author fixed the name");
+});
+
+test("validateExecutableCheck without specText does NOT retroactively reject old grep literals", () => {
+  // The runner path passes no specText — an already-authored bare-literal check must not
+  // suddenly fail on this guard at runtime. Defense-in-depth lives at author time.
+  const ok = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "test:graduate-crowned", path: "package.json", expect: "present" },
+  });
+  assert.equal(ok.valid, true, "no specText → no builder-chosen guard (runner-safe default)");
 });
 
 test("isPlainReadonlySql accepts SELECT + WITH; rejects chained + mutating statements", () => {
