@@ -12,6 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Read what has already been done for this customer before proposing to spend more on them** · verified 2026-07-28 · → [[../lifecycles/return-pipeline]] · also [[../libraries/cs-director]], [[../libraries/cx-agent-sdk]], [[../tables/returns]]
+- **Stop stranding good builds on a spelling: a check may not require an exact literal the builder invents** · verified 2026-07-28 · → [[recipes/what-makes-a-buildable-spec]]
+- **Bianca wires the graduate verb to scale winners, classifies removed Meta APIs as permanent, and surfaces unexercised autonomous rails** · verified 2026-07-28 · → [[../libraries/media-buyer-graduate-scaler]], [[../libraries/meta__dead-verb-escalation]], [[../libraries/cold-scaler-graduate-heartbeat]]
 - **A regression test nothing runs is decoration — register the orphans, guard new ones, and write the box auth-refresh test that never landed** · verified 2026-07-27 · → [[../libraries/control-tower]]
 - **Retry transient AdLibrary creative downloads before marking ads failed** · verified 2026-07-27 · → [[../libraries/adlibrary]]
 - **Bianca's loser-kill excludes cold-scaler adsets + a 7-day min-age grace before cutting a scaler** · verified 2026-07-27 · → [[../libraries/meta-cpa-signal]]
