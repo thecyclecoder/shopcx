@@ -257,6 +257,60 @@ export async function executePlaybookStep(
       .join("\n");
   }
 
+  // ── Near-expiration fast-path (CEO 2026-07-30) ──────────────────────────────
+  // An expired / near-term-expiration complaint gets an INSTANT full-order
+  // replacement: jump straight to create_replacement, skipping the tracking /
+  // classify / item-select / address-confirm steps that otherwise stall the
+  // customer (Callie Kimmel chased us for 5 days of ignored follow-ups before her
+  // replacement finally fired). Bounded by handleCreateReplacement's existing
+  // 1-replacement-per-customer guard; the replacement ships to the order's address
+  // on file. Only fires once clarify_issue has set replacement_reason="expired".
+  if (ctx.replacement_reason === "expired") {
+    const createIdx = steps.findIndex((s) => s.type === "create_replacement");
+    const EXPIRED_SKIP = new Set([
+      "check_tracking",
+      "classify_issue",
+      "select_missing_items",
+      "confirm_shipping_address",
+    ]);
+    if (createIdx > currentStepIdx && EXPIRED_SKIP.has(currentStep.type)) {
+      if (!ctx.replacement_items) {
+        const identified = (ctx.identified_orders as string[] | undefined)?.[0];
+        const order =
+          (identified ? orders.find((o) => o.order_number === identified) : undefined) || orders[0];
+        const lineItems =
+          (order?.line_items as
+            | { title?: string; quantity?: number; variant_id?: string | number; variantId?: string }[]
+            | undefined) || [];
+        // Replace the physical product(s) they received — skip shipping-protection lines.
+        const physical = lineItems.filter((li) => !/shipping protection/i.test(li.title || ""));
+        if (order && physical.length) {
+          ctx.identified_orders = [order.order_number];
+          ctx.replacement_items = physical.map((li) => ({
+            title: li.title || "item",
+            quantity: Number(li.quantity) || 1,
+            variantId: li.variantId ?? (li.variant_id != null ? String(li.variant_id) : undefined),
+            type: "full",
+          }));
+        }
+      }
+      // Only fast-path when we actually have items to ship; otherwise fall through
+      // to the normal flow (which will ask for order details).
+      if (Array.isArray(ctx.replacement_items) && (ctx.replacement_items as unknown[]).length) {
+        await admin
+          .from("tickets")
+          .update({ playbook_step: createIdx, playbook_context: ctx })
+          .eq("id", ticketId);
+        return {
+          action: "advance",
+          newStep: createIdx,
+          context: ctx,
+          systemNote: `[Playbook] Near-expiration fast-path: instant full-order replacement — skipped ${currentStep.type} + remaining friction steps (CEO 2026-07-30).`,
+        };
+      }
+    }
+  }
+
   // Execute the step
   const stepResult = await executeStep(
     admin, workspaceId, ticketId, playbook, currentStep, steps,
