@@ -1,0 +1,1 @@
+- **Self-service journeys are enrolled on the portal channel so Sol/June stop wrongly escalating portal tickets** · verified 2026-07-30 · → [[lifecycles/customer-portal]]
