@@ -153,6 +153,24 @@ Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount`. Appstl
 - `src/lib/portal/handlers/remove-line-item.ts`
 - `src/lib/portal/handlers/replace-variants.ts`
 
+## Post-mutation verification (Phase 1)
+
+Every line mutation (`subAddItem`, `appstleRemoveLineItem` under `subRemoveItem`, `subChangeQuantity`, `subSwapVariant`, `subUpdateLineItemPrice`) confirms the intended end state against the LIVE Appstle contract before returning `{ success: true }` and before writing the local `subscriptions.items` mirror. HTTP 2xx from `replace-variants-v3` / `remove-line-item` / `update-line-item-price` is NOT the same claim as "the subscription changed" — Appstle answers 200 on requests it declines to apply (reproduced on contracts `27946909869` and `27871477933` on 2026-07-30: `subscriptionAddItem` then `subscriptionRemoveItem` both returned `{success:true}` while `subscriptionGetLiveContract` showed the old flavour still on both).
+
+`verifyContractEndState(apiKey, contractId, expectation)` polls the contract lines through the same URL `subscriptionGetLiveContract` reads, with a bounded settle window (`SUBSCRIPTION_ITEMS_VERIFY_TIMEOUT_MS`, default 4000ms) and poll interval (`SUBSCRIPTION_ITEMS_VERIFY_POLL_MS`, default 500ms). The expectations mirror the four line ops:
+
+- `add` → the variant is present at the expected quantity
+- `remove` → the variant is absent
+- `swap` → the new variant present AND the old one absent
+- `priceUpdate` → the line carries the expected base price (or its post-S&S `currentPrice`)
+- `changeQuantity` → the line is at the expected quantity
+
+A timeout ends as FAILURE — the returned `{ success: false, error }` names the expectation and the observed contract state (e.g. `"variant 44112233445 still present on contract"`). **Unverifiable is not the same as done**; a false success is worse than a failure because a failure retries, a false success is recorded as done and the customer ships the wrong thing. `syncItemsAfterMutation` only runs after verification passes — the mirror is never written to reflect an unverified end state, so a later reader of our own DB isn't misled either.
+
+The pure predicate `checkAppstleLineExpectation(lines, expectation)` is exported for testing; regression fixtures for the 2026-07-30 Strawberry Lemonade false-success live in `src/lib/subscription-items.verify.test.ts` (registered as `npm run test:sub-mutation-verify`).
+
+Phase 2 (a permanent-decline classifier for 2xx-with-decline-body and `errorKey: maxiterations`) is a follow-up spec item.
+
 ## Gotchas
 
 - **`couponApplicableToSubStatus` guards both coupon-apply entry points.** `subscriptionApplyCoupon` and `applyCouponToSub` both check the subscription status before apply — refusing `'paused'`, `'cancelled'`, or null. Discounts on non-active subs silently discount a future renewal the customer didn't earn (ticket f9e28d57, Cora: $15 coupon + $15 cash payout from one 1,500-pt redemption). Both return `{ success: false, error: 'subscription_not_active' }` on a non-active sub.

@@ -260,6 +260,21 @@ export async function appstleRemoveLineItem(
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
 
+    // Resolve the numeric variantId being removed for verification. Prefer the
+    // caller-provided value; fall back to the line we resolved above (whose GID
+    // ends in the same numeric id).
+    const removedVariantId =
+      variantOrLine.variantId && /^\d+$/.test(String(variantOrLine.variantId))
+        ? String(variantOrLine.variantId)
+        : lastPathSegment(lineGid || "");
+    if (removedVariantId) {
+      const verified = await verifyContractEndState(config.apiKey, contractId, {
+        kind: "remove",
+        variantId: removedVariantId,
+      });
+      if (!verified.verified) return { success: false, error: verified.error };
+    }
+
     // Update local DB
     await syncContractItems(workspaceId, contractId, config.apiKey);
 
@@ -267,6 +282,197 @@ export async function appstleRemoveLineItem(
   } catch (err) {
     console.error("[appstleRemoveLineItem] failed:", err);
     return { success: false, error: errText(err) };
+  }
+}
+
+// ── Post-mutation verification ──────────────────────────────────────
+//
+// Every line mutation confirms the intended end state against the LIVE
+// Appstle contract before returning success. HTTP 2xx from replace-variants-v3
+// / remove-line-item / update-line-item-price is not the same claim as
+// "the subscription changed" — Appstle answers 200 on requests it then
+// declines to apply (reproduced on contracts 27946909869 + 27871477933
+// on 2026-07-30: `subscriptionAddItem` then `subscriptionRemoveItem` both
+// returned {success:true} while `subscriptionGetLiveContract` showed the
+// old flavour still on both). A false success is worse than a failure:
+// a failure retries, a false success is recorded as done and the customer
+// ships the wrong thing. The bounded settle window covers Appstle's async
+// apply latency; a timeout ends as FAILURE, never assumed success.
+//
+// This closes docs/brain/specs/a-subscription-mutation-must-verify-it-happened-not-trust-http-200 Phase 1.
+
+/** Live-contract line shape (subset) used for post-mutation verification. */
+export interface ContractLineForVerify {
+  variantId?: string;
+  quantity?: number;
+  currentPrice?: { amount?: string | number } | null;
+  basePrice?: string | number | null;
+}
+
+/** Expected end state for one line mutation. */
+export type LineMutationExpectation =
+  | { kind: "add"; variantId: string; quantity: number }
+  | { kind: "remove"; variantId: string }
+  | { kind: "swap"; oldVariantId: string; newVariantId: string; quantity: number }
+  | { kind: "changeQuantity"; variantId: string; quantity: number }
+  | { kind: "priceUpdate"; variantId: string; basePriceCents: number };
+
+/** Base multiplier baked into `subUpdateLineItemPrice` — mirrors the value used to compute price_cents on the mirror. */
+const S_AND_S_PRICE_MULTIPLIER = 0.75;
+
+/** Poll deadline for waiting on Appstle's async apply. Overridable by env for
+ *  callers that need a tighter/looser bound; a 0 disables the settle wait
+ *  (single check + fail). */
+const VERIFY_SETTLE_TIMEOUT_MS = Number(process.env.SUBSCRIPTION_ITEMS_VERIFY_TIMEOUT_MS ?? 4000);
+const VERIFY_POLL_INTERVAL_MS = Number(process.env.SUBSCRIPTION_ITEMS_VERIFY_POLL_MS ?? 500);
+
+function lastPathSegment(id: string): string {
+  return String(id || "").split("/").pop() || "";
+}
+
+/** Pure predicate: does the observed live-contract line set satisfy the expectation? */
+export function checkAppstleLineExpectation(
+  lines: ContractLineForVerify[],
+  exp: LineMutationExpectation,
+): { met: true } | { met: false; observed: string } {
+  const byVariant = new Map<string, ContractLineForVerify>();
+  for (const l of lines) {
+    const vid = lastPathSegment(String(l.variantId ?? ""));
+    if (vid) byVariant.set(vid, l);
+  }
+  switch (exp.kind) {
+    case "add": {
+      const line = byVariant.get(String(exp.variantId));
+      if (!line) return { met: false, observed: `variant ${exp.variantId} not present on contract` };
+      if (Number(line.quantity ?? 0) !== Number(exp.quantity)) {
+        return {
+          met: false,
+          observed: `variant ${exp.variantId} present at qty ${line.quantity ?? "?"} (expected ${exp.quantity})`,
+        };
+      }
+      return { met: true };
+    }
+    case "remove": {
+      if (byVariant.has(String(exp.variantId))) {
+        return { met: false, observed: `variant ${exp.variantId} still present on contract` };
+      }
+      return { met: true };
+    }
+    case "swap": {
+      if (byVariant.has(String(exp.oldVariantId))) {
+        return { met: false, observed: `old variant ${exp.oldVariantId} still present on contract` };
+      }
+      const newLine = byVariant.get(String(exp.newVariantId));
+      if (!newLine) return { met: false, observed: `new variant ${exp.newVariantId} not present on contract` };
+      return { met: true };
+    }
+    case "changeQuantity": {
+      const line = byVariant.get(String(exp.variantId));
+      if (!line) return { met: false, observed: `variant ${exp.variantId} not present on contract` };
+      if (Number(line.quantity ?? 0) !== Number(exp.quantity)) {
+        return {
+          met: false,
+          observed: `variant ${exp.variantId} at qty ${line.quantity ?? "?"} (expected ${exp.quantity})`,
+        };
+      }
+      return { met: true };
+    }
+    case "priceUpdate": {
+      const line = byVariant.get(String(exp.variantId));
+      if (!line) return { met: false, observed: `variant ${exp.variantId} not present on contract` };
+      const expectedBaseCents = exp.basePriceCents;
+      const expectedCurrentCents = Math.round(exp.basePriceCents * S_AND_S_PRICE_MULTIPLIER);
+      const observedBase = line.basePrice != null && line.basePrice !== ""
+        ? Math.round(parseFloat(String(line.basePrice)) * 100)
+        : null;
+      const observedCurrentRaw = line.currentPrice?.amount;
+      const observedCurrent = observedCurrentRaw != null && observedCurrentRaw !== ""
+        ? Math.round(parseFloat(String(observedCurrentRaw)) * 100)
+        : null;
+      const baseMatches = observedBase !== null && observedBase === expectedBaseCents;
+      const currentMatches = observedCurrent !== null && Math.abs(observedCurrent - expectedCurrentCents) <= 1;
+      if (baseMatches || currentMatches) return { met: true };
+      return {
+        met: false,
+        observed: `variant ${exp.variantId} basePrice=${observedBase ?? "?"}¢ currentPrice=${observedCurrent ?? "?"}¢ (expected basePrice=${expectedBaseCents}¢ or currentPrice≈${expectedCurrentCents}¢)`,
+      };
+    }
+  }
+}
+
+function describeExpectation(exp: LineMutationExpectation): string {
+  switch (exp.kind) {
+    case "add": return `variant ${exp.variantId} present at qty ${exp.quantity}`;
+    case "remove": return `variant ${exp.variantId} absent from contract`;
+    case "swap": return `variant ${exp.oldVariantId} absent AND variant ${exp.newVariantId} present at qty ${exp.quantity}`;
+    case "changeQuantity": return `variant ${exp.variantId} at qty ${exp.quantity}`;
+    case "priceUpdate": return `variant ${exp.variantId} carrying basePrice ${exp.basePriceCents}¢`;
+  }
+}
+
+/** Fetch the live Appstle contract lines. `null` on any transport / 4xx / 5xx failure. */
+async function fetchLiveContractLines(
+  apiKey: string,
+  contractId: string,
+): Promise<ContractLineForVerify[] | null> {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as { lines?: { nodes?: unknown } };
+    const nodes = Array.isArray(json.lines?.nodes) ? (json.lines?.nodes as ContractLineForVerify[]) : [];
+    return nodes;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll the live Appstle contract until the expectation is met or the settle
+ * window elapses. On timeout returns FAILURE with the observed contract state —
+ * NEVER an assumed success. Unverifiable is not the same as done. The self-heal
+ * verify+retry pattern already exists in action-executor.ts; this is the
+ * missing pass for the line-mutation surface.
+ *
+ * Dependency-injection seams (`nowMs` / `sleepMs` / `fetchLines`) are for the
+ * unit test — prod callers pass no opts.
+ */
+export async function verifyContractEndState(
+  apiKey: string,
+  contractId: string,
+  expectation: LineMutationExpectation,
+  opts: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    nowMs?: () => number;
+    sleepMs?: (ms: number) => Promise<void>;
+    fetchLines?: (apiKey: string, contractId: string) => Promise<ContractLineForVerify[] | null>;
+  } = {},
+): Promise<{ verified: true } | { verified: false; error: string }> {
+  const timeoutMs = opts.timeoutMs ?? VERIFY_SETTLE_TIMEOUT_MS;
+  const pollIntervalMs = opts.pollIntervalMs ?? VERIFY_POLL_INTERVAL_MS;
+  const now = opts.nowMs ?? Date.now;
+  const sleep = opts.sleepMs ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const fetchLines = opts.fetchLines ?? fetchLiveContractLines;
+  const start = now();
+  let lastObserved = "contract fetch failed";
+  while (true) {
+    const lines = await fetchLines(apiKey, contractId);
+    if (lines !== null) {
+      const check = checkAppstleLineExpectation(lines, expectation);
+      if (check.met) return { verified: true };
+      lastObserved = check.observed;
+    }
+    const elapsed = now() - start;
+    if (elapsed >= timeoutMs) {
+      return {
+        verified: false,
+        error: `Verification failed after ${elapsed}ms — expected ${describeExpectation(expectation)}, live contract shows: ${lastObserved}. Appstle answered 2xx without applying the mutation.`,
+      };
+    }
+    await sleep(pollIntervalMs);
   }
 }
 
@@ -381,14 +587,24 @@ export async function subAddItem(
     stopSwapEmails: true,
   });
 
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) => [
-      ...items,
-      { variant_id: variantId, quantity, title: "", variant_title: "", price_cents: 0, product_id: "" },
-    ]);
-  }
+  if (!result.success) return result;
 
-  return result;
+  // Confirm the add landed on the live contract before mirroring the intended
+  // state into `subscriptions.items`. Writing the mirror on an unverified
+  // mutation is what makes the false success durable.
+  const verified = await verifyContractEndState(config.apiKey, contractId, {
+    kind: "add",
+    variantId,
+    quantity,
+  });
+  if (!verified.verified) return { success: false, error: verified.error };
+
+  await syncItemsAfterMutation(workspaceId, contractId, (items) => [
+    ...items,
+    { variant_id: variantId, quantity, title: "", variant_title: "", price_cents: 0, product_id: "" },
+  ]);
+
+  return { success: true };
 }
 
 /**
@@ -601,15 +817,22 @@ export async function subChangeQuantity(
     stopSwapEmails: true,
   });
 
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-      items.map((item) =>
-        String(item.variant_id) === resolvedId ? { ...item, quantity } : item,
-      ),
-    );
-  }
+  if (!result.success) return result;
 
-  return result;
+  const verified = await verifyContractEndState(config.apiKey, contractId, {
+    kind: "changeQuantity",
+    variantId: resolvedId,
+    quantity,
+  });
+  if (!verified.verified) return { success: false, error: verified.error };
+
+  await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+    items.map((item) =>
+      String(item.variant_id) === resolvedId ? { ...item, quantity } : item,
+    ),
+  );
+
+  return { success: true };
 }
 
 /**
@@ -678,6 +901,13 @@ export async function subUpdateLineItemPrice(
       console.error("Appstle updateLineItemPrice error:", text);
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
+
+    const verified = await verifyContractEndState(config.apiKey, contractId, {
+      kind: "priceUpdate",
+      variantId,
+      basePriceCents,
+    });
+    if (!verified.verified) return { success: false, error: verified.error };
 
     // Update our DB with the new price
     const discountedCents = Math.round(basePriceCents * 0.75);
@@ -889,34 +1119,46 @@ export async function subSwapVariant(
     stopSwapEmails: true,
   });
 
+  if (!result.success) return { ...result };
+
+  // The named failing state for this spec: contracts 27946909869 + 27871477933
+  // (2026-07-30) — swap returned {success:true} but Strawberry Lemonade stayed
+  // on the contract. The swap end state must show the NEW variant present AND
+  // the OLD one absent, or we return a failure that a caller can retry /
+  // escalate rather than mirror a lie into subscriptions.items.
+  const verified = await verifyContractEndState(config.apiKey, contractId, {
+    kind: "swap",
+    oldVariantId: resolvedOld,
+    newVariantId,
+    quantity,
+  });
+  if (!verified.verified) return { success: false, error: verified.error };
+
+  await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+    items.map((item) =>
+      String(item.variant_id) === resolvedOld
+        ? { ...item, variant_id: newVariantId, quantity }
+        : item,
+    ),
+  );
+
   let newLineGid: string | undefined;
-
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-      items.map((item) =>
-        String(item.variant_id) === resolvedOld
-          ? { ...item, variant_id: newVariantId, quantity }
-          : item,
-      ),
+  // Query Appstle for the new line's GID (swap creates a new line, old GID is dead)
+  try {
+    const detailRes = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+      { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
     );
+    if (detailRes.ok) {
+      const detail = await detailRes.json();
+      const lines = (detail?.lines?.nodes || []) as { id?: string; variantId?: string }[];
+      const lineMatch = lines.find(l => {
+        const vid = l.variantId?.split("/").pop() || l.variantId;
+        return String(vid) === String(newVariantId);
+      });
+      if (lineMatch?.id) newLineGid = lineMatch.id;
+    }
+  } catch { /* non-fatal — callers can still use subUpdateLineItemPrice without GID */ }
 
-    // Query Appstle for the new line's GID (swap creates a new line, old GID is dead)
-    try {
-      const detailRes = await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
-        { headers: { "X-API-Key": config.apiKey }, cache: "no-store" },
-      );
-      if (detailRes.ok) {
-        const detail = await detailRes.json();
-        const lines = (detail?.lines?.nodes || []) as { id?: string; variantId?: string }[];
-        const lineMatch = lines.find(l => {
-          const vid = l.variantId?.split("/").pop() || l.variantId;
-          return String(vid) === String(newVariantId);
-        });
-        if (lineMatch?.id) newLineGid = lineMatch.id;
-      }
-    } catch { /* non-fatal — callers can still use subUpdateLineItemPrice without GID */ }
-  }
-
-  return { ...result, newLineGid };
+  return { success: true, newLineGid };
 }
