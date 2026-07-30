@@ -1,0 +1,30 @@
+import { loadEnv } from "./_bootstrap"; loadEnv();
+import { authorSpecRowStructured } from "../src/lib/author-spec";
+const WS="fdc11e10-b89f-4989-8b73-ed6526c4d906";
+async function main(){
+  const s = await authorSpecRowStructured(WS, "june-review-replaces-solver-skeptic-quorum-triage", {
+    title: "June's review over the handling + the analyzer's grade becomes the escalation triage — retire the solver/skeptic quorum",
+    why: "When a ticket escalates it's because the analyzer (Cora) graded the handling and flagged a real problem — so the escalation ALREADY carries the solver's output (the AI's handling / Sol's Direction) AND the skeptic's critique (the analyzer's grade + issue tags). The current triage runs a separate solver-to-skeptic-to-quorum sweep that re-derives exactly those two things before anything materializes, and only falls to June (the CS Director) when the quorum can't vote. That is redundant work and cost: the solver seat is the handling that already happened, the skeptic seat is the grade that already fired. The lean path is June reading what the handler did + what the analyzer flagged and deciding — with the founder as the final rung and an on-demand second opinion for the genuinely ambiguous. It is also the clean north-star cascade: the analyzer supervises the handling, June supervises the escalation decision, the founder supervises June — nobody re-does the layer below.",
+    what: "June's direct review becomes the PRIMARY escalation triage: she reads the ticket's handling (the resolution record / Direction) + the analyzer's grade + issues, and emits the verdict (approve remedy / author a fix spec / escalate to founder). The automatic solver-to-skeptic-to-quorum sweep is retired as the default; June-to-founder stays the top rung, and a single on-demand second opinion is available for borderline calls.",
+    summary: "**Brain refs:** [[../libraries/cs-director]] [[../libraries/ticket-analyzer]] [[../tables/triage_runs]] [[../functions/cs]]. Grounded in: box-escalation-triage (the solver-to-skeptic-to-quorum sweep, [[../specs/box-escalation-triage]] shipped) + the cs-director-call June hard-call (currently the third-rung FALLBACK when quorum can't vote — this makes it PRIMARY). The escalation already carries the handling (ticket_resolution_events) + the analyzer grade (ticket_analyses). Consolidation companion to the [[../goals/sol-ticket-direction-then-cheap-execution|Sol goal]] and the Improve/Triage-fold-into-Sol simplification.",
+    owner: "cs",
+    parent: '[[../functions/cs]] — "Escalation triage quality" mandate: an escalated ticket already carries the handler\'s resolution (the solver) + the analyzer\'s grade (the skeptic), so triage is June reading both and deciding — not a quorum re-deriving them.',
+    blocked_by: [],
+    phases: [
+      { title: "Phase 1 — June's review is the primary escalation triage",
+        why: "The escalated ticket already contains the solver (the handling) and the skeptic (the analyzer's grade); the only missing piece is the decision — which is June's job. Reading the two things that already exist is cheaper and faster than a quorum re-deriving them.",
+        what: "On an escalated ticket, June reads the handling record + the analyzer's grade/issues and emits the verdict (approve remedy / author a fix spec / escalate to founder) as the default triage path.",
+        body: "Make the cs-director-call (June's hard-call, [[../libraries/cs-director]]) the PRIMARY triage on every escalation: it reads the ticket's handling (ticket_resolution_events / the Direction when present) + the analyzer's grade + issue tags (ticket_analyses, [[../libraries/ticket-analyzer]]) and emits { decision, remedy | spec_seed | escalate_founder }, replacing the automatic solver-to-skeptic-to-quorum sweep as the default. The WORKER applies it (executeSonnetDecision on approve_remedy, specs SDK on author_spec, dashboard_notifications on escalate_founder) — same as today's hard-call path, just triggered first. Cite cs-director-call + the analyzer grade + triage_runs.",
+        verification: "An escalated ticket routes to June's review, which reads the handling + the analyzer grade and produces a verdict WITHOUT a solver-to-skeptic-to-quorum run. The verdict materializes via the existing worker path. June-to-founder is still reachable. Recorded in triage_runs / director_activity.",
+        status: "planned" },
+      { title: "Phase 2 — retire the quorum default; keep the founder rung + an on-demand second opinion",
+        why: "The multi-agent quorum's only real value was catching a bad single call; retiring it removes redundant per-escalation cost, but the two genuine safety values — founder escalation + a second opinion on ambiguity — must remain.",
+        what: "The automatic solver-to-skeptic-to-quorum run per escalation is retired; June-to-founder stays the top rung; a single on-demand second opinion (one skeptic) is available for borderline cases, invoked BY June rather than run by default.",
+        body: "Stop dispatching the box-escalation-triage quorum on every escalation (retire or gate it to on-demand only, [[../specs/box-escalation-triage]]). Preserve June-to-founder escalation (the dashboard_notifications rung / the ladder). Add an on-demand single second-opinion June can pull when a case is genuinely borderline — the exception, not a default quorum. Cite the escalation ladder + triage_runs.",
+        verification: "No solver-to-skeptic-to-quorum run fires per escalation by default; June can escalate to founder AND can pull exactly one second opinion on demand; triage_runs reflects the leaner path (June-review verdicts, occasional second-opinion, no routine quorum).",
+        status: "planned" },
+    ],
+  }, "planned", { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "cs#escalation-triage" });
+  console.log("june-triage spec:", s ? "authored" : "FAILED");
+}
+main().then(()=>process.exit(0)).catch(e=>{console.error("ERR",e.message||e);process.exit(1);});

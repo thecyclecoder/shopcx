@@ -1,0 +1,36 @@
+import { loadEnv } from "./_bootstrap"; loadEnv();
+import { authorSpecRowStructured } from "../src/lib/author-spec";
+const WS="fdc11e10-b89f-4989-8b73-ed6526c4d906";
+async function main(){
+  const s = await authorSpecRowStructured(WS, "playbook-compiler-becomes-box-agent-mining-full-history", {
+    title: "The playbook compiler becomes a supervised box-session agent that mines the full ticket history for data-grounded playbook seeds — no Fable",
+    why: "The playbook compiler is starved: it mines only the ~9-row ticket_resolution_events ledger (last 30 days) and outputs conversation rules, while the real signal — thousands of historical tickets plus a thousand graded analyses — sits unused. The exploratory Fable tree research that found the recurring 'trees' customers go down was never persisted, and Fable now costs API money, so it isn't the tool. But the WORK — read the history, find the recurring problem-to-resolution trees, propose grounded playbook seeds — is agent work: a big-context, deep, ONE-TIME pass, exactly what a box session is for (pay for the understanding once, amortized, like Sol's first touch). Done as a supervised box agent under June it needs no Fable and no raw-API cron, and it fixes the over-triggering fear that parked the assisted-purchase playbooks: triggers derived from real intent distributions instead of hand-guessed keywords, and seeds that are proposed + human-gated, never auto-active.",
+    what: "Convert the playbook compiler from a starved raw-API cron into a CS box-session agent in June's charge that reads the FULL historical corpus (tickets + graded analyses), clusters it into recurring problem-to-resolution trees, and proposes actual playbook seeds — triggers grounded in real intent distributions, steps grounded in what actually resolved those tickets — landing as PROPOSED, human-gated playbooks (never auto-active), and feeding Sol's session-chosen playbook selection.",
+    summary: "**Brain refs:** [[../libraries/playbook-compiler]] [[../inngest/playbook-compiler]] [[../functions/cs]] [[../tables/ticket_analyses]] [[../tables/playbooks]]. Grounded in: src/lib/playbook-compiler.ts (mines ticket_resolution_events over MINING_WINDOW_DAYS, inserts sonnet_prompts — starved: ~9 ledger rows vs 2,586 tickets + 1,010 ticket_analyses) + src/lib/inngest/playbook-compiler.ts (the cron). No Fable (now paid); runs on the box via the model-tier registry. Same supervised-box-agent conversion as [[../specs/ticket-analyzer-becomes-box-agent-under-june]]. Feeds the [[../goals/sol-ticket-direction-then-cheap-execution|Sol goal]] M4 (session-chosen playbook selection).",
+    owner: "cs",
+    parent: '[[../functions/cs]] — "Fix weird tickets fast, calibrate so they don\'t recur" mandate: recurring ticket trees are mined from the full history by a supervised box agent and compiled into data-grounded playbook seeds so weird tickets stop recurring — no Fable, no raw-API cron.',
+    blocked_by: [],
+    phases: [
+      { title: "Phase 1 — box-agent conversion + full-history tree extraction (the backfill)",
+        why: "The compiler is starved and headless; the recurring trees only surface from a deep box-session pass over the FULL corpus, not the 9-row ledger, and that pass must be supervised, not a raw-API cron.",
+        what: "A CS box-session agent (in June's charge) reads the full historical corpus — tickets + graded analyses — clusters it into recurring problem-to-resolution trees, and persists them durably; reasoning surfaced + recorded to director_activity.",
+        body: "Convert src/lib/playbook-compiler.ts + its cron (src/lib/inngest/playbook-compiler.ts) from a raw-API cron mining only ticket_resolution_events into a box agent kind dispatched by the builder worker (like runCsDirectorCallJob). The agent reads the full corpus (tickets + ticket_analyses, not the 30-day ledger), clusters into recurring problem-to-resolution trees, and persists them to a durable store (a compiled_trees table or the resolution-record spine). Runs on box models via the model-tier registry — NO Fable, no external image/model call. One-time backfill over history + periodic passes over new tickets. Cite the compiler + the box-agent dispatch pattern.",
+        verification: "A box-session agent run persists recurring trees derived from the FULL history (tickets + analyses), not just the ledger; the agent's reasoning is recorded to director_activity under CS. No code path calls Fable or a raw external model API. Re-running over unchanged history is idempotent.",
+        status: "planned" },
+      { title: "Phase 2 — propose data-grounded playbook seeds → human-gated",
+        why: "The compiler outputs rules today; the goal is PLAYBOOK seeds with triggers from real intent distributions + steps from real resolutions — and they must be proposed + human-gated, the exact lesson from the assisted-purchase over-trigger scare.",
+        what: "The agent proposes actual playbook seeds from the trees — triggers derived from real intent distributions, step sequences from real resolutions — landing as PROPOSED / inactive playbooks that a human (via June / the review flow) approves before they go active.",
+        body: "Extend the agent to emit playbooks + playbook_steps rows in a PROPOSED, is_active=false state, with trigger_intents/patterns derived from the real intent distribution of the tree (not hand-guessed keywords) and steps derived from the actual resolution sequences. Activation is human-gated (is_active stays false until approved via the proposed-review flow — Wren/prompt-review or a dashboard approval). Never auto-active. Cite playbooks/playbook_steps + the proposed-review path.",
+        verification: "Seeds land as proposed, is_active=false playbooks with data-grounded triggers + steps; NONE auto-active. Approval flips is_active. A grep/audit confirms the compiler never inserts an active playbook directly.",
+        status: "planned" },
+      { title: "Phase 3 — wire the compiled library as a durable input to Sol's selection",
+        why: "Sol's session-chosen playbook selection (Sol goal M4) is only as good as the library it picks from; the compiled, grounded playbooks become Sol's option set and the trees inform her direction-setting.",
+        what: "The approved compiled playbooks are the pool Sol's first-touch session selects from, and the persisted trees are available to the direction-setting session as context.",
+        body: "Make the approved compiled playbooks discoverable by Sol's first-touch session (the [[../goals/sol-ticket-direction-then-cheap-execution|Sol goal]] M4 selection) and expose the persisted trees as context the direction-setting session can read. Cite the Sol goal M4 + the compiled-trees store.",
+        verification: "Sol's session-chosen selection can pick a compiled playbook; the persisted trees are readable by the direction-setting session. Removing/adding a compiled playbook changes Sol's option set (DB-driven, no hardcoding).",
+        status: "planned" },
+    ],
+  }, "planned", { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "cs#calibrate" });
+  console.log("compiler-agent spec:", s ? "authored" : "FAILED");
+}
+main().then(()=>process.exit(0)).catch(e=>{console.error("ERR",e.message||e);process.exit(1);});

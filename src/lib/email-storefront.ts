@@ -64,7 +64,7 @@ export function isReviewableProduct(product: {
  * Messaging. Defaults: brand name → workspace.name, primary color →
  * neutral zinc, from-local → "orders", reply-to → no-reply@{domain}.
  */
-async function getBrand(workspaceId: string, resendDomain: string): Promise<{
+export async function getBrand(workspaceId: string, resendDomain: string): Promise<{
   logoUrl: string | null;
   primaryColor: string;
   brandName: string;
@@ -167,7 +167,7 @@ function formatAddress(a: AddressLike | null | undefined): string {
  * products (don't render the block at all in that case — empty
  * social-proof slot is worse than no slot).
  */
-async function pickFeaturedReview(workspaceId: string, productIds: string[]): Promise<{
+export async function pickFeaturedReview(workspaceId: string, productIds: string[]): Promise<{
   reviewer_name: string | null;
   rating: number | null;
   title: string | null;
@@ -237,7 +237,7 @@ async function pickFeaturedReview(workspaceId: string, productIds: string[]): Pr
   };
 }
 
-function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFeaturedReview>>>): string {
+export function renderReviewBlock(review: NonNullable<Awaited<ReturnType<typeof pickFeaturedReview>>>): string {
   const rating = Math.max(0, Math.min(5, review.rating || 5));
   const stars = "★★★★★".slice(0, rating) + "☆☆☆☆☆".slice(0, 5 - rating);
   // Always render the FULL review body — smart_quote (AI excerpt)
@@ -439,7 +439,7 @@ async function buildLogoBlock(rawLogoUrl: string, brandName: string): Promise<st
   return `<img src="${escapeHtml(renderUrl)}" alt="${safeAlt}" height="${displayH}" style="display:block;height:${displayH}px;width:auto;border:0;outline:none;" />`;
 }
 
-async function shellHtml(opts: {
+export async function shellHtml(opts: {
   title: string;
   preheader: string;
   bodyHtml: string;
