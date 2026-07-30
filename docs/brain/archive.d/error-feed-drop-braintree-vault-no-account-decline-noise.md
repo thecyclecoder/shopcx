@@ -1,0 +1,1 @@
+- **Filter Braintree 'No Account' issuer decline out of the portal vault error feed** · verified 2026-07-30 · → [[../integrations/vercel-log-drain]]
