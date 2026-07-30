@@ -1,0 +1,1 @@
+- **Classify Klaviyo reviews-fetch 5xx as transient in the Vercel log-drain** · verified 2026-07-30 · → [[../libraries/control-tower]]
