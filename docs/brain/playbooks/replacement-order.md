@@ -186,6 +186,14 @@ If the order ingestion ran without addresses (rare — see [[../lifecycles/fraud
 | `src/lib/customer-events.ts` | Event logging |
 | `src/app/dashboard/settings/playbooks/page.tsx` | Settings UI |
 
+## Near-expiration fast-path (CEO 2026-07-30)
+
+An **expired / near-term-expiration** complaint gets an **instant full-order replacement** — it does NOT walk the normal 8-step machine. Once `clarify_issue` classifies the issue as `expired` (sets `ctx.replacement_reason="expired"`), [[../libraries/playbook-executor]] `executePlaybookStep` jumps the step pointer straight to `create_replacement`, skipping `check_tracking` / `classify_issue` / `select_missing_items` / `confirm_shipping_address` (all irrelevant friction for an expiration case — the customer has the product, it's just short-dated). It pre-populates `replacement_items` with the identified (or most-recent) order's physical lines (shipping-protection excluded, `type:"full"`) and ships to the order's address on file. The executor's `while (action==="advance")` loop then fires `create_replacement` in the SAME turn, so the replacement + confirmation go out on the customer's first message — no back-and-forth.
+
+**Why:** a near-expiration complaint stalled in the multi-step confirm-and-wait flow left Callie Kimmel chasing us for ~5 days of ignored follow-ups before her replacement fired. Near-expiration is our fault (short-dated stock shipped), so we replace instantly.
+
+**Bounded by** `handleCreateReplacement`'s existing **1-replacement-per-customer** guard (a second expired claim escalates to admin, not auto-ships). Fires only when items are resolvable; otherwise falls through to the normal flow (which asks for order details).
+
 ## Related
 
 [[../README]] · [[refund]] · [[../tables/playbooks]] · [[../tables/replacements]] · [[../tables/orders]] · [[../tables/subscriptions]] · [[../journeys/missing-items]] · [[../journeys/shipping-address]] · [[../lifecycles/return-pipeline]] · [[../lifecycles/fraud-detection]] · [[../integrations/shopify]] · [[../integrations/easypost]] · [[../integrations/appstle]]
