@@ -68,6 +68,23 @@ Internal-subscription guard: `isInternalSubscription()` short-circuits these cal
 - Coupon endpoints use specific status codes for errors: `409` (conflict — already applied), `404`, `422`, `400`.
 - Webhook signature verification uses Svix with `webhook-*` header prefix.
 
+### `replace-variants-v3` — decline shapes on a 2xx body
+
+Appstle answers HTTP 200 on `replace-variants-v3` requests it then declines to apply — the response body carries the actual verdict. Trusting `res.ok` alone recorded the mutation as done while the contract kept the old flavour (contracts `27946909869` + `27871477933` on 2026-07-30). `callReplaceVariants` in [[../libraries/subscription-items]] now runs the pure `classifyReplaceVariantsBody(text, status)` on every response and treats a decline as failure:
+
+| 2xx body shape | Class | Meaning |
+|---|---|---|
+| `{ errorKey: "maxiterations", message: "Unable to complete variant replacement after multiple attempts" }` | **PERMANENT** | Appstle has given up retrying internally for that contract. Survived every retry across two separate campaigns on `27946909869` + `27871477933` (2026-07-30). Retrying reaches the same wall — the caller escalates for human repair and does NOT loop. A dedup-keyed `dashboard_notifications` `type='system'` row (`metadata.subscription_mutation_permanent:true` + `contract_id` + `error_key`) surfaces the contract to the CEO inbox. |
+| `{ errorKey: "<other>", … }` | transient | Mutation did NOT apply, but retrying might; the caller decides. `errorKey` propagates as `errorKey` on the return value. |
+| `{ success: false, message: "…" }` | transient | Explicit decline. |
+| `{ error: "…" }` | transient | Free-text decline. |
+| plain contract JSON, `{}`, non-JSON, arrays/primitives | ok | Historical happy path (no signal to interpret). |
+| Non-2xx HTTP | transient | Existing wire behaviour — `Appstle <status>: <body-snippet-or-"no body">`. |
+
+The **permanent** classification is closed over the CURRENT known-permanent `errorKey` set in `PERMANENT_REPLACE_VARIANTS_ERROR_KEYS` — currently just `maxiterations`. A new key that Appstle only fixes with human touch is added there in the same PR that introduces it. Pinned by [[../libraries/subscription-items]] regression `npm run test:sub-mutation-decline` (`src/lib/subscription-items.decline.test.ts`) so a future refactor can't quietly swallow `maxiterations` again.
+
+`subscriptionAddItem` / `subscriptionChangeQuantity` / `subscriptionSwapVariant` in [[../libraries/commerce__subscription]] propagate `{ permanent?: boolean; errorKey?: string }` on their return value — a caller that owns a retry loop consumes `permanent` to break out instead of hammering the same contract.
+
 ## Rate limits + retry
 
 - No published rate limit. Empirically forgiving; we don't backoff aggressively.

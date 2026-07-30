@@ -502,10 +502,153 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
   } catch { /* non-fatal */ }
 }
 
+// ── Phase 2 — a 200 that declines the work is classified, not swallowed ─
+//
+// Appstle answers 2xx on `replace-variants-v3` requests it then declines to
+// apply — the response body carries the decline (e.g. `errorKey: maxiterations`,
+// "Unable to complete variant replacement after multiple attempts"). Trusting
+// the HTTP status alone recorded the mutation as done while the contract kept
+// the old flavour (contracts 27946909869 + 27871477933 on 2026-07-30). The
+// same two contracts survived every retry across two separate campaigns, so
+// `maxiterations` is a PERMANENT wall for that contract, not an ordinary
+// transient — retrying wastes attempts and hides a subscription that
+// genuinely needs a human. Phase 1 caught the false success via post-mutation
+// verification; Phase 2 catches it earlier by parsing the body Appstle
+// actually returned, and surfaces the permanent class to the CEO inbox
+// instead of burying it in a batch summary.
+//
+// Closes docs/brain/specs/a-subscription-mutation-must-verify-it-happened-not-trust-http-200 Phase 2.
+
+/** Classified outcome of a `replace-variants-v3` call. */
+export type ReplaceVariantsDecline =
+  | { kind: "ok" }
+  | { kind: "transient"; reason: string; errorKey?: string }
+  | { kind: "permanent"; reason: string; errorKey?: string };
+
+/** Appstle decline shapes recognized as PERMANENT for that contract — retrying reaches the same wall. */
+const PERMANENT_REPLACE_VARIANTS_ERROR_KEYS = new Set<string>([
+  // "Unable to complete variant replacement after multiple attempts" — survived every retry
+  // across two separate campaigns on 27946909869 + 27871477933 (2026-07-30). Appstle has
+  // given up retrying internally; anything downstream should too.
+  "maxiterations",
+]);
+
+/**
+ * Pure classifier for the `replace-variants-v3` response. Inspects the body,
+ * not just the status — HTTP 2xx from Appstle is NOT the same claim as "the
+ * mutation applied". Callers use the return value to decide between a
+ * transient retry and permanent human-repair surface.
+ *
+ * Rules:
+ *   • non-2xx HTTP → transient with the raw snippet (existing behaviour)
+ *   • empty / non-JSON body on 2xx → ok (the historical happy path)
+ *   • 2xx body with `errorKey` in PERMANENT_REPLACE_VARIANTS_ERROR_KEYS → permanent
+ *   • 2xx body with any other `errorKey` OR `success: false` OR an `error`
+ *     string → transient (the caller can retry, but the mutation did NOT apply)
+ *   • otherwise → ok
+ */
+export function classifyReplaceVariantsBody(
+  responseBody: string | null | undefined,
+  httpStatus: number,
+): ReplaceVariantsDecline {
+  if (httpStatus < 200 || httpStatus >= 300) {
+    const snippet = (responseBody ?? "").slice(0, 400).replace(/\s+/g, " ").trim();
+    return { kind: "transient", reason: `Appstle ${httpStatus}: ${snippet || "no body"}` };
+  }
+  if (!responseBody) return { kind: "ok" };
+  let parsed: Record<string, unknown> | null;
+  try {
+    const p = JSON.parse(responseBody);
+    parsed = p && typeof p === "object" && !Array.isArray(p) ? (p as Record<string, unknown>) : null;
+  } catch {
+    return { kind: "ok" };
+  }
+  if (!parsed) return { kind: "ok" };
+  const errorKey = typeof parsed.errorKey === "string" ? parsed.errorKey : undefined;
+  const message = typeof parsed.message === "string"
+    ? parsed.message
+    : typeof parsed.error === "string"
+      ? parsed.error
+      : undefined;
+  if (errorKey && PERMANENT_REPLACE_VARIANTS_ERROR_KEYS.has(errorKey)) {
+    return {
+      kind: "permanent",
+      errorKey,
+      reason: `Appstle 2xx declined replace-variants-v3: errorKey=${errorKey}${message ? ` — ${message}` : ""}. PERMANENT for this contract: retrying reaches the same wall (survived every retry on 27946909869 + 27871477933, 2026-07-30). Needs human repair.`,
+    };
+  }
+  if (errorKey) {
+    return {
+      kind: "transient",
+      errorKey,
+      reason: `Appstle 2xx declined replace-variants-v3: errorKey=${errorKey}${message ? ` — ${message}` : ""}`,
+    };
+  }
+  if (parsed.success === false) {
+    return { kind: "transient", reason: `Appstle 2xx declined replace-variants-v3: success=false${message ? ` — ${message}` : ""}` };
+  }
+  if (typeof parsed.error === "string" && parsed.error.length > 0) {
+    return { kind: "transient", reason: `Appstle 2xx declined replace-variants-v3: ${message ?? String(parsed.error)}` };
+  }
+  return { kind: "ok" };
+}
+
+/**
+ * Surface a PERMANENT Appstle decline for one contract to the CEO inbox so a
+ * human can repair the subscription. Deduped per `(workspace, contract, errorKey)`
+ * against the open inbox — a stuck contract can't spam the inbox on every retry.
+ * Rides on the existing `type='system'` inbox channel (the constraint enforced by
+ * `dashboard_notifications_type_check` does not yet carry a subscription-specific
+ * type; the title + metadata disambiguate).
+ */
+async function surfacePermanentReplaceVariantsFailure(
+  workspaceId: string,
+  requestBody: Record<string, unknown>,
+  cls: Extract<ReplaceVariantsDecline, { kind: "permanent" }>,
+): Promise<void> {
+  try {
+    const admin = createAdminClient();
+    const contractId = String(requestBody.contractId ?? "");
+    if (!workspaceId || !contractId) return;
+    const dedupeMeta = {
+      subscription_mutation_permanent: true,
+      contract_id: contractId,
+      error_key: cls.errorKey ?? null,
+    };
+    const { data: existing } = await admin
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("type", "system")
+      .contains("metadata", dedupeMeta)
+      .eq("dismissed", false)
+      .limit(1);
+    if ((existing ?? []).length > 0) return;
+    await admin.from("dashboard_notifications").insert({
+      workspace_id: workspaceId,
+      type: "system",
+      title: `Subscription mutation permanently declined by Appstle (contract ${contractId})`,
+      body: cls.reason,
+      link: `/dashboard/subscriptions?contract=${contractId}`,
+      metadata: {
+        ...dedupeMeta,
+        endpoint: "replace-variants-v3",
+        request_body: requestBody,
+      },
+    });
+  } catch (err) {
+    // Non-fatal — the caller still gets `permanent:true` in its return value
+    // so an upstream handler can escalate through its own path even if the
+    // inbox insert failed.
+    console.error("[surfacePermanentReplaceVariantsFailure] insert failed:", err);
+  }
+}
+
 async function callReplaceVariants(
+  workspaceId: string,
   apiKey: string,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; errorKey?: string }> {
   const url = "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3";
   const t0 = Date.now();
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
@@ -515,17 +658,24 @@ async function callReplaceVariants(
       body: JSON.stringify(body), cache: "no-store",
     });
     const text = await res.text();
+    const cls = classifyReplaceVariantsBody(text, res.status);
     await logAppstleCall({
       url, method: "POST", body, endpoint: "replace-variants-v3",
-      status: res.status, responseBody: text, success: res.ok,
+      status: res.status, responseBody: text,
+      success: cls.kind === "ok",
       durationMs: Date.now() - t0,
     });
-    if (!res.ok) {
-      console.error("Appstle replaceVariants error:", text, "body sent:", JSON.stringify(body));
-      const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
-      return { success: false, error: `Appstle ${res.status}: ${snippet || "no body"}` };
+    if (cls.kind === "ok") return { success: true };
+    console.error(
+      `Appstle replaceVariants ${cls.kind}:`, cls.reason,
+      "body sent:", JSON.stringify(body),
+      "response:", text.slice(0, 400),
+    );
+    if (cls.kind === "permanent") {
+      await surfacePermanentReplaceVariantsFailure(workspaceId, body, cls);
+      return { success: false, error: cls.reason, permanent: true, errorKey: cls.errorKey };
     }
-    return { success: true };
+    return { success: false, error: cls.reason, errorKey: cls.errorKey };
   } catch (err) {
     console.error("Appstle replaceVariants failed:", err);
     await logAppstleCall({
@@ -565,13 +715,19 @@ async function syncItemsAfterMutation(
   }
 }
 
-/** Add a product variant to a subscription */
+/** Add a product variant to a subscription.
+ *
+ * Return value carries the Phase-2 permanent flag: `permanent: true` means the
+ * Appstle upstream refused this mutation in a way that further retries can't
+ * clear (`errorKey: maxiterations`) — the caller should escalate for human
+ * repair rather than loop. `errorKey` is the raw Appstle key for downstream
+ * routing / dedupe. */
 export async function subAddItem(
   workspaceId: string,
   contractId: string,
   variantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; errorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
@@ -579,7 +735,7 @@ export async function subAddItem(
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
 
-  const result = await callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(workspaceId, config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
@@ -769,13 +925,14 @@ export async function subRemoveItem(
   return appstleRemoveLineItem(workspaceId, contractId, arg);
 }
 
-/** Change quantity of a variant on a subscription (remove + re-add with new qty) */
+/** Change quantity of a variant on a subscription (remove + re-add with new qty).
+ *  `permanent`/`errorKey` propagate the Phase-2 classifier verdict — see `subAddItem`. */
 export async function subChangeQuantity(
   workspaceId: string,
   contractId: string,
   variantId: string,
   quantity: number,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; errorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     // Internal path: rewrite the line's quantity directly.
     const admin = createAdminClient();
@@ -807,7 +964,7 @@ export async function subChangeQuantity(
     resolvedId = r.numericId;
   }
 
-  const result = await callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(workspaceId, config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",
@@ -1081,14 +1238,15 @@ export async function subscriptionRemoveCoupon(
   return { success: !r.error, error: r.error };
 }
 
-/** Swap one variant for another (e.g., change flavor or swap product) */
+/** Swap one variant for another (e.g., change flavor or swap product).
+ *  `permanent`/`errorKey` propagate the Phase-2 classifier verdict — see `subAddItem`. */
 export async function subSwapVariant(
   workspaceId: string,
   contractId: string,
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string; newLineGid?: string }> {
+): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; errorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }
@@ -1109,7 +1267,7 @@ export async function subSwapVariant(
     resolvedOld = r.numericId;
   }
 
-  const result = await callReplaceVariants(config.apiKey, {
+  const result = await callReplaceVariants(workspaceId, config.apiKey, {
     shop: config.shop,
     contractId: Number(contractId),
     eventSource: "CUSTOMER_PORTAL",

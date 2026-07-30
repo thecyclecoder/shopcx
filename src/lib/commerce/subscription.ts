@@ -528,7 +528,7 @@ export async function subscriptionAddItem(
   contractId: string,
   variantId: string,
   quantity: number = 1,
-): Promise<OpResult> {
+): Promise<OpResult & { permanent?: boolean; errorKey?: string }> {
   return subAddItem(workspaceId, contractId, variantId, quantity);
 }
 
@@ -545,7 +545,7 @@ export async function subscriptionChangeQuantity(
   contractId: string,
   variantId: string,
   quantity: number,
-): Promise<OpResult> {
+): Promise<OpResult & { permanent?: boolean; errorKey?: string }> {
   return subChangeQuantity(workspaceId, contractId, variantId, quantity);
 }
 
@@ -555,7 +555,7 @@ export async function subscriptionSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<OpResult & { newLineGid?: string }> {
+): Promise<OpResult & { newLineGid?: string; permanent?: boolean; errorKey?: string }> {
   return subSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
 }
 
