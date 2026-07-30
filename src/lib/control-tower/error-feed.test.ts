@@ -27,6 +27,7 @@ import {
   isTransientClientNetworkAbort,
   isTransientInngestStepRetryThrow,
   isTransientInngestTransportError,
+  isTransientKlaviyoReviewsFetch5xx,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
   isTransientSupabaseEdgeHtmlBody,
@@ -1813,4 +1814,106 @@ test("isTransientAnthropicOverloadError returns false on empty / nullish input",
   assert.equal(isTransientAnthropicOverloadError(undefined), false);
   assert.equal(isTransientAnthropicOverloadError(""), false);
   assert.equal(isTransientAnthropicOverloadError("   "), false);
+});
+
+// ── isTransientKlaviyoReviewsFetch5xx (error-feed-classify-klaviyo-reviews-fetch-5xx-transient) ──
+// `src/lib/klaviyo.ts` `fetchAllReviews` (:118) and `syncReviewPage` (:154) log
+// `console.error(\`Klaviyo reviews fetch failed: ${res.status}\`)` on a non-ok Klaviyo
+// response and RECOVER (break page loop / return graceful no-op); reviews are idempotent by
+// `external_id`, so the next daily beat re-syncs. Classifying the pre-recovery 5xx transient
+// auto-resolves a first sighting; a chronic Klaviyo outage would recur and still surface.
+// Control Tower `vercel:a7d8086bb71bbfe3`.
+
+test("isTransientKlaviyoReviewsFetch5xx matches the captured /api/inngest 5xx signature", () => {
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: 503",
+    ),
+    true,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: 500",
+    ),
+    true,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: 599",
+    ),
+    true,
+  );
+});
+
+test("isTransientKlaviyoReviewsFetch5xx KEEPS a 4xx (paged — auth/bad-request is a real bug)", () => {
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: 401",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: 429",
+    ),
+    false,
+  );
+});
+
+test("isTransientKlaviyoReviewsFetch5xx KEEPS a different Klaviyo log prefix (paged)", () => {
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo profiles fetch failed: 503",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Some other job failed: 500",
+    ),
+    false,
+  );
+});
+
+test("isTransientKlaviyoReviewsFetch5xx KEEPS a mismatched path (paged)", () => {
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/webhooks/klaviyo",
+      "Klaviyo reviews fetch failed: 503",
+    ),
+    false,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      null,
+      "Klaviyo reviews fetch failed: 503",
+    ),
+    false,
+  );
+});
+
+test("isTransientKlaviyoReviewsFetch5xx returns false on empty / nullish / non-5xx-tail input", () => {
+  assert.equal(isTransientKlaviyoReviewsFetch5xx(null, null), false);
+  assert.equal(isTransientKlaviyoReviewsFetch5xx(undefined, undefined), false);
+  assert.equal(isTransientKlaviyoReviewsFetch5xx("", ""), false);
+  assert.equal(isTransientKlaviyoReviewsFetch5xx("/api/inngest", ""), false);
+  // Prefix present but no parseable status token.
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx("/api/inngest", "Klaviyo reviews fetch failed:"),
+    false,
+  );
+  assert.equal(
+    isTransientKlaviyoReviewsFetch5xx(
+      "/api/inngest",
+      "Klaviyo reviews fetch failed: unknown",
+    ),
+    false,
+  );
 });
