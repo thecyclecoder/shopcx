@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Classify Klaviyo reviews-fetch 5xx as transient in the Vercel log-drain** · verified 2026-07-30 · → [[../libraries/control-tower]]
 - **Read what has already been done for this customer before proposing to spend more on them** · verified 2026-07-28 · → [[../lifecycles/return-pipeline]] · also [[../libraries/cs-director]], [[../libraries/cx-agent-sdk]], [[../tables/returns]]
 - **Stop stranding good builds on a spelling: a check may not require an exact literal the builder invents** · verified 2026-07-28 · → [[recipes/what-makes-a-buildable-spec]]
 - **Bianca wires the graduate verb to scale winners, classifies removed Meta APIs as permanent, and surfaces unexercised autonomous rails** · verified 2026-07-28 · → [[../libraries/media-buyer-graduate-scaler]], [[../libraries/meta__dead-verb-escalation]], [[../libraries/cold-scaler-graduate-heartbeat]]
