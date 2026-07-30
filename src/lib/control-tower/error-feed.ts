@@ -495,7 +495,7 @@ export function isForeignAppstleUnskipUpstream500(
  * SDK throws with a processor-decline body (`Cannot Authorize at this time
  * (Life cycle)`, `Do Not Honor`, `Insufficient Funds`, `Pick Up Card`,
  * `Expired Card`, `Invalid Card Number`, `Card Not Activated`,
- * `Restricted Card`, `Declined`). That body plus the 502 status trip Vercel's
+ * `Restricted Card`, `Declined`, `No Account`). That body plus the 502 status trip Vercel's
  * log-drain `isError` gate on BOTH channels (level='error' AND status>=500),
  * minting a paged Control Tower incident for what is a per-customer issuer
  * decision — nothing on our side to repair and no code change can prevent it.
@@ -529,6 +529,7 @@ const BRAINTREE_PROCESSOR_DECLINE_MARKERS = [
   "card not activated",
   "restricted card",
   "declined",
+  "no account",
 ];
 
 export function isForeignBraintreeVaultProcessorDecline(

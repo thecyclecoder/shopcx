@@ -1166,6 +1166,7 @@ test("isForeignBraintreeVaultProcessorDecline drops other allow-listed processor
     "Card Not Activated",
     "Restricted Card",
     "Declined",
+    "No Account",
   ]) {
     assert.equal(
       isForeignBraintreeVaultProcessorDecline(path, `[portal/payment-method-update] vault failed: ${body}`),
