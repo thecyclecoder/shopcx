@@ -33,6 +33,7 @@ import {
   isTransientAnthropicOverloadError,
   isTransientAppstleFrequencyUpstreamTimeout,
   isTransientInngestStepRetryThrow,
+  isTransientKlaviyoReviewsFetch5xx,
   isTransientShopifyWebhookHmacFailure,
   isTransientSupabaseEdgeHandshakeError,
   isTransientSupabaseEdgeHtmlBody,
@@ -235,6 +236,7 @@ export async function POST(request: Request) {
         isTransientInngestStepRetryThrow(g.path, g.message) ||
         isTransientShopifyWebhookHmacFailure(g.path, g.message) ||
         isTransientAppstleFrequencyUpstreamTimeout(g.path, g.message) ||
+        isTransientKlaviyoReviewsFetch5xx(g.path, g.message) ||
         isForeignEasyPostReturnsSweepRateLimit(g.path, g.message) ||
         isTransientSupabaseEdgeHandshakeError(g.message) ||
         isTransientSupabaseEdgeHtmlBody(g.message) ||

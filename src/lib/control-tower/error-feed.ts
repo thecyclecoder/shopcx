@@ -1116,6 +1116,57 @@ export function isTransientAnthropicOverloadError(message: string | null | undef
   return false;
 }
 
+/**
+ * Klaviyo reviews-sync upstream 5xx — the klaviyo sibling to
+ * `isTransientAppstleFrequencyUpstreamTimeout` / `isTransientAnthropicOverloadError`,
+ * factored here so the vercel-logs route can reuse it (Control Tower
+ * `vercel:a7d8086bb71bbfe3`).
+ *
+ * `src/lib/klaviyo.ts` `fetchAllReviews` (line 118) and `syncReviewPage` (line 154) both
+ * fetch Klaviyo's `/reviews/` endpoint and, on a non-ok response, log
+ * `console.error(\`Klaviyo reviews fetch failed: ${res.status}\`)` and RECOVER: the page
+ * loop breaks / the sync returns a graceful no-op with `synced: 0, errors: 0, nextUrl: null`,
+ * so the durable `syncKlaviyoReviews` Inngest function (`src/lib/inngest/sync-reviews.ts`,
+ * daily 3am cron) still emits its end-of-run heartbeat. Reviews are idempotent by
+ * `external_id`, so the next daily beat re-syncs anything a 5xx dropped — no data loss. The
+ * log-drain line is a PRE-RECOVERY sighting of a vendor 5xx the code already handles
+ * cleanly; minting a fresh OPEN paged incident + repair fan-out for it churns Platform
+ * owners on a loop that already self-heals.
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/inngest` — the durable `syncKlaviyoReviews` Inngest step is the
+ *      only surface that reaches `fetchAllReviews`/`syncReviewPage` today; a different
+ *      caller would fire on a different path and stays captured / paged,
+ *   2. the trimmed message begins with the exact `Klaviyo reviews fetch failed:` prefix
+ *      (the two `console.error` labels — not any other Klaviyo log), AND
+ *   3. the trailing status token parses as a 5xx (500–599).
+ *
+ * A Klaviyo 4xx (auth / bad-request — those are terminal bugs to fix, not transient) or a
+ * different Klaviyo failure log stays captured / paged on first sighting. Wired in
+ * `/api/webhooks/vercel-logs` as the `transient` flag to `recordError`, which auto-resolves
+ * a first sighting (recorded for visibility, NOT paged, no repair fan-out) and escalates to
+ * a real open+page ONLY if the SAME signature recurs within `TRANSIENT_RECUR_WINDOW_MS` —
+ * so a one-off Klaviyo blip is dropped while a chronic Klaviyo outage (would recur every
+ * daily beat within the window? no — daily > window; the recurrence guard is the sibling
+ * classifiers' rail and matches the same behavior across all one-off vendor blips) still
+ * surfaces via the daily error-feed sweep.
+ */
+export function isTransientKlaviyoReviewsFetch5xx(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  const PREFIX = "Klaviyo reviews fetch failed:";
+  if (!text.startsWith(PREFIX)) return false;
+  const tail = text.slice(PREFIX.length).trim();
+  const match = tail.match(/^(\d{3})\b/);
+  if (!match) return false;
+  const status = Number(match[1]);
+  return status >= 500 && status <= 599;
+}
+
 export interface RecordErrorInput {
   source: ErrorSource;
   /** the grouping key parts (stable bits — function id / route / error class). */
