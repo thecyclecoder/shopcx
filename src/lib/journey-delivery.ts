@@ -25,6 +25,31 @@ import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/**
+ * Trigger intents of the self-service journeys the `portal` branch below can
+ * render (CTA bubble in the portal thread + emailed to the customer). Source
+ * of truth for portal-deliverability: Sol/June's channel-eligibility filter
+ * (`channelMatches` in [[cx-agent-sdk]]) only offers a journey on a portal
+ * ticket when 'portal' is in `journey_definitions.channels`, so every intent
+ * listed here MUST also carry 'portal' in its channels row — otherwise the
+ * agents skip a resolvable self-service option and escalate to the founder
+ * (Natalie's medical-hardship cancel, 2026-07-30). Crisis-tier journeys are
+ * deliberately email-only (proactive outreach, not portal self-service) and
+ * are NOT listed. Enforced by the migration-scanning test in
+ * `journey-delivery.portal-enrolled.test.ts` and the ship-time backfill in
+ * `scripts/_backfill-portal-journey-channels.ts`.
+ */
+export const PORTAL_DELIVERABLE_JOURNEY_INTENTS = [
+  "cancel_subscription",
+  "select_subscription",
+  "missing_items",
+  "shipping_address",
+  "account_linking",
+  "discount_signup",
+  "marketing_signup",
+  "add_payment_method",
+] as const;
+
 /** Strip any trailing arrow / chevron / "→" / "»" that an upstream caller
  *  may have appended to ctaText. The styled-button render adds its own
  *  chevron, so without this we get duplicates like "Cancel Subscription → →". */
