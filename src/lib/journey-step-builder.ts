@@ -70,6 +70,12 @@ export async function buildJourneySteps(
       const { buildSelectSubscriptionSteps } = await import("@/lib/select-subscription-journey-builder");
       return buildSelectSubscriptionSteps(admin, workspaceId, customerId, ticketId);
     }
+    case "win_back":
+    case "reactivate":
+    case "reactivate_subscription": {
+      const { buildReactivateSteps } = await import("@/lib/reactivate-journey-builder");
+      return buildReactivateSteps(admin, workspaceId, customerId, ticketId);
+    }
     case "crisis_tier1": {
       const { buildCrisisTier1Steps } = await import("@/lib/crisis-journey-builder");
       return buildCrisisTier1Steps(admin, workspaceId, customerId, ticketId);

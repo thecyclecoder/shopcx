@@ -60,6 +60,39 @@ export const journeySessionCompleted = inngest.createFunction(
         });
       }
 
+      // ── Win-back reactivation (reactivate-journey-builder) ──────────────────────────────
+      // One-click restart from the crisis win-back email. The session was minted per customer with
+      // its own token, so `session.subscription_id` is unambiguous — no interpretation needed.
+      // Commerce SDK, so the internal-vs-Appstle rail is dispatched for us.
+      // Guard-first: re-read LIVE status and only resume something that is actually paused or
+      // cancelled; never "resume" a subscription the customer already restarted themselves.
+      if (outcome === "reactivated") {
+        if (session.subscription_id) {
+          const { data: subData } = await admin
+            .from("subscriptions")
+            .select("shopify_contract_id, status")
+            .eq("id", session.subscription_id)
+            .single();
+          if (subData?.shopify_contract_id) {
+            if (subData.status === "active") {
+              console.log(`[journey-outcomes] reactivate: ${subData.shopify_contract_id} already active — no-op`);
+            } else {
+              const { subscriptionAction } = await import("@/lib/commerce/subscription");
+              const r = await subscriptionAction(
+                workspace_id,
+                subData.shopify_contract_id,
+                "resume",
+                undefined,
+                "Customer via win-back reactivation journey",
+              );
+              if (!r.success) {
+                console.error(`[journey-outcomes] reactivate FAILED ${subData.shopify_contract_id}: ${r.error}`);
+              }
+            }
+          }
+        }
+      }
+
       // Execute action based on outcome type
       if (outcome === "cancelled") {
         // Cancel subscription via Appstle API

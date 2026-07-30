@@ -1885,6 +1885,11 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
   const [{ data: actions }, { data: workspaceCrises }] = await Promise.all([
     admin.from("crisis_customer_actions")
       .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier1_swapped_to, tier2_response, tier2_swapped_to, tier3_response, paused_at, removed_item_at, auto_resume, auto_readd, cancelled, exhausted_at, preserved_base_price_cents, original_item")
+      // ARCHIVE FILTER (crisis-restore, 2026-07-30). A restored row is DONE — the subscription was
+      // already put back. Surfacing it kept Sol telling customers a crisis was live and promising
+      // auto_resume / auto_readd that had ALREADY happened, weeks after the fact. Open rows still
+      // surface; the history stays in the table for anyone reading the record deliberately.
+      .is("restored_at", null)
       .in("customer_id", allCustIds)
       .order("created_at", { ascending: false })
       .limit(3),
