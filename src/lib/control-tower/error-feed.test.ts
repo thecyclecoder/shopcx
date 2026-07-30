@@ -16,6 +16,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignBraintreeVaultGatewayRejection,
   isForeignBraintreeVaultProcessorDecline,
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
@@ -1264,6 +1265,144 @@ test("isForeignBraintreeVaultProcessorDecline returns false on empty / nullish i
   assert.equal(isForeignBraintreeVaultProcessorDecline(undefined, undefined), false);
   assert.equal(isForeignBraintreeVaultProcessorDecline("", ""), false);
   assert.equal(isForeignBraintreeVaultProcessorDecline("/api/portal", ""), false);
+});
+
+// ── isForeignBraintreeVaultGatewayRejection (error-feed-drop-braintree-portal-vault-gateway-rejection-noise) ──
+// Sibling of the processor-decline filter above. Same call site
+// (`src/lib/portal/handlers/payment-method-update.ts` → `[portal/payment-method-update]
+// vault failed: <msg>` + HTTP 502), but the tail carries the MERCHANT-side Braintree
+// risk-rule rejection instead of an issuer decline — `Gateway Rejected: <reason>` for
+// one of nine documented reasons (avs, avs_and_cvv, cvv, duplicate, fraud,
+// risk_threshold, three_d_secure, application_incomplete, token_issuance). No code
+// change on our side can prevent a per-customer / per-risk-rule rejection, so wire the
+// filter into `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP.
+
+test("isForeignBraintreeVaultGatewayRejection drops the avs rejection", () => {
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Gateway Rejected: avs",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection drops the fraud rejection", () => {
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Gateway Rejected: fraud",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection drops the three_d_secure rejection", () => {
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Gateway Rejected: three_d_secure",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection drops the remaining allow-listed rejection reasons", () => {
+  const path = "/api/portal";
+  for (const reason of [
+    "avs_and_cvv",
+    "cvv",
+    "duplicate",
+    "risk_threshold",
+    "application_incomplete",
+    "token_issuance",
+  ]) {
+    assert.equal(
+      isForeignBraintreeVaultGatewayRejection(
+        path,
+        `[portal/payment-method-update] vault failed: Gateway Rejected: ${reason}`,
+      ),
+      true,
+      `dropped: ${reason}`,
+    );
+  }
+});
+
+test("isForeignBraintreeVaultGatewayRejection KEEPS a real vault_failed carrying an unrelated Braintree error class", () => {
+  // Negative case — a genuine SDK/integration fault (paymentMethod.create failed,
+  // Braintree API timeout, no_braintree_customer) carries a different tail. Same
+  // prefix, no `gateway rejected: <reason>` marker → stays captured / paged.
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: paymentMethod.create failed",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Braintree API timeout",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: no_braintree_customer",
+    ),
+    false,
+  );
+  // A processor-decline body (issuer said no AFTER auth) is the SIBLING class handled
+  // by `isForeignBraintreeVaultProcessorDecline`, not by this filter.
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: Cannot Authorize at this time (Life cycle)",
+    ),
+    false,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection KEEPS a non-allowlisted path even with a rejection body", () => {
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/journey/token/submit-payment",
+      "[portal/payment-method-update] vault failed: Gateway Rejected: fraud",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      null,
+      "[portal/payment-method-update] vault failed: Gateway Rejected: avs",
+    ),
+    false,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection is case-insensitive on the tail marker", () => {
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: gateway rejected: fraud",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignBraintreeVaultGatewayRejection(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: GATEWAY REJECTED: AVS",
+    ),
+    true,
+  );
+});
+
+test("isForeignBraintreeVaultGatewayRejection returns false on empty / nullish input", () => {
+  assert.equal(isForeignBraintreeVaultGatewayRejection(null, null), false);
+  assert.equal(isForeignBraintreeVaultGatewayRejection(undefined, undefined), false);
+  assert.equal(isForeignBraintreeVaultGatewayRejection("", ""), false);
+  assert.equal(isForeignBraintreeVaultGatewayRejection("/api/portal", ""), false);
 });
 
 // ── isForeignEasyPostReturnsSweepRateLimit (error-feed-scope-easypost-returns-sweep-rate-limit-noise) ──

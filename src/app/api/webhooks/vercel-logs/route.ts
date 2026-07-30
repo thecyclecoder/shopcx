@@ -26,6 +26,7 @@ import {
   isBareInngestStepErrorMiddlewareLog,
   isBareLifecycle,
   isForeignAppstleUnskipUpstream500,
+  isForeignBraintreeVaultGatewayRejection,
   isForeignBraintreeVaultProcessorDecline,
   isForeignEasyPostReturnsSweepRateLimit,
   isInngestStepWrappedNonErrorLog,
@@ -140,6 +141,15 @@ function isError(log: VercelLog): boolean {
   // broken, connectivity, auth misconfig) carry different marker text and stay
   // captured / paged.
   if (isForeignBraintreeVaultProcessorDecline(path, message)) return false;
+  // Drop foreign Braintree Gateway Rejection noise on the same portal vault path:
+  // when the MERCHANT-side Braintree risk rule rejects the vault attempt BEFORE the
+  // issuer ever sees it, the SDK throws `Gateway Rejected: <reason>` for one of the
+  // nine documented reasons (avs, avs_and_cvv, cvv, duplicate, fraud, risk_threshold,
+  // three_d_secure, application_incomplete, token_issuance). Same 502 + same log
+  // prefix as the processor-decline path — a per-customer / per-risk-rule outcome
+  // the code cannot prevent. Non-rejection vault failures carry different markers
+  // and stay captured / paged.
+  if (isForeignBraintreeVaultGatewayRejection(path, message)) return false;
   return true;
 }
 

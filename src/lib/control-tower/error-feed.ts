@@ -482,42 +482,57 @@ export function isForeignAppstleUnskipUpstream500(
 }
 
 /**
- * Foreign-app noise — Braintree's own gateway declining a customer's card at
- * vault time on the portal payment-method-update flow
- * ([[../specs/error-feed-drop-braintree-portal-vault-processor-decline-noise]]).
+ * Foreign-app noise — Braintree failing a customer's card at vault time on the
+ * portal payment-method-update flow. TWO distinct rejection classes ride the
+ * same log line and get the same treatment (capture-time drop before signature
+ * grouping):
+ *
+ *   1. PROCESSOR DECLINE — the customer's own ISSUER said no AFTER the auth
+ *      attempt reached them. Marker text like `Cannot Authorize at this time
+ *      (Life cycle)`, `Do Not Honor`, `Insufficient Funds`, `Pick Up Card`,
+ *      `Expired Card`, `Invalid Card Number`, `Card Not Activated`,
+ *      `Restricted Card`, `Declined`, `No Account`. Filtered by
+ *      `isForeignBraintreeVaultProcessorDecline`
+ *      ([[../specs/error-feed-drop-braintree-portal-vault-processor-decline-noise]]).
+ *
+ *   2. GATEWAY REJECTION — the MERCHANT's own Braintree-side risk rule said no
+ *      BEFORE the auth attempt was ever forwarded to the issuer. The SDK
+ *      surfaces these as `Gateway Rejected: <reason>`, where `<reason>` is one
+ *      of Braintree's nine documented rejection reasons: `avs`, `avs_and_cvv`,
+ *      `cvv`, `duplicate`, `fraud`, `risk_threshold`, `three_d_secure`,
+ *      `application_incomplete`, `token_issuance`. Filtered by
+ *      `isForeignBraintreeVaultGatewayRejection`
+ *      ([[../specs/error-feed-drop-braintree-portal-vault-gateway-rejection-noise]]).
  *
  * `src/lib/portal/handlers/payment-method-update.ts` calls
  * `vaultAndMigratePaymentMethod` inside a try/catch and, on any throw from the
  * vault helper, logs
  * `console.error(\`[portal/payment-method-update] vault failed: ${msg}\`)` then
- * responds `502 { error: 'vault_failed' }`. Braintree's gateway sits at the top
- * of that vault call: when the customer's own issuer declines the card, the
- * SDK throws with a processor-decline body (`Cannot Authorize at this time
- * (Life cycle)`, `Do Not Honor`, `Insufficient Funds`, `Pick Up Card`,
- * `Expired Card`, `Invalid Card Number`, `Card Not Activated`,
- * `Restricted Card`, `Declined`, `No Account`). That body plus the 502 status trip Vercel's
- * log-drain `isError` gate on BOTH channels (level='error' AND status>=500),
- * minting a paged Control Tower incident for what is a per-customer issuer
- * decision — nothing on our side to repair and no code change can prevent it.
+ * responds `502 { error: 'vault_failed' }`. Both the processor-decline body
+ * and the gateway-rejection body plus the 502 status trip Vercel's log-drain
+ * `isError` gate on BOTH channels (level='error' AND status>=500), minting a
+ * paged Control Tower incident for what is either a per-customer issuer
+ * decision (processor decline) or a merchant-side risk-rule outcome (gateway
+ * rejection) — neither has anything on our side to repair and no code change
+ * can prevent them.
  *
- * `true` ONLY when ALL of:
+ * Each filter returns `true` ONLY when ALL of:
  *   1. `path` equals `/api/portal` — the portal payment-method-update handler
  *      is the only surface that reaches this call site today; a different
  *      caller would fire on a different path and stays captured / paged,
  *   2. the trimmed message begins with the exact
  *      `[portal/payment-method-update] vault failed: ` prefix (the handler's
  *      console.error label — not any other portal log), AND
- *   3. the tail matches a case-insensitive allow-list of known Braintree
- *      processor-decline text families.
+ *   3. the tail matches a case-insensitive allow-list of the class-specific
+ *      markers above.
  *
- * A non-decline vault failure (SDK broken, connectivity, auth misconfig, or
- * any other Braintree gateway error class) carries different marker text —
- * e.g. `paymentMethod.create failed`, `Braintree API timeout`,
- * `no_braintree_customer` — and stays captured / paged. Wired in
- * `/api/webhooks/vercel-logs` `isError` as a CAPTURE-TIME DROP — the log is
- * skipped before it becomes a group, so `recordError` never sees it and a
- * chronic burst of issuer declines cannot mint a paged incident on a surface
- * we can't fix.
+ * Any OTHER Braintree gateway error class (SDK broken, connectivity, auth
+ * misconfig — e.g. `paymentMethod.create failed`, `Braintree API timeout`,
+ * `no_braintree_customer`) carries different marker text and stays captured /
+ * paged. Both filters are wired into `/api/webhooks/vercel-logs` `isError` as
+ * CAPTURE-TIME DROPS — the log is skipped before it becomes a group, so
+ * `recordError` never sees it and a chronic burst of declines / rejections
+ * cannot mint a paged incident on a surface we can't fix.
  */
 const BRAINTREE_PROCESSOR_DECLINE_MARKERS = [
   "cannot authorize at this time",
@@ -532,6 +547,21 @@ const BRAINTREE_PROCESSOR_DECLINE_MARKERS = [
   "no account",
 ];
 
+// The nine documented Braintree Gateway Rejection reasons — the SDK stringifies
+// each as `Gateway Rejected: <reason>` in the thrown error's message. Matched
+// case-insensitively as substrings on the vault-failed tail.
+const BRAINTREE_GATEWAY_REJECTION_MARKERS = [
+  "gateway rejected: avs",
+  "gateway rejected: avs_and_cvv",
+  "gateway rejected: cvv",
+  "gateway rejected: duplicate",
+  "gateway rejected: fraud",
+  "gateway rejected: risk_threshold",
+  "gateway rejected: three_d_secure",
+  "gateway rejected: application_incomplete",
+  "gateway rejected: token_issuance",
+];
+
 export function isForeignBraintreeVaultProcessorDecline(
   path: string | null | undefined,
   message: string | null | undefined,
@@ -542,6 +572,18 @@ export function isForeignBraintreeVaultProcessorDecline(
   if (!text.startsWith("[portal/payment-method-update] vault failed: ")) return false;
   const lower = text.toLowerCase();
   return BRAINTREE_PROCESSOR_DECLINE_MARKERS.some((marker) => lower.includes(marker));
+}
+
+export function isForeignBraintreeVaultGatewayRejection(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/portal") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("[portal/payment-method-update] vault failed: ")) return false;
+  const lower = text.toLowerCase();
+  return BRAINTREE_GATEWAY_REJECTION_MARKERS.some((marker) => lower.includes(marker));
 }
 
 /**
