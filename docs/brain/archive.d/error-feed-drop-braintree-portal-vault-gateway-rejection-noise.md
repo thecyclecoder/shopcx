@@ -1,0 +1,1 @@
+- **Drop recurring Braintree portal-vault Gateway Rejection noise from the Vercel error feed** · verified 2026-07-30 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
