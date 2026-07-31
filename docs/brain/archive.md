@@ -13,6 +13,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Classify Klaviyo reviews-fetch 5xx as transient in the Vercel log-drain** · verified 2026-07-30 · → [[../libraries/control-tower]]
+- **Drop recurring Braintree portal-vault Gateway Rejection noise from the Vercel error feed** · verified 2026-07-30 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
+- **Filter Braintree 'No Account' issuer decline out of the portal vault error feed** · verified 2026-07-30 · → [[../integrations/vercel-log-drain]]
+- **Self-service journeys are enrolled on the portal channel so Sol/June stop wrongly escalating portal tickets** · verified 2026-07-30 · → [[lifecycles/customer-portal]]
 - **Read what has already been done for this customer before proposing to spend more on them** · verified 2026-07-28 · → [[../lifecycles/return-pipeline]] · also [[../libraries/cs-director]], [[../libraries/cx-agent-sdk]], [[../tables/returns]]
 - **Stop stranding good builds on a spelling: a check may not require an exact literal the builder invents** · verified 2026-07-28 · → [[recipes/what-makes-a-buildable-spec]]
 - **Bianca wires the graduate verb to scale winners, classifies removed Meta APIs as permanent, and surfaces unexercised autonomous rails** · verified 2026-07-28 · → [[../libraries/media-buyer-graduate-scaler]], [[../libraries/meta__dead-verb-escalation]], [[../libraries/cold-scaler-graduate-heartbeat]]
