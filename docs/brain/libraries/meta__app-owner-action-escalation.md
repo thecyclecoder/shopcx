@@ -116,6 +116,15 @@ Data Use Checkup — surfaces once per day, not once per retry).
 - [[../inngest/media-buyer-test-cadence]] — wraps each `pullOneCadenceTarget` call
   in `runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () => {...})` so
   each workspace's cadence run surfaces its own escalations.
+- [[../inngest/meta-performance]] `meta-iteration-run` (Phase 5) — calls
+  `escalateAppOwnerActionRequired` directly from the catch block with
+  `workspaceId` from `event.data.workspace_id` (explicit argument, not a scope).
+  When an ingest/decision/attribution stage throws `app_owner_action_required`
+  (e.g., Data Use Checkup), the run catches it, escalates one deduped CEO card
+  scoped to THIS invocation's workspace, records the run as human-blocked via
+  `finishRun()`, and returns without rethrow. Two overlapping runs for different
+  workspaces each see only their own workspace_id, with no cross-contamination
+  risk from module-global state or shared async scope.
 
 ## Tests
 
