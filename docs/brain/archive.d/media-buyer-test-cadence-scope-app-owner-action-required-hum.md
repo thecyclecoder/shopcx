@@ -1,0 +1,1 @@
+- **Scope Meta Data Use Checkup as human-blocked on the media-buyer-test-cadence cron** · verified 2026-08-01 · → [[../inngest/media-buyer-test-cadence]]
