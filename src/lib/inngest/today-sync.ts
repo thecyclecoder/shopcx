@@ -8,6 +8,24 @@ import { requestReport, pollReportStatus, downloadReport, processOrderReport } f
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
+/**
+ * HUMAN-blocked Meta enforcement signature: the app owner must complete
+ * 'Data Use Checkup' in the Meta App Dashboard before the Graph API will
+ * accept requests again. This is NOT a transient — Meta will keep returning
+ * the same 400 every 5 minutes until a human acts — so the today-sync cron
+ * would otherwise flood the Control Tower error feed with hundreds of
+ * duplicate captures per day, crowding out real regressions.
+ *
+ * Mirrors the sibling `error-feed-amazon-today-sync-transient` precedent
+ * for this same file: pure classifier + log-level downgrade at the catch
+ * site, so the Vercel drain stops capturing while the CEO stays pointed
+ * at the exact human action required.
+ */
+export function isMetaHumanActionBlock(err: unknown): boolean {
+  const msg = errText(err).toLowerCase();
+  return msg.includes("api access disrupted") && msg.includes("data use checkup");
+}
+
 export const todaySyncCron = inngest.createFunction(
   {
     id: "today-sync",
@@ -121,6 +139,12 @@ export const todaySyncCron = inngest.createFunction(
             // Facebook-edge 5xx (e.g. 504 gateway timeout) — graphFetchJson already
             // retried 4× before surfacing; the 5-min cron self-heals on the next tick.
             (typeof metaErr?.httpStatus === "number" && metaErr.httpStatus >= 500);
+          if (isMetaHumanActionBlock(err)) {
+            console.warn(
+              `[Today Sync] Meta app requires Data Use Checkup — resolve at https://developers.facebook.com/apps/ (account ${acct.meta_account_id})`,
+            );
+            continue;
+          }
           const log = isHandledTransient ? console.warn : console.error;
           log(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
         }
