@@ -27,6 +27,11 @@ import { runGrowthAllocationPass } from "@/lib/growth-allocation";
 import { attributeCreativeOutcomes } from "@/lib/ads/creative-outcome-attribution";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  setCurrentAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
+import { isAppOwnerActionRequiredError } from "./meta-performance-app-owner-action";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -228,9 +233,21 @@ export const metaIterationRun = inngest.createFunction(
     };
     const p = { workspaceId: workspace_id, adAccountId: ad_account_id };
 
+    // Install the app-owner-action-required escalation handler once per run so any
+    // Graph 400 classified as `app_owner_action_required` (canonical: yearly Data
+    // Use Checkup) books exactly one deduped CEO card per workspace per UTC day
+    // via the shared SDK, instead of throwing through /api/inngest every run.
+    installDefaultAppOwnerActionEscalationHandler(createAdminClient());
+
     const runId = await step.run("start-run", () =>
       startRun(p, trigger === "manual" ? "manual" : "cron"),
     );
+
+    // Scope the escalation handler to THIS run's workspace before any Graph-backed
+    // stage runs, so a Data Use Checkup 400 raised inside graphFetchJson books the
+    // deduped CEO card against the RIGHT workspace. Cleared in `finally` so a
+    // subsequent unrelated call site can't raise a card scoped to this workspace.
+    setCurrentAppOwnerActionWorkspaceScope(workspace_id);
 
     const stages: StageRecord[] = [];
     try {
@@ -473,6 +490,22 @@ export const metaIterationRun = inngest.createFunction(
       return { status: "complete", runId, snapshotDate, ...counts };
     } catch (err) {
       const message = errText(err);
+      // Meta App Dashboard gate (canonical: yearly Data Use Checkup) — a
+      // permanent-until-cleared 400 that Inngest retrying can never fix. The
+      // installed escalation handler has already booked exactly one deduped CEO
+      // card per workspace per UTC day; a rethrow here would just add a
+      // /api/inngest crash every run with no additional signal. Record the
+      // human-blocked outcome on the run row and RETURN so the run is treated
+      // as handled — real Meta outages and code defects still fall through to
+      // the rethrow branch below and surface loudly on the Inngest failure feed.
+      if (isAppOwnerActionRequiredError(err)) {
+        await finishRun(runId, {
+          status: "failed",
+          stages,
+          error: `human_blocked: app_owner_action_required — ${message}`,
+        });
+        return { status: "human_blocked" as const, runId, reason: "app_owner_action_required" };
+      }
       // Record the failure on the run row + alert the owners, then rethrow so
       // Inngest marks the run failed (and retries per the function config).
       await finishRun(runId, { status: "failed", stages, error: message });
@@ -482,6 +515,8 @@ export const metaIterationRun = inngest.createFunction(
         severity: "warning",
       });
       throw err;
+    } finally {
+      setCurrentAppOwnerActionWorkspaceScope(null);
     }
   },
 );
