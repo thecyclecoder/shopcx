@@ -29,7 +29,7 @@ import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import {
   installDefaultAppOwnerActionEscalationHandler,
-  setCurrentAppOwnerActionWorkspaceScope,
+  runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
 import { isAppOwnerActionRequiredError } from "./meta-performance-app-owner-action";
 
@@ -243,12 +243,14 @@ export const metaIterationRun = inngest.createFunction(
       startRun(p, trigger === "manual" ? "manual" : "cron"),
     );
 
-    // Scope the escalation handler to THIS run's workspace before any Graph-backed
-    // stage runs, so a Data Use Checkup 400 raised inside graphFetchJson books the
-    // deduped CEO card against the RIGHT workspace. Cleared in `finally` so a
-    // subsequent unrelated call site can't raise a card scoped to this workspace.
-    setCurrentAppOwnerActionWorkspaceScope(workspace_id);
-
+    // Scope the escalation handler to THIS run's workspace via AsyncLocalStorage
+    // so a Data Use Checkup 400 raised inside graphFetchJson (transitively
+    // reached from any stage below) books the deduped CEO card against the RIGHT
+    // workspace even when overlapping runs for different workspaces interleave
+    // awaits — the retired module-global `setCurrentAppOwnerActionWorkspaceScope`
+    // pattern raced on concurrent Inngest publishes and could book a card
+    // against a sibling workspace (fix-ad-tool-app-owner-action-scope-isolation).
+    return await runWithAppOwnerActionWorkspaceScope(workspace_id, async () => {
     const stages: StageRecord[] = [];
     try {
       // ── Stage 1 — ingest Meta performance (P1) ──────────────────────────────
@@ -515,9 +517,8 @@ export const metaIterationRun = inngest.createFunction(
         severity: "warning",
       });
       throw err;
-    } finally {
-      setCurrentAppOwnerActionWorkspaceScope(null);
     }
+    });
   },
 );
 
