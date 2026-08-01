@@ -55,6 +55,22 @@ import {
   escalateMediaBuyerTestPublishRefusal,
   type CreateAdsetSpec,
 } from "@/lib/media-buyer/publish-gate";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  setCurrentAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
+
+/**
+ * Stable failed-publish fingerprint for a Meta "app owner action required" gate
+ * (canonical: yearly Data Use Checkup). Only a human clearing the gate in the
+ * Meta App Dashboard fixes this class — retrying at the Inngest layer floods
+ * `/api/inngest` with identical crashes. Written to `ad_publish_jobs.error`
+ * and, when linked, to `iteration_recommendations.external_result.error`; the
+ * publisher also clears `publish_active` so no ad is live. The escalation
+ * handler installed by [[../meta/app-owner-action-escalation]] books the
+ * deduped CEO card.
+ */
+export const META_APP_OWNER_ACTION_REQUIRED_REASON = "meta_app_owner_action_required" as const;
 
 // Veo talking-head prompt: strict "say ONLY these words" to suppress Veo's
 // hallucinated filler (we still proofread captions, but tighter input = cleaner).
@@ -852,6 +868,15 @@ export const adToolPublishToMeta = inngest.createFunction(
     const setStatus = (status: string, extra: Record<string, unknown> = {}) =>
       admin.from("ad_publish_jobs").update({ publish_status: status, updated_at: new Date().toISOString(), ...extra }).eq("id", job_id);
 
+    // Scope the app-owner-action escalation handler to this publish's workspace so a
+    // Data Use Checkup 400 raised inside any Graph call below (uploadAdVideo /
+    // uploadAdImage / createAdCreative / createAd / …) books the deduped CEO card
+    // against the RIGHT workspace. Cleared in `finally` so a subsequent unrelated
+    // call site can't accidentally raise a card scoped to this workspace.
+    installDefaultAppOwnerActionEscalationHandler(admin);
+    setCurrentAppOwnerActionWorkspaceScope(workspace_id);
+    try {
+
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
@@ -1298,6 +1323,32 @@ export const adToolPublishToMeta = inngest.createFunction(
         }
         return { ok: true, adId };
       } catch (err: any) {
+        // Meta App Dashboard gate (canonical: yearly Data Use Checkup) — a permanent-
+        // until-cleared class only the workspace OWNER can fix from the Meta App
+        // Dashboard. The escalation handler installed above already booked the deduped
+        // CEO card that names WHERE to act. Fail closed with the stable
+        // `meta_app_owner_action_required` reason, CLEAR publish_active so no ad is
+        // live/spending, and RETURN normally — retrying at the Inngest layer only
+        // floods `/api/inngest` with identical crashes without possibility of self-
+        // heal. Other unexpected Meta errors still throw so real regressions surface.
+        const metaClass = (err as { metaClass?: string } | null)?.metaClass;
+        if (metaClass === "app_owner_action_required") {
+          await setStatus("failed", {
+            error: META_APP_OWNER_ACTION_REQUIRED_REASON,
+            publish_active: false,
+          });
+          if (j.recommendation_id) {
+            await admin
+              .from("iteration_recommendations")
+              .update({
+                status: "failed",
+                external_result: { ad_publish_job_id: job_id, error: META_APP_OWNER_ACTION_REQUIRED_REASON },
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", j.recommendation_id);
+          }
+          return { ok: false, reason: META_APP_OWNER_ACTION_REQUIRED_REASON };
+        }
         await setStatus("failed", { error: String(err?.message || err).slice(0, 300) });
         if (j.recommendation_id) {
           await admin
@@ -1314,6 +1365,9 @@ export const adToolPublishToMeta = inngest.createFunction(
     });
 
     return result;
+    } finally {
+      setCurrentAppOwnerActionWorkspaceScope(null);
+    }
   },
 );
 
