@@ -35,7 +35,7 @@ const MAX_DELAY_MS = 8000;
  * disappeared behind a Graph endpoint, distinct from a transient rate limit or
  * a stale token. `metaClass='permanent_api_removed'` is that signal.
  */
-export type GraphErrorClass = "permanent_api_removed";
+export type GraphErrorClass = "permanent_api_removed" | "app_owner_action_required";
 
 export interface GraphError extends Error {
   metaCode?: number;
@@ -57,10 +57,48 @@ export function graphError(status: number, error: any): GraphError {
   // timeout — Facebook returns HTML, no JSON body, so metaCode/subcode are undefined and
   // only httpStatus distinguishes it from a fatal 400 validation error).
   e.httpStatus = status;
-  if (isPermanentGraphError(status, error)) {
+  // Ordering matters: app_owner_action_required is checked BEFORE permanent so a
+  // Data Use Checkup 400 (workspace-owner-fixable via the Meta App Dashboard) is
+  // never mis-tagged as permanent_api_removed (a code-change escalation). Both
+  // paths never-retry, but they route to different CEO cards.
+  if (classifyAppOwnerActionRequired(status, error)) {
+    e.metaClass = "app_owner_action_required";
+  } else if (isPermanentGraphError(status, error)) {
     e.metaClass = "permanent_api_removed";
   }
   return e;
+}
+
+/**
+ * APP_OWNER_ACTION_REQUIRED = a Meta-side gate a HUMAN must clear from the Meta
+ * App Dashboard — canonical example: the yearly "Data Use Checkup" that
+ * disables an app's API access until the workspace owner completes it. Meta
+ * surfaces this as an HTTP 400 whose message / user-facing title / user-facing
+ * message contains one of the canonical phrasings — "data use checkup",
+ * "api access disrupted", or "app is currently unavailable".
+ *
+ * Distinct from PERMANENT (a removed endpoint requires a code change) and
+ * FATAL (a token/permission issue is caller-fixable). Retrying an
+ * app-owner-action-required error is pointless: the only fix is a human
+ * logging into the Meta App Dashboard, so retrying floods logs without
+ * possibility of self-heal.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-graph-classify-app-owner-action-required-data-use-check]]
+ * Phase 1 — the 5-min today-sync cron was logging this class as
+ * `console.error` per active ad account per tick (~576/day), flooding the
+ * Control Tower error feed with identical entries that carried no
+ * additional information beyond the first occurrence.
+ */
+export function classifyAppOwnerActionRequired(status: number, error: any): boolean {
+  if (status !== 400) return false;
+  const rawMsg = typeof error?.message === "string" ? error.message : "";
+  const rawTitle = typeof error?.error_user_title === "string" ? error.error_user_title : "";
+  const rawUser = typeof error?.error_user_msg === "string" ? error.error_user_msg : "";
+  const haystack = `${rawMsg} ${rawTitle} ${rawUser}`.toLowerCase();
+  if (haystack.includes("data use checkup")) return true;
+  if (haystack.includes("api access disrupted")) return true;
+  if (haystack.includes("app is currently unavailable")) return true;
+  return false;
 }
 
 /**
@@ -197,6 +235,63 @@ function firePermanentGraphErrorHandler(ctx: PermanentGraphErrorContext): void {
 }
 
 /**
+ * The context passed to a registered app-owner-action-required handler. Same
+ * shape as [[PermanentGraphErrorContext]] so a caller can share a single
+ * escalation SDK layout — the metaClass on the tagged error distinguishes.
+ */
+export interface AppOwnerActionRequiredContext {
+  /** The label passed to `graphFetchJson` — the calling function + endpoint. */
+  label: string;
+  /** HTTP status Meta returned (always 400 for this class). */
+  status: number;
+  /** The tagged Error the caller will receive. `metaClass='app_owner_action_required'`. */
+  error: GraphError;
+}
+
+type AppOwnerActionRequiredHandler = (ctx: AppOwnerActionRequiredContext) => void | Promise<void>;
+
+let appOwnerActionRequiredHandler: AppOwnerActionRequiredHandler | null = null;
+
+/**
+ * Register a fire-and-forget handler invoked on every
+ * app-owner-action-required Graph error. See
+ * [[../../docs/brain/specs/meta-graph-classify-app-owner-action-required-data-use-check]]
+ * Phase 1 — the CEO card is raised through this seam by
+ * [[./app-owner-action-escalation]] at import time.
+ */
+export function registerAppOwnerActionRequiredHandler(
+  fn: AppOwnerActionRequiredHandler | null,
+): void {
+  appOwnerActionRequiredHandler = fn;
+}
+
+/** Return the current registered handler (or null). Exported for tests. */
+export function getAppOwnerActionRequiredHandler(): AppOwnerActionRequiredHandler | null {
+  return appOwnerActionRequiredHandler;
+}
+
+function fireAppOwnerActionRequiredHandler(ctx: AppOwnerActionRequiredContext): void {
+  const handler = appOwnerActionRequiredHandler;
+  if (!handler) return;
+  try {
+    const result = handler(ctx);
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch((err) => {
+        console.warn(
+          "[graph-retry] app-owner-action-required handler threw (swallowed)",
+          { err },
+        );
+      });
+    }
+  } catch (err) {
+    console.warn(
+      "[graph-retry] app-owner-action-required handler threw (swallowed)",
+      { err },
+    );
+  }
+}
+
+/**
  * Issue a Graph request (the thunk re-runs each attempt so the fetch is fresh),
  * parse JSON, and retry transient failures with bounded exponential backoff +
  * jitter. Returns the parsed JSON on success; throws the canonical graphError on
@@ -216,6 +311,21 @@ export async function graphFetchJson(makeRequest: () => Promise<Response>, label
     if (res.ok && !json.error) return json;
 
     const err = json.error || {};
+
+    // App-owner-action-required = a Meta-side gate the workspace owner must
+    // clear from the Meta App Dashboard (e.g. yearly Data Use Checkup). Never
+    // retry: only a human logging in can fix it, so retrying floods logs
+    // without possibility of self-heal. Checked BEFORE permanent so a Data
+    // Use Checkup 400 is never mis-tagged as permanent_api_removed.
+    if (classifyAppOwnerActionRequired(res.status, err)) {
+      const tagged = graphError(res.status, err);
+      fireAppOwnerActionRequiredHandler({ label, status: res.status, error: tagged });
+      console.warn(
+        `[graph-retry] ${label} APP_OWNER_ACTION_REQUIRED meta error http=${res.status} — ` +
+          `workspace owner must clear this from the Meta App Dashboard; not retrying, escalating.`,
+      );
+      throw tagged;
+    }
 
     // Permanent = a Meta-side surface we depend on has been removed. Never retry:
     // the endpoint won't return, retrying only burns quota. Fire the escalation

@@ -6,6 +6,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { requestReport, pollReportStatus, downloadReport, processOrderReport } from "@/lib/amazon/sync-orders";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  setCurrentAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /**
@@ -102,6 +106,13 @@ export const todaySyncCron = inngest.createFunction(
 
       if (!conn?.access_token_encrypted) return { meta: "no_connection" };
 
+      // Install + scope the app-owner-action-required escalation handler for
+      // this pass — so a Data Use Checkup 400 from graphFetchJson raises exactly
+      // one CEO card per workspace per UTC day instead of flooding the Control
+      // Tower error feed. See app-owner-action-escalation.ts.
+      installDefaultAppOwnerActionEscalationHandler(admin);
+      setCurrentAppOwnerActionWorkspaceScope(conn.workspace_id);
+
       const token = decrypt(conn.access_token_encrypted);
       const { data: accounts } = await admin
         .from("meta_ad_accounts")
@@ -131,14 +142,25 @@ export const todaySyncCron = inngest.createFunction(
           // permissions 200/10/803, disabled account) still hit console.error
           // and surface. Mirrors isTransientGraphError in
           // src/lib/meta/graph-retry.ts.
-          const metaErr = err as { metaCode?: number; metaSubcode?: number; httpStatus?: number } | null;
+          const metaErr = err as {
+            metaCode?: number;
+            metaSubcode?: number;
+            httpStatus?: number;
+            metaClass?: string;
+          } | null;
           const isHandledTransient =
             metaErr?.metaCode === 1 ||
             metaErr?.metaCode === 2 ||
             metaErr?.metaSubcode === 1504018 ||
             // Facebook-edge 5xx (e.g. 504 gateway timeout) — graphFetchJson already
             // retried 4× before surfacing; the 5-min cron self-heals on the next tick.
-            (typeof metaErr?.httpStatus === "number" && metaErr.httpStatus >= 500);
+            (typeof metaErr?.httpStatus === "number" && metaErr.httpStatus >= 500) ||
+            // App-owner-action-required (canonical: Data Use Checkup 400) — the
+            // escalation handler already raised a deduped CEO card, and retrying
+            // will never fix this class (only a human clearing the Meta App
+            // Dashboard gate can). Log at warn so the Control Tower error feed
+            // stops re-recording it every 5 minutes per active ad account.
+            metaErr?.metaClass === "app_owner_action_required";
           if (isMetaHumanActionBlock(err)) {
             console.warn(
               `[Today Sync] Meta app requires Data Use Checkup — resolve at https://developers.facebook.com/apps/ (account ${acct.meta_account_id})`,
@@ -149,6 +171,10 @@ export const todaySyncCron = inngest.createFunction(
           log(`[Today Sync] Meta error for ${acct.meta_account_id}:`, err);
         }
       }
+
+      // Clear the workspace scope so a subsequent unrelated call site cannot
+      // accidentally raise a card scoped to this workspace.
+      setCurrentAppOwnerActionWorkspaceScope(null);
 
       return { meta: "synced", accounts: accounts?.length || 0, days: totalDays };
     });
