@@ -5,6 +5,51 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  setCurrentAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
+
+/**
+ * Stable human-blocked fingerprint for the meta/sync-spend function. When
+ * Meta's Data Use Checkup gate fires (graph-retry tags `metaClass =
+ * 'app_owner_action_required'`), the escalation handler already books ONE
+ * deduped CEO card per workspace per UTC day — retrying or throwing the same
+ * 400 from the Inngest job just floods the Control Tower error feed with
+ * duplicates that no re-run can clear. This function returns the fingerprint
+ * instead, so a real fatal Meta 400 still propagates while the known gate is
+ * contained. Mirrors today-sync (log-level downgrade) and media-buyer test
+ * cadence (result-tagged human-blocked) precedents for the same class.
+ */
+export const META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED =
+  "meta_sync_spend_app_owner_action_required" as const;
+
+/**
+ * Narrow error-branch classifier for `metaSyncSpend`. If the thrown error is
+ * a graph-retry-tagged app-owner-action-required (canonical: Data Use
+ * Checkup 400), return the stable human-blocked result the function should
+ * emit; otherwise return null so the caller rethrows. Extracted so the
+ * containment predicate is unit-testable without spinning up the Inngest
+ * handler + step wrapper.
+ */
+export function classifyMetaSyncSpendError(
+  err: unknown,
+  scope: { workspaceId: string; adAccountId: string; metaAccountId: string },
+): {
+  status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
+  workspaceId: string;
+  adAccountId: string;
+  metaAccountId: string;
+} | null {
+  const metaClass = (err as { metaClass?: string } | null)?.metaClass;
+  if (metaClass !== "app_owner_action_required") return null;
+  return {
+    status: META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
+    workspaceId: scope.workspaceId,
+    adAccountId: scope.adAccountId,
+    metaAccountId: scope.metaAccountId,
+  };
+}
 
 // ── meta/sync-spend ──
 export const metaSyncSpend = inngest.createFunction(
@@ -24,34 +69,62 @@ export const metaSyncSpend = inngest.createFunction(
 
     const admin = createAdminClient();
 
-    // Get access token from connection
-    const token = await step.run("get-token", async () => {
-      const { data: conn } = await admin
-        .from("meta_connections")
-        .select("access_token_encrypted")
-        .eq("workspace_id", workspace_id)
-        .eq("is_active", true)
-        .single();
-      if (!conn) throw new Error("No active Meta connection");
-      return decrypt(conn.access_token_encrypted);
-    });
+    // Install + scope the app-owner-action-required escalation handler for
+    // this run so a Data Use Checkup 400 raised inside graphFetchJson books
+    // exactly one deduped CEO card per workspace per UTC day (routed to the
+    // workspace that owns this sync). Scope is cleared in `finally` so a
+    // subsequent unrelated call site can't accidentally raise a card scoped
+    // to this workspace. Handler is idempotent — safe to install per run.
+    installDefaultAppOwnerActionEscalationHandler(admin);
+    setCurrentAppOwnerActionWorkspaceScope(workspace_id);
 
-    const syncDays = Math.min(days || 30, 90);
-    const endDate = new Date().toISOString().slice(0, 10);
-    const startDate = new Date(Date.now() - syncDays * 86400000).toISOString().slice(0, 10);
-
-    const result = await step.run("sync-spend", async () => {
-      return syncMetaAdSpend({
-        workspaceId: workspace_id,
-        adAccountId: ad_account_id,
-        metaAccountId: meta_account_id,
-        accessToken: token,
-        startDate,
-        endDate,
+    try {
+      // Get access token from connection
+      const token = await step.run("get-token", async () => {
+        const { data: conn } = await admin
+          .from("meta_connections")
+          .select("access_token_encrypted")
+          .eq("workspace_id", workspace_id)
+          .eq("is_active", true)
+          .single();
+        if (!conn) throw new Error("No active Meta connection");
+        return decrypt(conn.access_token_encrypted);
       });
-    });
 
-    return { status: "complete", ...result };
+      const syncDays = Math.min(days || 30, 90);
+      const endDate = new Date().toISOString().slice(0, 10);
+      const startDate = new Date(Date.now() - syncDays * 86400000).toISOString().slice(0, 10);
+
+      try {
+        const result = await step.run("sync-spend", async () => {
+          return syncMetaAdSpend({
+            workspaceId: workspace_id,
+            adAccountId: ad_account_id,
+            metaAccountId: meta_account_id,
+            accessToken: token,
+            startDate,
+            endDate,
+          });
+        });
+
+        return { status: "complete", ...result };
+      } catch (err) {
+        // Contain Meta's Data Use Checkup gate as a human-blocked result: the
+        // escalation handler above already booked the deduped CEO card, and
+        // Inngest retrying will never clear the gate (only a human clearing
+        // it in the App Dashboard can). Any other Meta failure keeps its
+        // current throw behavior so the Inngest failure feed still surfaces it.
+        const blocked = classifyMetaSyncSpendError(err, {
+          workspaceId: workspace_id,
+          adAccountId: ad_account_id,
+          metaAccountId: meta_account_id,
+        });
+        if (blocked) return blocked;
+        throw err;
+      }
+    } finally {
+      setCurrentAppOwnerActionWorkspaceScope(null);
+    }
   }
 );
 
