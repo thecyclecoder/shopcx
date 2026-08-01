@@ -26,6 +26,10 @@ import {
   getMetaUserToken,
 } from "@/lib/meta-ads";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  runWithAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
 
 const CUSTOMER_CHUNK = 10_000;
 const DEFAULT_WATERMARK_LOOKBACK_DAYS = 2;
@@ -57,6 +61,12 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
   },
   async ({ step }) => {
     const admin = createAdminClient();
+    // Install the app-owner-action-required escalation handler once per run so any
+    // Graph 400 classified as `app_owner_action_required` (canonical: yearly Data
+    // Use Checkup) books exactly one deduped CEO card per workspace per UTC day.
+    // Per-group workspace scope is set inside the refresh step via
+    // runWithAppOwnerActionWorkspaceScope so overlapping workspaces don't race.
+    installDefaultAppOwnerActionEscalationHandler(admin);
     const nowIso = new Date().toISOString();
 
     // Enumerate every active per-test cohort that has been stamped with the all-customers
@@ -108,83 +118,113 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
 
     for (const g of groups.values()) {
       const groupSummary = await step.run(`refresh-${g.audienceId}`, async () => {
-        // Watermark: last successful heartbeat for THIS cron on THIS workspace.
-        // We store the last-refresh watermark on the workspace's most recent
-        // media_buyer_all_customers_refresh_runs row so we only ever upload the new-customer delta.
-        const { data: lastRun } = await admin
-          .from("media_buyer_all_customers_refresh_runs")
-          .select("completed_at")
-          .eq("workspace_id", g.workspaceId)
-          .eq("audience_id", g.audienceId)
-          .order("completed_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        const watermarkIso = pickRefreshWatermarkIso({
-          lastRunAtIso: (lastRun as { completed_at?: string | null } | null)?.completed_at ?? null,
-          nowIso,
-        });
+        // Scope the app-owner-action escalation to THIS group's workspace via
+        // AsyncLocalStorage so a Data Use Checkup 400 raised inside
+        // addUsersToCustomAudience books the deduped CEO card against the RIGHT
+        // workspace even when overlapping groups for different workspaces
+        // interleave awaits.
+        return runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () => {
+          // Watermark: last successful heartbeat for THIS cron on THIS workspace.
+          // We store the last-refresh watermark on the workspace's most recent
+          // media_buyer_all_customers_refresh_runs row so we only ever upload the new-customer delta.
+          const { data: lastRun } = await admin
+            .from("media_buyer_all_customers_refresh_runs")
+            .select("completed_at")
+            .eq("workspace_id", g.workspaceId)
+            .eq("audience_id", g.audienceId)
+            .order("completed_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const watermarkIso = pickRefreshWatermarkIso({
+            lastRunAtIso: (lastRun as { completed_at?: string | null } | null)?.completed_at ?? null,
+            nowIso,
+          });
 
-        const token = await getMetaUserToken(g.workspaceId);
-        if (!token) {
+          const token = await getMetaUserToken(g.workspaceId);
+          if (!token) {
+            return {
+              workspace: g.workspaceId,
+              audience_id: g.audienceId,
+              watermark_iso: watermarkIso,
+              new_customers: 0,
+              uploaded_rows: 0,
+              skipped: "no_meta_token" as const,
+            };
+          }
+
+          // Cursor-paginate new customers acquired since the watermark. This IS the "select only
+          // customers since the last-refresh watermark" contract the spec verification checks.
+          let cursor: string | null = null;
+          let newCustomers = 0;
+          let uploaded = 0;
+          try {
+            for (;;) {
+              let q = admin
+                .from("customers")
+                .select("id, email, phone, first_order_at")
+                .eq("workspace_id", g.workspaceId)
+                .gte("first_order_at", watermarkIso)
+                .order("id", { ascending: true })
+                .limit(CUSTOMER_CHUNK);
+              if (cursor) q = q.gt("id", cursor);
+              const { data: rows, error } = await q;
+              if (error) throw new Error(`customers read failed: ${error.message}`);
+              const list = (rows ?? []) as Array<{
+                id: string;
+                email: string | null;
+                phone: string | null;
+                first_order_at: string | null;
+              }>;
+              if (!list.length) break;
+              newCustomers += list.length;
+              const uploadRows = list.map((c) => ({ email: c.email, phone: c.phone }));
+              const results = await addUsersToCustomAudience(token, g.audienceId, uploadRows);
+              for (const r of results) uploaded += r.num_received;
+              if (list.length < CUSTOMER_CHUNK) break;
+              cursor = list[list.length - 1].id;
+            }
+          } catch (err) {
+            // A Meta App Dashboard gate (canonical: yearly Data Use Checkup 400)
+            // classified by graphFetchJson as `app_owner_action_required` is human-only
+            // to clear. The escalation handler already booked the deduped CEO card for
+            // THIS workspace via the ALS scope above; skip this group so other
+            // workspaces continue processing, and do NOT advance the watermark (this
+            // run uploaded nothing, so the next run must restart from the same one).
+            if ((err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required") {
+              console.warn(
+                `[media-buyer-all-customers-refresh] Meta app requires Data Use Checkup — resolve at https://developers.facebook.com/apps/ (workspace ${g.workspaceId})`,
+              );
+              return {
+                workspace: g.workspaceId,
+                audience_id: g.audienceId,
+                watermark_iso: watermarkIso,
+                new_customers: 0,
+                uploaded_rows: 0,
+                skipped: "app_owner_action_required" as const,
+              };
+            }
+            throw err;
+          }
+
+          // Record the completion so the next run's watermark is this run's timestamp.
+          await admin.from("media_buyer_all_customers_refresh_runs").insert({
+            workspace_id: g.workspaceId,
+            audience_id: g.audienceId,
+            meta_ad_account_id: g.metaAdAccountId,
+            watermark_at: watermarkIso,
+            completed_at: nowIso,
+            new_customers: newCustomers,
+            uploaded_rows: uploaded,
+          });
+
           return {
             workspace: g.workspaceId,
             audience_id: g.audienceId,
             watermark_iso: watermarkIso,
-            new_customers: 0,
-            uploaded_rows: 0,
-            skipped: "no_meta_token" as const,
+            new_customers: newCustomers,
+            uploaded_rows: uploaded,
           };
-        }
-
-        // Cursor-paginate new customers acquired since the watermark. This IS the "select only
-        // customers since the last-refresh watermark" contract the spec verification checks.
-        let cursor: string | null = null;
-        let newCustomers = 0;
-        let uploaded = 0;
-        for (;;) {
-          let q = admin
-            .from("customers")
-            .select("id, email, phone, first_order_at")
-            .eq("workspace_id", g.workspaceId)
-            .gte("first_order_at", watermarkIso)
-            .order("id", { ascending: true })
-            .limit(CUSTOMER_CHUNK);
-          if (cursor) q = q.gt("id", cursor);
-          const { data: rows, error } = await q;
-          if (error) throw new Error(`customers read failed: ${error.message}`);
-          const list = (rows ?? []) as Array<{
-            id: string;
-            email: string | null;
-            phone: string | null;
-            first_order_at: string | null;
-          }>;
-          if (!list.length) break;
-          newCustomers += list.length;
-          const uploadRows = list.map((c) => ({ email: c.email, phone: c.phone }));
-          const results = await addUsersToCustomAudience(token, g.audienceId, uploadRows);
-          for (const r of results) uploaded += r.num_received;
-          if (list.length < CUSTOMER_CHUNK) break;
-          cursor = list[list.length - 1].id;
-        }
-
-        // Record the completion so the next run's watermark is this run's timestamp.
-        await admin.from("media_buyer_all_customers_refresh_runs").insert({
-          workspace_id: g.workspaceId,
-          audience_id: g.audienceId,
-          meta_ad_account_id: g.metaAdAccountId,
-          watermark_at: watermarkIso,
-          completed_at: nowIso,
-          new_customers: newCustomers,
-          uploaded_rows: uploaded,
         });
-
-        return {
-          workspace: g.workspaceId,
-          audience_id: g.audienceId,
-          watermark_iso: watermarkIso,
-          new_customers: newCustomers,
-          uploaded_rows: uploaded,
-        };
       });
       summary.push(groupSummary);
     }
