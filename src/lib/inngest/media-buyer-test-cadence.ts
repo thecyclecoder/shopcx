@@ -28,7 +28,7 @@ import { refreshScorecards } from "@/lib/meta/scorecards";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import {
   installDefaultAppOwnerActionEscalationHandler,
-  setCurrentAppOwnerActionWorkspaceScope,
+  runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -129,37 +129,37 @@ export async function pullOneCadenceTarget(
   now: Date,
   scorecardDate: string,
 ): Promise<CadencePullResult> {
-  // Scope the app-owner-action escalation handler to this target's workspace so a
-  // Data Use Checkup 400 raised inside graphFetchJson books the deduped CEO card
-  // against the RIGHT workspace. Cleared in `finally` so a subsequent unrelated
-  // call site can't accidentally raise a card scoped to this workspace.
-  setCurrentAppOwnerActionWorkspaceScope(t.workspaceId);
-  try {
-    const token = await getMetaUserToken(t.workspaceId);
-    if (!token) return { ok: false, account: t.metaAccountId, error: "no_token" };
-    const until = localDayInTz(now, t.timezone); // account-local today
-    const since = localDayInTz(new Date(now.getTime() - (TEST_CADENCE_WINDOW_DAYS - 1) * 86400000), t.timezone);
-    const p = { workspaceId: t.workspaceId, adAccountId: t.adAccountId, metaAccountId: t.metaAccountId, accessToken: token };
-    const struct = await syncMetaStructure(p, { campaignIds: t.campaignIds });
-    const adset = await syncMetaInsightsForLevel(p, "adset", since, until, { campaignIds: t.campaignIds });
-    const ad = await syncMetaInsightsForLevel(p, "ad", since, until, { campaignIds: t.campaignIds });
-    const sc = await refreshScorecards({ workspaceId: t.workspaceId, adAccountId: t.adAccountId }, { snapshotDate: scorecardDate });
-    // Fresh scorecards → fire Bianca's deterministic review for this workspace (part 2 of the loop).
-    await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
-    return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
-  } catch (e) {
-    // Tag human-blocked failures so the summarizer can exclude them from the
-    // allFailed rethrow decision — a Meta App Dashboard gate is not an outage
-    // Inngest should retry, and the escalation handler has already booked the
-    // deduped CEO card for the workspace.
-    const metaClass = (e as { metaClass?: string } | null)?.metaClass;
-    if (metaClass === "app_owner_action_required") {
-      return { ok: false, account: t.metaAccountId, error: errText(e), humanBlocked: true };
+  // Scope the app-owner-action escalation handler to this target's workspace
+  // via AsyncLocalStorage so a Data Use Checkup 400 raised inside graphFetchJson
+  // books the deduped CEO card against the RIGHT workspace even when overlapping
+  // targets for different workspaces interleave awaits (the previous module-global
+  // setter raced and could book cards against a sibling workspace).
+  return runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () => {
+    try {
+      const token = await getMetaUserToken(t.workspaceId);
+      if (!token) return { ok: false, account: t.metaAccountId, error: "no_token" };
+      const until = localDayInTz(now, t.timezone); // account-local today
+      const since = localDayInTz(new Date(now.getTime() - (TEST_CADENCE_WINDOW_DAYS - 1) * 86400000), t.timezone);
+      const p = { workspaceId: t.workspaceId, adAccountId: t.adAccountId, metaAccountId: t.metaAccountId, accessToken: token };
+      const struct = await syncMetaStructure(p, { campaignIds: t.campaignIds });
+      const adset = await syncMetaInsightsForLevel(p, "adset", since, until, { campaignIds: t.campaignIds });
+      const ad = await syncMetaInsightsForLevel(p, "ad", since, until, { campaignIds: t.campaignIds });
+      const sc = await refreshScorecards({ workspaceId: t.workspaceId, adAccountId: t.adAccountId }, { snapshotDate: scorecardDate });
+      // Fresh scorecards → fire Bianca's deterministic review for this workspace (part 2 of the loop).
+      await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
+      return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
+    } catch (e) {
+      // Tag human-blocked failures so the summarizer can exclude them from the
+      // allFailed rethrow decision — a Meta App Dashboard gate is not an outage
+      // Inngest should retry, and the escalation handler has already booked the
+      // deduped CEO card for the workspace.
+      const metaClass = (e as { metaClass?: string } | null)?.metaClass;
+      if (metaClass === "app_owner_action_required") {
+        return { ok: false, account: t.metaAccountId, error: errText(e), humanBlocked: true };
+      }
+      return { ok: false, account: t.metaAccountId, error: errText(e) };
     }
-    return { ok: false, account: t.metaAccountId, error: errText(e) };
-  } finally {
-    setCurrentAppOwnerActionWorkspaceScope(null);
-  }
+  });
 }
 
 /**
