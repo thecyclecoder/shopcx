@@ -1,0 +1,1 @@
+- **Classify Meta 'Data Use Checkup' as app_owner_action_required + downgrade today-sync log** · verified 2026-08-01 · → [[../integrations/meta-marketing]]

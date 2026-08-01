@@ -46,7 +46,11 @@ feed only escalates real problems:
 
 The Meta loop wraps each account in a try/catch and continues to the next
 account on failure. The log level is split so the Control Tower error feed only
-escalates real problems:
+escalates real problems. The function also installs the app-owner-action-required
+escalation handler at the start of the Meta leg and clears the workspace scope
+at the end, so a Data Use Checkup / API access disrupted error fires a deduped
+CEO card exactly once per workspace per UTC day instead of flooding the Control
+Tower feed:
 
 - `metaCode === 1` ("unknown, retry later"), `metaCode === 2` ("Service
   temporarily unavailable"), or `metaSubcode === 1504018` ("Your request timed
@@ -63,6 +67,14 @@ escalates real problems:
   edge 504 is retried in-line 4× before this catch even sees it; the surfaced
   error is a genuinely sustained edge blip that the next 5-min cron self-heals.
   Repair signature `vercel:9422061756e527f7`.
+- `metaClass === 'app_owner_action_required'` → `console.warn`. Meta-side gate
+  a human must clear from the Meta App Dashboard (canonical example: the yearly
+  "Data Use Checkup" that disables an app's API access until the workspace owner
+  completes it). [[../libraries/meta__graph-retry]]'s `classifyAppOwnerActionRequired`
+  tags the error, and [[../libraries/meta__app-owner-action-escalation]]'s
+  registered handler raises a deduped CEO card; retrying will never fix this
+  class, so the error must not flood the Control Tower feed. Repair signature
+  `vercel:7a6fa4c8d1e2b9f4`.
 - Everything else (auth 190, permissions 200/10/803, disabled account, any
   other error) → `console.error`, which Vercel routes into the error feed for
   Control Tower to escalate.
