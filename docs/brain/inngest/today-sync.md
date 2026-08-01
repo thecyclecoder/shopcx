@@ -46,11 +46,16 @@ feed only escalates real problems:
 
 The Meta loop wraps each account in a try/catch and continues to the next
 account on failure. The log level is split so the Control Tower error feed only
-escalates real problems. The function also installs the app-owner-action-required
-escalation handler at the start of the Meta leg and clears the workspace scope
-at the end, so a Data Use Checkup / API access disrupted error fires a deduped
-CEO card exactly once per workspace per UTC day instead of flooding the Control
-Tower feed.
+escalates real problems. The function installs the app-owner-action-required
+escalation handler at the start of the Meta leg and wraps each workspace's Meta
+work in `runWithAppOwnerActionWorkspaceScope(conn.workspace_id, async () => {...})`
+([[../libraries/meta__app-owner-action-escalation]] Phase 1, 2026-08-01 — replaced
+the racy module-global `setCurrentAppOwnerActionWorkspaceScope` pattern with
+AsyncLocalStorage binding), so a Data Use Checkup / API access disrupted error
+fires a deduped CEO card exactly once per workspace per UTC day instead of
+flooding the Control Tower feed. The AsyncLocalStorage scope is isolated per
+async chain, so concurrent syncs for different workspaces each see their own scope
+and cards book to the right workspace.
 
 ### `isMetaHumanActionBlock(err: unknown): boolean`
 
