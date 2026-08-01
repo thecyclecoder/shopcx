@@ -42,15 +42,37 @@ rows. Returns `{emitted:false}` on a same-day duplicate or a DB write failure
 would drop the caller into a nested error path just as the CEO card was supposed
 to make things easier).
 
+### `runWithAppOwnerActionWorkspaceScope` — scoped helper
+
+```ts
+export function runWithAppOwnerActionWorkspaceScope<T>(
+  workspaceId: string,
+  fn: () => Promise<T>,
+): Promise<T>
+```
+
+Bind the app-owner-action workspace scope to `workspaceId` for the duration of
+`fn` (and every awaited continuation reachable from it, transitively). The scope
+is held in an [[https://nodejs.org/docs/latest/api/async_context.html|AsyncLocalStorage]]
+store, NOT a process-global mutable variable. Nested calls shadow the outer
+scope; two concurrent publishes for different workspaces each see only their own.
+**MUST wrap every await that could raise a Meta `app_owner_action_required`
+error** — the retired `setCurrentAppOwnerActionWorkspaceScope` module-global was
+a race: publish A sets scope=A, publish B sets scope=B, publish A's Graph call
+fires, handler reads B — the card books against the wrong workspace. AsyncLocalStorage
+binds the scope to the async chain, not the module, closing that race. Callers:
+[[../inngest/today-sync]] (wraps the Meta-account loop), [[../inngest/media-buyer-test-cadence]]
+(wraps each `pullOneCadenceTarget`).
+
 ### `installDefaultAppOwnerActionEscalationHandler` wire
 
 `installDefaultAppOwnerActionEscalationHandler(admin)` installs a handler on
 [[meta__graph-retry]] that fires the CEO card automatically when an
 app-owner-action-required error is thrown AND a workspace scope is set via
-`setCurrentAppOwnerActionWorkspaceScope(workspaceId)`. The scope is a module-level
-slot because `graphFetchJson` doesn't know which workspace it's serving; a caller
-(typically an Inngest function like [[../inngest/today-sync]]) sets the scope at
-its own boundary and clears it at exit.
+`runWithAppOwnerActionWorkspaceScope(workspaceId, fn)`. The handler consults
+the scope from the SAME async chain that made the Graph call; two overlapping
+publishes for different workspaces each see their own scope — no cross-workspace
+card leak.
 
 ## Dedupe key shape
 
@@ -61,6 +83,13 @@ Data Use Checkup — surfaces once per day, not once per retry).
 
 ## Gotchas
 
+- **AsyncLocalStorage scope binding is mandatory for isolation.** [[fix-ad-tool-app-owner-action-scope-isolation]]
+  Phase 1 (2026-08-01) replaced the module-global `setCurrentAppOwnerActionWorkspaceScope(workspaceId) + finally cleanup`
+  pattern with `runWithAppOwnerActionWorkspaceScope(workspaceId, fn)`, which binds the scope to the async chain, not the
+  module. The old pattern was a race: publish A sets scope=A, publish B sets scope=B, A's Graph call fires and handler
+  reads B — the card books against the wrong workspace. Every caller that fires a Graph call that could raise
+  `app_owner_action_required` MUST wrap it via `runWithAppOwnerActionWorkspaceScope`; a naked Graph call sees no scope
+  and the handler is a no-op (the throw still carries `metaClass` so the caller can escalate explicitly if needed).
 - **Dedupe is per (workspace, UTC day).** A persistent gate (e.g., an uncleared
   Data Use Checkup) surfaces once per day per workspace, not once per retry.
   But this is intentional: a workspace owner who clears the gate on Tuesday will
@@ -80,9 +109,20 @@ Data Use Checkup — surfaces once per day, not once per retry).
 
 ## Callers
 
-- [[../inngest/today-sync]] — installs the handler and sets the workspace scope
-  before the Meta-account loop runs, so a Data Use Checkup 400 raises at most
-  one card per workspace per day instead of flooding the error feed.
+- [[../inngest/today-sync]] — installs the handler; wraps the Meta-account loop
+  in `runWithAppOwnerActionWorkspaceScope(conn.workspace_id, async () => {...})` so
+  a Data Use Checkup 400 raises at most one card per workspace per day instead of
+  flooding the error feed.
+- [[../inngest/media-buyer-test-cadence]] — wraps each `pullOneCadenceTarget` call
+  in `runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () => {...})` so
+  each workspace's cadence run surfaces its own escalations.
+
+## Tests
+
+- `src/lib/meta/app-owner-action-escalation.workspace-scope.test.ts` — registered
+  as `test:app-owner-action-escalation-workspace-scope`. Proves two overlapping
+  app-owner-action scopes for different workspace IDs stay isolated when the
+  escalation handler fires from an interleaved async chain.
 
 ## Related
 
