@@ -116,6 +116,9 @@ Data Use Checkup — surfaces once per day, not once per retry).
 - [[../inngest/media-buyer-test-cadence]] — wraps each `pullOneCadenceTarget` call
   in `runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () => {...})` so
   each workspace's cadence run surfaces its own escalations.
+- [[../inngest/media-buyer-all-customers-refresh]] — installs the handler; wraps
+  each per-group (workspace, audience) refresh in `runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () => {...})`
+  so a Data Use Checkup 400 surfaces one deduped card per workspace and other workspaces' refreshes continue.
 - [[../inngest/meta-performance]] `meta-iteration-run` (Phase 5) — calls
   `escalateAppOwnerActionRequired` directly from the catch block with
   `workspaceId` from `event.data.workspace_id` (explicit argument, not a scope).
