@@ -42,15 +42,25 @@ rows. Returns `{emitted:false}` on a same-day duplicate or a DB write failure
 would drop the caller into a nested error path just as the CEO card was supposed
 to make things easier).
 
-### `installDefaultAppOwnerActionEscalationHandler` wire
+### `escalateAppOwnerActionRequired` direct invocation (preferred)
+
+Direct invocation with explicit `workspaceId` in the input object. This is the
+preferred pattern for Inngest functions and ensures workspace isolation — two
+overlapping runs from different workspaces use their own `workspaceId` in the call
+and cannot cross-contaminate each other's service-role notification writes.
+[[../inngest/meta-sync]] `handleMetaSyncSpendError` is the canonical example.
+
+### `installDefaultAppOwnerActionEscalationHandler` wire (legacy)
 
 `installDefaultAppOwnerActionEscalationHandler(admin)` installs a handler on
 [[meta__graph-retry]] that fires the CEO card automatically when an
 app-owner-action-required error is thrown AND a workspace scope is set via
-`setCurrentAppOwnerActionWorkspaceScope(workspaceId)`. The scope is a module-level
-slot because `graphFetchJson` doesn't know which workspace it's serving; a caller
-(typically an Inngest function like [[../inngest/today-sync]]) sets the scope at
-its own boundary and clears it at exit.
+`setCurrentAppOwnerActionWorkspaceScope(workspaceId)`. **Do not use this pattern
+for new code.** The scope is a module-level slot; when two Inngest invocations
+overlap, they share the same slot and cross-contaminate each other's notifications.
+This pattern is preserved only for [[../inngest/today-sync]] (pre-isolation);
+all new app-owner-action callers must pass `workspaceId` explicitly to
+`escalateAppOwnerActionRequired`.
 
 ## Dedupe key shape
 
@@ -61,6 +71,11 @@ Data Use Checkup — surfaces once per day, not once per retry).
 
 ## Gotchas
 
+- **Use explicit `workspaceId` for invocation-local isolation.** When called from
+  an Inngest function where multiple invocations can overlap (e.g., the
+  `meta/sync-spend` event), pass the invocation's own `workspaceId` explicitly.
+  Never rely on `setCurrentAppOwnerActionWorkspaceScope` (module-global, unsafe).
+  The isolation invariant is unit-tested in `src/lib/inngest/meta-sync.test.ts`.
 - **Dedupe is per (workspace, UTC day).** A persistent gate (e.g., an uncleared
   Data Use Checkup) surfaces once per day per workspace, not once per retry.
   But this is intentional: a workspace owner who clears the gate on Tuesday will
@@ -80,9 +95,9 @@ Data Use Checkup — surfaces once per day, not once per retry).
 
 ## Callers
 
+- [[../inngest/meta-sync]] — `handleMetaSyncSpendError` calls `escalateAppOwnerActionRequired` with explicit `workspaceId` (canonical workspace-isolation pattern for new code).
 - [[../inngest/today-sync]] — installs the handler and sets the workspace scope
-  before the Meta-account loop runs, so a Data Use Checkup 400 raises at most
-  one card per workspace per day instead of flooding the error feed.
+  before the Meta-account loop runs (legacy module-global pattern; preserved for compatibility but do not use for new code).
 
 ## Related
 
