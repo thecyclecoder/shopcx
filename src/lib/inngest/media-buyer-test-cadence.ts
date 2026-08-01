@@ -26,6 +26,10 @@ import { getMetaUserToken } from "@/lib/meta-ads";
 import { syncMetaStructure, syncMetaInsightsForLevel } from "@/lib/meta/performance";
 import { refreshScorecards } from "@/lib/meta/scorecards";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import {
+  installDefaultAppOwnerActionEscalationHandler,
+  setCurrentAppOwnerActionWorkspaceScope,
+} from "@/lib/meta/app-owner-action-escalation";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -113,7 +117,7 @@ export async function resolveTestCadenceTargets(admin: Admin): Promise<TestCaden
  */
 export type CadencePullResult =
   | { ok: true; account: string; tz: string | null; window: { since: string; until: string }; campaigns: number; adsets: number; adsetInsightRows: number; adInsightRows: number; scorecardRows: number }
-  | { ok: false; account: string; error: string };
+  | { ok: false; account: string; error: string; humanBlocked?: true };
 
 /**
  * Pull one target's structure + insights + scorecards and fire Bianca's sweep. Result-returning: any
@@ -125,6 +129,11 @@ export async function pullOneCadenceTarget(
   now: Date,
   scorecardDate: string,
 ): Promise<CadencePullResult> {
+  // Scope the app-owner-action escalation handler to this target's workspace so a
+  // Data Use Checkup 400 raised inside graphFetchJson books the deduped CEO card
+  // against the RIGHT workspace. Cleared in `finally` so a subsequent unrelated
+  // call site can't accidentally raise a card scoped to this workspace.
+  setCurrentAppOwnerActionWorkspaceScope(t.workspaceId);
   try {
     const token = await getMetaUserToken(t.workspaceId);
     if (!token) return { ok: false, account: t.metaAccountId, error: "no_token" };
@@ -139,20 +148,33 @@ export async function pullOneCadenceTarget(
     await inngest.send({ name: "growth/media-buyer-cadence-sweep", data: { workspace_id: t.workspaceId, trigger: "test-cadence" } });
     return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
   } catch (e) {
+    // Tag human-blocked failures so the summarizer can exclude them from the
+    // allFailed rethrow decision — a Meta App Dashboard gate is not an outage
+    // Inngest should retry, and the escalation handler has already booked the
+    // deduped CEO card for the workspace.
+    const metaClass = (e as { metaClass?: string } | null)?.metaClass;
+    if (metaClass === "app_owner_action_required") {
+      return { ok: false, account: t.metaAccountId, error: errText(e), humanBlocked: true };
+    }
     return { ok: false, account: t.metaAccountId, error: errText(e) };
+  } finally {
+    setCurrentAppOwnerActionWorkspaceScope(null);
   }
 }
 
 /**
  * Summarize one cadence run into the heartbeat payload + rethrow decision.
  * - `ok` flips to false if ANY target failed — the Control Tower sees the loop ran but wasn't clean.
- * - `allFailed` is true only when every attempted target failed → the caller rethrows AFTER the
- *   heartbeat lands, so a total Meta outage still surfaces on the Inngest failure feed while a
- *   partial pull stays green on liveness.
+ * - `allFailed` is true only when every REAL failure was a genuine outage — human-blocked failures
+ *   (Meta App Dashboard gate; only a human can clear) are excluded because the escalation handler
+ *   already booked the deduped CEO card and Inngest retrying will never fix the class. A run where
+ *   every failure is human-blocked therefore does NOT rethrow (no per-2h Vercel error), while a
+ *   real total outage still surfaces on the Inngest failure feed.
  */
 export function summarizeCadenceRun(results: CadencePullResult[]): {
   succeededTargets: number;
   failedTargets: number;
+  humanBlockedTargets: number;
   ok: boolean;
   detail: string;
   allFailed: boolean;
@@ -160,15 +182,18 @@ export function summarizeCadenceRun(results: CadencePullResult[]): {
 } {
   const succeededTargets = results.filter((r) => r.ok).length;
   const failedTargets = results.length - succeededTargets;
-  const allFailed = results.length > 0 && succeededTargets === 0;
+  const humanBlockedTargets = results.filter((r): r is Extract<CadencePullResult, { ok: false }> => !r.ok && r.humanBlocked === true).length;
+  const realFailedTargets = failedTargets - humanBlockedTargets;
+  const allFailed = results.length > 0 && succeededTargets === 0 && realFailedTargets > 0;
   const firstFailureRow = results.find((r): r is Extract<CadencePullResult, { ok: false }> => !r.ok) ?? null;
   const firstFailure = firstFailureRow ? { account: firstFailureRow.account, error: firstFailureRow.error } : null;
-  const detail = failedTargets === 0
+  const base = failedTargets === 0
     ? `pulled ${succeededTargets} account(s)`
     : succeededTargets === 0
     ? `all ${failedTargets} target(s) failed`
     : `partial: ${succeededTargets} succeeded, ${failedTargets} failed`;
-  return { succeededTargets, failedTargets, ok: failedTargets === 0, detail, allFailed, firstFailure };
+  const detail = humanBlockedTargets > 0 ? `${base} (${humanBlockedTargets} human-blocked)` : base;
+  return { succeededTargets, failedTargets, humanBlockedTargets, ok: failedTargets === 0, detail, allFailed, firstFailure };
 }
 
 export const mediaBuyerTestCadenceCron = inngest.createFunction(
@@ -179,6 +204,11 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
   },
   async ({ step }) => {
     const admin = createAdminClient();
+    // Install the app-owner-action-required escalation handler once per run so any
+    // Graph 400 classified as `app_owner_action_required` (canonical: yearly Data
+    // Use Checkup) books exactly one deduped CEO card per workspace per UTC day.
+    // Per-target workspace scope is set inside `pullOneCadenceTarget`.
+    installDefaultAppOwnerActionEscalationHandler(admin);
     const targets = await step.run("resolve-targets", async () => resolveTestCadenceTargets(admin));
     if (!targets.length) {
       await step.run("emit-heartbeat", async () => {

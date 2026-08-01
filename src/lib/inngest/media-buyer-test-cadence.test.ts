@@ -121,6 +121,9 @@ function ok(account: string): CadencePullResult {
 function bad(account: string, error: string): CadencePullResult {
   return { ok: false, account, error };
 }
+function humanBlocked(account: string, error = "api access disrupted — data use checkup"): CadencePullResult {
+  return { ok: false, account, error, humanBlocked: true };
+}
 
 test("summarizeCadenceRun — all succeeded → ok:true, no rethrow", () => {
   const s = summarizeCadenceRun([ok("act-a"), ok("act-b")]);
@@ -167,4 +170,41 @@ test("summarizeCadenceRun — empty results (no targets) → ok:true, allFailed=
   assert.equal(s.ok, true);
   assert.equal(s.allFailed, false);
   assert.equal(s.firstFailure, null);
+});
+
+// --- app-owner-action-required scoping (spec: media-buyer-test-cadence-scope-app-owner-action-required-human-blocked) ---
+
+test("summarizeCadenceRun — every failure is human-blocked → allFailed=false (no rethrow)", () => {
+  // The canonical case: Meta Data Use Checkup gates every target's pull with the same 400.
+  // The escalation handler has already booked one deduped CEO card per workspace per UTC day;
+  // rethrowing here would just log a Vercel error every 2h that no re-run can fix. ok stays
+  // false so Control Tower sees the loop wasn't clean, but the summary excludes human-blocked
+  // failures from the allFailed decision.
+  const s = summarizeCadenceRun([humanBlocked("act-a"), humanBlocked("act-b"), humanBlocked("act-c"), humanBlocked("act-d")]);
+  assert.equal(s.succeededTargets, 0);
+  assert.equal(s.failedTargets, 4);
+  assert.equal(s.humanBlockedTargets, 4);
+  assert.equal(s.ok, false); // any failure flips ok
+  assert.equal(s.allFailed, false); // BUT: no rethrow — all failures are human-blocked
+  assert.match(s.detail, /4 human-blocked/);
+});
+
+test("summarizeCadenceRun — mix of human-blocked + real outage → allFailed=true (rethrow)", () => {
+  // A genuine outage on top of the Meta gate must still surface on the Inngest failure feed —
+  // the human-blocked tag only excludes THAT class from the rethrow decision, not real failures.
+  const s = summarizeCadenceRun([humanBlocked("act-a"), bad("act-b", "graph 500")]);
+  assert.equal(s.humanBlockedTargets, 1);
+  assert.equal(s.failedTargets, 2);
+  assert.equal(s.succeededTargets, 0);
+  assert.equal(s.allFailed, true); // 1 real failure remains after excluding human-blocked
+});
+
+test("summarizeCadenceRun — partial with one human-blocked → allFailed=false, detail mentions it", () => {
+  const s = summarizeCadenceRun([ok("act-a"), humanBlocked("act-b")]);
+  assert.equal(s.succeededTargets, 1);
+  assert.equal(s.failedTargets, 1);
+  assert.equal(s.humanBlockedTargets, 1);
+  assert.equal(s.ok, false);
+  assert.equal(s.allFailed, false);
+  assert.match(s.detail, /1 human-blocked/);
 });
