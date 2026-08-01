@@ -13,6 +13,12 @@ Daily 12:00 UTC cron: incremental top-up of each per-test cohort's CUSTOMER_LIST
 - **Owner:** Growth (Bianca) — declared in [[../libraries/control-tower]] `MONITORED_LOOPS`
 - **Liveness window:** 30 hours (daily + 20% jitter grace per the monitor-cadence invariant)
 
+## Escalation & skip logic
+
+The cron installs the `installDefaultAppOwnerActionEscalationHandler(admin)` once at start to handle Meta Graph 400 errors classified as `app_owner_action_required` (canonical: yearly Data Use Checkup gate). When any workspace's refresh hits this gate during `addUsersToCustomAudience`, the escalation handler books exactly one deduped CEO card for that workspace per UTC day (via [[../libraries/meta-ads]] `getMetaUserToken`'s escalation wiring).
+
+Per-group refresh is scoped to its workspace via `runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () => { ... })` so the AsyncLocalStorage scope correctly associates the CEO card with the right workspace even when groups for different workspaces interleave awaits. If a refresh catches `app_owner_action_required`, it logs a warn naming the workspace + https://developers.facebook.com/apps/ and returns a summary row with `skipped: 'app_owner_action_required'` and `uploaded_rows: 0`, allowing other workspaces' refreshes to continue. The watermark is NOT advanced on the skipped path (no upload means the next run must restart from the same watermark). [[../specs/media-buyer-all-customers-refresh-wire-app-owner-action-skip]] Fix 1.
+
 ## Pure helpers
 
 - `pickRefreshWatermarkIso({ lastRunAtIso, nowIso, lookbackDays? })` — returns the ISO the customers-since-watermark selector reads. On first run (no last-run row) falls back to `now − 2d` — one 24h grace over the 1d daily cadence so a paused/delayed run doesn't silently skip the miss window. Unit-tested in `src/lib/media-buyer/all-customers-exclusion.test.ts`.
