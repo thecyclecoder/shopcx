@@ -1,0 +1,1 @@
+- **Fix ad-tool Meta owner-action escalation workspace scope isolation** · verified 2026-08-01 · → [[../libraries/meta__app-owner-action-escalation]]
