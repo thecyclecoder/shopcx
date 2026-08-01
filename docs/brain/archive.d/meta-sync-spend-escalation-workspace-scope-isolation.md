@@ -1,0 +1,1 @@
+- **Isolate Meta Sync Spend Escalation Workspace Scope** · verified 2026-08-01 · → [[../inngest/meta-sync]]
