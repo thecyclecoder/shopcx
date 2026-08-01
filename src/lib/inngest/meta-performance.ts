@@ -27,6 +27,10 @@ import { runGrowthAllocationPass } from "@/lib/growth-allocation";
 import { attributeCreativeOutcomes } from "@/lib/ads/creative-outcome-attribution";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import {
+  isAppOwnerActionRequiredError,
+  escalateAppOwnerActionForIterationRun,
+} from "./meta-performance-app-owner-action";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -473,6 +477,28 @@ export const metaIterationRun = inngest.createFunction(
       return { status: "complete", runId, snapshotDate, ...counts };
     } catch (err) {
       const message = errText(err);
+      // Meta App Dashboard gate (canonical: yearly Data Use Checkup) — a
+      // permanent-until-cleared 400 that Inngest retrying can never fix. Book
+      // exactly one deduped CEO card per workspace per UTC day scoped to THIS
+      // invocation's event.data.workspace_id (no module-global handler, no
+      // AsyncLocalStorage scope — two overlapping runs for different
+      // workspaces cannot cross-contaminate each other's notification write),
+      // record the human-blocked outcome on the run row, and RETURN so the
+      // run is treated as handled. Real Meta outages and code defects still
+      // fall through to the rethrow branch below and surface loudly on the
+      // Inngest failure feed.
+      if (isAppOwnerActionRequiredError(err)) {
+        await escalateAppOwnerActionForIterationRun(createAdminClient(), err, {
+          workspaceId: workspace_id,
+          adAccountId: ad_account_id,
+        });
+        await finishRun(runId, {
+          status: "failed",
+          stages,
+          error: `human_blocked: app_owner_action_required — ${message}`,
+        });
+        return { status: "human_blocked" as const, runId, reason: "app_owner_action_required" };
+      }
       // Record the failure on the run row + alert the owners, then rethrow so
       // Inngest marks the run failed (and retries per the function config).
       await finishRun(runId, { status: "failed", stages, error: message });
