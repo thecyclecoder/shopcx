@@ -5,6 +5,83 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { escalateAppOwnerActionRequired } from "@/lib/meta/app-owner-action-escalation";
+import type { GraphError } from "@/lib/meta/graph-retry";
+
+/**
+ * Stable human-blocked fingerprint returned by `metaSyncSpend` when Meta's
+ * Data Use Checkup gate fires (graph-retry tags
+ * `metaClass = 'app_owner_action_required'`). Retrying can never clear this
+ * class — only a human completing the checkup in the Meta App Dashboard can —
+ * so we contain the error as a stable result instead of letting it flood the
+ * Inngest failure feed with duplicate throws.
+ */
+export const META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED =
+  "meta_sync_spend_app_owner_action_required" as const;
+
+/**
+ * Narrow error-branch classifier for `metaSyncSpend`. Returns the stable
+ * human-blocked result when the thrown error is a graph-retry-tagged
+ * app-owner-action-required (canonical: Data Use Checkup 400); returns null
+ * for anything else so the caller rethrows.
+ */
+export function classifyMetaSyncSpendError(
+  err: unknown,
+  scope: { workspaceId: string; adAccountId: string; metaAccountId: string },
+): {
+  status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
+  workspaceId: string;
+  adAccountId: string;
+  metaAccountId: string;
+} | null {
+  const metaClass = (err as { metaClass?: string } | null)?.metaClass;
+  if (metaClass !== "app_owner_action_required") return null;
+  return {
+    status: META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
+    workspaceId: scope.workspaceId,
+    adAccountId: scope.adAccountId,
+    metaAccountId: scope.metaAccountId,
+  };
+}
+
+type EscalateFn = typeof escalateAppOwnerActionRequired;
+type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * Handle a metaSyncSpend throw: if it's the app-owner-action-required class,
+ * explicitly book the deduped CEO card against THIS invocation's
+ * `workspaceId` (never a module-global scope, so two overlapping
+ * `meta/sync-spend` runs from different workspaces cannot cross-contaminate
+ * each other's service-role notification writes) and return the stable
+ * human-blocked result. Any other error is rethrown so the Inngest failure
+ * feed still surfaces it.
+ *
+ * Exported so the workspace-isolation invariant is unit-testable without
+ * spinning up the Inngest handler + step wrapper.
+ */
+export async function handleMetaSyncSpendError(
+  admin: Admin,
+  err: unknown,
+  scope: { workspaceId: string; adAccountId: string; metaAccountId: string },
+  escalate: EscalateFn = escalateAppOwnerActionRequired,
+): Promise<{
+  status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
+  workspaceId: string;
+  adAccountId: string;
+  metaAccountId: string;
+}> {
+  const blocked = classifyMetaSyncSpendError(err, scope);
+  if (!blocked) throw err;
+  const graphErr = err as GraphError;
+  await escalate(admin, {
+    workspaceId: scope.workspaceId,
+    label: `meta/sync-spend act_${scope.metaAccountId}`,
+    status: graphErr.httpStatus ?? 400,
+    error: graphErr,
+    affectedAdAccountIds: [scope.metaAccountId],
+  });
+  return blocked;
+}
 
 // ── meta/sync-spend ──
 export const metaSyncSpend = inngest.createFunction(
@@ -40,18 +117,26 @@ export const metaSyncSpend = inngest.createFunction(
     const endDate = new Date().toISOString().slice(0, 10);
     const startDate = new Date(Date.now() - syncDays * 86400000).toISOString().slice(0, 10);
 
-    const result = await step.run("sync-spend", async () => {
-      return syncMetaAdSpend({
+    try {
+      const result = await step.run("sync-spend", async () => {
+        return syncMetaAdSpend({
+          workspaceId: workspace_id,
+          adAccountId: ad_account_id,
+          metaAccountId: meta_account_id,
+          accessToken: token,
+          startDate,
+          endDate,
+        });
+      });
+
+      return { status: "complete", ...result };
+    } catch (err) {
+      return await handleMetaSyncSpendError(admin, err, {
         workspaceId: workspace_id,
         adAccountId: ad_account_id,
         metaAccountId: meta_account_id,
-        accessToken: token,
-        startDate,
-        endDate,
       });
-    });
-
-    return { status: "complete", ...result };
+    }
   }
 );
 
