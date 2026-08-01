@@ -34,7 +34,8 @@ loadEnv();
 const W = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
 const SWAP_AT = "2026-07-30T00:00:00Z";
-const HOLD = new Set(["heavensangel411@yahoo.com"]); // pending the floor decision
+const HOLD = new Set<string>(); // CEO 2026-08-01: honor each customer's real historical rate,
+                               // not the 50%-MSRP floor — so heavensangel411 is owed the balance.
 
 interface Row {
   email: string; customerId: string; orderId: string; orderNumber: string; shopifyOrderId: string | null;
