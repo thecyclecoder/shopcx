@@ -141,6 +141,7 @@
     "test:graduate-crowned": "tsx --test src/lib/media-buyer/graduate-scaler.test.ts src/lib/media-buyer/agent.test.ts",
     "test:cold-scaler-graduate-heartbeat": "tsx --test src/lib/media-buyer/cold-scaler-graduate-heartbeat.test.ts",
     "test:meta-graph-retry-permanent": "tsx --test src/lib/meta/graph-retry.permanent.test.ts",
+    "test:meta-sync-spend-workspace-scope-isolation": "tsx --test src/lib/inngest/meta-sync.test.ts",
     "test:media-buyer-purchaser-overlap": "tsx --test src/lib/media-buyer/purchaser-overlap.test.ts",
     "test:migration-safety": "tsx --test src/lib/migration-safety.test.ts",
     "test:check-no-hard-destructive-migrations": "tsx --test scripts/_check-no-hard-destructive-migrations.test.ts",
