@@ -50,7 +50,25 @@ escalates real problems. The function also installs the app-owner-action-require
 escalation handler at the start of the Meta leg and clears the workspace scope
 at the end, so a Data Use Checkup / API access disrupted error fires a deduped
 CEO card exactly once per workspace per UTC day instead of flooding the Control
-Tower feed:
+Tower feed.
+
+### `isMetaHumanActionBlock(err: unknown): boolean`
+
+Pure classifier exported from today-sync.ts that detects the
+"API access disrupted / Data Use Checkup" Meta enforcement signature
+(case-insensitive substring match). When an error matches this pattern,
+`console.warn` is called with an App Dashboard action pointer
+(e.g., `https://developers.facebook.com/apps/`) instead of falling through to the
+general transient/error logic. This is a human-blocked enforcement gate,
+not a transient — the app owner must complete the checkup in the Meta App Dashboard
+before the Graph API will resume; it mirrors the sibling `error-feed-amazon-today-sync-transient`
+precedent for the same file, so the Vercel drain stops capturing hundreds of
+duplicate Control Tower captures per day while the CEO stays pointed at the exact
+human action required. Also exported for unit tests in `today-sync.test.ts`.
+
+### Per-condition log levels
+
+These conditions are evaluated in order after the `isMetaHumanActionBlock` preemption check:
 
 - `metaCode === 1` ("unknown, retry later"), `metaCode === 2` ("Service
   temporarily unavailable"), or `metaSubcode === 1504018` ("Your request timed

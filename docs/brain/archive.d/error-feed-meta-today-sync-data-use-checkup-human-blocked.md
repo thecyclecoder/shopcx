@@ -1,0 +1,1 @@
+- **Scope Meta 'API access disrupted / Data Use Checkup' as human-blocked (warn, not error) on the today-sync cron** · verified 2026-08-01 · → [[../inngest/today-sync]]
