@@ -28,6 +28,7 @@
  * Introduced by [[../../../docs/brain/specs/meta-graph-classify-app-owner-action-required-data-use-check]]
  * Phase 1.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 import {
@@ -149,31 +150,56 @@ export async function escalateAppOwnerActionRequired(
 
 /**
  * Default-handler workspace scope. `graphFetchJson` doesn't know the calling
- * workspace, so this module-scoped variable is set at the request/pass
- * boundary before the fetch runs. When the tagged error fires, the handler
- * consults this scope; if unset, the handler is a no-op (the CLASS
- * information is still preserved on the thrown `GraphError.metaClass`, so a
- * caller that catches the throw can escalate through this SDK explicitly).
+ * workspace, so callers wrap the awaited Graph work in
+ * [[runWithAppOwnerActionWorkspaceScope]] which pushes the workspace id onto
+ * an AsyncLocalStorage store. When the tagged error fires, the handler
+ * consults `getStore()` from within the SAME async chain that made the call,
+ * so two overlapping publishes for different workspaces each see their own
+ * scope — no cross-workspace card leak. If no scope is set the handler is a
+ * no-op (the CLASS is still preserved on the thrown `GraphError.metaClass`
+ * so a caller that catches the throw can escalate through this SDK
+ * explicitly).
+ *
+ * Why AsyncLocalStorage over a module-level mutable variable: the previous
+ * `setCurrentAppOwnerActionWorkspaceScope(workspaceId)` + `finally` cleanup
+ * pattern was a process-global. Two concurrent Inngest publishes for
+ * different workspaces interleave their awaits — publish A sets scope=A,
+ * publish B sets scope=B, publish A's Graph call fires, handler reads B —
+ * the card is booked against the wrong workspace. AsyncLocalStorage binds
+ * the scope to the async chain, not the module, closing that race.
  */
-let currentWorkspaceScope: string | null = null;
+const workspaceScopeStore = new AsyncLocalStorage<{ workspaceId: string }>();
 
-export function setCurrentAppOwnerActionWorkspaceScope(workspaceId: string | null): void {
-  currentWorkspaceScope = workspaceId;
+/**
+ * Bind the app-owner-action workspace scope to `workspaceId` for the
+ * duration of `fn` (and every await reached from it, transitively). Nested
+ * calls shadow the outer scope; overlapping chains see only their own.
+ * MUST wrap every await that could raise a Meta `app_owner_action_required`
+ * error — a plain mutation before the awaits (as the retired
+ * `setCurrentAppOwnerActionWorkspaceScope` module-global did) races on
+ * concurrent publishes and books cards against the wrong workspace.
+ */
+export function runWithAppOwnerActionWorkspaceScope<T>(
+  workspaceId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return workspaceScopeStore.run({ workspaceId }, fn);
 }
 
 export function getCurrentAppOwnerActionWorkspaceScope(): string | null {
-  return currentWorkspaceScope;
+  return workspaceScopeStore.getStore()?.workspaceId ?? null;
 }
 
 /**
  * Install the default handler that raises the CEO card when an
  * app-owner-action-required error fires AND a workspace scope is set. Import
- * from an app-startup path (typically the today-sync inngest function) after
- * wiring the workspace scope for the caller.
+ * from an app-startup path (typically the today-sync inngest function) and
+ * run the awaited Graph work inside [[runWithAppOwnerActionWorkspaceScope]]
+ * so the handler can resolve the caller's workspace.
  */
 export function installDefaultAppOwnerActionEscalationHandler(admin: Admin): void {
   registerAppOwnerActionRequiredHandler((ctx: AppOwnerActionRequiredContext) => {
-    const workspaceId = currentWorkspaceScope;
+    const workspaceId = getCurrentAppOwnerActionWorkspaceScope();
     if (!workspaceId) return;
     void escalateAppOwnerActionRequired(admin, {
       workspaceId,
