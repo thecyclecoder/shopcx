@@ -39,6 +39,7 @@ async function syncMetaAdSpend(params: { workspaceId: string; adAccountId: strin
   even when Facebook returns HTML (no JSON body → `metaCode` is undefined).
   [[../inngest/today-sync]] uses this to demote exhaustion of `httpStatus >= 500` to
   `console.warn`.
+- **App-owner-action-required errors must use invocation-local workspace scope.** When `syncMetaAdSpend` throws an app-owner-action-required error (e.g., Meta's Data Use Checkup 400), the caller (typically [[../inngest/meta-sync]] `metaSyncSpend`) catches it and explicitly passes the invocation's `workspaceId` to [[meta__app-owner-action-escalation]] `escalateAppOwnerActionRequired`. Never use `setCurrentAppOwnerActionWorkspaceScope` (that is module-global and unsafe for overlapping invocations). The isolation invariant is unit-tested in `src/lib/inngest/meta-sync.test.ts` with two overlapping workspace invocations.
 
 ---
 
