@@ -35,6 +35,11 @@
  * this follows it: the baseline is the last order **on this subscription** (`orders.subscription_id`),
  * excluding drafts. A sub with no renewal history has no established rate and is left alone.
  *
+ * The baseline must also predate the swap (`created_at < SWAP_AT`). Seven subs renewed on 7/31 at
+ * the reset price before the correction ran; for those, "the last renewal" IS the corrupted order,
+ * so an unbounded baseline reads $59.96 as their established rate and the sub is left inflated —
+ * exactly what happened on the first pass (4 subs refunded but still set to bill $59.96 again).
+ *
  * ── THE FLOOR, AND WHY THIS DEVIATES ──────────────────────────────────────────────────────────
  * `subscription-overcharge` clamps an inferred baseline UP to the 50%-MSRP floor ($39.98 realized
  * here). This script does NOT clamp. That guardrail protects against restoring off a stale INFERRED
@@ -65,6 +70,7 @@ const arg = (n: string) => { const i = process.argv.indexOf(n); return i > -1 ? 
 const LIMIT = arg("--limit") ? Math.max(1, Number(arg("--limit"))) : Infinity;
 const CONCURRENCY = arg("--concurrency") ? Math.max(1, Math.min(8, Number(arg("--concurrency")))) : 4;
 const TOL = 2; // cents
+const SWAP_AT = "2026-07-30T00:00:00Z"; // the crisis swap that reset these prices
 
 /**
  * The 5 contracts the first canary run set 25% low (it passed a realized price where MSRP was
@@ -112,11 +118,13 @@ async function main() {
       join subscriptions s on s.id = a.subscription_id and s.status in ('active','paused')
       join customers cu on cu.id = a.customer_id
       cross join lateral (
-          -- the established rate = what THIS subscription last actually billed
+          -- the established rate = what THIS subscription last billed BEFORE the swap.
+          -- Post-swap renewals are the corrupted ones; they can never be the baseline.
           select o.created_at, (i->>'price_cents')::int unit
           from orders o
           cross join lateral jsonb_array_elements(o.line_items) i
           where o.subscription_id = s.id
+            and o.created_at < $2
             and coalesce(o.source_name,'') <> 'shopify_draft_order'
             and i->>'sku' like 'SC-TABS%' and (i->>'price_cents')::int > 0
           order by o.created_at desc limit 1
@@ -129,7 +137,7 @@ async function main() {
         ) live
       left join product_variants pv on pv.workspace_id = $1 and pv.shopify_variant_id = live.variant_id
       where a.restored_at is not null
-      order by s.id, live.cents desc`, [W])).rows;
+      order by s.id, live.cents desc`, [W, SWAP_AT])).rows;
   } finally { await c.end(); }
 
   const { createAdminClient } = await import("../src/lib/supabase/admin");
