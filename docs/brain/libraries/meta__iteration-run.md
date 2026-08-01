@@ -86,5 +86,13 @@ the same values on a re-run.
   (iteration-scorecard-upsert-resilience): the rollup now nulls unresolved refs, isolates
   bad rows per-row, and **throws** on a real error, so the run fails loudly instead of
   feeding this stage an empty table.
+- **App-owner-action-required error handling uses invocation-local scope.** When
+  `meta-iteration-run` throws an `app_owner_action_required` error (Meta App Dashboard
+  gate, e.g., Data Use Checkup), the Inngest catch block ([[../inngest/meta-performance]])
+  calls [[meta__app-owner-action-escalation]] `escalateAppOwnerActionRequired` with
+  `workspaceId` from `event.data.workspace_id` as an explicit argument — never a
+  module-global or AsyncLocalStorage scope. Two overlapping runs for different workspaces
+  cannot cross-contaminate each other's notification writes; each run sees only its own
+  workspace_id, and the run records as `human_blocked` via `finishRun()` without rethrow.
 
 See [[../specs/storefront-iteration-engine]] (Phase 5) · [[meta__decision-engine]].
