@@ -52,6 +52,13 @@ Meta's canonical wording still classifies correctly. Distinct from FATAL
 Permanent-class errors NEVER retry; retrying only burns quota to reach the
 same wall.
 
+### `classifyAppOwnerActionRequired` — function
+
+```ts
+function classifyAppOwnerActionRequired(status: number, error: any): boolean
+```
+**[[../specs/meta-graph-classify-app-owner-action-required-data-use-check]] Phase 1** — classifies a Graph response as APP_OWNER_ACTION_REQUIRED: a Meta-side gate (canonical example: the yearly "Data Use Checkup") that a HUMAN must clear from the Meta App Dashboard before the API will return data. Fires on HTTP 400 when the concatenated `message` + `error_user_title` + `error_user_message` (lowercased) contains one of Meta's canonical phrasings: "data use checkup", "api access disrupted", or "app is currently unavailable". Distinct from TRANSIENT (retry-able wobble) and PERMANENT (code-change escalation). Retrying an app-owner-action-required error is pointless: the only fix is a human logging into the Meta App Dashboard, so retrying floods logs without possibility of self-heal.
+
 ### `graphError` — function
 
 ```ts
@@ -72,6 +79,13 @@ throw can branch on class (a permanent removal deserves a different response
 from a bad token). See [[meta__dead-verb-escalation]] `escalateDeadMetaVerb` for
 the CEO-card SDK a caller invokes on that branch.
 
+**Phase 1 addition (meta-graph-classify-app-owner-action-required):** when
+`classifyAppOwnerActionRequired` fires, `graphError` tags the throw with
+`metaClass='app_owner_action_required'` (checked BEFORE permanent so a Data Use
+Checkup 400 is never mis-tagged as permanent). See
+[[meta__app-owner-action-escalation]] `escalateAppOwnerActionRequired` for the
+CEO-card SDK.
+
 ### `registerPermanentGraphErrorHandler` — function
 
 ```ts
@@ -84,6 +98,20 @@ primitive stays DB-free and testable in isolation — the real escalation SDK
 installs itself here at startup so any `graphFetchJson` call site reaches the
 CEO card without knowing to wrap. Handler throws / rejects are swallowed
 (a broken escalation must not mask the underlying permanent throw).
+
+### `registerAppOwnerActionRequiredHandler` — function
+
+```ts
+function registerAppOwnerActionRequiredHandler(fn: ((ctx: AppOwnerActionRequiredContext) => void | Promise<void>) | null): void
+```
+Optional fire-and-forget hook `graphFetchJson` invokes when it classifies a
+response as app-owner-action-required. Same pattern as
+`registerPermanentGraphErrorHandler`: a module-level slot keeps graph-retry
+DB-free. The escalation SDK ([[meta__app-owner-action-escalation]]
+`installDefaultAppOwnerActionEscalationHandler`) installs itself here at startup
+so any `graphFetchJson` call site reaches the deduped CEO card without knowing
+to wrap. Handler throws / rejects are swallowed (a broken escalation must not
+mask the underlying app-owner-action-required throw).
 
 ## Callers
 
@@ -106,10 +134,13 @@ CEO card without knowing to wrap. Handler throws / rejects are swallowed
   'permanent_api_removed'` is the caller's contract: catch and branch, don't
   wrap in a generic try/catch that logs "transient wobble". See
   [[meta__dead-verb-escalation]].
-- Ordering — permanent classification runs BEFORE transient. A hypothetical
-  "no longer supported" message on a 5xx would still classify TRANSIENT
-  (retryable) because the permanent branch only fires on HTTP 400, and the
-  transient branch owns HTTP 5xx unconditionally.
+- **Ordering — app-owner-action-required, then permanent, then transient.** The
+  `graphError` function classifies in this order: `classifyAppOwnerActionRequired`
+  (HTTP 400 with canonical Meta phrasings), `isPermanentGraphError` (HTTP 400 with
+  removed-endpoint wording or code/subcode), then transient (is_transient / code
+  1/2 / 429 / 5xx). This prevents a Data Use Checkup 400 (workspace-owner-fixable)
+  from being mis-tagged as permanent (code-change escalation). Both app-owner and
+  permanent never retry; they route to different CEO cards.
 
 ---
 
