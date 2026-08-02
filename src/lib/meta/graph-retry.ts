@@ -75,7 +75,10 @@ export function graphError(status: number, error: any): GraphError {
  * disables an app's API access until the workspace owner completes it. Meta
  * surfaces this as an HTTP 400 whose message / user-facing title / user-facing
  * message contains one of the canonical phrasings — "data use checkup",
- * "api access disrupted", or "app is currently unavailable".
+ * "api access disrupted", "app is currently unavailable", or
+ * "api access blocked". The classifier is INTENTIONALLY a phrase-list (not a
+ * single-phrase match) so a new Meta wording for the same underlying condition
+ * is added as one more branch here rather than a new class.
  *
  * Distinct from PERMANENT (a removed endpoint requires a code change) and
  * FATAL (a token/permission issue is caller-fixable). Retrying an
@@ -98,6 +101,7 @@ export function classifyAppOwnerActionRequired(status: number, error: any): bool
   if (haystack.includes("data use checkup")) return true;
   if (haystack.includes("api access disrupted")) return true;
   if (haystack.includes("app is currently unavailable")) return true;
+  if (haystack.includes("api access blocked")) return true;
   return false;
 }
 
