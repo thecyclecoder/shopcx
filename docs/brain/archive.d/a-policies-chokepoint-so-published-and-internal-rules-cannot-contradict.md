@@ -1,0 +1,1 @@
+- **Policies get an SDK, and the customer-facing text can't contradict the internal rule** · verified 2026-08-02 · → [[../tables/policies]], [[../libraries/policies]]
