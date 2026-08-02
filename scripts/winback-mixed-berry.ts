@@ -199,8 +199,16 @@ async function main() {
   if (TEST_TO) {
     const preview = renderEmail("Dylan", getJourneyUrl("EXAMPLE-TOKEN-not-a-real-session"), creative);
     const html = await shellHtml({ title: preview.subject, preheader: preview.preheader, bodyHtml: preview.bodyHtml, brand });
-    const { sendBrandedEmail } = await import("./_winback-send");
-    const r = await sendBrandedEmail(W, TEST_TO, `[TEST] ${preview.subject}`, html, preview.text);
+    const { sendCampaignEmailAsTicket } = await import("./_campaign-send");
+    const { Resend } = await import("resend");
+    const { decrypt } = await import("../src/lib/crypto");
+    const { data: ws } = await admin.from("workspaces").select("resend_api_key_encrypted, resend_domain, support_email, name").eq("id", W).maybeSingle();
+    const resend = new Resend(decrypt(ws.resend_api_key_encrypted));
+    const replyTo = ws.support_email || `support@${ws.resend_domain}`;
+    const sent = await resend.emails.send({ from: `${ws.name} <orders@${ws.resend_domain}>`, to: TEST_TO,
+      subject: `[TEST] ${preview.subject}`, html, text: preview.text, replyTo });
+    const r = sent.error ? { error: sent.error.message } : { messageId: sent.data?.id };
+    console.log(`   reply-to: ${replyTo}`);
     console.log(`\n✉️  test sent to ${TEST_TO}: ${r.error ? `FAILED — ${r.error}` : `ok (${r.messageId})`}`);
     console.log("   (link is a placeholder — real sends mint a per-customer token)");
     return;
@@ -216,7 +224,7 @@ async function main() {
   }
 
   // ── Mint one session per customer + send ──
-  const { sendBrandedEmail } = await import("./_winback-send");
+  const { sendCampaignEmailAsTicket } = await import("./_campaign-send");
   const slice = audience.slice(0, LIMIT === Infinity ? audience.length : LIMIT);
   let sent = 0; const failures: { email: string; error: string }[] = [];
   for (const cust of slice) {
@@ -237,8 +245,12 @@ async function main() {
 
       const mail = renderEmail(cust.first_name, getJourneyUrl(token), creative);
       const html = await shellHtml({ title: mail.subject, preheader: mail.preheader, bodyHtml: mail.bodyHtml, brand });
-      const r = await sendBrandedEmail(W, cust.email, mail.subject, html, mail.text);
-      if (r.error) { failures.push({ email: cust.email, error: r.error }); continue; }
+      const r = await sendCampaignEmailAsTicket({
+        workspaceId: W, customerId: cust.id, toEmail: cust.email,
+        subject: mail.subject, html, text: mail.text,
+        tags: ["winback","crisis:mixed-berry","campaign"], source: "winback-mixed-berry",
+      });
+      if (!r.ok) { failures.push({ email: cust.email, error: r.error ?? "send failed" }); continue; }
       sent++;
       if (sent % 25 === 0) console.log(`  … ${sent}/${slice.length}`);
     } catch (e) {
