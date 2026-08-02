@@ -54,13 +54,33 @@ export async function deliverTicketMessage(
     .eq("id", ticketId)
     .single();
 
+  // Placeholder safety net at the delivery chokepoint. Every outbound customer
+  // message flows through here; individual composing paths (action-executor
+  // substitute, cs-director remedy fill, journey lead-in) may fill the tokens
+  // upstream, but three did not on 2026-07-28..29 and customers read literal
+  // "{{label_url}}" — including a BBB complaint from Ethel Hutton (2305546a)
+  // and 15 days lost for Julianne Peters (de357c10). The strip is idempotent:
+  // a message already filled has no matching tokens, so this is a no-op safety
+  // net under the existing callers, not a replacement for them. WARN with the
+  // ticket id when a strip fires so the upstream caller can be located.
+  const PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/;
+  let safeMessage = message;
+  if (PLACEHOLDER_RE.test(safeMessage)) {
+    const { stripUnsubstitutedPlaceholders } = await import("@/lib/action-executor");
+    console.warn(
+      `[deliverTicketMessage] stripping unsubstituted placeholder(s) in outbound message ticket=${ticketId}:`,
+      safeMessage.match(/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/g),
+    );
+    safeMessage = stripUnsubstitutedPlaceholders(safeMessage);
+  }
+
   // Translate to the customer's detected language (matches the orchestrator's
   // sendWithDelay) so a non-English customer never gets an English body.
-  let body = message;
+  let body = safeMessage;
   const lang = (t?.detected_language as string | null) || "en";
   if (lang && lang !== "en") {
     const { translateIfNeeded } = await import("@/lib/translate");
-    body = await translateIfNeeded(message, lang, { workspaceId, ticketId });
+    body = await translateIfNeeded(safeMessage, lang, { workspaceId, ticketId });
   }
   // Render any bare return-label URL as a CTA button (same safety net as the
   // orchestrator). Runs after translation so the button markup isn't mangled.
