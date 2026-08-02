@@ -30,6 +30,41 @@ import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { loggedActionFetch } from "@/lib/appstle-call-log";
 import { normalizeCountryToIso2Strict } from "@/lib/country-iso2";
 
+/**
+ * Hard ceiling on units of a single variant per replacement. The CEO set
+ * this on 2026-08-02 while resolving a non-delivery make-whole: never
+ * issue a replacement for more than 4 units of one variant. A 4 + 4
+ * multi-flavour replacement is fine; 8 of one flavour is not. The cap
+ * lives in the SDK so every caller (portal, script, agent, executor)
+ * inherits it — a cap that lives in one caller is a cap the next caller
+ * does not have.
+ */
+export const REPLACEMENT_MAX_UNITS_PER_VARIANT = 4;
+
+/**
+ * Pure predicate for the per-variant cap. Sums quantities by variantId
+ * across the items array (two line items for the same variant sum) and
+ * returns the first variant that exceeds [[REPLACEMENT_MAX_UNITS_PER_VARIANT]],
+ * or null when every variant is within the cap. Exposed so callers can
+ * pre-check without invoking the full SDK.
+ */
+export function findVariantOverCap(
+  items: ReadonlyArray<{ variantId: string; quantity: number; title?: string }>,
+): { variantId: string; title: string | null; requested: number; cap: number } | null {
+  const totals = new Map<string, { qty: number; title: string | null }>();
+  for (const it of items) {
+    const prev = totals.get(it.variantId);
+    const nextQty = (prev?.qty ?? 0) + (it.quantity || 0);
+    totals.set(it.variantId, { qty: nextQty, title: prev?.title ?? it.title ?? null });
+  }
+  for (const [variantId, { qty, title }] of totals) {
+    if (qty > REPLACEMENT_MAX_UNITS_PER_VARIANT) {
+      return { variantId, title, requested: qty, cap: REPLACEMENT_MAX_UNITS_PER_VARIANT };
+    }
+  }
+  return null;
+}
+
 export interface CreateReplacementInput {
   workspaceId: string;
   customerId: string;
@@ -132,6 +167,21 @@ export function buildReplacementDraftOrderInput(
 
 export async function createReplacementOrder(input: CreateReplacementInput): Promise<CreateReplacementResult> {
   const admin = createAdminClient();
+
+  // ── 0. Refuse an over-cap request BEFORE we insert or call Shopify.
+  // The CEO ceiling (REPLACEMENT_MAX_UNITS_PER_VARIANT) is enforced here
+  // in the SDK so every caller inherits it. We do NOT silently truncate
+  // — the caller decides whether to split, drop the excess, or escalate.
+  const over = findVariantOverCap(input.items);
+  if (over) {
+    const label = over.title ? `${over.title} (variant ${over.variantId})` : `variant ${over.variantId}`;
+    return {
+      success: false,
+      replacementId: "",
+      shopifyOrderName: null,
+      error: `Replacement refused: ${over.requested} units of ${label} exceeds the per-variant cap of ${over.cap}. A larger replacement needs approval.`,
+    };
+  }
 
   // ── 1. Insert the row FIRST (record-first guarantee) ────────────────
   const initialItems = input.items.map(i => ({
