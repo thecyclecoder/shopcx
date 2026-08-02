@@ -4,6 +4,17 @@ Canonical published policies (refund window, restocking, exchange rules, cancell
 
 **Role in customer messaging:** this table answers the *"what can we do?"* layer of customer communication. The orchestrator references it to determine eligibility (e.g. "is this refund within the 14-day window?"). The voice layer ([[../customer-voice]]) governs how the answer is delivered; the scenario-rule layer ([[sonnet_prompts]]) governs when to invoke which policy. Three-layer model fully described in [[../customer-voice]] § Three layers of customer communication.
 
+## ⭐ Two halves — which half binds (hard rule)
+
+Every policy row carries **TWO halves** and they are **NOT interchangeable**:
+
+- **`internal_summary` + `rules` — AUTHORITATIVE.** This is what the AI obeys. The orchestrator prompt, June's director brief, the grader, the analyzer, and every automated decision path read these fields — never `customer_summary`. `rules[]` is the machine-readable half (assertions like `returns.no_refund_on_refused_or_return_to_sender`, `cancellation.never_promise_cancel_or_stop_shipment`); `internal_summary` is the human-readable rule body those assertions describe.
+- **`customer_summary` — DERIVED.** The published rendering surfaced on the storefront `/policies/{slug}` help-centre page. Written from the authoritative half; NEVER a source of truth. Quoting it as the rule is a known failure mode — **the 2026-08-02 refuse-delivery incident** shipped because the published Order Cancellation summary told customers "You can refuse the delivery when it arrives" while three OTHER active policies say refused / return-to-sender packages arrive with no order-matchable tracking and CANNOT be refunded (Terms: "absolutely, 100% not eligible"). A real customer followed the published half and lost her refund entirely.
+
+**Neither half may contradict the other.** Enforced at build time by [scripts/_check-policy-contradictions.ts](../../../scripts/_check-policy-contradictions.ts) (Phase 3 of [[../specs/a-policies-chokepoint-so-published-and-internal-rules-cannot-contradict]]): the check scans every active policy's `customer_summary` for phrases that a `rules[]` assertion on another active policy forbids, and fails `predeploy` red on a match. The refuse-delivery case ships as an inline regression fixture — a code change that stops flagging it fails the build with the exact reason.
+
+**Chokepoint access.** The single sanctioned read/write surface for this table is [[../libraries/policies]] — `getPolicy` / `listActivePolicies` / `getInternalRules` / `getAgentPolicyPackage` / `updatePolicyText` / `getPolicyCustomerFacing` / `insertDraftPolicy`. Enforced by [scripts/_check-policies-sdk-compliance.ts](../../../scripts/_check-policies-sdk-compliance.ts) — a raw `.from('policies')` outside the SDK fails `predeploy`. See CLAUDE.md § Local conventions.
+
 **Primary key:** `id`
 
 ## Columns
