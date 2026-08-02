@@ -17,6 +17,7 @@
  */
 
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { getPolicy } from "@/lib/policies";
 
 // Below this confidence AND acting on an irreversible action → clarify.
 // Aligned with the problem-lockin default (0.7) so the two thresholds move together.
@@ -123,16 +124,10 @@ type Admin = ReturnType<typeof createAdminClient>;
  */
 export async function loadIrreversibleSet(admin: Admin, workspaceId: string): Promise<ReadonlySet<string>> {
   try {
-    const { data: policy } = await admin
-      .from("policies")
-      .select("rules")
-      .eq("workspace_id", workspaceId)
-      .eq("slug", "irreversible_actions")
-      .eq("is_active", true)
-      .is("superseded_by", null)
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    // Routed through the policies SDK — active-and-not-superseded filtering lives in the
+    // SDK, not repeated here. A missing / malformed policy falls back to the default set so
+    // a broken policy edit can never disable the gate.
+    const policy = await getPolicy(admin, workspaceId, "irreversible_actions");
     const rules = policy?.rules;
     if (!Array.isArray(rules) || rules.length === 0) return DEFAULT_IRREVERSIBLE_SET;
     const set = new Set<string>();

@@ -5,6 +5,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { executeToolCall } from "@/lib/sonnet-orchestrator-v2";
+import { getPolicy, listActivePolicies, type PolicyRow } from "@/lib/policies";
 
 type Ticket = { id: string; customer_email?: string; [key: string]: unknown };
 
@@ -38,23 +39,21 @@ export default async function executeToolCallImprove(
   if (name === "get_policies") {
     const admin = createAdminClient();
     const slugInput = typeof input.slug === "string" ? input.slug.trim() : "";
-    let q = admin
-      .from("policies")
-      .select("slug, name, customer_summary, internal_summary, updated_at")
-      .eq("workspace_id", workspaceId)
-      .eq("is_active", true)
-      .is("superseded_by", null)
-      .order("slug");
-    if (slugInput) q = q.eq("slug", slugInput);
-    const { data, error } = await q;
-    if (error) return `get_policies failed: ${error.message}`;
-    const rows = (data ?? []) as Array<{
-      slug: string;
-      name: string;
-      customer_summary: string | null;
-      internal_summary: string | null;
-      updated_at: string;
-    }>;
+    let rows: PolicyRow[];
+    try {
+      // Routed through the policies SDK — active-and-not-superseded filtering lives in
+      // the SDK, not here. Sol's research tool still surfaces BOTH halves so she can see
+      // drift between what we publish and what we obey; the agent-facing enforcement path
+      // (Phase 2 `getAgentPolicyPackage`) is the one that hides `customer_summary`.
+      if (slugInput) {
+        const p = await getPolicy(admin, workspaceId, slugInput);
+        rows = p ? [p] : [];
+      } else {
+        rows = await listActivePolicies(admin, workspaceId);
+      }
+    } catch (err) {
+      return `get_policies failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
     if (!rows.length) {
       return slugInput
         ? `No active policy matches slug='${slugInput}' in this workspace.`

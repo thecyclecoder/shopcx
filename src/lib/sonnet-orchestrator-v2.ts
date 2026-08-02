@@ -23,6 +23,7 @@ import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
 import { LOYALTY_REMEDY_MAX_CENTS, getMemberByCustomerId, getMembersInLinkGroup } from "@/lib/loyalty";
+import { getInternalRules } from "@/lib/policies";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -479,13 +480,11 @@ async function buildPreContext(
     // subscriptions / exchanges / crisis. Replaces ~60 scattered prompts
     // that previously paraphrased the same rules and drifted over time
     // (the same-day-void incident on 2026-05-26 was a contradiction
-    // between two prompts that lived in different rule-bodies).
-    admin.from("policies")
-      .select("slug, name, internal_summary")
-      .eq("workspace_id", workspaceId)
-      .eq("is_active", true)
-      .is("superseded_by", null)
-      .order("slug"),
+    // between two prompts that lived in different rule-bodies). Reads
+    // the INTERNAL half via the SDK chokepoint — never `customer_summary`
+    // (that's the published rendering; quoting it as the rule caused the
+    // 2026-08-02 refuse-delivery incident).
+    getInternalRules(admin, workspaceId).then(data => ({ data })),
     // Phase 3 of playbook-compiler-becomes-box-agent-mining-full-history —
     // Sol's first-touch direction-setting session reads the COMPILED LIBRARY
     // (approved compiler-derived playbooks + persisted trees) as a durable,
