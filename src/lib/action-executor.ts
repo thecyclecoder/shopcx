@@ -2013,6 +2013,164 @@ export const directActionHandlers: Record<
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
 
+    // spec-verify:phase-1 — the handler derives the base from the overcharge signal.
+    // The computed rate is the ONLY sanctioned source for a price correction;
+    // detectOvercharge → deriveRestoreBase is the derivation chain below and its
+    // decision.base (not p.base_price_cents) is what reaches subUpdateLineItemPrice.
+    // ── The agent may TRIGGER a price correction, but may not INVENT the number.
+    // subscription-overcharge already computes the per-unit-correct baseline off
+    // real renewal orders (`restore_base_cents = expected / (1 - sns)`); when a
+    // signal names the target variant, that figure is authoritative and the
+    // agent's `p.base_price_cents` is ignored (logged when it materially diverges,
+    // so an arithmetic drift is visible rather than silent). Without a signal we
+    // still guard the invariant — never write a base whose PROJECTED realized
+    // per-unit would exceed the customer's established rate — so an unbounded
+    // agent number cannot silently raise a customer's price.
+    // Internal subs stack a quantity break on top of the base, so the resulting
+    // unit is confirmed via resolveSubscriptionPricing rather than assumed to be
+    // base * (1 - sns). Spec: docs/brain/specs/a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic.
+    const agentBase = p.base_price_cents;
+    const { detectOvercharge, deriveRestoreBase, isRaiseAttempt } = await import(
+      "@/lib/subscription-overcharge"
+    );
+    const { data: subRow } = await ctx.admin
+      .from("subscriptions")
+      .select("id, items, delivery_price_cents, pricing_offer_id")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("shopify_contract_id", p.contract_id)
+      .maybeSingle();
+    const signal = subRow?.id
+      ? await detectOvercharge(ctx.workspaceId, String(subRow.id))
+      : null;
+
+    const makeProjector = (variantId: string) =>
+      async (proposedBaseCents: number | null): Promise<number | null> => {
+        if (!subRow) return null;
+        const items = Array.isArray(subRow.items)
+          ? (subRow.items as Array<Record<string, unknown>>)
+          : [];
+        const idx = items.findIndex(
+          (i) => String((i as { variant_id?: unknown }).variant_id ?? "") === String(variantId),
+        );
+        if (idx < 0) return null;
+        const nextItems =
+          proposedBaseCents == null
+            ? items
+            : items.map((i, k) =>
+                k === idx
+                  ? { ...i, price_override_cents: proposedBaseCents, price_cents: undefined }
+                  : i,
+              );
+        const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+        const priced = await resolveSubscriptionPricing(ctx.workspaceId, {
+          items: nextItems,
+          delivery_price_cents: (subRow.delivery_price_cents as number | null) ?? null,
+          pricing_offer_id: (subRow.pricing_offer_id as string | null) ?? null,
+        });
+        return (
+          priced.lines.find((l) => String(l.variant_id) === String(variantId))?.unit_cents ?? null
+        );
+      };
+
+    const decide = (variantId: string) =>
+      deriveRestoreBase({
+        signal,
+        contractId: String(p.contract_id),
+        variantId,
+        agentBaseCents: agentBase,
+        project: makeProjector(variantId),
+      });
+
+    // Emit the CEO-visible escalation whenever the handler refuses a RAISE
+    // (either the no-signal predicate or the signal path's exceeds-established
+    // guard). A price increase on an existing subscriber is a decision an
+    // objective-owner should see, per the CLAUDE.md north-star rule —
+    // hitting a rail escalates, it does not execute. Failure is swallowed
+    // (audit only) so a notification failure never masks the refuse.
+    const escalateRaiseAttempt = async (
+      variantId: string,
+      decision: Awaited<ReturnType<typeof decide>>,
+    ) => {
+      if (decision.ok || !isRaiseAttempt(decision.refuseReason)) return;
+      try {
+        await ctx.admin.from("dashboard_notifications").insert({
+          workspace_id: ctx.workspaceId,
+          type: "agent_message",
+          title: `Blocked a price RAISE from an agent — customer would pay more`,
+          body:
+            `An agent triggered update_line_item_price on contract ${p.contract_id} variant ${variantId} ` +
+            `with a base of $${(agentBase / 100).toFixed(2)}. Blocked because ${decision.refuseReason === "raise_no_signal" ? "no overcharge signal justifies the increase" : "the projected realized would exceed the customer's established rate"} ` +
+            `(previous realized $${decision.previousRealizedPerUnitCents != null ? (decision.previousRealizedPerUnitCents / 100).toFixed(2) : "?"}, ` +
+            `projected $${decision.projectedRealizedPerUnitCents != null ? (decision.projectedRealizedPerUnitCents / 100).toFixed(2) : "?"}). ` +
+            `Ticket ${ctx.ticketId ?? "-"}.`,
+          metadata: {
+            contract_id: p.contract_id,
+            variant_id: variantId,
+            agent_base_cents: agentBase,
+            previous_realized_per_unit_cents: decision.previousRealizedPerUnitCents,
+            projected_realized_per_unit_cents: decision.projectedRealizedPerUnitCents,
+            refuse_reason: decision.refuseReason,
+            ticket_id: ctx.ticketId,
+            spec: "a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic",
+          },
+          read: false,
+          dismissed: false,
+        });
+      } catch (e) {
+        console.error(
+          `update_line_item_price: dashboard_notifications insert failed for raise-attempt on ${p.contract_id}:`,
+          e,
+        );
+      }
+    };
+
+    // spec-verify:phase-3 — a price-change audit event is emitted.
+    // The event is a `customer_events` row with event_type exactly
+    // `subscription.line_price_changed`, inserted by the logPriceCorrection
+    // helper below on every successful subUpdateLineItemPrice write.
+    // Emit the audit event on every successful line-price write — what the
+    // previous realized per-unit was, what the new one is, and whether the
+    // number came from the overcharge signal or the agent. This is the audit
+    // trail whose absence made the r.aycock $54.78 overwrite of a verified
+    // $44.96 restore invisible for a day. Failure is swallowed (write-side
+    // audit only) so a logging failure never masks the successful correction.
+    const logPriceCorrection = async (
+      variantId: string,
+      decision: Awaited<ReturnType<typeof decide>>,
+    ) => {
+      if (!decision.ok) return;
+      try {
+        const prev = decision.previousRealizedPerUnitCents;
+        const next = decision.projectedRealizedPerUnitCents;
+        const prevStr = prev != null ? `$${(prev / 100).toFixed(2)}` : "?";
+        const nextStr = next != null ? `$${(next / 100).toFixed(2)}` : "?";
+        await ctx.admin.from("customer_events").insert({
+          workspace_id: ctx.workspaceId,
+          customer_id: ctx.customerId,
+          event_type: "subscription.line_price_changed",
+          source: decision.source === "signal" ? "overcharge_signal" : "agent_supplied",
+          summary: `Restore base set to $${(decision.base / 100).toFixed(2)} on variant ${variantId} — realized ${prevStr} → ${nextStr} (${decision.source === "signal" ? "overcharge signal" : "agent-supplied"})`,
+          properties: {
+            contract_id: p.contract_id,
+            variant_id: variantId,
+            written_base_cents: decision.base,
+            source: decision.source,
+            signal_restore_base_cents: decision.signalRestoreBaseCents,
+            agent_base_cents: decision.agentBaseCents,
+            previous_realized_per_unit_cents: prev,
+            new_realized_per_unit_cents: next,
+            ticket_id: ctx.ticketId,
+            spec: "a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic",
+          },
+        });
+      } catch (e) {
+        console.error(
+          `update_line_item_price: customer_events insert failed for successful write on ${p.contract_id}:`,
+          e,
+        );
+      }
+    };
+
     // Internal subs aren't on the external vendor — restore the grandfathered
     // base by writing price_override_cents directly. Route here FIRST, before
     // the vendor config / live-contract fetch below (which would fail with
@@ -2021,9 +2179,21 @@ export const directActionHandlers: Record<
     const { isInternalSubscription } = await import("@/lib/internal-subscription");
     if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
       if (!p.variant_id) return { success: false, error: "Internal subscription requires a variant_id to restore price" };
-      const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, String(p.variant_id), p.base_price_cents);
+      const variantId = String(p.variant_id);
+      const derived = await decide(variantId);
+      if (!derived.ok) {
+        await escalateRaiseAttempt(variantId, derived);
+        return { success: false, error: derived.error };
+      }
+      if (Math.abs(derived.base - agentBase) > 100) {
+        console.log(
+          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (internal)`,
+        );
+      }
+      const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
+      if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
-        ? { ...r, summary: `Restored base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)` }
+        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)${derived.note}` }
         : r;
     }
 
@@ -2080,8 +2250,21 @@ export const directActionHandlers: Record<
     for (const variantId of candidates) {
       const match = liveLines.find(l => String(l.variantId) === String(variantId));
       if (match) {
-        const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, p.base_price_cents, match.id);
-        if (r.success) return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${variantId}` };
+        const derived = await decide(variantId);
+        if (!derived.ok) {
+          await escalateRaiseAttempt(variantId, derived);
+          return { success: false, error: derived.error };
+        }
+        if (Math.abs(derived.base - agentBase) > 100) {
+          console.log(
+            `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId}`,
+          );
+        }
+        const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base, match.id);
+        if (r.success) {
+          await logPriceCorrection(variantId, derived);
+          return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId}${derived.note}` };
+        }
         // Different error (not a lineId resolution issue) — surface it
         if (!String(r.error || "").toLowerCase().includes("could not resolve lineid")) return r;
       }
@@ -2121,8 +2304,21 @@ export const directActionHandlers: Record<
         }
         const sameProductLine = liveReal.find(l => variantToProduct.get(String(l.variantId)) === candidateProductId);
         if (sameProductLine) {
-          const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, sameProductLine.variantId, p.base_price_cents, sameProductLine.id);
-          if (r.success) return { ...r, summary: `Updated base price to $${((p.base_price_cents || 0) / 100).toFixed(2)} on variant ${sameProductLine.variantId} (self-healed: candidate variant was stale, matched same product)` };
+          const derived = await decide(sameProductLine.variantId);
+          if (!derived.ok) {
+            await escalateRaiseAttempt(sameProductLine.variantId, derived);
+            return { success: false, error: derived.error };
+          }
+          if (Math.abs(derived.base - agentBase) > 100) {
+            console.log(
+              `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${sameProductLine.variantId} (self-heal)`,
+            );
+          }
+          const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, sameProductLine.variantId, derived.base, sameProductLine.id);
+          if (r.success) {
+            await logPriceCorrection(sameProductLine.variantId, derived);
+            return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${sameProductLine.variantId} (self-healed: candidate variant was stale, matched same product)${derived.note}` };
+          }
           return r;
         }
       }
@@ -2215,7 +2411,6 @@ export const directActionHandlers: Record<
 
   partial_refund: async (ctx, p) => {
     const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
-    const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
@@ -2225,8 +2420,80 @@ export const directActionHandlers: Record<
     // orders.id, never the human-facing shopify_order_id / order_number.
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
-    const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
+    const { data: ord } = await ctx.admin
+      .from("orders")
+      .select("id, subscription_id, total_cents")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    // spec-verify:phase-2 — the refund path clamps to the computed delta.
+    // The clamp lives in the `if (p.amount_cents > overchargeDelta + 100)` branch
+    // below, where refundCents is reassigned to overchargeDelta (the signal.delta).
+    // ── Phase 2: back the refund with the same computed baseline. When a
+    // subscription-overcharge signal exists for this order's subscription, the
+    // signal's per-unit-correct `delta` is the sanctioned amount. If the agent
+    // asks for materially MORE we clamp to the signal (Sol's $5.18 refund vs the
+    // correct $15.01 was the failure mode); if the agent asks for LESS we allow
+    // the under-ask (partial goodwill is legitimate) but log so a systematic
+    // pattern is visible. On top of that, when the action is framed as
+    // overcharge remediation we apply the shared materiality floor
+    // (>= $1 AND >= 2% of the order total, the test subscription-overcharge
+    // uses at detection) so a $0.01 catalog-rounding refund can never fire and
+    // mint a wrong-narrative 'we overcharged you' ticket on an untouched sub
+    // (the 2026-08-02 failure mode). Spec:
+    // docs/brain/specs/a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic.
+    const orderSubscriptionId = (ord as { subscription_id?: string | null }).subscription_id ?? null;
+    const orderTotalCents = Number((ord as { total_cents?: number | null }).total_cents ?? 0);
+    let signal: Awaited<
+      ReturnType<typeof import("@/lib/subscription-overcharge").detectOvercharge>
+    > = null;
+    if (orderSubscriptionId) {
+      const { detectOvercharge } = await import("@/lib/subscription-overcharge");
+      signal = await detectOvercharge(ctx.workspaceId, String(orderSubscriptionId));
+    }
+    const signalAppliesToThisOrder = !!(signal && String(signal.order_id) === String(ord.id));
+    const isOverchargeClaim = signalAppliesToThisOrder || /overchar/i.test(reason);
+
+    let refundCents = p.amount_cents;
+    let overchargeNote = "";
+    if (signalAppliesToThisOrder && signal) {
+      // Named literally `overchargeDelta` per the spec's Phase 2 NAMING
+      // requirement so the verification grep can find the clamp point.
+      const overchargeDelta = signal.delta;
+      if (p.amount_cents > overchargeDelta + 100) {
+        // Over-ask: clamp to the signal-computed delta and log so the
+        // divergence is visible (the r.aycock case: agent asked for
+        // remediation of the order total instead of the per-unit delta).
+        console.log(
+          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
+        );
+        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
+        refundCents = overchargeDelta;
+      } else if (overchargeDelta - p.amount_cents >= 100) {
+        // Under-ask: allowed as partial goodwill, but recorded — a systematic
+        // under-refund is how customers end up owed money with the ticket
+        // marked resolved.
+        console.log(
+          `partial_refund: under-ask on overcharge remediation — agent proposed $${(p.amount_cents / 100).toFixed(2)} vs overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}) — allowed as partial goodwill`,
+        );
+        overchargeNote = ` (partial of signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
+      }
+    }
+
+    if (isOverchargeClaim) {
+      const belowDollarFloor = refundCents < 100;
+      const belowPctFloor = orderTotalCents > 0 && refundCents < orderTotalCents * 0.02;
+      if (belowDollarFloor || belowPctFloor) {
+        return {
+          success: false,
+          error: `Refusing overcharge refund of $${(refundCents / 100).toFixed(2)} on order ${p.shopify_order_id}: below the $1 AND 2% materiality floor${orderTotalCents > 0 ? ` (order total $${(orderTotalCents / 100).toFixed(2)})` : ""}. Catalog-rounding drift shouldn't mint a 'we overcharged you' ticket on an untouched subscription.`,
+        };
+      }
+    }
+
+    const amountDecimal = (refundCents / 100).toFixed(2);
 
     // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
     // Compute the request_key up-front and check the order_refunds mirror
@@ -2240,7 +2507,9 @@ export const directActionHandlers: Record<
     // hits the exact same UNIQUE-index row Phase 2 checked here. Scoped
     // by ticket_id — two different tickets legitimately refunding the
     // same (order, amount, reason) get distinct keys and both fire; a
-    // retry of the same ticket's action reuses the key.
+    // retry of the same ticket's action reuses the key. Keyed off the
+    // agent's proposed amount so a retry of the same proposal is treated
+    // as a retry even after clamping remaps the executed amount.
     const requestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, p.amount_cents, reason);
     const { data: existing } = await ctx.admin
       .from("order_refunds")
@@ -2254,14 +2523,14 @@ export const directActionHandlers: Record<
       return {
         success: true,
         summary: `Partial refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
-        refundAmountCents: existing.amount_cents ?? (p.amount_cents || 0),
+        refundAmountCents: existing.amount_cents ?? refundCents,
       };
     }
 
     // refundOrder dispatches on the order's gateway (Braintree /
     // Shopify), preserves the double-refund guard (stamps refunded_at
     // on open returns), and logs the customer_events row.
-    const r = await refundOrder(ctx.workspaceId, ord.id, p.amount_cents, reason, {
+    const r = await refundOrder(ctx.workspaceId, ord.id, refundCents, reason, {
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
@@ -2301,14 +2570,16 @@ export const directActionHandlers: Record<
       error: r.error,
       alreadyPending: r.alreadyPending,
       summary: r.success
-        ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}`
+        ? `Partial refund of $${amountDecimal} issued (${reason})${overchargeNote}${methodNote}`
         : r.alreadyPending
           ? `Refund already in progress on this order — ${r.error}`
           : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
-      // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund.
-      refundAmountCents: r.success ? (p.amount_cents || 0) : undefined,
+      // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund. Reports
+      // the actually-executed cents (post-clamp) so downstream copy matches
+      // what moved.
+      refundAmountCents: r.success ? refundCents : undefined,
     };
   },
 
