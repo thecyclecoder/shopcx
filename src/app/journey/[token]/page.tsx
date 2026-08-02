@@ -1695,7 +1695,16 @@ function PaymentMethodStep({
   }, [token]);
 
   async function handleSave() {
-    if (!hfRef.current || saving || submitting) return;
+    if (saving || submitting) return;
+    // Fail LOUDLY. This used to `return` silently when the ref was empty, which is exactly how the
+    // missing `ref={hfRef}` above went unnoticed: the button did nothing, showed nothing, and logged
+    // nothing. 9 add-payment-method journeys were launched and 0 ever completed, and the only signal
+    // was a customer typing "it is not letting me save" (ticket 4e07febc, 2026-07-30).
+    if (!hfRef.current) {
+      console.error("[journey/payment] card form not mounted — hostedFields ref is empty");
+      setTokenError("Card form didn't load. Please refresh and try again.");
+      return;
+    }
     setSaving(true);
     setTokenError(null);
     try {
@@ -1757,6 +1766,7 @@ function PaymentMethodStep({
   return (
     <div className="mt-5">
       <HostedFieldsCard
+        ref={hfRef}
         clientToken={clientToken}
         primaryColor={primaryColor}
         cardholderName={cardholderName}
