@@ -3514,7 +3514,16 @@ export const directActionHandlers: Record<
       reason: (p.reason as string) || "damaged_items",
       originalOrderNumber: p.order_number || null,
       ticketId: ctx.ticketId || null,
-      shopifyNote: "Replacement order — crisis swap compensation",
+      // The caller's explanation goes in the order NOTE where it belongs (the
+      // SDK normalises `reason` into a short slug for the Shopify TAG, so a
+      // long prose reason no longer rejects the whole order — see
+      // `normalizeReplacementReasonTag`). Measured 2026-08-02: 84 of 87
+      // replacements this workspace has ever issued were NOT crisis-related
+      // (goodwill bags, expired items, wrong variant, address corrections),
+      // yet every single one was labelled 'crisis swap compensation' because
+      // that string was hardcoded here. The Shopify audit log now records
+      // whatever explanation the caller gave, or a neutral fallback.
+      shopifyNote: (p.reason as string) || "Replacement order",
       initiatedBy: "ai",
     });
 

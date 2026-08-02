@@ -14,7 +14,9 @@ import assert from "node:assert/strict";
 import {
   buildReplacementDraftOrderInput,
   findVariantOverCap,
+  normalizeReplacementReasonTag,
   REPLACEMENT_MAX_UNITS_PER_VARIANT,
+  REPLACEMENT_REASON_TAG_MAX_LEN,
   type CreateReplacementInput,
 } from "./replacement-order";
 
@@ -104,6 +106,42 @@ test("tags carry the reason so Shopify surfaces it — ['replacement', <reason>]
   input.reason = "not_received";
   const out = buildReplacementDraftOrderInput(input, "US", "https://shopcx.ai");
   assert.deepEqual(out.tags, ["replacement", "not_received"]);
+});
+
+test("a 62-char free-form reason NEVER produces a >40-char tag — no more 'Title Tag exceeds the maximum length of 40 characters' (2026-08-02)", () => {
+  const input = baseInput();
+  input.items = [{ variantId: "v", quantity: 1 }];
+  // The exact class of reason that failed a real replacement on 2026-08-02:
+  // a Sonnet-authored prose sentence longer than Shopify's 40-char tag ceiling.
+  input.reason = "Customer received two damaged bottles, one leaking";
+  const out = buildReplacementDraftOrderInput(input, "US", "https://shopcx.ai");
+  assert.equal(out.tags[0], "replacement");
+  assert.ok(
+    out.tags[1].length <= REPLACEMENT_REASON_TAG_MAX_LEN,
+    `reason tag must be <= ${REPLACEMENT_REASON_TAG_MAX_LEN} chars; got ${out.tags[1].length} (${out.tags[1]})`,
+  );
+});
+
+test("normalizeReplacementReasonTag — codes idempotent, prose slugified, blank → 'unspecified', long → truncated", () => {
+  assert.equal(normalizeReplacementReasonTag("not_received"), "not_received");
+  assert.equal(normalizeReplacementReasonTag("damaged_items"), "damaged_items");
+  assert.equal(normalizeReplacementReasonTag("Damaged Items"), "damaged_items");
+  assert.equal(normalizeReplacementReasonTag(""), "unspecified");
+  assert.equal(normalizeReplacementReasonTag(null), "unspecified");
+  const long = "a".repeat(80);
+  assert.equal(normalizeReplacementReasonTag(long).length, REPLACEMENT_REASON_TAG_MAX_LEN);
+});
+
+test("shopifyNote is NOT hardcoded — a caller who passes no note gets the neutral fallback, not 'crisis swap compensation'", () => {
+  const input = baseInput();
+  input.items = [{ variantId: "v", quantity: 1 }];
+  // Explicitly clear shopifyNote to prove the SDK default is neutral; the
+  // action-executor caller now passes `p.reason` (the explanation) here,
+  // never the 2026-08-02 hardcoded 'crisis swap compensation' string.
+  input.shopifyNote = undefined;
+  const out = buildReplacementDraftOrderInput(input, "US", "https://shopcx.ai");
+  assert.doesNotMatch(out.note, /crisis swap compensation/i);
+  assert.match(out.note, /Replacement order/);
 });
 
 test("100% discount always applied — the replacement ships FREE", () => {

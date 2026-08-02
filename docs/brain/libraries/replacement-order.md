@@ -58,6 +58,18 @@ Enforces the per-variant cap via `findVariantOverCap()` BEFORE inserting the row
 
 ### `CreateReplacementResult` — interface
 
+### `normalizeReplacementReasonTag` — function
+
+```ts
+function normalizeReplacementReasonTag(raw: string | null | undefined): string
+```
+
+Normalise a caller's free-form `reason` into a short stable Shopify tag token — lower-case, alphanumerics only, underscores for separators, truncated to `REPLACEMENT_REASON_TAG_MAX_LEN` (40 chars). A blank input falls back to `unspecified`. Called inside `buildReplacementDraftOrderInput` so the emitted tags are always `["replacement", <normalised code>]` — the raw prose reason (e.g., "Customer received two damaged bottles, one leaking, plus expired shipping label") goes to the ORDER NOTE (via `shopifyNote`) where it belongs, not into a tag Shopify will reject at 40 chars.
+
+### `REPLACEMENT_REASON_TAG_MAX_LEN` — constant
+
+`40` — Shopify's per-tag ceiling. A 62-char reason failed a real replacement on 2026-08-02 with 'Title Tag exceeds the maximum length of 40 characters', which reads as nothing to do with tags.
+
 ## Callers
 
 _No internal callers found via static scan._
@@ -70,19 +82,25 @@ _No internal callers found via static scan._
 
 - **One call, one order, N line items.** `createReplacementOrder` now accepts `input.items[]` with multiple variant IDs, creating ONE Shopify draft order with N line items in a single call. Previously, a 2-flavor replacement fragmented into 2 orders (SC134462 + SC134463). Keep single-item back-compat for existing callers; pass `items: [{ variantId }]` if you have one variant.
 
+- **Tag vs note split — the reason has TWO homes.** Shopify tags cap at 40 chars per tag; a 62-char free-form reason failed a real replacement on 2026-08-02 with 'Title Tag exceeds the maximum length of 40 characters', which reads as nothing to do with tags. The SDK now emits `tags: ["replacement", normalizeReplacementReasonTag(input.reason)]` — a short stable slug that never rejects the whole order — while `input.shopifyNote` carries the human explanation in the ORDER NOTE (ticket URL auto-appended). Callers pass the free-form prose to `shopifyNote`; the SDK derives the safe tag slug. This closes the mislabelling gap: measured 2026-08-02, 84 of 87 replacements this workspace has ever issued were NOT crisis-related (goodwill bags, expired items, wrong variant, address corrections), yet every single one was recorded in Shopify with 'Replacement order — crisis swap compensation' because that string was hardcoded in `action-executor.ts` `create_replacement_order`. The hardcoded crisis note is gone; the caller's explanation is what Shopify records now.
+
+- **Per-variant replacement cap — 4 units (⏳ Phase 2 will enforce in the SDK).** CEO ruling 2026-08-02: never replace more than 4 units of a SINGLE variant on one order. The cap is PER VARIANT, not per order — a 4 + 4 multi-flavour replacement is fine; 8 of one flavour is not. Recorded in the `exchanges` policy's INTERNAL half as machine rule `exchanges.replacement_max_units_per_variant` (value: 4) via `scripts/_backfill-replacement-cap-policy.ts`, so Sol (via `getAgentPolicyPackage`) and June (via the CS-director brief loader) both state the ceiling consistently. Phase 2 will surface it in `createReplacementOrder` as a named constant `REPLACEMENT_MAX_UNITS_PER_VARIANT` that refuses (does NOT silently truncate) any line above 4 units, returning an error naming the variant and requested quantity. Phase 3 escalates the refusal to the CEO approvals feed via a `dashboard_notifications` row of `type='agent_approval_request'` + `metadata.routed_to_function='ceo'`, so an over-cap request gets a decision instead of a wall.
+
 ## Status / open work
 
 **Shipped:**
-- CEO per-variant cap (max 4 units per variant) enforced at SDK entry point `createReplacementOrder` via `findVariantOverCap()` predicate (Phase 1).
+- CEO per-variant cap (max 4 units per variant) enforced at SDK entry point `createReplacementOrder` via `findVariantOverCap()` predicate.
 - Countrycode normalization with loud failure on unresolvable codes.
 - Multi-item replacement creates one order with N line items.
 - Stalled replacement detection + `superseded` status — see [[replacement-stall]].
+- Reason tag/note split: SDK derives a normalised Shopify tag slug via `normalizeReplacementReasonTag`, the free-form prose goes to the order note. Hardcoded 'crisis swap compensation' note removed from `action-executor.ts`. 4-unit per-variant cap recorded in the `exchanges` policy INTERNAL half.
 
 **Known gaps / not yet shipped:**
-- Phase 2 & 3 queued for follow-up sessions.
+- Phase 3 (⏳): over-cap refusal escalates a `dashboard_notifications` row (type='agent_approval_request', metadata.routed_to_function='ceo') carrying the ticket, customer, variant and requested quantity — same shape as the refused-raise escalation in `update_line_item_price`, per the CLAUDE.md north-star rule (hitting a rail escalates, does not execute).
 
 **Recent activity:**
-- Per-variant cap enforced: `REPLACEMENT_MAX_UNITS_PER_VARIANT = 4` and `findVariantOverCap()` guard all callers.
+- Reason handling honest: tag = normalized slug (SDK-derived), note = caller's explanation. Measured 2026-08-02: 84 of 87 replacements were non-crisis yet every one carried the hardcoded 'crisis swap compensation' note, and 4 reasons exceeded Shopify's 40-char tag limit — one failed a real replacement outright.
+- Per-variant cap enforced: `REPLACEMENT_MAX_UNITS_PER_VARIANT = 4` and `findVariantOverCap()` guard all callers. Cheap insurance rather than a live fire — exactly 1 of 87 replacements had ever exceeded it.
 - Countrycode normalization tightened; unresolvable codes now fail loudly instead of silently.
 - Multi-item support added to `createReplacementOrder`.
 - Stalled replacement reconciliation integrated via [[replacement-stall]].
