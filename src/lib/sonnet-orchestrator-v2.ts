@@ -23,6 +23,7 @@ import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
 import { LOYALTY_REMEDY_MAX_CENTS, getMemberByCustomerId, getMembersInLinkGroup } from "@/lib/loyalty";
+import { getAgentPolicyPackage, formatAgentPolicyPackage, type AgentPolicyPackageEntry } from "@/lib/policies";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -234,14 +235,16 @@ function buildToolDefinitions() {
  * contradiction between two such prompts caused the same-day-void incident
  * on 2026-05-26).
  *
- * Reads `internal_summary` from each active policy row. The customer_summary
- * field is reserved for the storefront /policies/{slug} page and is NOT
- * surfaced here.
+ * Phase 2 of a-policies-chokepoint-so-published-and-internal-rules-cannot-contradict:
+ * the assembly moved into the policies SDK as `getAgentPolicyPackage` /
+ * `formatAgentPolicyPackage` so BOTH Sol and June ([[cs-director]] `loadDirectorPolicyBrief`)
+ * read the same rulebook. Reads the INTERNAL half (`internal_summary` + `rules`) only. The
+ * `customer_summary` field is reserved for the storefront /policies/{slug} page and is NOT
+ * surfaced here — quoting the published half as the rule is exactly how a customer was told
+ * on 2026-08-02 that she could refuse delivery, which would have voided her refund entirely.
  */
-function buildPoliciesSection(policies: { slug: string; name: string; internal_summary: string }[]): string {
-  if (!policies.length) return "";
-  const blocks = policies.map(p => `## ${p.name} (slug: ${p.slug})\n${p.internal_summary}`).join("\n\n");
-  return `POLICIES (canonical — these supersede any conflicting older rule below):\n${blocks}`;
+function buildPoliciesSection(policies: AgentPolicyPackageEntry[]): string {
+  return formatAgentPolicyPackage(policies);
 }
 
 function buildPromptSections(prompts: { category: string; title: string; content: string }[]): string {
@@ -479,13 +482,14 @@ async function buildPreContext(
     // subscriptions / exchanges / crisis. Replaces ~60 scattered prompts
     // that previously paraphrased the same rules and drifted over time
     // (the same-day-void incident on 2026-05-26 was a contradiction
-    // between two prompts that lived in different rule-bodies).
-    admin.from("policies")
-      .select("slug, name, internal_summary")
-      .eq("workspace_id", workspaceId)
-      .eq("is_active", true)
-      .is("superseded_by", null)
-      .order("slug"),
+    // between two prompts that lived in different rule-bodies). Phase 2
+    // upgrades the read to `getAgentPolicyPackage` — internal_summary +
+    // rules — the SAME shared package June reads via cs-director.ts, so
+    // the two agents can never reason from divergent rules again. Reads
+    // the INTERNAL half only; never `customer_summary` (that's the
+    // published rendering; quoting it as the rule caused the 2026-08-02
+    // refuse-delivery incident).
+    getAgentPolicyPackage(admin, workspaceId).then(data => ({ data })),
     // Phase 3 of playbook-compiler-becomes-box-agent-mining-full-history —
     // Sol's first-touch direction-setting session reads the COMPILED LIBRARY
     // (approved compiler-derived playbooks + persisted trees) as a durable,

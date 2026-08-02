@@ -140,4 +140,8 @@ The `buildPreContext` prompt used to inject an "AGENT CONTEXT" block when `agent
 
 ---
 
-[[../README]] · [[../../CLAUDE]]
+## Related
+
+[[../tables/policies]] · [[policies]] · [[cs-director]] · [[../specs/a-policies-chokepoint-so-published-and-internal-rules-cannot-contradict]] · [[../README]] · [[../../CLAUDE]]
+
+**Policy package (Phase 2 of the policies-chokepoint spec).** `buildPoliciesSection` inside `sonnet-orchestrator-v2.ts` is Sol's injection point for the shared agent policy package — the SAME `getAgentPolicyPackage` + `formatAgentPolicyPackage` calls that feed June's `loadDirectorPolicyBrief` in [[cs-director]]. INTERNAL half only (`internal_summary` + machine-readable `rules[]`); never `customer_summary` (the published rendering; quoting it as the rule caused the 2026-08-02 refuse-delivery incident). Two agents, one rulebook — see [[policies]] § Agent injection points.
