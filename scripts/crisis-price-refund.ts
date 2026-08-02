@@ -34,6 +34,16 @@ loadEnv();
 const W = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
 const SWAP_AT = "2026-07-30T00:00:00Z";
+/**
+ * A refund must be materially an overcharge. Mirrors the >= $1 AND >= 2% test
+ * `subscription-overcharge` uses, and for the same reason: catalog prices drift by pennies
+ * ($59.95 -> $59.96), and without a floor a one-cent rounding artifact reads as an overcharge.
+ * That happened for real — lrb@bartelsplants.com was refunded $0.01 on 2026-08-02 and had a
+ * "we overcharged you" ticket opened, on a subscription this crisis never touched.
+ */
+const MIN_REFUND_CENTS = 100;
+const MIN_REFUND_PCT = 2;
+
 const HOLD = new Set<string>(); // CEO 2026-08-01: honor each customer's real historical rate,
                                // not the 50%-MSRP floor — so heavensangel411 is owed the balance.
 
@@ -78,7 +88,10 @@ async function main() {
         email: String(x.email), customerId: String(x.customer_id), orderId: String(x.order_id),
         orderNumber: String(x.order_number), shopifyOrderId: x.shopify_order_id ? String(x.shopify_order_id) : null,
         billedUnit: Number(x.billed_unit), priorUnit: Number(x.prior_unit), qty: Number(x.qty || 1),
-        alreadyRefunded: Number(x.refunded), owed: Math.max(0, over - Number(x.refunded)),
+        alreadyRefunded: Number(x.refunded),
+        owed: (over >= MIN_REFUND_CENTS && (over * 100) / Math.max(1, Number(x.billed_unit) * Number(x.qty || 1)) >= MIN_REFUND_PCT)
+          ? Math.max(0, over - Number(x.refunded))
+          : 0,
       };
     });
   } finally { await c.end(); }
@@ -88,6 +101,7 @@ async function main() {
   for (const r of rows) {
     const over = (r.billedUnit - r.priorUnit) * r.qty;
     const why = HOLD.has(r.email) ? "HELD — pending the 50%-floor decision"
+      : r.owed === 0 && (r.billedUnit - r.priorUnit) * r.qty < MIN_REFUND_CENTS ? `below the $${(MIN_REFUND_CENTS / 100).toFixed(2)} materiality floor — rounding drift, not an overcharge`
       : r.owed === 0 ? "settled — already refunded in full"
       : "to refund";
     console.log(`  ${r.email.padEnd(32)} ${r.orderNumber.padEnd(10)} $${(r.billedUnit / 100).toFixed(2)}/u vs $${(r.priorUnit / 100).toFixed(2)}/u ×${r.qty}` +
