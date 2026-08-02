@@ -2093,22 +2093,34 @@ export const directActionHandlers: Record<
         return { ok: true, base: signalBase, note };
       }
 
-      // No-signal path: refuse a RAISE (materiality floor: >= $1 AND >= 2%).
+      // No-signal path: refuse a RAISE and apply the shared materiality floor.
       // Lowering with no signal stays allowed — it cannot harm the customer and
       // goodwill discounts are a real use.
       if (subRow) {
         const currentRealized = await projectRealizedPerUnit(variantId, null);
         const proposedRealized = await projectRealizedPerUnit(variantId, agentBase);
-        if (
-          currentRealized != null &&
-          proposedRealized != null &&
-          proposedRealized - currentRealized >= 100 &&
-          proposedRealized >= currentRealized * 1.02
-        ) {
-          return {
-            ok: false,
-            error: `Refusing to raise realized price on contract ${p.contract_id} variant ${variantId}: no overcharge signal justifies the increase from $${(currentRealized / 100).toFixed(2)} to $${(proposedRealized / 100).toFixed(2)} (agent-supplied base $${(agentBase / 100).toFixed(2)}).`,
-          };
+        if (currentRealized != null && proposedRealized != null) {
+          const absChange = Math.abs(proposedRealized - currentRealized);
+          // Phase 2: materiality floor (>= $1 AND >= 2%, the test
+          // subscription-overcharge already uses at detection). Below the
+          // floor, the change is catalog-rounding noise — an "we overcharged
+          // you" correction on that scale mints a wrong-narrative ticket on
+          // an untouched subscription (the 2026-08-02 $0.01 failure mode).
+          if (absChange < 100 || absChange < currentRealized * 0.02) {
+            return {
+              ok: false,
+              error: `Refusing immaterial price change on contract ${p.contract_id} variant ${variantId}: change $${(absChange / 100).toFixed(2)} on a $${(currentRealized / 100).toFixed(2)} baseline is below the $1 AND 2% materiality floor (catalog rounding drift shouldn't trigger a correction).`,
+            };
+          }
+          if (
+            proposedRealized - currentRealized >= 100 &&
+            proposedRealized >= currentRealized * 1.02
+          ) {
+            return {
+              ok: false,
+              error: `Refusing to raise realized price on contract ${p.contract_id} variant ${variantId}: no overcharge signal justifies the increase from $${(currentRealized / 100).toFixed(2)} to $${(proposedRealized / 100).toFixed(2)} (agent-supplied base $${(agentBase / 100).toFixed(2)}).`,
+            };
+          }
         }
       }
       return { ok: true, base: agentBase, note: "" };
@@ -2322,7 +2334,6 @@ export const directActionHandlers: Record<
 
   partial_refund: async (ctx, p) => {
     const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
-    const amountDecimal = ((p.amount_cents || 0) / 100).toFixed(2);
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
@@ -2332,8 +2343,75 @@ export const directActionHandlers: Record<
     // orders.id, never the human-facing shopify_order_id / order_number.
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
-    const { data: ord } = await ctx.admin.from("orders").select("id").eq(orderMatch.col, orderMatch.val).eq("workspace_id", ctx.workspaceId).maybeSingle();
+    const { data: ord } = await ctx.admin
+      .from("orders")
+      .select("id, subscription_id, total_cents")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    // ── Phase 2: back the refund with the same computed baseline. When a
+    // subscription-overcharge signal exists for this order's subscription, the
+    // signal's per-unit-correct `delta` is the sanctioned amount. If the agent
+    // asks for materially MORE we clamp to the signal (Sol's $5.18 refund vs the
+    // correct $15.01 was the failure mode); if the agent asks for LESS we allow
+    // the under-ask (partial goodwill is legitimate) but log so a systematic
+    // pattern is visible. On top of that, when the action is framed as
+    // overcharge remediation we apply the shared materiality floor
+    // (>= $1 AND >= 2% of the order total, the test subscription-overcharge
+    // uses at detection) so a $0.01 catalog-rounding refund can never fire and
+    // mint a wrong-narrative 'we overcharged you' ticket on an untouched sub
+    // (the 2026-08-02 failure mode). Spec:
+    // docs/brain/specs/a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic.
+    const orderSubscriptionId = (ord as { subscription_id?: string | null }).subscription_id ?? null;
+    const orderTotalCents = Number((ord as { total_cents?: number | null }).total_cents ?? 0);
+    let signal: Awaited<
+      ReturnType<typeof import("@/lib/subscription-overcharge").detectOvercharge>
+    > = null;
+    if (orderSubscriptionId) {
+      const { detectOvercharge } = await import("@/lib/subscription-overcharge");
+      signal = await detectOvercharge(ctx.workspaceId, String(orderSubscriptionId));
+    }
+    const signalAppliesToThisOrder = !!(signal && String(signal.order_id) === String(ord.id));
+    const isOverchargeClaim = signalAppliesToThisOrder || /overchar/i.test(reason);
+
+    let refundCents = p.amount_cents;
+    let overchargeNote = "";
+    if (signalAppliesToThisOrder && signal) {
+      const delta = signal.delta;
+      if (p.amount_cents > delta + 100) {
+        // Over-ask: clamp to the signal-computed delta and log so the
+        // divergence is visible (the r.aycock case: agent asked for
+        // remediation of the order total instead of the per-unit delta).
+        console.log(
+          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overcharge-signal delta $${(delta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
+        );
+        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overcharge delta $${(delta / 100).toFixed(2)})`;
+        refundCents = delta;
+      } else if (delta - p.amount_cents >= 100) {
+        // Under-ask: allowed as partial goodwill, but recorded — a systematic
+        // under-refund is how customers end up owed money with the ticket
+        // marked resolved.
+        console.log(
+          `partial_refund: under-ask on overcharge remediation — agent proposed $${(p.amount_cents / 100).toFixed(2)} vs signal-computed delta $${(delta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}) — allowed as partial goodwill`,
+        );
+        overchargeNote = ` (partial of signal-computed overcharge delta $${(delta / 100).toFixed(2)})`;
+      }
+    }
+
+    if (isOverchargeClaim) {
+      const belowDollarFloor = refundCents < 100;
+      const belowPctFloor = orderTotalCents > 0 && refundCents < orderTotalCents * 0.02;
+      if (belowDollarFloor || belowPctFloor) {
+        return {
+          success: false,
+          error: `Refusing overcharge refund of $${(refundCents / 100).toFixed(2)} on order ${p.shopify_order_id}: below the $1 AND 2% materiality floor${orderTotalCents > 0 ? ` (order total $${(orderTotalCents / 100).toFixed(2)})` : ""}. Catalog-rounding drift shouldn't mint a 'we overcharged you' ticket on an untouched subscription.`,
+        };
+      }
+    }
+
+    const amountDecimal = (refundCents / 100).toFixed(2);
 
     // ── Refund-integrity Phase 2: verify-by-refund-id idempotency guard ──
     // Compute the request_key up-front and check the order_refunds mirror
@@ -2347,7 +2425,9 @@ export const directActionHandlers: Record<
     // hits the exact same UNIQUE-index row Phase 2 checked here. Scoped
     // by ticket_id — two different tickets legitimately refunding the
     // same (order, amount, reason) get distinct keys and both fire; a
-    // retry of the same ticket's action reuses the key.
+    // retry of the same ticket's action reuses the key. Keyed off the
+    // agent's proposed amount so a retry of the same proposal is treated
+    // as a retry even after clamping remaps the executed amount.
     const requestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, p.amount_cents, reason);
     const { data: existing } = await ctx.admin
       .from("order_refunds")
@@ -2361,14 +2441,14 @@ export const directActionHandlers: Record<
       return {
         success: true,
         summary: `Partial refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
-        refundAmountCents: existing.amount_cents ?? (p.amount_cents || 0),
+        refundAmountCents: existing.amount_cents ?? refundCents,
       };
     }
 
     // refundOrder dispatches on the order's gateway (Braintree /
     // Shopify), preserves the double-refund guard (stamps refunded_at
     // on open returns), and logs the customer_events row.
-    const r = await refundOrder(ctx.workspaceId, ord.id, p.amount_cents, reason, {
+    const r = await refundOrder(ctx.workspaceId, ord.id, refundCents, reason, {
       source: "ai",
       customerId: ctx.customerId,
       eventProperties: { ticket_id: ctx.ticketId },
@@ -2408,14 +2488,16 @@ export const directActionHandlers: Record<
       error: r.error,
       alreadyPending: r.alreadyPending,
       summary: r.success
-        ? `Partial refund of $${amountDecimal} issued (${reason})${methodNote}`
+        ? `Partial refund of $${amountDecimal} issued (${reason})${overchargeNote}${methodNote}`
         : r.alreadyPending
           ? `Refund already in progress on this order — ${r.error}`
           : undefined,
       // Drives {{refund_amount}} substitution in response_message. Without
       // this, the placeholder leaked through verbatim — see ticket
-      // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund.
-      refundAmountCents: r.success ? (p.amount_cents || 0) : undefined,
+      // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund. Reports
+      // the actually-executed cents (post-clamp) so downstream copy matches
+      // what moved.
+      refundAmountCents: r.success ? refundCents : undefined,
     };
   },
 
