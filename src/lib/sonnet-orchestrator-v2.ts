@@ -1890,6 +1890,11 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     admin.from("crisis_customer_actions")
       .select("id, crisis_id, subscription_id, segment, current_tier, tier1_response, tier1_swapped_to, tier2_response, tier2_swapped_to, tier3_response, paused_at, removed_item_at, auto_resume, auto_readd, cancelled, exhausted_at, preserved_base_price_cents, original_item")
       .in("customer_id", allCustIds)
+      // ARCHIVE FILTER. A restored row is DONE — crisis-restore.ts already put the subscription
+      // back and stamped `restored_at`. Surfacing it kept Sol telling customers a crisis was live
+      // and promising an auto_resume / auto_readd that had ALREADY happened, weeks after the fact.
+      // Open rows still surface; the history stays in the table for anyone reading it deliberately.
+      .is("restored_at", null)
       .order("created_at", { ascending: false })
       .limit(3),
     admin.from("crisis_events")
