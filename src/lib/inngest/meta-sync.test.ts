@@ -19,6 +19,9 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import {
   META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
@@ -129,6 +132,108 @@ test("handleMetaSyncSpendError — untagged Meta 400 still throws (regression: I
     (rejected: unknown) => rejected === untagged,
   );
   assert.equal(seen.length, 0, "no escalation card is booked for a plain fatal");
+});
+
+test("step-scoped invariant — on a tagged Data Use Checkup error the sync-spend step body contains + returns the fingerprint WITHOUT throwing (blocks the Inngest failure-feed leak)", async () => {
+  // The prior bug caught OUTSIDE step.run: the step body itself still threw,
+  // Inngest exhausted retries: 2, fired `inngest/function.failed`, and
+  // inngest-failure-capture flooded the Control Tower error feed with
+  // ~1 signature per active ad account per daily cron (leak signature
+  // inngest:bf59b5ccb1252b4d). The proven fix (mirror today-sync.ts) is to
+  // catch INSIDE the step body so the step returns cleanly. This test pins
+  // the semantic invariant of that shape: given the tagged error, the step
+  // body must escalate exactly once against THIS invocation's workspaceId
+  // AND return the stable fingerprint WITHOUT throwing.
+  const seen: EscalateAppOwnerActionRequiredInput[] = [];
+  const fakeEscalate = async (
+    _admin: unknown,
+    input: EscalateAppOwnerActionRequiredInput,
+  ) => {
+    seen.push(input);
+    return { emitted: true };
+  };
+  const failingSyncFn = async () => {
+    throw taggedError();
+  };
+  // Mirrors the fix's actual step body shape (see src/lib/inngest/meta-sync.ts
+  // `step.run("sync-spend", ...)`): try the Meta sync, on throw delegate to
+  // handleMetaSyncSpendError, return the fingerprint from within the step.
+  const stepBody = async () => {
+    try {
+      await failingSyncFn();
+      return { status: "complete" as const };
+    } catch (err) {
+      return await handleMetaSyncSpendError(
+        {} as never,
+        err,
+        SCOPE_A,
+        fakeEscalate as never,
+      );
+    }
+  };
+  const result = await stepBody();
+  // Must NOT throw — a throw here is what the old outer-catch shape let happen
+  // (step exhaustion → inngest/function.failed → Control Tower leak).
+  assert.equal(
+    (result as { status: string }).status,
+    META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
+    "step body must return the stable fingerprint, never throw",
+  );
+  assert.equal(seen.length, 1, "exactly one CEO escalation card is booked");
+  assert.equal(
+    seen[0].workspaceId,
+    SCOPE_A.workspaceId,
+    "escalation binds THIS invocation's workspaceId (per-workspace isolation)",
+  );
+});
+
+test("source-scan invariant — `handleMetaSyncSpendError` is called INSIDE the `sync-spend` step.run body (no outer try/catch around step.run)", () => {
+  // Prevents regressions to the outer-catch shape that leaked
+  // `inngest/function.failed` on every retry-exhausted Data Use Checkup 400.
+  // The fingerprint substring the deploy-gate/spec-runner greps for.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, "meta-sync.ts"), "utf8");
+
+  const openIdx = src.indexOf('step.run("sync-spend"');
+  assert.notEqual(openIdx, -1, 'expected a step.run("sync-spend", ...) call in meta-sync.ts');
+
+  // Find the balanced end of the step.run callback body (from the first `{`
+  // after the step.run open paren to the matching `}`).
+  const braceStart = src.indexOf("{", openIdx);
+  assert.notEqual(braceStart, -1, "expected a `{` opening the step.run callback body");
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        braceEnd = i;
+        break;
+      }
+    }
+  }
+  assert.notEqual(braceEnd, -1, "expected a matching `}` closing the step.run callback body");
+
+  const stepBody = src.slice(braceStart, braceEnd + 1);
+  assert.ok(
+    stepBody.includes("handleMetaSyncSpendError("),
+    "handleMetaSyncSpendError MUST be called INSIDE the sync-spend step.run body — the containment-inside-step invariant that stops the inngest/function.failed leak",
+  );
+
+  // The outer try/catch that wrapped step.run("sync-spend") must be gone —
+  // check the code IMMEDIATELY before the step.run call is not a `try {`
+  // opener that would still let the old shape sneak back in.
+  const beforeStepRun = src.slice(Math.max(0, openIdx - 200), openIdx);
+  // Allow the word "try" in comments; assert there is no `try {` opener
+  // in the last 200 chars leading into step.run("sync-spend".
+  const tryOpenerMatch = beforeStepRun.match(/\btry\s*\{[^}]*await\s+$/);
+  assert.equal(
+    tryOpenerMatch,
+    null,
+    "the outer try/catch around step.run(\"sync-spend\") must be removed — containment lives INSIDE the step",
+  );
 });
 
 test("handleMetaSyncSpendError — two overlapping invocations from DIFFERENT workspaces each write only to their own workspace (isolation invariant)", async () => {
