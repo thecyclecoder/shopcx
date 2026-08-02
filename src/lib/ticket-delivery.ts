@@ -19,7 +19,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
-import { renderLabelUrlsAsButtons } from "@/lib/label-cta";
+import { ctaButton, renderLabelUrlsAsButtons } from "@/lib/label-cta";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -64,7 +64,40 @@ export async function deliverTicketMessage(
   // net under the existing callers, not a replacement for them. WARN with the
   // ticket id when a strip fires so the upstream caller can be located.
   const PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/;
+  const LABEL_URL_TOKEN_RE = /\{\{\s*label_url\s*\}\}|\[\s*LABEL_URL\s*\]/;
   let safeMessage = message;
+
+  // Live-return label fallback (Phase 2). When the message references a
+  // {{label_url}} that THIS turn produced no action result for, the token is
+  // unfillable by construction — the case Ethel and Julianne actually hit
+  // (both had a valid label on the return row the whole time; the agent was
+  // re-sending a label created in an earlier turn). Instead of stripping the
+  // token and shipping "here is your label:" with nothing after it, look up
+  // the customer's most recent non-terminal return that still carries a
+  // label_url and render it as the same CTA button substituteActionPlaceholders
+  // would. Bounded to THIS customer_id — never guess across customers.
+  if (t?.customer_id && LABEL_URL_TOKEN_RE.test(safeMessage)) {
+    const { data: liveReturn } = await admin
+      .from("returns")
+      .select("id, label_url, status, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", t.customer_id)
+      .not("label_url", "is", null)
+      .not("status", "in", "(refunded,cancelled,closed)")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (liveReturn?.label_url) {
+      const button = ctaButton(liveReturn.label_url, "Download your prepaid return label →");
+      safeMessage = safeMessage
+        .replace(/\{\{\s*label_url\s*\}\}/g, button)
+        .replace(/\[\s*LABEL_URL\s*\]/g, button);
+      console.info(
+        `[deliverTicketMessage] filled {{label_url}} from live return ticket=${ticketId} return=${liveReturn.id} status=${liveReturn.status}`,
+      );
+    }
+  }
+
   if (PLACEHOLDER_RE.test(safeMessage)) {
     const { stripUnsubstitutedPlaceholders } = await import("@/lib/action-executor");
     console.warn(
