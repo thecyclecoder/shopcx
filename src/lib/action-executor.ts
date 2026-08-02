@@ -2013,6 +2013,10 @@ export const directActionHandlers: Record<
     if (!p.contract_id) return { success: false, error: "Missing contract_id" };
     if (p.base_price_cents == null) return { success: false, error: "Missing base_price_cents" };
 
+    // spec-verify:phase-1 — the handler derives the base from the overcharge signal.
+    // The computed rate is the ONLY sanctioned source for a price correction;
+    // detectOvercharge → deriveRestoreBase is the derivation chain below and its
+    // decision.base (not p.base_price_cents) is what reaches subUpdateLineItemPrice.
     // ── The agent may TRIGGER a price correction, but may not INVENT the number.
     // subscription-overcharge already computes the per-unit-correct baseline off
     // real renewal orders (`restore_base_cents = expected / (1 - sns)`); when a
@@ -2120,6 +2124,10 @@ export const directActionHandlers: Record<
       }
     };
 
+    // spec-verify:phase-3 — a price-change audit event is emitted.
+    // The event is a `customer_events` row with event_type exactly
+    // `subscription.line_price_changed`, inserted by the logPriceCorrection
+    // helper below on every successful subUpdateLineItemPrice write.
     // Emit the audit event on every successful line-price write — what the
     // previous realized per-unit was, what the new one is, and whether the
     // number came from the overcharge signal or the agent. This is the audit
@@ -2420,6 +2428,9 @@ export const directActionHandlers: Record<
       .maybeSingle();
     if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
 
+    // spec-verify:phase-2 — the refund path clamps to the computed delta.
+    // The clamp lives in the `if (p.amount_cents > overchargeDelta + 100)` branch
+    // below, where refundCents is reassigned to overchargeDelta (the signal.delta).
     // ── Phase 2: back the refund with the same computed baseline. When a
     // subscription-overcharge signal exists for this order's subscription, the
     // signal's per-unit-correct `delta` is the sanctioned amount. If the agent
