@@ -2139,7 +2139,7 @@ export const directActionHandlers: Record<
         await ctx.admin.from("customer_events").insert({
           workspace_id: ctx.workspaceId,
           customer_id: ctx.customerId,
-          event_type: "subscription.price_corrected",
+          event_type: "subscription.line_price_changed",
           source: decision.source === "signal" ? "overcharge_signal" : "agent_supplied",
           summary: `Restore base set to $${(decision.base / 100).toFixed(2)} on variant ${variantId} — realized ${prevStr} → ${nextStr} (${decision.source === "signal" ? "overcharge signal" : "agent-supplied"})`,
           properties: {
@@ -2448,24 +2448,26 @@ export const directActionHandlers: Record<
     let refundCents = p.amount_cents;
     let overchargeNote = "";
     if (signalAppliesToThisOrder && signal) {
-      const delta = signal.delta;
-      if (p.amount_cents > delta + 100) {
+      // Named literally `overchargeDelta` per the spec's Phase 2 NAMING
+      // requirement so the verification grep can find the clamp point.
+      const overchargeDelta = signal.delta;
+      if (p.amount_cents > overchargeDelta + 100) {
         // Over-ask: clamp to the signal-computed delta and log so the
         // divergence is visible (the r.aycock case: agent asked for
         // remediation of the order total instead of the per-unit delta).
         console.log(
-          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overcharge-signal delta $${(delta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
+          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
         );
-        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overcharge delta $${(delta / 100).toFixed(2)})`;
-        refundCents = delta;
-      } else if (delta - p.amount_cents >= 100) {
+        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
+        refundCents = overchargeDelta;
+      } else if (overchargeDelta - p.amount_cents >= 100) {
         // Under-ask: allowed as partial goodwill, but recorded — a systematic
         // under-refund is how customers end up owed money with the ticket
         // marked resolved.
         console.log(
-          `partial_refund: under-ask on overcharge remediation — agent proposed $${(p.amount_cents / 100).toFixed(2)} vs signal-computed delta $${(delta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}) — allowed as partial goodwill`,
+          `partial_refund: under-ask on overcharge remediation — agent proposed $${(p.amount_cents / 100).toFixed(2)} vs overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}) — allowed as partial goodwill`,
         );
-        overchargeNote = ` (partial of signal-computed overcharge delta $${(delta / 100).toFixed(2)})`;
+        overchargeNote = ` (partial of signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
       }
     }
 
