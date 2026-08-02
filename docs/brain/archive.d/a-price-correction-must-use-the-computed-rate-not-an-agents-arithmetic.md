@@ -1,0 +1,1 @@
+- **An agent may trigger a price correction, but may not invent the number** · verified 2026-08-02 · → [[lifecycles/subscription-billing]]
