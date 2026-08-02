@@ -117,9 +117,16 @@ export const metaSyncSpend = inngest.createFunction(
     const endDate = new Date().toISOString().slice(0, 10);
     const startDate = new Date(Date.now() - syncDays * 86400000).toISOString().slice(0, 10);
 
-    try {
-      const result = await step.run("sync-spend", async () => {
-        return syncMetaAdSpend({
+    // Containment lives INSIDE step.run so the step returns cleanly on a
+    // human-blocked Data Use Checkup 400 — if we caught OUTSIDE the step,
+    // the throw would exhaust Inngest step retries and fire
+    // `inngest/function.failed`, which inngest-failure-capture then records
+    // on the Control Tower error feed with source='inngest'. The workspaceId
+    // is bound at the invocation call site (never a module global), so the
+    // per-workspace escalation-scope isolation invariant is preserved.
+    return await step.run("sync-spend", async () => {
+      try {
+        const result = await syncMetaAdSpend({
           workspaceId: workspace_id,
           adAccountId: ad_account_id,
           metaAccountId: meta_account_id,
@@ -127,16 +134,15 @@ export const metaSyncSpend = inngest.createFunction(
           startDate,
           endDate,
         });
-      });
-
-      return { status: "complete", ...result };
-    } catch (err) {
-      return await handleMetaSyncSpendError(admin, err, {
-        workspaceId: workspace_id,
-        adAccountId: ad_account_id,
-        metaAccountId: meta_account_id,
-      });
-    }
+        return { status: "complete" as const, ...result };
+      } catch (err) {
+        return await handleMetaSyncSpendError(admin, err, {
+          workspaceId: workspace_id,
+          adAccountId: ad_account_id,
+          metaAccountId: meta_account_id,
+        });
+      }
+    });
   }
 );
 
