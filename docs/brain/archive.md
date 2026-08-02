@@ -13,8 +13,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Scope Meta 'API access disrupted / Data Use Checkup' as human-blocked (warn, not error) on the today-sync cron** · verified 2026-08-01 · → [[../inngest/today-sync]]
+- **Fix ad-tool Meta owner-action escalation workspace scope isolation** · verified 2026-08-01 · → [[../libraries/meta__app-owner-action-escalation]]
+- **Wire the app-owner-action escalation + skip into the media-buyer all-customers refresh cron** · verified 2026-08-01 · → [[../inngest/media-buyer-all-customers-refresh]]
 - **Scope Meta Data Use Checkup as human-blocked on the media-buyer-test-cadence cron** · verified 2026-08-01 · → [[../inngest/media-buyer-test-cadence]]
 - **Classify Meta 'Data Use Checkup' as app_owner_action_required + downgrade today-sync log** · verified 2026-08-01 · → [[../integrations/meta-marketing]]
+- **Isolate Meta iteration-run app-owner escalation workspace scope** · verified 2026-08-01 · → [[../inngest/meta-performance]]
+- **Isolate Meta Sync Spend Escalation Workspace Scope** · verified 2026-08-01 · → [[../inngest/meta-sync]]
 - **Classify Klaviyo reviews-fetch 5xx as transient in the Vercel log-drain** · verified 2026-07-30 · → [[../libraries/control-tower]]
 - **Drop recurring Braintree portal-vault Gateway Rejection noise from the Vercel error feed** · verified 2026-07-30 · → [[../libraries/control-tower]] (§ error-feed.ts classifiers)
 - **Filter Braintree 'No Account' issuer decline out of the portal vault error feed** · verified 2026-07-30 · → [[../integrations/vercel-log-drain]]
