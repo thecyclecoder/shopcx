@@ -1,0 +1,1 @@
+- **Replacement orders: enforce per-variant cap (4 units max)** · verified 2026-08-02 · → [[../libraries/replacement-order]]
