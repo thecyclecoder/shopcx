@@ -169,7 +169,8 @@
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts",
     "test:physical-size-cue": "tsx --test src/lib/ad-tool-config.physical-size-cue.test.ts",
     "test:meta-ads-create": "tsx --test src/lib/meta-ads.create.test.ts",
-    "test:swallowed-escalation-sample": "tsx --test src/lib/agents/platform-director.swallowed-sample.test.ts"
+    "test:swallowed-escalation-sample": "tsx --test src/lib/agents/platform-director.swallowed-sample.test.ts",
+    "test:ticket-delivery-placeholder-guard": "tsx --test src/lib/ticket-delivery.placeholder-guard.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

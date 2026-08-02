@@ -23,6 +23,8 @@ KB/AI responses, or escalation.
 function stripUnsubstitutedPlaceholders(message: string) : string
 ```
 
+Last-resort strip of any `{{token}}` / `[UPPER_TOKEN]` a composer failed to fill so the literal brace text can never reach a customer. **Since [[../specs/no-send-path-can-emit-an-unsubstituted-placeholder]] Phase 1 the authoritative caller is [[ticket-delivery|resolvePlaceholderSafeMessage]] at the send chokepoint** — this helper still runs from `substituteActionPlaceholders` and its historical composing sites, but a composer that forgets it can no longer leak because every outbound customer message runs through the chokepoint. Ethel Hutton (BBB complaint, ticket `2305546a`) and Julianne Peters (15 days unresolved, ticket `de357c10`) hit the pre-rail failure on 2026-07-28..29, both agent-authored replies that composed `{{label_url}}` without calling this helper; the delivery-owned rail closed that class.
+
 ### `executeSonnetDecision` — function
 
 ```ts

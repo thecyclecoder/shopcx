@@ -33,55 +33,33 @@ const toHtml = (t: string) =>
     .join("");
 
 /**
- * Insert an outbound external message on `ticketId` and deliver it on the
- * ticket's `channel`. In sandbox mode the message is logged as an internal
- * draft and nothing is sent.
- *
- * Returns nothing — failures are best-effort logged via console; the caller
- * (executeSonnetDecision) tracks messageSent independently.
+ * Placeholder guarantee at the delivery chokepoint (docs/brain/specs/
+ * no-send-path-can-emit-an-unsubstituted-placeholder). Every outbound customer
+ * message runs through this before render/send: an unfilled `{{label_url}}`
+ * falls back to the customer's most recent non-terminal `returns` row (Ethel
+ * 2305546a, Julianne de357c10 both had the label on the return the whole
+ * time), and any residual `{{token}}` / `[UPPER_TOKEN]` is stripped so the
+ * literal brace text can NEVER reach the customer. Bounded to `customerId`
+ * — never guess across customers. Exported so the regression tests can pin
+ * the three named cases without spinning up a live delivery.
  */
-export async function deliverTicketMessage(
+export async function resolvePlaceholderSafeMessage(
   admin: Admin,
   workspaceId: string,
   ticketId: string,
-  channel: string,
+  customerId: string | null,
   message: string,
-  sandbox: boolean,
-): Promise<void> {
-  const { data: t } = await admin
-    .from("tickets")
-    .select("subject, email_message_id, customer_id, detected_language")
-    .eq("id", ticketId)
-    .single();
-
-  // Placeholder safety net at the delivery chokepoint. Every outbound customer
-  // message flows through here; individual composing paths (action-executor
-  // substitute, cs-director remedy fill, journey lead-in) may fill the tokens
-  // upstream, but three did not on 2026-07-28..29 and customers read literal
-  // "{{label_url}}" — including a BBB complaint from Ethel Hutton (2305546a)
-  // and 15 days lost for Julianne Peters (de357c10). The strip is idempotent:
-  // a message already filled has no matching tokens, so this is a no-op safety
-  // net under the existing callers, not a replacement for them. WARN with the
-  // ticket id when a strip fires so the upstream caller can be located.
+): Promise<string> {
   const PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/;
   const LABEL_URL_TOKEN_RE = /\{\{\s*label_url\s*\}\}|\[\s*LABEL_URL\s*\]/;
   let safeMessage = message;
 
-  // Live-return label fallback (Phase 2). When the message references a
-  // {{label_url}} that THIS turn produced no action result for, the token is
-  // unfillable by construction — the case Ethel and Julianne actually hit
-  // (both had a valid label on the return row the whole time; the agent was
-  // re-sending a label created in an earlier turn). Instead of stripping the
-  // token and shipping "here is your label:" with nothing after it, look up
-  // the customer's most recent non-terminal return that still carries a
-  // label_url and render it as the same CTA button substituteActionPlaceholders
-  // would. Bounded to THIS customer_id — never guess across customers.
-  if (t?.customer_id && LABEL_URL_TOKEN_RE.test(safeMessage)) {
+  if (customerId && LABEL_URL_TOKEN_RE.test(safeMessage)) {
     const { data: liveReturn } = await admin
       .from("returns")
       .select("id, label_url, status, created_at")
       .eq("workspace_id", workspaceId)
-      .eq("customer_id", t.customer_id)
+      .eq("customer_id", customerId)
       .not("label_url", "is", null)
       .not("status", "in", "(refunded,cancelled,closed)")
       .order("created_at", { ascending: false })
@@ -106,6 +84,46 @@ export async function deliverTicketMessage(
     );
     safeMessage = stripUnsubstitutedPlaceholders(safeMessage);
   }
+
+  return safeMessage;
+}
+
+/**
+ * Insert an outbound external message on `ticketId` and deliver it on the
+ * ticket's `channel`. In sandbox mode the message is logged as an internal
+ * draft and nothing is sent.
+ *
+ * Returns nothing — failures are best-effort logged via console; the caller
+ * (executeSonnetDecision) tracks messageSent independently.
+ */
+export async function deliverTicketMessage(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  channel: string,
+  message: string,
+  sandbox: boolean,
+): Promise<void> {
+  const { data: t } = await admin
+    .from("tickets")
+    .select("subject, email_message_id, customer_id, detected_language")
+    .eq("id", ticketId)
+    .single();
+
+  // Placeholder safety net at the delivery chokepoint. See
+  // `resolvePlaceholderSafeMessage` above for the guarantee — this is the
+  // single chokepoint call that pins it. The strip is idempotent: a message
+  // already filled by an upstream composer has no matching tokens, so this
+  // is a no-op safety net under the existing callers, not a replacement for
+  // them. WARN with the ticket id (inside the helper) when a strip fires so
+  // the upstream caller can be located.
+  const safeMessage = await resolvePlaceholderSafeMessage(
+    admin,
+    workspaceId,
+    ticketId,
+    t?.customer_id ?? null,
+    message,
+  );
 
   // Translate to the customer's detected language (matches the orchestrator's
   // sendWithDelay) so a non-English customer never gets an English body.
