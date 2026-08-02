@@ -79,6 +79,7 @@
     "test:apply-loyalty-coupon-bounded-regen": "tsx --test src/lib/action-executor.apply-loyalty-coupon-bounded-regen.test.ts",
     "test:apply-loyalty-coupon-owner-mismatch": "tsx --test src/lib/action-executor.apply-loyalty-coupon-owner-mismatch.test.ts",
     "test:loyalty-order-stacking-guards": "tsx --test src/lib/action-executor.loyalty-order-stacking-guards.test.ts",
+    "test:derive-restore-base": "tsx --test src/lib/subscription-overcharge.derive-restore-base.test.ts",
     "test:cart-gifts": "tsx --test src/lib/cart-gifts.test.ts",
     "test:offers-renewal": "tsx --test src/lib/offers-renewal.test.ts",
     "test:bundle-cta": "tsx --test src/lib/bundle-cta.test.ts",
