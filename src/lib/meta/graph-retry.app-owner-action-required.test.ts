@@ -67,6 +67,15 @@ test("classifyAppOwnerActionRequired — 'app is currently unavailable' user-fac
   );
 });
 
+test("classifyAppOwnerActionRequired — 'API access blocked' HTTP 400 message classifies true", () => {
+  assert.equal(
+    classifyAppOwnerActionRequired(400, {
+      message: "API access blocked",
+    }),
+    true,
+  );
+});
+
 test("classifyAppOwnerActionRequired — the wording on a 5xx wobble does NOT classify (transient wins)", () => {
   assert.equal(
     classifyAppOwnerActionRequired(503, { message: "data use checkup pending" }),
