@@ -2026,7 +2026,9 @@ export const directActionHandlers: Record<
     // unit is confirmed via resolveSubscriptionPricing rather than assumed to be
     // base * (1 - sns). Spec: docs/brain/specs/a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic.
     const agentBase = p.base_price_cents;
-    const { detectOvercharge } = await import("@/lib/subscription-overcharge");
+    const { detectOvercharge, deriveRestoreBase, isRaiseAttempt } = await import(
+      "@/lib/subscription-overcharge"
+    );
     const { data: subRow } = await ctx.admin
       .from("subscriptions")
       .select("id, items, delivery_price_cents, pricing_offer_id")
@@ -2037,93 +2039,128 @@ export const directActionHandlers: Record<
       ? await detectOvercharge(ctx.workspaceId, String(subRow.id))
       : null;
 
-    const projectRealizedPerUnit = async (
-      variantId: string,
-      proposedBaseCents: number | null,
-    ): Promise<number | null> => {
-      if (!subRow) return null;
-      const items = Array.isArray(subRow.items)
-        ? (subRow.items as Array<Record<string, unknown>>)
-        : [];
-      const idx = items.findIndex(
-        (i) => String((i as { variant_id?: unknown }).variant_id ?? "") === String(variantId),
-      );
-      if (idx < 0) return null;
-      const nextItems =
-        proposedBaseCents == null
-          ? items
-          : items.map((i, k) =>
-              k === idx
-                ? { ...i, price_override_cents: proposedBaseCents, price_cents: undefined }
-                : i,
-            );
-      const { resolveSubscriptionPricing } = await import("@/lib/pricing");
-      const priced = await resolveSubscriptionPricing(ctx.workspaceId, {
-        items: nextItems,
-        delivery_price_cents: (subRow.delivery_price_cents as number | null) ?? null,
-        pricing_offer_id: (subRow.pricing_offer_id as string | null) ?? null,
+    const makeProjector = (variantId: string) =>
+      async (proposedBaseCents: number | null): Promise<number | null> => {
+        if (!subRow) return null;
+        const items = Array.isArray(subRow.items)
+          ? (subRow.items as Array<Record<string, unknown>>)
+          : [];
+        const idx = items.findIndex(
+          (i) => String((i as { variant_id?: unknown }).variant_id ?? "") === String(variantId),
+        );
+        if (idx < 0) return null;
+        const nextItems =
+          proposedBaseCents == null
+            ? items
+            : items.map((i, k) =>
+                k === idx
+                  ? { ...i, price_override_cents: proposedBaseCents, price_cents: undefined }
+                  : i,
+              );
+        const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+        const priced = await resolveSubscriptionPricing(ctx.workspaceId, {
+          items: nextItems,
+          delivery_price_cents: (subRow.delivery_price_cents as number | null) ?? null,
+          pricing_offer_id: (subRow.pricing_offer_id as string | null) ?? null,
+        });
+        return (
+          priced.lines.find((l) => String(l.variant_id) === String(variantId))?.unit_cents ?? null
+        );
+      };
+
+    const decide = (variantId: string) =>
+      deriveRestoreBase({
+        signal,
+        contractId: String(p.contract_id),
+        variantId,
+        agentBaseCents: agentBase,
+        project: makeProjector(variantId),
       });
-      return (
-        priced.lines.find((l) => String(l.variant_id) === String(variantId))?.unit_cents ?? null
-      );
+
+    // Emit the CEO-visible escalation whenever the handler refuses a RAISE
+    // (either the no-signal predicate or the signal path's exceeds-established
+    // guard). A price increase on an existing subscriber is a decision an
+    // objective-owner should see, per the CLAUDE.md north-star rule —
+    // hitting a rail escalates, it does not execute. Failure is swallowed
+    // (audit only) so a notification failure never masks the refuse.
+    const escalateRaiseAttempt = async (
+      variantId: string,
+      decision: Awaited<ReturnType<typeof decide>>,
+    ) => {
+      if (decision.ok || !isRaiseAttempt(decision.refuseReason)) return;
+      try {
+        await ctx.admin.from("dashboard_notifications").insert({
+          workspace_id: ctx.workspaceId,
+          type: "agent_message",
+          title: `Blocked a price RAISE from an agent — customer would pay more`,
+          body:
+            `An agent triggered update_line_item_price on contract ${p.contract_id} variant ${variantId} ` +
+            `with a base of $${(agentBase / 100).toFixed(2)}. Blocked because ${decision.refuseReason === "raise_no_signal" ? "no overcharge signal justifies the increase" : "the projected realized would exceed the customer's established rate"} ` +
+            `(previous realized $${decision.previousRealizedPerUnitCents != null ? (decision.previousRealizedPerUnitCents / 100).toFixed(2) : "?"}, ` +
+            `projected $${decision.projectedRealizedPerUnitCents != null ? (decision.projectedRealizedPerUnitCents / 100).toFixed(2) : "?"}). ` +
+            `Ticket ${ctx.ticketId ?? "-"}.`,
+          metadata: {
+            contract_id: p.contract_id,
+            variant_id: variantId,
+            agent_base_cents: agentBase,
+            previous_realized_per_unit_cents: decision.previousRealizedPerUnitCents,
+            projected_realized_per_unit_cents: decision.projectedRealizedPerUnitCents,
+            refuse_reason: decision.refuseReason,
+            ticket_id: ctx.ticketId,
+            spec: "a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic",
+          },
+          read: false,
+          dismissed: false,
+        });
+      } catch (e) {
+        console.error(
+          `update_line_item_price: dashboard_notifications insert failed for raise-attempt on ${p.contract_id}:`,
+          e,
+        );
+      }
     };
 
-    const deriveBaseForVariant = async (
+    // Emit the audit event on every successful line-price write — what the
+    // previous realized per-unit was, what the new one is, and whether the
+    // number came from the overcharge signal or the agent. This is the audit
+    // trail whose absence made the r.aycock $54.78 overwrite of a verified
+    // $44.96 restore invisible for a day. Failure is swallowed (write-side
+    // audit only) so a logging failure never masks the successful correction.
+    const logPriceCorrection = async (
       variantId: string,
-    ): Promise<{ ok: true; base: number; note: string } | { ok: false; error: string }> => {
-      const line = signal?.lines.find((l) => String(l.variant_id) === String(variantId));
-
-      // Signal path: computed rate wins; agent's disagreement is logged, never applied.
-      if (line) {
-        const signalBase = line.restore_base_cents;
-        let note = "";
-        if (Math.abs(signalBase - agentBase) > 100) {
-          console.log(
-            `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with overcharge-signal base $${(signalBase / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} — established per-unit $${(line.expected_per_unit / 100).toFixed(2)}`,
-          );
-          note = ` (agent-proposed $${(agentBase / 100).toFixed(2)} → signal-computed $${(signalBase / 100).toFixed(2)})`;
-        }
-        const projected = await projectRealizedPerUnit(variantId, signalBase);
-        if (projected != null && projected > line.expected_per_unit + 1) {
-          return {
-            ok: false,
-            error: `Refusing to write base $${(signalBase / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId}: projected realized $${(projected / 100).toFixed(2)} exceeds established $${(line.expected_per_unit / 100).toFixed(2)}.`,
-          };
-        }
-        return { ok: true, base: signalBase, note };
+      decision: Awaited<ReturnType<typeof decide>>,
+    ) => {
+      if (!decision.ok) return;
+      try {
+        const prev = decision.previousRealizedPerUnitCents;
+        const next = decision.projectedRealizedPerUnitCents;
+        const prevStr = prev != null ? `$${(prev / 100).toFixed(2)}` : "?";
+        const nextStr = next != null ? `$${(next / 100).toFixed(2)}` : "?";
+        await ctx.admin.from("customer_events").insert({
+          workspace_id: ctx.workspaceId,
+          customer_id: ctx.customerId,
+          event_type: "subscription.price_corrected",
+          source: decision.source === "signal" ? "overcharge_signal" : "agent_supplied",
+          summary: `Restore base set to $${(decision.base / 100).toFixed(2)} on variant ${variantId} — realized ${prevStr} → ${nextStr} (${decision.source === "signal" ? "overcharge signal" : "agent-supplied"})`,
+          properties: {
+            contract_id: p.contract_id,
+            variant_id: variantId,
+            written_base_cents: decision.base,
+            source: decision.source,
+            signal_restore_base_cents: decision.signalRestoreBaseCents,
+            agent_base_cents: decision.agentBaseCents,
+            previous_realized_per_unit_cents: prev,
+            new_realized_per_unit_cents: next,
+            ticket_id: ctx.ticketId,
+            spec: "a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic",
+          },
+        });
+      } catch (e) {
+        console.error(
+          `update_line_item_price: customer_events insert failed for successful write on ${p.contract_id}:`,
+          e,
+        );
       }
-
-      // No-signal path: refuse a RAISE and apply the shared materiality floor.
-      // Lowering with no signal stays allowed — it cannot harm the customer and
-      // goodwill discounts are a real use.
-      if (subRow) {
-        const currentRealized = await projectRealizedPerUnit(variantId, null);
-        const proposedRealized = await projectRealizedPerUnit(variantId, agentBase);
-        if (currentRealized != null && proposedRealized != null) {
-          const absChange = Math.abs(proposedRealized - currentRealized);
-          // Phase 2: materiality floor (>= $1 AND >= 2%, the test
-          // subscription-overcharge already uses at detection). Below the
-          // floor, the change is catalog-rounding noise — an "we overcharged
-          // you" correction on that scale mints a wrong-narrative ticket on
-          // an untouched subscription (the 2026-08-02 $0.01 failure mode).
-          if (absChange < 100 || absChange < currentRealized * 0.02) {
-            return {
-              ok: false,
-              error: `Refusing immaterial price change on contract ${p.contract_id} variant ${variantId}: change $${(absChange / 100).toFixed(2)} on a $${(currentRealized / 100).toFixed(2)} baseline is below the $1 AND 2% materiality floor (catalog rounding drift shouldn't trigger a correction).`,
-            };
-          }
-          if (
-            proposedRealized - currentRealized >= 100 &&
-            proposedRealized >= currentRealized * 1.02
-          ) {
-            return {
-              ok: false,
-              error: `Refusing to raise realized price on contract ${p.contract_id} variant ${variantId}: no overcharge signal justifies the increase from $${(currentRealized / 100).toFixed(2)} to $${(proposedRealized / 100).toFixed(2)} (agent-supplied base $${(agentBase / 100).toFixed(2)}).`,
-            };
-          }
-        }
-      }
-      return { ok: true, base: agentBase, note: "" };
     };
 
     // Internal subs aren't on the external vendor — restore the grandfathered
@@ -2134,9 +2171,19 @@ export const directActionHandlers: Record<
     const { isInternalSubscription } = await import("@/lib/internal-subscription");
     if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
       if (!p.variant_id) return { success: false, error: "Internal subscription requires a variant_id to restore price" };
-      const derived = await deriveBaseForVariant(String(p.variant_id));
-      if (!derived.ok) return { success: false, error: derived.error };
-      const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, String(p.variant_id), derived.base);
+      const variantId = String(p.variant_id);
+      const derived = await decide(variantId);
+      if (!derived.ok) {
+        await escalateRaiseAttempt(variantId, derived);
+        return { success: false, error: derived.error };
+      }
+      if (Math.abs(derived.base - agentBase) > 100) {
+        console.log(
+          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (internal)`,
+        );
+      }
+      const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
+      if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
         ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)${derived.note}` }
         : r;
@@ -2195,10 +2242,21 @@ export const directActionHandlers: Record<
     for (const variantId of candidates) {
       const match = liveLines.find(l => String(l.variantId) === String(variantId));
       if (match) {
-        const derived = await deriveBaseForVariant(variantId);
-        if (!derived.ok) return { success: false, error: derived.error };
+        const derived = await decide(variantId);
+        if (!derived.ok) {
+          await escalateRaiseAttempt(variantId, derived);
+          return { success: false, error: derived.error };
+        }
+        if (Math.abs(derived.base - agentBase) > 100) {
+          console.log(
+            `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId}`,
+          );
+        }
         const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base, match.id);
-        if (r.success) return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId}${derived.note}` };
+        if (r.success) {
+          await logPriceCorrection(variantId, derived);
+          return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId}${derived.note}` };
+        }
         // Different error (not a lineId resolution issue) — surface it
         if (!String(r.error || "").toLowerCase().includes("could not resolve lineid")) return r;
       }
@@ -2238,10 +2296,21 @@ export const directActionHandlers: Record<
         }
         const sameProductLine = liveReal.find(l => variantToProduct.get(String(l.variantId)) === candidateProductId);
         if (sameProductLine) {
-          const derived = await deriveBaseForVariant(sameProductLine.variantId);
-          if (!derived.ok) return { success: false, error: derived.error };
+          const derived = await decide(sameProductLine.variantId);
+          if (!derived.ok) {
+            await escalateRaiseAttempt(sameProductLine.variantId, derived);
+            return { success: false, error: derived.error };
+          }
+          if (Math.abs(derived.base - agentBase) > 100) {
+            console.log(
+              `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${sameProductLine.variantId} (self-heal)`,
+            );
+          }
           const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, sameProductLine.variantId, derived.base, sameProductLine.id);
-          if (r.success) return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${sameProductLine.variantId} (self-healed: candidate variant was stale, matched same product)${derived.note}` };
+          if (r.success) {
+            await logPriceCorrection(sameProductLine.variantId, derived);
+            return { ...r, summary: `Updated base price to $${(derived.base / 100).toFixed(2)} on variant ${sameProductLine.variantId} (self-healed: candidate variant was stale, matched same product)${derived.note}` };
+          }
           return r;
         }
       }

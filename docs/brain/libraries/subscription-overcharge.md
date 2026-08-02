@@ -19,6 +19,8 @@ The established baseline is **clamped UP to the 50%-MSRP floor** — we never pr
 - **`detectOvercharge(workspaceId, subscriptionId) → OverchargeSignal | null`** — single-sub variant.
 - **`buildOverchargePlan(signal) → OverchargePlan`** — the deterministic playbook: `partial_refund(delta)` on the overcharging order + `update_line_item_price(restore_base_cents)` per line + `reply_points`. **Never emits migrate-to-internal** — a pricing error is healed in place.
 - **`formatOverchargeForAgent(signal) → string`** — the human-readable `⚠️ OVERCHARGE DETECTED …` block (charged/expected/delta/dropped_base + per-line restore base + the remediation instruction) baked into the agent context.
+- **`deriveRestoreBase({signal, contractId, variantId, agentBaseCents, project}) → RestoreBaseDecision`** — the sanctioned-source rule for `update_line_item_price`. **The agent may TRIGGER a price correction, but may not INVENT the number.** When the signal names the target variant, its `restore_base_cents` is authoritative and the agent's proposed base is only logged when it materially diverges; when no signal names the variant, the helper refuses a RAISE (`raise_no_signal`) and refuses an immaterial change on either side of the `>= $1 AND >= 2%` materiality floor (`immaterial`) — the same test used at detection. The signal path additionally confirms via the passed-in projector that the projected realized per-unit does not exceed `line.expected_per_unit` (`exceeds_established`), so an internal sub's stacked quantity break can't overshoot the established rate. The projector callback is `(proposedBaseCents: number | null) => Promise<number | null>` — runtime wraps [[pricing]] `resolveSubscriptionPricing`, unit tests pass a fixture. Consumed by [[action-executor]] `update_line_item_price`; the audit-event source label (`overcharge_signal` / `agent_supplied`) is `decision.source`, and every refused raise fires an `agent_message` [[../tables/dashboard_notifications]] row via `isRaiseAttempt(decision.refuseReason)`.
+- **`isRaiseAttempt(reason) → boolean`** — true when the refused reason names a RAISE attempt (`raise_no_signal` or `exceeds_established`). The action-executor uses this to fire the CEO-visible `dashboard_notifications` escalation on the refuse path.
 
 ## Signal shape
 
@@ -34,6 +36,7 @@ The established baseline is **clamped UP to the 50%-MSRP floor** — we never pr
 
 - `src/lib/sonnet-orchestrator-v2.ts` — `getCustomerAccount` surfaces the signal; the system prompt grounds the "check overcharge before create_return/cancel" rule.
 - `src/lib/agent-todos/triage.ts` — `loadTriageBrief` surfaces the signal; the [[../specs/box-escalation-triage]] skill grounds the `customer_fix` pattern.
+- `src/lib/action-executor.ts` — the `update_line_item_price` handler calls `detectOvercharge` + `deriveRestoreBase` before every write (internal sub fast-path, candidate loop, and same-product self-heal), and the `partial_refund` handler calls `detectOvercharge` to clamp an over-asking refund down to the signal's `delta`. Together they enforce the sanctioned-source rule at the point money moves.
 
 ## Gotchas
 
