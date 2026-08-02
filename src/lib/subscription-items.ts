@@ -6,6 +6,7 @@ import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
+import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
 import {
   isInternalSubscription,
   internalSubAddItem,
@@ -975,9 +976,65 @@ export async function subSwapVariant(
         };
       }
     }
+
+    // Phase 3 — Assert it. Re-read the new line's realized from Appstle and fail loudly if the
+    // post-swap price moved UP vs the captured value. callReplaceVariants + subUpdateLineItemPrice
+    // both already returned success on any 2xx without reading the body, so this is the only
+    // gate that catches a silent regression in the preservation math on a live contract.
+    const observedRealizedCents = await readNewLineRealizedCents(
+      config.apiKey,
+      contractId,
+      String(newVariantId),
+    );
+    if (observedRealizedCents <= 0) {
+      return {
+        success: false,
+        error: `Swap on contract ${contractId} succeeded but post-swap realized price could not be verified — refusing to report success on an unverified swap`,
+        newLineGid,
+      };
+    }
+    const raiseErr = assertSwapDidNotRaise({
+      capturedRealizedCents: captured.realizedCents,
+      observedRealizedCents,
+      contractId,
+    });
+    if (raiseErr) {
+      return { success: false, error: raiseErr, newLineGid };
+    }
   }
 
   return { ...result, newLineGid };
+}
+
+/**
+ * Re-read the NEW line's realized per-unit price from a live Appstle contract. Returns 0 when
+ * the read fails (network error, non-2xx, line missing, unparseable amount) — the caller MUST
+ * treat 0 as an unverified swap and refuse to report success, per Phase 3 of
+ * docs/brain/specs/swap-variant-preserves-the-line-price.md.
+ */
+async function readNewLineRealizedCents(
+  apiKey: string,
+  contractId: string,
+  newVariantId: string,
+): Promise<number> {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+      { headers: { "X-API-Key": apiKey }, cache: "no-store" },
+    );
+    if (!res.ok) return 0;
+    const detail = await res.json();
+    const lines = (detail?.lines?.nodes || []) as AppstleLine[];
+    const match = lines.find(l => {
+      const vid = l.variantId?.split("/").pop() || l.variantId;
+      return String(vid) === String(newVariantId);
+    });
+    const amt = match?.currentPrice?.amount;
+    if (!amt) return 0;
+    return Math.round(parseFloat(amt) * 100);
+  } catch {
+    return 0;
+  }
 }
 
 /**

@@ -22,6 +22,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
+import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
 
 type ActionResult = { success: boolean; error?: string };
 
@@ -507,6 +508,32 @@ export async function internalSubSwapVariant(
   }
 
   const nextItems = items.map((i) => (i === oldItem ? newItem : i));
+
+  // Phase 3 — Assert it. Re-price the FINAL items list through the engine (pure w.r.t. the sub
+  // object, so this is the exact per-unit price the renewal scheduler will bill) and refuse to
+  // commit if the new realized moved UP vs the captured value. Skips the assertion when we had
+  // no captured baseline (no lock and engine returned 0 for outgoing — nothing to compare).
+  if (capturedUnitCents > 0) {
+    const finalPricing = await resolveSubscriptionPricing(workspaceId, {
+      ...pricingSub,
+      items: nextItems,
+    });
+    const finalLine = finalPricing.lines.find((l) => String(l.variant_id) === newVariantKey);
+    const observedUnitCents = finalLine?.unit_cents ?? 0;
+    if (observedUnitCents <= 0) {
+      return {
+        success: false,
+        error: `Cannot verify post-swap realized price on internal contract ${contractId} — refusing to commit an unverified swap`,
+      };
+    }
+    const raiseErr = assertSwapDidNotRaise({
+      capturedRealizedCents: capturedUnitCents,
+      observedRealizedCents: observedUnitCents,
+      contractId,
+    });
+    if (raiseErr) return { success: false, error: raiseErr };
+  }
+
   await admin
     .from("subscriptions")
     .update({ items: nextItems, updated_at: new Date().toISOString() })

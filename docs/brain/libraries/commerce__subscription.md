@@ -90,6 +90,7 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 **`subscriptionSwapVariant`** — `async (workspaceId, contractId, oldVariantId, newVariantId, quantity?) → OpResult`
 - Delegates to [[subscription-items]]'s `subSwapVariant`.
 - New consolidated name (was `subSwapVariant`).
+- **Price preservation is enforced by the SDK, not the caller.** The chokepoint captures the outgoing line's realized price BEFORE the replace on both rails, carries it forward (Appstle: `subUpdateLineItemPrice` with `base = round(captured / (1 − sns))`; internal: verbatim `price_cents` or `price_override_cents = floor(captured × seedBase / seedUnit)` seed-priced through [[../libraries/pricing|resolveSubscriptionPricing]] so quantity breaks are handled), and POST-SWAP asserts the observed realized against captured via [[swap-price-assertion]] `assertSwapDidNotRaise` (2¢ tolerance; higher fails with a message naming the contract + expected + observed). A swap it can't guarantee is refused outright — `success: false` naming the contract. Callers pass no new arguments. Spec: [[../specs/swap-variant-preserves-the-line-price]].
 
 **`subscriptionUpdateLineItemPrice`** — `async (workspaceId, contractId, variantId, basePriceCents, lineGid?) → OpResult`
 - Delegates to [[subscription-items]]'s `subUpdateLineItemPrice`.
