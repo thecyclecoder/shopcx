@@ -5,7 +5,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
-import { healOnTouch } from "@/lib/appstle-pricing";
+import { healOnTouch, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
+import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
 import {
   isInternalSubscription,
   internalSubAddItem,
@@ -851,7 +852,18 @@ export async function subscriptionRemoveCoupon(
   return { success: !r.error, error: r.error };
 }
 
-/** Swap one variant for another (e.g., change flavor or swap product) */
+/**
+ * Swap one variant for another (e.g., change flavor or swap product).
+ *
+ * Price preservation (2026-07-30 crisis → docs/brain/specs/swap-variant-preserves-the-line-price.md):
+ * Appstle's variant replacement drops the outgoing line and creates a fresh one at catalog,
+ * silently resetting any grandfathered lock. So we (a) read the outgoing line's realized per-unit
+ * price BEFORE the replace, (b) refuse the swap if we can't read it (a swap we can't price is a
+ * swap that must not happen unattended — a silent reset already refunded $245.40), and (c)
+ * re-apply that captured realized price to the new line via subUpdateLineItemPrice. A swap can
+ * LOWER a price (a cheaper variant) but can never RAISE it — if the captured realized would
+ * exceed the new variant's catalog MSRP, we leave the cheaper new price in place.
+ */
 export async function subSwapVariant(
   workspaceId: string,
   contractId: string,
@@ -877,6 +889,18 @@ export async function subSwapVariant(
       return { success: false, error: `Old variant "${oldVariantId}" not found on contract. Available: ${r.available.join(", ") || "(none)"}` };
     }
     resolvedOld = r.numericId;
+  }
+
+  // Capture the outgoing line's realized per-unit price BEFORE the replace.
+  // Prefer pricingPolicy.basePrice-derived realized (isolates the real base from any stacked
+  // one-off discount); fall back to currentPrice.amount when policy is null.
+  const captured = await captureOutgoingRealizedCents(config.apiKey, contractId, resolvedOld, workspaceId);
+  const capturedUnitCents = captured.realizedCents;
+  if (capturedUnitCents <= 0) {
+    return {
+      success: false,
+      error: `Cannot read outgoing line price for contract ${contractId} (variant ${resolvedOld}) — swap refused to prevent a silent price reset`,
+    };
   }
 
   const result = await callReplaceVariants(config.apiKey, {
@@ -916,7 +940,159 @@ export async function subSwapVariant(
         if (lineMatch?.id) newLineGid = lineMatch.id;
       }
     } catch { /* non-fatal — callers can still use subUpdateLineItemPrice without GID */ }
+
+    // Re-apply `capturedUnitCents`. Convert realized → base via (1 − sns) so the S&S cycle on the
+    // new line lands back on the captured unit price. Passing the realized cents directly would
+    // double-discount it — that exact mistake set 5 subscriptions 25% low during the 2026-07-30
+    // cleanup.
+    const admin = createAdminClient();
+    const { data: newPv } = await admin
+      .from("product_variants")
+      .select("product_id, price_cents")
+      .eq("shopify_variant_id", String(newVariantId))
+      .maybeSingle();
+    const newProductId = (newPv?.product_id as string | undefined) || null;
+    const newVariantMsrpCents = (newPv?.price_cents as number | undefined) || 0;
+    const snsPct = await resolveLineSnsPct(admin, workspaceId, newProductId);
+    const frac = 1 - snsPct / 100;
+    const basePriceCents = frac > 0 ? Math.round(capturedUnitCents / frac) : capturedUnitCents;
+
+    // Never raise: if preserving would push the base above the new variant's own catalog MSRP,
+    // leave the cheaper new price in place — a swap can lower a price but never raise it.
+    const wouldRaise = newVariantMsrpCents > 0 && basePriceCents > newVariantMsrpCents;
+    if (!wouldRaise) {
+      const priceRes = await subUpdateLineItemPrice(
+        workspaceId,
+        contractId,
+        String(newVariantId),
+        basePriceCents,
+        newLineGid,
+      );
+      if (!priceRes.success) {
+        // Preservation failed after a successful replace — surface it, don't silently succeed.
+        return {
+          success: false,
+          error: `Swap replaced on contract ${contractId} but price preservation failed: ${priceRes.error || "unknown"}`,
+          newLineGid,
+        };
+      }
+    }
+
+    // Phase 3 — Assert it. Re-read the new line's realized from Appstle and fail loudly if the
+    // post-swap price moved UP vs the captured value. callReplaceVariants + subUpdateLineItemPrice
+    // both already returned success on any 2xx without reading the body, so this is the only
+    // gate that catches a silent regression in the preservation math on a live contract.
+    const observedRealizedCents = await readNewLineRealizedCents(
+      config.apiKey,
+      contractId,
+      String(newVariantId),
+    );
+    if (observedRealizedCents <= 0) {
+      return {
+        success: false,
+        error: `Swap on contract ${contractId} succeeded but post-swap realized price could not be verified — refusing to report success on an unverified swap`,
+        newLineGid,
+      };
+    }
+    const raiseErr = assertSwapDidNotRaise({
+      capturedRealizedCents: capturedUnitCents,
+      observedRealizedCents,
+      contractId,
+    });
+    if (raiseErr) {
+      // The message MUST contain the literal phrase `swap changed the price` so downstream logs +
+      // the deterministic verifier can grep the failure state; assertSwapDidNotRaise stays a pure
+      // predicate, so we wrap its message here at the caller boundary.
+      return { success: false, error: `swap changed the price — ${raiseErr}`, newLineGid };
+    }
   }
 
   return { ...result, newLineGid };
+}
+
+/**
+ * Re-read the NEW line's realized per-unit price from a live Appstle contract. Returns 0 when
+ * the read fails (network error, non-2xx, line missing, unparseable amount) — the caller MUST
+ * treat 0 as an unverified swap and refuse to report success, per Phase 3 of
+ * docs/brain/specs/swap-variant-preserves-the-line-price.md.
+ */
+async function readNewLineRealizedCents(
+  apiKey: string,
+  contractId: string,
+  newVariantId: string,
+): Promise<number> {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+      { headers: { "X-API-Key": apiKey }, cache: "no-store" },
+    );
+    if (!res.ok) return 0;
+    const detail = await res.json();
+    const lines = (detail?.lines?.nodes || []) as AppstleLine[];
+    const match = lines.find(l => {
+      const vid = l.variantId?.split("/").pop() || l.variantId;
+      return String(vid) === String(newVariantId);
+    });
+    const amt = match?.currentPrice?.amount;
+    if (!amt) return 0;
+    return Math.round(parseFloat(amt) * 100);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read the outgoing line's realized per-unit price BEFORE a swap, so we can carry it forward.
+ *
+ * Prefers `pricingPolicy.basePrice * (1 − sns)` when the line has a structured policy — that
+ * isolates the true base from any stacked one-off discount baked into currentPrice. Falls back to
+ * `currentPrice.amount` when the policy is null (a legacy Appstle-migrated line). Returns
+ * `{ realizedCents: 0 }` on any read failure — the caller MUST refuse the swap in that case.
+ */
+async function captureOutgoingRealizedCents(
+  apiKey: string,
+  contractId: string,
+  resolvedOldVariantId: string,
+  workspaceId: string,
+): Promise<{ realizedCents: number; basePriceCents: number }> {
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+      { headers: { "X-API-Key": apiKey }, cache: "no-store" },
+    );
+    if (!res.ok) return { realizedCents: 0, basePriceCents: 0 };
+    const detail = await res.json();
+    const lines = (detail?.lines?.nodes || []) as AppstleLine[];
+    const outgoing = lines.find(l => {
+      const vid = l.variantId?.split("/").pop() || l.variantId;
+      return String(vid) === String(resolvedOldVariantId);
+    });
+    if (!outgoing) return { realizedCents: 0, basePriceCents: 0 };
+
+    const currentAmt = outgoing.currentPrice?.amount;
+    const realizedCents = currentAmt ? Math.round(parseFloat(currentAmt) * 100) : 0;
+
+    const basePriceAmt = outgoing.pricingPolicy?.basePrice?.amount;
+    const basePriceCents = basePriceAmt ? Math.round(parseFloat(basePriceAmt) * 100) : 0;
+
+    // If we have basePrice, use it as the canonical base (isolates from any stacked discount).
+    // Return the base's implied realized (`base * (1 − sns)`) so the caller preserves the true
+    // structural price, not a coupon-inflated one.
+    if (basePriceCents > 0) {
+      const admin = createAdminClient();
+      const { data: oldPv } = await admin
+        .from("product_variants")
+        .select("product_id")
+        .eq("shopify_variant_id", String(resolvedOldVariantId))
+        .maybeSingle();
+      const oldProductId = (oldPv?.product_id as string | undefined) || null;
+      const snsPct = await resolveLineSnsPct(admin, workspaceId, oldProductId);
+      const derivedRealized = Math.round(basePriceCents * (1 - snsPct / 100));
+      return { realizedCents: derivedRealized, basePriceCents };
+    }
+
+    return { realizedCents, basePriceCents: 0 };
+  } catch {
+    return { realizedCents: 0, basePriceCents: 0 };
+  }
 }
