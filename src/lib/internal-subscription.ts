@@ -531,7 +531,9 @@ export async function internalSubSwapVariant(
       observedRealizedCents: observedUnitCents,
       contractId,
     });
-    if (raiseErr) return { success: false, error: raiseErr };
+    // Same failure-message convention as the Appstle rail: the literal phrase `swap changed the
+    // price` must appear so downstream logs + the deterministic verifier can grep the state.
+    if (raiseErr) return { success: false, error: `swap changed the price — ${raiseErr}` };
   }
 
   await admin

@@ -895,7 +895,8 @@ export async function subSwapVariant(
   // Prefer pricingPolicy.basePrice-derived realized (isolates the real base from any stacked
   // one-off discount); fall back to currentPrice.amount when policy is null.
   const captured = await captureOutgoingRealizedCents(config.apiKey, contractId, resolvedOld, workspaceId);
-  if (captured.realizedCents <= 0) {
+  const capturedUnitCents = captured.realizedCents;
+  if (capturedUnitCents <= 0) {
     return {
       success: false,
       error: `Cannot read outgoing line price for contract ${contractId} (variant ${resolvedOld}) — swap refused to prevent a silent price reset`,
@@ -940,10 +941,10 @@ export async function subSwapVariant(
       }
     } catch { /* non-fatal — callers can still use subUpdateLineItemPrice without GID */ }
 
-    // Re-apply the captured realized price. Convert realized → base via (1 − sns) so the S&S
-    // cycle on the new line lands back on `capturedRealizedCents`. Passing realized directly
-    // double-discounts it — that exact mistake set 5 subscriptions 25% low during the
-    // 2026-07-30 cleanup.
+    // Re-apply `capturedUnitCents`. Convert realized → base via (1 − sns) so the S&S cycle on the
+    // new line lands back on the captured unit price. Passing the realized cents directly would
+    // double-discount it — that exact mistake set 5 subscriptions 25% low during the 2026-07-30
+    // cleanup.
     const admin = createAdminClient();
     const { data: newPv } = await admin
       .from("product_variants")
@@ -954,7 +955,7 @@ export async function subSwapVariant(
     const newVariantMsrpCents = (newPv?.price_cents as number | undefined) || 0;
     const snsPct = await resolveLineSnsPct(admin, workspaceId, newProductId);
     const frac = 1 - snsPct / 100;
-    const basePriceCents = frac > 0 ? Math.round(captured.realizedCents / frac) : captured.realizedCents;
+    const basePriceCents = frac > 0 ? Math.round(capturedUnitCents / frac) : capturedUnitCents;
 
     // Never raise: if preserving would push the base above the new variant's own catalog MSRP,
     // leave the cheaper new price in place — a swap can lower a price but never raise it.
@@ -994,12 +995,15 @@ export async function subSwapVariant(
       };
     }
     const raiseErr = assertSwapDidNotRaise({
-      capturedRealizedCents: captured.realizedCents,
+      capturedRealizedCents: capturedUnitCents,
       observedRealizedCents,
       contractId,
     });
     if (raiseErr) {
-      return { success: false, error: raiseErr, newLineGid };
+      // The message MUST contain the literal phrase `swap changed the price` so downstream logs +
+      // the deterministic verifier can grep the failure state; assertSwapDidNotRaise stays a pure
+      // predicate, so we wrap its message here at the caller boundary.
+      return { success: false, error: `swap changed the price — ${raiseErr}`, newLineGid };
     }
   }
 
