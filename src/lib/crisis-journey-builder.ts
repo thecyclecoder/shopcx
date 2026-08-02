@@ -201,7 +201,7 @@ export async function buildCrisisTier3Steps(
 // ── Helpers ──
 
 async function getCrisisAction(admin: Admin, workspaceId: string, customerId: string, ticketId: string) {
-  // Find the most recent active crisis action for this customer
+  // Ticket-scoped first — the campaign cron enrols WITH a ticket so the thread stays together.
   const { data } = await admin.from("crisis_customer_actions")
     .select("id, crisis_id, subscription_id, segment, current_tier")
     .eq("workspace_id", workspaceId)
@@ -210,7 +210,25 @@ async function getCrisisAction(admin: Admin, workspaceId: string, customerId: st
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  return data;
+  if (data) return data;
+
+  // FALLBACK: a customer can be enrolled WITHOUT a ticket — a bulk enrolment does exactly that
+  // (the Strawberry Lemonade crisis enrolled 415 subs this way, all with ticket_id null). Requiring
+  // a ticket match made the journey render "No active crisis found for your account" for every one
+  // of them, from a link we had emailed them. Fall back to this customer's most recent action on an
+  // ACTIVE crisis, scoped to the workspace. Deliberately requires the crisis to still be active, so
+  // a resolved crisis never resurrects a stale journey.
+  const { data: viaActive } = await admin.from("crisis_customer_actions")
+    .select("id, crisis_id, subscription_id, segment, current_tier, crisis_events!inner(status)")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .eq("crisis_events.status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!viaActive) return null;
+  const { crisis_events: _drop, ...row } = viaActive as Record<string, unknown>;
+  return row as unknown as NonNullable<typeof data>;
 }
 
 function emptyConfig(): BuiltJourneyConfig {
