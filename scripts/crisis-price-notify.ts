@@ -31,6 +31,11 @@ loadEnv();
 
 const W = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
+/** Same materiality floor as crisis-price-refund.ts — never send a "we overcharged you" apology
+ *  for a rounding artifact. lrb@bartelsplants.com was refunded $0.01 on a $59.95 -> $59.96 catalog
+ *  drift; emailing them about it would be both wrong and embarrassing. */
+const MIN_NOTIFY_CENTS = 100;
+
 const SIGNOFF = "Suzie, Customer Support at Superfoods Company";
 
 function standardBody(first: string | null, amount: string, rate: string) {
@@ -65,13 +70,20 @@ async function main() {
     .order("created_at", { ascending: true });
 
   let sent = 0, skipped = 0;
+  const notified = new Set<string>();
   for (const t of tickets || []) {
     const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", t.customer_id).maybeSingle();
     if (!cust?.email) { skipped++; continue; }
 
-    // Already told? (external outbound on this ticket)
-    const { data: already } = await admin.from("ticket_messages")
-      .select("id").eq("ticket_id", t.id).eq("visibility", "external").eq("direction", "outbound").limit(1).maybeSingle();
+    // Already told? Scoped to the CUSTOMER, not the ticket. A customer can have more than one
+    // remediation ticket (a failed refund attempt leaves one behind, and the retry opens another) —
+    // per-ticket idempotency sent r.aycock@comcast.net the same email twice on 2026-08-02.
+    if (notified.has(String(t.customer_id))) { console.log(`  · ${cust.email} — already notified, skipping`); skipped++; continue; }
+    const { data: priorTickets } = await admin.from("tickets")
+      .select("id").eq("workspace_id", W).eq("customer_id", t.customer_id).contains("tags", ["overcharge-remediation"]);
+    const ids = (priorTickets || []).map((x: any) => x.id);
+    const { data: already } = ids.length ? await admin.from("ticket_messages")
+      .select("id").in("ticket_id", ids).eq("visibility", "external").eq("direction", "outbound").limit(1).maybeSingle() : { data: null };
     if (already) { console.log(`  · ${cust.email} — already notified, skipping`); skipped++; continue; }
 
     // The refund must actually have landed. Re-derived, never assumed.
@@ -84,6 +96,10 @@ async function main() {
     if (!mine.length) { console.log(`  ⚠ ${cust.email} — no refund landed for ${orderNumber}, NOT notifying`); skipped++; continue; }
 
     const amountCents = mine.reduce((s: number, r: any) => s + Number(r.amount_cents || 0), 0);
+    if (amountCents < MIN_NOTIFY_CENTS) {
+      console.log(`  · ${cust.email} — $${(amountCents / 100).toFixed(2)} is below the materiality floor, NOT notifying`);
+      skipped++; continue;
+    }
     const amount = `$${(amountCents / 100).toFixed(2)}`;
 
     // Their restored per-unit rate, read live off the sub.
@@ -131,6 +147,7 @@ async function main() {
         resend_email_id: res.messageId, email_status: "sent", email_message_id: emailMessageId,
       });
       await admin.from("tickets").update({ email_message_id: emailMessageId }).eq("id", t.id);
+      notified.add(String(t.customer_id));
       console.log(`  ✓ ${cust.email} — ${amount}, rate ${rate}`);
       sent++;
     } catch (e) {
