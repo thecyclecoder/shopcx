@@ -20,6 +20,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
+import { getInternalRules } from "@/lib/policies";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const REPORT_MODEL = OPUS_MODEL;
@@ -93,7 +94,7 @@ export async function generateDailyReport(
   const adminCorrected = analyses.filter(a => a.admin_score != null).length;
 
   // Pull existing rules so Opus doesn't propose duplicates
-  const [{ data: existingSonnet }, { data: existingGrader }, { data: activePolicies }] = await Promise.all([
+  const [{ data: existingSonnet }, { data: existingGrader }, activePolicies] = await Promise.all([
     admin.from("sonnet_prompts")
       .select("title")
       .eq("workspace_id", workspaceId)
@@ -105,13 +106,10 @@ export async function generateDailyReport(
     // Active policies — Opus must not propose rules that contradict
     // these. The same-day-void incident (2026-05-26) shipped because
     // a proposed rule contradicted "Returns require fulfilled orders"
-    // without anyone catching the conflict at approval time.
-    admin.from("policies")
-      .select("slug, name, internal_summary")
-      .eq("workspace_id", workspaceId)
-      .eq("is_active", true)
-      .is("superseded_by", null)
-      .order("slug"),
+    // without anyone catching the conflict at approval time. Routed
+    // through the policies SDK — the INTERNAL rule-body is what an
+    // Opus-authored proposal must respect, never `customer_summary`.
+    getInternalRules(admin, workspaceId),
   ]);
 
   const existingSonnetTitles = (existingSonnet || []).map(r => r.title);

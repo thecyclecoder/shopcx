@@ -22,6 +22,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { CsStoryline } from "./cs-director-digest";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
+import { insertDraftPolicy } from "@/lib/policies";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -162,23 +163,16 @@ export async function addPolicyFromStoryline(
         input.storyline.evidence ??
         "",
     );
-    const { data, error } = await admin
-      .from("policies")
-      .insert({
-        workspace_id: input.workspaceId,
-        slug: policySlugFor(input.storyline.title, input.digestId),
-        name: input.storyline.title || "Draft policy from CS digest",
-        customer_summary: draft,
-        internal_summary: draft,
-        rules: [],
-        is_active: false, // DRAFT — the founder activates from Settings → Policies after editing.
-      })
-      .select("id")
-      .single();
-    if (error || !data) {
-      return { ok: false, reason: `policies insert failed: ${error?.message ?? "no row"}` };
-    }
-    return { ok: true, policy_id: String(data.id) };
+    // Routed through the policies SDK — is_active=false is the SDK default so the founder
+    // still activates from Settings → Policies after editing.
+    const { id } = await insertDraftPolicy(admin, {
+      workspaceId: input.workspaceId,
+      slug: policySlugFor(input.storyline.title, input.digestId),
+      name: input.storyline.title || "Draft policy from CS digest",
+      customer_summary: draft,
+      internal_summary: draft,
+    });
+    return { ok: true, policy_id: id };
   } catch (err) {
     return { ok: false, reason: errText(err) };
   }
