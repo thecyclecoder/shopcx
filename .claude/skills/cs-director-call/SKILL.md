@@ -95,11 +95,37 @@ Return this when:
   identity relink, missing shipment, dunning fix) whose remedy is one of the runtime orchestrator
   actions already in the catalog.
 - The remedy is REVERSIBLE OR trivially bounded (a coupon / a partial refund inside the CS refund
-  ceiling / a subscription pause / a resend). NEVER `approve_remedy` on a full refund past the CS
-  ceiling, a cancel-with-refund on a legacy sub, an identity merge, or any action the leash flags
-  destructive/irreversible → those escalate.
+  ceiling / a subscription pause / a resend / a `restore_grandfathered_price` that lowers a
+  subscription's line price toward a rate the customer's own renewal history demonstrates).
+  NEVER `approve_remedy` on a full refund past the CS ceiling, a cancel-with-refund on a legacy
+  sub, an identity merge, or any action the leash flags destructive/irreversible → those escalate.
 - The read-only investigation could CONFIRM SOUND: you can point at the customer state that justifies
   it, not just accept the customer's framing.
+
+**`restore_grandfathered_price` — the bound (in-leash BECAUSE the number is not yours).** Use the
+literal `action_type: "restore_grandfathered_price"` (the skill, the brain and the verification
+name the same thing). This remedy names the subscription and carries **NO price** — the payload
+is only the contract/subscription reference. The `update_line_item_price` action derives the
+value from renewal history via `deriveRestoreBase` in
+[`src/lib/subscription-overcharge.ts`](../../../src/lib/subscription-overcharge.ts) (`:414`) —
+that computed number is the WHOLE reason this is safe to delegate, and passing a number in the
+payload would reintroduce exactly the defect PR #2359 closed. The CEO ruled on 2026-08-01 that a
+customer's demonstrated historical rate is honoured over the 50%-MSRP floor
+(`pricing.historical_rate_beats_floor` in the Subscription policy's rules), so a restore below
+the floor is IN-POLICY when the customer's demonstrated rate falls below the floor. A refusal
+classified by `isRaiseAttempt` (`src/lib/subscription-overcharge.ts:503`) must still `escalate_founder`
+rather than execute — lowering toward a demonstrated rate is in-leash; anything that would raise
+a customer's price is not, and no amount of agent reasoning may cross that line.
+
+```json
+"remedy": {
+  "action_type": "restore_grandfathered_price",
+  "payload":     { "contract_id": "…" },
+  "summary":     "restore Vicki to her demonstrated $24.95 rate (four consecutive renewals at that rate; deriveRestoreBase supplies the value)",
+  "customer_message": "…",
+  "confidence": 0.0
+}
+```
 
 Return a `remedy` object shaped as a **RemedyPlan** — the Phase-2 executor will fire it through
 `executeSonnetDecision` (the same real executor prod uses; see the `run-orchestrator-action` skill
