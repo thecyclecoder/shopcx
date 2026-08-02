@@ -1,0 +1,1 @@
+- **metaSyncSpend must contain the Data Use Checkup class INSIDE step.run** · verified 2026-08-02 · → [[../inngest/meta-sync]]
