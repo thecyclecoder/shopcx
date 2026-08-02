@@ -1,0 +1,1 @@
+- **A variant swap must never change what the customer pays** · verified 2026-08-02 · → [[../lifecycles/crisis-campaign]]
