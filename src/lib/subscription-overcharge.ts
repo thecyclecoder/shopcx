@@ -347,6 +347,163 @@ export function buildOverchargePlan(signal: OverchargeSignal): OverchargePlan {
   };
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Sanctioned-source rule for a `update_line_item_price` write.
+//
+// The agent may TRIGGER a price correction, but may not INVENT the number.
+// When an overcharge signal names the target variant, the signal's
+// `restore_base_cents` is authoritative and the agent's proposed base is
+// only logged when it materially diverges. When no signal names the
+// variant, the handler guards the invariant "never write a base whose
+// realized per-unit exceeds the customer's established rate" with the
+// same `>= $1 AND >= 2%` materiality floor `detectForSubscription` uses at
+// detection. Extracted from `update_line_item_price` in [[action-executor]]
+// so it can be tested purely (no admin, no DB) — the projector callback
+// wraps `resolveSubscriptionPricing` in the runtime and returns a fixture
+// value in the unit tests. Spec:
+// docs/brain/specs/a-price-correction-must-use-the-computed-rate-not-an-agents-arithmetic.
+// ────────────────────────────────────────────────────────────────────
+
+export type RestoreBaseSource = "signal" | "agent";
+export type RestoreBaseRefuseReason =
+  | "raise_no_signal"
+  | "immaterial"
+  | "exceeds_established";
+
+export type RestoreBaseDecisionOk = {
+  ok: true;
+  /** The cents value to write via `subUpdateLineItemPrice`. */
+  base: number;
+  /** Suffix to append to the action summary — visible in the ticket thread. */
+  note: string;
+  /** Where the number came from — the audit event stamps this. */
+  source: RestoreBaseSource;
+  signalRestoreBaseCents: number | null;
+  agentBaseCents: number;
+  previousRealizedPerUnitCents: number | null;
+  projectedRealizedPerUnitCents: number | null;
+};
+
+export type RestoreBaseDecisionRefused = {
+  ok: false;
+  error: string;
+  refuseReason: RestoreBaseRefuseReason;
+  agentBaseCents: number;
+  previousRealizedPerUnitCents: number | null;
+  projectedRealizedPerUnitCents: number | null;
+};
+
+export type RestoreBaseDecision =
+  | RestoreBaseDecisionOk
+  | RestoreBaseDecisionRefused;
+
+export interface DeriveRestoreBaseInput {
+  signal: OverchargeSignal | null;
+  contractId: string;
+  variantId: string;
+  agentBaseCents: number;
+  /**
+   * Callback that returns the customer's realized per-unit for the target
+   * variant. Pass `null` to get the CURRENT realized (unchanged items),
+   * pass a proposed base to get what would be realized AFTER the write.
+   * Runtime wraps `resolveSubscriptionPricing`; tests pass a fixture.
+   */
+  project: (proposedBaseCents: number | null) => Promise<number | null>;
+}
+
+export async function deriveRestoreBase(
+  input: DeriveRestoreBaseInput,
+): Promise<RestoreBaseDecision> {
+  const { signal, contractId, variantId, agentBaseCents, project } = input;
+  const previousRealizedPerUnitCents = await project(null);
+
+  const line = signal?.lines.find((l) => String(l.variant_id) === String(variantId));
+
+  // ── Signal path — computed rate wins; agent's disagreement is only logged.
+  if (line) {
+    const signalBase = line.restore_base_cents;
+    let note = "";
+    if (Math.abs(signalBase - agentBaseCents) > 100) {
+      note = ` (agent-proposed $${(agentBaseCents / 100).toFixed(2)} → signal-computed $${(signalBase / 100).toFixed(2)})`;
+    }
+    const projected = await project(signalBase);
+    // Invariant: the write must not raise the realized per-unit above the
+    // established rate — the signal already respects this by construction,
+    // but the internal engine can stack a quantity break on top of the base,
+    // so we confirm via resolveSubscriptionPricing rather than assume.
+    if (projected != null && projected > line.expected_per_unit + 1) {
+      return {
+        ok: false,
+        error: `Refusing to write base $${(signalBase / 100).toFixed(2)} on contract ${contractId} variant ${variantId}: projected realized $${(projected / 100).toFixed(2)} exceeds established $${(line.expected_per_unit / 100).toFixed(2)}.`,
+        refuseReason: "exceeds_established",
+        agentBaseCents,
+        previousRealizedPerUnitCents,
+        projectedRealizedPerUnitCents: projected,
+      };
+    }
+    return {
+      ok: true,
+      base: signalBase,
+      note,
+      source: "signal",
+      signalRestoreBaseCents: signalBase,
+      agentBaseCents,
+      previousRealizedPerUnitCents,
+      projectedRealizedPerUnitCents: projected,
+    };
+  }
+
+  // ── No-signal path — refuse a RAISE and apply the materiality floor.
+  // Lowering with no signal stays allowed — it cannot harm the customer and
+  // goodwill discounts are a real use.
+  const projected = await project(agentBaseCents);
+  if (previousRealizedPerUnitCents != null && projected != null) {
+    const absChange = Math.abs(projected - previousRealizedPerUnitCents);
+    // Phase 2 materiality floor: catalog rounding drift shouldn't fire any
+    // correction. Below `>= $1 AND >= 2%` the change is noise, and a
+    // "we overcharged you" refund on that scale mints a wrong-narrative
+    // ticket on an untouched subscription (the 2026-08-02 failure mode).
+    if (absChange < 100 || absChange < previousRealizedPerUnitCents * 0.02) {
+      return {
+        ok: false,
+        error: `Refusing immaterial price change on contract ${contractId} variant ${variantId}: change $${(absChange / 100).toFixed(2)} on a $${(previousRealizedPerUnitCents / 100).toFixed(2)} baseline is below the $1 AND 2% materiality floor (catalog rounding drift shouldn't trigger a correction).`,
+        refuseReason: "immaterial",
+        agentBaseCents,
+        previousRealizedPerUnitCents,
+        projectedRealizedPerUnitCents: projected,
+      };
+    }
+    if (
+      projected - previousRealizedPerUnitCents >= 100 &&
+      projected >= previousRealizedPerUnitCents * 1.02
+    ) {
+      return {
+        ok: false,
+        error: `Refusing to raise realized price on contract ${contractId} variant ${variantId}: no overcharge signal justifies the increase from $${(previousRealizedPerUnitCents / 100).toFixed(2)} to $${(projected / 100).toFixed(2)} (agent-supplied base $${(agentBaseCents / 100).toFixed(2)}).`,
+        refuseReason: "raise_no_signal",
+        agentBaseCents,
+        previousRealizedPerUnitCents,
+        projectedRealizedPerUnitCents: projected,
+      };
+    }
+  }
+  return {
+    ok: true,
+    base: agentBaseCents,
+    note: "",
+    source: "agent",
+    signalRestoreBaseCents: null,
+    agentBaseCents,
+    previousRealizedPerUnitCents,
+    projectedRealizedPerUnitCents: projected,
+  };
+}
+
+/** True when the refuse reason surfaces a RAISE attempt that should be escalated. */
+export function isRaiseAttempt(reason: RestoreBaseRefuseReason): boolean {
+  return reason === "raise_no_signal" || reason === "exceeds_established";
+}
+
 /** Human-readable block for the orchestrator / triage context, including the action plan. */
 export function formatOverchargeForAgent(signal: OverchargeSignal): string {
   const dollars = (c: number) => `$${(c / 100).toFixed(2)}`;
