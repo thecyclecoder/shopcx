@@ -11,7 +11,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReplacementDraftOrderInput, type CreateReplacementInput } from "./replacement-order";
+import {
+  buildReplacementDraftOrderInput,
+  findVariantOverCap,
+  REPLACEMENT_MAX_UNITS_PER_VARIANT,
+  type CreateReplacementInput,
+} from "./replacement-order";
 
 const ADDR: CreateReplacementInput["shippingAddress"] = {
   firstName: "Evan", lastName: "H",
@@ -107,4 +112,65 @@ test("100% discount always applied — the replacement ships FREE", () => {
   const out = buildReplacementDraftOrderInput(input, "US", "https://shopcx.ai");
   assert.equal(out.appliedDiscount.value, 100);
   assert.equal(out.appliedDiscount.valueType, "PERCENTAGE");
+});
+
+// ── Phase 1: REPLACEMENT_MAX_UNITS_PER_VARIANT cap ─────────────────
+// A single variant may not ship more than 4 units per replacement. The
+// CEO set this on 2026-08-02 while resolving a non-delivery make-whole
+// (that ticket could have shipped 12 units of one variant unbounded).
+// The cap lives in the SDK so every caller inherits it — a cap in one
+// caller is a cap the next caller does not have.
+test("cap constant is exactly 4 units per variant", () => {
+  assert.equal(REPLACEMENT_MAX_UNITS_PER_VARIANT, 4);
+});
+
+test("findVariantOverCap: at-cap (qty 4) passes — 4 is allowed, only >4 refuses", () => {
+  const over = findVariantOverCap([{ variantId: "vA", quantity: 4, title: "Peach Mango" }]);
+  assert.equal(over, null);
+});
+
+test("findVariantOverCap: single line over cap (qty 5) is refused with variant + requested", () => {
+  const over = findVariantOverCap([{ variantId: "vA", quantity: 5, title: "Peach Mango" }]);
+  assert.ok(over, "5 units of one variant must be over the cap");
+  assert.equal(over!.variantId, "vA");
+  assert.equal(over!.title, "Peach Mango");
+  assert.equal(over!.requested, 5);
+  assert.equal(over!.cap, 4);
+});
+
+test("findVariantOverCap: legitimate 4+4 multi-flavour replacement is fine (per-variant, not per-order)", () => {
+  // CEO's distinction: 4 + 4 across two flavours is fine; the cap is
+  // per variant. This test pins that a caller passing 4 of A + 4 of B
+  // is NOT refused.
+  const over = findVariantOverCap([
+    { variantId: "vA", quantity: 4, title: "Peach Mango" },
+    { variantId: "vB", quantity: 4, title: "Strawberry Lemonade" },
+  ]);
+  assert.equal(over, null);
+});
+
+test("findVariantOverCap: sums duplicate variantIds across line items — 3 + 3 of the same variant is over cap", () => {
+  // The CEO intent is 'no more than 4 of one variant'. Two line items
+  // for the same variant summing above the cap must still refuse — the
+  // check is per-variant, not per-line.
+  const over = findVariantOverCap([
+    { variantId: "vA", quantity: 3, title: "Peach Mango" },
+    { variantId: "vA", quantity: 3 },
+  ]);
+  assert.ok(over, "3 + 3 of the same variant must be over the cap");
+  assert.equal(over!.variantId, "vA");
+  assert.equal(over!.requested, 6);
+  assert.equal(over!.title, "Peach Mango");
+});
+
+test("findVariantOverCap: empty items → no over-cap variant (defensive)", () => {
+  assert.equal(findVariantOverCap([]), null);
+});
+
+test("findVariantOverCap: variant without a title still refuses with a usable identifier", () => {
+  const over = findVariantOverCap([{ variantId: "vX", quantity: 12 }]);
+  assert.ok(over);
+  assert.equal(over!.variantId, "vX");
+  assert.equal(over!.title, null);
+  assert.equal(over!.requested, 12);
 });
