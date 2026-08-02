@@ -21,6 +21,7 @@
  * stubbed for now — the renewal scheduler lands in a future commit.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { resolveSubscriptionPricing } from "@/lib/pricing";
 
 type ActionResult = { success: boolean; error?: string };
 
@@ -385,6 +386,20 @@ export async function internalSubRemoveItem(
   return { success: true };
 }
 
+/**
+ * Swap one variant for another on an internal subscription.
+ *
+ * Price preservation (2026-07-30 crisis → docs/brain/specs/swap-variant-preserves-the-line-price.md):
+ * The internal engine (src/lib/pricing.ts:141 resolveSubscriptionPricing) applies BOTH the
+ * quantity break AND S&S on top of `price_override_cents`, so `realized / (1 − sns)` undershoots
+ * on a break-priced line — during the 2026-07-30 cleanup, carrie.allen@medtronic.com (qty 4)
+ * needed base $59.01 to price at $38.95 where the flat formula gave $51.93. We seed-price the
+ * candidate item list through the engine, learn the new line's `unit_cents/base_cents` ratio, and
+ * solve `base = floor(captured × seedBase / seedUnit)` — floor (not round) so the recovered
+ * price is at-or-below captured, never a raise. A verbatim `price_cents` lock carries directly.
+ * If the outgoing line had a grandfathered lock but we can't read the realized price, the swap
+ * is refused rather than silently resetting.
+ */
 export async function internalSubSwapVariant(
   workspaceId: string,
   contractId: string,
@@ -403,25 +418,95 @@ export async function internalSubSwapVariant(
   const oldItem = items.find((i) => String(i.variant_id) === oldKey || String(i.variant_id) === String(oldVariantId));
   if (!oldItem) return { success: false, error: `Variant ${oldVariantId} not on subscription` };
 
-  // Resolve the NEW variant to its canonical UUID + catalog metadata. Store the
-  // reference only — no baked price; a swap also drops any grandfathered override
-  // (it's a different product, so the old lock no longer applies).
-  const resolved = await resolveVariant(String(newVariantId));
-  const nextItems = items.map((i) =>
-    i === oldItem
-      ? {
-          ...i,
-          variant_id: resolved?.id || String(newVariantId),
-          product_id: resolved?.product_id || i.product_id,
-          title: resolved?.title || i.title,
-          variant_title: resolved?.variant_title ?? i.variant_title,
-          sku: resolved?.sku ?? i.sku,
-          quantity: quantity ?? i.quantity,
-          price_cents: undefined,
-          price_override_cents: undefined,
-        }
-      : i,
+  // Extra fields the pricing engine reads that loadInternalSub doesn't carry —
+  // read once so seed-pricing reproduces the same rate the renewal engine will bill.
+  const { data: extras } = await admin
+    .from("subscriptions")
+    .select("delivery_price_cents, pricing_offer_id")
+    .eq("id", sub.id)
+    .maybeSingle();
+  const pricingSub = {
+    items,
+    delivery_price_cents: (extras?.delivery_price_cents as number | null | undefined) ?? null,
+    pricing_offer_id: (extras?.pricing_offer_id as string | null | undefined) ?? null,
+  };
+
+  // Capture the outgoing line's realized per-unit price BEFORE mutation.
+  const preSwapPricing = await resolveSubscriptionPricing(workspaceId, pricingSub);
+  const outgoingPriced = preSwapPricing.lines.find(
+    (l) => String(l.variant_id) === String(oldItem.variant_id),
   );
+  const capturedUnitCents = outgoingPriced?.unit_cents ?? 0;
+
+  const outgoingPriceCents =
+    typeof oldItem.price_cents === "number" && oldItem.price_cents > 0 ? oldItem.price_cents : null;
+  const outgoingOverrideCents =
+    typeof oldItem.price_override_cents === "number" && oldItem.price_override_cents > 0
+      ? oldItem.price_override_cents
+      : null;
+  const hadLock = outgoingPriceCents != null || outgoingOverrideCents != null;
+
+  // A locked line whose realized we can't read must not be swapped unattended —
+  // a silent reset already cost real money on the Appstle rail. Same rule here.
+  if (hadLock && capturedUnitCents <= 0) {
+    return {
+      success: false,
+      error: `Cannot read outgoing line's realized price for internal contract ${contractId} (variant ${oldVariantId}) — swap refused to prevent a silent price reset`,
+    };
+  }
+
+  // Resolve the NEW variant to its canonical UUID + catalog metadata.
+  const resolved = await resolveVariant(String(newVariantId));
+  const newVariantKey = resolved?.id || String(newVariantId);
+  let newItem: Item = {
+    ...oldItem,
+    variant_id: newVariantKey,
+    product_id: resolved?.product_id || oldItem.product_id,
+    title: resolved?.title || oldItem.title,
+    variant_title: resolved?.variant_title ?? oldItem.variant_title,
+    sku: resolved?.sku ?? oldItem.sku,
+    quantity: quantity ?? oldItem.quantity,
+    price_cents: undefined,
+    price_override_cents: undefined,
+  };
+
+  // Seed-price the swap with NO override to learn the new line's natural rate.
+  // The engine's ratio (`unit_cents / base_cents`) is `(1 − break/100) × (1 − sns/100)` for this
+  // line — deterministic per the item list. Reusing it lets us back-solve base analytically.
+  if (capturedUnitCents > 0) {
+    const seedItems = items.map((i) => (i === oldItem ? newItem : i));
+    const seedPricing = await resolveSubscriptionPricing(workspaceId, {
+      ...pricingSub,
+      items: seedItems,
+    });
+    const seedLine = seedPricing.lines.find((l) => String(l.variant_id) === newVariantKey);
+    const seedBase = seedLine?.base_cents ?? 0;
+    const seedUnit = seedLine?.unit_cents ?? 0;
+
+    // Never raise: if capturing would keep the customer above the new variant's natural realized,
+    // leave the bare swap in place — the engine will bill them at `seedUnit`, which is cheaper.
+    if (seedBase > 0 && seedUnit > 0 && capturedUnitCents <= seedUnit) {
+      if (outgoingPriceCents != null) {
+        // Verbatim baked lock → carry directly. No conversion (the engine short-circuits and
+        // bills `price_cents` as-is). Only if not a raise vs the new variant's natural realized.
+        if (outgoingPriceCents <= seedUnit) {
+          newItem = { ...newItem, price_cents: outgoingPriceCents };
+        }
+      } else if (outgoingOverrideCents != null || outgoingPriced?.is_grandfathered) {
+        // Solve the override base that lands the new line's realized on `capturedUnitCents`.
+        // `Math.floor` biases at-or-below captured to guarantee no upward-rounding raise —
+        // a lower price passes; a higher one violates the rule.
+        const solvedBase = Math.floor((capturedUnitCents * seedBase) / seedUnit);
+        if (solvedBase > 0) {
+          newItem = { ...newItem, price_override_cents: solvedBase };
+        }
+      }
+      // else: outgoing had no lock and wasn't grandfathered — leave the bare item (engine
+      // prices at the new variant's standard rate, which is <= captured by construction).
+    }
+  }
+
+  const nextItems = items.map((i) => (i === oldItem ? newItem : i));
   await admin
     .from("subscriptions")
     .update({ items: nextItems, updated_at: new Date().toISOString() })
