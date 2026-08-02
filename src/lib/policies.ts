@@ -105,6 +105,9 @@ export async function listActivePolicies(
  * the INTERNAL half only, never the published `customer_summary`. Used by the sonnet
  * orchestrator's `buildPoliciesSection`, the grader system prompt, the daily-analysis report,
  * and (Phase 2) the CS director's brief.
+ *
+ * Prefer {@link getAgentPolicyPackage} for new call sites — it also carries the machine-readable
+ * `rules[]` an agent must not talk itself past.
  */
 export async function getInternalRules(
   admin: Admin,
@@ -123,6 +126,109 @@ export async function getInternalRules(
     name: r.name,
     internal_summary: r.internal_summary ?? "",
   }));
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Shared agent policy package (Phase 2 — Sol AND June read the same rulebook).
+ *
+ * The chokepoint that fixes the "the two agents reason from different rules" gap the spec
+ * measured on 2026-08-02: `src/lib/sonnet-orchestrator-v2.ts` carried 21 policy references
+ * (Sol was reading them every turn), while `src/lib/cs-director.ts` carried ZERO — June, the
+ * more-authoritative agent who overrules Sol and rules on money, was reasoning from the ticket
+ * text alone. The refuse-delivery incident + the 2026-07-28 renewal-cancellation double
+ * escalation are the visible failures.
+ *
+ * `getAgentPolicyPackage` assembles the package ONCE and returns the INTERNAL half only
+ * (`internal_summary` + `rules`). `customer_summary` is DELIBERATELY excluded — that field is
+ * the published rendering, not the rule; quoting it as the rule is how a human on 2026-08-02
+ * told a customer she could refuse delivery. `formatAgentPolicyPackage` renders the package
+ * into the plain-text block both Sol's orchestrator prompt and June's director brief embed.
+ * --------------------------------------------------------------------------------------------- */
+
+/**
+ * One entry in the shared agent policy package. Carries both the free-text `internal_summary`
+ * (the human-readable rule body the AI already reads) AND the machine-readable `rules[]` (the
+ * assertions like `cancellation.no_refund_before_ship`, the returns prohibition on
+ * refused-package refunds, etc.) — the ones an agent must NOT talk itself past. Never carries
+ * `customer_summary` — that is the published rendering, not the rule.
+ */
+export interface AgentPolicyPackageEntry {
+  slug: string;
+  name: string;
+  internal_summary: string;
+  rules: unknown[];
+}
+
+/**
+ * The shared agent policy package — active, non-superseded policies with `internal_summary` +
+ * `rules`. Sol reads this via `buildPoliciesSection` in `sonnet-orchestrator-v2.ts`; June reads
+ * it via `loadDirectorPolicyBrief` in `src/lib/cs-director.ts` (which the CS-director-call
+ * brief loader in the worker embeds). Both agents therefore reason from the SAME rulebook.
+ */
+export async function getAgentPolicyPackage(
+  admin: Admin,
+  workspaceId: string,
+): Promise<AgentPolicyPackageEntry[]> {
+  const { data, error } = await admin
+    .from("policies")
+    .select("slug, name, internal_summary, rules")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .is("superseded_by", null)
+    .order("slug");
+  if (error) throw new Error(`policies.getAgentPolicyPackage: ${error.message}`);
+  return ((data as AgentPolicyPackageEntry[] | null) ?? []).map(r => ({
+    slug: r.slug,
+    name: r.name,
+    internal_summary: r.internal_summary ?? "",
+    rules: Array.isArray(r.rules) ? r.rules : [],
+  }));
+}
+
+/**
+ * Render one machine-readable rule assertion as a bullet line. Objects with an `assertion` or
+ * `key` field render as `- <assertion>: <detail>`; plain strings pass through; anything else
+ * is JSON-stringified so nothing silently drops out of view.
+ */
+function formatRule(rule: unknown): string {
+  if (typeof rule === "string") return `- ${rule}`;
+  if (rule && typeof rule === "object") {
+    const r = rule as Record<string, unknown>;
+    const key = (r.assertion ?? r.key ?? r.name ?? r.id) as string | undefined;
+    const detail = (r.detail ?? r.description ?? r.text ?? r.reason) as string | undefined;
+    if (key && detail) return `- ${key}: ${detail}`;
+    if (key) return `- ${key}`;
+  }
+  try {
+    return `- ${JSON.stringify(rule)}`;
+  } catch {
+    return `- (unrenderable rule)`;
+  }
+}
+
+/**
+ * Render the shared agent policy package into the plain-text block both Sol and June embed
+ * in their prompts. Returns `""` when the package is empty (caller decides how to fail — Sol
+ * treats empty as "no policies configured", June treats it as "escalate rather than guess").
+ *
+ * Header wording ("POLICIES (canonical — …") matches the pre-Phase-2 sonnet-orchestrator-v2
+ * `buildPoliciesSection` so the Sol block stays functionally the same on empty rules; the
+ * per-entry `RULES:` sub-block is the new content — the machine-readable assertions Phase 2
+ * explicitly wants both agents to see.
+ */
+export function formatAgentPolicyPackage(entries: AgentPolicyPackageEntry[]): string {
+  if (!entries.length) return "";
+  const blocks = entries.map(p => {
+    const parts: string[] = [`## ${p.name} (slug: ${p.slug})`];
+    if (p.internal_summary) parts.push(p.internal_summary);
+    if (p.rules.length) {
+      parts.push("");
+      parts.push("RULES:");
+      for (const r of p.rules) parts.push(formatRule(r));
+    }
+    return parts.join("\n");
+  }).join("\n\n");
+  return `POLICIES (canonical — these supersede any conflicting older rule below):\n${blocks}`;
 }
 
 /** Input for {@link updatePolicyText}. Every field is optional — only the provided keys patch. */

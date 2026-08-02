@@ -62,6 +62,7 @@ import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-e
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
 import { MONEY_ACTION_TYPES } from "@/lib/june-remedy-approval";
+import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -1989,5 +1990,44 @@ export async function applyBoxCsDirectorCall(
   } catch (e) {
     console.error(`[cs-director] applyBoxCsDirectorCall threw:`, e instanceof Error ? e.message : e);
     return { ok: false, reason: errText(e) };
+  }
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Phase 2 of a-policies-chokepoint-so-published-and-internal-rules-cannot-contradict —
+ * June's brief consumes the SAME policy package Sol reads.
+ *
+ * Before this wiring, `src/lib/cs-director.ts` carried ZERO policy references while
+ * `sonnet-orchestrator-v2.ts` carried 21 — the more-authoritative agent (June overrules Sol
+ * and rules on money) was reasoning from ticket text alone. It showed on 2026-07-28 when
+ * June escalated a plain post-renewal cancellation to the founder TWICE, when the Refund
+ * Policy answers it outright (renewals are not refundable once charged, path is a labelled
+ * return). A director holding the policy would have closed it.
+ *
+ * `loadDirectorPolicyBrief` returns the plain-text CURRENT POLICIES block the CS-director-call
+ * brief loader (`scripts/builder-worker.ts` `loadCsDirectorCallBrief`) embeds. The rules are
+ * loaded via `getAgentPolicyPackage` (INTERNAL half only + machine-readable `rules[]` — never
+ * `customer_summary`) and rendered via `formatAgentPolicyPackage` — the SAME assembly Sol's
+ * `buildPoliciesSection` uses. Best-effort: a load failure returns an empty string so the
+ * base brief still renders (June is instructed in the prompt to escalate rather than guess
+ * when the policy block is missing, mirroring how Sol treats an empty catalog).
+ * --------------------------------------------------------------------------------------------- */
+
+/**
+ * Returns the CURRENT POLICIES block June's brief embeds — the same shared package Sol reads
+ * via the policies SDK. INTERNAL half only (`internal_summary` + `rules`); never
+ * `customer_summary`. Empty string on empty rules or on load failure.
+ */
+export async function loadDirectorPolicyBrief(admin: Admin, workspaceId: string): Promise<string> {
+  try {
+    const entries = await getAgentPolicyPackage(admin, workspaceId);
+    if (!entries.length) return "";
+    const block = formatAgentPolicyPackage(entries);
+    return [
+      "--- CURRENT POLICIES (the rulebook — your verdict MUST reflect these; NEVER approve a remedy or escalate that talks past an active rule) ---",
+      block,
+    ].join("\n\n");
+  } catch (e) {
+    return `CURRENT POLICIES: read failed — ${errText(e)}`;
   }
 }

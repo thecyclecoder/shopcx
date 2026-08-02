@@ -14580,6 +14580,25 @@ async function loadCsDirectorCallBrief(
     parts.push(cxBrief);
   }
 
+  // Phase 2 of a-policies-chokepoint-so-published-and-internal-rules-cannot-contradict:
+  // June reads the SAME shared policy package Sol's orchestrator does — active, non-superseded
+  // `internal_summary` + `rules` — so the more-authoritative agent (June overrules Sol and
+  // rules on money) never reasons past a written rule. The 2026-07-28 renewal-cancellation
+  // double escalation is the visible failure a policy-holding director would have closed.
+  // Best-effort — `loadDirectorPolicyBrief` catches its own errors and returns a diagnostic
+  // string so the base brief still renders.
+  try {
+    const { loadDirectorPolicyBrief } = await import("../src/lib/cs-director");
+    const policyBrief = await loadDirectorPolicyBrief(db, workspaceId);
+    if (policyBrief) {
+      parts.push("");
+      parts.push(policyBrief);
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`CURRENT POLICIES: read failed — ${errText(e)}`);
+  }
+
   // Phase 1 of cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-
   // escalation — for the ticket's customer, evaluate every active playbook's tier-exception ladder
   // (thresholds pulled verbatim from the playbook_exceptions rows) and its disqualifier list
