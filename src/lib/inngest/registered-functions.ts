@@ -122,6 +122,7 @@ import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/tick
 import { adToolFunctions } from "@/lib/inngest/ad-tool";
 import { agentTodoExecute } from "@/lib/inngest/agent-todo-execute";
 import { triageEscalationsCron } from "@/lib/inngest/triage-escalations";
+import { founderEscalationStaleRecheckCron } from "@/lib/inngest/founder-escalation-stale-recheck";
 import { specTestCron } from "@/lib/inngest/spec-test-cron";
 import { blueprintBuildSubmitCron } from "@/lib/inngest/blueprint-build-submit-cron";
 import { specReviewCron } from "@/lib/inngest/spec-review-cron";
@@ -303,6 +304,7 @@ export const registeredInngestFunctions = [
   ticketHealRequested,
   agentTodoExecute,
   triageEscalationsCron,
+  founderEscalationStaleRecheckCron,
   specTestCron,
   blueprintBuildSubmitCron,
   specReviewCron,

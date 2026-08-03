@@ -426,6 +426,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     outputAssertion: "escalation-idle",
   },
   {
+    id: "founder-escalation-stale-recheck-cron",
+    kind: "cron",
+    owner: "cs",
+    label: "Founder-escalation stale re-check",
+    description: "Hourly sweep of founder-escalated tickets that have gone quiet for 48h while the customer keeps writing — re-enqueues one cs-director-call so June re-reads with fresh state, capped at 2 re-checks per ticket (a-founder-escalated-customer-never-waits-in-silence Phase 2).",
+    expectedCadence: "hourly (45 * * * *)",
+    livenessWindowMs: 2 * HOUR,
+  },
+  {
     id: "spec-test-cron",
     kind: "cron",
     owner: "platform",
