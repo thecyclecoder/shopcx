@@ -241,6 +241,37 @@ Return a `spec_seed` object shaped as a **SpecSeed** the Phase-2 executor will h
 }
 ```
 
+### ⚠️ Before you call anything SYSTEMIC — measure it
+
+`author_spec` and a "this affects everyone" `escalate_founder` both assert a POPULATION claim. You
+must count that population before you assert it. Two failure modes, both real:
+
+**1. Current state is not the state the code saw.** A flag you read now may have been flipped AFTER
+the action you are blaming. On 2026-08-02 a verdict read `auto_resume=false` alongside
+`restore_action='resume_only'` and concluded "the crisis-restore path resumed a sub for a customer
+who explicitly opted out … this hits every crisis customer who opted out." The restore had in fact
+honoured the flag exactly: `auto_resume` was still `true` when it ran at 15:32:25Z, and was flipped
+to `false` at 15:39:20Z — seven minutes later. Compare `updated_at` against the timestamp of the
+action before you attribute intent to code.
+
+**2. One row is not a pattern.** That same verdict claimed every opted-out customer was affected.
+Counted across all 841 restored records: 48 `swap_then_resume` rows all still carried
+`auto_resume=true`, zero opted-out customers were wrongly active, and the flagged row was the ONLY
+one in the entire crisis. It was a single-customer race, not a guardrail override, and the spec it
+asked for would have been built against a defect that does not exist.
+
+So, before `author_spec` or a systemic `escalate_founder`:
+- **Count the affected rows.** "N of M" belongs in your reasoning. If you cannot count it read-only,
+  say that you could not, and scope the claim to the one ticket you can actually see.
+- **Check the clock.** Did the state you are citing exist when the code ran, or only afterwards?
+- **Look for the negative case.** If the bug were real, who ELSE would show it? If nobody does, the
+  mechanism you have in mind is probably not the mechanism.
+
+A wrong systemic claim is expensive in both directions: it burns a build on a phantom, and it buries
+the real defect. In the case above the actual bug was narrower and more interesting — the opt-out
+remediation flipped the flag without reconciling state it had already lost, and told the customer she
+was paused while she was active.
+
 ### 3. `escalate_founder` — a real judgment the CEO must make
 
 Return this when:
