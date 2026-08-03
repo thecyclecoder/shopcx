@@ -57,7 +57,7 @@ same wall.
 ```ts
 function classifyAppOwnerActionRequired(status: number, error: any): boolean
 ```
-**[[../specs/meta-graph-classify-app-owner-action-required-data-use-check]] Phase 1** — classifies a Graph response as APP_OWNER_ACTION_REQUIRED: a Meta-side gate (canonical example: the yearly "Data Use Checkup") that a HUMAN must clear from the Meta App Dashboard before the API will return data. Fires on HTTP 400 when the concatenated `message` + `error_user_title` + `error_user_message` (lowercased) contains one of Meta's canonical phrasings: "data use checkup", "api access disrupted", or "app is currently unavailable". Distinct from TRANSIENT (retry-able wobble) and PERMANENT (code-change escalation). Retrying an app-owner-action-required error is pointless: the only fix is a human logging into the Meta App Dashboard, so retrying floods logs without possibility of self-heal.
+**[[../specs/meta-graph-classify-app-owner-action-required-data-use-check]] Phase 1** — classifies a Graph response as APP_OWNER_ACTION_REQUIRED: a Meta-side gate (canonical example: the yearly "Data Use Checkup") that a HUMAN must clear from the Meta App Dashboard before the API will return data. Fires on HTTP 400 when the concatenated `message` + `error_user_title` + `error_user_message` (lowercased) contains one of Meta's canonical phrasings: "data use checkup", "api access disrupted", "app is currently unavailable", or "api access blocked". Distinct from TRANSIENT (retry-able wobble) and PERMANENT (code-change escalation). Retrying an app-owner-action-required error is pointless: the only fix is a human logging into the Meta App Dashboard, so retrying floods logs without possibility of self-heal.
 
 ### `graphError` — function
 
