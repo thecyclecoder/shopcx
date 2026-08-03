@@ -38,6 +38,7 @@ import {
   buildAuthorSpecInput,
   buildRemedySonnetDecision,
   canOfferOneTapApproval,
+  composeFounderEscalationAck,
   extractRemedyCustomerMessage,
   extractRemedyOrderRefFromStep,
   planAuthorSpec,
@@ -1652,4 +1653,456 @@ test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled i
   assert.equal(ref!.orderNumber, "SC135494");
   assert.equal(ref!.shopifyOrderId, null);
   assert.equal(ref!.key, "SC135494");
+});
+
+// ── Phase 1 (a-founder-escalated-customer-never-waits-in-silence) — customer acknowledgement ─────
+//
+// The escalate_founder path must ALWAYS deliver one honest acknowledgement to the customer, written
+// as Suzie continuing to help — no handoff language, no timeframe, naming the specific concern. The
+// three worst founder-lane waits on record (232h, 75h, 46h) were all silence — the routing was
+// right; only the customer's experience was wrong.
+
+test("composeFounderEscalationAck — subject-scoped ack in Suzie's voice with no handoff language", () => {
+  const body = composeFounderEscalationAck({ subject: "My subscription renewed twice this month" });
+  // Names the specific thing (the customer's own subject) — the "person who read your note" test.
+  assert.match(body, /My subscription renewed twice this month/);
+  // First-person Suzie voice, signed off.
+  assert.match(body, /I want to make sure I get this right for you/);
+  assert.ok(body.trim().endsWith("Suzie"), `expected Suzie sign-off, got: ${body}`);
+  // NO handoff language — the customer must not learn an escalation happened. These are the
+  // Phase-3 pin words too; asserting here means a regression on the composer's phrasing fails
+  // Phase 1's own suite as well.
+  for (const banned of [
+    /escalat/i,
+    /\bhuman\b/i,
+    /\bmanager\b/i,
+    /\bsupervisor\b/i,
+    /another team/i,
+    /higher tier/i,
+    /passed to/i,
+    /forwarded to/i,
+    /transferr?ed/i,
+    /team member/i,
+  ]) {
+    assert.doesNotMatch(body, banned, `ack contains banned handoff phrase: ${String(banned)}`);
+  }
+  // NO timeframe — the honest answer on this lane is often days; any number quoted here is wrong.
+  for (const banned of [/shortly/i, /24 hours/i, /as soon as possible/i, /within \d/i, /tomorrow/i, /\btoday\b/i]) {
+    assert.doesNotMatch(body, banned, `ack contains timeframe: ${String(banned)}`);
+  }
+});
+
+test("composeFounderEscalationAck — strips Re:/Fwd: subject prefixes so the sentence reads naturally", () => {
+  const body = composeFounderEscalationAck({ subject: "Re: Fwd: Order SC131607 refund" });
+  assert.doesNotMatch(body, /Re:/i);
+  assert.doesNotMatch(body, /Fwd:/i);
+  assert.match(body, /Order SC131607 refund/);
+});
+
+test("composeFounderEscalationAck — a null / blank subject falls back to a non-generic phrasing", () => {
+  const bodyNull = composeFounderEscalationAck({ subject: null });
+  const bodyBlank = composeFounderEscalationAck({ subject: "   " });
+  for (const body of [bodyNull, bodyBlank]) {
+    assert.match(body, /what you've written in/);
+    assert.ok(body.trim().endsWith("Suzie"));
+  }
+});
+
+test("Phase 1 — escalate_founder delivers the acknowledgement via deliverMessage when no partial remedy runs", async () => {
+  // A verdict with only `recommended_remedy` (a human suggestion for the CEO) and NO in-leash
+  // `remedy` — the exact shape of every historical founder escalation on record. Before this spec,
+  // handleEscalateFounder returned without messaging on this path — the customer heard nothing at
+  // all. After: the ack goes out via deps.deliverMessage.
+  const admin = stubAdminMulti({
+    agent_jobs: {
+      data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1", triage_run_id: "run-1" }) },
+    },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: Array<{ ticketId: string; channel: string; body: string; sandbox: boolean }> = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => {
+        throw new Error("runExecutor must not fire when the verdict carries no remedy");
+      },
+      deliverMessage: async (_admin, _ws, ticketId, channel, body, sandbox) => {
+        deliveries.push({ ticketId, channel, body, sandbox });
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Grandfathered price lock on a $26.89 overcharge needs the CEO's ruling.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore the $33.01 grandfathered price before next renewal" },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.handler, "escalate_founder");
+  // ONE delivery — not zero, not two.
+  assert.equal(deliveries.length, 1, `expected exactly one delivery, got ${deliveries.length}`);
+  assert.equal(deliveries[0].ticketId, "ticket-1");
+  assert.equal(deliveries[0].channel, "email");
+  // The delivered body is the ack, subject-scoped, signed Suzie, no handoff language.
+  assert.match(deliveries[0].body, /Refund my second bag/);
+  assert.match(deliveries[0].body, /Suzie$/);
+  assert.doesNotMatch(deliveries[0].body, /escalat/i);
+});
+
+// ── Phase 2 (a-founder-escalated-customer-never-waits-in-silence) — recheck-aware ack variants ───
+//
+// "Never the same text twice" — a stale re-check (48h after the initial escalation, customer still
+// writing) sends a DIFFERENT acknowledgement so the reader doesn't hear a canned reply on a repeat
+// pass. Three variants (initial + two rechecks) match the FOUNDER_RECHECK_CAP = 2 hard cap; beyond
+// that the sweep does not enqueue a new job, so no fourth variant is needed.
+
+test("Phase 2 — composeFounderEscalationAck produces three DISTINCT bodies across recheckIndex 0/1/2", () => {
+  const bodies = [0, 1, 2].map((i) => composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: i }));
+  // All three must differ from each other — this is the "never the same text twice" rule.
+  assert.notEqual(bodies[0], bodies[1], "recheckIndex 0 vs 1 must differ");
+  assert.notEqual(bodies[1], bodies[2], "recheckIndex 1 vs 2 must differ");
+  assert.notEqual(bodies[0], bodies[2], "recheckIndex 0 vs 2 must differ");
+});
+
+test("Phase 2 — every recheck variant obeys the voice invariants (no handoff, no timeframe, subject-scoped, Suzie sign-off)", () => {
+  for (const idx of [0, 1, 2]) {
+    const body = composeFounderEscalationAck({ subject: "My subscription renewed twice this month", recheckIndex: idx });
+    assert.match(body, /My subscription renewed twice this month/, `variant ${idx} must name the topic`);
+    assert.ok(body.trim().endsWith("Suzie"), `variant ${idx} must sign off Suzie`);
+    for (const banned of [
+      /escalat/i,
+      /\bhuman\b/i,
+      /\bmanager\b/i,
+      /\bsupervisor\b/i,
+      /another team/i,
+      /higher tier/i,
+      /passed to/i,
+      /forwarded to/i,
+      /transferr?ed/i,
+      /team member/i,
+    ]) {
+      assert.doesNotMatch(body, banned, `variant ${idx} contains banned handoff phrase: ${String(banned)}`);
+    }
+    for (const banned of [/shortly/i, /24 hours/i, /as soon as possible/i, /within \d/i, /tomorrow/i, /\btoday\b/i]) {
+      assert.doesNotMatch(body, banned, `variant ${idx} contains timeframe: ${String(banned)}`);
+    }
+  }
+});
+
+test("Phase 2 — recheckIndex clamps to [0..2]: an out-of-range index reuses the closest variant (no crash, no undefined body)", () => {
+  const negative = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: -5 });
+  const initial = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 0 });
+  assert.equal(negative, initial, "negative recheckIndex clamps to 0");
+
+  const overCap = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 99 });
+  const secondRecheck = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 2 });
+  assert.equal(overCap, secondRecheck, "recheckIndex > 2 clamps to 2 (the sweep's cap)");
+});
+
+test("Phase 2 — a recheck job (instructions.recheck_index=1) delivers the SECOND variant, not the initial ack", async () => {
+  // The Phase-2 sweep enqueues cs-director-call jobs carrying `recheck_index` in
+  // `agent_jobs.instructions`. When June's re-review still says escalate_founder, the ack must
+  // switch to the second variant so the customer doesn't hear the same greeting twice.
+  const rechieckInstructions = JSON.stringify({ ticket_id: "ticket-1", triage_run_id: "run-1", recheck: true, recheck_index: 1 });
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: rechieckInstructions } },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Still a founder call after 48h.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore price" },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-2", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(deliveries.length, 1, "exactly one ack delivered on recheck");
+  const initialAck = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 0 });
+  const secondAck = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 1 });
+  assert.notEqual(deliveries[0], initialAck, "must NOT re-send the initial ack on a recheck");
+  assert.equal(deliveries[0], secondAck, "recheck delivers the second variant");
+});
+
+test("Phase 1 — escalate_founder skips the ack cleanly when the ticket_id cannot be resolved", async () => {
+  // The linkage-null path already returns ok:true with a null linkage; the ack must not fire when
+  // we have no ticket to deliver on, and the escalation itself must still succeed (the runner's
+  // audit row is the primary trail).
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: "{ not valid json" } },
+  });
+  let deliveryCalled = false;
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => null,
+      loadWorkspaceSandbox: async () => false,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async () => {
+        deliveryCalled = true;
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Judgment call.",
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.handler, "escalate_founder");
+  assert.equal(result.linkage_ticket_id, null);
+  assert.equal(deliveryCalled, false, "no delivery when ticket_id is unresolvable");
+});
+
+// ── Phase 3 (a-founder-escalated-customer-never-waits-in-silence) — pin the voice rule ──────────
+//
+// This suite is the DURABLE PIN for Phase 1's voice constraint (spec: "the voice constraint is the
+// part most likely to erode. A future edit that adds 'your ticket has been escalated to our team'
+// would technically satisfy Phase 1 and quietly break the thing the CEO actually asked for").
+//
+// The exact 8-word banned list below is the spec's own list — DO NOT tighten it silently and DO
+// NOT loosen it. A ninth entry belongs in the spec first, then here. The "no timeframe" and
+// "sent exactly once per escalation" pins encode the two other Phase-1 invariants the spec asks
+// Phase-3 to lock down.
+
+/** The 8 exact banned substrings from the spec (docs/brain/specs/a-founder-escalated-customer-
+ * never-waits-in-silence.md § Phase 3 verification bullet). Case-insensitive. Substring-shaped so
+ * "escalat" catches "escalated" / "escalating" / "escalation" in one pin. */
+const PHASE_3_SPEC_BANNED_ACK_SUBSTRINGS = [
+  "escalat",
+  "human",
+  "manager",
+  "supervisor",
+  "another team",
+  "higher tier",
+  "passed to",
+  "forwarded to",
+] as const;
+
+/** Timeframe-shaped words the spec forbids ("no shortly / 24 hours / as soon as possible"). Not
+ * enumerated in the Phase-3 banned list but explicitly named in the Phase-1 body — pinning them
+ * here catches a future edit that would insert a "we'll be back within an hour" pattern. */
+const PHASE_3_BANNED_TIMEFRAME_PATTERNS = [
+  /shortly/i,
+  /24 hours/i,
+  /as soon as possible/i,
+  /within \d/i,
+  /\btomorrow\b/i,
+  /\btoday\b/i,
+] as const;
+
+test("Phase 3 pin — composeFounderEscalationAck never contains ANY of the spec's 8 banned handoff substrings across every variant", () => {
+  const subject = "Refund my second bag — SC131607";
+  for (const idx of [0, 1, 2]) {
+    const body = composeFounderEscalationAck({ subject, recheckIndex: idx });
+    const lower = body.toLowerCase();
+    for (const banned of PHASE_3_SPEC_BANNED_ACK_SUBSTRINGS) {
+      assert.equal(
+        lower.includes(banned),
+        false,
+        `variant ${idx} contains spec-banned substring "${banned}" — internal routing must be invisible to the customer. Full body:\n${body}`,
+      );
+    }
+  }
+});
+
+test("Phase 3 pin — composeFounderEscalationAck never quotes a timeframe across every variant", () => {
+  const subject = "Refund my second bag";
+  for (const idx of [0, 1, 2]) {
+    const body = composeFounderEscalationAck({ subject, recheckIndex: idx });
+    for (const pattern of PHASE_3_BANNED_TIMEFRAME_PATTERNS) {
+      assert.doesNotMatch(body, pattern, `variant ${idx} carries a timeframe ${String(pattern)} — the honest answer on this lane is often days, any number quoted here is wrong. Full body:\n${body}`);
+    }
+  }
+});
+
+test("Phase 3 pin — a fallback subject (null / blank) still contains none of the banned substrings and no timeframe", () => {
+  for (const subject of [null, "", "   ", "Re: Fwd:"] as (string | null)[]) {
+    for (const idx of [0, 1, 2]) {
+      const body = composeFounderEscalationAck({ subject, recheckIndex: idx });
+      const lower = body.toLowerCase();
+      for (const banned of PHASE_3_SPEC_BANNED_ACK_SUBSTRINGS) {
+        assert.equal(lower.includes(banned), false, `fallback subject=${JSON.stringify(subject)} variant ${idx} contains banned "${banned}"`);
+      }
+      for (const pattern of PHASE_3_BANNED_TIMEFRAME_PATTERNS) {
+        assert.doesNotMatch(body, pattern, `fallback subject=${JSON.stringify(subject)} variant ${idx} carries timeframe ${String(pattern)}`);
+      }
+    }
+  }
+});
+
+/**
+ * A marker-aware stub for the Phase-3 "sent exactly once" pin. Extends stubAdminMulti with:
+ *   - persisted `ticket_messages` inserts across calls
+ *   - a chained `.eq().eq().like().limit()` reader that returns matching persisted rows
+ *
+ * The rest of the query shapes fall through to the base stub — the two extended surfaces are the
+ * only ones the ack idempotency path (`ackAlreadyDeliveredForJob`, `recordAckDeliveredMarker`)
+ * touches. Purpose-built for this suite so a general-purpose stub extension is not needed.
+ */
+function stubAdminWithMarkerMemory(tableRows: Record<string, { data: unknown }>): {
+  admin: Admin;
+  insertedTicketMessages: Array<{ body: string; visibility?: string; ticket_id?: string }>;
+} {
+  const insertedTicketMessages: Array<{ body: string; visibility?: string; ticket_id?: string }> = [];
+  const admin = {
+    from(table: string) {
+      return {
+        select(_cols: string) {
+          const filters: Array<{ col: string; val: unknown; op: "eq" | "like" }> = [];
+          const chain: {
+            eq: (col: string, val: unknown) => typeof chain;
+            like: (col: string, val: unknown) => typeof chain;
+            limit: (n: number) => Promise<{ data: unknown[] }>;
+            maybeSingle: () => Promise<{ data: unknown }>;
+            single: () => Promise<{ data: unknown }>;
+          } = {
+            eq(col, val) {
+              filters.push({ col, val, op: "eq" });
+              return chain;
+            },
+            like(col, val) {
+              filters.push({ col, val, op: "like" });
+              return chain;
+            },
+            async limit(_n: number) {
+              // Only the ticket_messages marker query uses this chain — filter persisted rows.
+              if (table !== "ticket_messages") return { data: [] };
+              const matches = insertedTicketMessages.filter((row) => {
+                for (const f of filters) {
+                  const rowVal = (row as unknown as Record<string, unknown>)[f.col];
+                  if (f.op === "eq") {
+                    if (rowVal !== f.val) return false;
+                  } else if (f.op === "like") {
+                    // supabase `.like(col, "prefix%")` — translate the % suffix into a startsWith.
+                    const pattern = String(f.val);
+                    const stripped = pattern.endsWith("%") ? pattern.slice(0, -1) : pattern;
+                    if (typeof rowVal !== "string" || !rowVal.startsWith(stripped)) return false;
+                  }
+                }
+                return true;
+              });
+              return { data: matches };
+            },
+            async maybeSingle() {
+              return tableRows[table] ?? { data: null };
+            },
+            async single() {
+              return tableRows[table] ?? { data: null };
+            },
+          };
+          return chain;
+        },
+        insert(row: unknown) {
+          if (table === "ticket_messages" && row && typeof row === "object") {
+            insertedTicketMessages.push(row as { body: string; visibility?: string; ticket_id?: string });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+    },
+  } as unknown as Admin;
+  return { admin, insertedTicketMessages };
+}
+
+test("Phase 3 pin — the ack is sent EXACTLY ONCE per escalation, even when the handler is invoked twice on the same job", async () => {
+  // Simulates the retry path (the runner claims a needs_input row after a session blip and re-
+  // dispatches the same job_id). The marker mechanism (`ackAlreadyDeliveredForJob` +
+  // `recordAckDeliveredMarker`) must short-circuit the second call so the customer never gets
+  // a duplicate acknowledgement — the "sent exactly once per escalation" verification bullet.
+  const { admin, insertedTicketMessages } = stubAdminWithMarkerMemory({
+    agent_jobs: {
+      data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1", triage_run_id: "run-1" }) },
+    },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Judgment call the CEO owns.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore price" },
+  };
+
+  // First invocation — ack fires + marker is persisted.
+  const first = await applyBoxCsDirectorCall(admin, "job-idempotent", verdict, deps);
+  assert.equal(first.ok, true);
+  assert.equal(deliveries.length, 1, "first invocation delivers the ack exactly once");
+  const markersAfterFirst = insertedTicketMessages.filter((r) =>
+    r.body.startsWith("[cs-director/escalate_founder/ack] job=job-idempotent"),
+  );
+  assert.equal(markersAfterFirst.length, 1, "marker note persisted after first delivery");
+
+  // Second invocation of the SAME job_id — marker check must short-circuit; no second delivery.
+  const second = await applyBoxCsDirectorCall(admin, "job-idempotent", verdict, deps);
+  assert.equal(second.ok, true);
+  assert.equal(deliveries.length, 1, "second invocation MUST NOT send a duplicate ack (spec: sent exactly once per escalation)");
+  const markersAfterSecond = insertedTicketMessages.filter((r) =>
+    r.body.startsWith("[cs-director/escalate_founder/ack] job=job-idempotent"),
+  );
+  assert.equal(markersAfterSecond.length, 1, "no duplicate marker note either");
+});
+
+test("Phase 3 pin — a DIFFERENT job_id on the same ticket (Phase-2 recheck) IS allowed to send a second, different ack", async () => {
+  // The Phase-2 stale-recheck sweep enqueues a fresh cs-director-call with a new job_id — that
+  // path must be able to send its own recheck-variant ack without tripping the idempotency guard,
+  // per the spec ("send the customer a second, different acknowledgement — never the same text
+  // twice"). The marker namespace is job-scoped precisely to preserve this.
+  const { admin } = stubAdminWithMarkerMemory({
+    // Seed the initial ack marker so ackAlreadyDeliveredForJob returns true for job-initial
+    // — but for the recheck job (different id), the query returns empty.
+    agent_jobs: {
+      data: {
+        ...CS_JOB_ROW,
+        instructions: JSON.stringify({ ticket_id: "ticket-1", recheck: true, recheck_index: 1 }),
+      },
+    },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Still a founder call after 48h.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore price" },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-recheck-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(deliveries.length, 1, "recheck job (fresh job_id) delivers its own ack");
+  // And crucially it's the SECOND-variant text (recheck_index=1), NOT the initial variant.
+  const initial = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 0 });
+  const second = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 1 });
+  assert.notEqual(deliveries[0], initial, "recheck must not re-send the initial variant");
+  assert.equal(deliveries[0], second, "recheck delivers the second variant");
 });

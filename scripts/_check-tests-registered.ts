@@ -236,7 +236,6 @@ const GRANDFATHER_ALLOWLIST_2026_07_27: ReadonlySet<string> = new Set([
   "src/lib/cs-director-playbook-tier-eligibility.test.ts",
   "src/lib/cs-director-ticket-transition.test.ts",
   "src/lib/cs-director-verdict-note.test.ts",
-  "src/lib/cs-director.test.ts",
   "src/lib/customer-shipping-address.audit.test.ts",
   "src/lib/customer-shipping-address.test.ts",
   "src/lib/cx-agent-sdk.test.ts",
