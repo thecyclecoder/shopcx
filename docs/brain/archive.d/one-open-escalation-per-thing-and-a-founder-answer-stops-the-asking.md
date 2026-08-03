@@ -1,0 +1,1 @@
+- **One open card per escalated thing, and a founder answer stops the asking** · verified 2026-08-03 · → [[../lifecycles/ticket-lifecycle]]
