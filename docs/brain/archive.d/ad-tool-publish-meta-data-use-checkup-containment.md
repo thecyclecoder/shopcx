@@ -1,0 +1,1 @@
+- **Contain Meta Data Use Checkup blocks in ad publishing** · verified 2026-08-03 · → [[../inngest/ad-tool]]

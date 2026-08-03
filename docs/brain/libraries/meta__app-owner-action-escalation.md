@@ -119,6 +119,12 @@ Data Use Checkup — surfaces once per day, not once per retry).
 - [[../inngest/media-buyer-all-customers-refresh]] — installs the handler; wraps
   each per-group (workspace, audience) refresh in `runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () => {...})`
   so a Data Use Checkup 400 surfaces one deduped card per workspace and other workspaces' refreshes continue.
+- [[../inngest/ad-tool]] `ad-tool-publish-to-meta` — installs the handler; wraps
+  the entire publish flow in `runWithAppOwnerActionWorkspaceScope(workspace_id, async () => {...})`
+  so a Data Use Checkup 400 from any Graph call (uploadAdVideo, createAdCreative, createAd, etc.)
+  surfaces one deduped CEO card scoped to THIS invocation's workspace. When a catch sees
+  `metaClass === 'app_owner_action_required'`, the publisher fails the job gracefully with reason
+  `meta_app_owner_action_required`, clears `publish_active`, and returns normally (no rethrow).
 - [[../inngest/meta-performance]] `meta-iteration-run` (Phase 5) — calls
   `escalateAppOwnerActionRequired` directly from the catch block with
   `workspaceId` from `event.data.workspace_id` (explicit argument, not a scope).
