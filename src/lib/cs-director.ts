@@ -1397,6 +1397,33 @@ async function resolveLinkageFromJob(
   return parseLinkageFromInstructions((jobRow as { instructions: string | null }).instructions);
 }
 
+/**
+ * Read the `recheck_index` field the Phase-2 stale-recheck sweep stamps on
+ * `agent_jobs.instructions` (see src/lib/inngest/founder-escalation-stale-recheck.ts
+ * `buildFounderRecheckInstructions`). Returns 0 when the field is absent — the initial June
+ * review — so `composeFounderEscalationAck` picks its first variant. Returns 0 on a resolve blip
+ * too (the spec's fallback is "still acknowledge, just with the first-invocation text" — a
+ * DB read failing must NEVER be why the customer hears nothing).
+ */
+async function resolveRecheckIndexFromJob(admin: Admin, jobId: string): Promise<number> {
+  try {
+    const { data: jobRow } = await admin
+      .from("agent_jobs")
+      .select("instructions")
+      .eq("id", jobId)
+      .maybeSingle();
+    if (!jobRow) return 0;
+    const inst = (jobRow as { instructions: string | null }).instructions;
+    if (!inst) return 0;
+    const parsed = JSON.parse(inst) as { recheck_index?: unknown };
+    const raw = parsed && typeof parsed.recheck_index === "number" ? parsed.recheck_index : 0;
+    if (!Number.isFinite(raw) || raw < 0) return 0;
+    return Math.floor(raw);
+  } catch {
+    return 0;
+  }
+}
+
 // ── Phase 3 handlers ───────────────────────────────────────────────────────────────────────────
 
 /**
@@ -1824,7 +1851,8 @@ const ESCALATE_FOUNDER_ACK_MARKER_PREFIX = "[cs-director/escalate_founder/ack]";
 /**
  * Compose the honest, no-handoff-language acknowledgement the customer sees when their ticket
  * has just been escalated to the founder (spec: a-founder-escalated-customer-never-waits-in-
- * silence Phase 1 — "acknowledge, in Suzie's voice, with no handoff language").
+ * silence Phase 1 — "acknowledge, in Suzie's voice, with no handoff language" · Phase 2 — "send
+ * the customer a second, different acknowledgement — never the same text twice").
  *
  * Voice invariants — enforced verbatim by Phase 3's pin test but ALSO the reason this function
  * is pure/exported (so a future edit can be caught by the pin instead of shipping):
@@ -1839,12 +1867,34 @@ const ESCALATE_FOUNDER_ACK_MARKER_PREFIX = "[cs-director/escalate_founder/ack]";
  *  - Suzie's voice — first person, continuing to own it. Per [[../customer-voice]]: plain text,
  *    at most two sentences per paragraph, signed "Suzie". No re-greet (this is always turn N>1
  *    on a ticket already in an escalation cycle).
- *  - Deterministic for a given `subject`, so the pin test can assert the exact output shape.
+ *  - Deterministic for a given `(subject, recheckIndex)`, so the pin test can assert the exact
+ *    output shape.
+ *
+ * `recheckIndex` (default 0) selects among distinct phrasings so a stale re-check (Phase 2)
+ * never re-sends the SAME text — the spec measured 232h / 75h / 46h waits where Susan Bellamy
+ * sent four more messages into silence. `0` is the initial escalation. `1` is the first stale
+ * re-check (48h later, customer wrote again). `2` is the second re-check (the cap). Beyond the
+ * cap the cron does not enqueue a new job, so we never need a fourth variant.
  */
-export function composeFounderEscalationAck(opts: { subject: string | null }): string {
+export function composeFounderEscalationAck(opts: { subject: string | null; recheckIndex?: number }): string {
   const topic = normalizeAckTopic(opts.subject);
-  return `I want to make sure I get this right for you, so I'm taking a proper look at ${topic} before I come back to you.\n\nSuzie`;
+  const idx = Math.max(0, Math.min(2, Math.floor(opts.recheckIndex ?? 0)));
+  const lines = FOUNDER_ACK_VARIANTS[idx];
+  return `${lines.body.replace("{topic}", topic)}\n\nSuzie`;
 }
+
+/**
+ * Three distinct acknowledgement bodies, one per recheckIndex position. The wording changes
+ * substantially between variants (opening verb, framing) so no two consecutive acks read as the
+ * same text — that's the Phase-2 "never the same text twice" rule. Every variant is written as
+ * Suzie continuing to own it, contains no handoff / manager / team / timeframe language, and
+ * names the specific topic. The Phase-3 pin test asserts these invariants across ALL three.
+ */
+const FOUNDER_ACK_VARIANTS: ReadonlyArray<{ body: string }> = [
+  { body: "I want to make sure I get this right for you, so I'm taking a proper look at {topic} before I come back to you." },
+  { body: "I haven't forgotten about you — I'm still working through {topic} carefully so my answer is the right one, and I'll write again as soon as I have it." },
+  { body: "I know you've been waiting on me, and I owe you an honest update: {topic} needs a call I want to get exactly right, and I'm still on it. I'll be back with you as soon as I can say something worth saying." },
+];
 
 function normalizeAckTopic(subject: string | null | undefined): string {
   if (!subject) return "what you've written in";
@@ -1981,7 +2031,13 @@ async function handleEscalateFounder(
     // A resolve miss on the ticket / customer / channel drops the ack silently — the escalation
     // itself still succeeds; a synthetic dispatch without a ticket_id is the same shape drift
     // the linkage resolver already tolerates below.
+    //
+    // Phase 2: read `instructions.recheck_index` (stamped by the stale-founder-escalation-recheck
+    // sweep — src/lib/inngest/founder-escalation-stale-recheck.ts) and thread it into the ack
+    // composer so a second/third invocation on the same ticket sends a DIFFERENT text rather
+    // than the same greeting twice. Zero / null means this is the initial escalation.
     const linkageEarly = await resolveLinkageFromJob(admin, jobId);
+    const recheckIndex = await resolveRecheckIndexFromJob(admin, jobId);
     let ackText: string | null = null;
     let ackFacts: Awaited<ReturnType<typeof loadAckFacts>> = null;
     let ackAlreadySent = false;
@@ -1990,7 +2046,7 @@ async function handleEscalateFounder(
       if (!ackAlreadySent) {
         ackFacts = await loadAckFacts(admin, workspaceId, linkageEarly.ticketId);
         if (ackFacts) {
-          ackText = composeFounderEscalationAck({ subject: ackFacts.subject });
+          ackText = composeFounderEscalationAck({ subject: ackFacts.subject, recheckIndex });
         } else {
           console.warn(`${tag} escalate_founder: cannot resolve ack facts for ticket ${linkageEarly.ticketId.slice(0, 8)} — skipping acknowledgement`);
         }

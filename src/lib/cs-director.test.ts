@@ -1751,6 +1751,91 @@ test("Phase 1 — escalate_founder delivers the acknowledgement via deliverMessa
   assert.doesNotMatch(deliveries[0].body, /escalat/i);
 });
 
+// ── Phase 2 (a-founder-escalated-customer-never-waits-in-silence) — recheck-aware ack variants ───
+//
+// "Never the same text twice" — a stale re-check (48h after the initial escalation, customer still
+// writing) sends a DIFFERENT acknowledgement so the reader doesn't hear a canned reply on a repeat
+// pass. Three variants (initial + two rechecks) match the FOUNDER_RECHECK_CAP = 2 hard cap; beyond
+// that the sweep does not enqueue a new job, so no fourth variant is needed.
+
+test("Phase 2 — composeFounderEscalationAck produces three DISTINCT bodies across recheckIndex 0/1/2", () => {
+  const bodies = [0, 1, 2].map((i) => composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: i }));
+  // All three must differ from each other — this is the "never the same text twice" rule.
+  assert.notEqual(bodies[0], bodies[1], "recheckIndex 0 vs 1 must differ");
+  assert.notEqual(bodies[1], bodies[2], "recheckIndex 1 vs 2 must differ");
+  assert.notEqual(bodies[0], bodies[2], "recheckIndex 0 vs 2 must differ");
+});
+
+test("Phase 2 — every recheck variant obeys the voice invariants (no handoff, no timeframe, subject-scoped, Suzie sign-off)", () => {
+  for (const idx of [0, 1, 2]) {
+    const body = composeFounderEscalationAck({ subject: "My subscription renewed twice this month", recheckIndex: idx });
+    assert.match(body, /My subscription renewed twice this month/, `variant ${idx} must name the topic`);
+    assert.ok(body.trim().endsWith("Suzie"), `variant ${idx} must sign off Suzie`);
+    for (const banned of [
+      /escalat/i,
+      /\bhuman\b/i,
+      /\bmanager\b/i,
+      /\bsupervisor\b/i,
+      /another team/i,
+      /higher tier/i,
+      /passed to/i,
+      /forwarded to/i,
+      /transferr?ed/i,
+      /team member/i,
+    ]) {
+      assert.doesNotMatch(body, banned, `variant ${idx} contains banned handoff phrase: ${String(banned)}`);
+    }
+    for (const banned of [/shortly/i, /24 hours/i, /as soon as possible/i, /within \d/i, /tomorrow/i, /\btoday\b/i]) {
+      assert.doesNotMatch(body, banned, `variant ${idx} contains timeframe: ${String(banned)}`);
+    }
+  }
+});
+
+test("Phase 2 — recheckIndex clamps to [0..2]: an out-of-range index reuses the closest variant (no crash, no undefined body)", () => {
+  const negative = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: -5 });
+  const initial = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 0 });
+  assert.equal(negative, initial, "negative recheckIndex clamps to 0");
+
+  const overCap = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 99 });
+  const secondRecheck = composeFounderEscalationAck({ subject: "Order refund", recheckIndex: 2 });
+  assert.equal(overCap, secondRecheck, "recheckIndex > 2 clamps to 2 (the sweep's cap)");
+});
+
+test("Phase 2 — a recheck job (instructions.recheck_index=1) delivers the SECOND variant, not the initial ack", async () => {
+  // The Phase-2 sweep enqueues cs-director-call jobs carrying `recheck_index` in
+  // `agent_jobs.instructions`. When June's re-review still says escalate_founder, the ack must
+  // switch to the second variant so the customer doesn't hear the same greeting twice.
+  const rechieckInstructions = JSON.stringify({ ticket_id: "ticket-1", triage_run_id: "run-1", recheck: true, recheck_index: 1 });
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: rechieckInstructions } },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Still a founder call after 48h.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore price" },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-2", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(deliveries.length, 1, "exactly one ack delivered on recheck");
+  const initialAck = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 0 });
+  const secondAck = composeFounderEscalationAck({ subject: "Refund my second bag", recheckIndex: 1 });
+  assert.notEqual(deliveries[0], initialAck, "must NOT re-send the initial ack on a recheck");
+  assert.equal(deliveries[0], secondAck, "recheck delivers the second variant");
+});
+
 test("Phase 1 — escalate_founder skips the ack cleanly when the ticket_id cannot be resolved", async () => {
   // The linkage-null path already returns ok:true with a null linkage; the ack must not fire when
   // we have no ticket to deliver on, and the escalation itself must still succeed (the runner's
