@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A customer escalated to the founder still hears back** · verified 2026-08-03 · → [[../libraries/cs-director]]
+- **A subscription mutation must prove it happened — HTTP 200 is not success** · verified 2026-08-03 · → [[../libraries/subscription-items]] & [[../integrations/appstle]]
+- **Contain Meta Data Use Checkup blocks in ad publishing** · verified 2026-08-03 · → [[../inngest/ad-tool]]
+- **A build shouldn't park because two specs both appended a line** · verified 2026-08-03 · → [[../libraries/build-lane-reconcile]]
+- **Downgrade appstleUpdateNextBillingDate billing-lock 400 to warn (mirror appstleAttemptBilling)** · verified 2026-08-03 · → [[../libraries/appstle]]
+- **Close the two holes that let a guessed-name grep check strand a correct build** · verified 2026-08-03 · → [[../libraries/spec-phase-checks-table]]
+- **Mario's eligible-never-enqueued source skips specs the director already dismissed from initiation** · verified 2026-08-03 · → [[../lifecycles/mario-pipeline-plumbing]]
+- **Policies get an SDK, and the customer-facing text can't contradict the internal rule** · verified 2026-08-02 · → [[../tables/policies]], [[../libraries/policies]]
+- **An agent may trigger a price correction, but may not invent the number** · verified 2026-08-02 · → [[lifecycles/subscription-billing]]
+- **June can restore a grandfathered price herself** · verified 2026-08-02 · → [[../libraries/cs-director]]
+- **Classify Meta 'API access blocked' 400 as app-owner-action-required** · verified 2026-08-02 · → [[../libraries/meta__graph-retry]]
+- **metaSyncSpend must contain the Data Use Checkup class INSIDE step.run** · verified 2026-08-02 · → [[../inngest/meta-sync]]
+- **Replacement orders: enforce per-variant cap (4 units max)** · verified 2026-08-02 · → [[../libraries/replacement-order]]
+- **A variant swap must never change what the customer pays** · verified 2026-08-02 · → [[../lifecycles/crisis-campaign]]
 - **Scope Meta 'API access disrupted / Data Use Checkup' as human-blocked (warn, not error) on the today-sync cron** · verified 2026-08-01 · → [[../inngest/today-sync]]
 - **Fix ad-tool Meta owner-action escalation workspace scope isolation** · verified 2026-08-01 · → [[../libraries/meta__app-owner-action-escalation]]
 - **Wire the app-owner-action escalation + skip into the media-buyer all-customers refresh cron** · verified 2026-08-01 · → [[../inngest/media-buyer-all-customers-refresh]]
