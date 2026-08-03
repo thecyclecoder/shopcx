@@ -154,6 +154,34 @@ Every verdict CLOSES THE TICKET LOOP so a ruled-on ticket is never left in the `
 
 Same `visibility='internal'` / `author_type='system'` note mechanism the rest of the pipeline uses ([[ticket-analyzer]], [[improve-plan-executor]], [[escalation]]) so the entry renders in the ticket thread as a non-customer note.
 
+### Population claims must be counted before they are made
+
+A verdict that asserts "this affects everyone" — either `author_spec` or a systemic
+`escalate_founder` — is a POPULATION claim, and the ledger shows it can be wrong in a way that costs
+a build. Derived-from case, 2026-08-02 (ticket `5df20f78`, Laura Light):
+
+June ruled `escalate_founder` reading `auto_resume=false` alongside `restore_action='resume_only'`,
+and concluded the crisis-restore path "resumed a sub for a customer who explicitly opted out … this
+hits every crisis customer who opted out of auto-resume — a north-star violation, and it wants a
+spec." Two things were wrong with that:
+
+- **The clock.** `scripts/crisis-restore.ts:192` guards the resume on `r.auto_resume`; it cannot
+  resume a false row. `auto_resume` was still `true` at 15:32:25Z when the restore ran, and was
+  flipped to `false` at 15:39:20Z — seven minutes later. The row's `updated_at` proves the ordering.
+  Current state was read as the state the code saw.
+- **The population.** Counted across all 841 restored Mixed Berry records: 48 `swap_then_resume` rows
+  all still carried `auto_resume=true`, zero opted-out customers were wrongly active, and the flagged
+  row was the only one in the crisis showing the pattern. One row, not a class.
+
+The real defect was narrower: the opt-out remediation flipped the flag without reconciling state it
+had already lost, emailing the customer "paused and it stays that way" one second after the flag
+write, while her subscription had been active for seven minutes. She stayed active 38 hours.
+
+The rule this leaves behind, mirrored in the `cs-director-call` skill: count the affected rows and
+put "N of M" in the reasoning; check whether the cited state existed when the code ran; and look for
+the negative case — if the bug were real, who else would show it? Where a read-only session cannot
+count, say so and scope the claim to the one ticket actually in evidence.
+
 ### Escalate to founder → CEO card contract
 
 [[../specs/escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-recommendation]] pins the hard contract for the `escalate_founder` verdict — the derived-from ticket (June ruled `escalate_founder` on a real $26.89 grandfathered overcharge, no CEO notification was created, the escalation reached no one) proved the prior "black-swan or bust" routing swallowed the escalation:
