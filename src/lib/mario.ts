@@ -641,6 +641,36 @@ async function readEligibleNeverEnqueuedStalls(
 const MARIO_STUCK_QUEUED_BUILD_GRACE_MS = 45 * 60 * 1000;
 
 /**
+ * Pure decision predicate for the primary (timecard-threshold) source in
+ * [[evaluateStalledSpecs]]. Mirrors the SURFACING conjunction the loop applies at line ~1014:
+ *
+ *   (a) `listStalledCandidates(admin, { older_than_ms: sla_ms })` filters to candidates whose
+ *       last-event gap already exceeds the threshold's `sla_ms` (`gap_ms > sla_ms`).
+ *   (b) The evaluator then keeps ONLY the candidates whose `last_event_kind === from_event` —
+ *       any other last event belongs to a different threshold (or is unmapped).
+ *
+ * The composite decides whether this (candidate, threshold) tuple is surfaced as an overdue
+ * transition. Extracting it into a pure function makes the [[build-that-never-finishes-is-visible-
+ * to-mario]] Phase 3 regression pinnable without a stubbed Admin: a spec whose latest timecard
+ * event is `build_started` and whose gap is past SLA MUST be surfaced under the new
+ * `build_started → build_done` threshold, and MUST NOT be surfaced under the original
+ * `build_done → phase_shipped` threshold (the exact blind spot the spec calls out — a transition
+ * nobody measures is a transition nobody supervises).
+ *
+ * Kept side-effect-free; the I/O is in `evaluateStalledSpecs`.
+ */
+export function matchesMarioThresholdForOverdueTransition(input: {
+  lastEventKind: string;
+  fromEvent: string;
+  gapMs: number;
+  slaMs: number;
+}): boolean {
+  if (input.lastEventKind !== input.fromEvent) return false;
+  if (input.gapMs <= input.slaMs) return false;
+  return true;
+}
+
+/**
  * Pure decision predicate — is this build row the seventh-source's stuck-queued-unclaimed class?
  * Fanned out of `readStuckQueuedBuildStalls` so the exact "surface?" logic is unit-testable
  * without a stubbed Supabase client. Returns true ONLY when: (1) status is `queued` (a starved
@@ -1008,10 +1038,23 @@ export async function evaluateStalledSpecs(
     });
     for (const r of rows) {
       // The threshold's `from_event` is the opening side — only surface the
-      // candidate under this threshold when the LAST event equals `from_event`.
-      // A stalled candidate whose last event is anything else belongs to a
-      // different threshold (or is unmapped — handled by future thresholds).
-      if (r.last_event_kind !== t.from_event) continue;
+      // candidate under this threshold when the LAST event equals `from_event`
+      // AND its gap is past this threshold's SLA. Encoded as one pure predicate
+      // ([[matchesMarioThresholdForOverdueTransition]]) so the composite decision
+      // is unit-testable — the [[build-that-never-finishes-is-visible-to-mario]]
+      // Phase 3 pinning test uses the SAME predicate to prove a `build_started` /
+      // no-`build_done` spec is surfaced under the new threshold but NOT under
+      // the original build_done→phase_shipped threshold (the historical blind spot).
+      if (
+        !matchesMarioThresholdForOverdueTransition({
+          lastEventKind: r.last_event_kind,
+          fromEvent: t.from_event,
+          gapMs: r.gap_ms,
+          slaMs: t.sla_ms,
+        })
+      ) {
+        continue;
+      }
       const key = `${r.workspace_id}::${r.spec_slug}`;
       if (seen.has(key)) continue;
       seen.add(key);
