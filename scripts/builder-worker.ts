@@ -26343,7 +26343,7 @@ async function dispatchJob(job: Job) {
             try { conflictedContent = readFileSync(filePath, "utf8"); }
             catch (e) {
               allOk = false;
-              unionNotes.push({ file: relPath, reason: `read failed: ${e instanceof Error ? e.message : String(e)}`, ok: false });
+              unionNotes.push({ file: relPath, reason: `read failed: ${errText(e)}`, ok: false });
               break;
             }
             const verdict = classifyAdditiveOnlyConflict({ path: relPath, content: conflictedContent });
@@ -26386,7 +26386,7 @@ async function dispatchJob(job: Job) {
             try { writeFileSync(filePath, verdict.unionContent, "utf8"); }
             catch (e) {
               allOk = false;
-              unionNotes.push({ file: relPath, reason: `write failed: ${e instanceof Error ? e.message : String(e)}`, ok: false });
+              unionNotes.push({ file: relPath, reason: `write failed: ${errText(e)}`, ok: false });
               break;
             }
             const gitAdd = sh("git", ["add", "--", relPath], { cwd: wt });
