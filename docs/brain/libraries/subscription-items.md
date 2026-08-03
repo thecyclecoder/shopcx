@@ -149,7 +149,7 @@ Pure predicate — does the live Appstle contract's `lines.nodes` snapshot satis
 
 A bounded settle window (`APPSTLE_MUTATION_VERIFY_ATTEMPTS`, default 3, and `APPSTLE_MUTATION_VERIFY_DELAY_MS`, default 400ms — worst-case ≈ 800ms wait) accommodates Appstle's asynchronous apply, but a TIMEOUT ends as FAILURE, never an assumed success. Unverifiable is NOT the same as done — the caller should retry or escalate rather than record a lie.
 
-**Why:** `callReplaceVariants` decides success purely from `res.ok`. Appstle answers 200 on requests it then declines to apply — reproduced on contracts `27946909869` and `27871477933` (2026-07-30) where a swap reported success and the flavour never moved. A false success is worse than a failure: a failure retries, a false success is recorded as done and the customer ships the wrong thing. Spec: `docs/brain/specs/a-subscription-mutation-must-verify-it-happened-not-trust-http-200.md`.
+**Why:** `callReplaceVariants` decides success purely from `res.ok`. Appstle answers 200 on requests it then declines to apply — reproduced on contracts `27946909869` and `27871477933` (2026-07-30) where a swap reported success and the flavour never moved. A false success is worse than a failure: a failure retries, a false success is recorded as done and the customer ships the wrong thing.
 
 ### `subSwapVariant` — function
 
