@@ -136,7 +136,7 @@ function checkContractSatisfiesExpectation(
 ): { ok: boolean; reason?: string }
 ```
 
-Pure predicate — does the live Appstle contract's `lines.nodes` snapshot satisfy the caller's mutation expectation? Broken out of the mutation helpers so the classification can be unit-tested (`src/lib/subscription-items.verifyEndState.test.ts`) without standing up a live vendor mock; the I/O wrapper `verifyAppstleMutationOnContract` polls this against the real contract with a bounded settle window. Returns `{ ok: true }` when satisfied, else `{ ok: false, reason }` naming the expectation and what the contract actually holds so the caller's error string is diagnosable at a glance.
+Pure predicate — does the live Appstle contract's `lines.nodes` snapshot satisfy the caller's mutation expectation? Broken out of the mutation helpers so the classification can be unit-tested (`src/lib/subscription-items.verifyEndState.test.ts`) without standing up a live vendor mock; the I/O wrapper `verifyContractEndState` polls this against the real contract with a bounded settle window. Returns `{ ok: true }` when satisfied, else `{ ok: false, reason }` naming the expectation and what the contract actually holds so the caller's error string is diagnosable at a glance.
 
 - **`add`** — variant present at ≥ requested quantity (Appstle merges an add into an existing line, so quantity is a lower bound not equality).
 - **`remove`** — variant absent from the contract.

@@ -298,7 +298,7 @@ export async function appstleRemoveLineItem(
       }
     }
     if (verifyVariantId && /^\d+$/.test(verifyVariantId)) {
-      const verdict = await verifyAppstleMutationOnContract(config.apiKey, contractId, {
+      const verdict = await verifyContractEndState(config.apiKey, contractId, {
         kind: "remove",
         variantId: verifyVariantId,
       });
@@ -360,7 +360,7 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
 //
 // The pure predicate `checkContractSatisfiesExpectation` decides
 // verified/not-verified/unverifiable from a `lines.nodes` snapshot. The I/O
-// wrapper `verifyAppstleMutationOnContract` fetches the live contract and
+// wrapper `verifyContractEndState` fetches the live contract and
 // polls with a bounded settle window (Appstle can apply asynchronously); a
 // TIMEOUT ends as FAILURE — unverifiable is NOT the same as done.
 
@@ -404,7 +404,7 @@ function lineVariantId(line: { variantId?: string }): string | null {
  * Pure predicate — does the live contract's line set satisfy the caller's
  * mutation expectation? Broken out of the mutation helpers so the classification
  * can be unit-tested without standing up a live Appstle contract; the I/O
- * wrapper `verifyAppstleMutationOnContract` polls this against the real contract.
+ * wrapper `verifyContractEndState` polls this against the real contract.
  *
  * Returns `{ ok: true }` when satisfied; `{ ok: false, reason }` naming the
  * expectation and what the contract actually holds so the caller's error string
@@ -509,7 +509,7 @@ export function checkContractSatisfiesExpectation(
  * via `APPSTLE_MUTATION_VERIFY_ATTEMPTS` / `APPSTLE_MUTATION_VERIFY_DELAY_MS`
  * or the `opts` arg (tests use `opts` to run synchronously).
  */
-async function verifyAppstleMutationOnContract(
+async function verifyContractEndState(
   apiKey: string,
   contractId: string,
   expected: MutationExpectation,
@@ -770,7 +770,7 @@ export async function subAddItem(
   // contract and refuse to report success unless the variant is actually present. syncItems only
   // fires on verified success — writing the intended state on an unverified mutation is what
   // makes the lie durable.
-  const verdict = await verifyAppstleMutationOnContract(config.apiKey, contractId, {
+  const verdict = await verifyContractEndState(config.apiKey, contractId, {
     kind: "add",
     variantId,
     quantity,
@@ -1001,7 +1001,7 @@ export async function subChangeQuantity(
   // Phase 1 — verify the quantity change actually landed on the live contract. Same class of bug
   // as the 2026-07-30 swap incident: callReplaceVariants returns success on a 2xx even when
   // Appstle silently declines to apply. Sync only on verified success.
-  const verdict = await verifyAppstleMutationOnContract(config.apiKey, contractId, {
+  const verdict = await verifyContractEndState(config.apiKey, contractId, {
     kind: "add",
     variantId: resolvedId,
     quantity,
@@ -1090,7 +1090,7 @@ export async function subUpdateLineItemPrice(
     // contract and refuse to report success unless the line's pricingPolicy.basePrice matches
     // what we asked for. Only mirror our own DB on verified success — writing the intended
     // discounted_cents on an unverified update would make the price lie durable.
-    const verdict = await verifyAppstleMutationOnContract(config.apiKey, contractId, {
+    const verdict = await verifyContractEndState(config.apiKey, contractId, {
       kind: "price",
       variantId: String(variantId),
       expectedBaseCents: basePriceCents,
@@ -1344,7 +1344,7 @@ export async function subSwapVariant(
     // never moved). The existing swap-price assertion downstream only catches a PRICE regression;
     // an identity no-op slips past it. syncItemsAfterMutation only runs on verified identity —
     // otherwise our own DB mirror durable-stores the lie.
-    const identityVerdict = await verifyAppstleMutationOnContract(config.apiKey, contractId, {
+    const identityVerdict = await verifyContractEndState(config.apiKey, contractId, {
       kind: "swap",
       newVariantId: String(newVariantId),
       oldVariantId: String(resolvedOld),
