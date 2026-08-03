@@ -46,6 +46,7 @@
     "test:june-remedy-approval-reask": "tsx --test src/lib/june-remedy-approval-reask.test.ts",
     "test:error-text": "tsx --test src/lib/error-text.test.ts",
     "test:swap-price-assertion": "tsx --test src/lib/swap-price-assertion.test.ts",
+    "test:subscription-items-verify-end-state": "tsx --test src/lib/subscription-items.verifyEndState.test.ts",
     "test:app-owner-action-escalation-workspace-scope": "tsx --test src/lib/meta/app-owner-action-escalation.workspace-scope.test.ts",
     "test:shopify-returns-net-refund": "tsx --test src/lib/shopify-returns.netRefund.test.ts",
     "test:return-net-refund": "tsx --test src/lib/shopify-returns.netRefund.test.ts",
