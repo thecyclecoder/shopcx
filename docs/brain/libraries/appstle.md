@@ -48,6 +48,8 @@ Short-circuits no-op requests: if the local `subscriptions.billing_interval` + `
 async function appstleUpdateNextBillingDate(workspaceId: string, contractId: string, nextBillingDate: string, // YYYY-MM-DD or full ISO datetime) : Promise<
 ```
 
+**Concurrency-lock warn-guard (mirrors `appstleAttemptBilling`).** When the change-next-billing-date PUT collides with an in-flight Appstle op and the response body matches *"billing operation is already in progress"*, the helper logs at `console.warn` with the distinct prefix `Appstle change-date race for contract ${contractId} (concurrent op already running):` instead of `console.error`, so the Vercel error feed / Control Tower stop capturing the benign race as a real error. The `{ success: false, error: text || \`Appstle API error: ${status}\` }` return shape is unchanged, so [[portal__remediation]]'s `classifyPortalFailure` keeps recognising the transient body and `healPortalAction` still auto-retries the customer's change-date action transparently. Same pattern as the `appstleAttemptBilling` guard documented below.
+
 ### `appstleGetUpcomingOrders` — function
 
 ```ts

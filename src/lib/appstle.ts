@@ -355,9 +355,23 @@ export async function appstleUpdateNextBillingDate(
 
     if (!res.ok && res.status !== 204) {
       const text = await res.text();
-      console.error(`Appstle next billing date update error for contract ${contractId}:`, text);
-      const snippet = text.slice(0, 300).replace(/\s+/g, " ").trim();
-      return { success: false, error: `Appstle ${res.status}: ${snippet}` };
+      // The "Another billing operation is already in progress" body is a
+      // benign upstream concurrency lock — Appstle is ALREADY running an op
+      // on this contract, so the portal healer's classifyPortalFailure treats
+      // it as transient and auto-retries via healPortalAction. Log at warn so
+      // the Vercel error feed / Control Tower stop capturing the recovered
+      // race as a real error. Mirrors the guard in appstleAttemptBilling
+      // (see the /billing operation is already in progress/i branch there)
+      // and the pattern documented in [[portal-order-now-billing-collision]].
+      if (/billing operation is already in progress/i.test(text)) {
+        console.warn(`Appstle change-date race for contract ${contractId} (concurrent op already running):`, text);
+      } else {
+        console.error(`Appstle next billing date update error for contract ${contractId}:`, text);
+      }
+      // Surface raw upstream text so classifyPortalFailure keeps matching the
+      // transient body and healPortalAction still auto-retries (mirrors the
+      // appstleAttemptBilling return shape above).
+      return { success: false, error: text || `Appstle API error: ${res.status}` };
     }
 
     return { success: true };
