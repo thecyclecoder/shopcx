@@ -105,6 +105,24 @@ export async function escalateTicket(
   await admin.from("tickets").update(patch).eq("id", ticketId);
 }
 
+/**
+ * Clear an escalation WITHOUT touching status.
+ *
+ * The inverse of `escalateTicket`, which is deliberately not reusable here: it forces
+ * `status: "open"`, so calling it with a null target would reopen a ticket that has already been
+ * resolved. A ticket can legitimately be closed and still carry a stale `escalated_to` — that is
+ * exactly the state a founder-escalated ticket lands in once the underlying issue is fixed
+ * elsewhere, and it leaves the CEO inbox showing work that no longer exists.
+ *
+ * Leaves `escalated_at` / `escalation_reason` intact as history; only ownership is released.
+ */
+export async function deescalateTicket(admin: Admin, ticketId: string): Promise<void> {
+  await admin
+    .from("tickets")
+    .update({ escalated_to: null, updated_at: nowIso() })
+    .eq("id", ticketId);
+}
+
 /** Assign (or unassign, with null) a ticket to a workspace member. */
 export async function assignTicket(admin: Admin, ticketId: string, userId: string | null): Promise<void> {
   await admin.from("tickets").update({ assigned_to: userId, updated_at: nowIso() }).eq("id", ticketId);
