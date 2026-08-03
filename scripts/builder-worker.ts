@@ -1219,6 +1219,13 @@ function noteAccountRecoveries(now: number) {
             ? `${reason} hold aged out — back in rotation`
             : "hold aged out — back in rotation",
       );
+      // build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 —
+      // clear the open CEO reauth card when the reauth_required hold clears, so the inbox doesn't
+      // accumulate stale cards for accounts that have since been re-logged-in. Fire-and-forget:
+      // a dismiss failure must never gate the local recovery path.
+      if (reason === "reauth_required") {
+        void dismissCeoReauthCardBestEffort(a.configDir);
+      }
     }
   }
 }
@@ -1570,7 +1577,22 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
     console.warn(`[multi-account] ${dir} ${reason} → pulled from rotation until ${astTime(a.cappedUntil)}: ${detail.slice(0, 200)}`);
     // Fire-and-forget the CEO card. An alert-write failure must never interfere with account
     // management or the hop-to-healthy path that just re-routed the ticket.
-    void emitCeoAuthExpiryAlertBestEffort(dir, reason);
+    // build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 —
+    // `reauth_required` gets its own `agent_approval_request`-typed card so the CEO approvals feed
+    // routes it (the pre-existing `box_account_auth_expired` type does NOT reach that feed and
+    // sat unreported for three days on 2026-08-03). The `auth_expired` / `refresh_failed` paths
+    // keep the historical card body — Phase 2 explicitly names the unrecoverable case as the one
+    // that needs to escalate; the auto-recoverable cases don't warrant a founder page.
+    if (reason === "reauth_required") {
+      // Read the credentials file's expiresAt so the card body can name how long the account
+      // has been dead ("expired ~49h ago") — the exact signal the CEO would use to prioritize
+      // the login. `readCredentialsFields` returns `{ expiresAt: 0 }` on any read error; the
+      // emit function treats a zero as "unknown" and phrases the body accordingly.
+      const { expiresAt } = readCredentialsFields(dir);
+      void emitCeoReauthCardBestEffort(dir, expiresAt, now);
+    } else {
+      void emitCeoAuthExpiryAlertBestEffort(dir, reason);
+    }
   }
 }
 
@@ -1652,6 +1674,148 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string, reason: Accou
     }
   } catch (e) {
     console.warn(`[multi-account] CEO auth-expired alert threw (swallowed) for ${configDir}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 ─────────
+// The FIRST time a pool account is classified `reauth_required`, raise ONE CEO approval card that
+// carries the config dir, how long the account has been dead, and the LITERAL command chain — the
+// signal that was missing during the 2026-08-03 outage (two accounts sat 49h and 66h dead with no
+// card surfaced anywhere the CEO looks). Deduped by config dir so a re-probe / restart doesn't spam
+// the inbox — one open card per account per expiry. Cleared in `noteAccountRecoveries` via
+// `dismissCeoReauthCardBestEffort` so a re-mint on the SAME dedupe key never adds noise (the
+// db_health cards became invisible via exactly that pattern).
+//
+// Card shape — Phase 2 SPEC:
+//   type='agent_approval_request', metadata.routed_to_function='ceo' — lands in the CEO approvals
+//   feed (approvals-feed.ts) rather than the legacy `box_account_auth_expired` bucket that never
+//   escalated. Body includes:
+//     ssh root@claude-server
+//     sudo -iu builder
+//     CLAUDE_CONFIG_DIR=~/<dir> claude
+//     /login
+//   plus the expired-for duration so the CEO can see "this account went dead ~66h ago" at a glance.
+const REAUTH_REQUIRED_CARD_TYPE = "agent_approval_request";
+const REAUTH_REQUIRED_ESCALATION_KIND = "box_account_reauth_required";
+async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: number, nowMs: number): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const idx = accounts.findIndex((a) => a.configDir === configDir);
+    const label = accountLabel(configDir, idx < 0 ? 0 : idx);
+    // Dedupe key names the ACCOUNT (config dir), so one open card per account per expiry — a
+    // second classification (mid-run re-probe, restart) finds the open card and NOOPs. When the
+    // account returns healthy, `dismissCeoReauthCardBestEffort` closes it so a subsequent expiry
+    // can raise a fresh card without being deduped against the closed one.
+    const dedupeKey = `${REAUTH_REQUIRED_ESCALATION_KIND}:${configDir}`;
+    const { data: open, error: openErr } = await db
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("type", REAUTH_REQUIRED_CARD_TYPE)
+      .eq("metadata->>dedupe_key", dedupeKey)
+      .eq("dismissed", false)
+      .limit(1);
+    if (openErr) {
+      console.warn(`[multi-account] reauth dedupe lookup failed for ${configDir}: ${openErr.message}`);
+      return;
+    }
+    if ((open ?? []).length > 0) return; // one open card per account — nothing to add.
+
+    // Home-dir-relative path for the display command — the spec asks for `CLAUDE_CONFIG_DIR=~/<dir>`
+    // (not the absolute `/home/builder/.claude…` path) so the operator can paste it verbatim from
+    // any shell without translating the login user's homedir. All box accounts live under /home/builder.
+    const homeRelDir = configDir.replace(/^\/home\/builder\//, "~/");
+    const expiredForMs = expiresAtMs > 0 && expiresAtMs < nowMs ? nowMs - expiresAtMs : null;
+    const expiredForLabel =
+      expiredForMs == null
+        ? "for an unknown period (credentials file could not be read)"
+        : expiredForMs >= 3600_000
+          ? `for ~${(expiredForMs / 3600_000).toFixed(1)}h`
+          : `for ~${Math.max(1, Math.round(expiredForMs / 60_000))}m`;
+    const expiredAtLabel = expiresAtMs > 0 ? astTime(expiresAtMs) : "unknown";
+
+    // The literal command chain the spec named — one command per line so the CEO can copy each
+    // step in sequence (paste-safe: no shell metachars beyond the assignment).
+    const commandLines = [
+      "ssh root@claude-server",
+      "sudo -iu builder",
+      `CLAUDE_CONFIG_DIR=${homeRelDir} claude`,
+      "/login",
+    ];
+    const title = `Box pool account ${label} needs a human /login (expired ${expiredForLabel})`;
+    const body =
+      `The box pool account ${label} (${configDir}) has an expired OAuth access token AND NO ` +
+      `refreshToken in \`.credentials.json\` — no wait or retry can renew it. Only an interactive ` +
+      `\`/login\` restores this account.\n\n` +
+      `Expired at: ${expiredAtLabel} (${expiredForLabel})\n\n` +
+      `To re-login:\n` +
+      commandLines.map((l) => `  ${l}`).join("\n") +
+      `\n\nThis account has been pulled from rotation. The pool is one account down until you re-login.`;
+
+    const { error: notifErr } = await db.from("dashboard_notifications").insert({
+      workspace_id: workspaceId,
+      type: REAUTH_REQUIRED_CARD_TYPE,
+      title: title.slice(0, 200),
+      body: body.slice(0, 4000),
+      link: "/dashboard/roadmap/box",
+      metadata: {
+        // approvals-feed.ts (`buildApprovalsFeed`) reads type='agent_approval_request' + this
+        // routing field to place the row in the CEO seat's inbox.
+        routed_to_function: "ceo",
+        escalated_by_director: "platform",
+        escalation_kind: REAUTH_REQUIRED_ESCALATION_KIND,
+        dedupe_key: dedupeKey,
+        config_dir: configDir,
+        config_dir_home_relative: homeRelDir,
+        account_label: label,
+        hold_reason: "reauth_required",
+        expired_at: expiresAtMs > 0 ? new Date(expiresAtMs).toISOString() : null,
+        expired_for_ms: expiredForMs,
+        login_command_chain: commandLines,
+        autonomous: true,
+      },
+      read: false,
+      dismissed: false,
+    });
+    if (notifErr) {
+      console.warn(`[multi-account] CEO reauth card insert failed for ${configDir}: ${notifErr.message}`);
+    } else {
+      console.warn(`[multi-account] CEO reauth card minted for ${label} (${configDir}) — awaiting interactive /login`);
+    }
+  } catch (e) {
+    console.warn(`[multi-account] CEO reauth card threw (swallowed) for ${configDir}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// Dismiss the OPEN reauth card for `configDir` when the account returns healthy — the CEO inbox
+// already carries 1,400+ rows and a stale re-login card would be noise rather than signal (which
+// is how the db_health cards became invisible). Compare-and-set on the dedupe key + dismissed=false
+// so a concurrent second recovery / an already-dismissed card never re-writes state. Best-effort.
+async function dismissCeoReauthCardBestEffort(configDir: string): Promise<void> {
+  try {
+    const workspaceId = await resolveOwnerWorkspaceId();
+    if (!workspaceId) return;
+    const dedupeKey = `${REAUTH_REQUIRED_ESCALATION_KIND}:${configDir}`;
+    const { data, error } = await db
+      .from("dashboard_notifications")
+      .update({ dismissed: true })
+      .eq("workspace_id", workspaceId)
+      .eq("type", REAUTH_REQUIRED_CARD_TYPE)
+      .eq("metadata->>dedupe_key", dedupeKey)
+      .eq("dismissed", false)
+      .select("id");
+    if (error) {
+      console.warn(`[multi-account] CEO reauth card dismiss failed for ${configDir}: ${error.message}`);
+      return;
+    }
+    if ((data ?? []).length > 0) {
+      const idx = accounts.findIndex((a) => a.configDir === configDir);
+      const label = accountLabel(configDir, idx < 0 ? 0 : idx);
+      console.warn(`[multi-account] CEO reauth card dismissed for ${label} (${configDir}) — account returned healthy`);
+    }
+  } catch (e) {
+    console.warn(`[multi-account] CEO reauth card dismiss threw (swallowed) for ${configDir}: ${e instanceof Error ? e.message : e}`);
   }
 }
 
