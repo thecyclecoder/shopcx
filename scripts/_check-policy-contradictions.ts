@@ -182,6 +182,54 @@ function extractRuleIds(rules: unknown[]): Set<string> {
  * against each `phrasePatterns` entry. Returns the finding list + a coverage report — the
  * caller decides whether to fail the build on findings (main() does).
  */
+/**
+ * Does `phrase` appear as an INSTRUCTION to the customer, rather than a PROHIBITION?
+ *
+ * The scan used to be a bare `haystack.includes(phrase)`, which cannot tell
+ * "you can refuse the delivery" from "please don't refuse the delivery". Every
+ * live finding on 2026-08-02 was the second kind — correct policy text that
+ * WARNS customers off the forbidden path — and the naive matcher flagged all
+ * three:
+ *
+ *   order-cancellation: "Please don't refuse the delivery or send it back marked
+ *                        'return to sender.' Those packages reach us with no
+ *                        tracking we can match to your order…"
+ *   terms:              "Return To Sender & 'Refused' Packages Are NOT Eligible…"
+ *
+ * That false positive is dangerous, not merely noisy: the only way to make the
+ * check green by editing DATA is to DELETE the warning, restoring the exact bug
+ * (a customer told to refuse delivery loses their refund) this check exists to
+ * prevent. A guard that can be satisfied by removing the safety text is worse
+ * than no guard — so negation is recognised here, and the policy text stays.
+ *
+ * Deliberately conservative: it looks for negation/prohibition markers in the
+ * clause CONTAINING the phrase. Anything ambiguous still reports, because a
+ * false positive costs a human read while a false negative ships the bug.
+ */
+export function appearsAsInstruction(haystack: string, phrase: string): boolean {
+  const hay = haystack.toLowerCase();
+  const needle = phrase.toLowerCase();
+  let from = 0;
+  for (;;) {
+    const at = hay.indexOf(needle, from);
+    if (at === -1) return false;
+    // The clause around the match — bounded by sentence/heading punctuation.
+    const start = Math.max(0, hay.lastIndexOf(".", at) + 1, hay.lastIndexOf("\n", at) + 1);
+    const dot = hay.indexOf(".", at + needle.length);
+    const nl = hay.indexOf("\n", at + needle.length);
+    const ends = [dot, nl].filter(x => x !== -1);
+    const end = ends.length ? Math.min(...ends) : hay.length;
+    const clause = hay.slice(start, end);
+    const NEGATORS = [
+      "don't", "do not", "dont", "never", "cannot", "can't", "cant", "not eligible",
+      "no refund", "won't", "will not", "aren't", "are not", "isn't", "is not",
+      "unable to", "please avoid", "avoid ", "ineligible", "not accepted", "we don't accept",
+    ];
+    if (!NEGATORS.some(n => clause.includes(n))) return true;   // no negation → reads as an instruction
+    from = at + needle.length;                                   // negated here; keep looking
+  }
+}
+
 export function scanPolicySet(policies: PolicyForCheck[]): ScanReport {
   // Per-slug rule-id index for anchor presence checks.
   const rulesBySlug = new Map<string, Set<string>>();
@@ -200,7 +248,7 @@ export function scanPolicySet(policies: PolicyForCheck[]): ScanReport {
     if (!haystack) continue;
     for (const assertion of FORBIDDEN_PATHS) {
       for (const phrase of assertion.phrasePatterns) {
-        if (haystack.includes(phrase.toLowerCase())) {
+        if (appearsAsInstruction(haystack, phrase)) {
           const anchorFound = (rulesBySlug.get(assertion.sourceSlug) ?? new Set<string>()).has(
             assertion.anchorRuleId,
           );
