@@ -37,10 +37,14 @@
  *     — the check still runs its phrase assertions, but the operator is told LOUDLY that the
  *     rule the check leans on is not currently in the source policy's rules array (a drift
  *     between the assertion and the live rulebook).
- *   - Live DB scan is opportunistic: when Supabase credentials are absent (a bare CI runner
- *     with no env), the script logs the mode and runs the regression fixture only. This is
- *     announced explicitly on the summary line so a green "0 findings, 0 policies scanned"
- *     line can never be mistaken for coverage.
+ *   - Live DB scan is opportunistic: when Supabase credentials are present the script scans
+ *     every workspace's active policies through the SDK chokepoint. When credentials are
+ *     ABSENT the script cannot honestly claim a full pass — it exits NON-ZERO by default,
+ *     announcing the offline mode. An operator running locally without credentials can opt in
+ *     to a partial-coverage pass with `--allow-offline` (or `ALLOW_OFFLINE_POLICY_CHECK=1`);
+ *     the box always has credentials so no opt-in is needed there. This is deliberately loud:
+ *     before Phase 2 the guard printed "live scan: skipped" and exited 0, letting a local
+ *     `npm run predeploy` read green while the box saw contradictions the developer never did.
  *
  * SCOPE — WHAT THIS CHECK CANNOT COVER (per spec's "loud rather than silent" rule).
  *   - Contradictions expressible only in prose (an internal_summary paragraph that a rule
@@ -52,8 +56,9 @@
  * `_check-rls-on-new-tables.ts` (static-analysis registry pattern). Wired into
  * `npm run check:policy-contradictions` + chained into `predeploy`. Read-only; never mutates.
  *
- * Run:  npx tsx scripts/_check-policy-contradictions.ts            # exits 1 on any finding
- *       npx tsx scripts/_check-policy-contradictions.ts --summary  # one-line-per-finding view
+ * Run:  npx tsx scripts/_check-policy-contradictions.ts                  # exits 1 on any finding OR unacknowledged offline mode
+ *       npx tsx scripts/_check-policy-contradictions.ts --allow-offline  # acknowledge the live scan is skipped
+ *       npx tsx scripts/_check-policy-contradictions.ts --summary        # one-line-per-finding view
  */
 
 import { errText } from "../src/lib/error-text";
@@ -277,9 +282,21 @@ export function scanPolicySet(policies: PolicyForCheck[]): ScanReport {
 }
 
 /* ------------------------------------------------------------------------------------------------
- * Regression fixture — the 2026-08-02 known-bad state. The check ALWAYS runs against this
- * fixture so the refuse-delivery case is covered independent of whatever the live DB looks
- * like. A regression that stops flagging the fixture fails the build with the exact reason.
+ * Regression fixture — pins BOTH shapes the matcher must distinguish:
+ *
+ *   INSTRUCTION (must be FLAGGED). The 2026-08-02 known-bad state — a customer_summary that
+ *   OFFERS the forbidden path. A regression here would re-ship the exact incident.
+ *
+ *   PROHIBITION (must NOT be flagged). The live, correct policy text that WARNS customers off
+ *   the forbidden path — verbatim excerpts of the current Superfoods order-cancellation and
+ *   terms customer_summaries. The naive `haystack.includes(phrase)` matcher flagged all three,
+ *   creating a false positive that could only be cleared by DELETING the safety warning (and
+ *   thereby restoring the very incident this check exists to prevent). Pinning the prohibition
+ *   shape here means a future edit that regresses `appearsAsInstruction` (say, by dropping a
+ *   negator token) fails the build BEFORE it hits the live scan.
+ *
+ * The check ALWAYS runs both fixtures so the refuse-delivery case is covered independent of
+ * whatever the live DB looks like. A regression fails the build with the exact reason.
  * --------------------------------------------------------------------------------------------- */
 
 const REFUSE_DELIVERY_FIXTURE: PolicyForCheck[] = [
@@ -295,8 +312,8 @@ const REFUSE_DELIVERY_FIXTURE: PolicyForCheck[] = [
     ],
   },
   {
-    slug: "cancellation",
-    name: "Order Cancellation Policy (2026-08-02 bad state — regression fixture)",
+    slug: "cancellation-instruction-bad-state",
+    name: "Order Cancellation Policy (2026-08-02 bad state — must be FLAGGED)",
     // This is the historical bad text — the exact wording that voided a real customer's refund.
     customer_summary: "If your package is already on the way, you can refuse the delivery when it arrives.",
     internal_summary:
@@ -305,29 +322,110 @@ const REFUSE_DELIVERY_FIXTURE: PolicyForCheck[] = [
       "the build.",
     rules: [],
   },
+  {
+    slug: "cancellation-instruction-synthesized",
+    name: "Synthesized instruction phrasing (must be FLAGGED)",
+    // Additional instruction-shape phrasing that is grammatically distinct from the 2026-08-02
+    // wording — proves the matcher does not silently narrow to one historical string.
+    customer_summary:
+      "For fastest resolution, refuse the delivery and we'll refund you as soon as it arrives back.",
+    internal_summary: "Fixture — synthesized instruction phrasing.",
+    rules: [],
+  },
+  {
+    slug: "cancellation-prohibition",
+    name: "Order Cancellation Policy (current correct text — must NOT be flagged)",
+    // Verbatim from the live Superfoods order-cancellation customer_summary — the 2026-08-02
+    // remediation. A matcher regression that flags this would force the operator to DELETE the
+    // safety warning to make the build green, restoring the original incident.
+    customer_summary:
+      "Please don't refuse the delivery or send it back marked 'return to sender.' Those packages reach us with no tracking we can match to your order, so we can't refund them.",
+    internal_summary: "Fixture — the CORRECT prohibition text as shipped on the live site.",
+    rules: [],
+  },
+  {
+    slug: "terms-prohibition",
+    name: "Terms (current correct text — must NOT be flagged)",
+    // Verbatim excerpt from the live Superfoods terms customer_summary. Heading + emphatic
+    // negator sentence, formatted the way the real policy is.
+    customer_summary:
+      "### Return To Sender & 'Refused' Packages Are NOT Eligible for Return\nSuch packages are absolutely, 100% not eligible for refund.",
+    internal_summary: "Fixture — the CORRECT prohibition text as shipped on the live site.",
+    rules: [],
+  },
 ];
 
 /**
- * Run the regression fixture and assert the refuse-delivery contradiction is flagged. Returns
- * `{ ok: true }` on the expected finding; `{ ok: false, reason }` when the assertion fails.
- * The main() function turns a failure into an exit-1.
+ * Slugs whose customer_summary is an INSTRUCTION and MUST produce a finding. Any of these
+ * failing to be flagged is a matcher regression (the 2026-08-02 incident would ship again).
+ */
+const INSTRUCTION_FIXTURE_SLUGS = [
+  "cancellation-instruction-bad-state",
+  "cancellation-instruction-synthesized",
+] as const;
+
+/**
+ * Slugs whose customer_summary is a PROHIBITION (correct warning) and MUST NOT produce a
+ * finding. Any of these being flagged is a false positive — the only way to clear it would be
+ * to delete the safety warning, restoring the 2026-08-02 incident. Pinned so a naive matcher
+ * regression fails the build BEFORE it silently forces someone to delete correct policy text.
+ */
+const PROHIBITION_FIXTURE_SLUGS = ["cancellation-prohibition", "terms-prohibition"] as const;
+
+/**
+ * Run the regression fixture and assert BOTH shapes are handled correctly:
+ *   - every INSTRUCTION slug produces at least one finding (the check still fires on the bad
+ *     state; a regression here would re-ship the 2026-08-02 incident);
+ *   - no PROHIBITION slug produces any finding (correct warning text is not flagged; a
+ *     regression here would force the operator to delete safety text to make the build green).
+ *
+ * Returns `{ ok: true }` when both hold; `{ ok: false, reason }` otherwise. main() turns a
+ * failure into exit 1.
  */
 function runRefuseDeliveryRegression(): { ok: boolean; reason?: string } {
   const report = scanPolicySet(REFUSE_DELIVERY_FIXTURE);
-  const flagged = report.findings.some(
-    f =>
-      f.assertionId === "returns.no_refund_on_refused_or_return_to_sender" &&
-      f.offendingSlug === "cancellation" &&
-      f.matchedPhrase.toLowerCase().includes("refuse"),
-  );
-  if (!flagged) {
+  const findingsBySlug = new Map<string, Finding[]>();
+  for (const f of report.findings) {
+    const list = findingsBySlug.get(f.offendingSlug) ?? [];
+    list.push(f);
+    findingsBySlug.set(f.offendingSlug, list);
+  }
+
+  const missingInstruction: string[] = [];
+  for (const slug of INSTRUCTION_FIXTURE_SLUGS) {
+    const hits = findingsBySlug.get(slug) ?? [];
+    const ok = hits.some(
+      f =>
+        f.assertionId === "returns.no_refund_on_refused_or_return_to_sender" &&
+        f.matchedPhrase.toLowerCase().includes("refuse"),
+    );
+    if (!ok) missingInstruction.push(slug);
+  }
+  if (missingInstruction.length > 0) {
     return {
       ok: false,
       reason:
-        "the 2026-08-02 refuse-delivery regression fixture is no longer flagged — the " +
-        "contradiction check has regressed and this class of failure would ship again.",
+        `refuse-delivery INSTRUCTION fixture(s) no longer flagged: ${missingInstruction.join(", ")} — ` +
+        "the contradiction check has regressed and the 2026-08-02 class of failure would ship again.",
     };
   }
+
+  const falsePositives: string[] = [];
+  for (const slug of PROHIBITION_FIXTURE_SLUGS) {
+    const hits = findingsBySlug.get(slug) ?? [];
+    if (hits.length > 0) falsePositives.push(`${slug} (matched "${hits[0]!.matchedPhrase}")`);
+  }
+  if (falsePositives.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `PROHIBITION fixture(s) incorrectly flagged: ${falsePositives.join("; ")} — ` +
+        "the matcher has regressed to the pre-2026-08-02 bare-substring shape and would force " +
+        "an operator to DELETE correct safety text to make the build green, restoring the very " +
+        "incident this check exists to prevent.",
+    };
+  }
+
   return { ok: true };
 }
 
@@ -417,6 +515,16 @@ async function runLiveScan(): Promise<LiveScanOutcome> {
 
 async function main() {
   const summary = process.argv.includes("--summary");
+  // Opt-in flag: an operator running locally without Supabase credentials must explicitly
+  // acknowledge that the live-DB half is being skipped. Without it, an env-less local run
+  // that used to print "live scan: skipped" and exit 0 is now a hard failure — the whole
+  // reason the box saw contradictions the developer's laptop didn't. Also accepted via
+  // ALLOW_OFFLINE_POLICY_CHECK=1 so `npm run predeploy` can be run offline as a chain
+  // without argv forwarding.
+  const allowOffline =
+    process.argv.includes("--allow-offline") ||
+    process.env.ALLOW_OFFLINE_POLICY_CHECK === "1" ||
+    process.env.ALLOW_OFFLINE_POLICY_CHECK === "true";
 
   // Regression fixture — always runs; a regression here fails the build with the exact reason.
   const regression = runRefuseDeliveryRegression();
@@ -506,9 +614,28 @@ async function main() {
     process.exit(1);
   }
 
+  // A skip is not a pass. When the live-DB half didn't run and the operator hasn't explicitly
+  // opted in, exit non-zero — otherwise a local run reads green while the box sees the real
+  // contradictions (the exact "local reads green, box reads red" surprise that motivated
+  // Phase 2 of predeploy-guards-actually-run-on-every-build). The opt-in is a CLI flag or
+  // `ALLOW_OFFLINE_POLICY_CHECK=1` so a developer can still get through an offline chain
+  // once they've read this message.
+  if (!live.attempted && !allowOffline) {
+    console.error(
+      `\n❌ check-policy-contradictions — live-DB scan was NOT performed and offline mode is\n` +
+        `   not explicitly permitted, so the check cannot honestly report a pass.\n\n` +
+        `   ${live.skippedReason ?? "Supabase credentials absent."}\n\n` +
+        `   Fix (pick one):\n` +
+        `     • run with Supabase credentials so the live scan runs (the box already does this), OR\n` +
+        `     • re-run with --allow-offline (or ALLOW_OFFLINE_POLICY_CHECK=1) to acknowledge that\n` +
+        `       the live half is skipped — the regression fixture still runs and its result stands.\n`,
+    );
+    process.exit(1);
+  }
+
   console.log(
     `✓ check-policy-contradictions — ${FORBIDDEN_PATHS.length} assertion(s), regression PASS, ` +
-      `${live.attempted ? `${live.policiesScanned} live policy(s) scanned` : "live scan skipped"}, 0 contradictions.`,
+      `${live.attempted ? `${live.policiesScanned} live policy(s) scanned` : "live scan skipped by opt-in"}, 0 contradictions.`,
   );
 }
 
