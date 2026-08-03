@@ -15,6 +15,7 @@ Mario's supervisability is its **determinism**. A *stall* is pipeline silence no
 | `blockedBy[i].cleared === false` — an upstream spec's code isn't on `main` yet | [[../libraries/brain-roadmap]] `getSpecBlockers` |
 | live job `status` ∈ `{blocked_on_dependency, blocked_on_usage, needs_input, needs_approval}` | live [[../tables/agent_jobs]] row |
 | `specs.status` ∈ `{folded, deferred}` — stopped emitting on purpose | [[../libraries/specs-table]] `getSpec` |
+| standing `init_dismissed` row (sixth source only) — the Platform Director parked this spec pending a CEO fix-or-cut call | [[../tables/director_activity]] `hasStandingInitDismissal` |
 
 Every OTHER silence (last event was `build_done` and no `phase_shipped` in the SLA window; a `job_queued` no worker has claimed past the claim SLA; a `review_started` that never emitted a verdict) is a stall.
 

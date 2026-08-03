@@ -1,0 +1,1 @@
+- **Mario's eligible-never-enqueued source skips specs the director already dismissed from initiation** · verified 2026-08-03 · → [[../lifecycles/mario-pipeline-plumbing]]
