@@ -117,8 +117,15 @@ interface LaneRow {
 // Per-account Max load + cap/failover events (box-multi-account-failover Phase 2). Written by the worker's
 // heartbeat as a single jsonb blob; passed through as-is so the box-health view can show how each account's
 // 5-hour quota is burning + an all-capped state.
+// build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 —
+// `hold_reason` carries the typed cause of a hold ('usage_cap' | 'auth_expired' | 'refresh_failed' |
+// 'reauth_required') so the box page can render 'needs re-login' distinctly from 'capped' — the
+// 2026-08-03 outage sat unreported for three days because the pool view collapsed every hold into
+// "capped", so a founder glancing at the box saw a capacity problem instead of the auth failure it
+// actually was. Null when the account is healthy OR (Phase 1) held for a genuinely unknown reason
+// — we never manufacture a default here.
 interface AccountsSnapshot {
-  pool: { label: string; in_flight: number; capped: boolean; capped_until: string | null }[];
+  pool: { label: string; in_flight: number; capped: boolean; capped_until: string | null; hold_reason: string | null }[];
   healthy: number;
   total: number;
   all_capped: boolean;
