@@ -419,3 +419,89 @@ export function classifyAdditiveOnlyConflict(
 
   return { additive: true, unionContent: unionResolve(input.content), hunks };
 }
+
+// ── Phase 2 (spec: additive-only-conflict-resolves-itself) — post-resolve validators ─────────────
+//
+// Classification says "the shape is additive"; validation says "the tree we actually wrote is
+// safe."  An auto-resolve that lands a broken file is far worse than a park — a broken
+// package.json breaks every downstream build; a truncated brain page silently loses knowledge.
+// So the caller runs EVERY validator on EVERY auto-resolved file before completing the merge:
+//   1. No conflict markers remain anywhere.
+//   2. The resolved file is a superset of BOTH prior sides — nothing dropped.
+//   3. package.json parses as JSON AND every pre-existing script key from EITHER side survives.
+// A failed validation is a PARK, never a retry — no configuration of the resolver would change
+// the verdict; the caller must fall through to today's needs_attention path.
+
+export type ValidationResult = { ok: true } | { ok: false; reason: string };
+
+/** No conflict markers remain in the file content — the resolver dropped every `<<<<<<<`,
+ *  `|||||||`, `=======`, `>>>>>>>` line.  A leftover marker means the resolve was partial. */
+export function validateNoConflictMarkers(content: string): ValidationResult {
+  const m = /^(?:<{7}|\|{7}|={7}|>{7})(?:\s|$)/m.exec(content);
+  if (m) return { ok: false, reason: `conflict marker remains in resolved content: ${JSON.stringify(m[0])}` };
+  return { ok: true };
+}
+
+/** The resolved file must contain EVERY non-empty line that appeared in ours OR theirs — the
+ *  resolve is a union, so nothing either side added may be dropped.  Trims whitespace-only
+ *  differences (a re-flowed blank line isn't a lost line).  Set-membership is safe for our
+ *  case because additive-only means base is empty, so a base line appearing on both sides is
+ *  represented once in the union and matches once on the ours pass and once on the theirs pass. */
+export function validateUnionSuperset(
+  oursContent: string,
+  theirsContent: string,
+  resolvedContent: string,
+): ValidationResult {
+  const present = new Set(resolvedContent.split(/\n/));
+  for (const l of oursContent.split(/\n/)) {
+    if (l.trim() === "") continue;
+    if (!present.has(l)) return { ok: false, reason: `resolved file is NOT a superset — OURS line was dropped: ${JSON.stringify(l.slice(0, 120))}` };
+  }
+  for (const l of theirsContent.split(/\n/)) {
+    if (l.trim() === "") continue;
+    if (!present.has(l)) return { ok: false, reason: `resolved file is NOT a superset — THEIRS line was dropped: ${JSON.stringify(l.slice(0, 120))}` };
+  }
+  return { ok: true };
+}
+
+/** Resolved package.json must parse AND every script key present on either side must survive
+ *  in the resolved `scripts` object.  Extracts keys via JSON.parse of each side (both sides,
+ *  taken alone, are complete files — git's stage 2 / stage 3 blobs). */
+export function validatePackageJsonScriptKeys(
+  oursContent: string,
+  theirsContent: string,
+  resolvedContent: string,
+): ValidationResult {
+  let resolved: unknown;
+  try { resolved = JSON.parse(resolvedContent); }
+  catch (e) {
+    return { ok: false, reason: `resolved package.json failed to parse as JSON: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const resolvedScripts = ((): Record<string, unknown> | null => {
+    if (!resolved || typeof resolved !== "object") return null;
+    const s = (resolved as Record<string, unknown>).scripts;
+    if (!s || typeof s !== "object") return null;
+    return s as Record<string, unknown>;
+  })();
+  if (!resolvedScripts) {
+    return { ok: false, reason: 'resolved package.json has no "scripts" object' };
+  }
+  const collectScriptKeys = (src: string): Set<string> => {
+    try {
+      const parsed: unknown = JSON.parse(src);
+      if (!parsed || typeof parsed !== "object") return new Set();
+      const s = (parsed as Record<string, unknown>).scripts;
+      if (!s || typeof s !== "object") return new Set();
+      return new Set(Object.keys(s as Record<string, unknown>));
+    } catch { return new Set(); }
+  };
+  const oursKeys = collectScriptKeys(oursContent);
+  const theirsKeys = collectScriptKeys(theirsContent);
+  for (const k of oursKeys) if (!(k in resolvedScripts)) {
+    return { ok: false, reason: `package.json script key dropped from OURS: "${k}"` };
+  }
+  for (const k of theirsKeys) if (!(k in resolvedScripts)) {
+    return { ok: false, reason: `package.json script key dropped from THEIRS: "${k}"` };
+  }
+  return { ok: true };
+}

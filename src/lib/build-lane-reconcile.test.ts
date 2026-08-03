@@ -22,6 +22,9 @@ import {
   classifyAdditiveOnlyConflict,
   parseConflictHunks,
   UNION_RESOLVABLE_PATHS,
+  validateNoConflictMarkers,
+  validateUnionSuperset,
+  validatePackageJsonScriptKeys,
   type ReconcileInput,
 } from "./build-lane-reconcile";
 
@@ -505,4 +508,99 @@ test("classifyAdditiveOnlyConflict: no hunks in content → park with a clear re
   const v = classifyAdditiveOnlyConflict({ path: "package.json", content: '{"scripts":{}}' });
   assert.equal(v.additive, false);
   if (!v.additive) assert.match(v.reason, /no conflict hunks/i);
+});
+
+// ── Phase 2 — post-resolve validators (the safety net if the resolver ever misbehaves) ──────────
+
+test("validateNoConflictMarkers: clean content → ok", () => {
+  assert.deepEqual(validateNoConflictMarkers("a\nb\nc\n"), { ok: true });
+});
+
+test("validateNoConflictMarkers: leftover <<<<<<< → not ok, reason names the marker", () => {
+  const r = validateNoConflictMarkers("a\n<<<<<<< HEAD\nb\n");
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /<<<<<<</);
+});
+
+test("validateNoConflictMarkers: leftover ||||||| / ======= / >>>>>>> all caught", () => {
+  for (const marker of ["||||||| base", "=======", ">>>>>>> main"]) {
+    const r = validateNoConflictMarkers(`a\n${marker}\nb`);
+    assert.equal(r.ok, false, `must reject ${JSON.stringify(marker)}`);
+  }
+});
+
+test("validateNoConflictMarkers: a false positive inside a code fence would still park (safety over cleverness)", () => {
+  // A `<<<<<<< ` at column 0 is always a conflict marker to git's parser; the validator is
+  // deliberately conservative and treats it as one too.
+  const r = validateNoConflictMarkers("prose\n<<<<<<< HEAD\nmore");
+  assert.equal(r.ok, false);
+});
+
+test("validateUnionSuperset: union preserves both sides → ok", () => {
+  const ours = "shared\nOURS-a\nOURS-b\ntrailing\n";
+  const theirs = "shared\nTHEIRS-a\ntrailing\n";
+  const resolved = "shared\nOURS-a\nOURS-b\nTHEIRS-a\ntrailing\n";
+  assert.deepEqual(validateUnionSuperset(ours, theirs, resolved), { ok: true });
+});
+
+test("validateUnionSuperset: dropped OURS line → not ok, names the dropped line", () => {
+  const ours = "keep\nOURS-important\n";
+  const theirs = "keep\nTHEIRS-side\n";
+  const resolved = "keep\nTHEIRS-side\n"; // OURS-important lost
+  const r = validateUnionSuperset(ours, theirs, resolved);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /OURS-important/);
+});
+
+test("validateUnionSuperset: dropped THEIRS line → not ok, names the dropped line", () => {
+  const ours = "keep\nOURS-side\n";
+  const theirs = "keep\nTHEIRS-important\n";
+  const resolved = "keep\nOURS-side\n";
+  const r = validateUnionSuperset(ours, theirs, resolved);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /THEIRS-important/);
+});
+
+test("validateUnionSuperset: blank-line differences are ignored (re-flow tolerance)", () => {
+  const ours = "a\n\nb\n";
+  const theirs = "a\nb\n";
+  const resolved = "a\nb\n";
+  assert.deepEqual(validateUnionSuperset(ours, theirs, resolved), { ok: true });
+});
+
+test("validatePackageJsonScriptKeys: union of scripts survives → ok", () => {
+  const ours = JSON.stringify({ scripts: { build: "next build", "test:ours": "npx tsx x.ts" } });
+  const theirs = JSON.stringify({ scripts: { build: "next build", "test:theirs": "npx tsx y.ts" } });
+  const resolved = JSON.stringify({ scripts: { build: "next build", "test:ours": "npx tsx x.ts", "test:theirs": "npx tsx y.ts" } });
+  assert.deepEqual(validatePackageJsonScriptKeys(ours, theirs, resolved), { ok: true });
+});
+
+test("validatePackageJsonScriptKeys: dropped OURS script key → names the key", () => {
+  const ours = JSON.stringify({ scripts: { build: "b", "test:only-ours": "x" } });
+  const theirs = JSON.stringify({ scripts: { build: "b" } });
+  const resolved = JSON.stringify({ scripts: { build: "b" } });
+  const r = validatePackageJsonScriptKeys(ours, theirs, resolved);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /test:only-ours/);
+});
+
+test("validatePackageJsonScriptKeys: dropped THEIRS script key → names the key", () => {
+  const ours = JSON.stringify({ scripts: { build: "b" } });
+  const theirs = JSON.stringify({ scripts: { build: "b", "test:only-theirs": "y" } });
+  const resolved = JSON.stringify({ scripts: { build: "b" } });
+  const r = validatePackageJsonScriptKeys(ours, theirs, resolved);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /test:only-theirs/);
+});
+
+test("validatePackageJsonScriptKeys: resolved content that fails JSON.parse → not ok", () => {
+  const r = validatePackageJsonScriptKeys("{}", "{}", "not{json}");
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /failed to parse/i);
+});
+
+test("validatePackageJsonScriptKeys: resolved has no scripts object → not ok", () => {
+  const r = validatePackageJsonScriptKeys("{}", "{}", "{}");
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /no "scripts" object/);
 });
