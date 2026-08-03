@@ -27193,6 +27193,48 @@ async function dispatchJob(job: Job) {
       return;
     }
 
+    // ⭐ predeploy-guards-actually-run-on-every-build Phase 3 — run the FULL hermetic guard
+    // chain (`npm run predeploy:static`) as a blocking pre-commit step in the build lane, same
+    // shape as the table-refs gate above. This is the wiring that makes the ~30 `check:*` guards
+    // (RLS-on-new-tables, personas-no-duplicate-keys, node-registry-drift, lossy-error-stringify,
+    // and the rest) actually enforce anything: before this landed, `npm run predeploy` was a
+    // named script with no runner — no .github/workflows, no husky, no git hook, and npm only
+    // fires a `predeploy` PRE-HOOK before a script literally named `deploy` (there is none), so
+    // the whole chain was dead code and three of its guards were red on main for weeks without
+    // anyone noticing (Phase 1 cleared those, this phase makes them enforced).
+    //
+    // Why HERE and not a `prebuild` npm hook: `runNextBuildGate` at :25673-25690 EXPLICITLY
+    // returns `{ pass: true }` for any non-prerender / non-route-config `next build` failure —
+    // it treats module/binary/transient failures as infrastructure noise and lets them through
+    // with a warning (see the /Uncached data was accessed…|Error occurred prerendering…|
+    // Route segment config…/ regex at :25683). A `prebuild` hook fires *inside* `next build`;
+    // a guard violation from prebuild would look identical to that infra-transient class and
+    // be swallowed. Adding `prebuild` would silently re-disarm the gate on the box while
+    // hard-failing Vercel; wiring HERE instead runs the chain BEFORE `next build`, where a
+    // non-zero exit is authoritatively a code violation and Bo's just-finished session still
+    // has the context to fix it.
+    //
+    // Why `predeploy:static` and not full `predeploy`: the full chain includes DB-touching
+    // guards (`check:policy-contradictions` — imports `createAdminClient` via dynamic import
+    // in the live-scan path). A DB blip in the build lane must not block a commit. Only the
+    // hermetic, repo-reading guards belong here.
+    const staticCheck = await shAsync(
+      "npm",
+      ["run", "predeploy:static"],
+      { timeout: 5 * 60 * 1000, cwd: wt },
+    );
+    if (staticCheck.code !== 0) {
+      const out = `${staticCheck.out}\n${staticCheck.err}`;
+      const failed = /❌\s*(check-[^\s—]+)/.exec(out)?.[1] ?? "unknown check";
+      await update(job.id, {
+        status: "needs_attention",
+        error: `predeploy:static failed — ${failed} — see log_tail for the exact guard's remediation`,
+        log_tail: out.slice(-2000),
+      });
+      console.error(`${tag} build-lane predeploy:static FAIL (${failed}) — see log_tail`);
+      return;
+    }
+
     // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1) —
     // front-run Rex on positive-absence. tsc + table-refs are green; nothing is committed yet; the
     // worktree is dirty (Bo's edits, if any). Now run the spec's OWN typed checks against this
