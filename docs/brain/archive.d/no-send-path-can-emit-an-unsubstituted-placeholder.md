@@ -1,0 +1,1 @@
+- **A customer can never receive a raw {{token}}** · verified 2026-08-03 · → [[../libraries/ticket-delivery]]
