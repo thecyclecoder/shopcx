@@ -444,6 +444,51 @@ export function detectBuilderChosenNameInGrep(
     };
   }
 
+  // grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 1 — a top-level `|` alternation of
+  // TWO OR MORE bare-literal branches is not "a real pattern" (which is the theory the metachar bail
+  // rides on); it is several guesses joined by a pipe, and it reads as *more* thorough than a single
+  // name while being just as unmatchable. The 2026-08-02 live-guard measurement:
+  // `verifyMutation|verifyContractState|assertLineState` was ALLOWED (waved through by the metachar
+  // bail); `verifyContractState` alone was FLAGGED. That is the hole this closes.
+  //
+  // Conservative rule so a legitimate alternation stays legal:
+  //   • split ONLY on top-level `|` (no groups, no anchors, no metachars other than the pipe itself)
+  //   • require ≥ 2 non-empty branches
+  //   • each branch itself must be a bare literal (no metachars) — a branch like `test:\\w+` means
+  //     the author is expressing a real pattern, so we do not touch it
+  //   • judge each branch through the same per-name rules by recursing WITH the spec text — if ANY
+  //     branch is spec-pinned or is not a builder-chosen shape (single word, ALL_CAPS, etc), the
+  //     whole pattern stays allowed (a real alternation with one genuine term)
+  //   • only reject when EVERY branch flags — then suggest a corrected pattern built from the
+  //     branches' distinctive tokens, joined with `|`, matching the style the existing rules emit
+  const branches = p.split("|");
+  if (branches.length >= 2 && branches.every((b) => b.length > 0 && !GREP_REGEX_METACHARS.test(b))) {
+    const perBranch = branches.map((b) => detectBuilderChosenNameInGrep(b, specText));
+    if (perBranch.every((g) => g !== null)) {
+      const distinctives = perBranch.map((g, i) => {
+        const s = g!.suggested;
+        // Strip regex noise the per-name rules add so the suggested alternation reads as a proper
+        // token list (e.g. `test:.*crowned` → `crowned`, `(?i)\\bquant-desk\\b` → `quant-desk`).
+        const stripped = s
+          .replace(/^\(\?i\)/, "")
+          .replace(/^\\b/, "")
+          .replace(/\\b$/, "")
+          .replace(/^test:\.\*/, "")
+          .replace(/^([^.\\]+)\\\..*$/, "$1");
+        return stripped || branches[i]!;
+      });
+      return {
+        reason:
+          `grep.pattern "${p}" is an alternation of ${branches.length} names the builder gets to ` +
+          `invent — each branch flags in isolation, so the union is a lottery, not a verification ` +
+          `(joining guesses by "|" reads more thorough while staying just as unmatchable). Name ` +
+          `the exact identifiers in the spec body so the check is spec-pinned, or loosen the ` +
+          `pattern to a case-insensitive regex on the distinctive tokens`,
+        suggested: `(?i)\\b(${distinctives.join("|")})\\b`,
+      };
+    }
+  }
+
   // A pattern that already carries any regex metacharacter (beyond the filename shape above) is
   // not a bare literal — treat it as a pattern and stop.
   if (GREP_REGEX_METACHARS.test(p)) return null;
@@ -494,6 +539,55 @@ export function detectBuilderChosenNameInGrep(
   }
 
   return null;
+}
+
+/**
+ * grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 2 — extract the identifiers a spec
+ * body pins via the `detectBuilderChosenNameInGrep` escape valve, so the build session can be told
+ * those names are REQUIRED API (same spelling, same casing) rather than the pin merely exempting the
+ * check at authoring while the builder invents a different name and the assertion never matches.
+ *
+ * A branch (or a whole pattern) is "pinned" iff BOTH hold:
+ *   • without `specText`, the guard would flag it as builder-chosen (npm-script / test-filename /
+ *     kebab / camelCase); AND
+ *   • with `specText`, the guard returns null — the ONLY reason it's allowed is the pin.
+ *
+ * A pattern the guard would have passed on its own (bare word, ALL_CAPS, or a real regex — anchor,
+ * quantifier, character class) is NOT pinned: no exemption fired, nothing to bind. Alternations
+ * split on top-level `|` and each bare-literal branch is judged independently — matches the split
+ * Phase 1 uses so an alternation with one pinned + one guessed branch returns just the pinned name.
+ *
+ * Pure — no DB. Callers pass the grep patterns they already have from `listPhaseChecks` /
+ * `listSpecPhaseChecks` plus the spec's rendered body text. Result is de-duped + sorted for a
+ * stable rendering in the build brief.
+ */
+export function collectSpecPinnedGrepLiterals(
+  grepPatterns: readonly string[],
+  specText: string,
+): string[] {
+  const pinned = new Set<string>();
+  for (const raw of grepPatterns) {
+    const p = (raw ?? "").trim();
+    if (!p) continue;
+    const branches = p.split("|");
+    const candidates =
+      branches.length >= 2 &&
+      branches.every((b) => b.length > 0 && !GREP_REGEX_METACHARS.test(b))
+        ? branches
+        : [p];
+    for (const branch of candidates) {
+      // A branch that carries its own metachars is a real regex piece, not a pinned literal.
+      if (GREP_REGEX_METACHARS.test(branch)) continue;
+      const withoutSpec = detectBuilderChosenNameInGrep(branch);
+      // The guard would have passed this branch on its own — no exemption fired, nothing to bind.
+      if (!withoutSpec) continue;
+      const withSpec = detectBuilderChosenNameInGrep(branch, specText);
+      // Exemption fired only if the with-spec judgment returned null: the pin is the ONE reason
+      // the guard let this literal through.
+      if (withSpec === null) pinned.add(branch);
+    }
+  }
+  return Array.from(pinned).sort();
 }
 
 export function validateExecutableCheck(
