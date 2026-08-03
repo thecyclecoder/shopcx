@@ -19,6 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyRefreshOutcome,
+  classifyAccountHealth,
   decideSweepAction,
   type SweepAction,
 } from "./builder-worker.auth-refresh";
@@ -153,4 +154,104 @@ test("recovered outcome with holdReasonBefore='usage_cap' does NOT clear the hol
   assert.equal(outcome.kind, "recovered");
   assert.equal(outcome.clearHold, false);
   assert.equal(outcome.markAuthExpired, false);
+});
+
+test("recovered outcome with holdReasonBefore='reauth_required' DOES clear the hold — the CEO re-logged in, the credentials file now has a refreshToken, and this sweep-triggered refresh just renewed the access token (build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — closes the ordering-trap deadlock where a reauth_required account otherwise sat cappedUntil for the full weekly window even after /login)", () => {
+  const outcome = applyRefreshOutcome({
+    freshExpiresAt: NOW + 3_600_000,
+    now: NOW,
+    holdReasonBefore: "reauth_required",
+  });
+  assert.equal(outcome.kind, "recovered");
+  assert.equal(outcome.clearHold, true);
+  assert.equal(outcome.markAuthExpired, false);
+});
+
+// ── classifyAccountHealth: the pure account-health classifier Phase 3 asked for in writing ─────
+// The four cases the spec named + the pre-expiry warning + a null-signal skip. Every downstream
+// label (box page chip, CEO card title, pool-holds summary line) is derived from this one
+// predicate, so the labels cannot regress via a sibling change.
+
+const WARN_MS = 24 * 60 * 60 * 1000; // 24 hours — warn a full day before the wall
+
+test("classifyAccountHealth: expired + refreshToken ⇒ renewable (the sweep will fire an exercise refresh; no human needed)", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW - 1_000,
+    hasRefreshToken: true,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "renewable");
+});
+
+test("classifyAccountHealth: expired + NO refreshToken ⇒ reauth_required (only an interactive /login restores this account)", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW - 1_000,
+    hasRefreshToken: false,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "reauth_required");
+});
+
+test("classifyAccountHealth: healthy (expiresAt well in the future) ⇒ no hold — 'healthy'", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW + 7 * 24 * 3600_000, // a week out
+    hasRefreshToken: true,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "healthy");
+});
+
+test("classifyAccountHealth: usage-wall rejection ⇒ usage_cap regardless of credentials-file state — the runtime signal overrides the file (a fresh token that Anthropic just rejected on quota is still capped)", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW + 7 * 24 * 3600_000,
+    hasRefreshToken: true,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: true,
+  });
+  assert.equal(health.kind, "usage_cap");
+});
+
+test("classifyAccountHealth: expiring_soon + NO refreshToken ⇒ 'expiring_soon' so the heartbeat sweep can flag this EARLY (before it goes fully dead) — the 2026-08-03 outage happened precisely because a no-refreshToken account was surfaced 49h AFTER expiry, not before", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW + 2 * 3600_000, // 2h away — inside the 24h warn window
+    hasRefreshToken: false,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "expiring_soon");
+  if (health.kind !== "expiring_soon") throw new Error("unreachable");
+  assert.equal(health.hasRefreshToken, false);
+  assert.equal(health.msUntilExpiry, 2 * 3600_000);
+});
+
+test("classifyAccountHealth: expiring_soon + refreshToken ⇒ 'expiring_soon' but the operator does NOT need to act — the sweep's exercise path will renew it once expired (the WITH-refreshToken half of Phase 3's remedy)", () => {
+  const health = classifyAccountHealth({
+    expiresAt: NOW + 2 * 3600_000,
+    hasRefreshToken: true,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "expiring_soon");
+  if (health.kind !== "expiring_soon") throw new Error("unreachable");
+  assert.equal(health.hasRefreshToken, true);
+});
+
+test("classifyAccountHealth: expiresAt=0 (missing / malformed credentials file) ⇒ 'healthy' so the reactive 401 path stays in charge — a file-read error must NEVER trigger a proactive eject wave", () => {
+  const health = classifyAccountHealth({
+    expiresAt: 0,
+    hasRefreshToken: false,
+    now: NOW,
+    warnThresholdMs: WARN_MS,
+    usageWallRejected: false,
+  });
+  assert.equal(health.kind, "healthy");
 });

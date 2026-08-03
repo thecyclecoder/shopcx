@@ -81,9 +81,16 @@ export function applyRefreshOutcome(input: {
     return {
       kind: "recovered",
       lastAuthRefreshFailed: false,
+      // build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 —
+      // a successful refresh ALSO clears a prior `reauth_required` hold (the CEO re-logged in, the
+      // credentials file now carries a refreshToken, and the sweep's exercise-fire-refresh path just
+      // renewed the access token). Without this, an account that came back healthy via /login would
+      // sit at cappedUntil for the full weekly window because clearHold=false — the "ordering trap"
+      // the spec explicitly names.
       clearHold:
         input.holdReasonBefore === "auth_expired" ||
-        input.holdReasonBefore === "refresh_failed",
+        input.holdReasonBefore === "refresh_failed" ||
+        input.holdReasonBefore === "reauth_required",
       markAuthExpired: false,
     };
   }
@@ -93,4 +100,55 @@ export function applyRefreshOutcome(input: {
     clearHold: false,
     markAuthExpired: true,
   };
+}
+
+// ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 ─────────
+// The pure account-health classifier the spec asked for in writing. It maps the two ground-truth
+// inputs an operator has — the credentials file's `expiresAt` + whether a `refreshToken` is present
+// — plus the runtime usage-wall signal to one of five states, so every downstream label (box page,
+// CEO card, summary line) is a function of the same predicate and cannot regress into a mislabel.
+//
+// The five states map 1:1 to the vocabulary the brain runbook documents:
+//   - 'healthy'         — access token is live (expiresAt > now). No hold; picked by dispatch.
+//   - 'expiring_soon'   — access token is live but within `warnThresholdMs` of expiry. A WITH-
+//                         refreshToken account is renewed automatically by the sweep's exercise
+//                         path once the wall is crossed (proven on 2026-08-03 midday); a WITHOUT
+//                         one is flagged EARLY (Phase 3 CEO warning card) so the human /login can
+//                         happen BEFORE the account goes fully dead.
+//   - 'renewable'       — access token is past expiry AND a refreshToken is present. The sweep will
+//                         fire an exercise `claude -p` that rewrites the credentials file with a
+//                         fresh accessToken; no human action needed.
+//   - 'reauth_required' — access token is past expiry AND no refreshToken. Only an interactive
+//                         `/login` restores this account. Distinct in kind — no wait or retry.
+//   - 'usage_cap'       — a real usage-wall rejection (isHardRateLimitRejection / isUsageCapError
+//                         upstream). Clears at the reset time; the classifier just names it.
+export type AccountHealth =
+  | { kind: "healthy" }
+  | { kind: "expiring_soon"; expiresAt: number; hasRefreshToken: boolean; msUntilExpiry: number }
+  | { kind: "renewable" }
+  | { kind: "reauth_required" }
+  | { kind: "usage_cap" };
+
+export function classifyAccountHealth(input: {
+  expiresAt: number;
+  hasRefreshToken: boolean;
+  now: number;
+  warnThresholdMs: number;
+  usageWallRejected: boolean;
+}): AccountHealth {
+  // A usage-wall rejection is a runtime signal that overrides file-based classification — the file
+  // can look pristine while Anthropic's server has rejected the account on quota.
+  if (input.usageWallRejected) return { kind: "usage_cap" };
+  // No signal (missing / malformed file). Treat as healthy so the reactive 401 path stays in
+  // charge — the sweep would otherwise start ejecting accounts based on a file-read error.
+  if (input.expiresAt <= 0) return { kind: "healthy" };
+  if (input.expiresAt > input.now) {
+    const msUntilExpiry = input.expiresAt - input.now;
+    if (msUntilExpiry <= input.warnThresholdMs) {
+      return { kind: "expiring_soon", expiresAt: input.expiresAt, hasRefreshToken: input.hasRefreshToken, msUntilExpiry };
+    }
+    return { kind: "healthy" };
+  }
+  // expiresAt is in the past — one of the two auth-hold cases.
+  return input.hasRefreshToken ? { kind: "renewable" } : { kind: "reauth_required" };
 }

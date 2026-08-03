@@ -47,7 +47,7 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
-import { applyRefreshOutcome, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named
+import { applyRefreshOutcome, classifyAccountHealth, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -1998,6 +1998,95 @@ function sweepExpiredCredentials(now: number): void {
           ? `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now, refreshToken missing — an interactive /login is required`
           : `credentials.json expiresAt=${new Date(expiresAt).toISOString()} ≤ now — proactive eject before dispatch`;
     markAccountAuthExpired(a.configDir, now, detail, action.holdReason);
+  }
+}
+
+// ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 ─────────
+// Warn BEFORE an account expires, not days after. Runs on the heartbeat cadence (throttled to
+// AUTH_EXPIRY_WARN_INTERVAL_MS so a ticket-hot poll loop doesn't spam the CEO inbox). For each
+// account — INCLUDING held ones, the "ordering trap" the spec names: a held account is never
+// dispatched so its token is never refreshed so it stays held — the sweep classifies via
+// classifyAccountHealth and takes the shape-appropriate action:
+//
+//   'expiring_soon' + NO refreshToken  → raise the same reauth CEO card EARLY (dedupe'd by config
+//                                        dir so a subsequent full-expiry doesn't add a second
+//                                        card). The body tells the CEO how long they have before
+//                                        the account goes dead. This is the case the outage was
+//                                        missing entirely — a no-refreshToken account was surfaced
+//                                        49h AFTER expiry, not before.
+//   'expiring_soon' + refreshToken     → log a low-noise console line + let the WITH-refreshToken
+//                                        sweep path handle the actual renewal once it expires. No
+//                                        card: the CLI self-heals; a card would be noise.
+//   'renewable'                        → no-op; sweepExpiredCredentials owns the refresh trigger.
+//                                        Included so the classifier's states are exhaustive here.
+//   'reauth_required'                  → no-op; sweepExpiredCredentials already ejected + carded.
+//   'healthy' / 'usage_cap'            → no-op; nothing to warn about.
+//
+// ORDERING-TRAP RECOVERY. When the CEO re-logs in for a currently-held reauth_required account,
+// the credentials file now carries a fresh expiresAt + refreshToken but the account is still
+// pinned at cappedUntil = weekly window from the initial eject. classifyAccountHealth reads
+// 'healthy' (or 'expiring_soon'); we clear the hold + cappedUntil + dismiss the open CEO card so
+// the account rejoins rotation immediately instead of waiting out the week the eject scheduled.
+const AUTH_EXPIRY_WARN_MS = 24 * 60 * 60 * 1000; // 24h — warn a full day before the wall
+const AUTH_EXPIRY_WARN_INTERVAL_MS = 15 * 60 * 1000; // 15 min — heartbeat runs every 5s; throttle
+let lastUpcomingExpirySweepAt = 0;
+function sweepUpcomingExpiries(now: number): void {
+  if (now - lastUpcomingExpirySweepAt < AUTH_EXPIRY_WARN_INTERVAL_MS) return;
+  lastUpcomingExpirySweepAt = now;
+  for (const a of accounts) {
+    // Ground-truth read of the credentials file — cache is fine for expiresAt (the sweep hot path
+    // already re-uses it) but refreshToken must be read fresh so a CEO re-login is picked up on the
+    // next warn tick, not the next expiry cycle.
+    const { expiresAt, hasRefreshToken } = readCredentialsFields(a.configDir);
+    const health = classifyAccountHealth({
+      expiresAt,
+      hasRefreshToken,
+      now,
+      warnThresholdMs: AUTH_EXPIRY_WARN_MS,
+      usageWallRejected: false, // usage caps arrive via markAccountCapped, not this sweep
+    });
+
+    // Ordering-trap recovery — a held reauth_required account whose credentials file is now valid
+    // (CEO re-logged in). Clear the hold IN this warn tick + dismiss the card, so the account
+    // rejoins rotation immediately instead of waiting out the weekly cappedUntil the eject wrote.
+    if (
+      a.cappedUntil > now &&
+      a.holdReason === "reauth_required" &&
+      (health.kind === "healthy" || health.kind === "expiring_soon" || health.kind === "renewable") &&
+      hasRefreshToken
+    ) {
+      const priorCappedUntil = a.cappedUntil;
+      a.cappedUntil = 0;
+      a.holdReason = null;
+      a.capEventLogged = false;
+      recordAccountEvent(
+        "recovered",
+        a.configDir,
+        `reauth_required hold cleared — credentials file is valid again (refreshToken present); rejoining rotation ~${Math.round((priorCappedUntil - now) / 3600_000)}h ahead of the weekly-window schedule`,
+      );
+      console.warn(`[multi-account] ${a.configDir} reauth_required hold cleared — credentials file is valid again (CEO re-login); back in rotation`);
+      void dismissCeoReauthCardBestEffort(a.configDir);
+      continue;
+    }
+
+    if (health.kind !== "expiring_soon") continue;
+    const hoursUntil = health.msUntilExpiry / 3600_000;
+
+    if (health.hasRefreshToken) {
+      // A WITH-refreshToken account will auto-renew once expired — the sweepExpiredCredentials
+      // path fires an exercise refresh at the moment of expiry (proven on 2026-08-03 midday when a
+      // third account renewed itself unattended). Log a low-noise console line so the console tail
+      // shows the pending renewal, but do NOT raise a card: a self-healing account is noise.
+      console.log(`[multi-account] ${a.configDir} access token expires in ~${hoursUntil.toFixed(1)}h — will auto-renew via CLI exercise (refreshToken present)`);
+      continue;
+    }
+
+    // NO refreshToken + inside the warn window — the case the outage completely missed. Raise the
+    // reauth CEO card EARLY so the /login can happen BEFORE the account goes dead. The card is
+    // deduped by config_dir, so a subsequent full-expiry (sweepExpiredCredentials → markAccountAuthExpired
+    // → emitCeoReauthCardBestEffort with the same dedupe key) does NOT add a second card.
+    console.warn(`[multi-account] ${a.configDir} needs an interactive /login within ~${hoursUntil.toFixed(1)}h — no refresh_token, no auto-renewal possible`);
+    void emitCeoReauthCardBestEffort(a.configDir, expiresAt, now);
   }
 }
 
@@ -4291,6 +4380,17 @@ async function writeHeartbeat(activeBuilds: number, status: string, detail?: str
   if (Date.now() - lastUsageRollupAt > USAGE_ROLLUP_INTERVAL_MS) {
     lastUsageRollupAt = Date.now();
     void runAccountUsageRollupBestEffort();
+  }
+  // build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 —
+  // warn BEFORE an account expires (no-refreshToken → CEO card, refreshToken → console) and
+  // recover a reauth_required hold when the CEO's /login has already put fresh credentials in
+  // place. Runs on the heartbeat cadence but self-throttles to AUTH_EXPIRY_WARN_INTERVAL_MS so
+  // the 5s poll tick doesn't spam. Fire-and-forget — a warn/recovery failure must never break
+  // the heartbeat write.
+  try {
+    sweepUpcomingExpiries(Date.now());
+  } catch (e) {
+    console.warn("[multi-account] sweepUpcomingExpiries threw (swallowed):", e instanceof Error ? e.message : e);
   }
   try {
     await db.from("worker_heartbeats").upsert({
