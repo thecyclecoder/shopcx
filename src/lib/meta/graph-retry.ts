@@ -361,6 +361,65 @@ function fireAppOwnerActionRequiredHandler(ctx: AppOwnerActionRequiredContext): 
 }
 
 /**
+ * The context passed to a registered reconnect-required handler. Same shape
+ * as its siblings so a caller can share a single escalation SDK layout —
+ * `metaClass='reconnect_required'` on the tagged error distinguishes.
+ */
+export interface ReconnectRequiredContext {
+  /** The label passed to `graphFetchJson` — the calling function + endpoint. */
+  label: string;
+  /** HTTP status Meta returned (always 400 for this class). */
+  status: number;
+  /** The tagged Error the caller will receive. `metaClass='reconnect_required'`. */
+  error: GraphError;
+}
+
+type ReconnectRequiredHandler = (ctx: ReconnectRequiredContext) => void | Promise<void>;
+
+let reconnectRequiredHandler: ReconnectRequiredHandler | null = null;
+
+/**
+ * Register a fire-and-forget handler invoked on every reconnect_required
+ * Graph error. See
+ * [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 2 — the CEO card is raised through this seam by
+ * [[./reconnect-required-escalation]] at import time, and its handler probes
+ * Meta's `debug_token` endpoint BEFORE emitting a card so a single-sighting
+ * string trigger cannot misroute the founder.
+ */
+export function registerReconnectRequiredHandler(
+  fn: ReconnectRequiredHandler | null,
+): void {
+  reconnectRequiredHandler = fn;
+}
+
+/** Return the current registered handler (or null). Exported for tests. */
+export function getReconnectRequiredHandler(): ReconnectRequiredHandler | null {
+  return reconnectRequiredHandler;
+}
+
+function fireReconnectRequiredHandler(ctx: ReconnectRequiredContext): void {
+  const handler = reconnectRequiredHandler;
+  if (!handler) return;
+  try {
+    const result = handler(ctx);
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch((err) => {
+        console.warn(
+          "[graph-retry] reconnect-required handler threw (swallowed)",
+          { err },
+        );
+      });
+    }
+  } catch (err) {
+    console.warn(
+      "[graph-retry] reconnect-required handler threw (swallowed)",
+      { err },
+    );
+  }
+}
+
+/**
  * Issue a Graph request (the thunk re-runs each attempt so the fetch is fresh),
  * parse JSON, and retry transient failures with bounded exponential backoff +
  * jitter. Returns the parsed JSON on success; throws the canonical graphError on
@@ -392,6 +451,27 @@ export async function graphFetchJson(makeRequest: () => Promise<Response>, label
       console.warn(
         `[graph-retry] ${label} APP_OWNER_ACTION_REQUIRED meta error http=${res.status} — ` +
           `workspace owner must clear this from the Meta App Dashboard; not retrying, escalating.`,
+      );
+      throw tagged;
+    }
+
+    // Reconnect-required = the stored per-workspace user token has been
+    // invalidated by Meta (see [[classifyReconnectRequired]]); the app-level
+    // gate is CLEAR, so the App Dashboard has nothing left to do — only
+    // re-authorizing OAuth restores access. Never retry: a dead token stays
+    // dead until the workspace owner reconnects. Fire the reconnect handler
+    // ([[./reconnect-required-escalation]] `escalateReconnectRequired` — which
+    // itself confirms via `debug_token` BEFORE raising a card, so a
+    // single-sighting string cannot misroute the founder), then throw the
+    // tagged GraphError so the caller can branch on `metaClass`. Checked
+    // BEFORE permanent so a reconnect state is never mis-tagged as
+    // permanent_api_removed (a code-change escalation).
+    if (classifyReconnectRequired(res.status, err)) {
+      const tagged = graphError(res.status, err);
+      fireReconnectRequiredHandler({ label, status: res.status, error: tagged });
+      console.warn(
+        `[graph-retry] ${label} RECONNECT_REQUIRED meta error http=${res.status} — ` +
+          `stored user token invalidated; not retrying, escalating (confirm-before-card via debug_token).`,
       );
       throw tagged;
     }

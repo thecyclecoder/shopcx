@@ -157,6 +157,7 @@
     "test:meta-graph-retry-permanent": "tsx --test src/lib/meta/graph-retry.permanent.test.ts",
     "test:meta-graph-retry-app-owner-action-required": "tsx --test src/lib/meta/graph-retry.app-owner-action-required.test.ts",
     "test:meta-reconnect-required": "tsx --test src/lib/meta/graph-retry.reconnect-required.test.ts",
+    "test:reconnect-required-escalation-workspace-scope": "tsx --test src/lib/meta/reconnect-required-escalation.workspace-scope.test.ts",
     "test:ad-tool-publish-app-owner-action-containment": "tsx --test src/lib/inngest/ad-tool.publish-app-owner-action-containment.test.ts",
     "test:today-sync": "tsx --test src/lib/inngest/today-sync.test.ts",
     "test:journey-delivery-portal-enrolled": "tsx --test src/lib/journey-delivery.portal-enrolled.test.ts",
