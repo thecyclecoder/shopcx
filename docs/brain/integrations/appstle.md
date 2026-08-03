@@ -56,6 +56,20 @@ Base: `https://subscription-admin.appstle.com/api/external/v2`
 
 Returns `200` with updated contract JSON. `lines` may be absent if processed async — re-fetch via `contract-raw-response` if you need to confirm.
 
+**A 2xx is NOT proof of success — the body must be classified.** `replace-variants-v3` answers `200` on requests it then declines to apply. `classifyReplaceVariantsBody(status, body)` in [[../libraries/subscription-items]] is the pure predicate every caller must run before treating a response as applied. Known decline shapes:
+
+| Body shape | Classification | Notes |
+|---|---|---|
+| `{ "errorKey": "maxiterations", "errorMessage": "Unable to complete variant replacement after multiple attempts" }` | **declined + permanent** | Appstle has given up retrying internally. Reproduced on contracts 27946909869 + 27871477933 (2026-07-30) across two campaigns each; retrying reaches the same wall. Surface for human repair — do NOT retry blindly. |
+| `{ "errorKey": "<other>", "errorMessage": "…" }` | declined, not permanent | Other Spring-Boot-style errorKeys still mean the mutation did not land, but the caller may retry. |
+| `{ "success": false, "message": "…" }` | declined, not permanent | Explicit success flag overrides HTTP status. |
+| `{ "errors": [{ "field": "…", "message": "…" }] }` | declined, not permanent | Validation-style envelope. |
+| Any body mentioning `maxiterations` as unstructured text | declined + permanent | Defensive fallback in case Appstle ships an unparseable body that still names the class. |
+| No decline signal + 2xx | applied | The happy path. |
+| No decline signal + non-2xx | declined, not permanent | Transient upstream failure — caller may retry. |
+
+`callReplaceVariants` returns `{ success: false, error, permanent?: boolean, declineErrorKey?: string }`; callers (`subAddItem`, `subChangeQuantity`, `subSwapVariant`) spread that through so a permanent per-contract failure surfaces up the stack instead of being buried in a batch summary. Regression: `test:subscription-items-replace-variants-decline` pins a 2xx-with-decline body to failure.
+
 Internal-subscription guard: `isInternalSubscription()` short-circuits these calls and updates Postgres directly. See `src/lib/internal-subscription.ts`.
 
 **Heal-on-touch gateway:** every Appstle **mutation** routes through `healOnTouch`/`appstleMutate` ([[../libraries/appstle-pricing]]) first, which heals any `pricingPolicy: null` line (via the pricing-policy endpoint above) before the mutation lands. No new code may call `subscription-admin.appstle.com` to mutate a contract without that guard. Cancel + migration skip the heal (the sub is being killed / re-homed).

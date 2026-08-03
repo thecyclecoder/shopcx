@@ -261,6 +261,55 @@ export async function appstleRemoveLineItem(
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
 
+    // Phase 1 — a 200 from remove-line-item is not proof the line is gone. Re-read the live
+    // contract and refuse to report success unless the variant is actually absent. syncContractItems
+    // only fires on verified success — mirroring the sub back to the intended shape on an
+    // unverified mutation would durable-store the lie.
+    //
+    // The variant id we verify on is the numeric variant behind the resolved `lineGid`. When the
+    // caller only handed us a `lineGid` (no `variantId`), we resolve the numeric variant from the
+    // just-resolved line so the predicate can classify "still-present". Skipping verification when
+    // we cannot identify the variant is safer than a false success — bail as unverifiable.
+    let verifyVariantId: string | null = variantOrLine.variantId ? String(variantOrLine.variantId) : null;
+    if (!verifyVariantId && lineGid) {
+      try {
+        const detailRes = await fetch(
+          `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+          { cache: "no-store" },
+        );
+        if (detailRes.ok) {
+          const detail = await detailRes.json();
+          const lines = (detail?.lines?.nodes || []) as Array<Record<string, unknown>>;
+          // The line we just removed is gone by now — but a fresh read still tells us what remains,
+          // and any pre-remove read of the same lineGid would have named its variant. We accept
+          // that a lineGid-only remove without variantId can only verify by looking at the AFTER
+          // state; if the caller never gave us a variantId and no line remains that maps to that
+          // GID, verification succeeds by construction.
+          const stillPresent = lines.find((l) => String(l.id || "") === String(lineGid));
+          if (stillPresent) {
+            return {
+              success: false,
+              error: `remove did not apply on contract ${contractId}: lineGid ${lineGid} still present on live contract`,
+            };
+          }
+        }
+      } catch (err) {
+        console.warn("[appstleRemoveLineItem] verify fetch failed:", errText(err));
+      }
+    }
+    if (verifyVariantId && /^\d+$/.test(verifyVariantId)) {
+      const verdict = await verifyContractEndState(config.apiKey, contractId, {
+        kind: "remove",
+        variantId: verifyVariantId,
+      });
+      if (!verdict.ok) {
+        return {
+          success: false,
+          error: `remove did not apply on contract ${contractId}: ${verdict.reason}`,
+        };
+      }
+    }
+
     // Update local DB
     await syncContractItems(workspaceId, contractId, config.apiKey);
 
@@ -297,10 +346,326 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
   } catch { /* non-fatal */ }
 }
 
+// ── Post-mutation end-state verification (Phase 1) ──────────────────
+//
+// Every subscription line mutation on the Appstle rail MUST re-read the LIVE
+// contract and confirm the intended end state before it returns success. The
+// upstream helper `callReplaceVariants` decides success purely from `res.ok`,
+// but Appstle answers 200 on requests it then declines to apply — reproduced
+// on contracts 27946909869 and 27871477933 (2026-07-30), where a swap reported
+// success and the flavour never moved. A false success is worse than a
+// failure: a failure retries, a false success is recorded as done and the
+// customer ships the wrong thing. See docs/brain/specs/
+// a-subscription-mutation-must-verify-it-happened-not-trust-http-200.md.
+//
+// The pure predicate `checkContractSatisfiesExpectation` decides
+// verified/not-verified/unverifiable from a `lines.nodes` snapshot. The I/O
+// wrapper `verifyContractEndState` fetches the live contract and
+// polls with a bounded settle window (Appstle can apply asynchronously); a
+// TIMEOUT ends as FAILURE — unverifiable is NOT the same as done.
+
+/**
+ * What the caller expected the subscription contract to look like after the
+ * mutation. Kept as a discriminated union so `checkContractSatisfiesExpectation`
+ * classifies each shape without any I/O.
+ *
+ * - `add` — variant present at ≥ requested quantity (Appstle merges into an
+ *   existing line, so quantity is a lower bound not an equality).
+ * - `remove` — variant absent from the contract.
+ * - `swap` — the new variant present at ≥ requested quantity AND the old
+ *   variant absent (a swap that added the new but left the old is a partial
+ *   apply, not a success).
+ * - `price` — the line for `variantId` carries `pricingPolicy.basePrice`
+ *   matching `expectedBaseCents` (±$0.01 tolerance for float→cents rounding).
+ */
+export type MutationExpectation =
+  | { kind: "add"; variantId: string; quantity: number }
+  | { kind: "remove"; variantId: string }
+  | { kind: "swap"; newVariantId: string; oldVariantId: string; quantity: number }
+  | { kind: "price"; variantId: string; expectedBaseCents: number };
+
+/** A verification verdict against a single live-contract snapshot. */
+export interface EndStateVerdict {
+  /** True when the snapshot satisfies the expectation. */
+  ok: boolean;
+  /** Present when `ok=false` — describes what was expected vs what is on the contract. */
+  reason?: string;
+}
+
+/** Pull a numeric-string variant id out of an Appstle line's GID-shaped `variantId`. */
+function lineVariantId(line: { variantId?: string }): string | null {
+  const raw = line.variantId;
+  if (!raw) return null;
+  const tail = String(raw).split("/").pop() || String(raw);
+  return tail || null;
+}
+
+/**
+ * Pure predicate — does the live contract's line set satisfy the caller's
+ * mutation expectation? Broken out of the mutation helpers so the classification
+ * can be unit-tested without standing up a live Appstle contract; the I/O
+ * wrapper `verifyContractEndState` polls this against the real contract.
+ *
+ * Returns `{ ok: true }` when satisfied; `{ ok: false, reason }` naming the
+ * expectation and what the contract actually holds so the caller's error string
+ * is diagnosable at a glance (e.g. "add expected variant 12345 present; contract
+ * holds variants 67890, 24680").
+ */
+export function checkContractSatisfiesExpectation(
+  lines: Array<{ variantId?: string; quantity?: number; pricingPolicy?: { basePrice?: { amount?: string } | null } | null }>,
+  expected: MutationExpectation,
+): EndStateVerdict {
+  const present = lines
+    .map((l) => ({ vid: lineVariantId(l), qty: Number(l.quantity ?? 0), line: l }))
+    .filter((r): r is { vid: string; qty: number; line: typeof lines[number] } => !!r.vid);
+  const holdList = present.map((r) => r.vid).join(", ") || "(none)";
+
+  if (expected.kind === "add") {
+    const match = present.find((r) => r.vid === String(expected.variantId));
+    if (!match) {
+      return {
+        ok: false,
+        reason: `add expected variant ${expected.variantId} present; contract holds variants ${holdList}`,
+      };
+    }
+    if (match.qty < expected.quantity) {
+      return {
+        ok: false,
+        reason: `add expected variant ${expected.variantId} at quantity ≥ ${expected.quantity}; contract has quantity ${match.qty}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  if (expected.kind === "remove") {
+    const still = present.find((r) => r.vid === String(expected.variantId));
+    if (still) {
+      return {
+        ok: false,
+        reason: `remove expected variant ${expected.variantId} absent; contract still holds it at quantity ${still.qty}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  if (expected.kind === "swap") {
+    const newMatch = present.find((r) => r.vid === String(expected.newVariantId));
+    const oldStill = present.find((r) => r.vid === String(expected.oldVariantId));
+    if (!newMatch) {
+      return {
+        ok: false,
+        reason: `swap expected new variant ${expected.newVariantId} present; contract holds variants ${holdList}`,
+      };
+    }
+    if (oldStill) {
+      return {
+        ok: false,
+        reason: `swap expected old variant ${expected.oldVariantId} absent; contract still holds it at quantity ${oldStill.qty}`,
+      };
+    }
+    if (newMatch.qty < expected.quantity) {
+      return {
+        ok: false,
+        reason: `swap expected new variant ${expected.newVariantId} at quantity ≥ ${expected.quantity}; contract has quantity ${newMatch.qty}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // price
+  const match = present.find((r) => r.vid === String(expected.variantId));
+  if (!match) {
+    return {
+      ok: false,
+      reason: `price update expected variant ${expected.variantId} present; contract holds variants ${holdList}`,
+    };
+  }
+  const basePriceAmt = match.line.pricingPolicy?.basePrice?.amount;
+  const observedCents = basePriceAmt != null ? Math.round(parseFloat(String(basePriceAmt)) * 100) : null;
+  if (observedCents == null) {
+    return {
+      ok: false,
+      reason: `price update expected base ${expected.expectedBaseCents}¢ on variant ${expected.variantId}; contract line has no pricingPolicy.basePrice`,
+    };
+  }
+  // ±$0.01 tolerance — float→cents rounding across the boundary can drift a penny.
+  if (Math.abs(observedCents - expected.expectedBaseCents) > 1) {
+    return {
+      ok: false,
+      reason: `price update expected base ${expected.expectedBaseCents}¢ on variant ${expected.variantId}; contract has ${observedCents}¢`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Fetch the live Appstle contract and confirm it satisfies `expected`. Polls
+ * with a small bounded settle window because Appstle applies asynchronously —
+ * but a TIMEOUT ends as FAILURE, never an assumed success. A fetch error at
+ * every attempt is also FAILURE (unverifiable is not done — the caller should
+ * escalate or retry rather than record a lie).
+ *
+ * Defaults: 3 attempts, 400ms between (≈ 800ms worst-case wait). Overridable
+ * via `APPSTLE_MUTATION_VERIFY_ATTEMPTS` / `APPSTLE_MUTATION_VERIFY_DELAY_MS`
+ * or the `opts` arg (tests use `opts` to run synchronously).
+ */
+async function verifyContractEndState(
+  apiKey: string,
+  contractId: string,
+  expected: MutationExpectation,
+  opts: { attempts?: number; delayMs?: number } = {},
+): Promise<EndStateVerdict> {
+  const attempts = Math.max(1, opts.attempts ?? Number(process.env.APPSTLE_MUTATION_VERIFY_ATTEMPTS ?? 3));
+  const delayMs = Math.max(0, opts.delayMs ?? Number(process.env.APPSTLE_MUTATION_VERIFY_DELAY_MS ?? 400));
+  let lastReason: string | undefined;
+  let lastFetchError: string | undefined;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0 && delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    try {
+      const res = await fetch(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${apiKey}`,
+        { headers: { "X-API-Key": apiKey }, cache: "no-store" },
+      );
+      if (!res.ok) {
+        lastFetchError = `contract fetch failed: ${res.status}`;
+        continue;
+      }
+      const detail = await res.json();
+      const lines = (detail?.lines?.nodes || []) as AppstleLine[];
+      const verdict = checkContractSatisfiesExpectation(lines, expected);
+      if (verdict.ok) return verdict;
+      lastReason = verdict.reason;
+    } catch (err) {
+      lastFetchError = errText(err);
+    }
+  }
+  return {
+    ok: false,
+    reason: lastReason
+      ?? `contract could not be verified (${lastFetchError || "no successful read"}) — treating as unverified, not success`,
+  };
+}
+
+// ── Phase 2 — a 200 that declines the work is classified, not swallowed ─────
+//
+// Appstle answers 200 on requests it then declines to apply — reproduced on
+// contracts 27946909869 and 27871477933 (2026-07-30), where the swap reported
+// success and the flavour never moved. Separately, the same two contracts
+// reject `replace-variants-v3` with `errorKey: "maxiterations"` ("Unable to
+// complete variant replacement after multiple attempts") — an upstream that has
+// given up retrying internally. Retrying reaches the same wall, so treating
+// either shape as an ordinary transient wastes attempts and hides a
+// subscription that genuinely needs hands.
+//
+// `classifyReplaceVariantsBody` is a pure predicate over `(status, body)` that
+// returns whether Appstle actually applied the mutation and — when declined —
+// whether the decline is permanent for that contract. `callReplaceVariants`
+// gates its success return on this classifier so a 2xx-with-decline body
+// returns FAILURE (with the `maxiterations` case tagged `permanent: true`)
+// instead of silently reporting the work done.
+
+/**
+ * The classification for one `replace-variants-v3` response.
+ *
+ * - `declined: true` — the mutation did NOT land, regardless of HTTP status.
+ *   Includes a 2xx whose body carries a decline (`errorKey`, `success: false`,
+ *   `error` / `errorMessage` string) — the exact shape the 2026-07-30 incident
+ *   surfaced — as well as any non-2xx response.
+ * - `permanent: true` — retrying this contract will reach the same wall. Today
+ *   only `errorKey: "maxiterations"` is classified permanent (survived every
+ *   retry across two campaigns on 27946909869 and 27871477933). Any other
+ *   decline is treated as non-permanent so callers may still retry.
+ * - `errorKey` — the surfaced errorKey when present (for observability).
+ * - `reason` — a diagnosable one-liner naming the classification path.
+ */
+export interface ReplaceVariantsClassification {
+  declined: boolean;
+  permanent: boolean;
+  errorKey?: string;
+  reason?: string;
+}
+
+/**
+ * Pure predicate — did Appstle apply the `replace-variants-v3` mutation, and if
+ * not, is the decline permanent for that contract? Broken out from
+ * `callReplaceVariants` so the exact 2xx-with-decline shapes (the class of bug
+ * this classifier exists to close) are unit-testable without a live HTTP call.
+ *
+ * The order matters: we look for an explicit decline shape in the body first
+ * (so a 2xx-with-decline is classified as declined, not success). If no decline
+ * signal is found, a non-2xx status is still a decline. Otherwise the mutation
+ * is treated as applied.
+ */
+export function classifyReplaceVariantsBody(
+  status: number,
+  body: string,
+): ReplaceVariantsClassification {
+  let parsed: unknown = null;
+  try {
+    parsed = body ? JSON.parse(body) : null;
+  } catch {
+    parsed = null;
+  }
+  const asRecord = (v: unknown): Record<string, unknown> | null =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  const obj = asRecord(parsed);
+
+  const readString = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  const errorKey =
+    (obj && readString(obj.errorKey)) ||
+    (obj && readString(asRecord(obj.error)?.errorKey)) ||
+    null;
+  const errorMessage =
+    (obj && readString(obj.errorMessage)) ||
+    (obj && readString(obj.message)) ||
+    (obj && readString(asRecord(obj.error)?.message)) ||
+    (obj && readString(obj.error)) ||
+    null;
+  const explicitSuccessFalse = !!obj && obj.success === false;
+  const errorsArray = obj && Array.isArray(obj.errors) && obj.errors.length > 0;
+
+  // Body-level decline overrides HTTP status — Appstle returns 200 with an
+  // errorKey when it declines a request it accepted. Detect the string form as
+  // a defensive fallback for future body shapes: `maxiterations` mentioned
+  // anywhere in the raw text is a decline regardless of JSON parse success.
+  const rawTextLooksMaxIterations = !errorKey && /maxiterations/i.test(body || "");
+
+  if (errorKey || explicitSuccessFalse || errorMessage || errorsArray || rawTextLooksMaxIterations) {
+    const effectiveKey = errorKey || (rawTextLooksMaxIterations ? "maxiterations" : null);
+    const permanent = effectiveKey === "maxiterations";
+    const reason = effectiveKey
+      ? `Appstle declined (errorKey=${effectiveKey})${errorMessage ? `: ${errorMessage}` : ""}`
+      : errorMessage
+        ? `Appstle declined: ${errorMessage}`
+        : explicitSuccessFalse
+          ? "Appstle declined (success=false in body)"
+          : "Appstle declined (errors[] present in body)";
+    return {
+      declined: true,
+      permanent,
+      errorKey: effectiveKey || undefined,
+      reason,
+    };
+  }
+
+  if (status < 200 || status >= 300) {
+    const snippet = (body || "").slice(0, 400).replace(/\s+/g, " ").trim();
+    return {
+      declined: true,
+      permanent: false,
+      reason: `Appstle ${status}: ${snippet || "no body"}`,
+    };
+  }
+
+  return { declined: false, permanent: false };
+}
+
 async function callReplaceVariants(
   apiKey: string,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   const url = "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3";
   const t0 = Date.now();
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
@@ -310,15 +675,33 @@ async function callReplaceVariants(
       body: JSON.stringify(body), cache: "no-store",
     });
     const text = await res.text();
+    // Phase 2 — parse the body BEFORE deciding success. A 2xx with an errorKey
+    // in the body is a decline, not success (this is the class of bug the
+    // 2026-07-30 incident exposed). Log with the CLASSIFIED success value so
+    // appstle_api_calls doesn't record a lie either.
+    const classification = classifyReplaceVariantsBody(res.status, text);
+    const trulyOk = !classification.declined;
     await logAppstleCall({
       url, method: "POST", body, endpoint: "replace-variants-v3",
-      status: res.status, responseBody: text, success: res.ok,
+      status: res.status, responseBody: text, success: trulyOk,
       durationMs: Date.now() - t0,
     });
-    if (!res.ok) {
-      console.error("Appstle replaceVariants error:", text, "body sent:", JSON.stringify(body));
-      const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
-      return { success: false, error: `Appstle ${res.status}: ${snippet || "no body"}` };
+    if (!trulyOk) {
+      // A permanent per-contract failure (today: `maxiterations`) must not be
+      // buried in a batch summary. The `permanent` flag on the return lets the
+      // caller surface it for human repair instead of retrying into the same
+      // upstream wall. Two subscriptions silently shipping the wrong flavour
+      // is exactly the outcome this classification exists to prevent.
+      console.error(
+        "Appstle replaceVariants declined:",
+        JSON.stringify({ status: res.status, classification, body }),
+      );
+      return {
+        success: false,
+        error: classification.reason || `Appstle ${res.status}: declined`,
+        permanent: classification.permanent,
+        declineErrorKey: classification.errorKey,
+      };
     }
     return { success: true };
   } catch (err) {
@@ -366,7 +749,7 @@ export async function subAddItem(
   contractId: string,
   variantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
@@ -381,13 +764,25 @@ export async function subAddItem(
     newVariants: { [variantId]: quantity },
     stopSwapEmails: true,
   });
+  if (!result.success) return result;
 
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) => [
-      ...items,
-      { variant_id: variantId, quantity, title: "", variant_title: "", price_cents: 0, product_id: "" },
-    ]);
+  // Phase 1 — a 200 from callReplaceVariants is not proof the add happened. Re-read the live
+  // contract and refuse to report success unless the variant is actually present. syncItems only
+  // fires on verified success — writing the intended state on an unverified mutation is what
+  // makes the lie durable.
+  const verdict = await verifyContractEndState(config.apiKey, contractId, {
+    kind: "add",
+    variantId,
+    quantity,
+  });
+  if (!verdict.ok) {
+    return { success: false, error: `add did not apply on contract ${contractId}: ${verdict.reason}` };
   }
+
+  await syncItemsAfterMutation(workspaceId, contractId, (items) => [
+    ...items,
+    { variant_id: variantId, quantity, title: "", variant_title: "", price_cents: 0, product_id: "" },
+  ]);
 
   return result;
 }
@@ -560,7 +955,7 @@ export async function subChangeQuantity(
   contractId: string,
   variantId: string,
   quantity: number,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     // Internal path: rewrite the line's quantity directly.
     const admin = createAdminClient();
@@ -601,14 +996,25 @@ export async function subChangeQuantity(
     carryForwardDiscount: "EXISTING_PLAN",
     stopSwapEmails: true,
   });
+  if (!result.success) return result;
 
-  if (result.success) {
-    await syncItemsAfterMutation(workspaceId, contractId, (items) =>
-      items.map((item) =>
-        String(item.variant_id) === resolvedId ? { ...item, quantity } : item,
-      ),
-    );
+  // Phase 1 — verify the quantity change actually landed on the live contract. Same class of bug
+  // as the 2026-07-30 swap incident: callReplaceVariants returns success on a 2xx even when
+  // Appstle silently declines to apply. Sync only on verified success.
+  const verdict = await verifyContractEndState(config.apiKey, contractId, {
+    kind: "add",
+    variantId: resolvedId,
+    quantity,
+  });
+  if (!verdict.ok) {
+    return { success: false, error: `quantity change did not apply on contract ${contractId}: ${verdict.reason}` };
   }
+
+  await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+    items.map((item) =>
+      String(item.variant_id) === resolvedId ? { ...item, quantity } : item,
+    ),
+  );
 
   return result;
 }
@@ -678,6 +1084,22 @@ export async function subUpdateLineItemPrice(
       const text = await res.text();
       console.error("Appstle updateLineItemPrice error:", text);
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
+    }
+
+    // Phase 1 — a 200 from update-line-item-price is not proof the base moved. Re-read the live
+    // contract and refuse to report success unless the line's pricingPolicy.basePrice matches
+    // what we asked for. Only mirror our own DB on verified success — writing the intended
+    // discounted_cents on an unverified update would make the price lie durable.
+    const verdict = await verifyContractEndState(config.apiKey, contractId, {
+      kind: "price",
+      variantId: String(variantId),
+      expectedBaseCents: basePriceCents,
+    });
+    if (!verdict.ok) {
+      return {
+        success: false,
+        error: `price update did not apply on contract ${contractId}: ${verdict.reason}`,
+      };
     }
 
     // Update our DB with the new price
@@ -870,7 +1292,7 @@ export async function subSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string; newLineGid?: string }> {
+): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }
@@ -916,6 +1338,25 @@ export async function subSwapVariant(
   let newLineGid: string | undefined;
 
   if (result.success) {
+    // Phase 1 — verify IDENTITY before anything else fires: the new variant is present AND the
+    // old is absent on the LIVE contract. This is the exact defect the 2026-07-30 crisis exposed
+    // (contracts 27946909869 + 27871477933 got success=true from callReplaceVariants; the flavour
+    // never moved). The existing swap-price assertion downstream only catches a PRICE regression;
+    // an identity no-op slips past it. syncItemsAfterMutation only runs on verified identity —
+    // otherwise our own DB mirror durable-stores the lie.
+    const identityVerdict = await verifyContractEndState(config.apiKey, contractId, {
+      kind: "swap",
+      newVariantId: String(newVariantId),
+      oldVariantId: String(resolvedOld),
+      quantity,
+    });
+    if (!identityVerdict.ok) {
+      return {
+        success: false,
+        error: `swap did not apply on contract ${contractId}: ${identityVerdict.reason}`,
+      };
+    }
+
     await syncItemsAfterMutation(workspaceId, contractId, (items) =>
       items.map((item) =>
         String(item.variant_id) === resolvedOld
