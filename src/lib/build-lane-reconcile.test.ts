@@ -19,6 +19,9 @@ import {
   chooseReconcileFallback,
   extractConflictingFiles,
   formatReconcileConflictError,
+  classifyAdditiveOnlyConflict,
+  parseConflictHunks,
+  UNION_RESOLVABLE_PATHS,
   type ReconcileInput,
 } from "./build-lane-reconcile";
 
@@ -234,4 +237,272 @@ test("formatReconcileConflictError: empty file list falls back to the strategies
   assert.match(err, /real conflict/);
   assert.match(err, /log_tail/);
   assert.match(err, /merge \+ rebase/);
+});
+
+// ── Phase 1 (spec: additive-only-conflict-resolves-itself) — classifier fixtures ────────────────
+//
+// Pins the three real 2026-08-02 collisions as fixtures — the two package.json script adds and
+// the brain-page bullet-list extension — plus negatives that must STILL park: two edits to the
+// same script line, a deletion on one side, and any `.ts` conflict.  The whole design value is
+// that this tier never guesses; the negatives prove it.
+
+test("UNION_RESOLVABLE_PATHS: package.json and docs/brain/**/*.md only, no source", () => {
+  assert.ok(UNION_RESOLVABLE_PATHS.some((r) => r.test("package.json")));
+  assert.ok(UNION_RESOLVABLE_PATHS.some((r) => r.test("docs/brain/libraries/foo.md")));
+  assert.ok(UNION_RESOLVABLE_PATHS.some((r) => r.test("docs/brain/specs/deep/nested/thing.md")));
+  // Source files intentionally NOT in the allowlist — a source conflict is semantic by default.
+  assert.ok(!UNION_RESOLVABLE_PATHS.some((r) => r.test("src/lib/foo.ts")));
+  assert.ok(!UNION_RESOLVABLE_PATHS.some((r) => r.test("src/lib/foo.tsx")));
+  assert.ok(!UNION_RESOLVABLE_PATHS.some((r) => r.test("package-lock.json")));
+  assert.ok(!UNION_RESOLVABLE_PATHS.some((r) => r.test("docs/brain/README.md/.ts"))); // pathologic
+});
+
+test("parseConflictHunks: diff3 hunk yields ours / base / theirs with hasBaseMarker=true", () => {
+  const content = [
+    "before",
+    "<<<<<<< HEAD",
+    "our line",
+    "||||||| merged common ancestors",
+    "base line",
+    "=======",
+    "their line",
+    ">>>>>>> origin/main",
+    "after",
+  ].join("\n");
+  const hunks = parseConflictHunks(content);
+  assert.equal(hunks.length, 1);
+  assert.deepEqual(hunks[0].ours, ["our line"]);
+  assert.deepEqual(hunks[0].base, ["base line"]);
+  assert.deepEqual(hunks[0].theirs, ["their line"]);
+  assert.equal(hunks[0].hasBaseMarker, true);
+  assert.equal(hunks[0].startLine, 1);
+});
+
+test("parseConflictHunks: 2-way hunk (no |||||||) sets hasBaseMarker=false + empty base", () => {
+  const content = [
+    "<<<<<<< HEAD",
+    "our",
+    "=======",
+    "their",
+    ">>>>>>> main",
+  ].join("\n");
+  const hunks = parseConflictHunks(content);
+  assert.equal(hunks.length, 1);
+  assert.equal(hunks[0].hasBaseMarker, false);
+  assert.deepEqual(hunks[0].base, []);
+});
+
+test("classifyAdditiveOnlyConflict FIXTURE 1: package.json — two adjacent script adds (2026-08-02 collision)", () => {
+  // The `no-send-path-can-emit-an-unsubstituted-placeholder` shape: main added `test:meta-ads-
+  // create`, branch added `test:ticket-delivery-placeholder-guard` — adjacent lines in the
+  // scripts object.  Union of both sides is the correct resolve.
+  const content = [
+    "{",
+    '  "name": "shopcx",',
+    '  "scripts": {',
+    '    "build": "next build",',
+    '    "existing": "npm run something",',
+    "<<<<<<< HEAD",
+    '    "test:meta-ads-create": "npx tsx scripts/test-meta-ads-create.ts",',
+    "||||||| merged common ancestors",
+    "=======",
+    '    "test:ticket-delivery-placeholder-guard": "npx tsx scripts/test-placeholder.ts",',
+    ">>>>>>> origin/main",
+    '    "start": "next start"',
+    "  },",
+    '  "dependencies": {}',
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content });
+  assert.equal(v.additive, true, JSON.stringify(v));
+  if (v.additive) {
+    assert.match(v.unionContent, /test:meta-ads-create/);
+    assert.match(v.unionContent, /test:ticket-delivery-placeholder-guard/);
+    assert.doesNotMatch(v.unionContent, /<<<<<<<|=======|>>>>>>>|\|{7}/);
+  }
+});
+
+test("classifyAdditiveOnlyConflict FIXTURE 2: package.json — SECOND real collision shape (both sides add)", () => {
+  // Same shape as Fixture 1 but with adjacent-add ordering flipped and 4 existing scripts, so
+  // we prove the classifier isn't tied to a specific fixture layout.
+  const content = [
+    "{",
+    '  "scripts": {',
+    '    "a": "x",',
+    '    "b": "y",',
+    "<<<<<<< HEAD",
+    '    "test:new-a": "npx tsx a.ts",',
+    "||||||| merged common ancestors",
+    "=======",
+    '    "test:new-b": "npx tsx b.ts",',
+    ">>>>>>> origin/main",
+    '    "c": "z"',
+    "  }",
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content });
+  assert.equal(v.additive, true, JSON.stringify(v));
+});
+
+test("classifyAdditiveOnlyConflict FIXTURE 3: docs/brain markdown — bullet-list extension (2026-08-02)", () => {
+  // The `replacement-orders-label-honestly-and-cap-at-four-units` collision: both sides
+  // extended the same bullet list in a brain page.  Union of the two added items is correct.
+  const content = [
+    "# Replacement orders",
+    "",
+    "The rules:",
+    "",
+    "- one unit per SKU by default",
+    "- label truthfully",
+    "<<<<<<< HEAD",
+    "- cap at four units per variant",
+    "||||||| merged common ancestors",
+    "=======",
+    "- label honestly across the flow",
+    ">>>>>>> origin/main",
+    "- return-authorization is separate",
+    "",
+    "## Notes",
+    "Some prose.",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({
+    path: "docs/brain/libraries/replacement-orders.md",
+    content,
+  });
+  assert.equal(v.additive, true, JSON.stringify(v));
+  if (v.additive) {
+    assert.match(v.unionContent, /cap at four units per variant/);
+    assert.match(v.unionContent, /label honestly across the flow/);
+    assert.doesNotMatch(v.unionContent, /<<<<<<<|=======|>>>>>>>|\|{7}/);
+  }
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: two edits to the same script line — base non-empty, must park", () => {
+  // The classic dangerous case the classifier MUST reject: both sides changed the SAME script's
+  // command.  A union resolve would produce a duplicate JSON key.  The diff3 base carries the
+  // pre-change line, so `base.length !== 0` → not additive.
+  const content = [
+    "{",
+    '  "scripts": {',
+    "<<<<<<< HEAD",
+    '    "test": "npm run test:one"',
+    "||||||| merged common ancestors",
+    '    "test": "npm test"',
+    "=======",
+    '    "test": "npm run test:two"',
+    ">>>>>>> origin/main",
+    "  }",
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /common ancestor|modified or deleted/i);
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: deletion on one side — empty ours, must park", () => {
+  // A deletion presents as an EMPTY side (the deleter contributed nothing).  Even if the other
+  // side merely added, the collision isn't 'both sides appended' — it's 'one deleted, one kept
+  // + added'.  The safe verdict is park.
+  const content = [
+    "- keep",
+    "<<<<<<< HEAD",
+    "- new item HEAD wants",
+    "||||||| merged common ancestors",
+    "- item origin/main wants to delete",
+    "=======",
+    ">>>>>>> origin/main",
+    "- also keep",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "docs/brain/libraries/foo.md", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /modified or deleted|empty/i);
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: any .ts conflict — parks unconditionally", () => {
+  // Source files are semantic by default; no heuristic is trusted with them.  Even a shape
+  // that would qualify in package.json (empty base, both sides added) must park in a .ts file.
+  const content = [
+    "export function foo() {",
+    "<<<<<<< HEAD",
+    "  const a = 1;",
+    "||||||| merged common ancestors",
+    "=======",
+    "  const b = 2;",
+    ">>>>>>> origin/main",
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "src/lib/foo.ts", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /UNION_RESOLVABLE_PATHS|source files park/i);
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: 2-way conflict (no ||||||| marker) — unknown base parks", () => {
+  // Without diff3, the base is unknown and neither-side-overwrote-a-base-line cannot be
+  // proven.  The classifier MUST park — a guess here defeats the design.
+  const content = [
+    "{",
+    '  "scripts": {',
+    '    "a": "x",',
+    "<<<<<<< HEAD",
+    '    "b": "y"',
+    "=======",
+    '    "c": "z"',
+    ">>>>>>> main",
+    "  }",
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /diff3|base marker/i);
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: package.json conflict OUTSIDE the scripts object", () => {
+  // A both-sides-added collision, empty base, both non-empty — but in the `dependencies`
+  // object, not `scripts`.  The scope guard MUST reject it.
+  const content = [
+    "{",
+    '  "scripts": {',
+    '    "build": "next build"',
+    "  },",
+    '  "dependencies": {',
+    "<<<<<<< HEAD",
+    '    "libA": "^1.0.0",',
+    "||||||| merged common ancestors",
+    "=======",
+    '    "libB": "^2.0.0",',
+    ">>>>>>> origin/main",
+    '    "libC": "^3.0.0"',
+    "  }",
+    "}",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /"scripts" object|outside/i);
+});
+
+test("classifyAdditiveOnlyConflict NEGATIVE: markdown conflict on paragraph prose — not append-shaped", () => {
+  // A both-sides-added collision in a brain page whose content is prose paragraphs, not list
+  // items or headers.  Even though the base is empty, an added paragraph mid-flow is not the
+  // 'appended shape' the spec restricts to.
+  const content = [
+    "# Title",
+    "",
+    "Existing paragraph.",
+    "<<<<<<< HEAD",
+    "This whole new paragraph was added by HEAD and continues freely.",
+    "||||||| merged common ancestors",
+    "=======",
+    "Meanwhile origin/main inserted a different prose paragraph here.",
+    ">>>>>>> origin/main",
+    "Trailing paragraph.",
+  ].join("\n");
+  const v = classifyAdditiveOnlyConflict({ path: "docs/brain/lifecycles/foo.md", content });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /append-shaped/i);
+});
+
+test("classifyAdditiveOnlyConflict: no hunks in content → park with a clear reason", () => {
+  const v = classifyAdditiveOnlyConflict({ path: "package.json", content: '{"scripts":{}}' });
+  assert.equal(v.additive, false);
+  if (!v.additive) assert.match(v.reason, /no conflict hunks/i);
 });
