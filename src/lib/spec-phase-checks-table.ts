@@ -541,6 +541,55 @@ export function detectBuilderChosenNameInGrep(
   return null;
 }
 
+/**
+ * grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 2 — extract the identifiers a spec
+ * body pins via the `detectBuilderChosenNameInGrep` escape valve, so the build session can be told
+ * those names are REQUIRED API (same spelling, same casing) rather than the pin merely exempting the
+ * check at authoring while the builder invents a different name and the assertion never matches.
+ *
+ * A branch (or a whole pattern) is "pinned" iff BOTH hold:
+ *   • without `specText`, the guard would flag it as builder-chosen (npm-script / test-filename /
+ *     kebab / camelCase); AND
+ *   • with `specText`, the guard returns null — the ONLY reason it's allowed is the pin.
+ *
+ * A pattern the guard would have passed on its own (bare word, ALL_CAPS, or a real regex — anchor,
+ * quantifier, character class) is NOT pinned: no exemption fired, nothing to bind. Alternations
+ * split on top-level `|` and each bare-literal branch is judged independently — matches the split
+ * Phase 1 uses so an alternation with one pinned + one guessed branch returns just the pinned name.
+ *
+ * Pure — no DB. Callers pass the grep patterns they already have from `listPhaseChecks` /
+ * `listSpecPhaseChecks` plus the spec's rendered body text. Result is de-duped + sorted for a
+ * stable rendering in the build brief.
+ */
+export function collectSpecPinnedGrepLiterals(
+  grepPatterns: readonly string[],
+  specText: string,
+): string[] {
+  const pinned = new Set<string>();
+  for (const raw of grepPatterns) {
+    const p = (raw ?? "").trim();
+    if (!p) continue;
+    const branches = p.split("|");
+    const candidates =
+      branches.length >= 2 &&
+      branches.every((b) => b.length > 0 && !GREP_REGEX_METACHARS.test(b))
+        ? branches
+        : [p];
+    for (const branch of candidates) {
+      // A branch that carries its own metachars is a real regex piece, not a pinned literal.
+      if (GREP_REGEX_METACHARS.test(branch)) continue;
+      const withoutSpec = detectBuilderChosenNameInGrep(branch);
+      // The guard would have passed this branch on its own — no exemption fired, nothing to bind.
+      if (!withoutSpec) continue;
+      const withSpec = detectBuilderChosenNameInGrep(branch, specText);
+      // Exemption fired only if the with-spec judgment returned null: the pin is the ONE reason
+      // the guard let this literal through.
+      if (withSpec === null) pinned.add(branch);
+    }
+  }
+  return Array.from(pinned).sort();
+}
+
 export function validateExecutableCheck(
   check: { exec_kind: SpecPhaseCheckExecKind | null | undefined; params?: unknown },
   ctx?: { packageScripts?: ReadonlySet<string>; specText?: string },

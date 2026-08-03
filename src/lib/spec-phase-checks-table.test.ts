@@ -13,6 +13,7 @@ import {
   validateExecutableCheck,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
+  collectSpecPinnedGrepLiterals,
   type SpecPhaseCheckExecKind,
 } from "./spec-phase-checks-table";
 
@@ -404,6 +405,84 @@ test("validateExecutableCheck rejects a builder-chosen alternation grep pattern 
     "an alternation of three guessed camelCase names must reject at author time",
   );
   assert.match((rejected as { reason: string }).reason, /alternation of 3 names/i);
+});
+
+// ── grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 2 ──────────────────────────────
+//
+// The pin escape valve exempts a check whose builder-chosen literal appears in the spec body — but
+// without carrying that literal to the builder as required API, the pin was a wish dressed as a
+// contract (the builder invented a different name and the check never matched). collectSpecPinnedGrepLiterals
+// is the pure extractor the build session uses to surface those literals; these cases pin its
+// semantics so a legit pattern is not accidentally named as "required API".
+
+test("collectSpecPinnedGrepLiterals returns a bare literal the spec body names (single camelCase)", () => {
+  const spec = "Phase 1 wires `consumeRedemption` at the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(["consumeRedemption"], spec);
+  assert.deepEqual(pinned, ["consumeRedemption"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns a kebab-case literal the spec body names", () => {
+  const spec = "The Quant-Desk lifecycle page is authored under docs/brain/lifecycles/.";
+  const pinned = collectSpecPinnedGrepLiterals(["quant-desk"], spec);
+  assert.deepEqual(pinned, ["quant-desk"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns a test:<slug> npm-script literal the spec body names", () => {
+  const spec = "Phase 3 registers `test:graduate-crowned` as the smoke test.";
+  const pinned = collectSpecPinnedGrepLiterals(["test:graduate-crowned"], spec);
+  assert.deepEqual(pinned, ["test:graduate-crowned"]);
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return a pattern the guard would have flagged (rejected, not exempted)", () => {
+  // The guard REJECTED this pattern (no pin in the spec text) → the check would have failed at
+  // author time. Nothing to bind; the identifier isn't in the spec body.
+  const spec = "Phase 1 wires the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(["verifyContractState"], spec);
+  assert.deepEqual(pinned, []);
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return a pattern the guard passed on its own (no exemption fired)", () => {
+  // A real regex — no builder-chosen shape, no exemption fired, no pin to bind.
+  const spec = "Phase 1 registers a check.";
+  for (const p of ["test:.*crowned", "(?i)\\bquant\\b", "^Phase 1", "consume\\("]) {
+    assert.deepEqual(
+      collectSpecPinnedGrepLiterals([p], spec),
+      [],
+      `real-regex pattern "${p}" must not be reported as pinned`,
+    );
+  }
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return bare single-word / ALL_CAPS literals (guard passes them)", () => {
+  const spec = "Phase 1 exercises SELECT and INSERT.";
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["SELECT", "INSERT", "runner", "hero"], spec), []);
+});
+
+test("collectSpecPinnedGrepLiterals splits an alternation and returns ONLY the pinned branch", () => {
+  // Mixed alternation — Phase 1 keeps this legal at the guard level (one genuine spec-pinned branch
+  // rescues the union). The collector extracts JUST the pinned name so the builder is bound to
+  // that spelling; the guessed branch stays a wish that no verification actually rides on.
+  const spec = "Phase 1 pins `consumeRedemption` as the required API at the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(
+    ["consumeRedemption|verifyContractState"],
+    spec,
+  );
+  assert.deepEqual(pinned, ["consumeRedemption"]);
+});
+
+test("collectSpecPinnedGrepLiterals dedupes and sorts across multiple grep checks", () => {
+  const spec = "Phase 1 wires `consumeRedemption` and `quant-desk`.";
+  const pinned = collectSpecPinnedGrepLiterals(
+    ["consumeRedemption", "quant-desk", "consumeRedemption"],
+    spec,
+  );
+  assert.deepEqual(pinned, ["consumeRedemption", "quant-desk"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns [] on empty patterns / empty specText", () => {
+  assert.deepEqual(collectSpecPinnedGrepLiterals([], "some spec text"), []);
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["consumeRedemption"], ""), []);
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["  "], "some spec text"), []);
 });
 
 test("isPlainReadonlySql accepts SELECT + WITH; rejects chained + mutating statements", () => {
