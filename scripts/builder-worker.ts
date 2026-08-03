@@ -26268,26 +26268,217 @@ async function dispatchJob(job: Job) {
         // fallback / recreate-fresh means such a branch never parks at all).
         conflictLogs.push(`--- fallback=${fallback} ---\n${outcome.log}`);
         const combinedLog = conflictLogs.join("\n");
-        const { extractConflictingFiles, formatReconcileConflictError } = await import(
-          "../src/lib/build-lane-reconcile"
-        );
+        const {
+          extractConflictingFiles,
+          formatReconcileConflictError,
+          formatConflictResolutionHints,
+          classifyAdditiveOnlyConflict,
+          validateNoConflictMarkers,
+          validateUnionSuperset,
+          validatePackageJsonScriptKeys,
+          UNION_RESOLVABLE_PATHS,
+        } = await import("../src/lib/build-lane-reconcile");
         const files = extractConflictingFiles(combinedLog);
-        const errorMsg = formatReconcileConflictError({
-          strategies: [primary, fallback],
-          files,
-        });
-        await update(job.id, {
-          status: "needs_attention",
-          needs_attention_class: "reconcile_conflict",
-          error: errorMsg,
-          log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):\n${combinedLog}`.slice(-2000),
-        });
-        console.error(
-          `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — parked needs_attention (reconcile_conflict; never silently dropped, never force-pushed)`,
-        );
-        chosenAccount.inFlight--;
-        sh("git", ["worktree", "remove", "--force", wt]);
-        return;
+
+        // ── Additive-only third tier (spec: additive-only-conflict-resolves-itself Phase 2) ─────
+        // The pre-Phase-2 lane parked ON ANY reconcile conflict — three 2026-08-02 escalations
+        // proved most of those are both-sides-APPENDED collisions in append-shaped files (a
+        // `test:*` script added to package.json on both sides; a `- bullet` added to the same
+        // brain-page list) that a rebase resolves in a minute by keeping both. Before we park,
+        // ask the classifier whether EVERY conflicted file is provably additive-only in an
+        // allowed shape; if so, union-resolve, VALIDATE the tree, and continue. On any doubt —
+        // classifier says not-additive, a validator flags a dropped script key, a marker
+        // survives, git shows an unexpected mid-attempt error — fall through to the park below.
+        //
+        // Invariants preserved:
+        //   • Never force-push — the auto-resolve produces a NEW merge commit on top of the
+        //     branch; nothing is rewritten.
+        //   • Never touch main — the merge is INTO the branch; origin/main is untouched.
+        //   • Never drop a commit carrying a build_sha — a merge preserves every branch commit;
+        //     only recreate-fresh can drop them and this tier never runs it.
+        type UnionNote = { file: string; reason: string; ok: boolean };
+        const unionNotes: UnionNote[] = [];
+        let unionResolveOk = false;
+
+        const eligible = files.filter((f) => UNION_RESOLVABLE_PATHS.some((r) => r.test(f)));
+        const ineligible = files.filter((f) => !UNION_RESOLVABLE_PATHS.some((r) => r.test(f)));
+
+        attemptUnion: {
+          if (files.length === 0) {
+            unionNotes.push({ file: "*", reason: "git output yielded no parseable file list — cannot classify", ok: false });
+            break attemptUnion;
+          }
+          if (ineligible.length > 0) {
+            // A single non-eligible file (a `.ts` source, package-lock.json, …) means the collision
+            // isn't a pure additive-only shape — park by design. Naming them helps the operator.
+            unionNotes.push({
+              file: "*",
+              reason: `${ineligible.length} conflicted file(s) not in UNION_RESOLVABLE_PATHS: ${ineligible.slice(0, 4).join(", ")}${ineligible.length > 4 ? ` +${ineligible.length - 4} more` : ""}`,
+              ok: false,
+            });
+            break attemptUnion;
+          }
+
+          // Reproduce the conflict with diff3 conflict style so `classifyAdditiveOnlyConflict`
+          // can inspect the base block. The tree is CLEAN here (both prior aborts ran); the -c
+          // flag scopes the config to this one command (worktree config untouched).
+          const reMerge = sh(
+            "git",
+            ["-c", "merge.conflictStyle=diff3", "merge", "--no-edit", "origin/main"],
+            { cwd: wt },
+          );
+          if (reMerge.code === 0) {
+            // The re-attempt succeeded cleanly (should be impossible given the prior fallback
+            // conflicted — but if git is telling us the tree is clean, take it as a win). The
+            // merge already committed (`git merge` w/o --no-commit auto-commits on success).
+            unionNotes.push({ file: "*", reason: "diff3 re-merge produced no conflict — proceeding", ok: true });
+            unionResolveOk = true;
+            break attemptUnion;
+          }
+
+          let allOk = true;
+          for (const relPath of eligible) {
+            const filePath = join(wt, relPath);
+            let conflictedContent: string;
+            try { conflictedContent = readFileSync(filePath, "utf8"); }
+            catch (e) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `read failed: ${e instanceof Error ? e.message : String(e)}`, ok: false });
+              break;
+            }
+            const verdict = classifyAdditiveOnlyConflict({ path: relPath, content: conflictedContent });
+            if (!verdict.additive) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `classifier: ${verdict.reason}`, ok: false });
+              break;
+            }
+            // Read git's stage 2 (OURS) and stage 3 (THEIRS) blobs so the validators compare
+            // the resolved bytes against the real prior sides, not the caller's guess.
+            const oursShow = sh("git", ["show", `:2:${relPath}`], { cwd: wt });
+            const theirsShow = sh("git", ["show", `:3:${relPath}`], { cwd: wt });
+            if (oursShow.code !== 0 || theirsShow.code !== 0) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `git show :2:/:3: failed — cannot compare against prior sides`, ok: false });
+              break;
+            }
+            const oursContent = oursShow.out;
+            const theirsContent = theirsShow.out;
+            const noMarkers = validateNoConflictMarkers(verdict.unionContent);
+            if (!noMarkers.ok) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `validator (no-markers): ${noMarkers.reason}`, ok: false });
+              break;
+            }
+            const superset = validateUnionSuperset(oursContent, theirsContent, verdict.unionContent);
+            if (!superset.ok) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `validator (superset): ${superset.reason}`, ok: false });
+              break;
+            }
+            if (/^package\.json$/.test(relPath)) {
+              const keys = validatePackageJsonScriptKeys(oursContent, theirsContent, verdict.unionContent);
+              if (!keys.ok) {
+                allOk = false;
+                unionNotes.push({ file: relPath, reason: `validator (package.json script keys): ${keys.reason}`, ok: false });
+                break;
+              }
+            }
+            try { writeFileSync(filePath, verdict.unionContent, "utf8"); }
+            catch (e) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `write failed: ${e instanceof Error ? e.message : String(e)}`, ok: false });
+              break;
+            }
+            const gitAdd = sh("git", ["add", "--", relPath], { cwd: wt });
+            if (gitAdd.code !== 0) {
+              allOk = false;
+              unionNotes.push({ file: relPath, reason: `git add failed: ${(gitAdd.out + gitAdd.err).slice(-160)}`, ok: false });
+              break;
+            }
+            unionNotes.push({
+              file: relPath,
+              reason: `additive-only union resolve (${verdict.hunks.length} hunk(s); base empty, both sides added)`,
+              ok: true,
+            });
+          }
+
+          if (!allOk) {
+            sh("git", ["merge", "--abort"], { cwd: wt });
+            break attemptUnion;
+          }
+
+          // Tree-wide safety net — `git diff --check` reports lingering conflict markers on the
+          // staged tree; a positive here after per-file validation would signal a bug in the
+          // resolver. Park rather than commit.
+          const check = sh("git", ["diff", "--cached", "--check"], { cwd: wt });
+          if (check.code !== 0) {
+            sh("git", ["merge", "--abort"], { cwd: wt });
+            unionNotes.push({
+              file: "*",
+              reason: `tree-wide git diff --check flagged post-resolve issues: ${(check.out + check.err).slice(-160)}`,
+              ok: false,
+            });
+            break attemptUnion;
+          }
+
+          const commit = sh("git", ["commit", "--no-edit"], { cwd: wt });
+          if (commit.code !== 0) {
+            sh("git", ["merge", "--abort"], { cwd: wt });
+            unionNotes.push({
+              file: "*",
+              reason: `git commit --no-edit failed: ${(commit.out + commit.err).slice(-160)}`,
+              ok: false,
+            });
+            break attemptUnion;
+          }
+          unionResolveOk = true;
+        }
+
+        if (unionResolveOk) {
+          // Record what happened on the job so a union resolve is NEVER silent — the CEO card and
+          // the box log render `log_tail`.  Naming which files were auto-resolved and why they
+          // qualified is the whole reason this tier ships instead of a quiet auto-heal.
+          const okNotes = unionNotes.filter((n) => n.ok);
+          const summary = okNotes.map((n) => `${n.file} — ${n.reason}`).join("; ");
+          const logTail = `reconcile-with-main additive-only union tier SUCCEEDED on ${branch} (after primary=${primary} + fallback=${fallback} both conflicted): ${okNotes.length} file(s) auto-resolved; ${summary} — CONTINUING build (no force-push, main untouched, no build_sha commit dropped)`;
+          await update(job.id, { log_tail: logTail.slice(-2000) });
+          console.log(`${tag} ${logTail}`);
+          usedStrategy = `union-resolve(${primary}+${fallback})`;
+          outcome = { ok: true, log: "" };
+        } else {
+          // Phase 3 — Actionable park at the FIRST surfacing. `formatReconcileConflictError` names
+          // the files + strategies; `formatConflictResolutionHints` adds a per-file resolution
+          // hint keyed on file shape (`package.json: keep one script line from each side`,
+          // `docs/brain/**.md: keep the appended items from each side`, `.ts: semantic merge`).
+          // The CEO card + build log both surface these AT PARK TIME — never a founder card
+          // that reads "Build stuck (grooming)" with the resolution buried in log_tail. The
+          // autonomous pr-resolve lane ([[../src/lib/agents/platform-director.ts]]
+          // `escortSweep` reconcile_resolve) continues to attempt the auto-merge; a
+          // reconcile_conflict park does NOT enter the deferred-build redrive budget
+          // (BUILDER_DEFERRED_REDRIVE_MAX applies to `completed_with_deferred` only), so a
+          // repeated identical reconcile never burns three founder escalations.
+          const errorMsg = formatReconcileConflictError({
+            strategies: [primary, fallback],
+            files,
+          });
+          const hints = formatConflictResolutionHints(files);
+          const unionSummary = unionNotes.length
+            ? `\n— additive-only tier considered but declined: ${unionNotes.map((n) => `${n.file} → ${n.reason}`).join(" | ")}`
+            : "";
+          const actionableError = `${errorMsg}\n${hints}`;
+          await update(job.id, {
+            status: "needs_attention",
+            needs_attention_class: "reconcile_conflict",
+            error: actionableError.slice(0, 2000),
+            log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):\n${hints}${unionSummary}\n${combinedLog}`.slice(-2000),
+          });
+          console.error(
+            `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — union tier declined; parked needs_attention (reconcile_conflict; actionable resolution surfaced at first park; never silently dropped, never force-pushed)`,
+          );
+          chosenAccount.inFlight--;
+          sh("git", ["worktree", "remove", "--force", wt]);
+          return;
+        }
       }
       console.log(
         `${tag} reconcile-onto-main SUCCESS on ${branch} via ${usedStrategy} — base now contains origin/main (no WIP dropped)`,
