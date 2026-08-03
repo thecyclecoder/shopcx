@@ -1,0 +1,1 @@
+- **Mario can't see a build that never reported finishing** · verified 2026-08-03 · → [[../libraries/mario]], [[../tables/mario_thresholds]], [[../tables/spec_timecard_events]]
