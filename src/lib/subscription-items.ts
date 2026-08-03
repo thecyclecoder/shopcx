@@ -548,10 +548,124 @@ async function verifyAppstleMutationOnContract(
   };
 }
 
+// ── Phase 2 — a 200 that declines the work is classified, not swallowed ─────
+//
+// Appstle answers 200 on requests it then declines to apply — reproduced on
+// contracts 27946909869 and 27871477933 (2026-07-30), where the swap reported
+// success and the flavour never moved. Separately, the same two contracts
+// reject `replace-variants-v3` with `errorKey: "maxiterations"` ("Unable to
+// complete variant replacement after multiple attempts") — an upstream that has
+// given up retrying internally. Retrying reaches the same wall, so treating
+// either shape as an ordinary transient wastes attempts and hides a
+// subscription that genuinely needs hands.
+//
+// `classifyReplaceVariantsBody` is a pure predicate over `(status, body)` that
+// returns whether Appstle actually applied the mutation and — when declined —
+// whether the decline is permanent for that contract. `callReplaceVariants`
+// gates its success return on this classifier so a 2xx-with-decline body
+// returns FAILURE (with the `maxiterations` case tagged `permanent: true`)
+// instead of silently reporting the work done.
+
+/**
+ * The classification for one `replace-variants-v3` response.
+ *
+ * - `declined: true` — the mutation did NOT land, regardless of HTTP status.
+ *   Includes a 2xx whose body carries a decline (`errorKey`, `success: false`,
+ *   `error` / `errorMessage` string) — the exact shape the 2026-07-30 incident
+ *   surfaced — as well as any non-2xx response.
+ * - `permanent: true` — retrying this contract will reach the same wall. Today
+ *   only `errorKey: "maxiterations"` is classified permanent (survived every
+ *   retry across two campaigns on 27946909869 and 27871477933). Any other
+ *   decline is treated as non-permanent so callers may still retry.
+ * - `errorKey` — the surfaced errorKey when present (for observability).
+ * - `reason` — a diagnosable one-liner naming the classification path.
+ */
+export interface ReplaceVariantsClassification {
+  declined: boolean;
+  permanent: boolean;
+  errorKey?: string;
+  reason?: string;
+}
+
+/**
+ * Pure predicate — did Appstle apply the `replace-variants-v3` mutation, and if
+ * not, is the decline permanent for that contract? Broken out from
+ * `callReplaceVariants` so the exact 2xx-with-decline shapes (the class of bug
+ * this classifier exists to close) are unit-testable without a live HTTP call.
+ *
+ * The order matters: we look for an explicit decline shape in the body first
+ * (so a 2xx-with-decline is classified as declined, not success). If no decline
+ * signal is found, a non-2xx status is still a decline. Otherwise the mutation
+ * is treated as applied.
+ */
+export function classifyReplaceVariantsBody(
+  status: number,
+  body: string,
+): ReplaceVariantsClassification {
+  let parsed: unknown = null;
+  try {
+    parsed = body ? JSON.parse(body) : null;
+  } catch {
+    parsed = null;
+  }
+  const asRecord = (v: unknown): Record<string, unknown> | null =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  const obj = asRecord(parsed);
+
+  const readString = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  const errorKey =
+    (obj && readString(obj.errorKey)) ||
+    (obj && readString(asRecord(obj.error)?.errorKey)) ||
+    null;
+  const errorMessage =
+    (obj && readString(obj.errorMessage)) ||
+    (obj && readString(obj.message)) ||
+    (obj && readString(asRecord(obj.error)?.message)) ||
+    (obj && readString(obj.error)) ||
+    null;
+  const explicitSuccessFalse = !!obj && obj.success === false;
+  const errorsArray = obj && Array.isArray(obj.errors) && obj.errors.length > 0;
+
+  // Body-level decline overrides HTTP status — Appstle returns 200 with an
+  // errorKey when it declines a request it accepted. Detect the string form as
+  // a defensive fallback for future body shapes: `maxiterations` mentioned
+  // anywhere in the raw text is a decline regardless of JSON parse success.
+  const rawTextLooksMaxIterations = !errorKey && /maxiterations/i.test(body || "");
+
+  if (errorKey || explicitSuccessFalse || errorMessage || errorsArray || rawTextLooksMaxIterations) {
+    const effectiveKey = errorKey || (rawTextLooksMaxIterations ? "maxiterations" : null);
+    const permanent = effectiveKey === "maxiterations";
+    const reason = effectiveKey
+      ? `Appstle declined (errorKey=${effectiveKey})${errorMessage ? `: ${errorMessage}` : ""}`
+      : errorMessage
+        ? `Appstle declined: ${errorMessage}`
+        : explicitSuccessFalse
+          ? "Appstle declined (success=false in body)"
+          : "Appstle declined (errors[] present in body)";
+    return {
+      declined: true,
+      permanent,
+      errorKey: effectiveKey || undefined,
+      reason,
+    };
+  }
+
+  if (status < 200 || status >= 300) {
+    const snippet = (body || "").slice(0, 400).replace(/\s+/g, " ").trim();
+    return {
+      declined: true,
+      permanent: false,
+      reason: `Appstle ${status}: ${snippet || "no body"}`,
+    };
+  }
+
+  return { declined: false, permanent: false };
+}
+
 async function callReplaceVariants(
   apiKey: string,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   const url = "https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details/replace-variants-v3";
   const t0 = Date.now();
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
@@ -561,15 +675,33 @@ async function callReplaceVariants(
       body: JSON.stringify(body), cache: "no-store",
     });
     const text = await res.text();
+    // Phase 2 — parse the body BEFORE deciding success. A 2xx with an errorKey
+    // in the body is a decline, not success (this is the class of bug the
+    // 2026-07-30 incident exposed). Log with the CLASSIFIED success value so
+    // appstle_api_calls doesn't record a lie either.
+    const classification = classifyReplaceVariantsBody(res.status, text);
+    const trulyOk = !classification.declined;
     await logAppstleCall({
       url, method: "POST", body, endpoint: "replace-variants-v3",
-      status: res.status, responseBody: text, success: res.ok,
+      status: res.status, responseBody: text, success: trulyOk,
       durationMs: Date.now() - t0,
     });
-    if (!res.ok) {
-      console.error("Appstle replaceVariants error:", text, "body sent:", JSON.stringify(body));
-      const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
-      return { success: false, error: `Appstle ${res.status}: ${snippet || "no body"}` };
+    if (!trulyOk) {
+      // A permanent per-contract failure (today: `maxiterations`) must not be
+      // buried in a batch summary. The `permanent` flag on the return lets the
+      // caller surface it for human repair instead of retrying into the same
+      // upstream wall. Two subscriptions silently shipping the wrong flavour
+      // is exactly the outcome this classification exists to prevent.
+      console.error(
+        "Appstle replaceVariants declined:",
+        JSON.stringify({ status: res.status, classification, body }),
+      );
+      return {
+        success: false,
+        error: classification.reason || `Appstle ${res.status}: declined`,
+        permanent: classification.permanent,
+        declineErrorKey: classification.errorKey,
+      };
     }
     return { success: true };
   } catch (err) {
@@ -617,7 +749,7 @@ export async function subAddItem(
   contractId: string,
   variantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
@@ -823,7 +955,7 @@ export async function subChangeQuantity(
   contractId: string,
   variantId: string,
   quantity: number,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     // Internal path: rewrite the line's quantity directly.
     const admin = createAdminClient();
@@ -1160,7 +1292,7 @@ export async function subSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string; newLineGid?: string }> {
+): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }
