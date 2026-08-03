@@ -1,0 +1,1 @@
+- **Classify Meta 'API access blocked' 400 as app-owner-action-required** · verified 2026-08-02 · → [[../libraries/meta__graph-retry]]
