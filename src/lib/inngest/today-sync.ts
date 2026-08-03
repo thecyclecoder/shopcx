@@ -10,6 +10,11 @@ import {
   installDefaultAppOwnerActionEscalationHandler,
   runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
+import {
+  installDefaultReconnectRequiredEscalationHandler,
+  runWithReconnectRequiredWorkspaceScope,
+} from "@/lib/meta/reconnect-required-escalation";
+import { isHumanBlockedGraphError } from "@/lib/meta/graph-retry";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /**
@@ -106,14 +111,18 @@ export const todaySyncCron = inngest.createFunction(
 
       if (!conn?.access_token_encrypted) return { meta: "no_connection" };
 
-      // Install the app-owner-action-required escalation handler once for this
-      // pass. Wrap the awaited Meta work in `runWithAppOwnerActionWorkspaceScope`
-      // so a Data Use Checkup 400 from graphFetchJson raises exactly one CEO card
+      // Install both human-blocked escalation handlers once for this pass. Wrap
+      // the awaited Meta work in BOTH workspace-scope wrappers so a Data Use
+      // Checkup 400 (app_owner_action_required) OR an invalidated stored token
+      // (reconnect_required) each raise the class-appropriate deduped CEO card
       // per workspace per UTC day against the RIGHT workspace, even under
-      // concurrent runs. See app-owner-action-escalation.ts.
+      // concurrent runs. See
+      // app-owner-action-escalation.ts + reconnect-required-escalation.ts.
       installDefaultAppOwnerActionEscalationHandler(admin);
+      installDefaultReconnectRequiredEscalationHandler(admin);
 
-      return await runWithAppOwnerActionWorkspaceScope(conn.workspace_id, async () => {
+      return await runWithAppOwnerActionWorkspaceScope(conn.workspace_id, async () =>
+        runWithReconnectRequiredWorkspaceScope(conn.workspace_id, async () => {
         const token = decrypt(conn.access_token_encrypted);
         const { data: accounts } = await admin
           .from("meta_ad_accounts")
@@ -156,15 +165,19 @@ export const todaySyncCron = inngest.createFunction(
               // Facebook-edge 5xx (e.g. 504 gateway timeout) — graphFetchJson already
               // retried 4× before surfacing; the 5-min cron self-heals on the next tick.
               (typeof metaErr?.httpStatus === "number" && metaErr.httpStatus >= 500) ||
-              // App-owner-action-required (canonical: Data Use Checkup 400) — the
-              // escalation handler already raised a deduped CEO card, and retrying
-              // will never fix this class (only a human clearing the Meta App
-              // Dashboard gate can). Log at warn so the Control Tower error feed
-              // stops re-recording it every 5 minutes per active ad account.
-              metaErr?.metaClass === "app_owner_action_required";
-            if (isMetaHumanActionBlock(err)) {
+              // Any human-blocked Meta class (app_owner_action_required OR
+              // reconnect_required) — the class-appropriate escalation handler
+              // already raised a deduped CEO card, and retrying will never fix
+              // this class (only a human clearing the Meta App Dashboard gate
+              // for the first, or OAuth re-consent for the second, can). Log at
+              // warn so the Control Tower error feed stops re-recording it
+              // every 5 minutes per active ad account. The single
+              // isHumanBlockedGraphError predicate lets a NEW human-blocked
+              // class be added by editing ONE file, not five.
+              isHumanBlockedGraphError(err);
+            if (isMetaHumanActionBlock(err) || isHumanBlockedGraphError(err)) {
               console.warn(
-                `[Today Sync] Meta app requires Data Use Checkup — resolve at https://developers.facebook.com/apps/ (account ${acct.meta_account_id})`,
+                `[Today Sync] Meta human-blocked (${metaErr?.metaClass ?? "string-triggered"}) for account ${acct.meta_account_id} — CEO card already booked by the escalation handler; skipping this tick`,
               );
               continue;
             }
@@ -174,7 +187,8 @@ export const todaySyncCron = inngest.createFunction(
         }
 
         return { meta: "synced", accounts: accounts?.length || 0, days: totalDays };
-      });
+        }),
+      );
     });
 
     const result = { today, ...amzResult, ...metaResult };

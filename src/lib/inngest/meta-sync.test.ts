@@ -25,10 +25,12 @@ import { dirname, join } from "node:path";
 
 import {
   META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
+  META_SYNC_SPEND_RECONNECT_REQUIRED,
   classifyMetaSyncSpendError,
   handleMetaSyncSpendError,
 } from "./meta-sync";
 import type { EscalateAppOwnerActionRequiredInput } from "@/lib/meta/app-owner-action-escalation";
+import type { EscalateReconnectRequiredInput } from "@/lib/meta/reconnect-required-escalation";
 
 const SCOPE_A = {
   workspaceId: "ws-A",
@@ -46,6 +48,18 @@ function taggedError(): Error {
     new Error("meta_400: API access disrupted. Go to the App Dashboard and complete Data Use Checkup."),
     { metaClass: "app_owner_action_required", httpStatus: 400 },
   );
+}
+
+/**
+ * Reconnect-required tagged error — mirrors [[taggedError]] for the second
+ * human-blocked class. Introduced by
+ * [[../../../docs/brain/specs/meta-reconnect-required-class]] Phase 3.
+ */
+function taggedReconnectError(): Error {
+  return Object.assign(new Error("meta_400: API access blocked."), {
+    metaClass: "reconnect_required",
+    httpStatus: 400,
+  });
 }
 
 test("classifyMetaSyncSpendError — Data Use Checkup tag is contained as the stable human-blocked fingerprint", () => {
@@ -68,6 +82,24 @@ test("classifyMetaSyncSpendError — unrelated metaClass does not match", () => 
     metaClass: "permanent_api_removed",
   });
   assert.equal(classifyMetaSyncSpendError(err, SCOPE_A), null);
+});
+
+// ── reconnect_required containment (Phase 3 — the new class) ────────────────
+
+test("classifyMetaSyncSpendError — reconnect_required tag is contained as the stable reconnect fingerprint", () => {
+  assert.deepEqual(classifyMetaSyncSpendError(taggedReconnectError(), SCOPE_A), {
+    status: META_SYNC_SPEND_RECONNECT_REQUIRED,
+    workspaceId: SCOPE_A.workspaceId,
+    adAccountId: SCOPE_A.adAccountId,
+    metaAccountId: SCOPE_A.metaAccountId,
+  });
+});
+
+test("META_SYNC_SPEND_RECONNECT_REQUIRED — stable fingerprint literal (grepable pin)", () => {
+  assert.equal(
+    META_SYNC_SPEND_RECONNECT_REQUIRED,
+    "meta_sync_spend_reconnect_required",
+  );
 });
 
 test("classifyMetaSyncSpendError — null / non-Error input is safe (no throw, returns null)", () => {
@@ -114,6 +146,80 @@ test("handleMetaSyncSpendError — tagged error returns the fingerprint AND expl
     seen[0].label.includes(SCOPE_A.metaAccountId),
     `label ${seen[0].label} should name the affected ad account`,
   );
+});
+
+test("handleMetaSyncSpendError — reconnect_required tag routes to the reconnect escalation SDK (not the app-owner one) against THIS invocation's workspaceId", async () => {
+  const appOwnerCalls: EscalateAppOwnerActionRequiredInput[] = [];
+  const reconnectCalls: EscalateReconnectRequiredInput[] = [];
+  const fakeAppOwnerEscalate = async (
+    _admin: unknown,
+    input: EscalateAppOwnerActionRequiredInput,
+  ) => {
+    appOwnerCalls.push(input);
+    return { emitted: true };
+  };
+  const fakeReconnectEscalate = async (
+    _admin: unknown,
+    input: EscalateReconnectRequiredInput,
+  ) => {
+    reconnectCalls.push(input);
+    return { emitted: true };
+  };
+  const result = await handleMetaSyncSpendError(
+    {} as never,
+    taggedReconnectError(),
+    SCOPE_A,
+    fakeAppOwnerEscalate as never,
+    fakeReconnectEscalate as never,
+  );
+  assert.deepEqual(result, {
+    status: META_SYNC_SPEND_RECONNECT_REQUIRED,
+    workspaceId: SCOPE_A.workspaceId,
+    adAccountId: SCOPE_A.adAccountId,
+    metaAccountId: SCOPE_A.metaAccountId,
+  });
+  assert.equal(
+    appOwnerCalls.length,
+    0,
+    "reconnect_required MUST NOT route to the app-owner escalation (wrong card)",
+  );
+  assert.equal(reconnectCalls.length, 1);
+  assert.equal(reconnectCalls[0].workspaceId, SCOPE_A.workspaceId);
+  assert.deepEqual(reconnectCalls[0].affectedAdAccountIds, [SCOPE_A.metaAccountId]);
+  assert.ok(
+    reconnectCalls[0].label.includes(SCOPE_A.metaAccountId),
+    `label ${reconnectCalls[0].label} should name the affected ad account`,
+  );
+});
+
+test("handleMetaSyncSpendError — the app-owner contract still holds after Phase 3 (Data Use Checkup tag STILL routes only to the app-owner escalation)", async () => {
+  // Regression guard for the pre-Phase-3 contract — after the class split,
+  // the OTHER escalation SDK MUST NOT be called for an app-owner tag.
+  const appOwnerCalls: EscalateAppOwnerActionRequiredInput[] = [];
+  const reconnectCalls: EscalateReconnectRequiredInput[] = [];
+  const fakeAppOwnerEscalate = async (
+    _admin: unknown,
+    input: EscalateAppOwnerActionRequiredInput,
+  ) => {
+    appOwnerCalls.push(input);
+    return { emitted: true };
+  };
+  const fakeReconnectEscalate = async (
+    _admin: unknown,
+    input: EscalateReconnectRequiredInput,
+  ) => {
+    reconnectCalls.push(input);
+    return { emitted: true };
+  };
+  await handleMetaSyncSpendError(
+    {} as never,
+    taggedError(),
+    SCOPE_A,
+    fakeAppOwnerEscalate as never,
+    fakeReconnectEscalate as never,
+  );
+  assert.equal(appOwnerCalls.length, 1, "app-owner tag → app-owner escalation (unchanged)");
+  assert.equal(reconnectCalls.length, 0, "app-owner tag MUST NOT route to reconnect (wrong card)");
 });
 
 test("handleMetaSyncSpendError — untagged Meta 400 still throws (regression: Inngest failure feed keeps surfacing real fatals)", async () => {

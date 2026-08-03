@@ -67,12 +67,19 @@ test("classifyAppOwnerActionRequired — 'app is currently unavailable' user-fac
   );
 });
 
-test("classifyAppOwnerActionRequired — 'API access blocked' HTTP 400 message classifies true", () => {
+test("classifyAppOwnerActionRequired — 'API access blocked' HTTP 400 no longer classifies here (moved to reconnect_required)", () => {
+  // Regression guard for
+  // [[../../../docs/brain/specs/meta-reconnect-required-class]] Phase 1 — the
+  // 2026-08-02 incident showed that Meta's 'API access blocked.' phrasing means
+  // the STORED USER TOKEN is dead (OAuth reconnect fixes it), not that the
+  // workspace owner has an App Dashboard gate to clear. Keeping it in this
+  // classifier would misroute the founder to the App Dashboard; it now lives in
+  // [[classifyReconnectRequired]] and routes to /dashboard/settings/integrations/meta.
   assert.equal(
     classifyAppOwnerActionRequired(400, {
       message: "API access blocked",
     }),
-    true,
+    false,
   );
 });
 
