@@ -25,6 +25,8 @@ import {
   validateNoConflictMarkers,
   validateUnionSuperset,
   validatePackageJsonScriptKeys,
+  conflictResolutionHintFor,
+  formatConflictResolutionHints,
   type ReconcileInput,
 } from "./build-lane-reconcile";
 
@@ -603,4 +605,55 @@ test("validatePackageJsonScriptKeys: resolved has no scripts object → not ok",
   const r = validatePackageJsonScriptKeys("{}", "{}", "{}");
   assert.equal(r.ok, false);
   if (!r.ok) assert.match(r.reason, /no "scripts" object/);
+});
+
+// ── Phase 3 — the reconcile_conflict park's actionable resolution hints ─────────────────────────
+
+test("conflictResolutionHintFor: package.json → keep one script line each side", () => {
+  assert.match(conflictResolutionHintFor("package.json"), /script line from each side/i);
+});
+
+test("conflictResolutionHintFor: docs/brain markdown → keep appended items each side", () => {
+  assert.match(conflictResolutionHintFor("docs/brain/libraries/foo.md"), /appended list items or sections/i);
+});
+
+test("conflictResolutionHintFor: lock file → regenerate", () => {
+  assert.match(conflictResolutionHintFor("package-lock.json"), /regenerate the lock file/i);
+  assert.match(conflictResolutionHintFor("pnpm-lock.yaml"), /regenerate the lock file/i);
+});
+
+test("conflictResolutionHintFor: source file (.ts/.tsx) → semantic merge, cite the design exclusion", () => {
+  // The hint MUST explain WHY the additive-only tier didn't handle a source file — the design
+  // exclusion is the point: no heuristic should be trusted with .ts semantics.
+  for (const p of ["src/lib/foo.ts", "src/app/route.tsx", "scripts/foo.mjs"]) {
+    const h = conflictResolutionHintFor(p);
+    assert.match(h, /semantic merge/i, `expected semantic merge hint for ${p}`);
+    assert.match(h, /source files are excluded/i, `expected design-exclusion note for ${p}`);
+  }
+});
+
+test("conflictResolutionHintFor: unknown file → manual merge / outside allowlist", () => {
+  assert.match(conflictResolutionHintFor("weird.yaml"), /manual merge/i);
+});
+
+test("formatConflictResolutionHints: one line per file, all named", () => {
+  const out = formatConflictResolutionHints(["package.json", "docs/brain/libraries/foo.md", "src/lib/x.ts"]);
+  assert.match(out, /package\.json — /);
+  assert.match(out, /docs\/brain\/libraries\/foo\.md — /);
+  assert.match(out, /src\/lib\/x\.ts — /);
+  assert.match(out, /^resolution:/);
+});
+
+test("formatConflictResolutionHints: caps + shows overflow count", () => {
+  const files = Array.from({ length: 12 }, (_, i) => `file${String(i).padStart(2, "0")}.md`);
+  const out = formatConflictResolutionHints(files, { maxLines: 5 });
+  assert.match(out, /file00\.md/);
+  assert.match(out, /file04\.md/); // 5th, last shown
+  assert.doesNotMatch(out, /file05\.md/); // truncated
+  assert.match(out, /\+ 7 more/);
+});
+
+test("formatConflictResolutionHints: empty file list points at log_tail (not a silent 'nothing to resolve')", () => {
+  const out = formatConflictResolutionHints([]);
+  assert.match(out, /log_tail/);
 });

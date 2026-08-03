@@ -26271,6 +26271,7 @@ async function dispatchJob(job: Job) {
         const {
           extractConflictingFiles,
           formatReconcileConflictError,
+          formatConflictResolutionHints,
           classifyAdditiveOnlyConflict,
           validateNoConflictMarkers,
           validateUnionSuperset,
@@ -26445,21 +26446,34 @@ async function dispatchJob(job: Job) {
           usedStrategy = `union-resolve(${primary}+${fallback})`;
           outcome = { ok: true, log: "" };
         } else {
+          // Phase 3 — Actionable park at the FIRST surfacing. `formatReconcileConflictError` names
+          // the files + strategies; `formatConflictResolutionHints` adds a per-file resolution
+          // hint keyed on file shape (`package.json: keep one script line from each side`,
+          // `docs/brain/**.md: keep the appended items from each side`, `.ts: semantic merge`).
+          // The CEO card + build log both surface these AT PARK TIME — never a founder card
+          // that reads "Build stuck (grooming)" with the resolution buried in log_tail. The
+          // autonomous pr-resolve lane ([[../src/lib/agents/platform-director.ts]]
+          // `escortSweep` reconcile_resolve) continues to attempt the auto-merge; a
+          // reconcile_conflict park does NOT enter the deferred-build redrive budget
+          // (BUILDER_DEFERRED_REDRIVE_MAX applies to `completed_with_deferred` only), so a
+          // repeated identical reconcile never burns three founder escalations.
           const errorMsg = formatReconcileConflictError({
             strategies: [primary, fallback],
             files,
           });
+          const hints = formatConflictResolutionHints(files);
           const unionSummary = unionNotes.length
             ? `\n— additive-only tier considered but declined: ${unionNotes.map((n) => `${n.file} → ${n.reason}`).join(" | ")}`
             : "";
+          const actionableError = `${errorMsg}\n${hints}`;
           await update(job.id, {
             status: "needs_attention",
             needs_attention_class: "reconcile_conflict",
-            error: errorMsg,
-            log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):${unionSummary}\n${combinedLog}`.slice(-2000),
+            error: actionableError.slice(0, 2000),
+            log_tail: `reconcile-with-main real conflict on ${branch} (primary ${primary} AND fallback ${fallback} both conflicted; ${files.length} file(s) named):\n${hints}${unionSummary}\n${combinedLog}`.slice(-2000),
           });
           console.error(
-            `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — union tier declined; parked needs_attention (reconcile_conflict; never silently dropped, never force-pushed)`,
+            `${tag} reconcile-with-main CONFLICT on ${branch} (${primary} + ${fallback}, ${files.length} file(s)) — union tier declined; parked needs_attention (reconcile_conflict; actionable resolution surfaced at first park; never silently dropped, never force-pushed)`,
           );
           chosenAccount.inFlight--;
           sh("git", ["worktree", "remove", "--force", wt]);

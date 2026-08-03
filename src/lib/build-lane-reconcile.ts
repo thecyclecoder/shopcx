@@ -464,6 +464,66 @@ export function validateUnionSuperset(
   return { ok: true };
 }
 
+// ── Phase 3 (spec: additive-only-conflict-resolves-itself) — actionable park + first-park escalation
+//
+// A `reconcile_conflict` park that survives Phase 2's union tier is a genuinely semantic
+// conflict (source file, non-append-shaped, mixed with a modification, …).  Today's card
+// reads "Build stuck (grooming)" with the reason buried in `agent_jobs.error`.  The CEO
+// sees a stuck build; they can't see "package.json needs one line kept from each side".
+//
+// Two changes:
+//   1. `formatConflictResolutionHints(files)` — a pure per-file hint line based on file
+//      shape.  package.json / docs/brain markdown are trivial to resolve by hand
+//      (Phase 1's classifier said no because a validator refused, or the base wasn't
+//      empty, or a scope-check failed — the hint tells the operator the shape); a
+//      source file is a semantic merge nobody should guess at.
+//   2. The park's `error` string carries the hints — the CEO card / build log both
+//      surface them at PARK TIME, not after the loop-guard finally escalates on the
+//      third redrive.
+//
+// A `reconcile_conflict` park does NOT consume `BUILDER_DEFERRED_REDRIVE_MAX` because
+// that counter tracks POST-BUILD `completed_with_deferred` redrives ([[roadmap-actions]]
+// `redriveDeferredBuildOrEscalate`); a `needs_attention` park never enters that path.
+// Its retry lane is [[platform-director]] `escortSweep` reconcile_resolve → pr-resolve,
+// which does REAL work (auto-merge) — bounded by `ESCORT_LOOP_GUARD_MAX` and dedup-per-PR.
+// Phase 3's guarantee is that the card surfaces its resolution on the FIRST park; the
+// autonomous pr-resolve continues to try, and a genuinely unresolvable conflict escalates
+// via that lane's normal loop-guard exactly once — never a founder "Build stuck" with no
+// context.
+
+/** Per-file resolution hint keyed off file-path shape.  Pure — reads only the path.
+ *  Used to make a `reconcile_conflict` park actionable at first surfacing. */
+export function conflictResolutionHintFor(path: string): string {
+  if (/^package\.json$/.test(path)) {
+    return "keep one script line from each side (both sides added to the same `scripts` object)";
+  }
+  if (/^docs\/brain\/.+\.md$/.test(path)) {
+    return "keep the appended list items or sections from each side";
+  }
+  if (/^package-lock\.json$/.test(path) || /^pnpm-lock\.yaml$/.test(path) || /^yarn\.lock$/.test(path)) {
+    return "regenerate the lock file after resolving package.json (`npm install` / `pnpm install` / `yarn install`)";
+  }
+  if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(path)) {
+    return "semantic merge — read both sides and decide (source files are excluded from the additive-only tier by design)";
+  }
+  if (/\.(md|mdx)$/.test(path)) {
+    return "manual merge — restrict to markdown that is not a docs/brain/ page";
+  }
+  return "manual merge — outside the additive-only tier's allowlist";
+}
+
+/** Formatter for the actionable resolution block appended to a `reconcile_conflict` park.
+ *  One line per file (up to `maxLines`; overflow gets `+N more`) so the CEO card stays
+ *  scannable but names EVERY file that needs a decision. */
+export function formatConflictResolutionHints(files: string[], opts: { maxLines?: number } = {}): string {
+  const maxLines = Math.max(1, opts.maxLines ?? 8);
+  if (files.length === 0) return "resolution: inspect the raw git output in log_tail — the file list could not be parsed";
+  const lines = files.slice(0, maxLines).map((f) => `${f} — ${conflictResolutionHintFor(f)}`);
+  const overflow = files.length - lines.length;
+  const tail = overflow > 0 ? `\n+ ${overflow} more file(s) not shown` : "";
+  return `resolution:\n  ${lines.join("\n  ")}${tail}`;
+}
+
 /** Resolved package.json must parse AND every script key present on either side must survive
  *  in the resolved `scripts` object.  Extracts keys via JSON.parse of each side (both sides,
  *  taken alone, are complete files — git's stage 2 / stage 3 blobs). */
