@@ -99,6 +99,7 @@
     "test:goal-member-pr-redrive": "tsx --test src/lib/goal-member-pr-redrive.test.ts",
     "test:spec-drift": "tsx --test src/lib/spec-drift.test.ts",
     "test:spec-review-gate": "tsx --test src/lib/spec-review-gate.test.ts",
+    "test:spec-phase-checks-table": "tsx --test src/lib/spec-phase-checks-table.test.ts",
     "test:derive-status-no-in-review": "tsx --test src/lib/brain-roadmap.derive-status-no-in-review.test.ts",
     "test:agent-grader-spec-review-retired": "tsx --test src/lib/agents/agent-grader.spec-review-retired.test.ts",
     "test:security-envelope": "tsx --test src/lib/security-envelope.test.ts",

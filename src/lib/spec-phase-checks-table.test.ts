@@ -311,6 +311,101 @@ test("validateExecutableCheck without specText does NOT retroactively reject old
   assert.equal(ok.valid, true, "no specText → no builder-chosen guard (runner-safe default)");
 });
 
+// ── grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 1 ──────────────────────────────
+//
+// The 2026-08-02 live-guard measurement — three guessed names joined by `|` sailed through the
+// metachar bail while a single guess was flagged, stranding the subscription-mutation spec for
+// over three days. These cases pin the fix so it cannot regress.
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed camelCase names (three-branch)", () => {
+  // The exact incident pattern the guard let through on 2026-08-02.
+  const g = detectBuilderChosenNameInGrep("verifyMutation|verifyContractState|assertLineState");
+  assert.ok(g, "an alternation of three guessed camelCase names must reject");
+  assert.match(g!.reason, /alternation of 3 names/i);
+  // Suggested pattern is a case-insensitive alternation of the distinctive tokens.
+  assert.match(g!.suggested, /verifyMutation/);
+  assert.match(g!.suggested, /verifyContractState/);
+  assert.match(g!.suggested, /assertLineState/);
+  assert.match(g!.suggested, /\(\?i\)/);
+});
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed npm-script names", () => {
+  const g = detectBuilderChosenNameInGrep("test:graduate-crowned|test:media-buyer-winner");
+  assert.ok(g, "an alternation of two guessed npm scripts must reject");
+  assert.match(g!.reason, /alternation/i);
+  assert.match(g!.suggested, /crowned/);
+  assert.match(g!.suggested, /winner/);
+});
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed kebab-case slugs", () => {
+  const g = detectBuilderChosenNameInGrep("quant-desk|hero-desk");
+  assert.ok(g, "an alternation of two guessed kebab-case names must reject");
+  assert.match(g!.reason, /alternation/i);
+  // Distinctive tokens (longest hyphen-split token) end up in the suggestion.
+  assert.match(g!.suggested, /quant/i);
+  assert.match(g!.suggested, /hero/i);
+});
+
+test("detectBuilderChosenNameInGrep still REJECTS a single guessed camelCase name (regression)", () => {
+  // The single-name case must keep flagging; closing the alternation hole does not weaken the
+  // one-guess rule the origin spec landed. `verifyContractState` alone stays rejected.
+  const g = detectBuilderChosenNameInGrep("verifyContractState");
+  assert.ok(g);
+  assert.match(g!.reason, /camelCase symbol/i);
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation that contains a spec-pinned branch", () => {
+  // A real alternation with ONE genuine spec-pinned term stays legal — closing the hole must not
+  // over-reject or authoring becomes blocked on legitimate patterns.
+  const spec = "Phase 1 wires `consumeRedemption` at the redemption chokepoint (see specs-table).";
+  assert.equal(
+    detectBuilderChosenNameInGrep("consumeRedemption|verifyContractState", spec),
+    null,
+    "an alternation containing a spec-pinned branch must NOT reject",
+  );
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation with a genuine regex branch (character class)", () => {
+  // A branch that carries its own metachars (character class, anchor, quantifier, group) reads as
+  // a real pattern piece — the whole alternation stays allowed.
+  for (const p of ["[a-z]|[A-Z]", "^Phase\\s+1|Phase 1", "handleRedemption|runSpec.+"]) {
+    assert.equal(
+      detectBuilderChosenNameInGrep(p),
+      null,
+      `alternation with a real-regex branch "${p}" must NOT flag`,
+    );
+  }
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation of legitimate bare words (no builder-chosen shape)", () => {
+  // The pre-existing invariant: `foo|bar` was allowed by the metachar bail. Now it is allowed by
+  // the per-branch judge — neither `foo` nor `bar` is a builder-chosen shape (no npm colon, no
+  // kebab hyphen, no camelCase transition, no `.test.` filename). The union stays allowed.
+  assert.equal(detectBuilderChosenNameInGrep("foo|bar"), null);
+  assert.equal(detectBuilderChosenNameInGrep("SELECT|INSERT|UPDATE"), null);
+});
+
+test("validateExecutableCheck rejects a builder-chosen alternation grep pattern at author time", () => {
+  const specText = "Phase 1 verifies the mutation actually happened rather than trusting HTTP 200.";
+  const rejected = validateExecutableCheck(
+    {
+      exec_kind: "grep",
+      params: {
+        pattern: "verifyMutation|verifyContractState|assertLineState",
+        path: "src/lib",
+        expect: "present",
+      },
+    },
+    { specText },
+  );
+  assert.equal(
+    rejected.valid,
+    false,
+    "an alternation of three guessed camelCase names must reject at author time",
+  );
+  assert.match((rejected as { reason: string }).reason, /alternation of 3 names/i);
+});
+
 test("isPlainReadonlySql accepts SELECT + WITH; rejects chained + mutating statements", () => {
   assert.equal(isPlainReadonlySql("SELECT id FROM public.specs"), true);
   assert.equal(isPlainReadonlySql("with a as (select 1) select * from a"), true);
