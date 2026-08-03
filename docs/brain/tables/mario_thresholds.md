@@ -27,12 +27,15 @@ The seeded rows carry the M3 defaults. Both endpoints are literals from the [[sp
 
 | `from_event` | `to_event` | default `sla_ms` | what it covers |
 |---|---|---|---|
+| `build_started` | `build_done` | 5,400,000 (90 min) | a build claimed and started (tsc gate, migrations) but never emitted `build_done`. Sits comfortably past `BUILD_HARD_CAP_MS` (60 min) + `MARIO_FAILED_BUILD_GRACE_MS` (20 min) so it never races the failed-build source and no legitimate long build trips it. Added by [[../specs/build-that-never-finishes-is-visible-to-mario]] Phase 1 — before it, a build that started and stopped reporting matched no threshold's `from_event` and was silently invisible to Mario (the 2026-08-03 measurement: 432 specs in that shape, 3 of them silent ~40 h = 80× over the finish-side SLA that could not see them) |
 | `build_done` | `phase_shipped` | 1,800,000 (30 min) | a phase's build finished (tsc clean, PR opened) but the PR has not merged and the phase is not shipped |
 | `review_started` | `review_passed` | 1,200,000 (20 min) | Vale ([[../libraries/spec-review-agent]]) started reviewing a spec but has not emitted a verdict |
 | `spec_test_started` | `spec_test_verdict` | 1,800,000 (30 min) | the spec-test agent ([[../libraries/spec-test-agent]]) started QA'ing a shipped spec but has not emitted a verdict |
 | `fold_started` | `folded` | 1,200,000 (20 min) | a fold job started but did not complete |
 | `job_queued` | `job_claimed` | 600,000 (10 min) | the worker-liveness SLA — a queued [[agent_jobs]] row nothing has claimed in 10min is a stall (the box worker is likely dead or partitioned) |
 | `phase_shipped` | `build_started` | 1,800,000 (30 min) | the auto-queue chain broke — a shipped phase should have the next phase's build_started picked up within one SLA window |
+
+**Blind-spot invariant (build-that-never-finishes-is-visible-to-mario).** A transition nobody measures is a transition nobody supervises, and it routes to the founder by default — the CEO surfaced the three silent specs on 2026-08-03 because Mario had no threshold whose `from_event` matched `build_started`, and the evaluator's `continue` at [[../libraries/mario|mario.ts]] `evaluateStalledSpecs` silently dropped every candidate in that shape. Adding the `build_started → build_done` row was strictly additive (`INSERT ... ON CONFLICT DO NOTHING` in [[../../supabase/migrations/20261212120000_mario_threshold_build_started_build_done.sql]]) and the seam is now guarded by [[../libraries/mario|matchesMarioThresholdForOverdueTransition]] — a pure predicate whose unit test pins that the SAME candidate is (a) surfaced under the new threshold and (b) NOT surfaced under the finish-side threshold, so the blind spot cannot silently reopen.
 
 ## Self-tuning contract (M4 owns updates)
 
@@ -47,7 +50,7 @@ The seeded rows carry the M3 defaults. Both endpoints are literals from the [[sp
 ## Reads / writes
 
 - **Reader:** [[../libraries/mario|src/lib/mario.ts]] `evaluateStalledSpecs` — reads every row for a workspace and issues one `listStalledCandidates(admin, { workspace_id, older_than_ms: row.sla_ms })` scan per row.
-- **Writer (seed):** the M3 migration inserts the six default rows for every existing workspace. Idempotent — the unique constraint means re-running the migration is a no-op.
+- **Writer (seed):** the M3 migration inserts the six default rows for every existing workspace. Idempotent — the unique constraint means re-running the migration is a no-op. The seventh row (`build_started → build_done`) ships in a follow-up idempotent migration ([[../../supabase/migrations/20261212120000_mario_threshold_build_started_build_done.sql]] — same `ON CONFLICT DO NOTHING` shape, per-workspace).
 - **Writer (runtime):** the M4 self-tuning agent only. Every widening bumps `last_widened_at` + `last_widened_reason` + `updated_at`.
 
 ## Indexes / RLS
