@@ -165,6 +165,7 @@
     "test:playbook-executor-assisted-purchase-routing": "tsx --test src/lib/playbook-executor.assisted-purchase-routing.test.ts",
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts",
     "test:physical-size-cue": "tsx --test src/lib/ad-tool-config.physical-size-cue.test.ts",
+    "test:meta-ads-create": "tsx --test src/lib/meta-ads.create.test.ts",
     "test:swallowed-escalation-sample": "tsx --test src/lib/agents/platform-director.swallowed-sample.test.ts"
   },
   "dependencies": {

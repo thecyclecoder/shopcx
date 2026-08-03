@@ -126,20 +126,44 @@ test("createAdSet — PAUSED purchase-optimized defaults + Advantage+ placements
   }
 });
 
-test("createCampaign — new-customer-only forwards existing_customer_budget_percentage + smart_promotion_type", async () => {
-  const stub = stubFetch(() => ({ json: { id: "adv-1" } }));
+test("createCampaign — a CBO campaign ALWAYS sends an explicit bid_strategy (default: no bid limit)", async () => {
+  // Regression: omitting bid_strategy let Meta apply the AD ACCOUNT default. On account
+  // 196487894712827 that default is LOWEST_COST_WITH_BID_CAP, so the scaler minted WITH a
+  // bid cap and the follow-up createAdSet died on
+  // `(#100/1815857) Bid Amount Required For The Bid Strategy Provided` (2026-07-27).
+  const stub = stubFetch(() => ({ json: { id: "cbo-1" } }));
+  try {
+    await createCampaign("token", "act_9999", { name: "CBO", abo: false, dailyBudgetCents: 20000 });
+    const [call] = stub.calls;
+    assert.equal(call.body.get("bid_strategy"), "LOWEST_COST_WITHOUT_CAP");
+    assert.equal(call.body.get("daily_budget"), "20000");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("createCampaign — an explicit bidStrategy + bidAmountCents both reach the wire", async () => {
+  const stub = stubFetch(() => ({ json: { id: "cbo-2" } }));
   try {
     await createCampaign("token", "act_9999", {
-      name: "MB — Cold Scaler (aaaaaaaa)",
-      abo: false,
-      dailyBudgetCents: 20000,
-      newCustomerBudgetPercentage: 0,
-      smartPromotionType: "AUTOMATED_SHOPPING_ADS",
+      name: "CBO capped", abo: false, dailyBudgetCents: 20000,
+      bidStrategy: "LOWEST_COST_WITH_BID_CAP", bidAmountCents: 1500,
     });
     const [call] = stub.calls;
-    assert.equal(call.body.get("existing_customer_budget_percentage"), "0");
-    assert.equal(call.body.get("smart_promotion_type"), "AUTOMATED_SHOPPING_ADS");
-    assert.equal(call.body.get("daily_budget"), "20000");
+    assert.equal(call.body.get("bid_strategy"), "LOWEST_COST_WITH_BID_CAP");
+    assert.equal(call.body.get("bid_amount"), "1500");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("createCampaign — an ABO campaign leaves bid_strategy to the ad set", async () => {
+  const stub = stubFetch(() => ({ json: { id: "abo-1" } }));
+  try {
+    await createCampaign("token", "act_9999", { name: "ABO" });
+    const [call] = stub.calls;
+    assert.equal(call.body.get("bid_strategy"), null);
+    assert.equal(call.body.get("is_adset_budget_sharing_enabled"), "false");
   } finally {
     stub.restore();
   }
@@ -158,7 +182,7 @@ test("createCampaign — baseline test-campaign call omits new-customer knobs en
   }
 });
 
-test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES Advantage+ with new-customer-only on first call, idempotent on second", async () => {
+test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES with NO bid limit and NO ASC knobs, idempotent on second call", async () => {
   const cohortId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const expectedName = coldScalerCampaignName(cohortId);
   assert.equal(expectedName, "MB — Cold Scaler (aaaaaaaa)");
@@ -194,9 +218,12 @@ test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES Advantage
     assert.equal(post.body.get("daily_budget"), "20000");
     // ABO flag MUST NOT be set (CBO campaign).
     assert.equal(post.body.get("is_adset_budget_sharing_enabled"), null);
-    // Advantage+ Sales + new-customer-only surfaces.
-    assert.equal(post.body.get("existing_customer_budget_percentage"), "0");
-    assert.equal(post.body.get("smart_promotion_type"), "AUTOMATED_SHOPPING_ADS");
+    // No bid limit — CBO ad sets inherit this, so it has to be right at mint time.
+    assert.equal(post.body.get("bid_strategy"), "LOWEST_COST_WITHOUT_CAP");
+    // ASC is DEAD on Graph v24.0+ — minting one throws (#100/2490568) and blocked every
+    // graduate. These two knobs must never go on the wire again.
+    assert.equal(post.body.get("smart_promotion_type"), null, "ASC is rejected by Graph v24.0+");
+    assert.equal(post.body.get("existing_customer_budget_percentage"), null, "ASC-only knob");
   } finally {
     stub.restore();
   }
