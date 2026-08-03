@@ -360,7 +360,6 @@ const GRANDFATHER_ALLOWLIST_2026_07_27: ReadonlySet<string> = new Set([
   "src/lib/spec-check-db-probes.test.ts",
   "src/lib/spec-check-runner.preview-redirect.test.ts",
   "src/lib/spec-check-runner.test.ts",
-  "src/lib/spec-phase-checks-table.test.ts",
   "src/lib/spec-phase-provenance.test.ts",
   "src/lib/spec-test-runs.test.ts",
   "src/lib/specs-table.compensate-partial-write.test.ts",

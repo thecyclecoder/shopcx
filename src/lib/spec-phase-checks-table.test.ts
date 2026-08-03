@@ -13,6 +13,7 @@ import {
   validateExecutableCheck,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
+  collectSpecPinnedGrepLiterals,
   type SpecPhaseCheckExecKind,
 } from "./spec-phase-checks-table";
 
@@ -309,6 +310,179 @@ test("validateExecutableCheck without specText does NOT retroactively reject old
     params: { pattern: "test:graduate-crowned", path: "package.json", expect: "present" },
   });
   assert.equal(ok.valid, true, "no specText → no builder-chosen guard (runner-safe default)");
+});
+
+// ── grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 1 ──────────────────────────────
+//
+// The 2026-08-02 live-guard measurement — three guessed names joined by `|` sailed through the
+// metachar bail while a single guess was flagged, stranding the subscription-mutation spec for
+// over three days. These cases pin the fix so it cannot regress.
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed camelCase names (three-branch)", () => {
+  // The exact incident pattern the guard let through on 2026-08-02.
+  const g = detectBuilderChosenNameInGrep("verifyMutation|verifyContractState|assertLineState");
+  assert.ok(g, "an alternation of three guessed camelCase names must reject");
+  assert.match(g!.reason, /alternation of 3 names/i);
+  // Suggested pattern is a case-insensitive alternation of the distinctive tokens.
+  assert.match(g!.suggested, /verifyMutation/);
+  assert.match(g!.suggested, /verifyContractState/);
+  assert.match(g!.suggested, /assertLineState/);
+  assert.match(g!.suggested, /\(\?i\)/);
+});
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed npm-script names", () => {
+  const g = detectBuilderChosenNameInGrep("test:graduate-crowned|test:media-buyer-winner");
+  assert.ok(g, "an alternation of two guessed npm scripts must reject");
+  assert.match(g!.reason, /alternation/i);
+  assert.match(g!.suggested, /crowned/);
+  assert.match(g!.suggested, /winner/);
+});
+
+test("detectBuilderChosenNameInGrep REJECTS an alternation of guessed kebab-case slugs", () => {
+  const g = detectBuilderChosenNameInGrep("quant-desk|hero-desk");
+  assert.ok(g, "an alternation of two guessed kebab-case names must reject");
+  assert.match(g!.reason, /alternation/i);
+  // Distinctive tokens (longest hyphen-split token) end up in the suggestion.
+  assert.match(g!.suggested, /quant/i);
+  assert.match(g!.suggested, /hero/i);
+});
+
+test("detectBuilderChosenNameInGrep still REJECTS a single guessed camelCase name (regression)", () => {
+  // The single-name case must keep flagging; closing the alternation hole does not weaken the
+  // one-guess rule the origin spec landed. `verifyContractState` alone stays rejected.
+  const g = detectBuilderChosenNameInGrep("verifyContractState");
+  assert.ok(g);
+  assert.match(g!.reason, /camelCase symbol/i);
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation that contains a spec-pinned branch", () => {
+  // A real alternation with ONE genuine spec-pinned term stays legal — closing the hole must not
+  // over-reject or authoring becomes blocked on legitimate patterns.
+  const spec = "Phase 1 wires `consumeRedemption` at the redemption chokepoint (see specs-table).";
+  assert.equal(
+    detectBuilderChosenNameInGrep("consumeRedemption|verifyContractState", spec),
+    null,
+    "an alternation containing a spec-pinned branch must NOT reject",
+  );
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation with a genuine regex branch (character class)", () => {
+  // A branch that carries its own metachars (character class, anchor, quantifier, group) reads as
+  // a real pattern piece — the whole alternation stays allowed.
+  for (const p of ["[a-z]|[A-Z]", "^Phase\\s+1|Phase 1", "handleRedemption|runSpec.+"]) {
+    assert.equal(
+      detectBuilderChosenNameInGrep(p),
+      null,
+      `alternation with a real-regex branch "${p}" must NOT flag`,
+    );
+  }
+});
+
+test("detectBuilderChosenNameInGrep ALLOWS an alternation of legitimate bare words (no builder-chosen shape)", () => {
+  // The pre-existing invariant: `foo|bar` was allowed by the metachar bail. Now it is allowed by
+  // the per-branch judge — neither `foo` nor `bar` is a builder-chosen shape (no npm colon, no
+  // kebab hyphen, no camelCase transition, no `.test.` filename). The union stays allowed.
+  assert.equal(detectBuilderChosenNameInGrep("foo|bar"), null);
+  assert.equal(detectBuilderChosenNameInGrep("SELECT|INSERT|UPDATE"), null);
+});
+
+test("validateExecutableCheck rejects a builder-chosen alternation grep pattern at author time", () => {
+  const specText = "Phase 1 verifies the mutation actually happened rather than trusting HTTP 200.";
+  const rejected = validateExecutableCheck(
+    {
+      exec_kind: "grep",
+      params: {
+        pattern: "verifyMutation|verifyContractState|assertLineState",
+        path: "src/lib",
+        expect: "present",
+      },
+    },
+    { specText },
+  );
+  assert.equal(
+    rejected.valid,
+    false,
+    "an alternation of three guessed camelCase names must reject at author time",
+  );
+  assert.match((rejected as { reason: string }).reason, /alternation of 3 names/i);
+});
+
+// ── grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 2 ──────────────────────────────
+//
+// The pin escape valve exempts a check whose builder-chosen literal appears in the spec body — but
+// without carrying that literal to the builder as required API, the pin was a wish dressed as a
+// contract (the builder invented a different name and the check never matched). collectSpecPinnedGrepLiterals
+// is the pure extractor the build session uses to surface those literals; these cases pin its
+// semantics so a legit pattern is not accidentally named as "required API".
+
+test("collectSpecPinnedGrepLiterals returns a bare literal the spec body names (single camelCase)", () => {
+  const spec = "Phase 1 wires `consumeRedemption` at the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(["consumeRedemption"], spec);
+  assert.deepEqual(pinned, ["consumeRedemption"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns a kebab-case literal the spec body names", () => {
+  const spec = "The Quant-Desk lifecycle page is authored under docs/brain/lifecycles/.";
+  const pinned = collectSpecPinnedGrepLiterals(["quant-desk"], spec);
+  assert.deepEqual(pinned, ["quant-desk"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns a test:<slug> npm-script literal the spec body names", () => {
+  const spec = "Phase 3 registers `test:graduate-crowned` as the smoke test.";
+  const pinned = collectSpecPinnedGrepLiterals(["test:graduate-crowned"], spec);
+  assert.deepEqual(pinned, ["test:graduate-crowned"]);
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return a pattern the guard would have flagged (rejected, not exempted)", () => {
+  // The guard REJECTED this pattern (no pin in the spec text) → the check would have failed at
+  // author time. Nothing to bind; the identifier isn't in the spec body.
+  const spec = "Phase 1 wires the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(["verifyContractState"], spec);
+  assert.deepEqual(pinned, []);
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return a pattern the guard passed on its own (no exemption fired)", () => {
+  // A real regex — no builder-chosen shape, no exemption fired, no pin to bind.
+  const spec = "Phase 1 registers a check.";
+  for (const p of ["test:.*crowned", "(?i)\\bquant\\b", "^Phase 1", "consume\\("]) {
+    assert.deepEqual(
+      collectSpecPinnedGrepLiterals([p], spec),
+      [],
+      `real-regex pattern "${p}" must not be reported as pinned`,
+    );
+  }
+});
+
+test("collectSpecPinnedGrepLiterals does NOT return bare single-word / ALL_CAPS literals (guard passes them)", () => {
+  const spec = "Phase 1 exercises SELECT and INSERT.";
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["SELECT", "INSERT", "runner", "hero"], spec), []);
+});
+
+test("collectSpecPinnedGrepLiterals splits an alternation and returns ONLY the pinned branch", () => {
+  // Mixed alternation — Phase 1 keeps this legal at the guard level (one genuine spec-pinned branch
+  // rescues the union). The collector extracts JUST the pinned name so the builder is bound to
+  // that spelling; the guessed branch stays a wish that no verification actually rides on.
+  const spec = "Phase 1 pins `consumeRedemption` as the required API at the redemption chokepoint.";
+  const pinned = collectSpecPinnedGrepLiterals(
+    ["consumeRedemption|verifyContractState"],
+    spec,
+  );
+  assert.deepEqual(pinned, ["consumeRedemption"]);
+});
+
+test("collectSpecPinnedGrepLiterals dedupes and sorts across multiple grep checks", () => {
+  const spec = "Phase 1 wires `consumeRedemption` and `quant-desk`.";
+  const pinned = collectSpecPinnedGrepLiterals(
+    ["consumeRedemption", "quant-desk", "consumeRedemption"],
+    spec,
+  );
+  assert.deepEqual(pinned, ["consumeRedemption", "quant-desk"]);
+});
+
+test("collectSpecPinnedGrepLiterals returns [] on empty patterns / empty specText", () => {
+  assert.deepEqual(collectSpecPinnedGrepLiterals([], "some spec text"), []);
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["consumeRedemption"], ""), []);
+  assert.deepEqual(collectSpecPinnedGrepLiterals(["  "], "some spec text"), []);
 });
 
 test("isPlainReadonlySql accepts SELECT + WITH; rejects chained + mutating statements", () => {

@@ -26876,6 +26876,77 @@ async function dispatchJob(job: Job) {
       });
     }
 
+    // grep-check-guess-guard-closes-alternation-and-pin-gaps Phase 2 — make a spec-pinned name BINDING
+    // on the builder, not merely an exemption at author-time. The `detectBuilderChosenNameInGrep`
+    // escape valve lets a grep check pin a builder-chosen literal when the spec body literally names
+    // it; without carrying that pin to the builder as a REQUIREMENT, the pin was a wish dressed as a
+    // contract — the builder invented a different name and the assertion never matched (two of three
+    // recent stranded specs failed this exact way on 2026-08-02). Now: collect every grep pattern's
+    // pinned literal via `collectSpecPinnedGrepLiterals` (the same specText the author-time guard
+    // uses = the whole rendered spec body) and surface each identifier to the build session as
+    // required API — same identifier, same spelling — with the "change the spec, not the code"
+    // invariant. Best-effort — a DB / read failure logs and proceeds with no injection (the
+    // pre-Phase-1 rules still stand). Skipped entirely for a resume that already carries a session:
+    // the pins were delivered on the first-turn prompt and the resume prompt reuses that session.
+    let pinnedApiInstr: string | null = null;
+    if (!isResume) {
+      try {
+        const { getSpec: getPinsSpec } = await import("../src/lib/specs-table");
+        const { listPhaseChecks, collectSpecPinnedGrepLiterals } = await import(
+          "../src/lib/spec-phase-checks-table"
+        );
+        const specForPins = await getPinsSpec(job.workspace_id, slug);
+        const phases = specForPins?.phases ?? [];
+        if (phases.length) {
+          const grepPatterns: string[] = [];
+          for (const p of phases) {
+            const checks = await listPhaseChecks(p.id);
+            for (const c of checks) {
+              if (c.exec_kind !== "grep") continue;
+              const params = c.params as { pattern?: unknown } | null;
+              const pattern = params && typeof params.pattern === "string" ? params.pattern : null;
+              if (pattern) grepPatterns.push(pattern);
+            }
+          }
+          if (grepPatterns.length) {
+            // Same text the author-time chokepoint uses — the whole rendered spec body Bo reads
+            // from the materialized file. `readFileSync` is best-effort; a missing file yields an
+            // empty specText and the collector returns [].
+            let specText = "";
+            try {
+              specText = require("fs")
+                .readFileSync(require("path").resolve(wt, materializedRelPath), "utf8") as string;
+            } catch (e) {
+              console.warn(
+                `${tag} pinned-literals: could not read ${materializedRelPath}:`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+            const pinned = collectSpecPinnedGrepLiterals(grepPatterns, specText);
+            if (pinned.length) {
+              pinnedApiInstr =
+                `⭐ REQUIRED API — the spec pins the following identifier(s) via a grep check's ` +
+                `spec-body-name escape valve. Use these EXACT spellings in the code you write; a ` +
+                `different-but-equivalent name (camelCase reshuffle, kebab casing, npm-script tail) ` +
+                `is a bug because the spec's verification check pins the exact literal and the ` +
+                `assertion will never match. If a different name is genuinely better, change the ` +
+                `SPEC (rename the identifier there so the pin follows), not the code. Pinned: ` +
+                pinned.map((s) => `\`${s}\``).join(", ") +
+                `.`;
+              console.log(
+                `${tag} pinned-literals: ${pinned.length} identifier(s) surfaced as required API: ${pinned.join(", ")}`,
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `${tag} pinned-literals: collection failed (proceeding without injection):`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
+
     // `isResume && sessionId`: a started-fresh run (owning account was capped → sessionId cleared) has no
     // prior session to "continue", so it uses the FRESH prompt and re-reads the spec from the branch WIP.
     // spec-authoring-writes-db-and-worker-materialize Phase 2: the spec body comes from the DB row; the
@@ -26906,6 +26977,7 @@ async function dispatchJob(job: Job) {
           `  F) PERSONAS UPSERT BY KEY. When adding an agent persona to \`src/lib/agents/personas.ts\` (or any TypeScript object literal keyed by a stable slug), UPSERT — before writing the new entry, grep the file for that key; if a \`PERSONAS[<key>]\` entry ALREADY EXISTS, REPLACE it (edit in place) instead of appending a second entry with the same key. A duplicate literal key fails \`tsc --noEmit\` with TS1117 ("An object literal cannot have multiple properties with the same name"), breaking EVERY subsequent build's tsc gate until a human dedupes — the 2026-07-07 prompt-review incident (Prue appended on top of Wren → dead build queue until 6777fb895 hotfix). The predeploy \`check:personas-no-duplicate-keys\` guard reds this deterministically, but the correct fix is upstream: check first, edit-in-place. Same rule for the \`RESPONSIBILITIES\` map below PERSONAS.`,
           `  G) PERSONA AVATAR AUTO-GEN — NEVER SHIP AN IMAGELESS AGENT. When you add (or upsert) a \`PERSONAS[<key>]\` entry in \`src/lib/agents/personas.ts\`, do NOT leave \`avatarUrl\` unset — an imageless persona renders as the neutral 🤖 mascot fallback across every surface (org chart, board posts, approvals feed). After the entry is in place, run \`npx tsx scripts/_gen-persona-avatars-backfill.ts\` (request approval via a \`needs_approval\` action of type \`run_prod_script\` — it needs the Gemini API key + Supabase service-role): it iterates every imageless PERSONAS entry, generates a photoreal headshot via \`generateNanoBananaProCombine\` in \`src/lib/gemini.ts\` (Nano Banana Pro) using the AVATAR STYLE preamble from personas.ts + a role-appropriate distinctive-look line, uploads to the public \`agent-avatars\` Supabase bucket at \`<name-lower>-<key>.jpg\`, and patches the entry to add \`avatarUrl: \\\`\${AV}<file>?v=1\\\`\` on the same line as \`mascotId:\`. Idempotent — a persona whose \`avatarUrl\` is already set is skipped; an existing bucket file is reused rather than regenerated. The 2026-07-07 Prue / earlier Sol-Cora incidents shipped imageless because this step was skipped.`,
           ...(nextPhaseScope ? [nextPhaseScope] : []),
+          ...(pinnedApiInstr ? [pinnedApiInstr] : []),
           ...(job.instructions ? [`SCOPE for THIS build — do exactly this and nothing more: ${job.instructions}`] : []),
           `Worker protocol (overrides the skill's git step): the harness owns version control — do NOT run git/push or open a PR. Author migrations/scripts as code (write-migration skill). You have NO prod credentials: to apply a migration or run a prod-mutating script, request approval instead of doing it. Run \`npx tsc --noEmit\` and fix errors you introduce. If you hit a product decision the spec doesn't cover, do NOT guess.`,
           `⭐ cacheComponents RULES (this app has \`cacheComponents: true\` in next.config — tsc does NOT catch prerender breaks, but the worker runs a real \`next build\` gate before merge, so get it right or the build bounces back to you): every page that reads DYNAMIC data must do so inside a <Suspense> boundary or the production build fails ("Uncached data accessed outside of <Suspense>"). When you add/edit a route: a SERVER page reading uncached DB/auth data, OR a CLIENT page using useSearchParams/useParams/usePathname → add a route \`layout.tsx\` that wraps {children} in \`<Suspense fallback={null}>\` (the cleanest fix — covers the whole segment). NEVER use \`connection()\` (it does NOT satisfy the boundary). NEVER add \`export const runtime / revalidate / dynamicParams\` (incompatible with cacheComponents — they fail the build). A storefront page that needs caching uses \`'use cache'\` + \`cacheLife\` (see the PDP). Static/marketing pages that read no dynamic data need nothing.`,
