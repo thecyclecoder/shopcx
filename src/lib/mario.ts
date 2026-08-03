@@ -1555,12 +1555,23 @@ const MARIO_ACTOR = "mario";
 
 /** One non-destructive live fix in the M4 vocabulary — the exact action key + its target. */
 export interface MarioLiveFix {
-  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | cancel_pr_resolve_storm | close_orphaned_pr | ...open slot. */
+  /** Vocabulary key: redrive_dropped_job | unstick_stale_status | release_cleared_blocker | requeue_unclaimed_job | queue_box_restart | reclaim_and_redrive | cancel_pr_resolve_storm | close_orphaned_pr | stamp_shipped_phase | ...open slot. */
   action: string;
   /** The specific row/slug/box/PR the action mutates — Phase 3 helpers each read exactly one field.
    *  `pr_number` (mario-detects-job-and-pr-wedges Phase 2) is set for the `cancel_pr_resolve_storm`
-   *  verdict — the target row-set is every parked pr-resolve row for that PR. */
-  target: { spec_slug?: string; job_id?: string; box_id?: string; pr_number?: number };
+   *  verdict — the target row-set is every parked pr-resolve row for that PR.
+   *  `phase_position` + `merge_sha` (build-that-never-finishes-is-visible-to-mario Phase 2) are set
+   *  for the `stamp_shipped_phase` verdict — the built-but-unstamped class, where the shipped code
+   *  landed on origin/main but the timecard never emitted phase_shipped; the applier hard-verifies
+   *  `merge_sha` is an ancestor of origin/main before stamping via the specs-table SDK. */
+  target: {
+    spec_slug?: string;
+    job_id?: string;
+    box_id?: string;
+    pr_number?: number;
+    phase_position?: number;
+    merge_sha?: string;
+  };
   /** Plain-language why — persisted verbatim on the director_activity row. */
   reasoning: string;
 }
@@ -1667,6 +1678,15 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
       const rawPrNumber = target.pr_number;
       const prNumberValid =
         typeof rawPrNumber === "number" && Number.isFinite(rawPrNumber) && rawPrNumber > 0 && Number.isInteger(rawPrNumber);
+      // phase_position and merge_sha carry the stamp_shipped_phase verdict's provenance. Same
+      // strict-on-write shape as pr_number: a bad type / negative / non-hex value drops silently to
+      // undefined so the applier's scope predicate (checkStampShippedPhaseScope) rejects the verdict
+      // at the boundary rather than firing a malformed stampPhaseShipped.
+      const rawPhasePosition = target.phase_position;
+      const phasePositionValid =
+        typeof rawPhasePosition === "number" && Number.isFinite(rawPhasePosition) && rawPhasePosition > 0 && Number.isInteger(rawPhasePosition);
+      const rawMergeSha = target.merge_sha;
+      const mergeShaValid = typeof rawMergeSha === "string" && /^[0-9a-f]{7,40}$/i.test(rawMergeSha);
       live_fix = {
         action,
         target: {
@@ -1674,6 +1694,8 @@ export function normalizeMarioVerdict(raw: unknown): MarioVerdict | null {
           job_id: typeof target.job_id === "string" ? target.job_id : undefined,
           box_id: typeof target.box_id === "string" ? target.box_id : undefined,
           pr_number: prNumberValid ? rawPrNumber : undefined,
+          phase_position: phasePositionValid ? rawPhasePosition : undefined,
+          merge_sha: mergeShaValid ? rawMergeSha : undefined,
         },
         reasoning: typeof lf.reasoning === "string" ? lf.reasoning : "",
       };
@@ -1966,6 +1988,71 @@ async function cancelPrResolveStorm(admin: Admin, workspaceId: string, prNumber:
   const count = Array.isArray(cancelled) ? cancelled.length : 0;
   if (count === 0) throw new Error(`cancel_pr_resolve_storm: no parked pr-resolve rows matched for PR #${prNumber}`);
   return count;
+}
+
+/** `stamp_shipped_phase` — the "work landed, phases unstamped" branch of Mario's build_started→
+ *  build_done vocabulary (build-that-never-finishes-is-visible-to-mario Phase 2). A build that
+ *  died before the timecard emitted `build_done` / `phase_shipped` but whose PR did merge onto
+ *  origin/main leaves `spec_phases.status='planned'` next to code that is genuinely shipped —
+ *  exactly the shape a human performed by hand for two specs on 2026-08-02. The safe way to close
+ *  the gap without a raw update is to call the specs-table SDK's `stampPhaseShipped`, but ONLY
+ *  after we prove the merge_sha the verdict names is really an ancestor of origin/main. Any drift
+ *  (sha unknown to git, sha not on main, phase already shipped) throws — the caller records the
+ *  reason on the `mario_fired` row rather than silently no-op'ing. Guarded further by the pure
+ *  [[checkStampShippedPhaseScope]] predicate at the applier's boundary — the position + merge_sha
+ *  are re-validated as well-formed integers/hex before we ever spawn `git`. */
+async function stampShippedPhase(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string,
+  position: number,
+  mergeSha: string,
+  prNumber: number | null,
+): Promise<void> {
+  // Guard 1 — phase must exist and NOT already be shipped. `stampPhaseShipped` itself has no
+  // regression guard (it's the canonical writer + a repeat stamp would be idempotent-ish), but a
+  // second stamp would still write a fresh merge_sha and re-emit a phase_shipped timecard event —
+  // both distortions of the audit trail. We refuse a second stamp explicitly.
+  const { data: spec, error: sErr } = await admin
+    .from("specs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("slug", specSlug)
+    .maybeSingle();
+  if (sErr) throw new Error(`stamp_shipped_phase: spec read failed: ${sErr.message}`);
+  if (!spec) throw new Error(`stamp_shipped_phase: no spec '${specSlug}' in workspace ${workspaceId}`);
+  const { data: phase, error: pErr } = await admin
+    .from("spec_phases")
+    .select("status")
+    .eq("spec_id", (spec as { id: string }).id)
+    .eq("position", position)
+    .maybeSingle();
+  if (pErr) throw new Error(`stamp_shipped_phase: phase read failed: ${pErr.message}`);
+  if (!phase) throw new Error(`stamp_shipped_phase: no phase at position ${position} on ${specSlug}`);
+  if ((phase as { status: string }).status === "shipped") {
+    throw new Error(`stamp_shipped_phase: phase already shipped at position ${position} on ${specSlug}`);
+  }
+
+  // Guard 2 — merge_sha must be reachable from origin/main. The core invariant from the spec:
+  // "Confirm the symbol is genuinely on main first; stamping on inference is how a spec gets marked
+  // shipped while its code is absent." A `git merge-base --is-ancestor <sha> origin/main` returns
+  // exit 0 iff the sha is an ancestor of origin/main — a non-zero exit is proof it is NOT (either
+  // sha unknown or not reachable). We fetch origin/main first so a stale local ref can't falsely
+  // reject a genuinely-landed sha. child_process is dynamic-imported so this file stays edge-safe
+  // if a non-box surface ever pulls it in.
+  const { spawnSync } = await import("node:child_process");
+  const fetchRes = spawnSync("git", ["fetch", "origin", "main", "--quiet"], { stdio: "ignore" });
+  if (fetchRes.status !== 0) {
+    throw new Error(`stamp_shipped_phase: git fetch origin main failed (exit=${fetchRes.status ?? "signal"})`);
+  }
+  const ancRes = spawnSync("git", ["merge-base", "--is-ancestor", mergeSha, "origin/main"], { stdio: "ignore" });
+  if (ancRes.status !== 0) {
+    throw new Error(`stamp_shipped_phase: merge_sha ${mergeSha} is NOT an ancestor of origin/main (exit=${ancRes.status ?? "signal"})`);
+  }
+
+  // Only now do we call the canonical SDK writer. This is the ONLY mutator path — no raw update.
+  const { stampPhaseShipped } = await import("@/lib/specs-table");
+  await stampPhaseShipped(workspaceId, specSlug, position, { merge_sha: mergeSha, pr: prNumber });
 }
 
 /** `queue_box_restart` — set `worker_controls.drain_for_update=true` for the target box so the worker
@@ -2407,6 +2494,38 @@ export function checkCloseOrphanedPrScope(input: {
   return { ok: true, specSlug: input.jobSpecSlug };
 }
 
+/** Pure security predicate for `stamp_shipped_phase` (build-that-never-finishes-is-visible-to-mario
+ *  Phase 2). The build_started→build_done stall detector stamps the REAL spec_slug on the surfacing
+ *  candidate → applyBoxMario reads it off `row.spec_slug`. Reject any verdict whose target.spec_slug
+ *  is explicitly set to a DIFFERENT slug (an injected verdict cannot retarget the stamp to a
+ *  SIBLING spec's phase). Require target.phase_position (positive integer) and target.merge_sha
+ *  (7–40 hex chars — normalizeMarioVerdict already rejects non-hex, but the boundary re-validates so
+ *  a future refactor of normalize can't silently downgrade the guard). A missing target.spec_slug
+ *  (verdict target = { phase_position, merge_sha }) is accepted as an implicit "use the job row's
+ *  slug" — matches the checkCloseOrphanedPrScope shape. */
+export function checkStampShippedPhaseScope(input: {
+  jobSpecSlug: string;
+  target: { spec_slug?: string; phase_position?: number; merge_sha?: string };
+}):
+  | { ok: true; specSlug: string; position: number; mergeSha: string }
+  | { ok: false; reason: string } {
+  if (typeof input.target.spec_slug === "string" && input.target.spec_slug !== input.jobSpecSlug) {
+    return {
+      ok: false,
+      reason: `spec_slug_mismatch: job=${input.jobSpecSlug} verdict=${input.target.spec_slug}`,
+    };
+  }
+  const position = input.target.phase_position;
+  if (typeof position !== "number" || !Number.isFinite(position) || !Number.isInteger(position) || position <= 0) {
+    return { ok: false, reason: "phase_position_missing_or_invalid" };
+  }
+  const mergeSha = input.target.merge_sha;
+  if (typeof mergeSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(mergeSha)) {
+    return { ok: false, reason: "merge_sha_missing_or_invalid" };
+  }
+  return { ok: true, specSlug: input.jobSpecSlug, position, mergeSha };
+}
+
 /** Repair a spec's MISSING blocked_by entry (the fifth candidate source class). Re-authors the spec with
  *  the merged `blocked_by` (UNION of existing + verdict.add_blocked_by) via the SAME author-spec gate that
  *  the verification repair uses — a content change re-opens the spec to Vale (`markSpecCardBackToReview`
@@ -2739,6 +2858,30 @@ export async function applyBoxMario(
             const scope = checkCloseOrphanedPrScope({ jobSpecSlug: row.spec_slug, target: lf.target });
             if (!scope.ok) throw new Error(`close_orphaned_pr: ${scope.reason}`);
             await closeOrphanedPr(admin, row.workspace_id, scope.specSlug);
+            fixExecuted = true;
+            break;
+          }
+          case "stamp_shipped_phase": {
+            // build-that-never-finishes-is-visible-to-mario Phase 2 — the "work landed, phases
+            // unstamped" branch of the new build_started→build_done stall class. Bind target.spec_slug
+            // to the Mario job row's spec_slug so an injected verdict cannot retarget the stamp to a
+            // sibling spec's phase (learning #11/#12: guard-before-mutation, compare-and-set). The
+            // predicate ALSO re-validates target.phase_position (positive integer) + target.merge_sha
+            // (7–40 hex chars) — normalizeMarioVerdict already rejects a malformed value, but the
+            // boundary re-checks so a future normalize refactor can't silently downgrade the guard.
+            // The applier itself (`stampShippedPhase`) then hard-verifies the merge_sha is an ancestor
+            // of origin/main BEFORE calling the specs-table SDK — never a raw update, never a stamp
+            // on inference. See [[checkStampShippedPhaseScope]] for the exact contract.
+            const scope = checkStampShippedPhaseScope({ jobSpecSlug: row.spec_slug, target: lf.target });
+            if (!scope.ok) throw new Error(`stamp_shipped_phase: ${scope.reason}`);
+            await stampShippedPhase(
+              admin,
+              row.workspace_id,
+              scope.specSlug,
+              scope.position,
+              scope.mergeSha,
+              lf.target.pr_number ?? null,
+            );
             fixExecuted = true;
             break;
           }
