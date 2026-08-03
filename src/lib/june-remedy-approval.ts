@@ -502,8 +502,167 @@ async function resolveOwnerUserId(admin: Admin, workspaceId: string): Promise<st
 
 export interface RaiseJuneRemedyResult {
   raised: boolean;
-  via: "sms_cockpit" | "escalated_no_cockpit" | "escalated_recommendation_only";
+  via:
+    | "sms_cockpit"
+    | "escalated_no_cockpit"
+    | "escalated_recommendation_only"
+    // one-open-escalation-per-thing Phase 3: an existing `asked` card for the same subject blocks
+    // the re-ask until the founder decides again (or the run consumes the answer). The mint site
+    // returned WITHOUT opening a new card. The prior asked card is still live; the founder's answer
+    // (its question_text) is the input the next cs-director-call run must consume.
+    | "blocked_by_asked"
+    // one-open-escalation-per-thing Phase 3: the per-subject ceiling fired — this decision has been
+    // asked N times in the window (see JUNE_REASK_CEILING). ONE `dashboard_notifications` card
+    // ("Refund decision asked N times — needs a call") is emitted (dedupe key
+    // `asked_ceiling:{ticket_id}:{category}`), the DB unique index prevents duplicates, and no new
+    // june_remedy card is minted. The founder decides on the summary card, not a fresh remedy card.
+    | "blocked_by_ceiling";
   approvalId?: string;
+  /**
+   * one-open-escalation-per-thing Phase 3 — the question_text the founder's `asked` answer carries.
+   * Populated only on `via='blocked_by_asked'` so the caller (cs-director-call resume) can feed it
+   * into the next investigation's context as required input. Null otherwise.
+   */
+  askedQuestionText?: string | null;
+}
+
+// ── one-open-escalation-per-thing Phase 3 — an answered question blocks the re-ask ────────────
+// The 2026-07-28 incident: the founder answered June's card at 23:47 with a specific investigative
+// lens ("look at the customer's LTV before refunding"); June opened four MORE cards over the next
+// 2.5h, none of which engaged with the answer. An answer that changes nothing teaches the founder
+// that answering is pointless. Two guards close it:
+//   (1) BLOCK re-mint while an `asked` card is open for the same subject — the founder is waiting on
+//       June to consume the answer, not to open a fresh card that ignores it.
+//   (2) BOUND the per-subject re-ask count — after JUNE_REASK_CEILING mints in JUNE_REASK_WINDOW_MS,
+//       emit ONE `dashboard_notifications` "this decision has been asked N times" card and stop
+//       minting. Reuses Phase 1's DB unique open-card index so the summary card also dedupes to one.
+
+/** The per-subject re-ask ceiling — after this many mints in the window, escalate ONE summary card. */
+export const JUNE_REASK_CEILING = 5;
+/** The window over which the ceiling counts — 24h matches Phase 2's stale-park window. */
+export const JUNE_REASK_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * one-open-escalation-per-thing Phase 3 — the pure re-ask decision. Kept pure so the "block vs
+ * ceiling vs mint" fork is unit-testable without a Supabase seam.
+ *
+ *   - `openAskedCount > 0` — an `asked` card is already live for the same (ticket, category);
+ *     the founder's answer is waiting to be consumed. Block the new mint, hand the question_text
+ *     back so the caller feeds it into the next run.
+ *   - `mintCountInWindow >= JUNE_REASK_CEILING` — the founder has been asked this same decision
+ *     too many times in the window. Block the new mint; emit the summary card once.
+ *   - else — no block; the caller mints normally.
+ */
+export type ReAskDecision =
+  | { block: false }
+  | { block: true; kind: "asked_open"; askedQuestionText: string | null }
+  | { block: true; kind: "ceiling"; mintCountInWindow: number };
+
+export function computeReAskBlock(state: {
+  openAskedCount: number;
+  askedQuestionText: string | null;
+  mintCountInWindow: number;
+}): ReAskDecision {
+  if (state.openAskedCount > 0) {
+    return { block: true, kind: "asked_open", askedQuestionText: state.askedQuestionText };
+  }
+  if (state.mintCountInWindow >= JUNE_REASK_CEILING) {
+    return { block: true, kind: "ceiling", mintCountInWindow: state.mintCountInWindow };
+  }
+  return { block: false };
+}
+
+/**
+ * one-open-escalation-per-thing Phase 3 — read the god_mode_approvals state for a given (ticket,
+ * category) subject: how many open `asked` cards exist + what question_text they carry, and how
+ * many mints have happened in the window (any status). Read-only. Best-effort: on a DB hiccup
+ * returns `{openAskedCount:0, askedQuestionText:null, mintCountInWindow:0}` so the caller falls
+ * through to the mint path — the pre-Phase-3 behavior is the safe fallback (never a silent block).
+ */
+export async function readReAskState(
+  admin: Admin,
+  input: { workspaceId: string; ticketId: string; category: string; windowMs?: number },
+): Promise<{ openAskedCount: number; askedQuestionText: string | null; mintCountInWindow: number }> {
+  const windowMs = input.windowMs ?? JUNE_REASK_WINDOW_MS;
+  const since = new Date(Date.now() - windowMs).toISOString();
+  try {
+    const { data } = await admin
+      .from("god_mode_approvals")
+      .select("id, status, question_text, tool_input, created_at")
+      .eq("workspace_id", input.workspaceId)
+      .eq("tool_name", JUNE_REMEDY_TOOL)
+      .eq("category", input.category)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    // Server can't filter on jsonb `tool_input->>ticket_id` cheaply through PostgREST — do it in JS
+    // over the small windowed set. Cards for OTHER tickets are ignored.
+    const rows = ((data ?? []) as Array<{ id: string; status: string; question_text: string | null; tool_input: Record<string, unknown>; created_at: string }>)
+      .filter((r) => {
+        const ti = r.tool_input ?? {};
+        const t = (ti as { ticket_id?: string }).ticket_id;
+        return typeof t === "string" && t === input.ticketId;
+      });
+    const asked = rows.filter((r) => r.status === "asked");
+    const askedQuestionText = asked.length > 0 ? asked[0].question_text ?? null : null;
+    return { openAskedCount: asked.length, askedQuestionText, mintCountInWindow: rows.length };
+  } catch (e) {
+    console.warn("[june-remedy-approval] readReAskState failed:", e instanceof Error ? e.message : e);
+    return { openAskedCount: 0, askedQuestionText: null, mintCountInWindow: 0 };
+  }
+}
+
+/**
+ * one-open-escalation-per-thing Phase 3 — emit the summary "asked N times" dashboard card ONCE per
+ * subject. Uses the same [[dashboard_notifications]] surface as the escalation cards (approval_request
+ * type + `escalation_kind='asked_ceiling'` + dedupe_key `asked_ceiling:{ticket_id}:{category}` so the
+ * DB unique-open-card index from Phase 1 dedupes it). Best-effort; a DB failure logs a warning and
+ * returns — the founder still sees the prior N cards in the queue.
+ */
+async function emitAskedCeilingCard(
+  admin: Admin,
+  input: { workspaceId: string; ticketId: string; category: string; mintCount: number; preview: string },
+): Promise<void> {
+  const dedupeKey = `asked_ceiling:${input.ticketId}:${input.category}`;
+  const nowIso = new Date().toISOString();
+  const title = `Refund decision asked ${input.mintCount} times — needs a call`;
+  const body =
+    `June has asked you to decide the same remedy on this ticket ${input.mintCount} times in the last ` +
+    `${Math.round(JUNE_REASK_WINDOW_MS / (60 * 60 * 1000))} hours. Rather than continuing to mint fresh ` +
+    `refund cards, this one is the safety valve: open the ticket to decide, or dismiss it if the answer ` +
+    `is already given. Latest card summary: ${input.preview.split("\n")[0]}`;
+  try {
+    const { error } = await admin.from("dashboard_notifications").insert({
+      workspace_id: input.workspaceId,
+      type: "agent_approval_request",
+      title: title.slice(0, 200),
+      body: body.slice(0, 4000),
+      link: `/dashboard/tickets/${input.ticketId}`,
+      metadata: {
+        routed_to_function: "ceo",
+        escalation_kind: "asked_ceiling",
+        escalation_reason: body.slice(0, 2000),
+        dedupe_key: dedupeKey,
+        ticket_id: input.ticketId,
+        category: input.category,
+        mint_count: input.mintCount,
+        deep_link: `/dashboard/tickets/${input.ticketId}`,
+        approve_action_id: null,
+        escalation_seen_count: 1,
+        escalation_first_seen_at: nowIso,
+        escalation_last_seen_at: nowIso,
+      },
+      read: false,
+      dismissed: false,
+    });
+    // 23505 unique_violation → the summary card already exists (Phase 1's DB-enforced dedupe). That's
+    // the correct STATE either way, so this is a benign no-op — never a re-fire.
+    if (error && error.code !== "23505") {
+      console.warn(`[june-remedy-approval] asked_ceiling card insert failed: ${error.message}`);
+    }
+  } catch (e) {
+    console.warn("[june-remedy-approval] emitAskedCeilingCard threw:", e instanceof Error ? e.message : e);
+  }
 }
 
 /**
@@ -571,6 +730,46 @@ export async function raiseJuneRemedyApproval(
     reasoning: input.reasoning,
     remedyStates,
   });
+
+  // one-open-escalation-per-thing Phase 3 — an answered question blocks the re-ask. Read the
+  // (ticket, category) re-ask state and consult the pure predicate BEFORE we arm a cockpit / open
+  // a card / text the founder. Two blocks:
+  //   - `asked_open`: a live `asked` card exists — the founder's answer is waiting. Return
+  //     `via:'blocked_by_asked'` + the question_text so the caller feeds it into the next run.
+  //   - `ceiling`: the founder has already been asked N times in the window → emit ONE summary
+  //     card + return `via:'blocked_by_ceiling'`. Never a silent no-op — the ticket stays
+  //     escalated-to-owner (below) so nothing is dropped.
+  const reAskState = await readReAskState(admin, {
+    workspaceId: input.workspaceId,
+    ticketId: input.ticketId,
+    category: JUNE_REFUND_CATEGORY,
+  });
+  const reAskDecision = computeReAskBlock(reAskState);
+  if (reAskDecision.block) {
+    if (reAskDecision.kind === "ceiling") {
+      await emitAskedCeilingCard(admin, {
+        workspaceId: input.workspaceId,
+        ticketId: input.ticketId,
+        category: JUNE_REFUND_CATEGORY,
+        mintCount: reAskDecision.mintCountInWindow,
+        preview,
+      });
+      await postInternalNote(
+        admin,
+        input.ticketId,
+        `[cs-director] Blocked a re-ask: this refund decision has been surfaced ${reAskDecision.mintCountInWindow} times in the last ${Math.round(JUNE_REASK_WINDOW_MS / (60 * 60 * 1000))}h. Emitted ONE summary "asked ${reAskDecision.mintCountInWindow} times" card instead of another remedy card. Preview: ${preview.split("\n")[0]}`,
+      );
+      return { raised: false, via: "blocked_by_ceiling" };
+    }
+    // asked_open
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] Blocked a re-ask: the founder's ${JUNE_REFUND_CATEGORY} card for this ticket is still 'asked' (waiting on June to consume the answer, not another card). Founder's question: "${(reAskDecision.askedQuestionText ?? "(none recorded)").slice(0, 300)}". Preview I would have raised: ${preview.split("\n")[0]}`,
+    );
+    return { raised: false, via: "blocked_by_asked", askedQuestionText: reAskDecision.askedQuestionText };
+  }
+
   const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
 
   // Ensure a cockpit session to host the card + give the SMS a link. Reuse the active Eve session;
@@ -747,6 +946,40 @@ export async function raiseFounderApproval(
   const preview = buildFounderApprovalPreview({ remedy: input.remedy, reasoning: input.reasoning, customerName, ticketSubject, remedyStates });
   const actionType = typeof input.remedy.action_type === "string" ? input.remedy.action_type.trim() : null;
   const amountCents = remedyMoneyAmountCents(input.remedy);
+
+  // one-open-escalation-per-thing Phase 3 — an answered question blocks the re-ask. Same guard as
+  // `raiseJuneRemedyApproval` — see the commentary there. Applied BEFORE the park-ticket update so
+  // a re-ask-blocked path doesn't repeatedly re-stamp `escalated_at` on the ticket either.
+  const reAskState = await readReAskState(admin, {
+    workspaceId: input.workspaceId,
+    ticketId: input.ticketId,
+    category: JUNE_FOUNDER_ESCALATION_CATEGORY,
+  });
+  const reAskDecision = computeReAskBlock(reAskState);
+  if (reAskDecision.block) {
+    if (reAskDecision.kind === "ceiling") {
+      await emitAskedCeilingCard(admin, {
+        workspaceId: input.workspaceId,
+        ticketId: input.ticketId,
+        category: JUNE_FOUNDER_ESCALATION_CATEGORY,
+        mintCount: reAskDecision.mintCountInWindow,
+        preview,
+      });
+      await postInternalNote(
+        admin,
+        input.ticketId,
+        `[cs-director] Blocked a re-ask: this founder escalation has been surfaced ${reAskDecision.mintCountInWindow} times in the last ${Math.round(JUNE_REASK_WINDOW_MS / (60 * 60 * 1000))}h. Emitted ONE summary card instead. Preview: ${preview.split("\n")[0]}`,
+      );
+      return { raised: false, via: "blocked_by_ceiling" };
+    }
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] Blocked a re-ask: the founder's ${JUNE_FOUNDER_ESCALATION_CATEGORY} card for this ticket is still 'asked' (waiting on June to consume the answer). Founder's question: "${(reAskDecision.askedQuestionText ?? "(none recorded)").slice(0, 300)}". Preview I would have raised: ${preview.split("\n")[0]}`,
+    );
+    return { raised: false, via: "blocked_by_asked", askedQuestionText: reAskDecision.askedQuestionText };
+  }
+
   const ownerId = await resolveOwnerUserId(admin, input.workspaceId);
 
   const now = new Date().toISOString();
