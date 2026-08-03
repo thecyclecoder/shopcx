@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import {
   applyRefreshOutcome,
   classifyAccountHealth,
+  decideHeldAccountRecovery,
   decideSweepAction,
   type SweepAction,
 } from "./builder-worker.auth-refresh";
@@ -254,4 +255,90 @@ test("classifyAccountHealth: expiresAt=0 (missing / malformed credentials file) 
     usageWallRejected: false,
   });
   assert.equal(health.kind, "healthy");
+});
+
+// ── decideHeldAccountRecovery ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 1 ─
+// The pure predicate the sweep consults for accounts ALREADY held out of rotation. On 2026-08-02 two
+// accounts were ejected as auth_expired, the CEO re-authed both within the hour, and the box refused
+// to use them for the full 25-hour window — because the sweep only decides about HEALTHY accounts;
+// held ones are skipped entirely. These cases pin the release-on-re-auth rule so a repeat of that
+// outage lights up in CI, and the usage-cap invariant (never release a real quota wall on a disk
+// read) stays intact.
+
+test("decideHeldAccountRecovery: usage_cap hold + fresh valid credentials ⇒ hold ('not_auth_hold') — a usage wall is a real quota that only ages out at its reset time; re-reading the credentials file cannot substantiate a release", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "usage_cap",
+    expiresAt: NOW + 3_600_000, // credentials look fine — irrelevant to a usage wall
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "hold");
+  if (decision.kind !== "hold") throw new Error("unreachable");
+  assert.equal(decision.reason, "not_auth_hold");
+});
+
+test("decideHeldAccountRecovery: null holdReason (unclassified hold) ⇒ hold ('not_auth_hold') — we never release something we cannot substantiate as an auth hold, so a restart cannot become a shortcut around a real quota wall", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: null,
+    expiresAt: NOW + 3_600_000,
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "hold");
+  if (decision.kind !== "hold") throw new Error("unreachable");
+  assert.equal(decision.reason, "not_auth_hold");
+});
+
+test("decideHeldAccountRecovery: auth_expired + expiresAt in the future + refreshToken present ⇒ RELEASE — the credentials file was rewritten by a successful CEO /login AFTER the eject; the account must rejoin rotation immediately, not wait out the 25-hour weekly window", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "auth_expired",
+    expiresAt: NOW + 3_600_000,
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "release");
+});
+
+test("decideHeldAccountRecovery: refresh_failed + expiresAt in the future + refreshToken present ⇒ RELEASE — a prior refresh attempt failed BUT the CEO has since re-authed and the credentials file now reads valid; the same recovery path applies", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "refresh_failed",
+    expiresAt: NOW + 3_600_000,
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "release");
+});
+
+test("decideHeldAccountRecovery: reauth_required + expiresAt in the future + refreshToken present ⇒ RELEASE — reauth_required is another auth-shape hold whose recovery condition is identical (fresh expiresAt + refreshToken on disk means the CEO re-logged in); the pre-Phase-1 sweep skipped this case too", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "reauth_required",
+    expiresAt: NOW + 3_600_000,
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "release");
+});
+
+test("decideHeldAccountRecovery: auth_expired + expiresAt STILL in the past ⇒ hold ('still_invalid') — the credentials file has not been re-authed yet; keep the hold in place", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "auth_expired",
+    expiresAt: NOW - 1_000,
+    hasRefreshToken: true,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "hold");
+  if (decision.kind !== "hold") throw new Error("unreachable");
+  assert.equal(decision.reason, "still_invalid");
+});
+
+test("decideHeldAccountRecovery: auth_expired + expiresAt fresh BUT no refreshToken ⇒ hold ('still_invalid') — guards against a mid-write credentials file where the fresh expiresAt landed before the refreshToken; releasing early would send a still-broken account back into rotation", () => {
+  const decision = decideHeldAccountRecovery({
+    holdReason: "auth_expired",
+    expiresAt: NOW + 3_600_000,
+    hasRefreshToken: false,
+    now: NOW,
+  });
+  assert.equal(decision.kind, "hold");
+  if (decision.kind !== "hold") throw new Error("unreachable");
+  assert.equal(decision.reason, "still_invalid");
 });

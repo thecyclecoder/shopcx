@@ -47,7 +47,7 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
-import { applyRefreshOutcome, classifyAccountHealth, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary.
+import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -1966,6 +1966,50 @@ function sweepExpiredCredentials(now: number): void {
       credentialsCache.set(a.configDir, { expiresAt: fields.expiresAt, checkedAt: now });
       return fields;
     })();
+    // ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 1 ────
+    // Before the eject decision runs (which only fires for HEALTHY accounts whose creds went stale),
+    // re-probe accounts that are ALREADY held. The 2026-08-02 incident: two accounts were ejected
+    // as auth_expired, the CEO re-authed both within the hour, and the box refused to use them
+    // until the 25-hour weekly-cap window aged out — because the sweep only decides EJECT vs
+    // REFRESH for healthy accounts and skips held ones entirely. `decideHeldAccountRecovery` is a
+    // pure disk-read predicate: no API call, no side effect, safe to run on every tick. The card
+    // dismissal for reauth_required is fired opportunistically (noteAccountRecoveries already fires
+    // it on the aged-out path, but we do it here too so a fast recovery clears the CEO card
+    // immediately rather than on the next capEventLogged reconciliation).
+    if (a.cappedUntil > now) {
+      const recovery = decideHeldAccountRecovery({
+        holdReason: a.holdReason ?? null,
+        expiresAt,
+        hasRefreshToken,
+        now,
+      });
+      if (recovery.kind === "release") {
+        const priorHoldReason = a.holdReason;
+        const priorCappedUntil = a.cappedUntil;
+        a.cappedUntil = 0;
+        a.holdReason = null;
+        // Reset capEventLogged so a later re-expiry ejects visibly (emits the CEO card again) —
+        // without this, the next markAccountAuthExpired would silently update cappedUntil without
+        // raising the alert that "this account has died again". The spec's Phase 1 explicitly calls
+        // this out.
+        a.capEventLogged = false;
+        recordAccountEvent(
+          "recovered",
+          a.configDir,
+          `re-authenticated — back in rotation (was held as ${priorHoldReason ?? "unknown"} until ${astTime(priorCappedUntil)}; credentials file now reads valid)`,
+        );
+        console.warn(`[multi-account] ${a.configDir} ${priorHoldReason ?? "auth"} hold cleared — CEO re-authenticated; back in rotation ${Math.round((priorCappedUntil - now) / 3600_000)}h ahead of the weekly-window schedule`);
+        // Fire-and-forget: a dismiss failure must never gate the local recovery path. Only fires for
+        // reauth_required (the only auth-shape hold that raises a CEO card via emitCeoReauthCardBestEffort).
+        if (priorHoldReason === "reauth_required") {
+          void dismissCeoReauthCardBestEffort(a.configDir);
+        }
+        continue; // account is now healthy — no eject/refresh decision needed this tick
+      }
+      // A held account whose credentials still read invalid (or is held for a non-auth reason) must
+      // stay held. Skip the eject/refresh decision below — it's about healthy accounts going stale.
+      continue;
+    }
     // a-test-that-no-runner-executes Phase 1 — the per-account decision is a pure function in
     // ./builder-worker.auth-refresh so scripts/builder-worker.auth-refresh.test.ts can pin the
     // four cases the outage named (recovery, genuinely-dead, refresh-failed, whole-pool guard)

@@ -152,3 +152,65 @@ export function classifyAccountHealth(input: {
   // expiresAt is in the past — one of the two auth-hold cases.
   return input.hasRefreshToken ? { kind: "renewable" } : { kind: "reauth_required" };
 }
+
+// ── build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 1 ────────
+// `decideHeldAccountRecovery` — the pure predicate the sweep consults for accounts that are ALREADY
+// held out of rotation. When the CEO re-authenticates, the credentials file gets rewritten with a
+// fresh `expiresAt` in the future + a `refreshToken`. Today the sweep only calls `decideSweepAction`
+// (which is about ejecting healthy accounts), and skips accounts already held — so a re-authed
+// account sits at `cappedUntil = now + 25h` until an operator hand-edits the heartbeat. That is the
+// exact behaviour the 2026-08-02 incident produced: two accounts came back healthy within the hour
+// and the box refused to use them for a full day.
+//
+// The predicate answers ONE question: "given this held account and its on-disk credentials, should
+// we release the hold on this sweep tick?" A `release` means the hold is cleared (cappedUntil = 0,
+// holdReason = null) so the account rejoins rotation on the next pick. A `hold` reports why the
+// release did not fire — either because the hold is not an auth-shape hold (a usage_cap only clears
+// at its reset time; the file says nothing about it) or because the credentials still read invalid.
+//
+// The three rules map 1:1 to the spec's decision table:
+//
+//   1. holdReason === 'usage_cap' (or null)                         → hold, not_auth_hold
+//        A usage wall is a real quota with its own reset time; re-reading the credentials file
+//        cannot answer whether it has cleared. A `null` reason is an unclassified hold — we do not
+//        release something we cannot substantiate as an auth hold. This preserves the invariant
+//        that a restart cannot become a shortcut around a real quota wall.
+//
+//   2. holdReason ∈ {auth_expired, refresh_failed, reauth_required}
+//      AND expiresAt > now
+//      AND hasRefreshToken                                          → release
+//        A future expiry on disk means the credentials file has been rewritten by a successful
+//        login (or auto-refresh) AFTER the eject. Requiring `hasRefreshToken` guards against a
+//        transient state where the file was mid-write with a fresh expiresAt but no refreshToken.
+//        `reauth_required` is treated equivalently to `auth_expired` / `refresh_failed` — the
+//        underlying condition is the same (an auth-shape hold whose credentials now read valid);
+//        the older label was added by a prior spec iteration and still exists in the pool.
+//
+//   3. otherwise                                                    → hold, still_invalid
+//        An auth-shape hold whose credentials do NOT yet read valid (expiresAt still in the past,
+//        or no refreshToken). Keep the hold in place; the sweep will check again on the next tick.
+//
+// This is a disk-read predicate — no API call, no side effect. Safe to run every sweep tick.
+export type HeldAccountRecovery =
+  | { kind: "release" }
+  | { kind: "hold"; reason: "not_auth_hold" | "still_invalid" };
+
+export function decideHeldAccountRecovery(input: {
+  holdReason: AccountHoldReason | null;
+  expiresAt: number;
+  hasRefreshToken: boolean;
+  now: number;
+}): HeldAccountRecovery {
+  const r = input.holdReason;
+  if (r == null || r === "usage_cap") {
+    return { kind: "hold", reason: "not_auth_hold" };
+  }
+  if (
+    (r === "auth_expired" || r === "refresh_failed" || r === "reauth_required") &&
+    input.expiresAt > input.now &&
+    input.hasRefreshToken
+  ) {
+    return { kind: "release" };
+  }
+  return { kind: "hold", reason: "still_invalid" };
+}
