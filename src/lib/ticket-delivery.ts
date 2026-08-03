@@ -19,7 +19,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendTicketReply } from "@/lib/email";
-import { renderLabelUrlsAsButtons } from "@/lib/label-cta";
+import { ctaButton, renderLabelUrlsAsButtons } from "@/lib/label-cta";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -31,6 +31,62 @@ const toHtml = (t: string) =>
     .filter(Boolean)
     .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
     .join("");
+
+/**
+ * Placeholder guarantee at the delivery chokepoint (docs/brain/specs/
+ * no-send-path-can-emit-an-unsubstituted-placeholder). Every outbound customer
+ * message runs through this before render/send: an unfilled `{{label_url}}`
+ * falls back to the customer's most recent non-terminal `returns` row (Ethel
+ * 2305546a, Julianne de357c10 both had the label on the return the whole
+ * time), and any residual `{{token}}` / `[UPPER_TOKEN]` is stripped so the
+ * literal brace text can NEVER reach the customer. Bounded to `customerId`
+ * — never guess across customers. Exported so the regression tests can pin
+ * the three named cases without spinning up a live delivery.
+ */
+export async function resolvePlaceholderSafeMessage(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  customerId: string | null,
+  message: string,
+): Promise<string> {
+  const PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/;
+  const LABEL_URL_TOKEN_RE = /\{\{\s*label_url\s*\}\}|\[\s*LABEL_URL\s*\]/;
+  let safeMessage = message;
+
+  if (customerId && LABEL_URL_TOKEN_RE.test(safeMessage)) {
+    const { data: liveReturn } = await admin
+      .from("returns")
+      .select("id, label_url, status, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customerId)
+      .not("label_url", "is", null)
+      .not("status", "in", "(refunded,cancelled,closed)")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (liveReturn?.label_url) {
+      const button = ctaButton(liveReturn.label_url, "Download your prepaid return label →");
+      safeMessage = safeMessage
+        .replace(/\{\{\s*label_url\s*\}\}/g, button)
+        .replace(/\[\s*LABEL_URL\s*\]/g, button);
+      console.info(
+        `[deliverTicketMessage] filled {{label_url}} from live return ticket=${ticketId} return=${liveReturn.id} status=${liveReturn.status}`,
+      );
+    }
+  }
+
+  if (PLACEHOLDER_RE.test(safeMessage)) {
+    const { stripUnsubstitutedPlaceholders } = await import("@/lib/action-executor");
+    console.warn(
+      `[deliverTicketMessage] stripping unsubstituted placeholder(s) in outbound message ticket=${ticketId}:`,
+      safeMessage.match(/\{\{\s*\w+\s*\}\}|\[\s*[A-Z_]+\s*\]/g),
+    );
+    safeMessage = stripUnsubstitutedPlaceholders(safeMessage);
+  }
+
+  return safeMessage;
+}
 
 /**
  * Insert an outbound external message on `ticketId` and deliver it on the
@@ -54,13 +110,28 @@ export async function deliverTicketMessage(
     .eq("id", ticketId)
     .single();
 
+  // Placeholder safety net at the delivery chokepoint. See
+  // `resolvePlaceholderSafeMessage` above for the guarantee — this is the
+  // single chokepoint call that pins it. The strip is idempotent: a message
+  // already filled by an upstream composer has no matching tokens, so this
+  // is a no-op safety net under the existing callers, not a replacement for
+  // them. WARN with the ticket id (inside the helper) when a strip fires so
+  // the upstream caller can be located.
+  const safeMessage = await resolvePlaceholderSafeMessage(
+    admin,
+    workspaceId,
+    ticketId,
+    t?.customer_id ?? null,
+    message,
+  );
+
   // Translate to the customer's detected language (matches the orchestrator's
   // sendWithDelay) so a non-English customer never gets an English body.
-  let body = message;
+  let body = safeMessage;
   const lang = (t?.detected_language as string | null) || "en";
   if (lang && lang !== "en") {
     const { translateIfNeeded } = await import("@/lib/translate");
-    body = await translateIfNeeded(message, lang, { workspaceId, ticketId });
+    body = await translateIfNeeded(safeMessage, lang, { workspaceId, ticketId });
   }
   // Render any bare return-label URL as a CTA button (same safety net as the
   // orchestrator). Runs after translation so the button markup isn't mangled.
