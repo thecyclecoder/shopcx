@@ -121,6 +121,36 @@ Decides the Appstle `basePrice` (cents) to set on the NEW line after a **single-
 
 **Derived from ticket `d19c2192`** (2026-07-10): the old inline logic in `replaceVariants` only repriced when `newStandard === oldStandard`, so a swap to a **different-priced** product (Creatine Prime → Amazing Creamer) left the new line at full MSRP ($69.95, 0% off) instead of the subscriber $52.46. `snsPct` defaults to 25 (parity with the surrounding hardcode); per-product `subscribe_discount_pct` awareness ([[appstle-pricing]] `resolveLineSnsPct`) is a follow-up.
 
+### `checkContractSatisfiesExpectation` — function (pure)
+
+```ts
+type MutationExpectation =
+  | { kind: "add"; variantId: string; quantity: number }
+  | { kind: "remove"; variantId: string }
+  | { kind: "swap"; newVariantId: string; oldVariantId: string; quantity: number }
+  | { kind: "price"; variantId: string; expectedBaseCents: number };
+
+function checkContractSatisfiesExpectation(
+  lines: Array<{ variantId?: string; quantity?: number; pricingPolicy?: { basePrice?: { amount?: string } | null } | null }>,
+  expected: MutationExpectation,
+): { ok: boolean; reason?: string }
+```
+
+Pure predicate — does the live Appstle contract's `lines.nodes` snapshot satisfy the caller's mutation expectation? Broken out of the mutation helpers so the classification can be unit-tested (`src/lib/subscription-items.verifyEndState.test.ts`) without standing up a live vendor mock; the I/O wrapper `verifyContractEndState` polls this against the real contract with a bounded settle window. Returns `{ ok: true }` when satisfied, else `{ ok: false, reason }` naming the expectation and what the contract actually holds so the caller's error string is diagnosable at a glance.
+
+- **`add`** — variant present at ≥ requested quantity (Appstle merges an add into an existing line, so quantity is a lower bound not equality).
+- **`remove`** — variant absent from the contract.
+- **`swap`** — the new variant present at ≥ requested quantity AND the old variant absent (a swap that added the new but left the old is a partial apply, not a success — the exact shape of the 2026-07-30 crisis).
+- **`price`** — the line for `variantId` carries `pricingPolicy.basePrice` matching `expectedBaseCents` (±$0.01 tolerance for float→cents rounding across the API boundary).
+
+### Phase 1 — every mutation verifies its end state before returning success
+
+`subAddItem`, `appstleRemoveLineItem` / `subRemoveItem`, `subChangeQuantity`, `subSwapVariant` (identity check — new present + old absent — separate from the pre-existing price assertion) and `subUpdateLineItemPrice` all re-read the LIVE Appstle contract after their upstream call succeeds and gate their `success: true` return on `checkContractSatisfiesExpectation`. `syncItemsAfterMutation` / `syncContractItems` fires ONLY on verified success — writing the intended state into our own `subscriptions.items` mirror on an unverified mutation is what makes the upstream lie durable.
+
+A bounded settle window (`APPSTLE_MUTATION_VERIFY_ATTEMPTS`, default 3, and `APPSTLE_MUTATION_VERIFY_DELAY_MS`, default 400ms — worst-case ≈ 800ms wait) accommodates Appstle's asynchronous apply, but a TIMEOUT ends as FAILURE, never an assumed success. Unverifiable is NOT the same as done — the caller should retry or escalate rather than record a lie.
+
+**Why:** `callReplaceVariants` decides success purely from `res.ok`. Appstle answers 200 on requests it then declines to apply — reproduced on contracts `27946909869` and `27871477933` (2026-07-30) where a swap reported success and the flavour never moved. A false success is worse than a failure: a failure retries, a false success is recorded as done and the customer ships the wrong thing. Spec: `docs/brain/specs/a-subscription-mutation-must-verify-it-happened-not-trust-http-200.md`.
+
 ### `subSwapVariant` — function
 
 ```ts
