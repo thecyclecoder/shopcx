@@ -1,0 +1,1 @@
+- **A subscription mutation must prove it happened — HTTP 200 is not success** · verified 2026-08-03 · → [[../libraries/subscription-items]] & [[../integrations/appstle]]
