@@ -1564,6 +1564,18 @@ export async function runPartialRemedyForEscalation(
   workspaceId: string,
   verdict: CsDirectorVerdictInput,
   deps: ApproveRemedyDeps = defaultApproveRemedyDeps,
+  /**
+   * Optional acknowledgement text to APPEND to the partial-remedy's customer message before
+   * delivery (spec: a-founder-escalated-customer-never-waits-in-silence Phase 1 — "when a partial
+   * remedy already sent its own customer_message, do NOT send a second one; append to that
+   * instead"). When provided:
+   *   • partial has a customerMessage → deliver `${customerMessage}\n\n${ack}` (one send).
+   *   • partial has no customerMessage → deliver JUST the ack (one send).
+   * The customer gets ONE message either way. `message_delivered:true` on the outcome tells
+   * handleEscalateFounder the ack was consumed by the partial; it does NOT send a second copy.
+   * Null / omitted keeps the pre-spec behavior — only the partial's own customerMessage is sent.
+   */
+  acknowledgementSuffix: string | null = null,
 ): Promise<PartialRemedyOutcome> {
   const tag = `[cs-director:${jobId.slice(0, 8)}]`;
   const planned = planRemedyExecution(verdict.remedy);
@@ -1748,15 +1760,22 @@ export async function runPartialRemedyForEscalation(
   }
 
   const customerMessage = planned.plan.customerMessage;
-  if (customerMessage) {
+  const ackSuffix = acknowledgementSuffix && acknowledgementSuffix.trim().length > 0 ? acknowledgementSuffix : null;
+  if (customerMessage || ackSuffix) {
     try {
-      const { substituteActionPlaceholders } = await import("@/lib/action-executor");
-      const filledMessage = substituteActionPlaceholders(customerMessage, ctx._lastActionResults ?? []);
-      await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, filledMessage, sandbox);
-      console.log(`${tag} escalate_founder partial-remedy landed · customer message delivered (residue → CEO)`);
+      let bodyToDeliver: string;
+      if (customerMessage) {
+        const { substituteActionPlaceholders } = await import("@/lib/action-executor");
+        const filledMessage = substituteActionPlaceholders(customerMessage, ctx._lastActionResults ?? []);
+        bodyToDeliver = ackSuffix ? `${filledMessage}\n\n${ackSuffix}` : filledMessage;
+      } else {
+        bodyToDeliver = ackSuffix!;
+      }
+      await deps.deliverMessage(admin, workspaceId, ticketId, ctx.channel, bodyToDeliver, sandbox);
+      console.log(`${tag} escalate_founder partial-remedy landed · customer message delivered (residue → CEO)${ackSuffix ? " · ack appended" : ""}`);
       return {
         status: "landed",
-        summary: `landed: [${rollup.landed.join(", ") || plannedActionTypes.join(", ")}]`,
+        summary: `landed: [${rollup.landed.join(", ") || plannedActionTypes.join(", ")}]${customerMessage ? "" : " (ack-only)"}`,
         landed_actions: rollup.landed.length > 0 ? rollup.landed : plannedActionTypes,
         failed_actions: [],
         message_delivered: true,
@@ -1790,13 +1809,144 @@ export async function runPartialRemedyForEscalation(
   };
 }
 
+// ── escalate_founder acknowledgement (spec: a-founder-escalated-customer-never-waits-in-silence) ─
+
+/**
+ * Internal-note marker prefix used to idempotency-guard the escalate_founder acknowledgement.
+ * Written to `ticket_messages` as an internal outbound note AFTER the ack is successfully
+ * delivered. A subsequent handleEscalateFounder invocation for the SAME `job_id` checks for this
+ * marker and skips resending — a retry of the same job must not send a second ack to the customer.
+ * Namespaced by job_id so a Phase-2 re-check enqueues a distinct director-call job that can send
+ * its own (different) acknowledgement without tripping this guard.
+ */
+const ESCALATE_FOUNDER_ACK_MARKER_PREFIX = "[cs-director/escalate_founder/ack]";
+
+/**
+ * Compose the honest, no-handoff-language acknowledgement the customer sees when their ticket
+ * has just been escalated to the founder (spec: a-founder-escalated-customer-never-waits-in-
+ * silence Phase 1 — "acknowledge, in Suzie's voice, with no handoff language").
+ *
+ * Voice invariants — enforced verbatim by Phase 3's pin test but ALSO the reason this function
+ * is pure/exported (so a future edit can be caught by the pin instead of shipping):
+ *  - NEVER says the ticket has been escalated / passed to a manager / sent to another team / a
+ *    human will follow up. The customer should feel Suzie is still on it — internal routing is
+ *    invisible to them (see [[../customer-voice]] § "internal routing is invisible").
+ *  - NO timeframe. The honest answer on the founder lane is often days; any number we quote here
+ *    will be wrong. No "shortly", "24 hours", "as soon as possible".
+ *  - Names the SPECIFIC THING being looked at (the ticket subject when we have it, else a
+ *    non-generic fallback) so the message reads as a person who read their note, not as an
+ *    autoresponder.
+ *  - Suzie's voice — first person, continuing to own it. Per [[../customer-voice]]: plain text,
+ *    at most two sentences per paragraph, signed "Suzie". No re-greet (this is always turn N>1
+ *    on a ticket already in an escalation cycle).
+ *  - Deterministic for a given `subject`, so the pin test can assert the exact output shape.
+ */
+export function composeFounderEscalationAck(opts: { subject: string | null }): string {
+  const topic = normalizeAckTopic(opts.subject);
+  return `I want to make sure I get this right for you, so I'm taking a proper look at ${topic} before I come back to you.\n\nSuzie`;
+}
+
+function normalizeAckTopic(subject: string | null | undefined): string {
+  if (!subject) return "what you've written in";
+  let s = String(subject).trim();
+  // Strip common thread-reply prefixes so the sentence reads naturally ("looking at Your order"
+  // is fine; "looking at Re: Your order" is not). Repeated Re:/Fwd: chains are collapsed.
+  for (let i = 0; i < 4; i += 1) {
+    const stripped = s.replace(/^(re|fw|fwd)\s*:\s*/i, "");
+    if (stripped === s) break;
+    s = stripped.trim();
+  }
+  if (!s) return "what you've written in";
+  // Guard against a subject long enough to blow the two-sentence budget — trim on a word boundary.
+  if (s.length > 80) {
+    const trimmed = s.slice(0, 80).replace(/\s+\S*$/, "").trim();
+    s = trimmed.length > 0 ? `${trimmed}…` : s.slice(0, 80);
+  }
+  return s;
+}
+
+/**
+ * Idempotency guard for the escalate_founder acknowledgement (spec: a-founder-escalated-customer-
+ * never-waits-in-silence Phase 1 — "re-running the handler must not send a second acknowledgement").
+ * Checks for an internal note with the ack marker referencing THIS job_id. A retry of the same
+ * job sees the marker and short-circuits; a Phase-2 re-check runs as a distinct job_id and can
+ * send its own (different) acknowledgement.
+ */
+async function ackAlreadyDeliveredForJob(admin: Admin, ticketId: string, jobId: string): Promise<boolean> {
+  try {
+    const marker = `${ESCALATE_FOUNDER_ACK_MARKER_PREFIX} job=${jobId}`;
+    const { data } = await admin
+      .from("ticket_messages")
+      .select("id")
+      .eq("ticket_id", ticketId)
+      .eq("visibility", "internal")
+      .like("body", `${marker}%`)
+      .limit(1);
+    return Array.isArray(data) && data.length > 0;
+  } catch {
+    // Fail-open on a DB blip — losing an ack retry is worse than a rare double-send. The marker
+    // insert below is best-effort too; both surfaces log on failure.
+    return false;
+  }
+}
+
+async function recordAckDeliveredMarker(
+  admin: Admin,
+  ticketId: string,
+  jobId: string,
+  channel: string,
+  via: "partial_appended" | "standalone_send",
+): Promise<void> {
+  try {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `${ESCALATE_FOUNDER_ACK_MARKER_PREFIX} job=${jobId} via=${via} channel=${channel}`,
+    });
+  } catch {
+    /* best-effort — an insert blip is not worth failing the whole escalation over */
+  }
+}
+
+/**
+ * Fetch the shape handleEscalateFounder needs to (a) compose the ack (subject) and (b) deliver
+ * it (customer_id + channel + sandbox). Returns null on any resolution miss so the caller can
+ * skip ack sending cleanly instead of throwing — matches the tolerance the existing linkage
+ * resolution already uses (a synthetic dispatch without a ticket_id logs a warning + returns).
+ */
+async function loadAckFacts(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<{ subject: string | null; customerId: string; channel: string; sandbox: boolean } | null> {
+  const { data: t } = await admin
+    .from("tickets")
+    .select("subject, customer_id, channel")
+    .eq("id", ticketId)
+    .maybeSingle();
+  if (!t) return null;
+  const row = t as { subject: string | null; customer_id: string | null; channel: string | null };
+  if (!row.customer_id) return null;
+  const channel = row.channel || "email";
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("sandbox_mode")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  const sandbox = (ws as { sandbox_mode?: boolean } | null)?.sandbox_mode === true;
+  return { subject: row.subject ?? null, customerId: row.customer_id, channel, sandbox };
+}
+
 /**
  * Phase 3 executor for `escalate_founder` (docs/brain/specs/cs-director-call-phase-2-executor-fires-
  * june-verdicts.md § Phase 3 · extended by june-does-the-in-leash-part-before-escalating-the-residue
- * Phase 1). FORMALIZES THE LINKAGE-BACK CONTRACT — the runner is the SOLE WRITER of the CEO
- * `dashboard_notifications` card per [[../../docs/brain/specs/escalate-founder-reliably-creates-the-
- * ceo-inbox-card-with-diagnosis-and-recommendation]] (minted after this executor returns), and this
- * handler NEVER mints a second card (a duplicate would page the CEO twice).
+ * Phase 1 · a-founder-escalated-customer-never-waits-in-silence Phase 1). FORMALIZES THE LINKAGE-BACK
+ * CONTRACT — the runner is the SOLE WRITER of the CEO `dashboard_notifications` card per
+ * [[../../docs/brain/specs/escalate-founder-reliably-creates-the-ceo-inbox-card-with-diagnosis-and-
+ * recommendation]] (minted after this executor returns), and this handler NEVER mints a second card
+ * (a duplicate would page the CEO twice).
  *
  * What the executor DOES on Phase 3:
  *  - Resolves the ticket_id + triage_run_id from `job.instructions` — the same values the runner
@@ -1825,18 +1975,71 @@ async function handleEscalateFounder(
 ): Promise<ApplyBoxCsDirectorCallResult> {
   const tag = `[cs-director:${jobId.slice(0, 8)}]`;
   try {
+    // ── Phase 1 (a-founder-escalated-customer-never-waits-in-silence): compose the customer
+    // acknowledgement BEFORE running the partial so it can be appended to the partial's own
+    // customer_message on the delivery path (spec: "the customer gets one message and not two").
+    // A resolve miss on the ticket / customer / channel drops the ack silently — the escalation
+    // itself still succeeds; a synthetic dispatch without a ticket_id is the same shape drift
+    // the linkage resolver already tolerates below.
+    const linkageEarly = await resolveLinkageFromJob(admin, jobId);
+    let ackText: string | null = null;
+    let ackFacts: Awaited<ReturnType<typeof loadAckFacts>> = null;
+    let ackAlreadySent = false;
+    if (linkageEarly.ticketId) {
+      ackAlreadySent = await ackAlreadyDeliveredForJob(admin, linkageEarly.ticketId, jobId);
+      if (!ackAlreadySent) {
+        ackFacts = await loadAckFacts(admin, workspaceId, linkageEarly.ticketId);
+        if (ackFacts) {
+          ackText = composeFounderEscalationAck({ subject: ackFacts.subject });
+        } else {
+          console.warn(`${tag} escalate_founder: cannot resolve ack facts for ticket ${linkageEarly.ticketId.slice(0, 8)} — skipping acknowledgement`);
+        }
+      } else {
+        console.log(`${tag} escalate_founder: ack marker present for ticket ${linkageEarly.ticketId.slice(0, 8)} · skipping duplicate send`);
+      }
+    }
+
     // Fire the in-leash partial remedy FIRST when the verdict carried one — the residue described
     // on the CEO card must reflect what June already did, not the whole ticket. Same rails as
     // approve_remedy (loyalty ceiling, money-threshold gate, execute-then-deliver); a refusal on
     // either rail surfaces as `loyalty_refused` / `threshold_gated` on the outcome so the CEO card
-    // still names both June's proposal and why nothing fired.
+    // still names both June's proposal and why nothing fired. Threads `ackText` into the partial
+    // so a landed partial with a customer_message delivers ONE combined send (partial body + ack).
     let partialOutcome: PartialRemedyOutcome | null = null;
     if (verdict.remedy && typeof verdict.remedy === "object" && !Array.isArray(verdict.remedy)) {
-      partialOutcome = await runPartialRemedyForEscalation(admin, jobId, workspaceId, verdict, deps);
+      partialOutcome = await runPartialRemedyForEscalation(admin, jobId, workspaceId, verdict, deps, ackText);
       console.log(`${tag} escalate_founder partial-remedy status=${partialOutcome.status}`);
     }
 
-    const linkage = await resolveLinkageFromJob(admin, jobId);
+    // Standalone ack send: no partial ran (verdict carried no remedy) OR the partial did not
+    // deliver a customer message (refused / gated / failed / delivery threw). Either way, the
+    // customer must hear from Suzie — the spec's whole point.
+    let ackDeliveredVia: "partial_appended" | "standalone_send" | null = null;
+    if (ackText && ackFacts && !ackAlreadySent) {
+      if (partialOutcome?.message_delivered) {
+        ackDeliveredVia = "partial_appended";
+      } else {
+        try {
+          await deps.deliverMessage(
+            admin,
+            workspaceId,
+            linkageEarly.ticketId!,
+            ackFacts.channel,
+            ackText,
+            ackFacts.sandbox,
+          );
+          ackDeliveredVia = "standalone_send";
+          console.log(`${tag} escalate_founder: ack delivered standalone (no partial customer message)`);
+        } catch (e) {
+          console.warn(`${tag} escalate_founder: ack delivery threw (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      }
+      if (ackDeliveredVia && linkageEarly.ticketId) {
+        await recordAckDeliveredMarker(admin, linkageEarly.ticketId, jobId, ackFacts.channel, ackDeliveredVia);
+      }
+    }
+
+    const linkage = linkageEarly;
     if (!linkage.ticketId) {
       console.warn(`${tag} escalate_founder: no ticket_id in job.instructions — linkage payload will be null`);
     } else {

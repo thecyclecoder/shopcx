@@ -38,6 +38,7 @@ import {
   buildAuthorSpecInput,
   buildRemedySonnetDecision,
   canOfferOneTapApproval,
+  composeFounderEscalationAck,
   extractRemedyCustomerMessage,
   extractRemedyOrderRefFromStep,
   planAuthorSpec,
@@ -1652,4 +1653,129 @@ test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled i
   assert.equal(ref!.orderNumber, "SC135494");
   assert.equal(ref!.shopifyOrderId, null);
   assert.equal(ref!.key, "SC135494");
+});
+
+// ── Phase 1 (a-founder-escalated-customer-never-waits-in-silence) — customer acknowledgement ─────
+//
+// The escalate_founder path must ALWAYS deliver one honest acknowledgement to the customer, written
+// as Suzie continuing to help — no handoff language, no timeframe, naming the specific concern. The
+// three worst founder-lane waits on record (232h, 75h, 46h) were all silence — the routing was
+// right; only the customer's experience was wrong.
+
+test("composeFounderEscalationAck — subject-scoped ack in Suzie's voice with no handoff language", () => {
+  const body = composeFounderEscalationAck({ subject: "My subscription renewed twice this month" });
+  // Names the specific thing (the customer's own subject) — the "person who read your note" test.
+  assert.match(body, /My subscription renewed twice this month/);
+  // First-person Suzie voice, signed off.
+  assert.match(body, /I want to make sure I get this right for you/);
+  assert.ok(body.trim().endsWith("Suzie"), `expected Suzie sign-off, got: ${body}`);
+  // NO handoff language — the customer must not learn an escalation happened. These are the
+  // Phase-3 pin words too; asserting here means a regression on the composer's phrasing fails
+  // Phase 1's own suite as well.
+  for (const banned of [
+    /escalat/i,
+    /\bhuman\b/i,
+    /\bmanager\b/i,
+    /\bsupervisor\b/i,
+    /another team/i,
+    /higher tier/i,
+    /passed to/i,
+    /forwarded to/i,
+    /transferr?ed/i,
+    /team member/i,
+  ]) {
+    assert.doesNotMatch(body, banned, `ack contains banned handoff phrase: ${String(banned)}`);
+  }
+  // NO timeframe — the honest answer on this lane is often days; any number quoted here is wrong.
+  for (const banned of [/shortly/i, /24 hours/i, /as soon as possible/i, /within \d/i, /tomorrow/i, /\btoday\b/i]) {
+    assert.doesNotMatch(body, banned, `ack contains timeframe: ${String(banned)}`);
+  }
+});
+
+test("composeFounderEscalationAck — strips Re:/Fwd: subject prefixes so the sentence reads naturally", () => {
+  const body = composeFounderEscalationAck({ subject: "Re: Fwd: Order SC131607 refund" });
+  assert.doesNotMatch(body, /Re:/i);
+  assert.doesNotMatch(body, /Fwd:/i);
+  assert.match(body, /Order SC131607 refund/);
+});
+
+test("composeFounderEscalationAck — a null / blank subject falls back to a non-generic phrasing", () => {
+  const bodyNull = composeFounderEscalationAck({ subject: null });
+  const bodyBlank = composeFounderEscalationAck({ subject: "   " });
+  for (const body of [bodyNull, bodyBlank]) {
+    assert.match(body, /what you've written in/);
+    assert.ok(body.trim().endsWith("Suzie"));
+  }
+});
+
+test("Phase 1 — escalate_founder delivers the acknowledgement via deliverMessage when no partial remedy runs", async () => {
+  // A verdict with only `recommended_remedy` (a human suggestion for the CEO) and NO in-leash
+  // `remedy` — the exact shape of every historical founder escalation on record. Before this spec,
+  // handleEscalateFounder returned without messaging on this path — the customer heard nothing at
+  // all. After: the ack goes out via deps.deliverMessage.
+  const admin = stubAdminMulti({
+    agent_jobs: {
+      data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1", triage_run_id: "run-1" }) },
+    },
+    tickets: { data: { subject: "Refund my second bag", customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: true } },
+  });
+  const deliveries: Array<{ ticketId: string; channel: string; body: string; sandbox: boolean }> = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => {
+        throw new Error("runExecutor must not fire when the verdict carries no remedy");
+      },
+      deliverMessage: async (_admin, _ws, ticketId, channel, body, sandbox) => {
+        deliveries.push({ ticketId, channel, body, sandbox });
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Grandfathered price lock on a $26.89 overcharge needs the CEO's ruling.",
+    recommended_remedy: { kind: "refund_and_price_lock", summary: "Refund + restore the $33.01 grandfathered price before next renewal" },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.handler, "escalate_founder");
+  // ONE delivery — not zero, not two.
+  assert.equal(deliveries.length, 1, `expected exactly one delivery, got ${deliveries.length}`);
+  assert.equal(deliveries[0].ticketId, "ticket-1");
+  assert.equal(deliveries[0].channel, "email");
+  // The delivered body is the ack, subject-scoped, signed Suzie, no handoff language.
+  assert.match(deliveries[0].body, /Refund my second bag/);
+  assert.match(deliveries[0].body, /Suzie$/);
+  assert.doesNotMatch(deliveries[0].body, /escalat/i);
+});
+
+test("Phase 1 — escalate_founder skips the ack cleanly when the ticket_id cannot be resolved", async () => {
+  // The linkage-null path already returns ok:true with a null linkage; the ack must not fire when
+  // we have no ticket to deliver on, and the escalation itself must still succeed (the runner's
+  // audit row is the primary trail).
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: "{ not valid json" } },
+  });
+  let deliveryCalled = false;
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => null,
+      loadWorkspaceSandbox: async () => false,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async () => {
+        deliveryCalled = true;
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Judgment call.",
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.handler, "escalate_founder");
+  assert.equal(result.linkage_ticket_id, null);
+  assert.equal(deliveryCalled, false, "no delivery when ticket_id is unresolvable");
 });
