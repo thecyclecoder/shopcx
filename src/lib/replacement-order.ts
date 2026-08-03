@@ -104,6 +104,30 @@ export interface CreateReplacementResult {
   error?: string;
 }
 
+/** Shopify's per-tag ceiling is 40 characters; a 62-char reason failed a
+ * real replacement on 2026-08-02 with 'Title Tag exceeds the maximum length
+ * of 40 characters', which reads as nothing to do with tags. Tags now carry
+ * a normalised reason CODE (slugged + truncated) so a long free-form reason
+ * never rejects the whole order; the human explanation lives in the note. */
+export const REPLACEMENT_REASON_TAG_MAX_LEN = 40;
+
+/**
+ * Normalise a caller's free-form `reason` into a short stable Shopify tag
+ * token — lower-case, alphanumerics only, hyphens for separators, truncated
+ * to {@link REPLACEMENT_REASON_TAG_MAX_LEN}. A blank input falls back to
+ * `unspecified` so we never emit an empty tag. Idempotent for callers that
+ * already pass a code (`not_received` → `not_received`; `damaged_items` →
+ * `damaged_items`).
+ */
+export function normalizeReplacementReasonTag(raw: string | null | undefined): string {
+  const slug = String(raw ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const trimmed = slug.slice(0, REPLACEMENT_REASON_TAG_MAX_LEN);
+  return trimmed || "unspecified";
+}
+
 /** Shape of the Shopify DraftOrderInput we hand to draftOrderCreate for a
  * replacement. Kept minimal — just the fields we actually populate. Exposed
  * so [[buildReplacementDraftOrderInput]] is testable without an HTTP mock. */
@@ -160,7 +184,7 @@ export function buildReplacementDraftOrderInput(
       countryCode: resolvedCountryCode,
     },
     note: noteText,
-    tags: ["replacement", input.reason],
+    tags: ["replacement", normalizeReplacementReasonTag(input.reason)],
     appliedDiscount: { value: 100.0, valueType: "PERCENTAGE", title: "Replacement" },
   };
 }
