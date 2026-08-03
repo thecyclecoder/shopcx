@@ -16,12 +16,19 @@
  * is never emptied.
  */
 
-export type AccountHoldReason = "usage_cap" | "auth_expired" | "refresh_failed";
+// build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 1 —
+// `reauth_required` is the un-recoverable auth hold: expiresAt in the past AND no refreshToken
+// in `.credentials.json`, so no retry ever renews the token. Distinct in kind from `auth_expired`
+// (kept as the reactive-401 signal) and `refresh_failed` (a refresh WAS attempted and did not
+// renew) — both of which the current pool machinery may still surface. A `null` holdReason is
+// "unknown" — the snapshot MUST NOT collapse unknown to `usage_cap` (which is exactly what
+// misreported two dead accounts as capacity-capped during 2026-08-03).
+export type AccountHoldReason = "usage_cap" | "auth_expired" | "refresh_failed" | "reauth_required";
 
 export type SweepAction =
   | { kind: "skip"; reason: "no_signal_or_valid" | "refresh_in_flight" | "throttled_after_success" }
   | { kind: "refresh" }
-  | { kind: "eject"; holdReason: "auth_expired" | "refresh_failed" };
+  | { kind: "eject"; holdReason: "auth_expired" | "refresh_failed" | "reauth_required" };
 
 export function decideSweepAction(input: {
   expiresAt: number;
@@ -36,7 +43,12 @@ export function decideSweepAction(input: {
     return { kind: "skip", reason: "no_signal_or_valid" };
   }
   if (!input.hasRefreshToken) {
-    return { kind: "eject", holdReason: "auth_expired" };
+    // Phase 1 — the un-recoverable case: an access token expired AND there is no refresh_token
+    // to renew it, so no wait or retry ever succeeds. Only an interactive `/login` fixes it.
+    // Distinct label from `auth_expired` (a reactive 401 whose credentials file we haven't read
+    // yet) so the box card + summary + parked job's log_tail can direct the operator at the
+    // right remedy — a human login, not a usage-wall wait.
+    return { kind: "eject", holdReason: "reauth_required" };
   }
   if (input.authRefreshInFlight) {
     return { kind: "skip", reason: "refresh_in_flight" };

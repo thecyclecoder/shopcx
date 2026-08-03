@@ -61,12 +61,14 @@ test("Case 1 (recovery) — expired access token + live refresh_token MUST decid
   assert.equal(outcome.lastAuthRefreshFailed, false);
 });
 
-test("Case 2 (genuinely-dead) — expired access token + NO refresh_token → eject with holdReason='auth_expired' (needs a CEO re-login; no auto-recovery possible)", () => {
+test("Case 2 (genuinely-dead) — expired access token + NO refresh_token → eject with holdReason='reauth_required' (a full human /login is required; no wait or retry can renew it — build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 1)", () => {
   const action = decideSweepAction(baseSweep({ hasRefreshToken: false }));
   assert.equal(action.kind, "eject");
   // Narrow via `if` (not the discriminated field on the outer literal) so tsc keeps the eject variant.
   if (action.kind !== "eject") throw new Error("unreachable");
-  assert.equal(action.holdReason, "auth_expired");
+  // Phase 1 named the un-recoverable case `reauth_required`. It MUST NOT collapse into `usage_cap`
+  // (the pre-fix snapshot default that misreported two 49h/66h-dead accounts as capacity-capped).
+  assert.equal(action.holdReason, "reauth_required");
 });
 
 test("Case 3a (refresh-failed, sweep tick) — throttled + last attempt FAILED → eject with holdReason='refresh_failed' — distinct from 'usage_cap', so the CEO card + parked-job tail don't collapse an auth failure into a usage-wall label", () => {
