@@ -1370,6 +1370,25 @@ export async function evaluateStalledSpecs(
       }
     }
 
+    // (d4) STANDING INIT-DISMISSAL (sixth source only) → legit held state, drop. When the Platform
+    // Director's init lane fires `dismiss_candidate` the spec is PARKED pending a CEO fix-or-cut
+    // call — it stays un-enqueued deliberately, on purpose, exactly as the sixth source's "auto_build,
+    // no build job, aged past grace" shape. The sixth source reads that legitimate hold as a stall
+    // and would (worst case) force-build a spec the director explicitly judged unsafe via
+    // `reclaim_and_redrive`; each firing burns a Max session. `clearDirectorSpecDismissals` deletes
+    // the `init_dismissed` row the moment the CEO clears the parking (re-author path), so a mere
+    // row-existence check is the correct "still standing" test. Scoped strictly to `spec_authored`
+    // so the other eight sources are untouched. Fail-open on any ledger read error so a transient
+    // DB fault never silently hides a real stall.
+    if (c.from_event === "spec_authored") {
+      try {
+        const hasDismissal = await hasStandingInitDismissal(admin, c.workspace_id, c.spec_slug);
+        if (shouldDropForStandingInitDismissal({ fromEvent: c.from_event, hasStandingDismissal: hasDismissal })) continue;
+      } catch {
+        // Fail-open — a transient ledger read failure must never mask a real stall.
+      }
+    }
+
     // (e) fill the brief now that the candidate survived every filter.
     const lastEvents = await readLastEvents(admin, c.workspace_id, c.spec_slug);
     // (e2) For the fifth (missing-blocker) source, stamp Vale's latest needsFixReason so the M4
@@ -2031,6 +2050,57 @@ export function shouldDropSeriallyHeldGoalMember(input: {
 }): boolean {
   if (input.fromEvent !== "spec_authored") return false;
   return input.dispatch.ok === false;
+}
+
+/**
+ * Pure decision predicate — should this candidate be dropped as an init-dismissed spec the CEO has
+ * not yet cleared? The Platform Director's `dismiss_candidate` (init lane) writes an `init_dismissed`
+ * `director_activity` row and PARKS the spec pending a CEO fix-or-cut call: the spec deliberately
+ * stays un-enqueued while the CEO decides. The sixth (eligible-never-enqueued) source reads that
+ * legitimately-held state as a stall and would burn a Max session — worse, its `reclaim_and_redrive`
+ * verdict threatens to force-build a spec the director explicitly judged unsafe.
+ *
+ * SCOPED to the sixth source's `from_event` (`spec_authored`) so the other eight sources (failed-build,
+ * stuck-queued, pr-resolve-storm, orphaned-folded-pr, …) are UNTOUCHED — those classes carry a real
+ * job/PR to act on and the init-dismissal held state does not apply to them.
+ *
+ * A re-authored spec has its `init_dismissed` rows deleted by [[clearDirectorSpecDismissals]], so a
+ * true "standing" dismissal is precisely "an `init_dismissed` row for (workspace, slug) still exists".
+ *
+ * Kept pure so the drop decision is unit-testable without a stubbed Supabase client (mirrors
+ * [[shouldSurfaceEligibleNeverEnqueued]] and [[shouldDropSeriallyHeldGoalMember]]).
+ */
+export function shouldDropForStandingInitDismissal(input: {
+  fromEvent: string;
+  hasStandingDismissal: boolean;
+}): boolean {
+  if (input.fromEvent !== "spec_authored") return false;
+  return input.hasStandingDismissal;
+}
+
+/**
+ * I/O wrapper for [[shouldDropForStandingInitDismissal]] — does the Platform Director's `init_dismissed`
+ * ledger still carry a STANDING dismissal for (workspace, slug)? Scoped narrowly to `director_function=
+ * 'platform'` + `action_kind='init_dismissed'` (the exact rows [[clearDirectorSpecDismissals]] deletes
+ * when a re-authored spec re-enters the pipeline), so a re-initiated spec disappears from this reader
+ * the moment the CEO clears the dismissal. Throws on any Supabase error so the caller's fail-open
+ * `try/catch` fires — a transient DB fault must NEVER mask a real stall.
+ */
+async function hasStandingInitDismissal(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("director_activity")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("director_function", "platform")
+    .eq("action_kind", "init_dismissed")
+    .limit(1);
+  if (error) throw new Error(error.message);
+  return (data ?? []).length > 0;
 }
 
 /**
