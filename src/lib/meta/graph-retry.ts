@@ -171,6 +171,54 @@ export function classifyReconnectRequired(status: number, error: any): boolean {
 }
 
 /**
+ * True iff `err` carries `metaClass='app_owner_action_required'` (see
+ * [[classifyAppOwnerActionRequired]]). The Meta App Dashboard gate — the
+ * workspace owner must clear it manually; retrying never fixes it. Callers
+ * use this to downgrade a cron ERROR to a warn+skip.
+ *
+ * Canonical location — the sibling
+ * `src/lib/inngest/meta-performance-app-owner-action.ts` re-exports this
+ * (backward-compat with its Phase-1 spec test import path); no new caller
+ * should import from there.
+ */
+export function isAppOwnerActionRequiredError(err: unknown): boolean {
+  return (err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required";
+}
+
+/**
+ * True iff `err` carries `metaClass='reconnect_required'` (see
+ * [[classifyReconnectRequired]]). The stored per-workspace user token has
+ * been invalidated by Meta; only OAuth re-consent restores access, so
+ * retrying never fixes it. Callers use this to downgrade a cron ERROR to a
+ * warn+skip.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3 (containment at the 5 human-blocked call sites).
+ */
+export function isReconnectRequiredError(err: unknown): boolean {
+  return (err as { metaClass?: string } | null)?.metaClass === "reconnect_required";
+}
+
+/**
+ * True iff `err` is ANY human-blocked Meta class — currently
+ * `app_owner_action_required` or `reconnect_required`. This is the shared
+ * predicate the 5 human-blocked call sites funnel through so a NEW class
+ * added tomorrow only requires editing THIS predicate, not five copy-pasted
+ * string comparisons across the Inngest layer.
+ *
+ * Callers can still branch on the specific class after this filter — e.g.
+ * to pick the right escalation SDK — but the containment decision (never
+ * retry, never fatal-log, warn+skip) is uniform across the human-blocked
+ * classes and belongs here.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3.
+ */
+export function isHumanBlockedGraphError(err: unknown): boolean {
+  return isAppOwnerActionRequiredError(err) || isReconnectRequiredError(err);
+}
+
+/**
  * Transient = worth retrying. Meta surfaces these as code 1 ("unknown, retry
  * later") / code 2 ("Service temporarily unavailable" — note: arrives on an HTTP
  * 400, so we MUST classify on the Graph code, not the HTTP status), an explicit
