@@ -6,7 +6,12 @@ import { decrypt } from "@/lib/crypto";
 import { syncMetaAdSpend } from "@/lib/meta/sync-spend";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { escalateAppOwnerActionRequired } from "@/lib/meta/app-owner-action-escalation";
-import type { GraphError } from "@/lib/meta/graph-retry";
+import { escalateReconnectRequired } from "@/lib/meta/reconnect-required-escalation";
+import {
+  isAppOwnerActionRequiredError,
+  isReconnectRequiredError,
+  type GraphError,
+} from "@/lib/meta/graph-retry";
 
 /**
  * Stable human-blocked fingerprint returned by `metaSyncSpend` when Meta's
@@ -20,66 +25,117 @@ export const META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED =
   "meta_sync_spend_app_owner_action_required" as const;
 
 /**
+ * Stable human-blocked fingerprint returned by `metaSyncSpend` when the
+ * stored per-workspace user token has been invalidated by Meta (graph-retry
+ * tags `metaClass = 'reconnect_required'`). Same containment shape as its
+ * sibling above — retrying never fixes it (only OAuth re-consent does), so
+ * we return the stable result instead of throwing.
+ *
+ * Introduced by [[../../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3.
+ */
+export const META_SYNC_SPEND_RECONNECT_REQUIRED =
+  "meta_sync_spend_reconnect_required" as const;
+
+type MetaSyncSpendBlockedFingerprint =
+  | {
+      status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
+      workspaceId: string;
+      adAccountId: string;
+      metaAccountId: string;
+    }
+  | {
+      status: typeof META_SYNC_SPEND_RECONNECT_REQUIRED;
+      workspaceId: string;
+      adAccountId: string;
+      metaAccountId: string;
+    };
+
+/**
  * Narrow error-branch classifier for `metaSyncSpend`. Returns the stable
- * human-blocked result when the thrown error is a graph-retry-tagged
- * app-owner-action-required (canonical: Data Use Checkup 400); returns null
- * for anything else so the caller rethrows.
+ * human-blocked fingerprint when the thrown error is a graph-retry-tagged
+ * human-blocked class — the sibling
+ * `app_owner_action_required` (Data Use Checkup 400) OR
+ * `reconnect_required` (stored user token invalidated) — and returns null
+ * for anything else so the caller rethrows. The class-to-fingerprint mapping
+ * lets the caller pick the right escalation SDK (App Dashboard card vs
+ * reconnect card) without a second string comparison.
  */
 export function classifyMetaSyncSpendError(
   err: unknown,
   scope: { workspaceId: string; adAccountId: string; metaAccountId: string },
-): {
-  status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
-  workspaceId: string;
-  adAccountId: string;
-  metaAccountId: string;
-} | null {
-  const metaClass = (err as { metaClass?: string } | null)?.metaClass;
-  if (metaClass !== "app_owner_action_required") return null;
-  return {
-    status: META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
-    workspaceId: scope.workspaceId,
-    adAccountId: scope.adAccountId,
-    metaAccountId: scope.metaAccountId,
-  };
+): MetaSyncSpendBlockedFingerprint | null {
+  if (isAppOwnerActionRequiredError(err)) {
+    return {
+      status: META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED,
+      workspaceId: scope.workspaceId,
+      adAccountId: scope.adAccountId,
+      metaAccountId: scope.metaAccountId,
+    };
+  }
+  if (isReconnectRequiredError(err)) {
+    return {
+      status: META_SYNC_SPEND_RECONNECT_REQUIRED,
+      workspaceId: scope.workspaceId,
+      adAccountId: scope.adAccountId,
+      metaAccountId: scope.metaAccountId,
+    };
+  }
+  return null;
 }
 
-type EscalateFn = typeof escalateAppOwnerActionRequired;
+type EscalateAppOwnerFn = typeof escalateAppOwnerActionRequired;
+type EscalateReconnectFn = typeof escalateReconnectRequired;
 type Admin = ReturnType<typeof createAdminClient>;
 
 /**
- * Handle a metaSyncSpend throw: if it's the app-owner-action-required class,
- * explicitly book the deduped CEO card against THIS invocation's
- * `workspaceId` (never a module-global scope, so two overlapping
- * `meta/sync-spend` runs from different workspaces cannot cross-contaminate
- * each other's service-role notification writes) and return the stable
- * human-blocked result. Any other error is rethrown so the Inngest failure
- * feed still surfaces it.
+ * Handle a metaSyncSpend throw: if it's a human-blocked class, explicitly
+ * book the deduped CEO card against THIS invocation's `workspaceId` via the
+ * class-appropriate escalation SDK (App Dashboard card for
+ * `app_owner_action_required`; reconnect card for `reconnect_required`).
+ * `workspaceId` flows through the local `scope` — never a module-global
+ * scope, so two overlapping `meta/sync-spend` runs from different workspaces
+ * cannot cross-contaminate each other's service-role notification writes.
+ * Any other error is rethrown so the Inngest failure feed still surfaces it.
  *
  * Exported so the workspace-isolation invariant is unit-testable without
  * spinning up the Inngest handler + step wrapper.
+ *
+ * The two escalate hooks default to the production SDKs; tests inject fakes
+ * to assert per-workspace propagation without touching the DB. The
+ * `escalate` param positional slot is preserved (backward-compat with the
+ * Phase-1 app-owner spec test that only knew about the app-owner escalate).
  */
 export async function handleMetaSyncSpendError(
   admin: Admin,
   err: unknown,
   scope: { workspaceId: string; adAccountId: string; metaAccountId: string },
-  escalate: EscalateFn = escalateAppOwnerActionRequired,
-): Promise<{
-  status: typeof META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED;
-  workspaceId: string;
-  adAccountId: string;
-  metaAccountId: string;
-}> {
+  escalate: EscalateAppOwnerFn = escalateAppOwnerActionRequired,
+  escalateReconnect: EscalateReconnectFn = escalateReconnectRequired,
+): Promise<MetaSyncSpendBlockedFingerprint> {
   const blocked = classifyMetaSyncSpendError(err, scope);
   if (!blocked) throw err;
   const graphErr = err as GraphError;
-  await escalate(admin, {
-    workspaceId: scope.workspaceId,
-    label: `meta/sync-spend act_${scope.metaAccountId}`,
-    status: graphErr.httpStatus ?? 400,
-    error: graphErr,
-    affectedAdAccountIds: [scope.metaAccountId],
-  });
+  const label = `meta/sync-spend act_${scope.metaAccountId}`;
+  const status = graphErr.httpStatus ?? 400;
+  const affectedAdAccountIds = [scope.metaAccountId];
+  if (blocked.status === META_SYNC_SPEND_APP_OWNER_ACTION_REQUIRED) {
+    await escalate(admin, {
+      workspaceId: scope.workspaceId,
+      label,
+      status,
+      error: graphErr,
+      affectedAdAccountIds,
+    });
+  } else {
+    await escalateReconnect(admin, {
+      workspaceId: scope.workspaceId,
+      label,
+      status,
+      error: graphErr,
+      affectedAdAccountIds,
+    });
+  }
   return blocked;
 }
 

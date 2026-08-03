@@ -30,7 +30,9 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import {
   isAppOwnerActionRequiredError,
   escalateAppOwnerActionForIterationRun,
+  escalateReconnectRequiredForIterationRun,
 } from "./meta-performance-app-owner-action";
+import { isReconnectRequiredError } from "@/lib/meta/graph-retry";
 
 // ── meta/sync-performance — ingest one account ──
 export const metaSyncPerformance = inngest.createFunction(
@@ -498,6 +500,25 @@ export const metaIterationRun = inngest.createFunction(
           error: `human_blocked: app_owner_action_required — ${message}`,
         });
         return { status: "human_blocked" as const, runId, reason: "app_owner_action_required" };
+      }
+      // reconnect_required (2026-08-02 Meta incident): the stored per-workspace
+      // user token has been invalidated by Meta — nothing left to fix in the App
+      // Dashboard, only OAuth re-consent restores access. Same containment shape
+      // as app-owner above — book the deduped CEO card scoped to THIS
+      // invocation's `event.data.workspace_id` (no module-global, no ALS), record
+      // the human-blocked outcome on the run row, and return. Genuine outages
+      // still fall through to the loud rethrow branch below.
+      if (isReconnectRequiredError(err)) {
+        await escalateReconnectRequiredForIterationRun(createAdminClient(), err, {
+          workspaceId: workspace_id,
+          adAccountId: ad_account_id,
+        });
+        await finishRun(runId, {
+          status: "failed",
+          stages,
+          error: `human_blocked: reconnect_required — ${message}`,
+        });
+        return { status: "human_blocked" as const, runId, reason: "reconnect_required" };
       }
       // Record the failure on the run row + alert the owners, then rethrow so
       // Inngest marks the run failed (and retries per the function config).

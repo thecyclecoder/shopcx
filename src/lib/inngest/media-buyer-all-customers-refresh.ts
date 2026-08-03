@@ -30,6 +30,11 @@ import {
   installDefaultAppOwnerActionEscalationHandler,
   runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
+import {
+  installDefaultReconnectRequiredEscalationHandler,
+  runWithReconnectRequiredWorkspaceScope,
+} from "@/lib/meta/reconnect-required-escalation";
+import { isHumanBlockedGraphError, isReconnectRequiredError } from "@/lib/meta/graph-retry";
 
 const CUSTOMER_CHUNK = 10_000;
 const DEFAULT_WATERMARK_LOOKBACK_DAYS = 2;
@@ -61,12 +66,15 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
   },
   async ({ step }) => {
     const admin = createAdminClient();
-    // Install the app-owner-action-required escalation handler once per run so any
-    // Graph 400 classified as `app_owner_action_required` (canonical: yearly Data
-    // Use Checkup) books exactly one deduped CEO card per workspace per UTC day.
-    // Per-group workspace scope is set inside the refresh step via
-    // runWithAppOwnerActionWorkspaceScope so overlapping workspaces don't race.
+    // Install BOTH human-blocked escalation handlers once per run so any Graph
+    // 400 classified as `app_owner_action_required` (canonical: yearly Data
+    // Use Checkup) OR `reconnect_required` (invalidated stored user token)
+    // books exactly one class-appropriate deduped CEO card per workspace per
+    // UTC day. Per-group workspace scope is set inside the refresh step via
+    // the two runWith*WorkspaceScope wrappers so overlapping workspaces don't
+    // race across either class.
     installDefaultAppOwnerActionEscalationHandler(admin);
+    installDefaultReconnectRequiredEscalationHandler(admin);
     const nowIso = new Date().toISOString();
 
     // Enumerate every active per-test cohort that has been stamped with the all-customers
@@ -123,7 +131,8 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
         // addUsersToCustomAudience books the deduped CEO card against the RIGHT
         // workspace even when overlapping groups for different workspaces
         // interleave awaits.
-        return runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () => {
+        return runWithAppOwnerActionWorkspaceScope(g.workspaceId, async () =>
+          runWithReconnectRequiredWorkspaceScope(g.workspaceId, async () => {
           // Watermark: last successful heartbeat for THIS cron on THIS workspace.
           // We store the last-refresh watermark on the workspace's most recent
           // media_buyer_all_customers_refresh_runs row so we only ever upload the new-customer delta.
@@ -184,15 +193,20 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
               cursor = list[list.length - 1].id;
             }
           } catch (err) {
-            // A Meta App Dashboard gate (canonical: yearly Data Use Checkup 400)
-            // classified by graphFetchJson as `app_owner_action_required` is human-only
-            // to clear. The escalation handler already booked the deduped CEO card for
-            // THIS workspace via the ALS scope above; skip this group so other
-            // workspaces continue processing, and do NOT advance the watermark (this
-            // run uploaded nothing, so the next run must restart from the same one).
-            if ((err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required") {
+            // Either human-blocked Meta class is human-only to clear (App
+            // Dashboard for app_owner_action_required, OAuth re-consent for
+            // reconnect_required). The class-appropriate escalation handler
+            // already booked the deduped CEO card for THIS workspace via the
+            // matching ALS scope above; skip this group so other workspaces
+            // continue processing, and do NOT advance the watermark (this run
+            // uploaded nothing, so the next run must restart from the same
+            // one). Uses the shared isHumanBlockedGraphError predicate so a
+            // NEW human-blocked class only requires editing one file.
+            if (isHumanBlockedGraphError(err)) {
+              const skippedReason: "app_owner_action_required" | "reconnect_required" =
+                isReconnectRequiredError(err) ? "reconnect_required" : "app_owner_action_required";
               console.warn(
-                `[media-buyer-all-customers-refresh] Meta app requires Data Use Checkup — resolve at https://developers.facebook.com/apps/ (workspace ${g.workspaceId})`,
+                `[media-buyer-all-customers-refresh] Meta human-blocked (${skippedReason}) — workspace ${g.workspaceId}; CEO card already booked, skipping this run`,
               );
               return {
                 workspace: g.workspaceId,
@@ -200,7 +214,7 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
                 watermark_iso: watermarkIso,
                 new_customers: 0,
                 uploaded_rows: 0,
-                skipped: "app_owner_action_required" as const,
+                skipped: skippedReason,
               };
             }
             throw err;
@@ -224,7 +238,8 @@ export const mediaBuyerAllCustomersRefreshDailyCron = inngest.createFunction(
             new_customers: newCustomers,
             uploaded_rows: uploaded,
           };
-        });
+          }),
+        );
       });
       summary.push(groupSummary);
     }

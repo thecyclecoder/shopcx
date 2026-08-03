@@ -30,6 +30,11 @@ import {
   installDefaultAppOwnerActionEscalationHandler,
   runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
+import {
+  installDefaultReconnectRequiredEscalationHandler,
+  runWithReconnectRequiredWorkspaceScope,
+} from "@/lib/meta/reconnect-required-escalation";
+import { isHumanBlockedGraphError } from "@/lib/meta/graph-retry";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -134,7 +139,8 @@ export async function pullOneCadenceTarget(
   // books the deduped CEO card against the RIGHT workspace even when overlapping
   // targets for different workspaces interleave awaits (the previous module-global
   // setter raced and could book cards against a sibling workspace).
-  return runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () => {
+  return runWithAppOwnerActionWorkspaceScope(t.workspaceId, async () =>
+    runWithReconnectRequiredWorkspaceScope(t.workspaceId, async () => {
     try {
       const token = await getMetaUserToken(t.workspaceId);
       if (!token) return { ok: false, account: t.metaAccountId, error: "no_token" };
@@ -150,16 +156,18 @@ export async function pullOneCadenceTarget(
       return { ok: true, account: t.metaAccountId, tz: t.timezone, window: { since, until }, campaigns: t.campaignIds.length, adsets: struct.adsets, adsetInsightRows: adset.rows, adInsightRows: ad.rows, scorecardRows: sc.rows };
     } catch (e) {
       // Tag human-blocked failures so the summarizer can exclude them from the
-      // allFailed rethrow decision — a Meta App Dashboard gate is not an outage
-      // Inngest should retry, and the escalation handler has already booked the
-      // deduped CEO card for the workspace.
-      const metaClass = (e as { metaClass?: string } | null)?.metaClass;
-      if (metaClass === "app_owner_action_required") {
+      // allFailed rethrow decision — neither the Meta App Dashboard gate nor a
+      // reconnect_required state is an outage Inngest should retry, and the
+      // class-appropriate escalation handler has already booked the deduped CEO
+      // card for the workspace. Uses the shared isHumanBlockedGraphError
+      // predicate so a NEW human-blocked class only requires editing one file.
+      if (isHumanBlockedGraphError(e)) {
         return { ok: false, account: t.metaAccountId, error: errText(e), humanBlocked: true };
       }
       return { ok: false, account: t.metaAccountId, error: errText(e) };
     }
-  });
+    }),
+  );
 }
 
 /**
@@ -204,11 +212,13 @@ export const mediaBuyerTestCadenceCron = inngest.createFunction(
   },
   async ({ step }) => {
     const admin = createAdminClient();
-    // Install the app-owner-action-required escalation handler once per run so any
-    // Graph 400 classified as `app_owner_action_required` (canonical: yearly Data
-    // Use Checkup) books exactly one deduped CEO card per workspace per UTC day.
+    // Install BOTH human-blocked escalation handlers once per run so any Graph
+    // 400 classified as `app_owner_action_required` (canonical: yearly Data Use
+    // Checkup) OR `reconnect_required` (invalidated stored user token) books
+    // exactly one class-appropriate deduped CEO card per workspace per UTC day.
     // Per-target workspace scope is set inside `pullOneCadenceTarget`.
     installDefaultAppOwnerActionEscalationHandler(admin);
+    installDefaultReconnectRequiredEscalationHandler(admin);
     const targets = await step.run("resolve-targets", async () => resolveTestCadenceTargets(admin));
     if (!targets.length) {
       await step.run("emit-heartbeat", async () => {

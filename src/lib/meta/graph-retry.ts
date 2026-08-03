@@ -35,7 +35,10 @@ const MAX_DELAY_MS = 8000;
  * disappeared behind a Graph endpoint, distinct from a transient rate limit or
  * a stale token. `metaClass='permanent_api_removed'` is that signal.
  */
-export type GraphErrorClass = "permanent_api_removed" | "app_owner_action_required";
+export type GraphErrorClass =
+  | "permanent_api_removed"
+  | "app_owner_action_required"
+  | "reconnect_required";
 
 export interface GraphError extends Error {
   metaCode?: number;
@@ -57,12 +60,25 @@ export function graphError(status: number, error: any): GraphError {
   // timeout — Facebook returns HTML, no JSON body, so metaCode/subcode are undefined and
   // only httpStatus distinguishes it from a fatal 400 validation error).
   e.httpStatus = status;
-  // Ordering matters: app_owner_action_required is checked BEFORE permanent so a
-  // Data Use Checkup 400 (workspace-owner-fixable via the Meta App Dashboard) is
-  // never mis-tagged as permanent_api_removed (a code-change escalation). Both
-  // paths never-retry, but they route to different CEO cards.
+  // Ordering matters. Three human-blocked classes share HTTP 400 but each has a
+  // DIFFERENT remedy, so a phrasing seen for one must never be routed to
+  // another's card:
+  //
+  //   1. app_owner_action_required  → workspace owner clears a Meta App
+  //      Dashboard gate (Data Use Checkup et al). Checked FIRST so a Checkup
+  //      400 can never be downgraded to a reconnect prompt.
+  //   2. reconnect_required         → the stored per-workspace user token was
+  //      invalidated by Meta and only re-authorizing OAuth restores access
+  //      (see [[classifyReconnectRequired]]). Confirmed against Meta by a
+  //      Phase-2 debug_token probe before any founder-facing card is raised.
+  //   3. permanent_api_removed      → a Graph endpoint has been removed;
+  //      requires a code change.
+  //
+  // All three never-retry, but they route to different CEO cards.
   if (classifyAppOwnerActionRequired(status, error)) {
     e.metaClass = "app_owner_action_required";
+  } else if (classifyReconnectRequired(status, error)) {
+    e.metaClass = "reconnect_required";
   } else if (isPermanentGraphError(status, error)) {
     e.metaClass = "permanent_api_removed";
   }
@@ -75,13 +91,16 @@ export function graphError(status: number, error: any): GraphError {
  * disables an app's API access until the workspace owner completes it. Meta
  * surfaces this as an HTTP 400 whose message / user-facing title / user-facing
  * message contains one of the canonical phrasings — "data use checkup",
- * "api access disrupted", "app is currently unavailable", or
- * "api access blocked". The classifier is INTENTIONALLY a phrase-list (not a
- * single-phrase match) so a new Meta wording for the same underlying condition
- * is added as one more branch here rather than a new class.
+ * "api access disrupted", or "app is currently unavailable". The classifier is
+ * INTENTIONALLY a phrase-list (not a single-phrase match) so a new Meta
+ * wording for the same underlying condition is added as one more branch here
+ * rather than a new class.
  *
- * Distinct from PERMANENT (a removed endpoint requires a code change) and
- * FATAL (a token/permission issue is caller-fixable). Retrying an
+ * Distinct from RECONNECT_REQUIRED (the stored per-workspace user token was
+ * invalidated by Meta — the app-level gate is CLEAR; only re-authorizing
+ * OAuth restores access — see [[classifyReconnectRequired]]),
+ * PERMANENT (a removed endpoint requires a code change) and FATAL (a
+ * token/permission issue is caller-fixable). Retrying an
  * app-owner-action-required error is pointless: the only fix is a human
  * logging into the Meta App Dashboard, so retrying floods logs without
  * possibility of self-heal.
@@ -91,6 +110,12 @@ export function graphError(status: number, error: any): GraphError {
  * `console.error` per active ad account per tick (~576/day), flooding the
  * Control Tower error feed with identical entries that carried no
  * additional information beyond the first occurrence.
+ *
+ * NOTE — "api access blocked" was briefly added to this classifier's haystack
+ * (PR #2369) after the 2026-08-02 Meta incident, but observation showed the
+ * remedy for that phrasing is OAuth re-authorization, not an App Dashboard
+ * action. Moved to [[classifyReconnectRequired]] by
+ * [[../../docs/brain/specs/meta-reconnect-required-class]] Phase 1.
  */
 export function classifyAppOwnerActionRequired(status: number, error: any): boolean {
   if (status !== 400) return false;
@@ -101,8 +126,96 @@ export function classifyAppOwnerActionRequired(status: number, error: any): bool
   if (haystack.includes("data use checkup")) return true;
   if (haystack.includes("api access disrupted")) return true;
   if (haystack.includes("app is currently unavailable")) return true;
+  return false;
+}
+
+/**
+ * RECONNECT_REQUIRED = the stored per-workspace user access token has been
+ * invalidated by Meta and only re-authorizing OAuth restores access. The
+ * app-level gate (Data Use Checkup et al) is CLEAR — the App Dashboard has
+ * nothing left to do — so raising the [[classifyAppOwnerActionRequired]] card
+ * for this state sends the workspace owner down the wrong remedy path.
+ *
+ * Seeded by the 2026-08-02 Meta incident: after the CEO completed the Data
+ * Use Checkup, Meta switched to a SECOND, undocumented phrasing — HTTP 400
+ * `"API access blocked."` — on every call made with the stored user token,
+ * while the app token (`{app_id}|{secret}`) still returned 200 and webhook
+ * subscriptions stayed active. That asymmetry — user token dead, app token
+ * live — is the diagnostic: nothing left to fix in the App Dashboard, only
+ * OAuth re-consent by the workspace owner will restore reads.
+ *
+ * ⚠ TRIGGER, NOT PROOF. The `"api access blocked"` phrasing was observed
+ * EXACTLY ONCE, in a ~40-minute window on 2026-08-02 between the CEO
+ * completing the Data Use Checkup and re-authorizing OAuth. Treat the
+ * classifier as a TRIGGER for downstream confirmation — never as sufficient
+ * evidence to raise a founder-facing card. It is Phase 2's `debug_token`
+ * confirmation ([[reconnect-required-escalation]] `escalateReconnectRequired`)
+ * — not this predicate — that decides whether the CEO card is raised. Do
+ * NOT 'simplify' the confirmation away in a future refactor.
+ *
+ * Distinct from APP_OWNER_ACTION_REQUIRED (which routes to the Meta App
+ * Dashboard) and PERMANENT (which requires a code change). All three
+ * never-retry but each routes to a different remedy card.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 1.
+ */
+export function classifyReconnectRequired(status: number, error: any): boolean {
+  if (status !== 400) return false;
+  const rawMsg = typeof error?.message === "string" ? error.message : "";
+  const rawTitle = typeof error?.error_user_title === "string" ? error.error_user_title : "";
+  const rawUser = typeof error?.error_user_msg === "string" ? error.error_user_msg : "";
+  const haystack = `${rawMsg} ${rawTitle} ${rawUser}`.toLowerCase();
   if (haystack.includes("api access blocked")) return true;
   return false;
+}
+
+/**
+ * True iff `err` carries `metaClass='app_owner_action_required'` (see
+ * [[classifyAppOwnerActionRequired]]). The Meta App Dashboard gate — the
+ * workspace owner must clear it manually; retrying never fixes it. Callers
+ * use this to downgrade a cron ERROR to a warn+skip.
+ *
+ * Canonical location — the sibling
+ * `src/lib/inngest/meta-performance-app-owner-action.ts` re-exports this
+ * (backward-compat with its Phase-1 spec test import path); no new caller
+ * should import from there.
+ */
+export function isAppOwnerActionRequiredError(err: unknown): boolean {
+  return (err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required";
+}
+
+/**
+ * True iff `err` carries `metaClass='reconnect_required'` (see
+ * [[classifyReconnectRequired]]). The stored per-workspace user token has
+ * been invalidated by Meta; only OAuth re-consent restores access, so
+ * retrying never fixes it. Callers use this to downgrade a cron ERROR to a
+ * warn+skip.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3 (containment at the 5 human-blocked call sites).
+ */
+export function isReconnectRequiredError(err: unknown): boolean {
+  return (err as { metaClass?: string } | null)?.metaClass === "reconnect_required";
+}
+
+/**
+ * True iff `err` is ANY human-blocked Meta class — currently
+ * `app_owner_action_required` or `reconnect_required`. This is the shared
+ * predicate the 5 human-blocked call sites funnel through so a NEW class
+ * added tomorrow only requires editing THIS predicate, not five copy-pasted
+ * string comparisons across the Inngest layer.
+ *
+ * Callers can still branch on the specific class after this filter — e.g.
+ * to pick the right escalation SDK — but the containment decision (never
+ * retry, never fatal-log, warn+skip) is uniform across the human-blocked
+ * classes and belongs here.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3.
+ */
+export function isHumanBlockedGraphError(err: unknown): boolean {
+  return isAppOwnerActionRequiredError(err) || isReconnectRequiredError(err);
 }
 
 /**
@@ -296,6 +409,65 @@ function fireAppOwnerActionRequiredHandler(ctx: AppOwnerActionRequiredContext): 
 }
 
 /**
+ * The context passed to a registered reconnect-required handler. Same shape
+ * as its siblings so a caller can share a single escalation SDK layout —
+ * `metaClass='reconnect_required'` on the tagged error distinguishes.
+ */
+export interface ReconnectRequiredContext {
+  /** The label passed to `graphFetchJson` — the calling function + endpoint. */
+  label: string;
+  /** HTTP status Meta returned (always 400 for this class). */
+  status: number;
+  /** The tagged Error the caller will receive. `metaClass='reconnect_required'`. */
+  error: GraphError;
+}
+
+type ReconnectRequiredHandler = (ctx: ReconnectRequiredContext) => void | Promise<void>;
+
+let reconnectRequiredHandler: ReconnectRequiredHandler | null = null;
+
+/**
+ * Register a fire-and-forget handler invoked on every reconnect_required
+ * Graph error. See
+ * [[../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 2 — the CEO card is raised through this seam by
+ * [[./reconnect-required-escalation]] at import time, and its handler probes
+ * Meta's `debug_token` endpoint BEFORE emitting a card so a single-sighting
+ * string trigger cannot misroute the founder.
+ */
+export function registerReconnectRequiredHandler(
+  fn: ReconnectRequiredHandler | null,
+): void {
+  reconnectRequiredHandler = fn;
+}
+
+/** Return the current registered handler (or null). Exported for tests. */
+export function getReconnectRequiredHandler(): ReconnectRequiredHandler | null {
+  return reconnectRequiredHandler;
+}
+
+function fireReconnectRequiredHandler(ctx: ReconnectRequiredContext): void {
+  const handler = reconnectRequiredHandler;
+  if (!handler) return;
+  try {
+    const result = handler(ctx);
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch((err) => {
+        console.warn(
+          "[graph-retry] reconnect-required handler threw (swallowed)",
+          { err },
+        );
+      });
+    }
+  } catch (err) {
+    console.warn(
+      "[graph-retry] reconnect-required handler threw (swallowed)",
+      { err },
+    );
+  }
+}
+
+/**
  * Issue a Graph request (the thunk re-runs each attempt so the fetch is fresh),
  * parse JSON, and retry transient failures with bounded exponential backoff +
  * jitter. Returns the parsed JSON on success; throws the canonical graphError on
@@ -327,6 +499,27 @@ export async function graphFetchJson(makeRequest: () => Promise<Response>, label
       console.warn(
         `[graph-retry] ${label} APP_OWNER_ACTION_REQUIRED meta error http=${res.status} — ` +
           `workspace owner must clear this from the Meta App Dashboard; not retrying, escalating.`,
+      );
+      throw tagged;
+    }
+
+    // Reconnect-required = the stored per-workspace user token has been
+    // invalidated by Meta (see [[classifyReconnectRequired]]); the app-level
+    // gate is CLEAR, so the App Dashboard has nothing left to do — only
+    // re-authorizing OAuth restores access. Never retry: a dead token stays
+    // dead until the workspace owner reconnects. Fire the reconnect handler
+    // ([[./reconnect-required-escalation]] `escalateReconnectRequired` — which
+    // itself confirms via `debug_token` BEFORE raising a card, so a
+    // single-sighting string cannot misroute the founder), then throw the
+    // tagged GraphError so the caller can branch on `metaClass`. Checked
+    // BEFORE permanent so a reconnect state is never mis-tagged as
+    // permanent_api_removed (a code-change escalation).
+    if (classifyReconnectRequired(res.status, err)) {
+      const tagged = graphError(res.status, err);
+      fireReconnectRequiredHandler({ label, status: res.status, error: tagged });
+      console.warn(
+        `[graph-retry] ${label} RECONNECT_REQUIRED meta error http=${res.status} — ` +
+          `stored user token invalidated; not retrying, escalating (confirm-before-card via debug_token).`,
       );
       throw tagged;
     }

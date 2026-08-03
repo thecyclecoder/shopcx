@@ -21,8 +21,11 @@ import assert from "node:assert/strict";
 import {
   isAppOwnerActionRequiredError,
   escalateAppOwnerActionForIterationRun,
+  escalateReconnectRequiredForIterationRun,
 } from "./meta-performance-app-owner-action";
+import { isReconnectRequiredError } from "@/lib/meta/graph-retry";
 import type { EscalateAppOwnerActionRequiredInput } from "@/lib/meta/app-owner-action-escalation";
+import type { EscalateReconnectRequiredInput } from "@/lib/meta/reconnect-required-escalation";
 
 const SCOPE_A = { workspaceId: "ws-A", adAccountId: "uuid-A" };
 const SCOPE_B = { workspaceId: "ws-B", adAccountId: "uuid-B" };
@@ -32,6 +35,16 @@ function taggedError(): Error {
     new Error("meta_400: API access disrupted. Go to the App Dashboard and complete Data Use Checkup."),
     { metaClass: "app_owner_action_required", httpStatus: 400 },
   );
+}
+
+/**
+ * Reconnect-required tagged error — the Phase-3 sibling.
+ */
+function taggedReconnectError(): Error {
+  return Object.assign(new Error("meta_400: API access blocked."), {
+    metaClass: "reconnect_required",
+    httpStatus: 400,
+  });
 }
 
 test("isAppOwnerActionRequiredError — TAGGED Data Use Checkup class is handled", () => {
@@ -56,6 +69,20 @@ test("isAppOwnerActionRequiredError — CONTROL: null / undefined / string / pla
   assert.equal(isAppOwnerActionRequiredError(undefined), false);
   assert.equal(isAppOwnerActionRequiredError("boom"), false);
   assert.equal(isAppOwnerActionRequiredError({}), false);
+});
+
+// ── isReconnectRequiredError (Phase 3 — the new class) ──────────────────────
+
+test("isReconnectRequiredError — TAGGED reconnect_required class is handled", () => {
+  assert.equal(isReconnectRequiredError(taggedReconnectError()), true);
+});
+
+test("isReconnectRequiredError — CONTROL: an app-owner tag is NOT reconnect_required (regression: pre-Phase-3 contract holds)", () => {
+  assert.equal(isReconnectRequiredError(taggedError()), false);
+});
+
+test("isReconnectRequiredError — CONTROL: an untagged Meta 500 does not match", () => {
+  assert.equal(isReconnectRequiredError(new Error("graph 500 — internal server error")), false);
 });
 
 test("escalateAppOwnerActionForIterationRun — escalates against THIS invocation's workspaceId with a label naming the ad account", async () => {
@@ -103,6 +130,36 @@ test("escalateAppOwnerActionForIterationRun — GraphError.httpStatus is preserv
   await escalateAppOwnerActionForIterationRun({} as never, errWithoutStatus, SCOPE_A, fakeEscalate as never);
   assert.equal(seen[0].status, 400);
   assert.equal(seen[1].status, 400);
+});
+
+test("escalateReconnectRequiredForIterationRun — escalates against THIS invocation's workspaceId with a label naming the ad account (Phase 3 sibling)", async () => {
+  const seen: Array<{ workspaceId: string; label: string; status: number; affected?: string[] }> = [];
+  const fakeEscalate = async (
+    _admin: unknown,
+    input: EscalateReconnectRequiredInput,
+  ) => {
+    seen.push({
+      workspaceId: input.workspaceId,
+      label: input.label,
+      status: input.status,
+      affected: input.affectedAdAccountIds,
+    });
+    return { emitted: true };
+  };
+  await escalateReconnectRequiredForIterationRun(
+    {} as never,
+    taggedReconnectError(),
+    SCOPE_A,
+    fakeEscalate as never,
+  );
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].workspaceId, SCOPE_A.workspaceId);
+  assert.equal(seen[0].status, 400);
+  assert.deepEqual(seen[0].affected, [SCOPE_A.adAccountId]);
+  assert.ok(
+    seen[0].label.includes(SCOPE_A.adAccountId),
+    `label ${seen[0].label} should name the affected ad account`,
+  );
 });
 
 test("escalateAppOwnerActionForIterationRun — two overlapping invocations from DIFFERENT workspaces each escalate only against their own workspace (isolation invariant)", async () => {

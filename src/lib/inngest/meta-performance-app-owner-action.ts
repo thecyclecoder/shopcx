@@ -26,17 +26,24 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { escalateAppOwnerActionRequired } from "@/lib/meta/app-owner-action-escalation";
-import type { GraphError } from "@/lib/meta/graph-retry";
+import { escalateReconnectRequired } from "@/lib/meta/reconnect-required-escalation";
+import {
+  isAppOwnerActionRequiredError as isAppOwnerActionRequiredErrorImpl,
+  type GraphError,
+} from "@/lib/meta/graph-retry";
 
 /**
  * True iff `err` was tagged by [[../meta/graph-retry]] `graphError` as the
  * app-owner-action-required class (canonical: Data Use Checkup 400). The
  * `metaIterationRun` catch block uses this to gate the human-blocked branch;
  * every other error still rethrows via `notifyOpsAlert` + throw.
+ *
+ * Re-exports the canonical predicate that now lives in
+ * [[../meta/graph-retry]] so a NEW human-blocked class is added once (there)
+ * instead of touching this file plus four others. The existing
+ * `meta-performance.test.ts` import path stays stable.
  */
-export function isAppOwnerActionRequiredError(err: unknown): boolean {
-  return (err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required";
-}
+export const isAppOwnerActionRequiredError = isAppOwnerActionRequiredErrorImpl;
 
 type Admin = ReturnType<typeof createAdminClient>;
 type EscalateFn = typeof escalateAppOwnerActionRequired;
@@ -63,6 +70,37 @@ export async function escalateAppOwnerActionForIterationRun(
   err: unknown,
   scope: IterationRunAppOwnerActionScope,
   escalate: EscalateFn = escalateAppOwnerActionRequired,
+): Promise<void> {
+  const graphErr = err as GraphError;
+  await escalate(admin, {
+    workspaceId: scope.workspaceId,
+    label: `meta/iteration-run account ${scope.adAccountId}`,
+    status: graphErr.httpStatus ?? 400,
+    error: graphErr,
+    affectedAdAccountIds: [scope.adAccountId],
+  });
+}
+
+type EscalateReconnectFn = typeof escalateReconnectRequired;
+
+/**
+ * Sibling of [[escalateAppOwnerActionForIterationRun]] for the
+ * `reconnect_required` class — same explicit workspace-argument shape (no
+ * module-global, no AsyncLocalStorage), same label convention. Book the
+ * deduped CEO card for a `metaIterationRun` invocation whose Graph call
+ * raised a `reconnect_required` GraphError; the escalation SDK itself
+ * confirms token death via `debug_token` before touching
+ * dashboard_notifications, so a single-sighting string trigger cannot
+ * misroute the founder from here either.
+ *
+ * Introduced by [[../../../docs/brain/specs/meta-reconnect-required-class]]
+ * Phase 3.
+ */
+export async function escalateReconnectRequiredForIterationRun(
+  admin: Admin,
+  err: unknown,
+  scope: IterationRunAppOwnerActionScope,
+  escalate: EscalateReconnectFn = escalateReconnectRequired,
 ): Promise<void> {
   const graphErr = err as GraphError;
   await escalate(admin, {

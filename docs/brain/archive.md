@@ -19,6 +19,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Downgrade appstleUpdateNextBillingDate billing-lock 400 to warn (mirror appstleAttemptBilling)** · verified 2026-08-03 · → [[../libraries/appstle]]
 - **Close the two holes that let a guessed-name grep check strand a correct build** · verified 2026-08-03 · → [[../libraries/spec-phase-checks-table]]
 - **Mario's eligible-never-enqueued source skips specs the director already dismissed from initiation** · verified 2026-08-03 · → [[../lifecycles/mario-pipeline-plumbing]]
+- **Treat Meta Data Use Checkup as human-blocked in the daily performance run** · verified 2026-08-03 · → [[../inngest/meta-performance]]
+- **Contain Meta Data Use Checkup blocks in meta sync spend** · verified 2026-08-03 · → [[../inngest/meta-sync]]
 - **Policies get an SDK, and the customer-facing text can't contradict the internal rule** · verified 2026-08-02 · → [[../tables/policies]], [[../libraries/policies]]
 - **An agent may trigger a price correction, but may not invent the number** · verified 2026-08-02 · → [[lifecycles/subscription-billing]]
 - **June can restore a grandfathered price herself** · verified 2026-08-02 · → [[../libraries/cs-director]]

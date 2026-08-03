@@ -50,7 +50,7 @@ const { count } = await admin.from("daily_meta_ad_spend")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **Generator gap — this table is written by two Inngest functions whose brain pages don't list it.** `syncMetaAdSpend` (`src/lib/meta/sync-spend.ts`) writes rows here, and it's called by both [[../inngest/meta-sync]] `meta/sync-spend` and [[../inngest/today-sync]] `today-sync` (5-min cron). Both those generated pages currently claim `Tables written: _None._` because the brain generator doesn't follow the `syncMetaAdSpend → daily_meta_ad_spend` transitive write. Noted here (per [[../specs/meta-reconnect-required-class]] Phase 4) so the next reader tracing provenance from this table's data lands on the right functions rather than the empty tables-written line. If the generator gains transitive-write following, drop this bullet.
 
 ---
 
