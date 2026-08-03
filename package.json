@@ -32,6 +32,7 @@
     "check:authinterrupts-when-forbidden-imported": "tsx scripts/_check-authinterrupts-when-forbidden-imported.ts",
     "check:node-registry-drift": "tsx scripts/_check-node-registry-drift.ts",
     "check:no-markdown-spec-authoring": "tsx scripts/_check-no-markdown-spec-authoring.ts",
+    "check:spec-grep-guess-sweep": "tsx scripts/_check-spec-grep-guess-sweep.ts",
     "check:no-shopify-sub-mutations": "tsx scripts/_check-no-shopify-sub-mutations.ts",
     "check:no-direct-appstle-mutations": "tsx scripts/_check-no-direct-appstle-mutations.ts",
     "check:route-auth-helper": "tsx scripts/_check-route-auth-helper.ts",
