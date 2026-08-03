@@ -1,0 +1,1 @@
+- **A re-authed account comes back immediately instead of sitting out a 25-hour hold** · verified 2026-08-03 · → [[../recipes/build-box-setup#account-hold-reason-vocabulary--re-login-runbook-build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped]]
