@@ -38,6 +38,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { STALE_FOUNDER_ESCALATION_HOURS } from "@/lib/cs-director";
 
 // ── Tunables ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -45,8 +46,15 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
  * A founder-escalated ticket is "stale" 48h after its `escalated_at`. The spec measured 232h /
  * 75h / 46h as the three worst multi-day stalls; 48h is the tightest cutoff that would have caught
  * all three (46h narrowly qualifies) without waking June for routine same-day CEO reviews.
+ *
+ * SINGLE SOURCE OF TRUTH — the authoritative constant is `STALE_FOUNDER_ESCALATION_HOURS` in
+ * `src/lib/cs-director.ts` (declared alongside the escalate_founder handler + Phase-2 recheckIndex
+ * resolver so the founder-escalation stale contract is findable in one place). This module
+ * re-exports it under the local alias so existing callers/tests that reference
+ * `FOUNDER_STALE_RECHECK_HOURS` keep working while a `git grep STALE_FOUNDER_ESCALATION_HOURS`
+ * on cs-director.ts stays green.
  */
-export const FOUNDER_STALE_RECHECK_HOURS = Number(process.env.FOUNDER_STALE_RECHECK_HOURS || 48);
+export const FOUNDER_STALE_RECHECK_HOURS = STALE_FOUNDER_ESCALATION_HOURS;
 
 /**
  * Max re-checks per ticket. Two rechecks + one initial review = at most three June-review sessions

@@ -1398,6 +1398,26 @@ async function resolveLinkageFromJob(
 }
 
 /**
+ * Phase-2 stale-recheck threshold in hours (spec: a-founder-escalated-customer-never-waits-in-
+ * silence Phase 2 — "a founder-escalated ticket with no founder action for two days, where the
+ * customer has written again, comes back to June to re-check whether it is still genuinely a
+ * founder call"). A founder-escalated ticket is considered "stale" once its `escalated_at` is at
+ * least `STALE_FOUNDER_ESCALATION_HOURS` old — the [[../inngest/founder-escalation-stale-recheck]]
+ * cron then re-enqueues a `cs-director-call` so June re-reads with fresh state.
+ *
+ * Declared HERE (in the file the escalate_founder path lives in) so the founder-escalation stale
+ * contract is findable in one place — the cron mirrors it in
+ * `src/lib/inngest/founder-escalation-stale-recheck.ts` under the local alias
+ * `FOUNDER_STALE_RECHECK_HOURS` (same env override so both stay in sync). The 48h default is the
+ * tightest cutoff that would have caught all three worst multi-day stalls the spec measured
+ * (232h jleone@earthlink.net · 75h bellamyjs@msn.com · 46h jhb222@aol.com — 46h narrowly
+ * qualifies) without waking June for routine same-day CEO reviews.
+ */
+export const STALE_FOUNDER_ESCALATION_HOURS = Number(
+  process.env.FOUNDER_STALE_RECHECK_HOURS || 48,
+);
+
+/**
  * Read the `recheck_index` field the Phase-2 stale-recheck sweep stamps on
  * `agent_jobs.instructions` (see src/lib/inngest/founder-escalation-stale-recheck.ts
  * `buildFounderRecheckInstructions`). Returns 0 when the field is absent — the initial June
