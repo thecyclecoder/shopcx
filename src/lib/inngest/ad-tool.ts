@@ -57,7 +57,7 @@ import {
 } from "@/lib/media-buyer/publish-gate";
 import {
   installDefaultAppOwnerActionEscalationHandler,
-  setCurrentAppOwnerActionWorkspaceScope,
+  runWithAppOwnerActionWorkspaceScope,
 } from "@/lib/meta/app-owner-action-escalation";
 
 /**
@@ -871,11 +871,13 @@ export const adToolPublishToMeta = inngest.createFunction(
     // Scope the app-owner-action escalation handler to this publish's workspace so a
     // Data Use Checkup 400 raised inside any Graph call below (uploadAdVideo /
     // uploadAdImage / createAdCreative / createAd / …) books the deduped CEO card
-    // against the RIGHT workspace. Cleared in `finally` so a subsequent unrelated
-    // call site can't accidentally raise a card scoped to this workspace.
+    // against the RIGHT workspace. Uses AsyncLocalStorage (runWith…) instead of a
+    // module-global setter so two concurrent publishes for different workspaces
+    // can't race and book a card against the wrong scope — see the docstring on
+    // [[../meta/app-owner-action-escalation]] for why the mutable-scope pattern
+    // was retired.
     installDefaultAppOwnerActionEscalationHandler(admin);
-    setCurrentAppOwnerActionWorkspaceScope(workspace_id);
-    try {
+    return await runWithAppOwnerActionWorkspaceScope(workspace_id, async () => {
 
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
@@ -1365,9 +1367,7 @@ export const adToolPublishToMeta = inngest.createFunction(
     });
 
     return result;
-    } finally {
-      setCurrentAppOwnerActionWorkspaceScope(null);
-    }
+    });
   },
 );
 

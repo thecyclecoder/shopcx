@@ -40,24 +40,29 @@ test("ad-tool publisher imports the app-owner-action escalation scope helpers", 
     /\binstallDefaultAppOwnerActionEscalationHandler\b/,
     "the publisher must install the default escalation handler so a Data Use Checkup 400 raised inside any Graph call triggers the CEO card",
   );
+  // AsyncLocalStorage wrapper — the retired module-global `setCurrentAppOwnerActionWorkspaceScope`
+  // raced on concurrent publishes for different workspaces (see the docstring on the escalation
+  // SDK). `runWithAppOwnerActionWorkspaceScope` binds the workspace to the ASYNC CHAIN, so two
+  // overlapping publishes each see only their own scope.
   assert.match(
     src,
-    /\bsetCurrentAppOwnerActionWorkspaceScope\b/,
-    "the publisher must scope the handler to the publish's workspace so the deduped card is booked against the RIGHT workspace",
+    /\brunWithAppOwnerActionWorkspaceScope\b/,
+    "the publisher must scope the handler to the publish's workspace via the ALS-based helper so the deduped card is booked against the RIGHT workspace under concurrent publishes",
   );
 });
 
-test("ad-tool publisher scopes the workspace before the publish work AND clears it in finally", async () => {
+test("ad-tool publisher wraps the publish work in the ALS workspace scope", async () => {
   const src = await readFile(new URL("./ad-tool.ts", import.meta.url), "utf8");
-  // Match the shape: install → set scope to workspace_id → try{ … } finally{ set null }.
-  // The finally clear is what keeps a subsequent unrelated call site from raising a card
-  // scoped to the previous publish's workspace.
+  // Match the shape: install → `return await runWithAppOwnerActionWorkspaceScope(workspace_id, async () => { … })`.
+  // Binding via ALS (not a module-global) is what keeps concurrent publishes from racing scope
+  // against each other — the retired mutable pattern booked cards against the wrong workspace
+  // when two publishes interleaved awaits.
   const scopeWire =
-    /installDefaultAppOwnerActionEscalationHandler\(admin\)[\s\S]*?setCurrentAppOwnerActionWorkspaceScope\(workspace_id\)[\s\S]*?try\s*\{[\s\S]*?\}\s*finally\s*\{\s*setCurrentAppOwnerActionWorkspaceScope\(null\)\s*;?\s*\}/;
+    /installDefaultAppOwnerActionEscalationHandler\(admin\)[\s\S]*?return\s+await\s+runWithAppOwnerActionWorkspaceScope\(\s*workspace_id\s*,\s*async\s*\(\s*\)\s*=>\s*\{/;
   assert.match(
     src,
     scopeWire,
-    "the publish handler must install the escalation handler, set the workspace scope, and clear it in a finally so scope can never leak to a subsequent call site",
+    "the publish handler must install the escalation handler and wrap the awaited publish work in `runWithAppOwnerActionWorkspaceScope(workspace_id, async () => { … })` so scope cannot leak across concurrent publishes",
   );
 });
 
