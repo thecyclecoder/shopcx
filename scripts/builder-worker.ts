@@ -1709,7 +1709,7 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
     }
   } catch (e) {
     a.lastAuthRefreshFailed = true;
-    markAccountAuthExpired(configDir, Date.now(), `credentials refresh via CLI threw: ${e instanceof Error ? e.message : String(e)}`);
+    markAccountAuthExpired(configDir, Date.now(), `credentials refresh via CLI threw: ${errText(e)}`);
   } finally {
     a.authRefreshInFlight = false;
   }

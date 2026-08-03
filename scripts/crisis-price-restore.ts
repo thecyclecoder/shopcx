@@ -61,6 +61,7 @@
  */
 import { loadEnv, pgClient } from "./_bootstrap";
 loadEnv();
+import { errText } from "../src/lib/error-text";
 import { appendFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
@@ -219,7 +220,7 @@ async function main() {
         else { bad++; failures.push({ email: t.email, error: `wrote base $${(t.writeBase / 100).toFixed(2)} but live bills ${nowRealized == null ? "unreadable" : "$" + (nowRealized / 100).toFixed(2)} (wanted $${(t.lastPaid / 100).toFixed(2)})` }); }
         if ((ok + bad) % 25 === 0) console.log(`  … ${ok + bad}/${slice.length}`);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errText(e);
         logLine({ event: "threw", ...t, error: msg });
         failures.push({ email: t.email, error: msg }); bad++;
       }

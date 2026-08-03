@@ -28,6 +28,7 @@
  */
 import { loadEnv } from "./_bootstrap";
 loadEnv();
+import { errText } from "../src/lib/error-text";
 
 const W = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
@@ -151,7 +152,7 @@ async function main() {
       console.log(`  ✓ ${cust.email} — ${amount}, rate ${rate}`);
       sent++;
     } catch (e) {
-      console.log(`  ✗ ${cust.email}: ${e instanceof Error ? e.message : String(e)}`);
+      console.log(`  ✗ ${cust.email}: ${errText(e)}`);
       skipped++;
     }
   }

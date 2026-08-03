@@ -56,6 +56,8 @@
  *       npx tsx scripts/_check-policy-contradictions.ts --summary  # one-line-per-finding view
  */
 
+import { errText } from "../src/lib/error-text";
+
 /* ------------------------------------------------------------------------------------------------
  * Types (mirrored from src/lib/policies.ts's AgentPolicyPackageEntry + full row shape needed
  * for `customer_summary` scanning — the SDK returns the internal projection which excludes the
@@ -401,7 +403,7 @@ async function runLiveScan(): Promise<LiveScanOutcome> {
   } catch (err) {
     return {
       attempted: true,
-      skippedReason: `live-DB scan threw: ${err instanceof Error ? err.message : String(err)}`,
+      skippedReason: `live-DB scan threw: ${errText(err)}`,
       workspacesScanned: 0,
       policiesScanned: 0,
       findings: [],
@@ -511,6 +513,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`check-policy-contradictions — main() threw: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`check-policy-contradictions — main() threw: ${errText(err)}`);
   process.exit(1);
 });

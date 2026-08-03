@@ -12,6 +12,7 @@
  * the customer can always read it on the dashboard).
  */
 import { getResendClient } from "@/lib/email";
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const FROM_NAME = "Superfoods Company";
@@ -679,7 +680,7 @@ export async function sendOrderConfirmationEmail(opts: {
     // Resend-events pipeline (`/api/webhooks/resend-events`).
     return { success: true, resendEmailId: data?.id };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -793,7 +794,7 @@ export async function sendShippingNotificationEmail(opts: {
     if (error) return { success: false, error: error.message };
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -941,7 +942,7 @@ export async function sendCartRecoveryEmail(opts: {
     if (error) return { success: false, error: error.message };
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }
 
@@ -1023,6 +1024,6 @@ export async function sendAbandonedCartEmail(opts: {
     if (error) return { success: false, error: error.message };
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return { success: false, error: errText(err) };
   }
 }

@@ -40,6 +40,7 @@
 import { loadEnv } from "./_bootstrap";
 loadEnv();
 import { createAdminClient } from "../src/lib/supabase/admin";
+import { errText } from "../src/lib/error-text";
 import { appendFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
@@ -322,7 +323,7 @@ async function main() {
       ok++;
       if (ok % 25 === 0) console.log(`  … ${ok}/${slice.length}`);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       logLine({ event: "threw", rowId: p.rowId, contract: p.contractId, branch: p.branch, error: msg });
       failures.push({ rowId: p.rowId, branch: p.branch, error: msg });
     }

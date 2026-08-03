@@ -7,6 +7,7 @@
  * it in Bianca's ready-to-test bin. See [[../../../docs/brain/reference/meta-scaling-methodology]].
  */
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
+import { errText } from "@/lib/error-text";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { compositeCopyOverlay, type OverlayCopy } from "@/lib/ads/creative-overlay";
 import { buildSideBySide } from "@/lib/ads/creative-side-by-side";
@@ -403,7 +404,7 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
           sideBySide = await buildSideBySide(competitorBuffer, buffer, { ratio: aspectRatio });
         }
       } catch (err) {
-        console.warn("overlay_side_by_side_build_failed", { err: err instanceof Error ? err.message : String(err) });
+        console.warn("overlay_side_by_side_build_failed", { err: errText(err) });
       }
     }
     return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };

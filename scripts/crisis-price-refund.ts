@@ -30,6 +30,7 @@
  */
 import { loadEnv, pgClient } from "./_bootstrap";
 loadEnv();
+import { errText } from "../src/lib/error-text";
 
 const W = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
@@ -168,7 +169,7 @@ async function main() {
       if (landed && !result.escalated) { ok++; console.log(`  ✓ ${r.email.padEnd(32)} ${amountStr}`); }
       else { failed.push(`${r.email}: escalated=${result.escalated} refunded-total $${(totalRefunded / 100).toFixed(2)}`); console.log(`  ✗ ${r.email} — did not land`); }
     } catch (e) {
-      failed.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`);
+      failed.push(`${r.email}: ${errText(e)}`);
     }
   }
 
