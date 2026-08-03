@@ -1,0 +1,1 @@
+- **A build shouldn't park because two specs both appended a line** · verified 2026-08-03 · → [[../libraries/build-lane-reconcile]]
