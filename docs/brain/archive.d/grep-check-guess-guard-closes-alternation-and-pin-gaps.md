@@ -1,0 +1,1 @@
+- **Close the two holes that let a guessed-name grep check strand a correct build** · verified 2026-08-03 · → [[../libraries/spec-phase-checks-table]]
