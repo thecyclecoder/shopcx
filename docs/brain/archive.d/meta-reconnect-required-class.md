@@ -1,0 +1,1 @@
+- **Meta 'reconnect_required' error class + its own reconnect card** · verified 2026-08-03 · → [[../integrations/meta-marketing]]
