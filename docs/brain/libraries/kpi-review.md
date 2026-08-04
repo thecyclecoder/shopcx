@@ -31,11 +31,16 @@ A single default tolerance (`0.5%`) with per-metric overrides keyed by `metric_k
 
 (Current-state point-read metrics — `lane_utilization` · `loop_health` · `needs_attention` — are SKIPPED entirely below, so they don't need a tolerance entry.)
 
-A metric is `withinTolerance` when `driftPct ≤` its tolerance. When `driftPct` is null (`snapshotValue === 0`): **count-unit** metrics tolerate `|drift| ≤ 2` (the count-metric zero-snapshot boundary-race floor — see below); every other unit requires `drift === 0` strictly.
+A metric is `withinTolerance` when `driftPct ≤` its tolerance OR (count-unit metrics only) `|drift| ≤ 2` (the count-metric boundary-race floor — see below). The count-unit floor applies on BOTH branches (`snapshotValue !== 0` and `snapshotValue === 0`); non-count units require `driftPct ≤ tolerance` or (when `driftPct` is null) `drift === 0` strictly.
 
-### Count-metric zero-snapshot boundary-race floor
+### Count-metric boundary-race floor
 
-When a `unit: 'count'` metric snapshots to 0, the percentage tolerance is undefined and strict `drift === 0` alarms on a single row that moved across the window boundary between snapshot write and audit re-read — the canonical case is [[../tables/error_events]] (`error_backlog:daily`) where `last_seen_at` is bumped to "now" each time the same error re-occurs, so a row whose `last_seen_at` lived in yesterday's window at snapshot time can have `last_seen_at = today` by the next audit pass (or vice versa), surfacing as drift of ±1 that isn't engine drift. The floor (`|drift| ≤ 2`) absorbs that boundary noise without masking real engine drift. Repair Agent verdict on signature `kpi_drift:error_backlog:daily` (verdict: monitor-false-positive). Non-count units (`ratio`, `hours`, `grade`) keep the strict `drift === 0` rule — a ratio drifting from 0 to even 0.0001 is meaningful in a way ±1 row in a count is not.
+A `unit: 'count'` metric where a single row moves across the window boundary between snapshot write and audit re-read reads as drift of ±1 that isn't engine drift — the canonical case is [[../tables/error_events]] (`error_backlog:daily`) where `last_seen_at` is bumped to "now" each time the same error re-occurs, so a row whose `last_seen_at` lived in yesterday's window at snapshot time can have `last_seen_at = today` by the next audit pass (or vice versa). The floor (`|drift| ≤ 2`) absorbs that boundary noise on BOTH tolerance branches:
+
+- **`snapshotValue === 0`** (percentage tolerance undefined) — tolerate `|drift| ≤ 2` instead of strict `drift === 0`. Original case from the shipped zero-snapshot floor.
+- **`snapshotValue !== 0` but small** — tolerate the tighter of `driftPct ≤ tolerance` OR `|drift| ≤ 2`. The same single boundary row that produces ±1 of raw drift produces `driftPct = 1/16 ≈ 6.25%` at snapshot=16 — well over the 0.5% default — but it is still just one row of boundary noise, not engine drift. Ground-truth incident: the persistent `kpi_drift:error_backlog:daily` loop that tripped 9 days in 10 on a KPI that was actually healthy, outside the original zero-snapshot guard's reach (see [[../specs/kpi-audit-nonzero-small-count-boundary-race-floor]]).
+
+Repair Agent verdict on signature `kpi_drift:error_backlog:daily` (verdict: monitor-false-positive). Non-count units (`ratio`, `hours`, `grade`) keep the strict tolerance rule — a ratio drifting from 0 to even 0.0001 is meaningful in a way ±1 row in a count is not, and an hours median at ±1 hour on a snapshot of 8 hours is still real drift.
 
 ## Current-state point-read skip
 
