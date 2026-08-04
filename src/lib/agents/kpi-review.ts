@@ -56,9 +56,10 @@ export interface KpiAuditReport {
   /** `|drift / snapshotValue|`; null when `snapshotValue` is 0 (division by zero — drift is reported but the percentage is undefined). */
   driftPct: number | null;
   /**
-   * true when `driftPct ≤` the metric's tolerance. When `driftPct` is null (`snapshotValue === 0`):
-   * count-unit metrics tolerate `|drift| ≤ COUNT_ZERO_SNAPSHOT_ABS_FLOOR` (the boundary-race floor —
-   * see the constant for why); every other unit requires `drift === 0` strictly.
+   * true when `driftPct ≤` the metric's tolerance OR (count-unit metrics only) `|drift| ≤
+   * COUNT_ABS_FLOOR` (the boundary-race floor — see the constant for why). The count-unit floor
+   * applies on BOTH branches (`snapshotValue !== 0` and `snapshotValue === 0`); non-count units
+   * require `driftPct ≤ tolerance` or (when `driftPct` is null) `drift === 0` strictly.
    */
   withinTolerance: boolean;
   /** the persisted `detail` blob (the engine's per-metric breakdown). */
@@ -93,16 +94,27 @@ const TOLERANCE_OVERRIDES: Record<string, number> = {
 };
 
 /**
- * Count-metric zero-snapshot boundary-race floor. When a count-unit metric's snapshot value is 0
- * the percentage tolerance is undefined (divide-by-zero) and strict `drift === 0` alarms on a
- * single row that moved across the window boundary between snapshot write and audit re-read —
- * e.g. `error_backlog:daily` where `error_events.last_seen_at` updates to "now" each time the
- * same error re-occurs, so a row whose last_seen_at lived in yesterday's window at snapshot time
- * can have last_seen_at = today by the next audit pass (or vice versa), surfacing as drift of ±1
- * that isn't engine drift. Tolerate small absolute drifts (≤ `COUNT_ZERO_SNAPSHOT_ABS_FLOOR`) in
- * this case — Repair Agent verdict on signature `kpi_drift:error_backlog:daily`.
+ * Count-metric boundary-race floor. A `unit: 'count'` metric where a single row moves across the
+ * window boundary between snapshot write and audit re-read reads as drift of ±1 that isn't engine
+ * drift — the canonical case is `error_backlog:daily`, where `error_events.last_seen_at` is bumped
+ * to "now" each time the same error re-occurs, so a row whose `last_seen_at` lived in yesterday's
+ * window at snapshot time can have `last_seen_at = today` by the next audit pass (or vice versa).
+ *
+ * The floor applies to BOTH branches of the tolerance check:
+ * - `snapshotValue === 0` (percentage tolerance undefined) — tolerate `|drift| ≤ COUNT_ABS_FLOOR`
+ *   instead of strict `drift === 0`. Original case from the shipped zero-snapshot floor.
+ * - `snapshotValue !== 0` but small — tolerate the TIGHTER of `driftPct ≤ tolerance` OR `|drift| ≤
+ *   COUNT_ABS_FLOOR`. The same single boundary row that produces ±1 of raw drift produces
+ *   `driftPct = 1/16 ≈ 6.25%` at snapshot=16 — well over the 0.5% default — but is still just one
+ *   row of boundary noise, not engine drift. Widening the floor to nonzero snapshots absorbs it.
+ *   Repair Agent case: the persistent `kpi_drift:error_backlog:daily` loop that tripped 9 days in
+ *   10 on a KPI that was actually healthy, outside the zero-snapshot guard's reach.
+ *
+ * Non-count units (`ratio`, `hours`, `grade`) keep the strict tolerance rule — a ratio drifting
+ * from 0 to 0.0001 remains meaningful, an hours median at ±1 hour on a snapshot of 8 hours is
+ * still real drift.
  */
-const COUNT_ZERO_SNAPSHOT_ABS_FLOOR = 2;
+const COUNT_ABS_FLOOR = 2;
 
 function toleranceFor(metricKey: string): number {
   return TOLERANCE_OVERRIDES[metricKey] ?? DEFAULT_TOLERANCE;
@@ -180,9 +192,11 @@ function buildReport(
   const withinTolerance =
     driftPct == null
       ? snapshot.unit === "count"
-        ? Math.abs(drift) <= COUNT_ZERO_SNAPSHOT_ABS_FLOOR
+        ? Math.abs(drift) <= COUNT_ABS_FLOOR
         : drift === 0
-      : driftPct <= tolerance;
+      : snapshot.unit === "count"
+        ? driftPct <= tolerance || Math.abs(drift) <= COUNT_ABS_FLOOR
+        : driftPct <= tolerance;
   return {
     metric: snapshot.metric_key,
     cadence: snapshot.cadence,

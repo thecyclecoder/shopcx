@@ -23,6 +23,13 @@ const firstOfLastMonthUtc = (): string => {
   return d.toISOString().slice(0, 10);
 };
 
+/** Yesterday UTC, YYYY-MM-DD — the last CLOSED daily window date. */
+const yesterdayUtc = (): string => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+};
+
 /**
  * Minimal chainable Supabase stub scoped to `platform_scorecard_snapshots` reads. Accumulates
  * `.eq/.lt` filters + `.order/.limit`, and applies them (filter → sort → limit) when the chain is
@@ -143,4 +150,67 @@ test("auditAllKpis('monthly') skips a today-dated in-flight snapshot and picks t
   );
   assert.notEqual(deploy!.snapshotDate, today);
   assert.equal(deploy!.withinTolerance, true, "closed-window compare is within the ratio tolerance");
+});
+
+test("auditAllKpis('daily') tolerates a single boundary-row drift on a small nonzero count snapshot (kpi_drift:error_backlog:daily regression)", async () => {
+  // Nonzero-snapshot mirror of the shipped zero-snapshot floor. A single error_events row whose
+  // last_seen_at moved across the daily window boundary between snapshot write and audit re-read
+  // reads as raw drift of 1 (snapshot=16 → ground truth=15) — that is 6.25% driftPct, well over the
+  // 0.5% default tolerance, yet still just one row of boundary noise. The widened count-metric
+  // COUNT_ABS_FLOOR (|drift| ≤ 2 on BOTH branches) absorbs it.
+  const yesterday = yesterdayUtc();
+  const workspaceId = "ws-1";
+  const nowIso = new Date().toISOString();
+
+  const rows: ScorecardSnapshotRow[] = [
+    {
+      workspace_id: workspaceId,
+      metric_key: "error_backlog",
+      cadence: "daily",
+      snapshot_date: yesterday,
+      window_days: 1,
+      value: 16,
+      prior_value: null,
+      delta_pct: null,
+      unit: "count",
+      detail: { window: 16, last_1h: 0, last_24h: 16, by_source: {} },
+      updated_at: nowIso,
+    },
+  ];
+
+  const admin = fakeAdmin(rows);
+
+  const compute = async (
+    _ws: string,
+    opts: { cadence: string; snapshotDate?: string },
+  ): Promise<ScorecardSnapshotRow[]> => {
+    assert.equal(opts.snapshotDate, yesterday);
+    return [
+      {
+        workspace_id: workspaceId,
+        metric_key: "error_backlog",
+        cadence: "daily",
+        snapshot_date: yesterday,
+        window_days: 1,
+        value: 15,
+        prior_value: null,
+        delta_pct: null,
+        unit: "count",
+        detail: { window: 15, last_1h: 0, last_24h: 15, by_source: {} },
+        updated_at: nowIso,
+      },
+    ];
+  };
+
+  const reports = await auditAllKpis(workspaceId, "daily", undefined, { admin, compute });
+  const backlog = reports.find((r) => r.metric === "error_backlog");
+  assert.ok(backlog, "expected an error_backlog audit report");
+  assert.equal(backlog!.snapshotValue, 16);
+  assert.equal(backlog!.groundTruthValue, 15);
+  assert.equal(backlog!.drift, -1);
+  assert.equal(
+    backlog!.withinTolerance,
+    true,
+    "widened count-metric floor must absorb a single boundary row on a small nonzero snapshot",
+  );
 });
