@@ -1,0 +1,1 @@
+- **KPI audit: nonzero small-count boundary-race floor** · verified 2026-08-04 · → [[libraries/kpi-review]]
