@@ -491,7 +491,7 @@ export function isForeignAppstleUnskipUpstream500(
  *      attempt reached them. Marker text like `Cannot Authorize at this time
  *      (Life cycle)`, `Do Not Honor`, `Insufficient Funds`, `Pick Up Card`,
  *      `Expired Card`, `Invalid Card Number`, `Card Not Activated`,
- *      `Restricted Card`, `Declined`, `No Account`. Filtered by
+ *      `Restricted Card`, `Closed Card`, `Declined`, `No Account`. Filtered by
  *      `isForeignBraintreeVaultProcessorDecline`
  *      ([[../specs/error-feed-drop-braintree-portal-vault-processor-decline-noise]]).
  *
@@ -543,6 +543,7 @@ const BRAINTREE_PROCESSOR_DECLINE_MARKERS = [
   "invalid card number",
   "card not activated",
   "restricted card",
+  "closed card",
   "declined",
   "no account",
 ];
