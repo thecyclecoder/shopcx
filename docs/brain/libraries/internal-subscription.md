@@ -95,8 +95,14 @@ async function internalSubRemoveItem(workspaceId: string, contractId: string, va
 ### `internalSubSwapVariant` — function
 
 ```ts
-async function internalSubSwapVariant(workspaceId: string, contractId: string, oldVariantId: string, newVariantId: string, quantity?: number,) : Promise<ActionResult>
+async function internalSubSwapVariant(workspaceId: string, contractId: string, oldVariantId: string, newVariantId: string, quantity?: number,) : Promise<{ success: boolean; error?: string; priceGuardRefusal?: PriceGuardRefusal }>
 ```
+
+**Price preservation is enforced by the SDK, not the caller.** A swap can LOWER a customer's price (a cheaper variant) but never RAISES it beyond what the pricing rules produce for the post-swap variant and quantity. The guard compares against the RULES-DERIVED expectation, not the captured-before price, so legitimate quantity-driven per-unit increases pass while catalog resets still fail loudly.
+
+The SDK: (1) Reads the current sub's state, (2) computes the expected post-swap line price via [[../libraries/commerce__price]] `resolveSubscriptionPricing` on a hypothetical items array with the new variant and quantity, (3) performs the local DB swap, (4) asserts the observed post-swap realized price (re-priced through `resolveSubscriptionPricing` on the final items) against the expected via [[swap-price-assertion]] `assertSwapDidNotRaise` (2¢ tolerance for arithmetic-solve rounding; anything higher fails).
+
+On refusal, returns a distinct `PriceGuardRefusal` object (not an error string) so upstream callers can distinguish a deliberate guard refusal from a real error. This closes the 2026-08-05 mislabel class where an internal-rail guard refusal (Isabel's internal contract `internal-8922b5701b2f45ea`, quantity 2→1 forfeiting buy-two) was incorrectly surfaced as an Appstle vendor error. Spec: [[../specs/swap-price-guard-compares-against-the-pricing-rules-not-the-old-price]].
 
 ### `internalSubUpdateLineItemPrice` — function
 
