@@ -75,6 +75,16 @@ async function checkPortalBan(workspaceId: string, shopifyCustomerId: string)
 function handleAppstleError(e: unknown, context?: { route?: string; payload?: unknown }) : NextResponse
 ```
 
+Wraps Appstle errors as a portal response (status 502 `appstle_error`). Distinguishes them from other failures.
+
+### `handlePriceGuardRefusal` — function
+
+```ts
+function handlePriceGuardRefusal(refusal: PriceGuardRefusal, context?: { route?: string; payload?: unknown }): NextResponse
+```
+
+Distinct response for a price-guard refusal — a swap the pricing rules would raise us above gets stopped on purpose. This is US deliberately declining, NOT a vendor fault: the error code is `price_guard_refusal` (not `appstle_error`) and the status is 422 (Unprocessable Entity — the request is semantically invalid), never 502 (which would blame an upstream). Renders a customer-facing message via `describePriceGuardRefusal` from [[swap-price-assertion]]. Ticket e2a55cfb (Isabel, 2026-08-05) surfaced a portal refusal on an INTERNAL contract as an Appstle vendor error even though Appstle was not involved at all — this helper is what routes both rails' `priceGuardRefusal` return through honest classification instead.
+
 ## Callers
 
 - `src/app/api/portal/route.ts`
