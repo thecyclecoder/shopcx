@@ -1,0 +1,1 @@
+- **Error-feed: drop Braintree portal vault "Closed Card" processor-decline noise** · verified 2026-08-05 · → [[../libraries/control-tower]]
