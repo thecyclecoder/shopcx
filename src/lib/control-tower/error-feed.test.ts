@@ -1166,6 +1166,7 @@ test("isForeignBraintreeVaultProcessorDecline drops other allow-listed processor
     "Invalid Card Number",
     "Card Not Activated",
     "Restricted Card",
+    "Closed Card",
     "Declined",
     "No Account",
   ]) {
@@ -1255,6 +1256,13 @@ test("isForeignBraintreeVaultProcessorDecline is case-insensitive on the tail ma
     isForeignBraintreeVaultProcessorDecline(
       "/api/portal",
       "[portal/payment-method-update] vault failed: INSUFFICIENT FUNDS",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignBraintreeVaultProcessorDecline(
+      "/api/portal",
+      "[portal/payment-method-update] vault failed: CLOSED CARD",
     ),
     true,
   );
