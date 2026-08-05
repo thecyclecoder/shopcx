@@ -2,7 +2,7 @@
 
 Routes a parked CS-owned `agent_jobs` row (`ticket-handle`, `ticket-analyze`, or any future kind whose registry owner is `cs`) to the CS Director (June) BEFORE the Platform director's backstop reaches the CEO fail-safe. **Phase 3 of [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]].**
 
-**File:** `src/lib/agents/needs-attention-route-cs-owner.ts` · **Tests:** `src/lib/agents/needs-attention-route-cs-owner.test.ts` (8 cases)
+**File:** `src/lib/agents/needs-attention-route-cs-owner.ts` · **Tests:** `src/lib/agents/needs-attention-route-cs-owner.test.ts` (12 cases — [[../specs/cs-director-call-loop-guard-and-message-only-remedy]] Phases 1–2 added loop-guard + self-routing exclusion tests)
 
 ## Overview
 
@@ -20,6 +20,19 @@ For a **`ticket-handle`** or **`ticket-analyze`** park it's not: `ownerFunctionF
   3. Records a `director_activity` row with `director_function='cs'` — the approvals feed reads this ledger to render `raisedBy`, so the escalation is attributed to the owner function, not Platform.
   4. Compare-and-set flips the parked row to `status='completed'` + `needs_attention_class='routed_cs_owner'`, gated on `.eq('status', 'needs_attention')` (Learning #9 — re-assert the read-time predicate at the write).
 
+## Loop guard — Phase 1 of [[../specs/cs-director-call-loop-guard-and-message-only-remedy]]
+
+`applyCsOwnerRoute` gates on `CS_DIRECTOR_LOOP_GUARD_MAX` (default **3**, env `CS_DIRECTOR_LOOP_GUARD_MAX` to override) — the same pattern `DEPLOY_GUARDIAN_LOOP_GUARD_MAX` and `MARIO_LOOP_GUARD_MAX` use. Before enqueueing a fresh `cs-director-call` for a ticket, `countPriorCsDirectorCallsForTicket` reads the LIVE `director_activity` ledger for calls on the same ticket in the last 24h (rolling window `CS_DIRECTOR_LOOP_GUARD_WINDOW_MS`). At or above the cap:
+
+- **No enqueue.** The fresh call is SUPPRESSED — June has been called N times on this ticket and cannot resolve it.
+- **Escalate once.** `escalateDiagnosisToCeo` mints ONE idempotent founder card (dedupeKey `cs-director-loop-guard:{ticket_id}`, via `bumpOpenEscalationCard`) carrying the diagnosis: "June has been called N times on ticket {id} in the last 24h and cannot resolve it (CS_DIRECTOR_LOOP_GUARD_MAX=3). Auto-routing this ticket to another cs-director-call is now SUPPRESSED; the customer is likely still waiting and needs a human to unblock the class June kept hitting." The card includes `latestCsDirectorReasonForTicket` (first 1500 chars of June's latest reasoning, so the founder sees WHY she is stuck).
+- **Ledger and terminal.** A `director_activity` row is written with `action_kind='routed_needs_attention'` (not enqueued) + `metadata.action='route_cs_owned_park'` + `metadata.loop_guard_tripped=true`, and the parked row compare-and-set flips to `status='completed'`, `needs_attention_class='routed_cs_owner'` — it's terminal, not re-routable on the next sweep tick.
+- **Caller gate.** The router's caller ([[needs-attention-route]]) checks `reason === 'loop_guard_tripped'` and skips the class dispatch AND the backstop sweep (no double-page via the CEO fail-safe).
+
+## Phase 2 — Self-routing exclusion
+
+`decideCsOwnerRoute` calls `wouldSelfRoute(row.kind)` and returns `{route_to: null, reason: 'self_routing_excluded'}` when the parked row's `kind === CS_DIRECTOR_CALL_KIND` (`'cs-director-call'`). A parked `cs-director-call` is the CS Director's OWN box session — routing it to another `cs-director-call` is self-routing (routing a thing to itself). The signal a parked director call carries is "June ran and could not finish" — that is exactly the signal Phase 1's loop-guard and the CEO fail-safe were built to handle. Narrow: other CS-owned kinds (`ticket-handle`, `ticket-analyze`) still route to the CS Director exactly as before. The parked `cs-director-call` falls through to the generic needs-attention sweep.
+
 ## Verdict shape
 
 | result reason                    | when                                                                                 |
@@ -30,6 +43,8 @@ For a **`ticket-handle`** or **`ticket-analyze`** park it's not: `ownerFunctionF
 | `enqueue_failed`                 | The insert on `agent_jobs` failed — the row stays parked for the next tick.          |
 | `compare_and_set_lost`           | The row moved under us between read and write (June's runner closed it, or a manual re-open) — the cs-director-call was still enqueued (that's the durable side-effect). |
 | `not_cs_owned`                   | Non-CS-owned kind (e.g. `build`) — the router never dispatched. The Platform sweep continues to own it. |
+| `loop_guard_tripped`             | (Phase 1) Prior calls ≥ CS_DIRECTOR_LOOP_GUARD_MAX on the same ticket — enqueue suppressed, founder card escalated, parked row terminal. |
+| `self_routing_excluded`          | (Phase 2) The parked row's kind is `'cs-director-call'` — self-routing excluded, falls through to generic sweep. |
 
 ## Wire-in
 

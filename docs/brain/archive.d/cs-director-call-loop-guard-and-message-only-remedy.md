@@ -1,0 +1,1 @@
+- **Stop the cs-director-call self-routing loop, and give June a message-only remedy** · verified 2026-08-05 · → [[../libraries/cs-director]]
