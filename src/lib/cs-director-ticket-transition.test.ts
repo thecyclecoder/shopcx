@@ -38,6 +38,26 @@ test("author_spec closes the ticket, clears the escalation, and unassigns", () =
   assert.equal(t.patch.updated_at, NOW);
 });
 
+test("message_only closes + de-escalates + unassigns — resolves rather than parks so the ticket cannot feed the loop Phase 1 caps", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "message_only",
+    reasoning: "Money already unwound; the residue was that the customer was never told. One message + close.",
+    remedy: { customer_message: "You were charged $182.95 for SC135494; $15 was refunded and a prepaid label is on the way." },
+    now: NOW,
+  });
+  assert.equal(
+    t.action_key,
+    "close_and_deescalate",
+    "message_only IS a resolution — it must close, not linger; a lingering message_only ticket would re-enter the CS auto-router and re-hit the loop-guard cap",
+  );
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.closed_at, NOW);
+  assert.equal(t.patch.escalated_at, null);
+  assert.equal(t.patch.escalated_to, null);
+  assert.equal(t.patch.escalation_reason, null);
+  assert.equal(t.patch.assigned_to, null);
+});
+
 test("close_no_action closes + de-escalates + unassigns (a correctly-handled no-op, not a founder page)", () => {
   const t = decideCsDirectorTicketTransition({
     decision: "close_no_action",

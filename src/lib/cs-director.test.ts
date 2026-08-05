@@ -198,6 +198,127 @@ test("escalate_founder routes to its handler + returns linkage", async () => {
   assert.equal(result.linkage_triage_run_id, "run-9");
 });
 
+// ── Phase 3 of cs-director-call-loop-guard-and-message-only-remedy — message-only remedy ──────
+// The failing state the verb closes: on ticket 86043da0 (Jan Bloom), the money was already
+// unwound; every mutation-based remedy would double-pay. The correct output was one message
+// stating what the customer was charged and that a prepaid return exists — no refund, no
+// cancel, nothing else. June had no verb for that, so the correct verdict had nowhere to go
+// and the job parked, feeding the 69-call loop Phase 1 caps. The tests below pin: a message_only
+// verdict (a) is routed by applyBoxCsDirectorCall to a handler that (b) delivers the message via
+// the SAME executor-suppressed-send pattern approve_remedy uses (never runs a mutating action
+// — no `runExecutor` call, no money/account touch), and (c) reports message_delivered so the
+// runner closes the ticket instead of parking it.
+
+test("message_only routes to its handler, delivers via deliverMessage, and NEVER runs the action executor (no money/account mutation)", async () => {
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1" }) } },
+    tickets: { data: { customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: false } },
+  });
+  let executorCalled = false;
+  let deliveryCalled = false;
+  let deliveredMessage: string | null = null;
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async () => {
+      executorCalled = true;
+      return { messageSent: false, escalated: false, closed: false, statusManaged: false };
+    },
+    deliverMessage: async (_admin, _ws, _tid, _channel, message, _sandbox) => {
+      deliveryCalled = true;
+      deliveredMessage = message;
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    // The new verb — a decision June can choose when the CUSTOMER simply needs to be told what happened.
+    decision: "message_only" as CsDirectorVerdictInput["decision"],
+    reasoning: "Money already unwound; the residue is that the customer was never told. No refund/cancel — one message and resolve.",
+    remedy: {
+      // A message_only remedy carries ONLY the customer_message — no `action_type`, no `actions[]`.
+      customer_message:
+        "You were charged $182.95 for order SC135494; $15 has already been refunded and a prepaid return label is on the way. Reply if anything else needs adjusting.",
+    },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, true, "message_only must route cleanly — no crash, no needs_attention on the happy path");
+  assert.equal(result.handler, "message_only", "the handler tag must be message_only so the runner + audit trail see the verb");
+  assert.equal(result.message_delivered, true, "the message must actually ship (that IS the whole remedy)");
+  assert.equal(deliveryCalled, true, "deliverMessage MUST be called — this is the sendThreadedReply path the spec pins");
+  assert.equal(
+    executorCalled,
+    false,
+    "NO money or account mutation — the whole point is that a settled-money ticket needs only a message; running the executor would open the door back to a double-pay",
+  );
+  assert.match(
+    deliveredMessage ?? "",
+    /prepaid return label/,
+    "the message June authored on the verdict is the message that ships (no substitution / no drop)",
+  );
+});
+
+test("message_only with an `action_type` on the remedy is REJECTED (any mutation attempt fails-closed; NO delivery, NO executor)", async () => {
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1" }) } },
+    tickets: { data: { customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: false } },
+  });
+  let executorCalled = false;
+  let deliveryCalled = false;
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async () => {
+      executorCalled = true;
+      return { messageSent: false, escalated: false, closed: false, statusManaged: false };
+    },
+    deliverMessage: async () => {
+      deliveryCalled = true;
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "message_only" as CsDirectorVerdictInput["decision"],
+    reasoning: "should be rejected — a message_only remedy is BY DEFINITION a no-mutation verb",
+    remedy: {
+      action_type: "partial_refund",
+      payload: { shopify_order_id: "9999", amount_cents: 1000 },
+      customer_message: "here's your refund",
+    },
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, false, "a mutation slipped into a message_only remedy MUST fail closed — the safety of the verb is that it CANNOT mutate");
+  assert.equal(result.handler, "message_only");
+  assert.equal(result.needs_attention, true, "a rejected message_only parks the job so a human sees the misuse — never silently upgrades to approve_remedy");
+  assert.equal(deliveryCalled, false, "no message delivery on a rejected verdict — never promise the customer a fix we blocked");
+  assert.equal(executorCalled, false, "no executor call on a message_only verdict, rejected or not");
+});
+
+test("message_only with an empty / missing customer_message is REJECTED (nothing to send is not a resolution)", async () => {
+  const admin = stubAdminMulti({
+    agent_jobs: { data: { ...CS_JOB_ROW, instructions: JSON.stringify({ ticket_id: "ticket-1" }) } },
+    tickets: { data: { customer_id: "cust-1", channel: "email" } },
+    workspaces: { data: { sandbox_mode: false } },
+  });
+  let deliveryCalled = false;
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+    deliverMessage: async () => {
+      deliveryCalled = true;
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "message_only" as CsDirectorVerdictInput["decision"],
+    reasoning: "empty remedy — should fail",
+    remedy: {},
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-1", verdict, deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.needs_attention, true);
+  assert.equal(deliveryCalled, false, "an empty message_only carries nothing to send — a park is the honest response");
+});
+
 test("a decision value outside the three literals is a clean no-op", async () => {
   const admin = stubAdmin(CS_JOB_ROW);
   // Cast through unknown — the runtime input can hit this state if `normalizeCsDirectorVerdict`
