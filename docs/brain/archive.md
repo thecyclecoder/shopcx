@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Error-feed: drop Braintree portal vault "Closed Card" processor-decline noise** · verified 2026-08-05 · → [[../libraries/control-tower]]
+- **KPI audit: nonzero small-count boundary-race floor** · verified 2026-08-04 · → [[libraries/kpi-review]]
 - **Mario can't see a build that never reported finishing** · verified 2026-08-03 · → [[../libraries/mario]], [[../tables/mario_thresholds]], [[../tables/spec_timecard_events]]
 - **A customer escalated to the founder still hears back** · verified 2026-08-03 · → [[../libraries/cs-director]]
 - **A subscription mutation must prove it happened — HTTP 200 is not success** · verified 2026-08-03 · → [[../libraries/subscription-items]] & [[../integrations/appstle]]
