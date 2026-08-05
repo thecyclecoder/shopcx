@@ -38,3 +38,40 @@ export function assertSwapDidNotRaise(input: {
   }
   return null;
 }
+
+/**
+ * Distinct refusal class — a price-guard refusal is US deliberately declining to proceed
+ * because the post-swap realized price exceeds the rules-derived expectation, NOT a vendor
+ * failure. Both the Appstle rail (subSwapVariant) and the internal rail (internalSubSwapVariant)
+ * emit this shape on refusal, so downstream response classifiers can tell it apart from a real
+ * Appstle error (a 5xx, a decline body, a network timeout).
+ *
+ * Ticket e2a55cfb (Isabel Disciullo, 2026-08-05): her portal replacevariants failure on the
+ * internal contract internal-8922b5701b2f45ea was mislabeled as an Appstle vendor error even
+ * though Appstle was not involved at all — the internal rail's own guard refused it. That
+ * mislabel is what this class exists to prevent.
+ */
+export interface PriceGuardRefusal {
+  contractId: string;
+  expectedRealizedCents: number;
+  observedRealizedCents: number;
+  quantity: number;
+  /** Machine-readable reason so the client can route the message. */
+  reason: "swap_raises_over_rules";
+}
+
+/**
+ * Build a customer-facing message for a price-guard refusal. Explains that the change WOULD
+ * raise the per-unit price and (when quantity dropped) attributes it to a volume discount no
+ * longer applying — so support and the customer both see a decision rather than a fault.
+ * Kept pure so consumers can render it uniformly (portal 422 body, action-executor reason,
+ * journey-complete telemetry) without duplicating copy.
+ */
+export function describePriceGuardRefusal(r: PriceGuardRefusal): string {
+  const dollars = (c: number) => `$${(c / 100).toFixed(2)}`;
+  const base = `This change would raise the per-unit price from ${dollars(r.expectedRealizedCents)} (what our pricing rules produce for this line at quantity ${r.quantity}) to ${dollars(r.observedRealizedCents)}, so we've stopped it.`;
+  const volumeHint = r.quantity <= 1
+    ? " A volume discount that applied at a higher quantity may no longer apply at this quantity."
+    : "";
+  return `${base}${volumeHint} If this looks wrong, contact support with contract ${r.contractId}.`;
+}

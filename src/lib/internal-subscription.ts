@@ -22,7 +22,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
-import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
+import { assertSwapDidNotRaise, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
 
 type ActionResult = { success: boolean; error?: string };
 
@@ -407,7 +407,7 @@ export async function internalSubSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity?: number,
-): Promise<ActionResult> {
+): Promise<ActionResult & { priceGuardRefusal?: PriceGuardRefusal }> {
   const admin = createAdminClient();
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
@@ -542,7 +542,23 @@ export async function internalSubSwapVariant(
     });
     // Same failure-message convention as the Appstle rail: the literal phrase `swap changed the
     // price` must appear so downstream logs + the deterministic verifier can grep the state.
-    if (raiseErr) return { success: false, error: `swap changed the price — ${raiseErr}` };
+    // Also emit the distinct PriceGuardRefusal class so the portal surface classifies this as a
+    // deliberate refusal on the INTERNAL contract — not a vendor error (Appstle is not involved
+    // at all on an internal contract; ticket e2a55cfb saw exactly that mislabel).
+    if (raiseErr) {
+      const priceGuardRefusal: PriceGuardRefusal = {
+        contractId,
+        expectedRealizedCents: seedUnit,
+        observedRealizedCents: observedUnitCents,
+        quantity: postSwapQuantity,
+        reason: "swap_raises_over_rules",
+      };
+      return {
+        success: false,
+        error: `swap changed the price — ${raiseErr}`,
+        priceGuardRefusal,
+      };
+    }
   }
 
   await admin

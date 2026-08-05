@@ -6,7 +6,7 @@ import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
-import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
+import { assertSwapDidNotRaise, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
 import {
   isInternalSubscription,
@@ -1293,7 +1293,7 @@ export async function subSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity: number = 1,
-): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string }> {
+): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string; priceGuardRefusal?: PriceGuardRefusal }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }
@@ -1466,7 +1466,22 @@ export async function subSwapVariant(
       // The message MUST contain the literal phrase `swap changed the price` so downstream logs +
       // the deterministic verifier can grep the failure state; assertSwapDidNotRaise stays a pure
       // predicate, so we wrap its message here at the caller boundary.
-      return { success: false, error: `swap changed the price — ${raiseErr}`, newLineGid };
+      // Also emit the distinct PriceGuardRefusal class — a guard refusal is US deliberately
+      // declining, NOT an Appstle vendor error, so the portal surface can classify it correctly
+      // instead of dressing it up as an appstle_error 502.
+      const priceGuardRefusal: PriceGuardRefusal = {
+        contractId,
+        expectedRealizedCents,
+        observedRealizedCents,
+        quantity,
+        reason: "swap_raises_over_rules",
+      };
+      return {
+        success: false,
+        error: `swap changed the price — ${raiseErr}`,
+        newLineGid,
+        priceGuardRefusal,
+      };
     }
   }
 

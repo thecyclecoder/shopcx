@@ -6,7 +6,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertSwapDidNotRaise } from "./swap-price-assertion";
+import { assertSwapDidNotRaise, describePriceGuardRefusal, type PriceGuardRefusal } from "./swap-price-assertion";
 
 test("observed equal to expected passes (no raise)", () => {
   const err = assertSwapDidNotRaise({
@@ -105,6 +105,38 @@ test("MUST PASS — Isabel 2026-08-05: qty 2 → qty 1 legitimately reprices $48
     err,
     null,
     `a legitimate quantity-driven per-unit increase (buy-two forfeited) must pass, got: ${err}`,
+  );
+});
+
+test("PriceGuardRefusal.reason is the distinct discriminator both rails emit — not a vendor error class", () => {
+  // The refusal MUST carry `reason: 'swap_raises_over_rules'` so downstream classifiers
+  // (portal/helpers.ts:handlePriceGuardRefusal) can tell it apart from a real vendor error.
+  // Ticket e2a55cfb (Isabel, internal-8922b5701b2f45ea) was mislabeled as `appstle_error`
+  // even though Appstle wasn't involved at all — this discriminator is what fixes that.
+  const refusal: PriceGuardRefusal = {
+    contractId: "internal-8922b5701b2f45ea",
+    expectedRealizedCents: 5246,
+    observedRealizedCents: 6995,
+    quantity: 1,
+    reason: "swap_raises_over_rules",
+  };
+  assert.equal(refusal.reason, "swap_raises_over_rules");
+});
+
+test("describePriceGuardRefusal renders a customer-facing message with the volume-discount hint at qty ≤ 1", () => {
+  const msg = describePriceGuardRefusal({
+    contractId: "27946909869",
+    expectedRealizedCents: 5246,
+    observedRealizedCents: 6995,
+    quantity: 1,
+    reason: "swap_raises_over_rules",
+  });
+  assert.ok(msg.includes("$52.46"), `must name the rules-derived expected in dollars: ${msg}`);
+  assert.ok(msg.includes("$69.95"), `must name the observed price in dollars: ${msg}`);
+  assert.ok(msg.includes("27946909869"), `must name the contract for support triage: ${msg}`);
+  assert.ok(
+    /volume discount/i.test(msg),
+    `at quantity ≤ 1 the message must attribute to a volume discount, not a fault: ${msg}`,
   );
 });
 
