@@ -44,11 +44,24 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 
 type Admin = SupabaseClient;
 
 /** The exact org-chart function slug the CS director (June) sits in. Matches [[../functions/cs]]. */
 export const CS_FUNCTION = "cs";
+
+/**
+ * Loop-guard (Phase 1 of cs-director-call-loop-guard-and-message-only-remedy) — cap how many times a
+ * single ticket may be handed to June via this router in a rolling window. Past the cap, DO NOT
+ * re-enqueue another `cs-director-call`: raise ONE founder escalation instead, so a director who is
+ * structurally unable to finish stops being re-asked forever (ticket 86043da0 burned 69 calls in 11
+ * days). Env-overridable; default 3 mirrors `MARIO_LOOP_GUARD_DEFAULT_MAX` in [[../mario]] and
+ * `DEPLOY_GUARDIAN_LOOP_GUARD_MAX` in [[../deploy-guardian]]. Same shape as both siblings.
+ */
+export const CS_DIRECTOR_LOOP_GUARD_MAX = Number(process.env.CS_DIRECTOR_LOOP_GUARD_MAX || 3);
+/** Rolling window the loop-guard counts prior calls over — 24h, mirroring both sibling guards. */
+const CS_DIRECTOR_LOOP_GUARD_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * agent_jobs kinds this Phase-3 router owns — the CS-owned box lanes whose parks the CS
@@ -122,7 +135,60 @@ export type CsOwnerApplyReason =
   | "no_ticket_id"
   | "enqueue_failed"
   | "compare_and_set_lost"
-  | "not_cs_owned";
+  | "not_cs_owned"
+  | "loop_guard_tripped";
+
+/**
+ * Count prior `cs_director_call` `director_activity` rows for THIS ticket in the last
+ * `CS_DIRECTOR_LOOP_GUARD_WINDOW_MS`. Same shape as `priorRollbacksForSlug` in [[../deploy-guardian]]
+ * and `countPriorMarioFixesForSlug` in [[../mario]] — an `exact/head:true` count read so we get the
+ * number without pulling row bodies. Filters on `metadata->>ticket_id` (that's where the runner
+ * stamps the ticket, per `scripts/builder-worker.ts` § runCsDirectorCallJob), NOT on `spec_slug`
+ * (which becomes the authored spec's slug when June writes a spec, so `.eq('spec_slug', ticketId)`
+ * would silently under-count on any spec-authoring outcome).
+ */
+export async function countPriorCsDirectorCallsForTicket(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<number> {
+  const sinceIso = new Date(Date.now() - CS_DIRECTOR_LOOP_GUARD_WINDOW_MS).toISOString();
+  const { count } = await admin
+    .from("director_activity")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", CS_FUNCTION)
+    .eq("action_kind", "cs_director_call")
+    .eq("metadata->>ticket_id", ticketId)
+    .gte("created_at", sinceIso);
+  return count ?? 0;
+}
+
+/**
+ * Latest cs_director_call reasoning for this ticket in the loop-guard window — surfaced verbatim on
+ * the founder escalation so the CEO sees WHY June is stuck, not just that she is (per spec Phase 1).
+ * Returns null when no prior row exists (the loop-guard branch is only reachable when count ≥ MAX,
+ * so this is effectively always non-null there — but null-safe for readability + tests).
+ */
+export async function latestCsDirectorReasonForTicket(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<string | null> {
+  const sinceIso = new Date(Date.now() - CS_DIRECTOR_LOOP_GUARD_WINDOW_MS).toISOString();
+  const { data } = await admin
+    .from("director_activity")
+    .select("reason, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("director_function", CS_FUNCTION)
+    .eq("action_kind", "cs_director_call")
+    .eq("metadata->>ticket_id", ticketId)
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const row = Array.isArray(data) && data.length ? (data[0] as { reason: string | null }) : null;
+  return row?.reason?.trim() || null;
+}
 
 export interface CsOwnerApplyResult {
   routed: boolean;
@@ -148,6 +214,96 @@ export async function applyCsOwnerRoute(
   const ticketId = decision.ticket_id;
   if (!ticketId) {
     return { routed: false, cs_director_call_job_id: null, reason: "no_ticket_id" };
+  }
+
+  // Loop-guard (Phase 1 of cs-director-call-loop-guard-and-message-only-remedy) — count how many
+  // times June has ALREADY been called on this ticket in the rolling window. At/above the cap,
+  // stop re-asking and raise ONE founder escalation whose reason names the loop explicitly + carries
+  // June's latest reasoning verbatim so the CEO sees WHY she is stuck. Mirrors the shape both
+  // sibling loop-guards use: `priorRollbacksForSlug` in [[../deploy-guardian]] (checked at
+  // deploy-guardian.ts:824) and `countPriorMarioFixesForSlug` in [[../mario]] (checked at
+  // mario.ts:2937). The inflight guard below still runs so the current in-flight call is not
+  // interrupted; the loop-guard is a NEW-enqueue precondition.
+  //
+  // The escalation is idempotent per ticket via `escalateDiagnosisToCeo` (its
+  // `bumpOpenEscalationCard` upsert — one open card per dedupe_key, not one card per suppressed
+  // attempt, per [[platform-director]] one-open-escalation-per-thing Phase 1). And the parked row
+  // is still moved terminal (`routed_cs_owner`) so the sweep's status filter excludes it next pass
+  // and the 70-min invariant alarm cannot fire against a loop-guarded row.
+  const priorCalls = await countPriorCsDirectorCallsForTicket(admin, row.workspace_id, ticketId);
+  if (priorCalls >= CS_DIRECTOR_LOOP_GUARD_MAX) {
+    const juneReason = await latestCsDirectorReasonForTicket(admin, row.workspace_id, ticketId);
+    const truncatedJuneReason = juneReason ? juneReason.slice(0, 1500) : null;
+    const diagnosis = `June has been called ${priorCalls} times on ticket ${ticketId.slice(0, 8)} in the last ${Math.round(
+      CS_DIRECTOR_LOOP_GUARD_WINDOW_MS / (60 * 60 * 1000),
+    )}h and cannot resolve it (CS_DIRECTOR_LOOP_GUARD_MAX=${CS_DIRECTOR_LOOP_GUARD_MAX}). Auto-routing this ticket to another cs-director-call is now SUPPRESSED; the customer is likely still waiting and needs a human to unblock the class June kept hitting.${
+      truncatedJuneReason ? ` Latest June reasoning: ${truncatedJuneReason}` : ""
+    }`;
+    try {
+      await escalateDiagnosisToCeo(admin, {
+        workspaceId: row.workspace_id,
+        specSlug: null,
+        title: `CS director loop: ticket ${ticketId.slice(0, 8)} — June stuck after ${priorCalls} calls`,
+        diagnosis,
+        dedupeKey: `cs-director-loop-guard:${ticketId}`,
+        deepLink: `/dashboard/tickets/${ticketId}`,
+        escalationKind: "cs_director_loop_guard",
+        metadata: {
+          ticket_id: ticketId,
+          parked_job_id: row.id,
+          parked_kind: row.kind,
+          prior_calls: priorCalls,
+          loop_guard_max: CS_DIRECTOR_LOOP_GUARD_MAX,
+          window_ms: CS_DIRECTOR_LOOP_GUARD_WINDOW_MS,
+        },
+      });
+    } catch (e) {
+      console.warn(
+        `[needs-attention-route-cs-owner] loop-guard escalation failed for ticket ${ticketId}:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+    // Ledger the loop-guard trip on `director_activity` so a grader / audit reader can trace the
+    // suppressed enqueue without re-parsing the CEO card. Mirrors the `mario_loop_guard` row Mario
+    // writes when its blocked-by-repair path trips the same 24h cap (mario.ts:2937-2957).
+    await recordDirectorActivity(admin, {
+      workspaceId: row.workspace_id,
+      directorFunction: CS_FUNCTION,
+      actionKind: "cs_director_loop_guard",
+      specSlug: row.spec_slug,
+      reason: diagnosis.slice(0, 4000),
+      metadata: {
+        job_id: row.id,
+        target_kind: row.kind,
+        action: "cs_director_loop_guard",
+        ticket_id: ticketId,
+        prior_calls: priorCalls,
+        loop_guard_max: CS_DIRECTOR_LOOP_GUARD_MAX,
+        window_ms: CS_DIRECTOR_LOOP_GUARD_WINDOW_MS,
+        autonomous: true,
+      },
+    });
+    // Move the parked row terminal with the routed marker so the sweep's status filter excludes it
+    // next pass (same shape the enqueue-success branch uses below — Learning #9: re-assert the
+    // read-time predicate at the write). Without this the same parked row would surface next tick
+    // and re-count, re-escalating (though the dedupe would still hold — the ledger just gets noisy).
+    const { data: updated, error: updateErr } = await admin
+      .from("agent_jobs")
+      .update({
+        status: "completed",
+        needs_attention_class: CS_ROUTED_MARKER,
+        error: `cs_director_loop_guard: ${priorCalls} prior calls ≥ CS_DIRECTOR_LOOP_GUARD_MAX=${CS_DIRECTOR_LOOP_GUARD_MAX}; escalated to CEO`,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", row.id)
+      .eq("status", "needs_attention")
+      .select("id");
+    if (updateErr) {
+      console.warn(`[needs-attention-route-cs-owner] loop-guard compare-and-set failed for ${row.id}: ${updateErr.message}`);
+    } else if (!updated || updated.length !== 1) {
+      // Row moved under us — no harm; the escalation is still up.
+    }
+    return { routed: false, cs_director_call_job_id: null, reason: "loop_guard_tripped" };
   }
 
   // Inflight guard — mirrors [[../cs-director-second-opinion]] `enqueueSecondOpinion`. A queued /
