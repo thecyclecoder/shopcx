@@ -92,26 +92,60 @@ export interface CsOwnerRouteDecision {
 }
 
 /**
+ * The CS Director's OWN job kind — the reactive lane June's box session runs in. Excluded from the
+ * routing set below so a parked `cs-director-call` row NEVER routes to another `cs-director-call`
+ * (self-routing). Phase 2 of [[../../../docs/brain/specs/cs-director-call-loop-guard-and-message-only-remedy]]:
+ * a parked director call is terminal for THIS router — it means June ran and could not finish, so
+ * re-asking her for another turn is asking the same director the same question again. The parked row
+ * falls through to the generic backstop (which escalates via the CEO fail-safe) instead.
+ *
+ * Kept alongside [[CS_FUNCTION]] so a future reactive-under-June kind (e.g. `cs-director-review`)
+ * can be added here without hunting for a magic string.
+ */
+export const CS_DIRECTOR_CALL_KIND = "cs-director-call" as const;
+
+/**
  * Pure predicate — decides whether this parked row is a CS-owned park that must route to the
  * CS Director. Extracts `ticket_id` from `instructions` (the JSON payload the enqueue path
  * writes, per unified-ticket-handler `sol-first-touch-enqueue`) and falls back to the
  * `ticket-handle-<slice>` `spec_slug` shape only when instructions are absent / malformed
  * (defensive read; the runner enforces `ticket_id` for a live job).
  *
- * Returns `route_to: null` for any kind whose registry owner is not `cs`, and for any CS-owned
- * kind without a resolvable ticket_id — the parked row falls through to the generic sweep in
- * both cases (the fail-safe: never dispatch a CS route on a row the CS runner can't act on).
+ * Returns `route_to: null` for:
+ *   - any kind whose registry owner is not `cs` (Platform sweep continues to route it);
+ *   - the CS Director's OWN job kind (`cs-director-call`), which would be self-routing — Phase 2
+ *     of cs-director-call-loop-guard-and-message-only-remedy explicitly excludes this;
+ *   - any CS-owned kind without a resolvable ticket_id — the parked row falls through to the
+ *     generic sweep in both cases (the fail-safe: never dispatch a CS route on a row the CS
+ *     runner can't act on).
  */
 export function decideCsOwnerRoute(row: ParkedRowLike): CsOwnerRouteDecision {
   const owner = resolveNodeOwner(row.kind);
   if (owner !== CS_FUNCTION) {
     return { route_to: null, ticket_id: null, reason: `not_cs_owned (kind=${row.kind}, owner=${owner ?? "null"})` };
   }
+  // Phase 2 exclusion: a parked cs-director-call is the CS Director's OWN box session — routing it
+  // to ANOTHER cs-director-call is self-routing (routing a thing to itself). The signal a parked
+  // director call carries is "June ran and could not finish" — that is exactly the signal Phase 1's
+  // loop-guard and the CEO fail-safe were built to handle; re-asking her is the wrong response.
+  // Narrow: other CS-owned kinds (ticket-handle, ticket-analyze) still route as before.
+  if (wouldSelfRoute(row.kind)) {
+    return { route_to: null, ticket_id: null, reason: `self_routing_excluded (kind=${row.kind})` };
+  }
   const ticketId = extractTicketIdFromRow(row);
   if (!ticketId) {
     return { route_to: null, ticket_id: null, reason: `cs_owned_but_no_ticket_id` };
   }
   return { route_to: CS_FUNCTION, ticket_id: ticketId, reason: `cs_owned_kind (${row.kind})` };
+}
+
+/**
+ * True when a parked row's `kind` is the CS Director's OWN job kind — routing it to another
+ * `cs-director-call` would be self-routing. Pure helper (no DB access) so callers can pin the
+ * exclusion in a unit test without touching the router itself.
+ */
+export function wouldSelfRoute(kind: string): boolean {
+  return kind === CS_DIRECTOR_CALL_KIND;
 }
 
 function extractTicketIdFromRow(row: ParkedRowLike): string | null {

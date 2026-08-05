@@ -74,6 +74,33 @@ test("decideCsOwnerRoute: instructions that don't parse → route_to=null (defen
   assert.equal(d.route_to, null);
 });
 
+// ── Phase 2 of cs-director-call-loop-guard-and-message-only-remedy ─────────────────
+// Failing state the exclusion closes: cs-director-call is 'cs'-owned in the node registry
+// (src/lib/control-tower/node-registry.ts:173 pins ownerFunctionForKind('cs-director-call')='cs'),
+// so a parked cs-director-call row falls through the current `owner === 'cs'` predicate and the
+// router enqueues ANOTHER cs-director-call for it — routing a thing to itself. The two tests
+// below pin the correct state: (a) a parked cs-director-call must NOT re-route (the director
+// ran and could not finish — that IS the signal); (b) other CS-owned kinds (ticket-handle etc.)
+// still route to a director call exactly as they do now. Narrow change: only self-routing is
+// removed; the CS Director's other reactive lanes are untouched.
+
+test("decideCsOwnerRoute: parked cs-director-call must NOT route to another cs-director-call (no self-routing)", () => {
+  const d = decideCsOwnerRoute(parked({ kind: "cs-director-call", spec_slug: TICKET_ID }));
+  assert.equal(
+    d.route_to,
+    null,
+    "a parked cs-director-call has already run — routing it to another cs-director-call is self-routing",
+  );
+  assert.equal(d.ticket_id, null);
+  assert.match(d.reason, /self.?rout/i, "the decision reason must name the self-routing exclusion");
+});
+
+test("decideCsOwnerRoute: parked ticket-handle STILL routes to cs-director-call (narrow change; only self-routing is removed)", () => {
+  const d = decideCsOwnerRoute(parked({ kind: "ticket-handle" }));
+  assert.equal(d.route_to, "cs", "narrow Phase-2 exclusion must NOT hijack the working ticket-handle → director-call route");
+  assert.equal(d.ticket_id, TICKET_ID);
+});
+
 // ── applyCsOwnerRoute ────────────────────────────────────────────────────────────
 
 interface FakeJob { id: string; workspace_id: string; kind: string; spec_slug: string | null; status: string }
