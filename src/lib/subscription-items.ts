@@ -7,6 +7,7 @@ import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
+import { resolveSubscriptionPricing } from "@/lib/pricing";
 import {
   isInternalSubscription,
   internalSubAddItem,
@@ -1419,10 +1420,11 @@ export async function subSwapVariant(
       }
     }
 
-    // Phase 3 — Assert it. Re-read the new line's realized from Appstle and fail loudly if the
-    // post-swap price moved UP vs the captured value. callReplaceVariants + subUpdateLineItemPrice
-    // both already returned success on any 2xx without reading the body, so this is the only
-    // gate that catches a silent regression in the preservation math on a live contract.
+    // Assert it — re-read the new line's realized from Appstle and fail loudly if the post-swap
+    // realized moved ABOVE the rules-derived expectation. callReplaceVariants +
+    // subUpdateLineItemPrice both already returned success on any 2xx without reading the body,
+    // so this is the only gate that catches a silent regression in the preservation math on a
+    // live contract.
     const observedRealizedCents = await readNewLineRealizedCents(
       config.apiKey,
       contractId,
@@ -1435,9 +1437,29 @@ export async function subSwapVariant(
         newLineGid,
       };
     }
+
+    // Compute the rules-derived expected per-unit price for the new variant AT THE NEW QUANTITY
+    // via the same engine that will bill it (resolveSubscriptionPricing wraps priceSubscription).
+    // The DB mirror was updated to the post-swap items by syncItemsAfterMutation above, so this
+    // reflects what the customer is actually asking for — not what they had. Comparing observed
+    // against this expectation lets a legitimate quantity-driven per-unit increase (buy-two break
+    // forfeited when qty drops from 2 → 1) pass, while a silent catalog reset still fails loudly.
+    const expectedRealizedCents = await readRulesExpectedForNewLineCents(
+      workspaceId,
+      contractId,
+      String(newVariantId),
+    );
+    if (expectedRealizedCents <= 0) {
+      return {
+        success: false,
+        error: `Swap on contract ${contractId} succeeded but rules-derived expected price could not be computed — refusing to report success on an unverified swap`,
+        newLineGid,
+      };
+    }
     const raiseErr = assertSwapDidNotRaise({
-      capturedRealizedCents: capturedUnitCents,
+      expectedRealizedCents,
       observedRealizedCents,
+      quantity,
       contractId,
     });
     if (raiseErr) {
@@ -1449,6 +1471,42 @@ export async function subSwapVariant(
   }
 
   return { ...result, newLineGid };
+}
+
+/**
+ * Compute the rules-derived expected per-unit price for the new line via the same pricing engine
+ * that will bill it (`resolveSubscriptionPricing`). Reads the DB mirror of the subscription's
+ * items — `subSwapVariant` calls `syncItemsAfterMutation` before this, so the mirror reflects the
+ * post-swap variant + quantity the customer actually asked for. Returns 0 on any failure (sub
+ * missing, engine couldn't price the line) so the caller refuses to report success rather than
+ * asserting against a bogus expectation.
+ */
+async function readRulesExpectedForNewLineCents(
+  workspaceId: string,
+  contractId: string,
+  newVariantId: string,
+): Promise<number> {
+  try {
+    const admin = createAdminClient();
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("items, delivery_price_cents, pricing_offer_id")
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!sub) return 0;
+    const pricing = await resolveSubscriptionPricing(workspaceId, {
+      items: sub.items as unknown[],
+      delivery_price_cents: (sub.delivery_price_cents as number | null | undefined) ?? null,
+      pricing_offer_id: (sub.pricing_offer_id as string | null | undefined) ?? null,
+    });
+    // PricedLine.variant_id preserves the shape stored on the item — Appstle-rail
+    // syncItemsAfterMutation writes the numeric Shopify variant id, so the line's variant_id
+    // matches `newVariantId` directly.
+    const line = pricing.lines.find((l) => String(l.variant_id) === String(newVariantId));
+    return line?.unit_cents ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**

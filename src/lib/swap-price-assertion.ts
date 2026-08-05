@@ -1,35 +1,40 @@
 /**
  * Pure never-raise assertion for a variant-swap on either rail.
  *
- * SPEC: docs/brain/specs/swap-variant-preserves-the-line-price.md — Phase 3.
+ * The guard exists because `callReplaceVariants` returns success on any 2xx without reading the
+ * body, and on 2026-07-30 286 subscriptions silently reset to catalog before anyone noticed. That
+ * protection must survive.
  *
- * `callReplaceVariants` returns success on any 2xx without reading the body, so "the swap
- * reported success" has repeatedly not meant the swap did what was intended (2026-07-30 crisis:
- * 286 subscriptions silently reset to catalog before anyone noticed). Phases 1 + 2 CARRY the
- * captured realized price forward on both rails; this is the assertion that turns a mispriced
- * post-swap state back into a caller-visible failure instead of a silent success.
+ * Semantics — compares the post-swap OBSERVED per-unit price against the EXPECTED per-unit price
+ * the pricing rules produce for the new variant AT THE NEW QUANTITY. The old baseline (whatever
+ * the line happened to cost before) was only meaningful while quantity stayed put — the moment a
+ * customer changes how many units they take, the per-unit rate legitimately moves (dropping from
+ * qty 2 to qty 1 forfeits the buy-two break, so the per-unit price correctly goes up). Comparing
+ * against the rules keeps working when quantity changes: a catalog reset still lands far above the
+ * rules-derived expectation and fails loudly, and a legitimate recomputation matches its
+ * expectation and passes.
  *
- * Semantics:
- *   – `observed > captured + tolerance` → RAISE → return a human-readable error string.
- *   – anything at-or-below captured is fine (a cheaper new variant is always allowed).
+ *   – `observed > expected + tolerance` → RAISE → return a human-readable error string.
+ *   – anything at-or-below expected is fine (a cheaper realization than the rules is always allowed).
  *   – tolerance defaults to 2¢ so a legitimate Math.round drift on the arithmetic base-solve
  *     doesn't flip the assertion; anything bigger is a real regression to surface.
  *   – `null` means the invariant holds.
  *
- * Pure. Broken out of subscription-items.ts + internal-subscription.ts so we can unit-test the
- * predicate directly (see swap-price-assertion.test.ts) without standing up a subscription or an
- * Appstle vendor mock.
+ * Pure. Takes the expectation as an input (callers compute it via `resolveSubscriptionPricing`
+ * on the post-swap items list) so the predicate stays free of DB access and directly unit-testable
+ * (see swap-price-assertion.test.ts).
  */
 export function assertSwapDidNotRaise(input: {
-  capturedRealizedCents: number;
+  expectedRealizedCents: number;
   observedRealizedCents: number;
+  quantity: number;
   contractId: string;
   toleranceCents?: number;
 }): string | null {
   const tolerance = input.toleranceCents ?? 2;
-  const drift = input.observedRealizedCents - input.capturedRealizedCents;
+  const drift = input.observedRealizedCents - input.expectedRealizedCents;
   if (drift > tolerance) {
-    return `Swap on contract ${input.contractId} raised the line price by ${drift}¢ — expected ≤ ${input.capturedRealizedCents}¢ (with ${tolerance}¢ tolerance), observed ${input.observedRealizedCents}¢`;
+    return `Swap on contract ${input.contractId} raised the line price by ${drift}¢ — expected ≤ ${input.expectedRealizedCents}¢ for quantity ${input.quantity} (with ${tolerance}¢ tolerance), observed ${input.observedRealizedCents}¢`;
   }
   return null;
 }
