@@ -1,5 +1,6 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch, safeStartsWith } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, handlePriceGuardRefusal, checkPortalBan, resolveSub, portalFetch, safeStartsWith } from "@/lib/portal/helpers";
+import type { PriceGuardRefusal } from "@/lib/swap-price-assertion";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
@@ -285,7 +286,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     const { data: cur } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
     const curVars = new Set(((cur?.items as { variant_id?: string }[]) || []).map((i) => String(i.variant_id)));
 
-    let r: { success: boolean; error?: string } = { success: true };
+    let r: { success: boolean; error?: string; priceGuardRefusal?: PriceGuardRefusal } = { success: true };
     if (oldVarIds.length === 1 && newEntries.length === 1) {
       r = await subSwapVariant(auth.workspaceId, String(contractId), oldVarIds[0], newEntries[0][0], newEntries[0][1] || 1);
     } else {
@@ -304,7 +305,17 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       r = await subAddItem(auth.workspaceId, String(contractId), nv, nq);
       if (!r.success) break;
     }
-    if (!r.success) return handleAppstleError(new Error(r.error || "Internal item update failed"), { route: "replaceVariants", payload: body });
+    if (!r.success) {
+      // A price-guard refusal is US declining a swap that would raise the price above the rules
+      // — NOT an Appstle vendor failure. Route to the distinct response class BEFORE the vendor
+      // fallback so an internal-contract refusal never gets mislabeled as an Appstle error
+      // (ticket e2a55cfb: Isabel's portal replacevariants on internal-8922b5701b2f45ea surfaced
+      // as `appstle_error` even though this branch never touches Appstle at all).
+      if (r.priceGuardRefusal) {
+        return handlePriceGuardRefusal(r.priceGuardRefusal, { route: "replaceVariants", payload: body });
+      }
+      return handleAppstleError(new Error(r.error || "Internal item update failed"), { route: "replaceVariants", payload: body });
+    }
   } else {
     try {
       const { healOnTouch } = await import("@/lib/appstle-pricing");

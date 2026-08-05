@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { describePriceGuardRefusal, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
 
 export function jsonOk(body: Record<string, unknown>, status = 200) {
   return NextResponse.json(body, { status });
@@ -241,4 +242,32 @@ export function handleAppstleError(e: unknown, context?: { route?: string; paylo
     appstle_details: err?.details || null,
     request_payload: context?.payload || null,
   }, 502);
+}
+
+/**
+ * Distinct response for a price-guard refusal — a swap the pricing rules would raise us above
+ * gets stopped on purpose. This is US declining, NOT a vendor fault: the error code is
+ * `price_guard_refusal` (not `appstle_error`) and the status is 422 (Unprocessable Entity — the
+ * request is semantically invalid), never 502 (which would blame an upstream). Ticket e2a55cfb
+ * (Isabel, 2026-08-05) surfaced a portal refusal on an INTERNAL contract as an Appstle vendor
+ * error even though Appstle was not involved at all — this helper is what routes both rails'
+ * `priceGuardRefusal` return through a honest classification instead.
+ */
+export function handlePriceGuardRefusal(
+  refusal: PriceGuardRefusal,
+  context?: { route?: string; payload?: unknown },
+): NextResponse {
+  return jsonErr(
+    {
+      error: "price_guard_refusal",
+      message: describePriceGuardRefusal(refusal),
+      reason: refusal.reason,
+      expected_realized_cents: refusal.expectedRealizedCents,
+      observed_realized_cents: refusal.observedRealizedCents,
+      quantity: refusal.quantity,
+      contract_id: refusal.contractId,
+      request_payload: context?.payload || null,
+    },
+    422,
+  );
 }
