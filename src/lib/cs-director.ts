@@ -66,7 +66,22 @@ import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies"
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
+export type CsDirectorDecision =
+  | "approve_remedy"
+  | "author_spec"
+  | "escalate_founder"
+  | "close_no_action"
+  /**
+   * `message_only` — Phase 3 of cs-director-call-loop-guard-and-message-only-remedy. June sends a
+   * customer-facing explanation and resolves the ticket, with NO money or account mutation. The
+   * verb exists because a ticket whose money is settled but whose customer is uninformed has no
+   * other executable outcome (ticket 86043da0 / Jan Bloom: money already unwound, the only thing
+   * missing was telling the customer). Without this verb June's correct verdict "just tell the
+   * customer" had nowhere to go — the job parked and the CS auto-router fed the 69-call loop
+   * Phase 1 caps. Materialized through the SAME delivery primitive `approve_remedy` uses
+   * (`deliverTicketMessage`, wrapping `sendThreadedReply`) — no new send path.
+   */
+  | "message_only";
 
 /**
  * The verdict shape the CS Director emits — mirrors `CsDirectorVerdict` in
@@ -120,7 +135,7 @@ export interface CsDirectorVerdictInput {
  */
 export interface ApplyBoxCsDirectorCallResult {
   ok: boolean;
-  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "noop";
+  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "message_only" | "noop";
   reason?: string;
   needs_attention?: boolean;
   error?: string;
@@ -2181,6 +2196,148 @@ async function handleEscalateFounder(
   }
 }
 
+// ── Phase 3 of cs-director-call-loop-guard-and-message-only-remedy ─────────────────────────────
+
+/**
+ * Detect the ONE class of misuse the message_only verb refuses: a remedy that ALSO carries
+ * mutation-shaped fields (`action_type` / `actions[]`). The whole safety of `message_only` is that
+ * it CANNOT touch money or accounts — a mutation smuggled in via a mis-typed verdict would silently
+ * turn a "just tell the customer" outcome into an executed refund/cancel/etc. Pure so the guard
+ * can be exercised in a unit test without booting the executor.
+ */
+export function messageOnlyRemedyHasMutation(remedy: Record<string, unknown> | null | undefined): boolean {
+  if (!remedy) return false;
+  if (typeof remedy.action_type === "string" && remedy.action_type.trim().length > 0) return true;
+  if (Array.isArray(remedy.actions) && remedy.actions.length > 0) return true;
+  return false;
+}
+
+/**
+ * Phase 3 executor for `message_only`
+ * ([[../../docs/brain/specs/cs-director-call-loop-guard-and-message-only-remedy]] § Phase 3).
+ * Sends the customer-facing explanation from `verdict.remedy.customer_message` via the SAME
+ * `deliverTicketMessage` primitive `approve_remedy` uses (which wraps [[tickets-reply]]
+ * `sendThreadedReply`), then RESOLVES the ticket via the runner's transition patch
+ * ([[cs-director-ticket-transition]] `close_and_deescalate`). NO account or money mutation — the
+ * whole point is that a settled-money ticket needs only a message; running the executor would
+ * open the door back to a double-pay (the derived-from ticket 86043da0 failure mode).
+ *
+ * Guards (all park `needs_attention` — never silently upgrade to a mutation, never promise a
+ * fix we couldn't ship):
+ *  - `verdict.remedy` missing a customer_message → `message_only_missing_message`.
+ *  - `verdict.remedy` carries an `action_type` / `actions[]` → `message_only_mutation_attempt`
+ *    (the mis-use class the verb's safety depends on rejecting).
+ *  - `ticket_id` unresolvable from `job.instructions` → `ticket_id_unresolved` (no addressee).
+ *  - `tickets` row missing customer_id / channel → `ticket_missing_customer`.
+ *  - `deliverMessage` threw → `delivery_threw` (a real failure — the customer didn't hear back).
+ *
+ * Never throws — every failure returns a structured result so the runner logs it on `log_tail`
+ * and parks the job. The message is delivered EXACTLY ONCE per verdict (no executor to loop).
+ */
+async function handleMessageOnly(
+  admin: Admin,
+  jobId: string,
+  workspaceId: string,
+  verdict: CsDirectorVerdictInput,
+  deps: ApproveRemedyDeps = defaultApproveRemedyDeps,
+): Promise<ApplyBoxCsDirectorCallResult> {
+  const tag = `[cs-director:${jobId.slice(0, 8)}]`;
+  try {
+    // 1. Guard: a message_only remedy MUST NOT carry a mutation. This is the safety of the verb
+    //    ("no money or account mutation is involved"): a mis-typed verdict that names an action
+    //    is refused, never silently upgraded to approve_remedy.
+    if (messageOnlyRemedyHasMutation(verdict.remedy)) {
+      const error = `message_only: remedy carries mutation-shaped fields (action_type / actions[]) — refused, no delivery`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "message_only",
+        needs_attention: true,
+        reason: "message_only_mutation_attempt",
+        error,
+      };
+    }
+
+    // 2. Extract the customer message. Reuses the same field-name heuristic approve_remedy uses
+    //    (`customer_message` canonical + `response_message` / `message` / `customer_reply` fallbacks)
+    //    so the verdict shape is consistent across verbs.
+    const message = verdict.remedy ? extractRemedyCustomerMessage(verdict.remedy) : null;
+    if (!message || !message.trim()) {
+      const error = `message_only: no customer_message on verdict.remedy — nothing to send, no resolution`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "message_only",
+        needs_attention: true,
+        reason: "message_only_missing_message",
+        error,
+      };
+    }
+
+    // 3. Resolve the ticket_id from job.instructions (same shape approve_remedy + author_spec read).
+    const linkage = await resolveLinkageFromJob(admin, jobId);
+    if (!linkage.ticketId) {
+      const error = `message_only: ticket_id not resolvable from job.instructions — no addressee, no delivery`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "message_only",
+        needs_attention: true,
+        reason: "ticket_id_unresolved",
+        error,
+      };
+    }
+
+    // 4. Resolve customer + channel + sandbox for delivery.
+    const facts = await deps.loadTicketFacts(admin, linkage.ticketId);
+    if (!facts || !facts.customer_id) {
+      const error = `message_only: ticket ${linkage.ticketId.slice(0, 8)} has no customer_id — no delivery`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "message_only",
+        needs_attention: true,
+        reason: "ticket_missing_customer",
+        error,
+      };
+    }
+    const sandbox = await deps.loadWorkspaceSandbox(admin, workspaceId);
+    const channel = facts.channel || "email";
+
+    // 5. Deliver via the SAME primitive approve_remedy uses (deliverTicketMessage → sendThreadedReply
+    //    under the hood). No placeholder substitution: message_only NEVER runs an executor, so there
+    //    are no action results to substitute against — an authored `{{label_url}}` would be a bug
+    //    (June should not reference an action result in a no-mutation reply), and we ship the message
+    //    verbatim rather than run substituteActionPlaceholders with an empty result set.
+    try {
+      await deps.deliverMessage(admin, workspaceId, linkage.ticketId, channel, message, sandbox);
+      console.log(`${tag} message_only: customer message delivered (ticket=${linkage.ticketId.slice(0, 8)})`);
+      return { ok: true, handler: "message_only", message_delivered: true };
+    } catch (e) {
+      const errMsg = errText(e);
+      const error = `message_only: delivery threw (${errMsg}) — customer did not hear back`;
+      console.warn(`${tag} ${error}`);
+      return {
+        ok: false,
+        handler: "message_only",
+        needs_attention: true,
+        reason: "delivery_threw",
+        error,
+      };
+    }
+  } catch (e) {
+    const errMsg = errText(e);
+    console.error(`${tag} handleMessageOnly threw:`, errMsg);
+    return {
+      ok: false,
+      handler: "message_only",
+      needs_attention: true,
+      reason: "handler_threw",
+      error: `message_only: handler threw (${errMsg})`,
+    };
+  }
+}
+
 // ── Public entrypoint ──────────────────────────────────────────────────────────────────────────
 
 /**
@@ -2253,6 +2410,13 @@ export async function applyBoxCsDirectorCall(
     }
     if (verdict.decision === "escalate_founder") {
       return handleEscalateFounder(admin, jobId, job.workspace_id, verdict, approveRemedyDeps);
+    }
+    // Phase 3 of cs-director-call-loop-guard-and-message-only-remedy — the new no-mutation verb.
+    // Reuses the ApproveRemedyDeps bag so tests share the same dep injection shape; the handler
+    // itself only exercises loadTicketFacts / loadWorkspaceSandbox / deliverMessage (never
+    // runExecutor — the whole point of the verb is no account/money mutation).
+    if (verdict.decision === "message_only") {
+      return handleMessageOnly(admin, jobId, job.workspace_id, verdict, approveRemedyDeps);
     }
 
     // close_no_action — nothing to execute here. The runner's `decideCsDirectorTicketTransition`

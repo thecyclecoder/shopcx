@@ -14855,7 +14855,16 @@ interface CsDirectorCallInstructions {
   second_opinion_of?: string;
 }
 
-type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder";
+// Kept in sync with src/lib/cs-director.ts `CsDirectorDecision`. `close_no_action` +
+// `message_only` (Phase 3 of cs-director-call-loop-guard-and-message-only-remedy) are the two
+// resolution-side verbs the executor also handles — the normalizer below whitelists them explicitly
+// so a valid June verdict is never re-branded as `escalate_founder`.
+type CsDirectorDecision =
+  | "approve_remedy"
+  | "author_spec"
+  | "escalate_founder"
+  | "close_no_action"
+  | "message_only";
 
 // The verdict shape the CS Director emits. `remedy` + `spec_seed` are the loose Phase-2 handoff shapes
 // (RemedyPlan + SpecSeed) — the runner records them verbatim so applyBoxCsDirectorCall can consume the
@@ -14922,7 +14931,8 @@ function normalizeCsDirectorVerdict(raw: unknown): CsDirectorVerdict | null {
     decisionRaw === "approve_remedy" ||
     decisionRaw === "author_spec" ||
     decisionRaw === "escalate_founder" ||
-    decisionRaw === "close_no_action"
+    decisionRaw === "close_no_action" ||
+    decisionRaw === "message_only"
       ? (decisionRaw as CsDirectorDecision)
       : "escalate_founder";
   const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";

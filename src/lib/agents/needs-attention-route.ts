@@ -753,6 +753,16 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
           // either be terminal by then, or June bounced it back and we can re-enqueue).
           continue;
         }
+        if (outcome.reason === "loop_guard_tripped") {
+          // Phase 1 of cs-director-call-loop-guard-and-message-only-remedy — the applier has
+          // ALREADY escalated the loop to the CEO (dedupe: cs-director-loop-guard:<ticket>),
+          // stamped `cs_director_loop_guard` on director_activity, and compare-and-set flipped
+          // the parked row terminal with the `routed_cs_owner` marker. Do NOT fall through to
+          // the generic backstop — a backstop escalation on top of the CEO card would double-page,
+          // and the 70-min invariant alarm cannot fire against a routed row.
+          chatted.push(row.spec_slug ?? row.id.slice(0, 8));
+          continue;
+        }
         // enqueue_failed / no_ticket_id / compare_and_set_lost — fall through to the generic
         // class dispatch + backstop so the row still surfaces somewhere.
       }

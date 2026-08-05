@@ -35,7 +35,19 @@
  * See docs/brain/libraries/cs-director.md loop-closure contract + Phase 2 verification bullet.
  */
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
+export type CsDirectorDecision =
+  | "approve_remedy"
+  | "author_spec"
+  | "escalate_founder"
+  | "close_no_action"
+  /**
+   * `message_only` — Phase 3 of cs-director-call-loop-guard-and-message-only-remedy. June sends a
+   * customer-facing explanation and RESOLVES the ticket (not parks it), with no money or account
+   * mutation involved. The transition maps it to `close_and_deescalate` — the same terminal patch
+   * `author_spec` + a resolving `approve_remedy` land on — so the ticket cannot feed the loop
+   * Phase 1 and 2 close.
+   */
+  | "message_only";
 
 export type CsDirectorTransitionActionKey =
   | "close_and_deescalate"
@@ -228,6 +240,12 @@ export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInpu
     // and the customer was already asked for identifying info; a "nothing to do" ticket). Close +
     // de-escalate + unassign — do NOT page the founder for a no-op. See cs-director § close_no_action.
     case "close_no_action":
+      return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
+    // message_only (Phase 3 of cs-director-call-loop-guard-and-message-only-remedy) — June sent
+    // a customer-facing explanation and there is NO account/money mutation to await. The message
+    // IS the resolution. Same close+clear patch as close_no_action / author_spec so the ticket
+    // does not linger open (which would let the CS auto-router feed the loop Phase 1 caps).
+    case "message_only":
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
     case "approve_remedy":
       // Close when the remedy explicitly signals no reply is pending OR the
