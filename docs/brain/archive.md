@@ -12,7 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop the cs-director-call self-routing loop, and give June a message-only remedy** · verified 2026-08-05 · → [[../libraries/cs-director]]
 - **Error-feed: drop Braintree portal vault "Closed Card" processor-decline noise** · verified 2026-08-05 · → [[../libraries/control-tower]]
+- **The never-raise swap guard blocks legitimate quantity changes — compare against the rules, not the previous price** · verified 2026-08-05 · → [[../libraries/swap-price-assertion]]
 - **KPI audit: nonzero small-count boundary-race floor** · verified 2026-08-04 · → [[libraries/kpi-review]]
 - **Mario can't see a build that never reported finishing** · verified 2026-08-03 · → [[../libraries/mario]], [[../tables/mario_thresholds]], [[../tables/spec_timecard_events]]
 - **A customer escalated to the founder still hears back** · verified 2026-08-03 · → [[../libraries/cs-director]]
