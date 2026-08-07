@@ -27,6 +27,8 @@
  */
 import { createHash } from "crypto";
 import type { createAdminClient } from "@/lib/supabase/admin";
+import type { StructuredSpecInput, StructuredPhaseInput } from "@/lib/author-spec";
+import type { SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -147,6 +149,133 @@ export function depFindingSignature(findings: Array<{ name: string; severity: st
   const keys = [...new Set((findings || []).map((f) => `${String(f.name || "").trim()}@${String(f.severity || "").trim()}`).filter(Boolean))].sort();
   if (!keys.length) return "clean";
   return createHash("sha1").update(keys.join("|")).digest("hex").slice(0, 12);
+}
+
+/** One `npm audit` finding the dep-watch surfaces (kept structurally identical to
+ *  `scripts/builder-worker.ts` `DepFinding` so the box can hand its findings straight in). */
+export interface DepUpgradeFinding {
+  name: string;
+  severity: string;
+  title: string;
+  fixTo: string | null;
+  major: boolean;
+}
+
+/** The typed parent (function|mandate) every dep-upgrade fix spec anchors under —
+ *  mirrors [[repair-agent]] `REPAIR_FIX_PARENT_KIND/REF` so the structured author-chokepoint's
+ *  parent-resolution gate has the anchor to look up in `docs/brain/functions/platform.md`. */
+export const DEP_UPGRADE_PARENT_KIND = "mandate" as const;
+export const DEP_UPGRADE_PARENT_REF = "platform#infra-devops-reliability" as const;
+export const DEP_UPGRADE_PARENT_PROSE =
+  `[[../functions/platform]] — "Infra & DevOps / reliability" mandate: security-agent's daily ` +
+  `dep-watch keeps the tree free of known CVEs.`;
+
+/** The npm-script name the `unit_test` machine check invokes. Kept in sync with
+ *  package.json's `check:npm-audit-actionable` — a rename must touch BOTH so the check validates.
+ *  Named as a bare literal so the spec's phase body can pin it verbatim (spec-pin escape valve
+ *  in [[spec-phase-checks-table]] `detectBuilderChosenNameInGrep`). */
+export const DEP_UPGRADE_AUDIT_SCRIPT = "check:npm-audit-actionable";
+
+/**
+ * Build the [[author-spec]] `StructuredSpecInput` for the dep-upgrade fix spec — the ONE typed
+ * door `authorDepUpgradeSpec` hands to `authorSpecRowStructured`. Deterministic + pure (no DB / no
+ * LLM). Every phase carries `exec_kind`-typed machine checks, so the author-chokepoint's
+ * `assertEveryPhaseHasMachineCheck` invariant holds on the SAME rail every other autonomous writer
+ * funnels through.
+ *
+ * retire-md-spec-writers-db-is-sole-spec Phase 4 (dep-watch conversion): the markdown door was
+ * silently rejecting every dep-upgrade spec because the prose Verification bullets parsed to
+ * `exec_kind='needs_human'` and the every-writer-authors-machine-runnable-verifications gate
+ * refused the spec — so a real advisory count climbed to 10 across 17 days without ever raising a
+ * fix. This helper closes that hole: the returned input carries a `unit_test` check that re-runs
+ * `npm audit` (via package.json's `check:npm-audit-actionable`) and exits non-zero while any
+ * actionable advisory remains, plus a `tsc` check that catches a semver-major upgrade that broke
+ * the build. Both are checks the deterministic runner can execute; a shipped upgrade is verifiable.
+ */
+export function buildDepUpgradeSpecInput(
+  findings: readonly DepUpgradeFinding[],
+  signature: string,
+): StructuredSpecInput {
+  const rows = findings.map((f) => {
+    const fix = f.fixTo
+      ? f.major
+        ? `${f.fixTo} (⚠️ semver-major — review breaking changes)`
+        : f.fixTo
+      : "no automatic fix — manual upgrade/replace";
+    return `- **${f.name}** (${f.severity}) — ${f.title}. Upgrade → ${fix}`;
+  });
+
+  const specWhy =
+    `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) ` +
+    `(≥ moderate, with published fixes). Every day this sits unfixed, our tree is running a ` +
+    `known-vulnerable version — the exact class of shipped code the security mandate exists to ` +
+    `keep out. Advisory signature \`${signature}\`.`;
+  const specWhat =
+    `When this spec ships, every listed dependency is bumped to its published fixed version, ` +
+    `the tree passes \`npm audit\` clean of actionable (≥ moderate + fixAvailable) advisories, ` +
+    `and the build still typechecks — a semver-major bump that broke the build is not a fix.`;
+
+  const phaseBody = [
+    `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) ` +
+      `(≥ moderate, all with fixes available). Bump the affected dependencies to their fixed ` +
+      `versions — NEVER auto-bumped; this owner-gated build does the bump + the \`tsc\` gate.`,
+    ``,
+    ...rows,
+    ``,
+    `Apply the upgrades (e.g. \`npm audit fix\`, or bump each in package.json + \`npm install\`), ` +
+      `then gate on \`npx tsc --noEmit\` and the machine check \`${DEP_UPGRADE_AUDIT_SCRIPT}\` ` +
+      `(re-runs \`npm audit\` and exits non-zero while any actionable advisory remains). Flag any ` +
+      `semver-major bump for human review before merge.`,
+    ``,
+    `**Dep-advisory-signature:** \`${signature}\``,
+  ].join("\n");
+
+  const phaseVerification = [
+    `- Re-run \`npm audit\` (via \`npm run ${DEP_UPGRADE_AUDIT_SCRIPT}\`) → expect 0 actionable ` +
+      `advisories (severity ≥ moderate with \`fixAvailable\`).`,
+    `- \`npx tsc --noEmit\` is clean after the bumps.`,
+  ].join("\n");
+
+  const phaseChecks: SpecPhaseCheckInput[] = [
+    {
+      position: 1,
+      description:
+        `\`npm run ${DEP_UPGRADE_AUDIT_SCRIPT}\` exits 0 — no actionable (≥ moderate + fixAvailable) ` +
+        `advisory remains in the tree.`,
+      kind: "auto",
+      exec_kind: "unit_test",
+      params: { script: DEP_UPGRADE_AUDIT_SCRIPT },
+    },
+    {
+      position: 2,
+      description: "Repo typechecks clean (`npx tsc --noEmit`) after the dependency bumps.",
+      kind: "auto",
+      exec_kind: "tsc",
+      params: null,
+    },
+  ];
+
+  const phase: StructuredPhaseInput = {
+    title: "upgrade the vulnerable dependencies",
+    body: phaseBody,
+    verification: phaseVerification,
+    why: specWhy,
+    what: specWhat,
+    status: "planned",
+    checks: phaseChecks,
+  };
+
+  return {
+    title: "Security dependency upgrades",
+    summary:
+      `Auto-authored by [[../libraries/security-agent]] daily dep-watch. Advisory signature ` +
+      `\`${signature}\`.`,
+    owner: "[[../functions/platform]]",
+    parent: DEP_UPGRADE_PARENT_PROSE,
+    why: specWhy,
+    what: specWhat,
+    phases: [phase],
+  };
 }
 
 /**
