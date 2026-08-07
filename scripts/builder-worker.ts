@@ -24537,15 +24537,35 @@ function securityFixSpecMarkdown(spec: SecurityFixProposal, parentSlug: string, 
 }
 
 // Author the fix spec on main DIRECTLY (mirrors authorRegressionFixSpec — same-slug convergence stays
-// idempotent). Returns the resolved slug + whether it pre-existed, or null on failure. The `source`
-// discriminator picks the diff/branch flavor of the rendered spec markdown.
-async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: SecurityFixSource, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+// idempotent). Returns the resolved slug + whether it pre-existed on success, or
+// `{authorError, slug?}` when the write failed — the underlying error class + message the author
+// chokepoint threw (or the pre-flight bail reason when the LLM's seed lacks a usable slug/title).
+// NEVER swallows to null — the caller carries `authorError` onto the surfaced action / parked
+// job's `error`/`log_tail` so the failure is diagnosable on sight (same discipline as
+// [[repair-agent]] `groupOrAuthorRepairSpec`). The `source` discriminator picks the diff/branch
+// flavor of the rendered spec markdown.
+type SecurityFixAuthorSuccess = { slug: string; alreadyExists: boolean };
+type SecurityFixAuthorFailure = { authorError: string; slug: string | null };
+type SecurityFixAuthorResult = SecurityFixAuthorSuccess | SecurityFixAuthorFailure;
+
+async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: SecurityFixSource, workspaceId: string): Promise<SecurityFixAuthorResult> {
   const s = (raw || {}) as SecurityFixProposal;
   const rawSlug = String(s.slug || "");
   const title = String(s.title || "");
-  if (!rawSlug || !title) return null;
+  if (!rawSlug || !title) {
+    return {
+      authorError:
+        `MalformedSeed: security fix-spec proposal is missing ${!rawSlug ? "slug" : ""}${!rawSlug && !title ? " + " : ""}${!title ? "title" : ""} — the LLM's spec envelope did not carry a usable identity; nothing to author`,
+      slug: null,
+    };
+  }
   const slug = rawSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase().replace(/^-+|-+$/g, "").slice(0, 60);
-  if (!slug) return null;
+  if (!slug) {
+    return {
+      authorError: `MalformedSeed: security fix-spec proposal slug "${rawSlug}" normalized to empty (only non-slug characters) — nothing to author`,
+      slug: null,
+    };
+  }
   try {
     // spec-pm-markdown-purge: existence + same-slug convergence checks the DB row; author ONLY the DB.
     const { getSpec } = await import("../src/lib/brain-roadmap");
@@ -24633,17 +24653,25 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
         { intendedStatusSetBy: "security-agent", parentKind: "mandate", parentRef: "platform#security" },
       );
       if (!ok) {
+        const authorError = `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (soft-halt: runaway circuit-breaker or silent no-op)`;
         console.warn(`[security] structured author returned false for ${slug}`);
-        return null;
+        return { authorError, slug };
       }
     } catch (e) {
-      console.warn(`[security] spec DB author failed for ${slug}: ${errText(e)}`);
-      return null;
+      // Preserve the throw's class + message so the caller surfaces WHY the author-chokepoint
+      // rejected this fix — MissingMachineCheckError / MissingVerificationError /
+      // MissingIntentError / InvalidParentError / AuthorWriteFailedError / EmptyPhaseBodyError.
+      const name = e instanceof Error ? e.name : "Error";
+      const msg = errText(e);
+      console.warn(`[security] spec DB author failed for ${slug}: ${name}: ${msg}`);
+      return { authorError: `${name}: ${msg}`, slug };
     }
     return { slug, alreadyExists: false };
   } catch (e) {
-    console.warn(`[security] spec author failed: ${errText(e)}`);
-    return null;
+    const name = e instanceof Error ? e.name : "Error";
+    const msg = errText(e);
+    console.warn(`[security] spec author failed for ${slug}: ${name}: ${msg}`);
+    return { authorError: `${name}: ${msg}`, slug };
   }
 }
 
@@ -24794,7 +24822,16 @@ async function runNpmAudit(): Promise<{ ok: boolean; findings: DepFinding[]; tot
 }
 
 // Author/refresh the single stable dep-upgrade spec on main. Idempotent: re-writes the body so the
-// advisory list stays current (find-or-update, never N specs). Returns the slug + whether it pre-existed.
+// advisory list stays current (find-or-update, never N specs). Returns the slug + whether it
+// pre-existed on success, or `{authorError}` when the write failed — the underlying error class +
+// message the author chokepoint threw (MissingMachineCheckError / MissingVerificationError /
+// MissingIntentError / InvalidParentError / AuthorWriteFailedError / a raw DB error). NEVER swallows
+// to `null` — a swallowed reason is exactly the gap Phase 2 of
+// security-dep-watch-authors-structured-and-never-ages-out closes: pre-fix, the lane parked with
+// "could not author dep-upgrade spec" + "N advisory(ies) but spec author failed" and no underlying
+// error, so a broken security watcher went unexamined for 17 days while the advisory count more
+// than tripled. Now the caller carries `authorError` straight onto the needs_attention park's
+// `error` column (mirrors [[repair-agent]] `groupOrAuthorRepairSpec` → runRepairJob).
 //
 // security-dep-watch-authors-structured-and-never-ages-out Phase 1 — this lane used to funnel the
 // dep-upgrade spec through the RETIRED `authorSpecRowFromMarkdown` / `markNewSpecInReview` door,
@@ -24805,7 +24842,11 @@ async function runNpmAudit(): Promise<{ ok: boolean; findings: DepFinding[]; tot
 // [[security-agent]] `buildDepUpgradeSpecInput` and authors through the SANCTIONED
 // `authorSpecRowStructured` chokepoint — the SAME rail every other autonomous writer funnels
 // through (mirror of the repair-agent lane's Phase-2 switch to `buildRepairSpecInput`).
-async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
+type DepUpgradeAuthorSuccess = { slug: string; alreadyExists: boolean };
+type DepUpgradeAuthorFailure = { authorError: string; slug: string };
+type DepUpgradeAuthorResult = DepUpgradeAuthorSuccess | DepUpgradeAuthorFailure;
+
+async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, workspaceId: string): Promise<DepUpgradeAuthorResult> {
   const {
     SECURITY_DEP_UPGRADE_SLUG,
     DEP_UPGRADE_PARENT_KIND,
@@ -24818,42 +24859,46 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
     const { getSpec } = await import("../src/lib/brain-roadmap");
     const existing = await getSpec(slug, workspaceId);
     const structuredInput = buildDepUpgradeSpecInput(findings, signature);
-    try {
-      // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to
-      // `in_review` with the actor stamp before the DB write so surfaces that key off
-      // `intended_status` behave identically to the retired markdown path. A refresh preserves
-      // the live status via `authorSpecRowStructured`'s standing behavior (no `status` opt passed).
-      if (!existing) {
-        const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
-        try {
-          await markSpecCardForReview(workspaceId, slug, "planned", {
-            actor: "security-agent",
-            reason: `security-agent dep-watch (sig ${signature})`,
-          });
-        } catch (e) {
-          console.warn(`[spec-card-state] markSpecCardForReview (security-agent) ${slug} failed:`, e instanceof Error ? e.message : e);
-        }
+    // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to
+    // `in_review` with the actor stamp before the DB write so surfaces that key off
+    // `intended_status` behave identically to the retired markdown path. A refresh preserves
+    // the live status via `authorSpecRowStructured`'s standing behavior (no `status` opt passed).
+    if (!existing) {
+      const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+      try {
+        await markSpecCardForReview(workspaceId, slug, "planned", {
+          actor: "security-agent",
+          reason: `security-agent dep-watch (sig ${signature})`,
+        });
+      } catch (e) {
+        console.warn(`[spec-card-state] markSpecCardForReview (security-agent) ${slug} failed:`, e instanceof Error ? e.message : e);
       }
-      const { authorSpecRowStructured } = await import("../src/lib/author-spec");
-      const authored = await authorSpecRowStructured(workspaceId, slug, structuredInput, "planned", {
-        intendedStatusSetBy: "security-agent",
-        parentKind: DEP_UPGRADE_PARENT_KIND,
-        parentRef: DEP_UPGRADE_PARENT_REF,
-      });
-      if (!authored) {
-        console.warn(
-          `[security] dep-upgrade spec author returned false for ${slug} — the row did not land in public.specs (silent no-op)`,
-        );
-        return null;
-      }
-    } catch (e) {
-      console.warn(`[security] dep-upgrade spec structured author failed for ${slug}: ${errText(e)}`);
-      return null;
+    }
+    const { authorSpecRowStructured } = await import("../src/lib/author-spec");
+    const authored = await authorSpecRowStructured(workspaceId, slug, structuredInput, "planned", {
+      intendedStatusSetBy: "security-agent",
+      parentKind: DEP_UPGRADE_PARENT_KIND,
+      parentRef: DEP_UPGRADE_PARENT_REF,
+    });
+    if (!authored) {
+      // A `false` return from the structured chokepoint means a soft-halt path (e.g. the
+      // runaway-authoring circuit breaker in author-spec.ts). Surface the concrete reason so the
+      // caller's park carries WHY rather than a bare "spec author failed".
+      const authorError = `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (soft-halt: runaway circuit-breaker or silent no-op)`;
+      console.warn(`[security] dep-upgrade spec author returned false for ${slug}`);
+      return { authorError, slug };
     }
     return { slug, alreadyExists: !!existing };
   } catch (e) {
-    console.warn(`[security] dep-upgrade spec author failed: ${errText(e)}`);
-    return null;
+    // repair-verify-spec-persisted-before-build Phase 3 discipline (same as repair-agent) —
+    // preserve the throw's class + message so the caller can write it to the parked job's
+    // `error` field. NAMED classes (MissingMachineCheckError / MissingVerificationError /
+    // MissingIntentError / InvalidParentError / AuthorWriteFailedError / EmptyPhaseBodyError)
+    // reach the operator + Ada's platform supervision lane with the exact rejection reason.
+    const name = e instanceof Error ? e.name : "Error";
+    const msg = errText(e);
+    console.warn(`[security] dep-upgrade spec author failed for ${slug}: ${name}: ${msg}`);
+    return { authorError: `${name}: ${msg}`, slug };
   }
 }
 
@@ -25070,7 +25115,7 @@ async function applySecurityVerdictToJob(
   if (verdict === "real-vuln") {
     const review = String(parsed?.review || "");
     const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
-    if (!authored) {
+    if ("authorError" in authored) {
       // security-escalation-carries-fix-spec-or-one-click-author-action Phase 1 — the auto-author
       // FAILED (the LLM's `spec` seed lacked a slug/title, or authorSpecRowStructured refused it). The
       // OLD behavior parked a dead-end `needs_attention` with error="no valid fix spec authored" — the
@@ -25078,6 +25123,11 @@ async function applySecurityVerdictToJob(
       // seeded with the finding envelope. Approving the action re-runs the authoring lane from the
       // seed (see runSecurityReviewJob's resume path). The card copy shifts from "no valid fix spec
       // authored" to "Author the fix →".
+      //
+      // security-dep-watch-authors-structured-and-never-ages-out Phase 2 — carry the underlying
+      // author error into the surfaced action's log_tail + director-activity reason so the operator
+      // reads WHY authoring failed (MissingMachineCheckError / MalformedSeed / …) rather than a
+      // bare "auto-author failed". Same discipline as the dep-watch caller above.
       const seed = seedAuthorFixSpecPayload(parsed, parentSlug, source, review);
       const action: PendingAction = {
         id: `secauth${job.id.slice(0, 6)}`,
@@ -25092,17 +25142,17 @@ async function applySecurityVerdictToJob(
         directorFunction: SECURITY_DIRECTOR_FUNCTION,
         actionKind: "escalated",
         specSlug: parentSlug,
-        reason: activityReason("real-vuln (author-failed)", `${review}\n\nauto-author failed — seed captured; approve to author the fix spec`),
-        metadata: { ...activityMetadata, seed_author_fix_spec: true },
+        reason: activityReason("real-vuln (author-failed)", `${review}\n\nauto-author failed (${authored.authorError}) — seed captured; approve to author the fix spec`),
+        metadata: { ...activityMetadata, seed_author_fix_spec: true, author_error: authored.authorError },
       });
       await update(job.id, {
         status: "needs_approval",
         error: null,
         pending_actions: [action],
-        log_tail: `real finding → auto-author failed. Author the fix → tap Approve to author the fix spec from the finding.\n\n${review}`.slice(-2000),
+        log_tail: `real finding → auto-author failed (${authored.authorError}). Author the fix → tap Approve to author the fix spec from the finding.\n\n${review}`.slice(-2000),
       });
       await emitVerdict();
-      console.log(`${tag} real-vuln but auto-author failed → surfaced author_fix_spec action`);
+      console.log(`${tag} real-vuln but auto-author failed → surfaced author_fix_spec action — ${authored.authorError}`);
       return;
     }
     const ledger = JSON.stringify({ ...instr, verdict, authored_slug: authored.slug });
@@ -25240,11 +25290,17 @@ async function runSecurityReviewJob(job: Job) {
     const parentSlug = payload.parent_slug || instr.spec_slug || job.spec_slug;
     const proposal = proposalFromAuthorFixSpecPayload(payload);
     const authored = await authorSecurityFixSpec(proposal, parentSlug, source, job.workspace_id);
-    if (!authored) {
+    if ("authorError" in authored) {
+      // security-dep-watch-authors-structured-and-never-ages-out Phase 2 — carry the underlying
+      // author error onto BOTH `error` + `log_tail` so a CEO-approved re-authoring that STILL
+      // fails is diagnosable on sight (pre-Phase-2 it parked with the generic "authoring failed"
+      // and lost the reason).
       authorAction.status = "failed";
-      authorAction.result = "authoring failed on the synthesized seed";
-      await update(job.id, { status: "needs_attention", pending_actions: job.pending_actions, error: "author_fix_spec resume: authoring failed", log_tail: `author_fix_spec resume: seed authoring failed for ${parentSlug}`.slice(-2000) });
-      console.log(`${tag} author_fix_spec resume: seed authoring failed`);
+      authorAction.result = `authoring failed on the synthesized seed — ${authored.authorError}`;
+      const parkError = `author_fix_spec resume: authoring failed — ${authored.authorError}`.slice(0, 2000);
+      const parkTail = `author_fix_spec resume: seed authoring failed for ${parentSlug} — ${authored.authorError}`.slice(-2000);
+      await update(job.id, { status: "needs_attention", pending_actions: job.pending_actions, error: parkError, log_tail: parkTail });
+      console.log(`${tag} author_fix_spec resume: seed authoring failed — ${authored.authorError}`);
       return;
     }
     authorAction.status = "done";
@@ -25315,9 +25371,17 @@ async function runSecurityReviewJob(job: Job) {
       }
       const signature = depFindingSignature(audit.findings.map((f) => ({ name: f.name, severity: f.severity })));
       const authored = await authorDepUpgradeSpec(audit.findings, signature, job.workspace_id);
-      if (!authored) {
-        await update(job.id, { status: "needs_attention", error: "could not author dep-upgrade spec", log_tail: `${audit.findings.length} advisory(ies) but spec author failed` });
-        console.log(`${tag} dep-watch: spec author failed → needs-human`);
+      if ("authorError" in authored) {
+        // security-dep-watch-authors-structured-and-never-ages-out Phase 2 — surface the underlying
+        // author error onto BOTH the `error` field (what the parked-router surfaces on the CEO card
+        // + Ada's platform supervision feed) AND the `log_tail` (what the operator reads inline).
+        // Pre-Phase-2 the park read "could not author dep-upgrade spec" + "N advisory(ies) but spec
+        // author failed" with no underlying reason — the exact gap that kept a broken security
+        // watcher unexamined for 17 days while the advisory count climbed from 3 to 10.
+        const parkError = `could not author dep-upgrade spec: ${authored.authorError}`.slice(0, 2000);
+        const parkTail = `${audit.findings.length} advisory(ies) but spec author failed — ${authored.authorError}`.slice(-2000);
+        await update(job.id, { status: "needs_attention", error: parkError, log_tail: parkTail });
+        console.log(`${tag} dep-watch: spec author failed → needs-human — ${authored.authorError}`);
         return;
       }
       const ledger = JSON.stringify({ ...instr, mode: "dep-watch", verdict: "real-vuln", authored_slug: authored.slug, finding_signature: signature });
