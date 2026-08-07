@@ -1,0 +1,1 @@
+- **The CVE watcher can't author its own fix spec — 10 patchable advisories have sat unfixed since July** · verified 2026-08-07 · → [[../libraries/security-agent]]
