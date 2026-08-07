@@ -107,6 +107,49 @@ The 2026-07-05 commerce-sdk-display-operations build wedge exposed a **recurring
 
 **Surfaced (box-multi-account-failover Phase 2):** the worker writes a per-account snapshot onto its [[../tables/worker_heartbeats|heartbeat]] (`accounts` column — per-account in-flight load + capped state, healthy/all-capped flags, soonest-reset, and a recent cap/failover/recovery event ring). [[../dashboard/roadmap]] `/dashboard/roadmap/box` renders a **Max accounts** panel (per-account load + an all-capped banner + recent events) and the [[../dashboard/control-tower]] box tile flips **amber** "all Max accounts capped — builds parked, auto-resume" so a silent everything's-capped state is visible. See [[../libraries/control-tower]] (`evalWorker`).
 
+## Account hold-reason vocabulary + re-login runbook (build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped)
+
+Every hold on a Max pool account carries a **typed reason** on the heartbeat + the box page + the CEO card. The four reasons are distinct in kind — a WAIT-for-reset case (`usage_cap`), an auto-recovered case (`renewable`, handled by the sweep with no card), and two HUMAN-needed cases (`auth_expired` / `refresh_failed` vs `reauth_required`). The pure classifier is [`classifyAccountHealth`](../../../scripts/builder-worker.auth-refresh.ts) — every downstream label reads from it, so the labels cannot regress via a sibling change.
+
+| Reason | Meaning | Who fixes it | Auto-recovery |
+|---|---|---|---|
+| `usage_cap` | A real usage-wall rejection (5-hour or weekly). | Wait for the reset. | Yes — `cappedUntil` clears at the parsed reset. |
+| `renewable` | Access token expired **and** a `refreshToken` is present. | Nobody — the CLI renews it. | Yes — `sweepExpiredCredentials` fires an exercise `claude -p` that rewrites `.credentials.json` with a fresh accessToken (proven on 2026-08-03 midday when a third account renewed itself unattended). |
+| `auth_expired` / `refresh_failed` | The reactive 401 path caught an OAuth expiry, or an attempted refresh did not renew. | CEO re-login. | Some — a refreshToken that was actually present will retry once. |
+| `reauth_required` | `expiresAt` in the past **and NO refreshToken** in `.credentials.json`. NO retry ever renews it — the OAuth server can only mint a new refresh token via an interactive login. | CEO re-login (only remedy). | Only after /login — the sweep's WITH-refreshToken exercise path then renews the accessToken on the next expiry. |
+
+**Never default an unknown hold to `usage_cap`.** An unclassified hold reports as **unknown** (`null` on the heartbeat, "held" on the box page); we never manufacture a quota claim we can't substantiate. This is the specific mislabel that let the 2026-08-03 incident (below) hide for three days.
+
+**Re-login runbook.** When a `reauth_required` card appears in the CEO inbox (type `agent_approval_request`, `metadata.escalation_kind='box_account_reauth_required'`, dedupe key `box_account_reauth_required:<config_dir>`), the exact command chain is on the card. It is:
+
+```bash
+ssh root@claude-server          # tailnet-only, per § Access
+sudo -iu builder                # every account lives under /home/builder
+CLAUDE_CONFIG_DIR=~/.claude-<slot> claude
+/login
+```
+
+The `~/.claude-<slot>` matches the config dir the card names (`~/.claude` for Round Robin 1, `~/.claude-personal` for RR2, `~/.claude-third` for RR3, `~/.claude-fourth` for RR4). Once /login completes, the credentials file gets a fresh accessToken + refreshToken; on the next heartbeat tick (~15 min) `sweepUpcomingExpiries` reads the file, sees `expiresAt` is now valid AND a refreshToken is present, clears the hold + `cappedUntil` + dismisses the open CEO card, and the account rejoins rotation immediately — not on the next weekly window the eject scheduled.
+
+**Warn before expiry, not days after.** `sweepUpcomingExpiries` (heartbeat cadence, throttled to every 15 min) checks every account — INCLUDING held ones, the "ordering trap" — via `classifyAccountHealth`. When it finds an `expiring_soon` account (`expiresAt` within 24h) that has **no refreshToken**, it raises the reauth CEO card EARLY so the /login can happen BEFORE the account goes dead (the exact case the outage below completely missed). An `expiring_soon` account WITH a refreshToken just logs a low-noise console line — the CLI self-heals; a card would be noise.
+
+### ⚠️ 2026-08-03 incident — two Max accounts sat dead for 49h and 66h, reported as "capped"
+
+**What happened.** Two of the four Max accounts had been dead for days and the box reported them as usage-capped, so the CEO went looking at quota. When measured at 2026-08-03T~19:00Z: one account had expired 49.5 hours earlier, another 66.4 hours earlier, and BOTH carried no `refreshToken` at all — the CLI had nothing to renew with, so no amount of waiting or re-probing recovers them. They needed an interactive browser login, and nothing said so.
+
+**Why the mislabel persisted.** Two compounding bugs:
+
+1. `AccountState.holdReason` was typed `'usage_cap' | 'auth_expired' | 'refresh_failed'` and the heartbeat snapshot at `builder-worker.ts:1225` defaulted a null to `'usage_cap'`. So an unclassified hold silently became a quota claim.
+2. The heartbeat restore at `builder-worker.ts:1272` preserved whatever was persisted — round-tripping the wrong label forever. The console logged `[multi-account] restored 2 capped account(s) from heartbeat` on every restart for days.
+
+**Why it stayed hidden.** A held account is never assigned work, so the CLI never runs against it, so its token is never refreshed — the box's own recovery path, which successfully refreshed a third account at midday on the same day, can never fire for an account it is holding out. Capacity halved during a quiet week, which is exactly when nobody would notice from throughput alone. This is the second auth-misread outage in a fortnight; a prior one ran 37 hours.
+
+**The fix that landed** (this recipe's parent spec, [[../specs/an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped]]):
+
+- Phase 1 — Added `reauth_required` to `AccountHoldReason`; stopped defaulting `hold_reason` to `usage_cap` on the snapshot + heartbeat restore + pool-holds summary + parked-job log_tail; `decideSweepAction` now emits `reauth_required` (not `auth_expired`) when the credentials file has no `refreshToken`.
+- Phase 2 — First time an account enters `reauth_required`, `emitCeoReauthCardBestEffort` writes ONE `dashboard_notifications` card (`type='agent_approval_request'`, `metadata.routed_to_function='ceo'`, deduped by config dir) carrying the exact command chain above + how long the account has been dead. `dismissCeoReauthCardBestEffort` clears the card on recovery. Box page renders the `reauth_required` chip amber ("needs re-login"), distinct from rose ("capped").
+- Phase 3 — Added the pure classifier `classifyAccountHealth`; unit-tested the four spec-named cases + the warning case (`scripts/builder-worker.auth-refresh.test.ts`, wired into `test:box-auth-refresh`); added `sweepUpcomingExpiries` on the heartbeat cadence that runs against BOTH healthy AND held accounts (the ordering-trap fix), raises the reauth card EARLY for no-refreshToken accounts within 24h of expiry, and clears the hold + card the moment a CEO /login puts fresh credentials in place. Updated `applyRefreshOutcome` to clear a `reauth_required` hold on a successful refresh (so a CEO re-login shortcuts the weekly-window wait).
+
 ## Second runtime: Codex on a ChatGPT plan (box-codex-runner)
 
 The box runs a **second agent runtime** — OpenAI's `codex exec` on a **ChatGPT-plan device-code login** (NOT an API key — same "session billing, no per-token `$`" shape as `claude -p` on Max). A whitelist of job kinds runs on **Codex primary**; **Claude is the fallback** when Codex is capped or errors (reusing the existing account-failover machinery). This **offloads Max** — directly relieving the usage wall — while keeping customer-facing voice + the core build/plan on Claude.

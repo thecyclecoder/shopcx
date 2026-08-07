@@ -22,7 +22,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
-import { assertSwapDidNotRaise } from "@/lib/swap-price-assertion";
+import { assertSwapDidNotRaise, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
 
 type ActionResult = { success: boolean; error?: string };
 
@@ -407,7 +407,7 @@ export async function internalSubSwapVariant(
   oldVariantId: string,
   newVariantId: string,
   quantity?: number,
-): Promise<ActionResult> {
+): Promise<ActionResult & { priceGuardRefusal?: PriceGuardRefusal }> {
   const admin = createAdminClient();
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
@@ -471,9 +471,15 @@ export async function internalSubSwapVariant(
     price_override_cents: undefined,
   };
 
-  // Seed-price the swap with NO override to learn the new line's natural rate.
-  // The engine's ratio (`unit_cents / base_cents`) is `(1 − break/100) × (1 − sns/100)` for this
-  // line — deterministic per the item list. Reusing it lets us back-solve base analytically.
+  // Seed-price the swap with NO override to learn the new line's natural rate — the rules-derived
+  // per-unit price the engine will bill for this variant at THIS quantity. This value doubles as
+  // the assertion baseline below: comparing the post-swap realized against what the rules say the
+  // line should cost stays correct when the customer legitimately changes quantity (dropping qty 2
+  // → 1 forfeits a buy-two break, so the natural per-unit price legitimately rises — the guard
+  // that compared against the OLD per-unit price would refuse a change the customer is entitled
+  // to make; comparing against the rules asks the right question).
+  let seedBase = 0;
+  let seedUnit = 0;
   if (capturedUnitCents > 0) {
     const seedItems = items.map((i) => (i === oldItem ? newItem : i));
     const seedPricing = await resolveSubscriptionPricing(workspaceId, {
@@ -481,8 +487,8 @@ export async function internalSubSwapVariant(
       items: seedItems,
     });
     const seedLine = seedPricing.lines.find((l) => String(l.variant_id) === newVariantKey);
-    const seedBase = seedLine?.base_cents ?? 0;
-    const seedUnit = seedLine?.unit_cents ?? 0;
+    seedBase = seedLine?.base_cents ?? 0;
+    seedUnit = seedLine?.unit_cents ?? 0;
 
     // Never raise: if capturing would keep the customer above the new variant's natural realized,
     // leave the bare swap in place — the engine will bill them at `seedUnit`, which is cheaper.
@@ -509,10 +515,11 @@ export async function internalSubSwapVariant(
 
   const nextItems = items.map((i) => (i === oldItem ? newItem : i));
 
-  // Phase 3 — Assert it. Re-price the FINAL items list through the engine (pure w.r.t. the sub
-  // object, so this is the exact per-unit price the renewal scheduler will bill) and refuse to
-  // commit if the new realized moved UP vs the captured value. Skips the assertion when we had
-  // no captured baseline (no lock and engine returned 0 for outgoing — nothing to compare).
+  // Assert it — re-price the FINAL items list through the engine (pure w.r.t. the sub object, so
+  // this is the exact per-unit price the renewal scheduler will bill) and refuse to commit if the
+  // post-swap realized moved ABOVE the rules-derived expectation (`seedUnit`). Skips the assertion
+  // when we had no captured baseline (nothing to compare — the engine's own answer IS the price
+  // the renewal will bill, so a raise vs itself is impossible).
   if (capturedUnitCents > 0) {
     const finalPricing = await resolveSubscriptionPricing(workspaceId, {
       ...pricingSub,
@@ -520,20 +527,38 @@ export async function internalSubSwapVariant(
     });
     const finalLine = finalPricing.lines.find((l) => String(l.variant_id) === newVariantKey);
     const observedUnitCents = finalLine?.unit_cents ?? 0;
-    if (observedUnitCents <= 0) {
+    if (observedUnitCents <= 0 || seedUnit <= 0) {
       return {
         success: false,
         error: `Cannot verify post-swap realized price on internal contract ${contractId} — refusing to commit an unverified swap`,
       };
     }
+    const postSwapQuantity = Number(newItem.quantity) || 1;
     const raiseErr = assertSwapDidNotRaise({
-      capturedRealizedCents: capturedUnitCents,
+      expectedRealizedCents: seedUnit,
       observedRealizedCents: observedUnitCents,
+      quantity: postSwapQuantity,
       contractId,
     });
     // Same failure-message convention as the Appstle rail: the literal phrase `swap changed the
     // price` must appear so downstream logs + the deterministic verifier can grep the state.
-    if (raiseErr) return { success: false, error: `swap changed the price — ${raiseErr}` };
+    // Also emit the distinct PriceGuardRefusal class so the portal surface classifies this as a
+    // deliberate refusal on the INTERNAL contract — not a vendor error (Appstle is not involved
+    // at all on an internal contract; ticket e2a55cfb saw exactly that mislabel).
+    if (raiseErr) {
+      const priceGuardRefusal: PriceGuardRefusal = {
+        contractId,
+        expectedRealizedCents: seedUnit,
+        observedRealizedCents: observedUnitCents,
+        quantity: postSwapQuantity,
+        reason: "swap_raises_over_rules",
+      };
+      return {
+        success: false,
+        error: `swap changed the price — ${raiseErr}`,
+        priceGuardRefusal,
+      };
+    }
   }
 
   await admin

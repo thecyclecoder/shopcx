@@ -48,11 +48,17 @@ interface LaneRow {
   // (a pre-Phase-2 heartbeat) — the chip is skipped so nothing regresses.
   resumed?: boolean;
 }
+// build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 —
+// `hold_reason` carries the typed cause when the account is held. `reauth_required` renders as
+// "needs re-login" (distinct chip + copy) so the pool view answers 'why is capacity down' without
+// opening the CEO inbox — the failure mode that let two accounts sit dead for 49h/66h on 2026-08-03.
+// `null` = healthy OR (Phase 1) held for an unknown reason (rendered as "held" — never "capped").
 interface AccountSlot {
   label: string;
   in_flight: number;
   capped: boolean;
   capped_until: string | null;
+  hold_reason: string | null;
 }
 interface AccountEvent {
   at: string;
@@ -459,33 +465,52 @@ function AccountsPanel({ accounts }: { accounts: AccountsSnapshot }) {
       )}
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
-        {accounts.pool.map((a) => (
-          <div
-            key={a.label}
-            className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs shadow-sm ${
-              a.capped
-                ? "border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/20"
-                : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-zinc-700 dark:text-zinc-200">{a.label}</span>
-              <span
-                className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                  a.capped
-                    ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
-                    : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                }`}
-              >
-                {a.capped ? "capped" : "healthy"}
+        {accounts.pool.map((a) => {
+          // build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 2 —
+          // render the TYPED hold reason distinctly so the pool view answers 'why is capacity down'
+          // at a glance. `reauth_required` is the case the outage was misreporting as capacity: a
+          // human /login is the ONLY remedy, so it gets an amber chip + "needs re-login" copy that
+          // routes the eye to the CEO inbox (where Phase 2's agent_approval_request card lives),
+          // NOT to a phantom quota reset time.
+          const chipLabel = !a.capped
+            ? "healthy"
+            : a.hold_reason === "reauth_required"
+              ? "needs re-login"
+              : a.hold_reason === "auth_expired" || a.hold_reason === "refresh_failed"
+                ? "auth expired"
+                : a.hold_reason === "usage_cap"
+                  ? "capped"
+                  : "held";
+          const chipTone = !a.capped
+            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+            : a.hold_reason === "reauth_required"
+              ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+              : "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300";
+          const borderTone = !a.capped
+            ? "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+            : a.hold_reason === "reauth_required"
+              ? "border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/20"
+              : "border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-900/20";
+          const detailLine =
+            a.hold_reason === "reauth_required"
+              ? " · needs an interactive /login (no refresh_token) — see the CEO inbox for the command"
+              : a.capped && a.capped_until
+                ? ` · resets ${astTime(a.capped_until)} (~${until(a.capped_until)})`
+                : "";
+          return (
+            <div key={a.label} className={`flex flex-col gap-1 rounded-lg border p-2.5 text-xs shadow-sm ${borderTone}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-zinc-700 dark:text-zinc-200">{a.label}</span>
+                <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${chipTone}`}>
+                  {chipLabel}
+                </span>
+              </div>
+              <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+                {a.in_flight} in flight{detailLine}
               </span>
             </div>
-            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
-              {a.in_flight} in flight
-              {a.capped && a.capped_until ? ` · resets ${astTime(a.capped_until)} (~${until(a.capped_until)})` : ""}
-            </span>
-          </div>
-        ))}
+          );
+        })}
 
         {/* The second runtime (box-codex-runner): a Codex runner card alongside the Max accounts. Indigo
             accent so it reads as a distinct runtime, not a Max account; rose when its ChatGPT-plan wall is hit. */}

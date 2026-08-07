@@ -21,7 +21,16 @@
  * Phase 1 verification + [[../../docs/brain/libraries/cs-director.md]] loop-closure contract.
  */
 
-export type CsDirectorDecision = "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action";
+export type CsDirectorDecision =
+  | "approve_remedy"
+  | "author_spec"
+  | "escalate_founder"
+  | "close_no_action"
+  /**
+   * `message_only` — Phase 3 of cs-director-call-loop-guard-and-message-only-remedy. See
+   * [[./cs-director]] and [[./cs-director-ticket-transition]] for the executor + transition.
+   */
+  | "message_only";
 
 /**
  * Phase 1 of cs-director-spec-claim-must-match-the-actual-write — the OUTCOME `handleAuthorSpec`
@@ -82,6 +91,7 @@ const DECISION_LABEL: Record<CsDirectorDecision, string> = {
   author_spec: "author_spec",
   escalate_founder: "escalate_founder",
   close_no_action: "close_no_action",
+  message_only: "message_only",
 };
 
 function normalizeReasoning(raw: string): string {
@@ -191,6 +201,14 @@ export function buildCsDirectorVerdictNote(verdict: CsDirectorNoteInput): string
     }
     case "close_no_action":
       lines.push("Outcome: No action needed — handling was already correct and there is no in-leash remedy or founder decision to make. Closed + de-escalated (no founder page).");
+      break;
+    case "message_only":
+      // Phase 3 of cs-director-call-loop-guard-and-message-only-remedy — the customer was told
+      // what happened; NO money or account mutation was executed. Same close+clear terminal as
+      // close_no_action / author_spec so the ticket cannot feed the loop Phase 1 caps.
+      lines.push(
+        "Outcome: Message-only remedy — customer was told; no money or account mutation. Closed + de-escalated.",
+      );
       break;
   }
   return lines.join("\n");

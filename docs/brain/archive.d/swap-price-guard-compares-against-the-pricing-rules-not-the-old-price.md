@@ -1,0 +1,1 @@
+- **The never-raise swap guard blocks legitimate quantity changes — compare against the rules, not the previous price** · verified 2026-08-05 · → [[../libraries/swap-price-assertion]]

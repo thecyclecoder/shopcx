@@ -18,6 +18,7 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
+- **Price-guard refusals are routed BEFORE vendor errors.** When a swap would raise the realized price above what the pricing rules produce, [[subscription-items]] `subSwapVariant` (Appstle rail) and [[internal-subscription]] `internalSubSwapVariant` (internal rail) return a `priceGuardRefusal` object. The handler checks for this BEFORE routing to `handleAppstleError`, so an internal-contract refusal gets classified as a distinct 422 `price_guard_refusal` (not a 502 `appstle_error` mislabel). Ticket e2a55cfb (Isabel, 2026-08-05): her internal contract `internal-8922b5701b2f45ea` swap refusal was surfaced as an Appstle error even though Appstle was not involved; this early-exit fix prevents the mislabel. The portal renders the message via `describePriceGuardRefusal`, which explains the per-unit increase and attributes it to a forfeited discount when applicable. Spec: [[../specs/swap-price-guard-compares-against-the-pricing-rules-not-the-old-price]].
 - **`oldLineId` is not a real Shopify line id for Appstle subs.** The portal sends
   `oldLineId = line.id`, and [[portal__helpers__transform-subscription]] sets
   `line.id = line_id || variant_id`. Appstle sub lines usually carry no Shopify
