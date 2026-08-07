@@ -24793,61 +24793,62 @@ async function runNpmAudit(): Promise<{ ok: boolean; findings: DepFinding[]; tot
   return { ok: true, findings, total };
 }
 
-function depUpgradeSpecMarkdown(findings: DepFinding[], signature: string): string {
-  const rows = findings.map((f) => {
-    const fix = f.fixTo ? (f.major ? `${f.fixTo} (⚠️ semver-major — review breaking changes)` : f.fixTo) : "no automatic fix — manual upgrade/replace";
-    return `- **${f.name}** (${f.severity}) — ${f.title}. Upgrade → ${fix}`;
-  });
-  return [
-    `# Security dependency upgrades`,
-    ``,
-    `**Owner:** [[../functions/platform]] · **Parent:** [[../functions/platform]] — Infra & DevOps / reliability mandate · **Fixes:** [[security-dependency-agent]] · auto-authored by [[../libraries/security-agent]].`,
-    `**Dep-advisory-signature:** \`${signature}\``,
-    ``,
-    `The daily \`npm audit\` dep-watch found ${findings.length} actionable advisory(ies) (≥ moderate). Bump the affected dependencies to their fixed versions. NEVER auto-bumped — this owner-gated build does the bump + the \`tsc\` gate.`,
-    ``,
-    `## Phase 1 — upgrade the vulnerable dependencies`,
-    ...rows,
-    ``,
-    `Apply the upgrades (e.g. \`npm audit fix\`, or bump each in package.json + \`npm install\`), then gate on \`npx tsc --noEmit\` and a smoke of any affected path. Flag any semver-major bump for human review before merge.`,
-    ``,
-    `## Verification`,
-    `- Re-run \`npm audit\` → expect the flagged advisory(ies) no longer appear (or are downgraded below moderate).`,
-    `- \`npx tsc --noEmit\` is clean after the bumps.`,
-    ``,
-    `> Authored by the box Security Agent (Vault). Read-only watch; the owner-gated build applies the bump.`,
-    ``,
-  ].join("\n");
-}
-
 // Author/refresh the single stable dep-upgrade spec on main. Idempotent: re-writes the body so the
 // advisory list stays current (find-or-update, never N specs). Returns the slug + whether it pre-existed.
+//
+// security-dep-watch-authors-structured-and-never-ages-out Phase 1 — this lane used to funnel the
+// dep-upgrade spec through the RETIRED `authorSpecRowFromMarkdown` / `markNewSpecInReview` door,
+// whose prose Verification bullets parsed to `exec_kind='needs_human'` and were rejected by the
+// every-writer-authors-machine-runnable-verifications gate. Every advisory it found was silently
+// discarded at author time. Now it builds the `StructuredSpecInput` (with a typed `unit_test`
+// `check:npm-audit-actionable` + `tsc` machine check per phase) via
+// [[security-agent]] `buildDepUpgradeSpecInput` and authors through the SANCTIONED
+// `authorSpecRowStructured` chokepoint — the SAME rail every other autonomous writer funnels
+// through (mirror of the repair-agent lane's Phase-2 switch to `buildRepairSpecInput`).
 async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, workspaceId: string): Promise<{ slug: string; alreadyExists: boolean } | null> {
-  const { SECURITY_DEP_UPGRADE_SLUG } = await import("../src/lib/security-agent");
+  const {
+    SECURITY_DEP_UPGRADE_SLUG,
+    DEP_UPGRADE_PARENT_KIND,
+    DEP_UPGRADE_PARENT_REF,
+    buildDepUpgradeSpecInput,
+  } = await import("../src/lib/security-agent");
   const slug = SECURITY_DEP_UPGRADE_SLUG;
   try {
     // spec-pm-markdown-purge: the dep-upgrade spec lives ONLY in the DB. Find-or-update on the spec row.
     const { getSpec } = await import("../src/lib/brain-roadmap");
     const existing = await getSpec(slug, workspaceId);
-    const markdown = depUpgradeSpecMarkdown(findings, signature);
-    if (existing) {
-      // Refresh-only: re-author the body so the advisory list stays current (no status/card-state change —
-      // authorSpecRowFromMarkdown preserves the live status when no `status` opt is passed).
-      try {
-        const { authorSpecRowFromMarkdown } = await import("../src/lib/author-spec");
-        await authorSpecRowFromMarkdown(workspaceId, slug, markdown, "planned", { intendedStatusSetBy: "security-agent" });
-      } catch (e) {
-        console.warn(`[security] dep-upgrade spec DB refresh failed for ${slug}: ${errText(e)}`);
+    const structuredInput = buildDepUpgradeSpecInput(findings, signature);
+    try {
+      // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to
+      // `in_review` with the actor stamp before the DB write so surfaces that key off
+      // `intended_status` behave identically to the retired markdown path. A refresh preserves
+      // the live status via `authorSpecRowStructured`'s standing behavior (no `status` opt passed).
+      if (!existing) {
+        const { markSpecCardForReview } = await import("../src/lib/spec-card-state");
+        try {
+          await markSpecCardForReview(workspaceId, slug, "planned", {
+            actor: "security-agent",
+            reason: `security-agent dep-watch (sig ${signature})`,
+          });
+        } catch (e) {
+          console.warn(`[spec-card-state] markSpecCardForReview (security-agent) ${slug} failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+      const { authorSpecRowStructured } = await import("../src/lib/author-spec");
+      const authored = await authorSpecRowStructured(workspaceId, slug, structuredInput, "planned", {
+        intendedStatusSetBy: "security-agent",
+        parentKind: DEP_UPGRADE_PARENT_KIND,
+        parentRef: DEP_UPGRADE_PARENT_REF,
+      });
+      if (!authored) {
+        console.warn(
+          `[security] dep-upgrade spec author returned false for ${slug} — the row did not land in public.specs (silent no-op)`,
+        );
         return null;
       }
-    } else {
-      // First creation — flag in_review + author the row.
-      try {
-        await markNewSpecInReview(workspaceId, slug, "planned", "security-agent", `security-agent dep-watch (sig ${signature})`, markdown);
-      } catch (e) {
-        console.warn(`[security] dep-upgrade spec DB author failed for ${slug}: ${errText(e)}`);
-        return null;
-      }
+    } catch (e) {
+      console.warn(`[security] dep-upgrade spec structured author failed for ${slug}: ${errText(e)}`);
+      return null;
     }
     return { slug, alreadyExists: !!existing };
   } catch (e) {

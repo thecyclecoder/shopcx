@@ -157,23 +157,11 @@ const SANCTIONED_MARKDOWN_CALLERS: SanctionedMarkdownCaller[] = [
       "Pre-Phase-4 debt; a follow-up spec authors via authorSpecRowStructured with a typed check on the " +
       "regressed verification bullet's spec_phase_checks row.",
   },
-  {
-    file: "scripts/builder-worker.ts",
-    identifier: "markNewSpecInReview",
-    tag: "security-agent",
-    reason:
-      "security-agent lane's dep-watch — the box's authored security fix-spec markdown. Pre-Phase-4 " +
-      "debt; a follow-up spec authors via authorSpecRowStructured with a typed grep check on the " +
-      "security-agent's implicated file / dep signature.",
-  },
-  {
-    file: "scripts/builder-worker.ts",
-    identifier: "authorSpecRowFromMarkdown",
-    tag: "security-agent",
-    reason:
-      "security-agent lane's dep-watch fallback author — same LLM output, direct call to the markdown " +
-      "chokepoint. Same conversion path as the other security-agent entry.",
-  },
+  // security-agent lane's dep-watch was retired to the structured door in
+  // security-dep-watch-authors-structured-and-never-ages-out Phase 1 (authorDepUpgradeSpec now
+  // calls authorSpecRowStructured via [[security-agent]] buildDepUpgradeSpecInput). Its previous
+  // pair of entries (markNewSpecInReview + authorSpecRowFromMarkdown, both actor "security-agent")
+  // are removed. The allow-list is shrink-only — never re-add.
   {
     file: "scripts/builder-worker.ts",
     identifier: "markNewSpecInReview",
