@@ -40,7 +40,8 @@
     "check:phantom-shipped-phases": "tsx scripts/_check-phantom-shipped-phases.ts",
     "check:remotion-lambda-in-sync": "tsx scripts/_check-remotion-lambda-in-sync.ts",
     "check:tests-registered": "tsx scripts/_check-tests-registered.ts",
-    "predeploy": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:competitors-sdk-compliance && npm run check:ticket-analyses-sdk-compliance && npm run check:sonnet-prompts-sdk-compliance && npm run check:policies-sdk-compliance && npm run check:policy-contradictions && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses && npm run check:box-types && npm run check:box-entrypoints-in-sync && npm run check:no-md-spec-commits && npm run check:rls-on-new-tables && npm run check:no-hard-destructive-migrations && npm run check:duplicate-migration-versions && npm run check:sql-comment-literals && npm run check:table-refs-have-migrations && npm run check:personas-no-duplicate-keys && npm run check:specs-phases-no-client-in-batching && npm run check:authinterrupts-when-forbidden-imported && npm run check:node-registry-drift && npm run check:no-markdown-spec-authoring && npm run check:route-auth-helper && npm run check:no-shopify-sub-mutations && npm run check:no-direct-appstle-mutations && npm run check:no-lossy-error-stringify && npm run check:remotion-lambda-in-sync && npm run check:tests-registered",
+    "predeploy:static": "npm run check:worker-lanes && npm run check:pm-md-reads && npm run check:pm-sdk-compliance && npm run check:competitors-sdk-compliance && npm run check:ticket-analyses-sdk-compliance && npm run check:sonnet-prompts-sdk-compliance && npm run check:policies-sdk-compliance && npm run check:vercel-ignore-step-rails && npm run check:goal-branch-targeting && npm run check:box-parses && npm run check:box-types && npm run check:box-entrypoints-in-sync && npm run check:no-md-spec-commits && npm run check:rls-on-new-tables && npm run check:no-hard-destructive-migrations && npm run check:duplicate-migration-versions && npm run check:sql-comment-literals && npm run check:table-refs-have-migrations && npm run check:personas-no-duplicate-keys && npm run check:specs-phases-no-client-in-batching && npm run check:authinterrupts-when-forbidden-imported && npm run check:node-registry-drift && npm run check:no-markdown-spec-authoring && npm run check:route-auth-helper && npm run check:no-shopify-sub-mutations && npm run check:no-direct-appstle-mutations && npm run check:no-lossy-error-stringify && npm run check:remotion-lambda-in-sync && npm run check:tests-registered",
+    "predeploy": "npm run predeploy:static && npm run check:policy-contradictions",
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:platform-director-escalation-dedupe": "tsx --test src/lib/agents/platform-director-escalation-dedupe.test.ts",
     "test:platform-director-terminal-park": "tsx --test src/lib/agents/platform-director-terminal-park.test.ts",
@@ -77,6 +78,7 @@
     "test:fold-closes-orphan-pr": "tsx --test src/lib/agent-jobs.fold-closes-orphan-pr.test.ts",
     "test:stuck-build-terminal-spec": "tsx --test src/lib/agents/platform-director.stuck-build-terminal-spec.test.ts",
     "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",
+    "test:mario-build-started-no-build-done": "tsx --test src/lib/mario.build-started-no-build-done.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
@@ -182,7 +184,10 @@
     "test:physical-size-cue": "tsx --test src/lib/ad-tool-config.physical-size-cue.test.ts",
     "test:meta-ads-create": "tsx --test src/lib/meta-ads.create.test.ts",
     "test:swallowed-escalation-sample": "tsx --test src/lib/agents/platform-director.swallowed-sample.test.ts",
-    "test:ticket-delivery-placeholder-guard": "tsx --test src/lib/ticket-delivery.placeholder-guard.test.ts"
+    "test:ticket-delivery-placeholder-guard": "tsx --test src/lib/ticket-delivery.placeholder-guard.test.ts",
+    "test:today-sync": "tsx --test src/lib/inngest/today-sync.test.ts",
+    "test:journey-delivery-portal-enrolled": "tsx --test src/lib/journey-delivery.portal-enrolled.test.ts",
+    "test:graph-retry-app-owner-action-required": "tsx --test src/lib/meta/graph-retry.app-owner-action-required.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",
@@ -225,6 +230,7 @@
     "playwright": "^1.50.0",
     "sharp": "^0.34.5",
     "tailwindcss": "^4",
+    "tsx": "^4.22.4",
     "typescript": "^5"
   },
   "overrides": {

@@ -4,6 +4,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { executeToolCall } from "@/lib/sonnet-orchestrator-v2";
 import { getPolicy, listActivePolicies, type PolicyRow } from "@/lib/policies";
 
@@ -52,7 +53,7 @@ export default async function executeToolCallImprove(
         rows = await listActivePolicies(admin, workspaceId);
       }
     } catch (err) {
-      return `get_policies failed: ${err instanceof Error ? err.message : String(err)}`;
+      return `get_policies failed: ${errText(err)}`;
     }
     if (!rows.length) {
       return slugInput

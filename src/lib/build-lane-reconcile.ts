@@ -27,6 +27,8 @@
  * `build_sha` is durable state — `hasBuiltWork` gates `recreate-fresh` off in the fallback).
  */
 
+import { errText } from "./error-text";
+
 export type ReconcileStrategy =
   | "skip"            // origin/main is already an ancestor of HEAD — nothing to reconcile
   | "merge"           // MERGE origin/main INTO the branch (safe for non-linear; no commit rewrite)
@@ -535,7 +537,7 @@ export function validatePackageJsonScriptKeys(
   let resolved: unknown;
   try { resolved = JSON.parse(resolvedContent); }
   catch (e) {
-    return { ok: false, reason: `resolved package.json failed to parse as JSON: ${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, reason: `resolved package.json failed to parse as JSON: ${errText(e)}` };
   }
   const resolvedScripts = ((): Record<string, unknown> | null => {
     if (!resolved || typeof resolved !== "object") return null;

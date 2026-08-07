@@ -25,6 +25,7 @@
 import { loadEnv } from "./_bootstrap";
 loadEnv();
 import { createAdminClient } from "../src/lib/supabase/admin";
+import { errText } from "../src/lib/error-text";
 import { generateJourneyToken, getJourneyUrl } from "../src/lib/journey-tokens";
 import { shellHtml, getBrand } from "../src/lib/email-storefront";
 
@@ -231,7 +232,7 @@ async function main() {
       sent++;
       if (sent % 25 === 0) console.log(`  … ${sent}/${slice.length}`);
     } catch (e) {
-      failures.push({ email: cust.email, error: e instanceof Error ? e.message : String(e) });
+      failures.push({ email: cust.email, error: errText(e) });
     }
   }
   console.log(`\n✓ sent ${sent}/${slice.length}`);
