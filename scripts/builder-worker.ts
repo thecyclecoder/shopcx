@@ -25378,8 +25378,14 @@ async function runSecurityReviewJob(job: Job) {
         // Pre-Phase-2 the park read "could not author dep-upgrade spec" + "N advisory(ies) but spec
         // author failed" with no underlying reason — the exact gap that kept a broken security
         // watcher unexamined for 17 days while the advisory count climbed from 3 to 10.
+        //
+        // Phase 3 — attach the ACTUAL advisory list (name/severity/fixTo) to `log_tail` so the CEO
+        // card that the platform-director's needs-attention triage surfaces on age carries a
+        // legible advisory rundown, not just a bare count. The escalate path reads the LAST 400
+        // chars of `log_tail` as the excerpt, so the list rides at the end where it survives.
+        const advisoryList = audit.findings.map((f) => `${f.name}(${f.severity})→${f.fixTo ?? "manual"}`).join("; ");
         const parkError = `could not author dep-upgrade spec: ${authored.authorError}`.slice(0, 2000);
-        const parkTail = `${audit.findings.length} advisory(ies) but spec author failed — ${authored.authorError}`.slice(-2000);
+        const parkTail = `${audit.findings.length} advisory(ies): ${advisoryList}. Spec author failed — ${authored.authorError}`.slice(-2000);
         await update(job.id, { status: "needs_attention", error: parkError, log_tail: parkTail });
         console.log(`${tag} dep-watch: spec author failed → needs-human — ${authored.authorError}`);
         return;
