@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **The CVE watcher can't author its own fix spec — 10 patchable advisories have sat unfixed since July** · verified 2026-08-07 · → [[../libraries/security-agent]]
 - **Stop the cs-director-call self-routing loop, and give June a message-only remedy** · verified 2026-08-05 · → [[../libraries/cs-director]]
 - **Error-feed: drop Braintree portal vault "Closed Card" processor-decline noise** · verified 2026-08-05 · → [[../libraries/control-tower]]
 - **The never-raise swap guard blocks legitimate quantity changes — compare against the rules, not the previous price** · verified 2026-08-05 · → [[../libraries/swap-price-assertion]]
