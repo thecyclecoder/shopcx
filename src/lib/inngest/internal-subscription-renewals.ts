@@ -60,6 +60,31 @@ export function filterCandidatesByDunningRetryWindow<T extends { id: string }>(
   return candidates.filter((c) => !blocked.has(c.id));
 }
 
+// ─── Stale renewal-attempt guard ────────────────────────────────────
+// The cron fan-out stamps the sub's next_billing_date onto every attempt event
+// as `expected_next_billing_date`. If a duplicate/delayed attempt reaches the
+// per-sub handler AFTER another attempt has already completed the cycle (and
+// advanced next_billing_date), the live value will no longer match — that is
+// the fingerprint of a stale event, and charging on it would re-bill the
+// customer and reopen dunning. Immediate-charge callers (portal "order now",
+// payment-method recovery, appstle orderNowByContract) intentionally bypass
+// the schedule and send NO expected_next_billing_date, so this guard leaves
+// them untouched.
+//
+// Pure — no I/O. Tested via [[../inngest/internal-subscription-renewals]]
+// stale-attempt test.
+export function isRenewalAttemptStale(
+  expected: string | null | undefined,
+  actual: string | null | undefined,
+): boolean {
+  if (!expected) return false; // immediate-charge path — no schedule to gate on
+  if (!actual) return false; // no live value → can't prove stale, don't over-hold
+  const e = new Date(expected).getTime();
+  const a = new Date(actual).getTime();
+  if (!Number.isFinite(e) || !Number.isFinite(a)) return false;
+  return e !== a;
+}
+
 // ─── Daily cron (3 AM Central) ──────────────────────────────────────
 // 9 AM UTC is 3 AM CST in winter, 4 AM CDT in summer. We accept the
 // 1-hour DST drift because renewal timing is idempotent — even if a
@@ -85,12 +110,12 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
       // Keyset-paginate — a bare select is capped at the PostgREST max-rows (1000).
       // Internal subs (~28K on a ~30-day cadence) run ~900/day, right at the cap; without
       // pagination the overflow is silently skipped (a missed renewal = lost revenue).
-      const all: { id: string; workspace_id: string; shopify_contract_id: string | null }[] = [];
+      const all: { id: string; workspace_id: string; shopify_contract_id: string | null; next_billing_date: string | null }[] = [];
       let afterId: string | null = null;
       while (true) {
         let q = admin
           .from("subscriptions")
-          .select("id, workspace_id, shopify_contract_id")
+          .select("id, workspace_id, shopify_contract_id, next_billing_date")
           .eq("is_internal", true)
           .eq("status", "active")
           .lte("next_billing_date", endOfToday.toISOString())
@@ -122,9 +147,18 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
     // Fan out one event per sub. Inngest's concurrency control on the
     // attempt function caps how many run at once.
     if (due.length > 0) {
+      // Stamp expected_next_billing_date onto every fan-out event. The per-sub
+      // handler's skip-stale-renewal-attempt guard re-reads the live sub before
+      // charging; if the value has moved (another attempt already advanced the
+      // cycle), the attempt is treated as a benign skip instead of re-billing +
+      // reopening dunning.
       await step.sendEvent("renewal-events", due.map((s) => ({
         name: "internal-subscription/renewal-attempt",
-        data: { subscription_id: s.id, workspace_id: s.workspace_id },
+        data: {
+          subscription_id: s.id,
+          workspace_id: s.workspace_id,
+          expected_next_billing_date: s.next_billing_date,
+        },
       })));
     }
 
@@ -167,12 +201,47 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     triggers: [{ event: "internal-subscription/renewal-attempt" }],
   },
   async ({ event, step }) => {
-    const { subscription_id, workspace_id } = event.data as {
+    const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
       subscription_id: string;
       workspace_id: string;
+      expected_next_billing_date?: string | null;
     };
 
     const admin = createAdminClient();
+
+    // ── 0a. Skip stale renewal attempt ──────────────────────────
+    // Runs BEFORE the comp and paid branches so no stale event can charge,
+    // create an order, or dispatch dunning. The cron fan-out stamps the sub's
+    // next_billing_date onto the event; if the live value has moved (another
+    // attempt already advanced the cycle), we're a duplicate/delayed event —
+    // record a benign skip outcome and exit. Immediate-charge callers (portal
+    // order-now, payment-method recovery, appstle orderNowByContract) send no
+    // expected_next_billing_date and the helper passes them through.
+    const stale = await step.run("skip-stale-renewal-attempt", async () => {
+      if (!expected_next_billing_date) return { stale: false } as const;
+      const { data: liveSub } = await admin
+        .from("subscriptions")
+        .select("next_billing_date")
+        .eq("id", subscription_id)
+        .maybeSingle();
+      const actual = (liveSub?.next_billing_date as string | null) ?? null;
+      return {
+        stale: isRenewalAttemptStale(expected_next_billing_date, actual),
+        expected: expected_next_billing_date,
+        actual,
+      } as const;
+    });
+    if (stale.stale) {
+      await step.run("emit-outcome-stale-renewal-attempt", () =>
+        emitRenewalOutcomeHeartbeat("skipped_other"),
+      );
+      return {
+        skipped: true,
+        reason: "stale_renewal_attempt",
+        expected_next_billing_date: stale.expected,
+        actual_next_billing_date: stale.actual,
+      };
+    }
 
     // ── 0. Comp branch ──────────────────────────────────────────
     // A comp sub ships FREE on schedule: no payment method, no Braintree charge,
