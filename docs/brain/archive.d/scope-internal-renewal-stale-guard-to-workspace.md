@@ -1,0 +1,1 @@
+- **Scope internal renewal stale guard to the event workspace** · verified 2026-08-09 · → [[../inngest/internal-subscription-renewals]]
