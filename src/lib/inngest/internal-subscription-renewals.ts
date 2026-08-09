@@ -85,6 +85,35 @@ export function isRenewalAttemptStale(
   return e !== a;
 }
 
+// Tenant-scoped live read for the stale-attempt guard. The renewal-attempt event
+// carries subscription_id AND workspace_id, and BOTH must be applied to the live
+// lookup — filtering on subscription_id alone lets an event whose workspace_id
+// does not match the sub's owning workspace read that sub's next_billing_date
+// and either surface it back on the outcome (a cross-tenant leak) or suppress a
+// legitimate renewal based on foreign state. No-row (mismatch or absent) fails
+// open as `null` so the stale check falls back to the "never over-hold" branch
+// in `isRenewalAttemptStale`. Extracted so it can be unit-tested with a mock
+// admin client without live Supabase I/O.
+type StaleGuardAdminLike = {
+  from: (table: "subscriptions") => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    select: (cols: string) => any;
+  };
+};
+export async function lookupSubscriptionNextBillingDateForStaleGuard(
+  admin: StaleGuardAdminLike,
+  subscriptionId: string,
+  workspaceId: string,
+): Promise<string | null> {
+  const { data } = await admin
+    .from("subscriptions")
+    .select("next_billing_date")
+    .eq("id", subscriptionId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  return (data?.next_billing_date as string | null) ?? null;
+}
+
 // ─── Daily cron (3 AM Central) ──────────────────────────────────────
 // 9 AM UTC is 3 AM CST in winter, 4 AM CDT in summer. We accept the
 // 1-hour DST drift because renewal timing is idempotent — even if a
@@ -219,12 +248,14 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // expected_next_billing_date and the helper passes them through.
     const stale = await step.run("skip-stale-renewal-attempt", async () => {
       if (!expected_next_billing_date) return { stale: false } as const;
-      const { data: liveSub } = await admin
-        .from("subscriptions")
-        .select("next_billing_date")
-        .eq("id", subscription_id)
-        .maybeSingle();
-      const actual = (liveSub?.next_billing_date as string | null) ?? null;
+      // Scope the live read to (id, workspace_id) — a cross-tenant lookup must
+      // return no row so `actual` stays null and the guard falls through as
+      // stale=false without ever surfacing another workspace's billing state.
+      const actual = await lookupSubscriptionNextBillingDateForStaleGuard(
+        admin,
+        subscription_id,
+        workspace_id,
+      );
       return {
         stale: isRenewalAttemptStale(expected_next_billing_date, actual),
         expected: expected_next_billing_date,
