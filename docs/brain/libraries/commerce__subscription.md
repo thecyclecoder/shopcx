@@ -121,6 +121,20 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 - **Why it exists:** `appstleAttemptBilling`'s `internal-*` guard is a NO-OP success — fine for dunning cron (real renewal follows separately), but for on-demand order-now with no cron follow-up, calling Appstle directly **silently drops the charge** (the bug that left internal sub's "Order Now" reporting success while never billing — ticket `dd67f3c7`, customer Angel). Replaces the fragmented path.
 - **Async-aware verify (Phase 1 of [[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]]):** the ticket-executor's `bill_now` direct action routes through `subscriptionOrderNowVerified` (see [[./order-now-verify]]) — fires this function AND schedules `commerce/order-now.verify` to read the REAL outcome minutes later. Appstle returns `pending: true` so the ticket_resolution_events verdict is stamped by the async verify, not the trigger ack (ticket `0a9e4d7f`, Judy — bill_now ack'd success then Shopify declined).
 
+### Create
+
+**`createSubscription`** — `async (workspaceId, input: CreateSubscriptionInput) → { success, subscription_id?, shopify_contract_id?, error? }`
+- `vendor: "internal"` → generates `internal-<16 hex>` via `synthesizeInternalContractId` UP FRONT and passes it into `buildCreateSubscriptionRow` via `opts.shopify_contract_id`, then inserts the row. `subscriptions.shopify_contract_id` is NOT NULL, so the id MUST exist at insert time — the pre-Phase-1 code synthesized after the insert and every internal create failed on the constraint (spec: [[../specs/create-subscription-internal-branch-cannot-create-a-subscription]], derived from ticket `687b2e7a` / Susan Bellamy). An explicit `input.shopify_contract_id` short-circuits the synthesis and passes through unchanged.
+- `input.payment_method_id` is persisted onto the row (the second half of the same defect — the interface accepted it and `buildCreateSubscriptionRow` silently dropped it, leaving the chosen card off the subscription).
+- `vendor: "appstle"` → not supported (Phase-1 primitive is internal-only).
+
+**`buildCreateSubscriptionRow`** — `(workspaceId, input, opts?: { shopify_contract_id?: string }) → row`
+- Pure builder pinned by `src/lib/commerce/subscription.create.test.ts`. `opts.shopify_contract_id` (populated by `createSubscription`'s synthesizer) wins over `input.shopify_contract_id`; both fall back to null.
+- Emits `payment_method_id: input.payment_method_id ?? null`.
+
+**`synthesizeInternalContractId`** — `() → \`internal-<16 hex>\``
+- Matches the live-row convention (e.g. `internal-97f66e6a03a74e97`) via `randomBytes(8).toString("hex")`. Used by `createSubscription`'s internal branch and by anywhere the caller pre-mints the id.
+
 ### Types
 
 **`export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView }`**

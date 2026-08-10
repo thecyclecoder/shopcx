@@ -1166,6 +1166,36 @@ async function handleApproveRemedy(
       // Also emit a rolled-up internal note so a human sees the partial-batch state in one place.
       await sysNote(`Batch escalated — ${summary.oneLine}. No customer message sent.`);
       console.warn(`${tag} ${error}`);
+      // ── Phase 2 of create-subscription-internal-branch-cannot-create-a-subscription ──
+      // When the escalated batch included a terminal assisted-purchase action (create_subscription
+      // / create_order), escalate the ticket AND mint the CEO card via the shared helper. Susan
+      // Bellamy's ticket sat `open` + `escalated_to = null` through this exact path on 2026-08-09
+      // ("Batch escalated — ... No customer message sent" logged but the ticket was untouched);
+      // the same "customer already consented to buy" surface must not fail quietly.
+      const failedAssistedStep = planned.plan.actions.find(
+        (a) =>
+          (a.actionType === "create_subscription" || a.actionType === "create_order") &&
+          batchEvents.some((ev) => ev.kind === "failed" && ev.label === a.actionType),
+      );
+      if (failedAssistedStep) {
+        const { escalateAndCardOnAssistedPurchaseFailure } = await import(
+          "@/lib/assisted-purchase-failure-escalate"
+        );
+        const failedEvent = batchEvents.find(
+          (ev) => ev.kind === "failed" && ev.label === failedAssistedStep.actionType,
+        );
+        await escalateAndCardOnAssistedPurchaseFailure({
+          admin,
+          wsId: workspaceId,
+          tid: ticketId,
+          customer: { id: facts.customer_id },
+          params: failedAssistedStep.actionParams,
+          actionType: failedAssistedStep.actionType as "create_subscription" | "create_order",
+          failureError: failedEvent?.error ?? summary.oneLine,
+          origin: "director_remedy",
+          jobId: null,
+        });
+      }
       return {
         ok: false,
         handler: "approve_remedy",

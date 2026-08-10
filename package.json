@@ -122,6 +122,7 @@
     "test:cs-director": "tsx --test src/lib/agents/cs-director.test.ts",
     "test:cs-director-founder-ack": "tsx --test src/lib/cs-director.test.ts",
     "test:cs-director-author-spec-failure-card": "tsx --test src/lib/cs-director-author-spec-failure-card.test.ts",
+    "test:assisted-purchase-failure-card": "tsx --test src/lib/assisted-purchase-failure-card.test.ts",
     "test:founder-escalation-stale-recheck-selection": "tsx --test src/lib/inngest/founder-escalation-stale-recheck.selection.test.ts",
     "test:growth-director-brief": "tsx --test src/lib/agents/growth-director-brief.test.ts",
     "test:growth-director-analytical-brief": "tsx --test src/lib/agents/growth-director-analytical-brief.test.ts",

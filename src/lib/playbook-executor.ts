@@ -12,6 +12,7 @@ import {
   pickChargeableVaultedPm,
   type CustomerPaymentMethodRow,
 } from "@/lib/action-executor";
+import { escalateAndCardOnAssistedPurchaseFailure } from "@/lib/assisted-purchase-failure-escalate";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -1490,6 +1491,24 @@ async function handleAssistedCreate(
     },
     personaName: pers?.name ?? null,
   });
+  // ── Phase 2 of create-subscription-internal-branch-cannot-create-a-subscription ──
+  // On failure at the terminal assisted-purchase step: escalate the ticket AND mint a CEO
+  // `dashboard_notifications` card. Susan Bellamy's ticket sat `open` + `escalated_to = null`
+  // through two silent create_subscription failures across 4 days — a purchase the customer has
+  // already agreed to must not be able to fail quietly. Best-effort side effects (a failed
+  // escalation write must not swallow the customer-visible response the interpreter returned).
+  if (!result.success) {
+    await escalateAndCardOnAssistedPurchaseFailure({
+      admin,
+      wsId,
+      tid,
+      customer,
+      params: merged,
+      actionType,
+      failureError: result.error ?? null,
+      origin: "playbook",
+    });
+  }
   return {
     action: verdict.action,
     response: verdict.response,
