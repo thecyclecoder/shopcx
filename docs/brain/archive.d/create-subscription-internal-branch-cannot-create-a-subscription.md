@@ -1,0 +1,1 @@
+- **create_subscription can never create an in-house subscription — the fallback that would save it runs after the insert that fails** · verified 2026-08-10 · → [[lifecycles/subscription-billing]]
