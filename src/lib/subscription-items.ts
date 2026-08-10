@@ -1281,7 +1281,12 @@ export async function subscriptionApplyCoupon(
  * Remove a coupon from a subscription — internal-aware dispatcher.
  *
  * Internal subs: delegate to internalSubRemoveDiscount, which filters
- * subscriptions.applied_discounts by title or id.
+ * subscriptions.applied_discounts case-insensitively across every stored
+ * shape (bare string · `{title}` · `{code}` · `{id}`) — a coupon rewritten
+ * as `{code}` by internal_subscription_renewal has to remove too, or the
+ * remover silently no-ops on any sub that has billed once. Returns
+ * `{success:false, error:'coupon_not_found'}` when the filter dropped
+ * nothing so the caller does not report a false success.
  * Appstle subs: healOnTouch, then removeExistingDiscounts (which clears the
  * whole applied_discounts set — matches the 1-coupon-per-sub invariant, so
  * the discountIdOrCode argument is retained for API symmetry only).

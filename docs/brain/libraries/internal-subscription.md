@@ -122,6 +122,16 @@ async function internalSubApplyDiscount(workspaceId: string, contractId: string,
 async function internalSubRemoveDiscount(workspaceId: string, contractId: string, discountCodeOrId: string,) : Promise<ActionResult>
 ```
 
+Filters `subscriptions.applied_discounts` case-insensitively across every stored shape (bare string · `{title}` · `{code}` · `{id}`). Shape tolerance is load-bearing: `internalSubApplyDiscount` writes `{title: CODE}`, but after `internal_subscription_renewal` rewrites the row the entry is stored as `{code: CODE}` — the pre-fix filter only knew `{title}` / `{id}`, so removing a coupon from a subscription that had billed once silently no-op'd and returned `{success:true}`, discounting every subsequent renewal until noticed by eye (spec derived from Randi Stier, ticket `c2bc8bd8-2aca-4eeb-968b-dd968a3d0dbc`, 2026-08-10). Returns `{success:false, error:'coupon_not_found'}` when the filter dropped nothing so a caller that just told a customer "removed" can find out it did not happen. Extracted pure helper `filterOutDiscount(applied, code) → {next, removed}` for unit tests (`src/lib/internal-subscription.removeDiscount.test.ts`).
+
+### `filterOutDiscount` — function
+
+```ts
+function filterOutDiscount(applied: unknown, discountCodeOrId: string) : { next: Array<Record<string, unknown>>; removed: boolean }
+```
+
+Pure filter behind `internalSubRemoveDiscount`. Matches every stored shape case-insensitively (bare string · `{title}` · `{code}` · `{id}`); returns `removed:true` iff at least one entry was dropped. The bare-string case coerces to `{title: <string>}` so the returned `next` is uniform for the JSONB write.
+
 ### `internalSubNotYetSupported` — function
 
 ```ts
