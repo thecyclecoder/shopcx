@@ -10,6 +10,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { ctaButton } from "@/lib/label-cta";
 import { unbackedEffectClaim } from "@/lib/claim-guard";
+import { backedEffectsForCompletedEffects } from "@/lib/completed-effect-backing";
 import { assertCtaBackedByLaunch } from "@/lib/sol-cta-reference-guard";
 import { resolveAlias } from "@/lib/action-handler-aliases";
 import { recordUnknownActionType } from "@/lib/proposed-action-aliases";
@@ -3775,10 +3776,26 @@ export async function executeSonnetDecision(
     case "ai_response": {
       // Claim↔action binding guard (Phase 0). This path attaches NO actions, so
       // a first-person completed-effect assertion in the reply ("I've refunded
-      // you", "your subscription has been cancelled") is by definition unbacked
-      // — the #1 false-promise mechanism. Block it and escalate to a human
-      // rather than ship a lie. Fail-safe + deterministic (no model).
-      const unbackedClaim = unbackedEffectClaim(decision.response_message, new Set<string>());
+      // you", "your subscription has been cancelled") is unbacked by THIS turn's
+      // actions — the #1 false-promise mechanism.
+      //
+      // BUT a truthful post-journey follow-up ("your subscription has been
+      // cancelled" AFTER a completed cancel journey) is a restatement of an
+      // effect that ALREADY completed, and blocking it costs an escalation for
+      // nothing. Populate the backed set from effects that DEMONSTRABLY already
+      // completed — completed journeys on this ticket + subscriptions already in
+      // the claimed end state — before the guard runs. Fail-safe + deterministic
+      // (no model): on a lookup error the helper returns an empty set, which
+      // reproduces today's blocking behavior. See
+      // docs/brain/libraries/completed-effect-backing.md and Phase 1 of
+      // docs/brain/specs/claim-guard-backs-completed-effects-on-post-journey-followups.md.
+      const backed = await backedEffectsForCompletedEffects({
+        admin: ctx.admin,
+        workspace_id: ctx.workspaceId,
+        ticket_id: ctx.ticketId,
+        customer_id: ctx.customerId,
+      });
+      const unbackedClaim = unbackedEffectClaim(decision.response_message, backed);
       if (unbackedClaim) {
         await sysNote(`[Guard] Blocked unbacked "${unbackedClaim}" claim in ${decision.action_type} — no action was attached. Escalating instead of sending a false promise.`);
         await escalateTicket(ctx, `blocked_unbacked_claim:${unbackedClaim}`);

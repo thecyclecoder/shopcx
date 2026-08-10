@@ -16,7 +16,7 @@ Conservative by design: does **not** trip on offers ("I can refund you"), questi
 
 ## Callers
 
-- [[action-executor]] `executeSonnetDecision` — `kb_response` / `ai_response` case: before sending `response_message` (a path that attaches no actions), any hit → `sysNote` + `escalateTicket(ctx, "blocked_unbacked_claim:<effect>")` instead of sending. Phase 1 will extend the check to the `direct_action` send with the verified action families as `backed` (catches "claimed refund, only ran a date change").
+- [[action-executor]] `executeSonnetDecision` — `kb_response` / `ai_response` case: before sending `response_message` (a path that attaches no actions in THIS turn), the caller first populates `backed` from effects that ALREADY completed on the ticket via [[completed-effect-backing]] `backedEffectsForCompletedEffects` — a truthful post-journey follow-up like "your subscription has been cancelled" (uttered AFTER a completed cancel journey on this ticket, or with the target subscription already `status='cancelled'`) is now allowed through; a claim with no such backing still trips and `escalateTicket(ctx, "blocked_unbacked_claim:<effect>")` fires instead of sending. Phase 1 will extend the check to the `direct_action` send with the verified action families as `backed` (catches "claimed refund, only ran a date change").
 
 ## Tests
 
