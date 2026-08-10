@@ -51,6 +51,7 @@
     "test:swap-price-assertion": "tsx --test src/lib/swap-price-assertion.test.ts",
     "test:subscription-items-mutation-verify": "tsx --test src/lib/subscription-items.verifyEndState.test.ts",
     "test:subscription-items-mutation-verify-decline": "tsx --test src/lib/subscription-items.replaceVariantsDecline.test.ts",
+    "test:subscription-items-self-swap-identity": "tsx --test src/lib/subscription-items.selfSwapIdentity.test.ts",
     "test:app-owner-action-escalation-workspace-scope": "tsx --test src/lib/meta/app-owner-action-escalation.workspace-scope.test.ts",
     "test:shopify-returns-net-refund": "tsx --test src/lib/shopify-returns.netRefund.test.ts",
     "test:return-net-refund": "tsx --test src/lib/shopify-returns.netRefund.test.ts",
