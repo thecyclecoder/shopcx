@@ -181,7 +181,7 @@ Internal-aware coupon apply. Guarded by `couponApplicableToSubStatus` — refuse
 async function subscriptionRemoveCoupon(workspaceId: string, contractId: string, discountIdOrCode: string,) : Promise<{ success: boolean; error?: string }>
 ```
 
-Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount`. Appstle subs: `healOnTouch` → `removeExistingDiscounts` (1-coupon-per-sub, so `discountIdOrCode` is only consulted for the internal filter).
+Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount` — filters `subscriptions.applied_discounts` case-insensitively across every stored shape (bare string · `{title}` · `{code}` · `{id}`) because a coupon rewritten as `{code}` by `internal_subscription_renewal` has to remove too, and returns `{success:false, error:'coupon_not_found'}` when the filter dropped nothing so the caller does not report a false success (spec derived from Randi Stier 2026-08-10; pre-fix the filter only knew `{title}`/`{id}` and returned `{success:true}` unconditionally, discounting every renewal until noticed by eye). Appstle subs: `healOnTouch` → `removeExistingDiscounts` (1-coupon-per-sub, so `discountIdOrCode` is only consulted for the internal filter).
 
 ## Callers
 

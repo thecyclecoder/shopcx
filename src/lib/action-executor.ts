@@ -677,6 +677,40 @@ export async function verifyLoyaltyCouponAppliedToContract(
   return false;
 }
 
+/**
+ * True when a `subscriptions.applied_discounts` JSONB blob still carries the
+ * given coupon code under ANY of the stored shapes the codebase writes:
+ * bare string, `{title}`, `{code}`, `{id}`. Match is case-insensitive
+ * because `resolveCoupon` returns the caller's casing. Load-bearing for
+ * `verifyActionInDB`'s `remove_coupon` case: the executor confirms the
+ * removal actually landed before the customer-facing "removed" message
+ * goes out, so a coupon rewritten as `{code}` by
+ * `internal_subscription_renewal` (Randi Stier 2026-08-10) cannot slip
+ * past a `{title}`-only read-back.
+ *
+ * Exported for unit tests.
+ */
+export function stillHasDiscountCode(
+  appliedDiscounts: unknown,
+  code: string,
+): boolean {
+  if (!Array.isArray(appliedDiscounts)) return false;
+  const target = String(code).toUpperCase();
+  for (const entry of appliedDiscounts) {
+    let hit = false;
+    if (typeof entry === "string") {
+      hit = entry.toUpperCase() === target;
+    } else if (entry && typeof entry === "object") {
+      const rec = entry as { title?: unknown; code?: unknown; id?: unknown };
+      if (typeof rec.title === "string" && rec.title.toUpperCase() === target) hit = true;
+      else if (typeof rec.code === "string" && rec.code.toUpperCase() === target) hit = true;
+      else if (typeof rec.id === "string" && rec.id.toUpperCase() === target) hit = true;
+    }
+    if (hit) return true;
+  }
+  return false;
+}
+
 // ── Phase-2 order/sub-scoped loyalty-ceiling guards
 // (spec: loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates)
 //
@@ -4380,6 +4414,39 @@ export async function verifyActionInDB(
       const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: { title?: string }[] } | null }> }).maybeSingle();
       const discounts = (data?.applied_discounts || []) as { title?: string }[];
       return discounts.some(d => d.title === action.code);
+    }
+    case "remove_coupon": {
+      // Re-read applied_discounts and confirm the removed code is truly gone.
+      // Match every stored shape the codebase writes — bare string, {title},
+      // {code}, {id} — case-insensitively; the {code} shape is what
+      // internal_subscription_renewal rewrites the row to after a billing
+      // cycle, and the pre-fix remover only knew {title}/{id}. Without this
+      // read-back the executor logs 'uncovered action type — assuming OK:
+      // remove_coupon' (observed 2026-08-10, Randi Stier ticket
+      // c2bc8bd8-2aca-4eeb-968b-dd968a3d0dbc) and ships the false success
+      // onward. This is the executor-level backstop behind Phase 1's honest
+      // failure return from internalSubRemoveDiscount.
+      const code = action.code || (action as { coupon_code?: string }).coupon_code;
+      if (!action.contract_id || !code) return true;
+      const q = scopeSub(admin.from("subscriptions")
+        .select("applied_discounts").eq("shopify_contract_id", action.contract_id));
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: unknown } | null }> }).maybeSingle();
+      return !stillHasDiscountCode(data?.applied_discounts, code);
+    }
+    case "bill_now":
+    case "order_now": {
+      // No cheap synchronous post-read exists for a charge. bill_now delegates
+      // to subscriptionOrderNowVerified — Appstle accepts the trigger, then
+      // charges asynchronously and can decline; the confirming predicate is
+      // the async `commerce/order-now.verify` re-check that stamps the
+      // ticket_resolution_events row on the REAL outcome (see the bill_now
+      // handler comment above). Return true here so the executor does not
+      // false-negative a legitimately-pending charge; the async verify owns
+      // the truth. Named explicitly — not the silent default warn — so the
+      // exposure the spec Phase 2 audit called out ('bill_now also logged
+      // uncovered action type — assuming OK, and it CHARGES money') can't
+      // hide behind the generic branch.
+      return true;
     }
     case "create_return":
     case "create_replacement": {

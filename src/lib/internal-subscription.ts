@@ -623,6 +623,55 @@ export async function internalSubApplyDiscount(
   return { success: true };
 }
 
+/**
+ * Pure: filter a subscription's `applied_discounts` JSONB, dropping every
+ * entry whose coupon identifier matches `discountCodeOrId` under ANY of the
+ * shapes actually written by the codebase (bare string · `{title}` · `{code}` ·
+ * `{id}`). Match is case-insensitive because `resolveCoupon` returns the
+ * caller's casing.
+ *
+ * Why the shape tolerance is load-bearing: `internalSubApplyDiscount` writes
+ * `{title: CODE}`, but after `internal_subscription_renewal` rewrites the
+ * subscription the entry is stored as `{code: CODE}`. The pre-fix filter only
+ * matched `{title}`/`{id}` — so removing a coupon from a subscription that had
+ * billed at least once silently no-op'd and reported success, discounting
+ * every subsequent renewal until noticed by eye. Rows already in the DB carry
+ * the `{code}` shape, so tolerating it in the remover cannot be replaced by
+ * normalising on write alone.
+ *
+ * Returns `{ next, removed }` — `removed` is TRUE when at least one entry was
+ * dropped so the caller can report failure honestly instead of a false
+ * success. Exported for unit tests.
+ */
+export function filterOutDiscount(
+  applied: unknown,
+  discountCodeOrId: string,
+): { next: Array<Record<string, unknown>>; removed: boolean } {
+  const target = String(discountCodeOrId).toUpperCase();
+  const arr: Array<Record<string, unknown>> = Array.isArray(applied)
+    ? (applied as unknown[]).map((e) =>
+        typeof e === "string" ? { title: e } : (e as Record<string, unknown>),
+      )
+    : [];
+  const next: Array<Record<string, unknown>> = [];
+  let removed = false;
+  for (const entry of arr) {
+    const title = typeof entry?.title === "string" ? entry.title : "";
+    const code = typeof entry?.code === "string" ? entry.code : "";
+    const id = typeof entry?.id === "string" ? entry.id : "";
+    const matches =
+      (!!title && title.toUpperCase() === target) ||
+      (!!code && code.toUpperCase() === target) ||
+      (!!id && id.toUpperCase() === target);
+    if (matches) {
+      removed = true;
+      continue;
+    }
+    next.push(entry);
+  }
+  return { next, removed };
+}
+
 export async function internalSubRemoveDiscount(
   workspaceId: string,
   contractId: string,
@@ -632,13 +681,13 @@ export async function internalSubRemoveDiscount(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
-  const existing = (sub.applied_discounts as Array<{ title?: string; id?: string }>) || [];
-  const nextDiscounts = existing.filter(
-    (d) => d.title !== discountCodeOrId && d.id !== discountCodeOrId,
-  );
+  const { next, removed } = filterOutDiscount(sub.applied_discounts, discountCodeOrId);
+  if (!removed) {
+    return { success: false, error: "coupon_not_found" };
+  }
   await admin
     .from("subscriptions")
-    .update({ applied_discounts: nextDiscounts, updated_at: new Date().toISOString() })
+    .update({ applied_discounts: next, updated_at: new Date().toISOString() })
     .eq("id", sub.id);
   return { success: true };
 }

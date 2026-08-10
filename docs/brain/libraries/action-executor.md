@@ -82,6 +82,16 @@ async function verifyLoyaltyCouponAppliedToContract(
 
 Phase-2 predicate (spec: loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen). Re-reads `subscriptions.applied_discounts` and returns true only when `code` is actually present — case-insensitive match across the tolerant shape family used by `subscriptionHasLoyaltyCoupon` (bare string · `{title}` · `{code}`). Called in the regen branch AFTER `subscriptionApplyCoupon` returns success, before the handler reports success back to the caller: Shopify's "success" is not the same as the code landing on the contract (a race with a concurrent apply/remove or an Appstle sync lag can report success on a request that didn't stick). Missing sub row ⇒ false — unknown-provenance is treated as "didn't land" so the caller retries or exhausts, rather than trusting an ambiguous upstream ack.
 
+### `stillHasDiscountCode` — function
+
+```ts
+function stillHasDiscountCode(appliedDiscounts: unknown, code: string): boolean
+```
+
+Executor-level read-back predicate for `verifyActionInDB`'s `remove_coupon` case. True when `subscriptions.applied_discounts` still carries `code` under ANY of the stored shapes the codebase writes (bare string · `{title}` · `{code}` · `{id}`), case-insensitive because `resolveCoupon` returns the caller's casing. Load-bearing: pre-fix, `verifyActionInDB` had no `remove_coupon` case and the switch hit `console.warn(uncovered action type — assuming OK: remove_coupon)`, letting a silent no-op remover (the shape mismatch fixed in Phase 1) ship an "I removed it" message onward (Randi Stier 2026-08-10, ticket `c2bc8bd8-2aca-4eeb-968b-dd968a3d0dbc`). The new case re-reads `applied_discounts` after the removal and returns `verified=false` when this predicate is still true, so the same class of false success cannot pass even if a future variant of the shape mismatch re-emerges. Tests: `src/lib/action-executor.verify-remove-coupon.test.ts`.
+
+**Uncovered mutating actions audit** (Phase 2 of [[../specs/internal-sub-remove-coupon-actually-removes-and-reports-truthfully]]): `bill_now` / `order_now` are NAMED explicitly in `verifyActionInDB` — not left to the silent default warn — with a `return true` comment noting that no cheap synchronous post-read exists (the vendor accepts, then charges async). The confirming predicate for the charge lives in the async `commerce/order-now.verify` re-check dispatched by [[../libraries/commerce__order-now-verify]] `subscriptionOrderNowVerified`, which stamps the `ticket_resolution_events` row on the REAL outcome; the executor's return-time verify would false-negative a legitimately-pending charge, so trusting the async verify is the correct semantic. Making the case explicit means the exposure the spec Phase 2 audit named ("`bill_now` also logged `uncovered action type — assuming OK`, and it CHARGES money") can't hide behind the generic branch.
+
 ### `refuseLoyaltyCouponIfCustomerMismatch` — function
 
 ```ts
