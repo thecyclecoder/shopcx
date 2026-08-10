@@ -1,0 +1,1 @@
+- **Claim-guard backs a truthful restatement of an already-completed cancellation** · verified 2026-08-10 · → [[../lifecycles/ticket-lifecycle]]
