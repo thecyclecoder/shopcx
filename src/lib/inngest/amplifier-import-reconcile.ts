@@ -36,6 +36,43 @@ import { errText } from "@/lib/error-text";
 const RETRY_CAP = 5;
 const GRACE_MINUTES = 10;
 const BATCH_LIMIT = 200;
+/** Residue alert: paid + errored + not accepted within this window ⇒ CEO card. Set to a day per spec — a full business day of retries is well past any transient upstream flake. */
+const STALE_ERRORED_HOURS = 24;
+
+/**
+ * Source names the reconcile rail retries. Storefront was the historical scope
+ * (the fraud-dismiss retry surface covers only that), but internal subscription
+ * renewals ALSO route through Amplifier via createAmplifierOrder — a nameless
+ * stored address 400s the request, the order lands paid + un-imported, and
+ * without this rail retrying it the order sits stuck forever (the Shannon
+ * Russell / 2026-08-10 incident: 2 paid orders with amplifier_import_attempts=1
+ * that never retried because the source_name gate below was storefront-only).
+ * Comp renewals are $0 marker orders, not warehouse-bound, so they stay out.
+ */
+export const RECONCILE_ELIGIBLE_SOURCE_NAMES = new Set<string>([
+  "storefront",
+  "internal_subscription_renewal",
+]);
+
+/** True when a `paid` order's source_name is one the reconcile rail retries. Pure — unit-tested. */
+export function isReconcileEligibleSourceName(sourceName: string | null | undefined): boolean {
+  return typeof sourceName === "string" && RECONCILE_ELIGIBLE_SOURCE_NAMES.has(sourceName);
+}
+
+/**
+ * Pick the recipient's first name off a stored order shipping address. Internal
+ * renewals write camelCase (`firstName` — matches the portal + checkout on
+ * orders.shipping_address), while storefront legacy rows and Shopify webhook
+ * imports write snake_case (`first_name`). Accept both so the packing-slip
+ * greeting silently doesn't lose the name on a widened-eligibility renewal.
+ * Empty string when neither is present. Pure — unit-tested.
+ */
+export function packingSlipFirstName(ship: { first_name?: unknown; firstName?: unknown } | null | undefined): string {
+  if (!ship) return "";
+  const snake = typeof ship.first_name === "string" ? ship.first_name : "";
+  const camel = typeof ship.firstName === "string" ? ship.firstName : "";
+  return snake || camel || "";
+}
 
 type AdminClient = ReturnType<typeof createAdminClient>;
 
@@ -87,10 +124,10 @@ async function reconcileOne(
   admin: AdminClient,
   row: CandidateRow,
 ): Promise<"imported" | "failed" | "skipped-fraud" | "skipped-no-skus" | "skipped-non-storefront"> {
-  if (row.source_name !== "storefront") return "skipped-non-storefront";
+  if (!isReconcileEligibleSourceName(row.source_name)) return "skipped-non-storefront";
   if (await isFraudHeld(admin, row.workspace_id, row.id)) return "skipped-fraud";
 
-  const ship = (row.shipping_address as { phone?: string; first_name?: string } | null) || null;
+  const ship = (row.shipping_address as { phone?: string; first_name?: string; firstName?: string } | null) || null;
   const lines = ((row.line_items as Line[]) || []).filter((l) => l && l.sku);
   if (lines.length === 0) return "skipped-no-skus";
 
@@ -102,7 +139,7 @@ async function reconcileOne(
         workspaceId: row.workspace_id,
         customerId: row.customer_id,
         orderId: row.id,
-        firstName: ship?.first_name || "",
+        firstName: packingSlipFirstName(ship),
         productCount: distinctProducts,
       }).catch(() => null)
     : null;
@@ -233,6 +270,88 @@ async function escalateExhaustedOrders(admin: AdminClient): Promise<{ scanned: n
   return { scanned, opened, already_open: alreadyOpen, skipped_fraud: skippedFraud };
 }
 
+/**
+ * Residue alert: a `paid` order that has an `amplifier_last_error` and hasn't
+ * been accepted within a day is CEO-visible even if it never reached the
+ * exhaustion escalation. The exhaustion path (attempts ≥ RETRY_CAP) needs 5
+ * retries × 15-min cadence ≈ 75 min to trip, but the 2026-08-10 Shannon
+ * Russell case sat at `amplifier_import_attempts=1` for FOUR DAYS because the
+ * source_name gate skipped the retry entirely — attempts never grew, and the
+ * exhaustion escalation never fired. This safety-net check catches ANY
+ * paid+errored order older than STALE_ERRORED_HOURS regardless of attempt
+ * count. Dedupe key is the same `metadata @> {order_id: X}` un-dismissed
+ * fulfillment_alert existence check the exhaustion escalation uses, so a
+ * given order gets exactly one card even if both selections would match.
+ */
+async function escalateStaleErroredOrders(admin: AdminClient): Promise<{ scanned: number; opened: number; already_open: number; skipped_fraud: number }> {
+  const staleCutoffIso = new Date(Date.now() - STALE_ERRORED_HOURS * 60 * 60_000).toISOString();
+  const { data: rows } = await admin
+    .from("orders")
+    .select("id, workspace_id, order_number, source_name, amplifier_last_error, amplifier_import_attempts, created_at")
+    .eq("financial_status", "paid")
+    .is("amplifier_order_id", null)
+    .not("amplifier_last_error", "is", null)
+    .lt("created_at", staleCutoffIso)
+    .order("created_at", { ascending: true })
+    .limit(BATCH_LIMIT);
+
+  let scanned = 0;
+  let opened = 0;
+  let alreadyOpen = 0;
+  let skippedFraud = 0;
+  for (const row of (rows || []) as Array<{
+    id: string;
+    workspace_id: string;
+    order_number: string | null;
+    source_name: string | null;
+    amplifier_last_error: string | null;
+    amplifier_import_attempts: number | null;
+    created_at: string;
+  }>) {
+    scanned++;
+    if (await isFraudHeld(admin, row.workspace_id, row.id)) { skippedFraud++; continue; }
+
+    // Same dedupe shape as escalateExhaustedOrders — a card of either kind for
+    // this order short-circuits so we never double-alert on the same stuck row.
+    const { data: existing } = await admin
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", row.workspace_id)
+      .eq("type", "fulfillment_alert")
+      .eq("dismissed", false)
+      .contains("metadata", { order_id: row.id })
+      .limit(1)
+      .maybeSingle();
+    if (existing) { alreadyOpen++; continue; }
+
+    const orderLabel = row.order_number || row.id.slice(0, 8);
+    const attempts = row.amplifier_import_attempts ?? 0;
+    const ageHours = Math.round((Date.now() - new Date(row.created_at).getTime()) / 3_600_000);
+    const { error } = await admin.from("dashboard_notifications").insert({
+      workspace_id: row.workspace_id,
+      type: "fulfillment_alert",
+      title: `${orderLabel} — paid ${ageHours}h with Amplifier error (${row.source_name || "unknown source"})`,
+      body: `Paid order ${orderLabel} has been sitting ${ageHours}h with an Amplifier error and has not been imported. Attempts so far: ${attempts}. Last error: ${row.amplifier_last_error || "unknown"}. On 2026-08-10 two paid renewals were only discovered because one customer wrote in — investigate before the customer notices.`,
+      link: `/dashboard/orders/${row.id}`,
+      metadata: {
+        kind: "amplifier_import_stale_errored",
+        order_id: row.id,
+        order_number: row.order_number,
+        source_name: row.source_name,
+        attempts,
+        age_hours: ageHours,
+        last_error: row.amplifier_last_error,
+      },
+    });
+    if (error) {
+      console.warn(`[amplifier-import-reconcile] stale-errored fulfillment_alert insert failed for order ${row.id}: ${error.message}`);
+    } else {
+      opened++;
+    }
+  }
+  return { scanned, opened, already_open: alreadyOpen, skipped_fraud: skippedFraud };
+}
+
 export const amplifierImportReconcileCron = inngest.createFunction(
   {
     id: "amplifier-import-reconcile",
@@ -303,15 +422,24 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       return escalateExhaustedOrders(admin);
     });
 
+    // Residue safety net — paid + errored + not accepted within a day catches
+    // any stuck order the exhaustion path missed (e.g. attempts stalled below
+    // RETRY_CAP for any reason). Dedupes against the same un-dismissed
+    // fulfillment_alert card so an already-escalated order gets exactly one.
+    const staleEscalation = await step.run("escalate-stale-errored-orders", async () => {
+      const admin = createAdminClient();
+      return escalateStaleErroredOrders(admin);
+    });
+
     await step.run("emit-heartbeat", async () => {
       await emitCronHeartbeat("amplifier-import-reconcile", {
         ok: true,
-        produced: { ...result, escalation },
-        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup`,
+        produced: { ...result, escalation, stale_escalation: staleEscalation },
+        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
         durationMs: Date.now() - startedAt,
       });
     });
 
-    return { ...result, escalation };
+    return { ...result, escalation, stale_escalation: staleEscalation };
   },
 );
