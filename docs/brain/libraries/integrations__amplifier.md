@@ -48,6 +48,10 @@ async function stampAmplifierImportFailure(
 
 Phase 1 of the import-reliability rail. Called by every `createAmplifierOrder` caller on a `!res.success` result (in addition to the existing `console.warn`), so a failed import is queryable off the order row. Reads current `amplifier_import_attempts` and writes `attempts+1`, `amplifier_last_error` (`${error}: ${details}`, capped at 1000 chars), and `amplifier_last_attempt_at = now()`. Non-fatal — a stamp failure is logged and swallowed so it never bubbles into a caller that's already handling a downstream failure. The success paths (checkout, comp renewal, paid renewal) additionally clear `amplifier_last_error = null` alongside the existing `amplifier_order_id` / `amplifier_received_at` stamp. The Phase 2 reconcile-sweep cron and Phase 3 CEO-inbox escalation both read these columns.
 
+### Address recipient-name requirement
+
+Amplifier rejects an order whose shipping address has **no** recipient name (`{ error: "Shipping Name (or First Name/Last Name) is required" }`). The address-mapper is casing-tolerant (`str("first_name", "firstName")` at `src/lib/integrations/amplifier.ts:146`), so either camelCase (`firstName`/`lastName`) or snake_case (`first_name`/`last_name`) works — but the address MUST carry a name on at least one of them (or a combined `name` field). Callers building an address from stored data (subscriptions.shipping_address, orders.shipping_address, customers.default_address) must inject the customer's name onto a nameless address before dispatching, or the order will be charged, marked `paid`, and never enter fulfilment. See [[../inngest/internal-subscription-renewals]] § Shipping-name injection for the internal-renewal path.
+
 ### `applyVariantSkus(lineItems, skuById)` — pure SKU-resolution core
 
 **Invariant: `product_variants` is the source of truth for a line's SKU at import
