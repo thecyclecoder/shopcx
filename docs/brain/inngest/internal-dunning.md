@@ -16,6 +16,7 @@ Not an Inngest function itself — a library of handlers called from [[internal-
 
 ## Key behaviour
 
+- **Recovered-from-dunning skip (fires BEFORE cycle open/advance):** a late/duplicate failure event whose live subscription is already `active`, has `last_payment_status='succeeded'`, and whose `next_billing_date` is strictly after `Date.now()` returns `{ status: "skipped_recovered" }` and does NOT create or reschedule a cycle. Predicate `isSubscriptionRecoveredFromDunning` is pure (unit-tested via `test:internal-dunning-recovered-skip`); the live read is `lookupSubscriptionForDunningRecoveryGuard`, scoped to `(id, workspace_id)` — a cross-tenant lookup returns null and the guard fails open into normal dunning. Prevents the Control Tower `dunning-payday-retry-cron` tile from going red on a `retrying` cycle the retry engine can never clear (the sub is already scheduled forward, so the daily renewal cron won't touch it).
 - **Cycle key:** `dunning_cycles.shopify_contract_id` holds the `internal-*` id (internal subs have no Shopify contract).
 - **Retry engine = the daily renewal cron.** On failure, `next_billing_date` → next payday (`getNextPaydayDates`); `internalSubscriptionRenewalCron` re-attempts. No Appstle billing-attempt, no separate retry cron.
 - **Attempt counting:** counts `payment_failures` rows (last 90d, `succeeded=false`) for the sub. `MAX_PAYDAY_RETRIES = 4` → 5th failure exhausts.
