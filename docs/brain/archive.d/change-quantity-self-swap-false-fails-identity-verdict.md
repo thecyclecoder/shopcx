@@ -1,0 +1,1 @@
+- **change_quantity self-swap false-fails the identity verdict — spurious escalation + silently reset grandfathered price** · verified 2026-08-10 · → [[../libraries/subscription-items]], [[../libraries/action-executor]]
