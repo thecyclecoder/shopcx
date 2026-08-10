@@ -328,3 +328,44 @@ test("Phase 2 — author_spec without an outcome (legacy back-compat) still clos
   assert.equal(t.action_key, "close_and_deescalate");
   assert.equal(t.patch.status, "closed");
 });
+
+test("june-authored-specs-carry-machine-runnable-checks Phase 2 — a failed author_spec stamps escalated_to = ceoUserId when the caller can resolve the workspace owner", () => {
+  // Before this shipped, a failed author_spec kept the ticket escalated but left escalated_to
+  // untouched — the ticket sat open with NO OWNER on the escalated view (Yvonne Carreon: 2.6 days
+  // sitting in that limbo). Phase 2 stamps the founder so the ticket lands in the founder-escalated
+  // view alongside every other escalate_founder verdict, and the CEO card the runner mints for
+  // this branch pairs with this ownership stamp.
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Analyzer gap — the spec write threw and no fix landed.",
+    authorSpecOutcome: { specWritten: false, reason: "author_spec_threw" },
+    ceoUserId: "founder-user-123",
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  assert.equal(t.patch.escalated_to, "founder-user-123");
+  // Still MUST NOT close — the phantom-close was the irreversible half of the pre-Phase-2 miss.
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.closed_at, undefined);
+  assert.equal(t.patch.resolved_at, undefined);
+  // Escalation not cleared (escalated_at stays), reason stamped.
+  assert.equal(t.patch.escalated_at, undefined);
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(author_spec_threw\)/);
+});
+
+test("june-authored-specs-carry-machine-runnable-checks Phase 2 — a failed author_spec WITHOUT a resolvable ceoUserId still keeps-escalated (escalated_to left untouched — the CEO card is the surface)", () => {
+  // The CEO card the runner mints is the primary human-visible surface for this branch. When the
+  // owner lookup fails (a race, RLS drop, workspace with no owner), we still want the ticket to
+  // stay escalated + reason-stamped so the card matches a queue entry — but we MUST NOT invent
+  // an escalated_to. Leaving it undefined preserves whatever was there before June's review.
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "SDK threw, no spec landed.",
+    authorSpecOutcome: { specWritten: false, reason: "author_spec_threw" },
+    ceoUserId: null,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  assert.equal(t.patch.escalated_to, undefined);
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(author_spec_threw\)/);
+});

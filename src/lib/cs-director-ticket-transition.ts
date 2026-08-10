@@ -216,19 +216,27 @@ export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInpu
       // back in the queue instead of disappearing. Playbook fields are NOT cleared — this is not a
       // resolution-side transition (June's structural fix never landed; a customer follow-up may
       // still legitimately resume the pre-escalation lane after a human resolves the failed write).
+      //
+      // june-authored-specs-carry-machine-runnable-checks Phase 2 — a failed author_spec is now
+      // ESCALATED TO THE CEO (`escalated_to = ceoUserId` when resolvable), the same treatment
+      // `escalate_founder` gets, so the ticket lands in the founder's escalated view instead of an
+      // "escalated but owned by nobody" limbo (the exact failure mode Yvonne Carreon's ticket sat
+      // in for 2.6 days). The CEO card the runner mints for this branch is the human-visible
+      // surface that pairs with this ownership stamp.
       const outcome = input.authorSpecOutcome;
       // Read the `specWritten` predicate off the outcome — the ONLY signal that authorizes closing
       // + de-escalating an author_spec verdict. `outcome === undefined` is the legacy back-compat
       // path (a pre-Phase-2 caller); the shipped runCsDirectorCallJob always threads the outcome.
       const specWritten = outcome ? outcome.specWritten === true : true;
       if (outcome && specWritten === false) {
-        return {
-          action_key: "keep_escalated_needs_attention",
-          patch: {
-            escalation_reason: needsAttentionEscalationReason(outcome.reason),
-            updated_at: input.now,
-          },
+        const patch: Record<string, unknown> = {
+          escalation_reason: needsAttentionEscalationReason(outcome.reason),
+          updated_at: input.now,
         };
+        // Stamp the CEO as the escalation owner when we can resolve them, so the ticket surfaces
+        // in the founder-escalated view alongside every other escalate_founder verdict.
+        if (input.ceoUserId) patch.escalated_to = input.ceoUserId;
+        return { action_key: "keep_escalated_needs_attention", patch };
       }
       // Confirmed write (specWritten === true) — OR the legacy back-compat path where the caller
       // didn't thread the outcome at all (pre-Phase-2 unit tests) — closes + de-escalates + clears
