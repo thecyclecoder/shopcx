@@ -1,0 +1,1 @@
+- **Internal subscription coupon removal now removes and reports truthfully** · verified 2026-08-10 · → [[../libraries/internal-subscription]]
