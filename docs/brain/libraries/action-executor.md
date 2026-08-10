@@ -4,6 +4,8 @@
 
 Dispatches `SonnetDecision` JSON. Handles direct_action / journey / playbook / workflow / macro / kb_response / ai_response / escalate. Resolves handler_name against journeys, playbooks, workflows by name OR trigger_intent (case-insensitive). Single source of truth for executing AI decisions.
 
+**Plain-reply claim-guard backing** — on `kb_response` / `ai_response` the [[claim-guard]] `unbackedEffectClaim` is called with a `backed` set populated by [[completed-effect-backing]] `backedEffectsForCompletedEffects` (completed journeys on this ticket + subscriptions already in the claimed end state). A truthful post-journey follow-up like "your subscription has been cancelled" AFTER a completed cancel journey now passes; an invented promise still hits `escalateTicket(ctx, "blocked_unbacked_claim:<effect>")` exactly as before. Fail-safe: helper returns an empty set on any lookup error, reproducing today's blocking behavior. Phase 1 of [[../specs/claim-guard-backs-completed-effects-on-post-journey-followups]].
+
 **File:** `src/lib/action-executor.ts`
 
 ## File header
