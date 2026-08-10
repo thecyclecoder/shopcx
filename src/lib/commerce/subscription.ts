@@ -29,6 +29,7 @@
  * the full old→new pairing, and docs/brain/libraries/commerce__subscription.md
  * for the surface reference.
  */
+import { randomBytes } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { priceSubscription } from "./price";
 import type {
@@ -836,8 +837,10 @@ export interface CreateSubscriptionInput {
   shipping_protection_amount_cents?: number;
   applied_discounts?: Array<Record<string, unknown>>;
   payment_method_id?: string | null;
-  /** Optional contract id for the internal branch — defaults to
-   *  `internal-${uuid}` at insert time when omitted. */
+  /** Optional contract id. When omitted on the internal branch,
+   *  `createSubscription` generates `internal-<16-hex>` up front and passes it
+   *  to `buildCreateSubscriptionRow` via `opts` before the insert — the row is
+   *  never inserted with a null id (the column is NOT NULL). */
   shopify_contract_id?: string | null;
 }
 
@@ -846,6 +849,17 @@ export interface CreateSubscriptionResult {
   error?: string;
   subscription_id?: string;
   shopify_contract_id?: string | null;
+}
+
+/**
+ * Synthesize an internal-branch contract id — `internal-<16 hex>`. Matches the
+ * existing live-row convention (e.g. `internal-97f66e6a03a74e97`). Callers
+ * MUST generate this BEFORE the insert; the `subscriptions.shopify_contract_id`
+ * column is NOT NULL, so a null-then-repair sequence throws before the repair
+ * ever runs (the defect fixed in the create-subscription-internal-branch spec).
+ */
+export function synthesizeInternalContractId(): string {
+  return `internal-${randomBytes(8).toString("hex")}`;
 }
 
 /**
@@ -891,6 +905,7 @@ export function buildCreateSubscriptionRow(
     shipping_protection_added: Boolean(input.shipping_protection_added),
     shipping_protection_amount_cents: input.shipping_protection_amount_cents ?? null,
     applied_discounts: input.applied_discounts ?? [],
+    payment_method_id: input.payment_method_id ?? null,
     subscription_created_at: new Date().toISOString(),
   };
 }
@@ -918,7 +933,10 @@ export async function createSubscription(
   const admin = createAdminClient();
 
   if (input.vendor === "internal") {
-    const row = buildCreateSubscriptionRow(workspaceId, input);
+    const contractId = input.shopify_contract_id ?? synthesizeInternalContractId();
+    const row = buildCreateSubscriptionRow(workspaceId, input, {
+      shopify_contract_id: contractId,
+    });
     const { data, error } = await admin
       .from("subscriptions")
       .insert(row)
@@ -926,14 +944,6 @@ export async function createSubscription(
       .single();
     if (error) return { success: false, error: error.message };
     const inserted = data as { id: string; shopify_contract_id: string | null };
-    if (!inserted.shopify_contract_id) {
-      const synth = `internal-${inserted.id}`;
-      await admin
-        .from("subscriptions")
-        .update({ shopify_contract_id: synth })
-        .eq("id", inserted.id);
-      return { success: true, subscription_id: inserted.id, shopify_contract_id: synth };
-    }
     return {
       success: true,
       subscription_id: inserted.id,

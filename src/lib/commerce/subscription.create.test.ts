@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 
 import {
   buildCreateSubscriptionRow,
+  synthesizeInternalContractId,
   type CreateSubscriptionInput,
 } from "./subscription";
 
@@ -106,7 +107,7 @@ test("buildCreateSubscriptionRow: defaults empty applied_discounts + delivery_pr
   assert.equal(row.delivery_price_cents, 0);
 });
 
-test("buildCreateSubscriptionRow: shopify_contract_id null by default (post-insert synth via `internal-<uuid>`)", () => {
+test("buildCreateSubscriptionRow: shopify_contract_id null when neither opts nor input supply one (caller `createSubscription` synthesizes upstream)", () => {
   const row = buildCreateSubscriptionRow(WORKSPACE, baseInput());
   assert.equal(row.shopify_contract_id, null);
 });
@@ -121,4 +122,28 @@ test("buildCreateSubscriptionRow: opts.shopify_contract_id (synth) overrides the
     shopify_contract_id: "internal-9999",
   });
   assert.equal(row.shopify_contract_id, "internal-9999");
+});
+
+test("buildCreateSubscriptionRow: payment_method_id lands on the row (was silently dropped before Phase 1 of create-subscription-internal-branch-cannot-create-a-subscription)", () => {
+  const row = buildCreateSubscriptionRow(
+    WORKSPACE,
+    baseInput({ payment_method_id: "pm-abc123" }),
+  );
+  assert.equal(row.payment_method_id, "pm-abc123");
+});
+
+test("buildCreateSubscriptionRow: payment_method_id null when omitted", () => {
+  const row = buildCreateSubscriptionRow(WORKSPACE, baseInput());
+  assert.equal(row.payment_method_id, null);
+});
+
+test("synthesizeInternalContractId: `internal-` followed by 16 hex chars (matches live-row convention)", () => {
+  const id = synthesizeInternalContractId();
+  assert.match(id, /^internal-[0-9a-f]{16}$/);
+});
+
+test("synthesizeInternalContractId: distinct each call", () => {
+  const a = synthesizeInternalContractId();
+  const b = synthesizeInternalContractId();
+  assert.notEqual(a, b);
 });
