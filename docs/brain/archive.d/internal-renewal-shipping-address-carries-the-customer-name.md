@@ -1,0 +1,1 @@
+- **Renewal shipping address carries the customer's name so the warehouse can fulfill the order** · verified 2026-08-10 · → [[../inngest/internal-subscription-renewals]] · also [[../inngest/amplifier-import-reconcile]]
