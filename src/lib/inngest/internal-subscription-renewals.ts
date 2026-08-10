@@ -114,6 +114,107 @@ export async function lookupSubscriptionNextBillingDateForStaleGuard(
   return (data?.next_billing_date as string | null) ?? null;
 }
 
+// ─── Renewal shipping-address resolver ─────────────────────────────
+// A renewal reaches the warehouse via `createAmplifierOrder`, which 400s with
+// "Shipping Name (or First Name/Last Name) is required" the moment the address
+// has no recipient name. That order is then charged, marked `paid`, and never
+// enters fulfilment — the reconcile rail skips it (Phase 2 widens that).
+//
+// The historical resolver returned `sub.shipping_address || lastOrder.shipping_address
+// || customer.default_address` unmodified, so a stored nameless address (a real
+// storefront-checkout gap that we no longer create but still holds legacy rows)
+// reached Amplifier every renewal and every renewal silently died. Shannon
+// Russell (SHOPCX170) and one other customer (SHOPCX181) sat paid + unshipped
+// on 2026-08-06 until 2026-08-10 hand-repair.
+//
+// This helper injects the customer's first/last name onto the resolved address
+// pair when the address itself carries no recipient (any casing — combined
+// `name`, camel `firstName`/`lastName`, snake `first_name`/`last_name`). It
+// never overwrites a name the address already carries: a customer may ship to
+// someone else. Same treatment for the billing address returned alongside.
+//
+// When the address is nameless AND the customer has no first/last on file
+// either, there is no valid recipient — `needsHuman: true` tells the caller to
+// skip BEFORE charging (no leak of a paid-unshipped order) and surface the
+// block via a customer-timeline event.
+//
+// Pure — no I/O. Tested via internal-subscription-renewals.shipping-name.test.ts.
+type RenewalAddress = Record<string, unknown>;
+type RenewalSubForShipping = { shipping_address?: RenewalAddress | null } | null;
+type RenewalLastOrderForShipping = {
+  shipping_address?: RenewalAddress | null;
+  billing_address?: RenewalAddress | null;
+} | null;
+type RenewalCustomerForShipping = {
+  first_name?: string | null;
+  last_name?: string | null;
+  default_address?: RenewalAddress | null;
+} | null;
+
+function addressHasAnyRecipientName(a: RenewalAddress | null | undefined): boolean {
+  if (!a) return false;
+  const trimmed = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return Boolean(
+    trimmed(a.name) ||
+      trimmed(a.firstName) ||
+      trimmed(a.lastName) ||
+      trimmed(a.first_name) ||
+      trimmed(a.last_name),
+  );
+}
+
+function attachCustomerName(
+  address: RenewalAddress | null,
+  first: string,
+  last: string,
+): RenewalAddress | null {
+  if (!address) return address;
+  if (addressHasAnyRecipientName(address)) return address;
+  if (!first && !last) return address;
+  // Write camelCase — matches the portal + checkout convention on
+  // orders.shipping_address. Amplifier accepts either casing via
+  // str("first_name", "firstName") in the mapper.
+  return { ...address, firstName: first, lastName: last };
+}
+
+export type ResolveInternalRenewalShippingResult =
+  | {
+      needsHuman: false;
+      shipping: RenewalAddress | null;
+      billing: RenewalAddress | null;
+    }
+  | { needsHuman: true; reason: "no_recipient_name" };
+
+export function resolveInternalRenewalShipping(
+  sub: RenewalSubForShipping,
+  lastOrder: RenewalLastOrderForShipping,
+  customer: RenewalCustomerForShipping,
+): ResolveInternalRenewalShippingResult {
+  const resolvedShipping: RenewalAddress | null =
+    (sub?.shipping_address as RenewalAddress | null) ||
+    (lastOrder?.shipping_address as RenewalAddress | null) ||
+    (customer?.default_address as RenewalAddress | null) ||
+    null;
+  const resolvedBilling: RenewalAddress | null =
+    (lastOrder?.billing_address as RenewalAddress | null) || resolvedShipping;
+
+  const first = typeof customer?.first_name === "string" ? customer.first_name.trim() : "";
+  const last = typeof customer?.last_name === "string" ? customer.last_name.trim() : "";
+
+  // Doomed request: nameless address AND no name we could inject. The warehouse
+  // will 400 every attempt, so bail here rather than charge + create a paid
+  // order that can never ship. Caller surfaces the block for human repair.
+  if (resolvedShipping && !addressHasAnyRecipientName(resolvedShipping) && !first && !last) {
+    return { needsHuman: true, reason: "no_recipient_name" };
+  }
+
+  return {
+    needsHuman: false,
+    shipping: attachCustomerName(resolvedShipping, first, last),
+    billing: attachCustomerName(resolvedBilling, first, last),
+  };
+}
+
 // ─── Daily cron (3 AM Central) ──────────────────────────────────────
 // 9 AM UTC is 3 AM CST in winter, 4 AM CDT in summer. We accept the
 // 1-hour DST drift because renewal timing is idempotent — even if a
@@ -604,26 +705,49 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         .limit(1)
         .maybeSingle();
 
-      const resolvedShipping =
-        (sub.shipping_address as Record<string, unknown> | null) ||
-        (lastOrder?.shipping_address as Record<string, unknown> | null) ||
-        (customer.default_address as Record<string, unknown> | null) ||
-        null;
+      const shippingRes = resolveInternalRenewalShipping(sub, lastOrder ?? null, customer);
+      if (shippingRes.needsHuman) {
+        // Doomed request: nameless stored address AND the customer record has no
+        // first/last on file. Bail BEFORE charging so we don't leak a paid-but-
+        // unshipped order (the Shannon Russell / 2026-08-10 incident). Return the
+        // customer_id so the skip-handler below can log a needs_attention event.
+        return {
+          skip: true,
+          reason: "no_recipient_name",
+          customer_id: sub.customer_id as string | null,
+        } as const;
+      }
 
       return {
         skip: false,
         sub,
         pm,
         customer,
-        shipping_address: resolvedShipping,
-        billing_address: (lastOrder?.billing_address as Record<string, unknown> | null) || resolvedShipping,
+        shipping_address: shippingRes.shipping,
+        billing_address: shippingRes.billing,
       } as const;
     });
 
     if (ctx.skip) {
       // no_payment_method is the load-bearing skip the outcome-distribution assertion watches for
-      // a spike; the rest (not_internal / status_* / no_customer / customer_not_found) are benign
-      // between-fan-out-and-attempt state changes → skipped_other.
+      // a spike; the rest (not_internal / status_* / no_customer / customer_not_found /
+      // no_recipient_name) are benign or manual-intervention state changes → skipped_other.
+      if (ctx.reason === "no_recipient_name") {
+        // Surface the block on the customer timeline so a human can add a name and re-run,
+        // rather than the sub being retried forever with the same doomed payload.
+        await step.run("log-no-recipient-name-event", async () => {
+          const { logCustomerEvent } = await import("@/lib/customer-events");
+          await logCustomerEvent({
+            workspaceId: workspace_id,
+            customerId: (ctx.customer_id as string | null) ?? null,
+            eventType: "subscription.renewal_blocked_no_recipient_name",
+            source: "internal_subscription_renewal",
+            summary:
+              "Renewal blocked — the customer's stored shipping address has no recipient name and no first/last name is on their record. Add a name before re-running.",
+            properties: { subscription_id, needs_attention: true },
+          });
+        });
+      }
       await step.run("emit-outcome-skip", () =>
         emitRenewalOutcomeHeartbeat(ctx.reason === "no_payment_method" ? "skipped_no_payment_method" : "skipped_other"),
       );
