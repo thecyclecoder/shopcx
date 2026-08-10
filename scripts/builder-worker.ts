@@ -15479,7 +15479,14 @@ async function runCsDirectorCallJob(job: Job) {
     try {
       const { decideCsDirectorTicketTransition } = await import("../src/lib/cs-director-ticket-transition");
       let ceoUserId: string | null = null;
-      if (verdict.decision === "escalate_founder") {
+      // june-authored-specs-carry-machine-runnable-checks Phase 2 — a FAILED author_spec ALSO
+      // needs the CEO stamp so the ticket lands in the founder-escalated view (same treatment
+      // escalate_founder gets). Only fetch the owner on either of those two branches — the
+      // resolve-side transitions (approve_remedy / close_no_action / message_only) never use it.
+      if (
+        verdict.decision === "escalate_founder" ||
+        (verdict.decision === "author_spec" && authorOutcomeOk === false)
+      ) {
         try {
           const { data: owner } = await db
             .from("workspace_members")
@@ -15723,6 +15730,48 @@ async function runCsDirectorCallJob(job: Job) {
         } catch (e) {
           console.warn(`${tag} escalate_founder digest append threw:`, e instanceof Error ? e.message : e);
         }
+      }
+    }
+
+    // june-authored-specs-carry-machine-runnable-checks Phase 2 — a FAILED author_spec verdict
+    // (handleAuthorSpec returned needs_attention on any of its branches — spec_seed_missing_*,
+    // ticket_id_unresolved, author_spec_write_returned_false, author_spec_threw, handler_threw)
+    // ALSO mints a CEO `dashboard_notifications` card. Before this shipped, a failed author_spec
+    // parked the agent_job needs_attention (the designed fail-safe) but no human ever saw it —
+    // the ticket sat open with no owner (Yvonne Carreon: 2.6 days). A fail-safe nobody can see is
+    // not a fail-safe. Same SINGLE-WRITER contract as escalate_founder: the RUNNER is the sole
+    // writer of the card, minted AFTER applyBoxCsDirectorCall returns; the handler NEVER inserts a
+    // `dashboard_notifications` row from inside itself. The transition above already stamped
+    // `escalated_to = ceoUserId` on the ticket so it lands in the founder-escalated view too.
+    if (verdict.decision === "author_spec" && authorOutcomeOk === false) {
+      try {
+        const { buildAuthorSpecFailureCard } = await import("../src/lib/cs-director-author-spec-failure-card");
+        const row = buildAuthorSpecFailureCard({
+          ticketId,
+          reasoning: verdict.reasoning,
+          jobId: job.id,
+          triageRunId: triageRunId ?? null,
+          failureReason: authorFailureReason ?? "unknown_reason",
+          failureError: applyResult.error ?? null,
+          specSeed: verdict.spec_seed ?? null,
+        });
+        const { error: notifErr } = await db.from("dashboard_notifications").insert({
+          workspace_id: job.workspace_id,
+          type: "agent_approval_request",
+          title: row.title,
+          body: row.body,
+          link: row.link,
+          metadata: row.metadata,
+          read: false,
+          dismissed: false,
+        });
+        if (notifErr) {
+          console.error(`${tag} author_spec-failure CEO card insert failed — failure reached no one: ${notifErr.message}`);
+        } else {
+          console.log(`${tag} author_spec-failure CEO card minted (routed_to_function=ceo · reason=${authorFailureReason ?? "unknown_reason"})`);
+        }
+      } catch (e) {
+        console.error(`${tag} author_spec-failure CEO card build/insert threw:`, e instanceof Error ? e.message : e);
       }
     }
 
