@@ -56,6 +56,77 @@ function isBraintreeTerminal(code: string | null | undefined): boolean {
   return code ? BRAINTREE_TERMINAL.has(String(code)) : false;
 }
 
+/**
+ * Live-subscription shape the recovered-from-dunning boundary reads. Kept narrow
+ * so the predicate stays pure — it decides on `status` + `last_payment_status`
+ * + `next_billing_date` alone and does no I/O of its own.
+ */
+export interface DunningRecoveryProbe {
+  status: string | null | undefined;
+  last_payment_status: string | null | undefined;
+  next_billing_date: string | null | undefined;
+}
+
+/**
+ * Pure boundary: is a subscription already recovered from a prior dunning
+ * cycle, so a late/duplicate internal renewal failure event should NOT open
+ * or advance a new cycle? True iff the sub is `active`, its most-recent
+ * charge is `succeeded`, and `next_billing_date` is strictly after the
+ * reference time (safely in the future). Fail-open (returns false) on any
+ * missing field, unparseable date, or non-active/non-succeeded state so a
+ * genuinely-due failure still enters dunning normally.
+ *
+ * Pure — no I/O. Tested via `internal-dunning.recovered-skip.test.ts`.
+ */
+export function isSubscriptionRecoveredFromDunning(
+  sub: DunningRecoveryProbe | null | undefined,
+  referenceMs: number,
+): boolean {
+  if (!sub) return false;
+  if (sub.status !== "active") return false;
+  if (sub.last_payment_status !== "succeeded") return false;
+  if (!sub.next_billing_date) return false;
+  const nextMs = new Date(sub.next_billing_date).getTime();
+  if (!Number.isFinite(nextMs)) return false;
+  if (!Number.isFinite(referenceMs)) return false;
+  return nextMs > referenceMs;
+}
+
+/**
+ * Tenant-scoped live read for the recovered-from-dunning guard. The dunning
+ * failure event carries subscription_id AND workspace_id, and BOTH must be
+ * applied to the live lookup — filtering on subscription_id alone lets an
+ * event whose workspace_id does not match the sub's owning workspace read
+ * that sub's state (a cross-tenant leak, or a false-recovered skip based on
+ * foreign state). No-row (mismatch or absent) fails open as `null` so the
+ * predicate falls through as recovered=false in the "never over-skip" branch.
+ * Extracted so it can be unit-tested with a mock admin client.
+ */
+type DunningRecoveryAdminLike = {
+  from: (table: "subscriptions") => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    select: (cols: string) => any;
+  };
+};
+export async function lookupSubscriptionForDunningRecoveryGuard(
+  admin: DunningRecoveryAdminLike,
+  subscriptionId: string,
+  workspaceId: string,
+): Promise<DunningRecoveryProbe | null> {
+  const { data } = await admin
+    .from("subscriptions")
+    .select("status, last_payment_status, next_billing_date")
+    .eq("id", subscriptionId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (!data) return null;
+  return {
+    status: (data.status as string | null) ?? null,
+    last_payment_status: (data.last_payment_status as string | null) ?? null,
+    next_billing_date: (data.next_billing_date as string | null) ?? null,
+  };
+}
+
 export interface InternalDunningInput {
   workspace_id: string;
   subscription_id: string;
@@ -77,6 +148,22 @@ export async function handleInternalDunningFailure(input: InternalDunningInput):
 
   const settings = await getDunningSettings(workspace_id);
   if (!settings?.dunning_enabled) return { status: "dunning_disabled" };
+
+  // Guard against a late/duplicate internal renewal failure event whose live
+  // subscription has already recovered and advanced to its next billing date.
+  // Without this, the retry engine keeps a `retrying` cycle open even though
+  // the customer has paid and the sub is scheduled forward — the Control Tower
+  // dunning-payday-retry-cron surface goes red on a cycle nothing can clear.
+  // Fail-open on a null probe (no cross-tenant row, or missing sub) so a real
+  // due failure still enters dunning normally.
+  const liveSub = await lookupSubscriptionForDunningRecoveryGuard(
+    admin,
+    subscription_id,
+    workspace_id,
+  );
+  if (isSubscriptionRecoveredFromDunning(liveSub, Date.now())) {
+    return { status: "skipped_recovered" };
+  }
 
   // Load or open the cycle (keyed on subscription_id via shopify_contract_id = internal-*).
   const existing = await getActiveDunningCycle(workspace_id, internal_contract_id);
