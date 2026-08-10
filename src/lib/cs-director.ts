@@ -1293,6 +1293,15 @@ export function planAuthorSpec(
  * body. Owner is always `'cs'` (June's function); parent is always the bare `[[../functions/cs]]`
  * wikilink so the SDK's Phase-2 auto-anchor deterministically resolves it to a specific CS mandate
  * (same pattern the improve-plan-executor uses when the LLM omitted the mandate pick).
+ *
+ * june-authored-specs-carry-machine-runnable-checks Phase 1 — the phase carries a `checks[]` with an
+ * unconditional `exec_kind:'tsc'` floor. The SDK's `assertEveryPhaseHasChecks` requires >=1 check
+ * with an auto-testable `exec_kind` per phase (`MissingMachineCheckError` otherwise), and the seed
+ * arrives with no proposed check, so a phase authored by this builder used to throw every time —
+ * measured 3-for-3 on 2026-08-06 / 08-07 / 08-10, 0 specs ever authored via this path. The floor is
+ * appended unconditionally — no seed-supplied check can reduce the phase back below one machine
+ * check — so this can never regress. The prose `verification` still renders on the card; prose is
+ * allowed as EXTRA alongside a machine check, only the sole-verification case is rejected.
  */
 export function buildAuthorSpecInput(plan: AuthorSpecPlan, ticketId: string): StructuredSpecInput {
   const targetLine = plan.target ? `\n\n**Target:** \`${plan.target}\`` : "";
@@ -1337,6 +1346,18 @@ export function buildAuthorSpecInput(plan: AuthorSpecPlan, ticketId: string): St
         status: "planned",
         why: whyLine,
         what: whatLine,
+        // Unconditional floor — same shape [[author-spec]] `buildStructuredSpecInputFromMarkdown`
+        // uses. `exec_kind:'tsc'` is in `AUTO_TESTABLE_EXEC_KINDS`, satisfies
+        // `assertEveryPhaseHasChecks`, and is universally valid regardless of the ticket topic.
+        checks: [
+          {
+            position: 1,
+            description: "Repo typechecks clean (`npx tsc --noEmit`) after this phase lands.",
+            kind: "auto",
+            exec_kind: "tsc",
+            params: null,
+          },
+        ],
       },
     ],
   };

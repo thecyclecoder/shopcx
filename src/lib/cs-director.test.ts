@@ -1342,6 +1342,43 @@ test("buildAuthorSpecInput — omits Target section when the LLM didn't name one
   assert.doesNotMatch(spec.summary ?? "", /Target:/);
 });
 
+test("buildAuthorSpecInput — Phase 1: generated phase carries an auto-testable exec_kind:'tsc' floor check so the SDK's MissingMachineCheckError never fires again", () => {
+  const spec = buildAuthorSpecInput(
+    {
+      slug: "cs-analyzer-coupon-gap",
+      title: "Analyzer routes repeat-coupon tickets to remedy",
+      intent: "Route repeat-coupon tickets to the remedy path.",
+      problem: "The analyzer skipped remedy path on repeat coupon.",
+      target: "src/lib/ticket-analyzer.ts",
+    },
+    "ticket-115350d5",
+  );
+  assert.equal(spec.phases.length, 1);
+  const phase = spec.phases[0];
+  const checks = phase.checks ?? [];
+  assert.ok(checks.length >= 1, "phase must carry >=1 machine-runnable check");
+  const autoTestableKinds = new Set([
+    "tsc",
+    "grep",
+    "ci_status",
+    "http_get",
+    "db_probe_readonly",
+    "unit_test",
+    "build",
+  ]);
+  const hasAutoTestable = checks.some(
+    (c) => typeof c.exec_kind === "string" && autoTestableKinds.has(c.exec_kind),
+  );
+  assert.ok(
+    hasAutoTestable,
+    "at least one check must carry an auto-testable exec_kind (satisfies assertEveryPhaseHasChecks)",
+  );
+  const floor = checks.find((c) => c.exec_kind === "tsc");
+  assert.ok(floor, "the unconditional tsc floor check is present");
+  assert.equal(floor?.params, null, "tsc takes no params (see validateExecutableCheck)");
+  assert.equal(floor?.kind, "auto", "kind is 'auto' — display/chip category");
+});
+
 // ── Phase 3 handleAuthorSpec — SDK write via injected dep ──────────────────────────────────────
 
 function authorSpecAdmin(ticketId: string | null): Admin {
