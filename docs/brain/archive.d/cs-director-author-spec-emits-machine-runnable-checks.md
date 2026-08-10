@@ -1,0 +1,1 @@
+- **June's author_spec verb has never once worked — it builds phases with no machine-runnable checks** · verified 2026-08-10 · → [[../libraries/cs-director]]
