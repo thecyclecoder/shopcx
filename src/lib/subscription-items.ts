@@ -1346,6 +1346,42 @@ export async function subSwapVariant(
     resolvedOld = r.numericId;
   }
 
+  // Already-landed short-circuit (spec: [[swap-variant-self-heal-must-not-refire-an-already-landed-swap]]).
+  // The self-heal loop retries subSwapVariant when the first attempt didn't verify in the DB. If the
+  // first swap DID succeed (target variant present on the LIVE contract, old absent), re-invoking
+  // replace-variants would fire against an outgoing line that no longer exists —
+  // captureOutgoingRealizedCents below correctly refuses with "Cannot read outgoing line price",
+  // which reads to the customer as a scary price-reset danger even though the swap already landed.
+  // Ticket 46a77d60 (Christine, 2026-08-05): crisis auto-swap-back to Mixed Berry succeeded on
+  // contract 33827422381; the retry re-called subSwapVariant against the removed Peach Mango line
+  // and surfaced "I ran into a small issue" to a customer who'd threatened non-payment.
+  //
+  // Only genuine variant-to-variant swaps (old !== new) can hit this class — a self-swap
+  // (change_quantity) never loses its outgoing line because the line IS the target.
+  if (String(resolvedOld) !== String(newVariantId)) {
+    const preInvokeIdentity = await verifyContractEndState(
+      config.apiKey,
+      contractId,
+      identityExpectationForSwap(String(resolvedOld), String(newVariantId), quantity),
+      { attempts: 1, delayMs: 0 },
+    );
+    if (preInvokeIdentity.ok) {
+      // Sync the DB mirror in case the first pass didn't reach syncItemsAfterMutation. Idempotent
+      // — a no-op when the mirror already reflects the post-swap state. We deliberately do NOT
+      // re-apply capturedUnitCents here: the first invocation's price-preservation branch already
+      // ran on the live line, and re-invoking subUpdateLineItemPrice on a preserved line would
+      // reset it to the current post-swap realized rather than the grandfathered base.
+      await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+        items.map((item) =>
+          String(item.variant_id) === String(resolvedOld)
+            ? { ...item, variant_id: String(newVariantId), quantity }
+            : item,
+        ),
+      );
+      return { success: true };
+    }
+  }
+
   // Capture the outgoing line's realized per-unit price BEFORE the replace.
   // Prefer pricingPolicy.basePrice-derived realized (isolates the real base from any stacked
   // one-off discount); fall back to currentPrice.amount when policy is null.
