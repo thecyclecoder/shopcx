@@ -500,6 +500,33 @@ export function checkContractSatisfiesExpectation(
 }
 
 /**
+ * Pick the right MutationExpectation for a `subSwapVariant` identity check. When
+ * old === new (a self-swap, i.e. the shape `change_quantity` uses), the swap
+ * post-condition "old is absent" can never hold, so the correct assertion is
+ * `add` — the variant is present at the requested quantity. A genuine variant-
+ * to-variant swap keeps the strict swap post-condition (new present AND old
+ * absent) so the 2026-07-30 partial-apply still fails loudly.
+ *
+ * Broken out as a pure helper so the selection is unit-testable without
+ * standing up a live Appstle contract.
+ */
+export function identityExpectationForSwap(
+  oldVariantId: string,
+  newVariantId: string,
+  quantity: number,
+): MutationExpectation {
+  if (String(oldVariantId) === String(newVariantId)) {
+    return { kind: "add", variantId: String(newVariantId), quantity };
+  }
+  return {
+    kind: "swap",
+    newVariantId: String(newVariantId),
+    oldVariantId: String(oldVariantId),
+    quantity,
+  };
+}
+
+/**
  * Fetch the live Appstle contract and confirm it satisfies `expected`. Polls
  * with a small bounded settle window because Appstle applies asynchronously —
  * but a TIMEOUT ends as FAILURE, never an assumed success. A fetch error at
@@ -1345,12 +1372,19 @@ export async function subSwapVariant(
     // never moved). The existing swap-price assertion downstream only catches a PRICE regression;
     // an identity no-op slips past it. syncItemsAfterMutation only runs on verified identity —
     // otherwise our own DB mirror durable-stores the lie.
-    const identityVerdict = await verifyContractEndState(config.apiKey, contractId, {
-      kind: "swap",
-      newVariantId: String(newVariantId),
-      oldVariantId: String(resolvedOld),
-      quantity,
-    });
+    //
+    // Self-swap = pure quantity change (`change_quantity` calls subSwapVariant(_, _, v, v, qty)).
+    // The `swap` verdict asserts the OLD variant is absent, which can NEVER be true when old === new,
+    // so a real success would always false-fail — skipping syncItemsAfterMutation AND the
+    // capturedUnitCents re-apply below (that skip IS the grandfathered-price reset). See
+    // identityExpectationForSwap: it returns `add` for a self-swap and keeps `swap` (new present
+    // AND old absent) for a genuine variant-to-variant swap so the 2026-07-30 partial-apply still
+    // fails loudly.
+    const identityVerdict = await verifyContractEndState(
+      config.apiKey,
+      contractId,
+      identityExpectationForSwap(String(resolvedOld), String(newVariantId), quantity),
+    );
     if (!identityVerdict.ok) {
       return {
         success: false,
