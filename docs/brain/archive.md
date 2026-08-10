@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Skip stale internal renewal attempts before they reopen dunning** · verified 2026-08-09 · → [[../inngest/internal-subscription-renewals]]
+- **Scope internal renewal stale guard to the event workspace** · verified 2026-08-09 · → [[../inngest/internal-subscription-renewals]]
 - **The CVE watcher can't author its own fix spec — 10 patchable advisories have sat unfixed since July** · verified 2026-08-07 · → [[../libraries/security-agent]]
 - **Stop the cs-director-call self-routing loop, and give June a message-only remedy** · verified 2026-08-05 · → [[../libraries/cs-director]]
 - **Error-feed: drop Braintree portal vault "Closed Card" processor-decline noise** · verified 2026-08-05 · → [[../libraries/control-tower]]
