@@ -144,6 +144,18 @@ Idempotent-replay recovery for `apply_loyalty_coupon` when `claimRegenSpendSlot`
 
 ### `ActionResult` — interface
 
+### `resolveCreateReturnResolutionType` — function
+
+```ts
+function resolveCreateReturnResolutionType(
+  value: unknown,
+):
+  | { ok: true; resolutionType: "refund_return" | "store_credit_return" | undefined }
+  | { ok: false; error: string }
+```
+
+Pure validator wired into the `create_return` direct-action handler (spec: [[../specs/create-return-direct-action-honors-store-credit-resolution|create-return-direct-action-honors-store-credit-resolution]] Phase 1). Normalizes the optional `resolution_type` field on `ActionParams` into the value passed through as `createFullReturn.resolutionType` in [[shopify-returns]]. `undefined` → `undefined` (`createFullReturn` writes its built-in `'refund_return'` default, matching today's every-call behavior); `'refund_return'` / `'store_credit_return'` → passed through unchanged so an agent-authored store-credit return actually resolves as store credit (the sanctioned retention-friendly outcome the returns engine already supports on both Shopify and internal SHOPCX* orders). Any other value → `{ ok: false, error }` and the handler surfaces the reason without ever calling `createFullReturn` (a bogus value must not silently downgrade to the refund default). Tests: `src/lib/action-executor.create-return-resolution-type.test.ts` — six pins covering pass-through, defaults, rejected strings, non-string smuggling, and the handler wiring itself (grep-verifiable that `resolutionType: resolution.resolutionType` is the literal that flows into `createFullReturn`).
+
 ## Callers
 
 - `src/lib/inngest/ticket-research.ts`

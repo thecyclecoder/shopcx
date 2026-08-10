@@ -78,6 +78,15 @@ export interface ActionParams {
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
+  // create_return — how the return resolves once the item is back. Passed
+  // through to createFullReturn.resolutionType (src/lib/shopify-returns.ts). Omit
+  // to keep today's behavior (createFullReturn defaults to 'refund_return' — a
+  // cash refund). Set 'store_credit_return' to have the return settle as store
+  // credit instead — the sanctioned retention-friendly outcome the returns
+  // engine already supports on both Shopify and internal (SHOPCX*) orders but
+  // that agents could not reach through the direct-action handler before this
+  // parameter existed. Reject any other value at the handler.
+  resolution_type?: "refund_return" | "store_credit_return";
   // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
   // off after it ships (never recurs). `free` defaults true (a $0 gift); set
   // false + base_price_cents for a paid one-time add-on (internal only).
@@ -1169,6 +1178,42 @@ async function deferCreateToAssistedPurchase(
     summary: launched
       ? `${actionName} deferred — no vaulted PM; launched add_payment_method journey`
       : `${actionName} deferred — no vaulted PM; add_payment_method journey NOT delivered`,
+  };
+}
+
+/**
+ * Validate + normalize the optional `resolution_type` field on a `create_return`
+ * ActionParams payload. The value that comes out is what the handler passes to
+ * `createFullReturn`'s `resolutionType` parameter (src/lib/shopify-returns.ts:833).
+ *
+ * `undefined` → `undefined` (createFullReturn's built-in `'refund_return'` default
+ * fires downstream — today's behavior on every call site that omits the field).
+ * `'refund_return'` or `'store_credit_return'` → passed through unchanged, so an
+ * agent that authored a sanctioned store-credit outcome (the cheaper, retention-
+ * friendly resolution the returns engine already supports on both Shopify and
+ * internal orders) actually gets it. Anything else → `{ ok: false, error }` so
+ * the handler surfaces the reason and NEVER calls createFullReturn — a bogus
+ * value must not silently downgrade to the refund default.
+ *
+ * Spec: create-return-direct-action-honors-store-credit-resolution Phase 1.
+ * The two valid strings mirror the union declared on `FullReturnParams`
+ * (`shopify-returns.ts`); the four-string enum on the returns row itself
+ * (`store_credit_no_return` / `refund_no_return`) is deliberately out of scope
+ * for the direct-action handler — a no-return refund would flow through
+ * `partial_refund` instead.
+ */
+export function resolveCreateReturnResolutionType(
+  value: unknown,
+):
+  | { ok: true; resolutionType: "refund_return" | "store_credit_return" | undefined }
+  | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, resolutionType: undefined };
+  if (value === "refund_return" || value === "store_credit_return") {
+    return { ok: true, resolutionType: value };
+  }
+  return {
+    ok: false,
+    error: `Invalid resolution_type: ${JSON.stringify(value)}. Must be 'refund_return' or 'store_credit_return' (or omitted for the refund_return default).`,
   };
 }
 
@@ -2374,6 +2419,16 @@ export const directActionHandlers: Record<
     const addr = order.shipping_address as Record<string, string> | null;
     if (!addr) return { success: false, error: "No shipping address on order" };
 
+    // Resolve the optional resolution_type via the pure helper below so a bad
+    // value is REJECTED at the handler rather than falling through and silently
+    // downgrading to createFullReturn's built-in refund_return default. Omitting
+    // the field keeps today's behavior exactly (`resolutionType: undefined` →
+    // createFullReturn writes 'refund_return'). Applies on both Shopify and
+    // internal (SHOPCX*) orders — the internal path already runs whenever
+    // shopify_order_id is null and nothing about that changes here.
+    const resolution = resolveCreateReturnResolutionType(p.resolution_type);
+    if (!resolution.ok) return { success: false, error: resolution.error };
+
     const r = await createFullReturn({
       workspaceId: ctx.workspaceId,
       orderId: order.id,
@@ -2395,6 +2450,7 @@ export const directActionHandlers: Record<
       },
       source: "ai",
       freeLabel: !!p.free_label,
+      resolutionType: resolution.resolutionType,
     });
 
     if (r.success && r.labelUrl) {

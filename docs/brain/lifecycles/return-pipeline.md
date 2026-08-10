@@ -4,7 +4,7 @@ End-to-end trace from "agent / playbook / customer initiates a return" to "custo
 
 ## Cast
 
-- Initiators: agent UI, [[../playbooks]] return-request playbook, customer portal, AI orchestrator (via `direct_action`).
+- Initiators: agent UI, [[../playbooks]] return-request playbook, customer portal, AI orchestrator (via `direct_action`). The orchestrator's `create_return` handler accepts an optional `resolution_type: 'refund_return' | 'store_credit_return'` — omit for a cash refund (today's default), set `'store_credit_return'` when the sanctioned outcome is store credit. Validated at the handler via [[../libraries/action-executor]] `resolveCreateReturnResolutionType`; passed through as `createFullReturn.resolutionType` on both Shopify and internal (SHOPCX*) orders. See [[../specs/create-return-direct-action-honors-store-credit-resolution|Phase 1 spec]].
 - Brain: `src/lib/shopify-returns.ts` (`createFullReturn`, `closeReturn`, `partialRefundByAmount`, `issueStoreCredit`) + [[../inngest/returns]] (process-delivery, issue-refund).
 - Label: [[../integrations/easypost]] (USPS-pinned).
 - Refunds: [[../integrations/shopify]] (`refundCreate`) + [[../integrations/braintree]] (`transaction.refund`) when applicable.
