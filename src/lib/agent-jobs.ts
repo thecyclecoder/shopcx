@@ -1697,6 +1697,34 @@ export interface GoalBranchPromoteResult {
  * inline stamp idempotent: a re-run (or a phase the heal already stamped) is excluded, so we never
  * double-stamp or over-stamp. Pure — testable without DB or GitHub.
  */
+/**
+ * ⭐ chain-advance-skips-built-but-unstamped-phases (2026-08-11) — the pure selector behind
+ * [[queueNextChainedPhase]]: which phase should the chain build NEXT?
+ *
+ * Answer: the first phase that is `planned` AND carries **no `build_sha`**.
+ *
+ * WHY BOTH CONDITIONS. Selecting on `status === "planned"` alone wedges the chain PERMANENTLY the moment a
+ * phase is BUILT-BUT-UNSTAMPED (`build_sha` set, `status` still `planned`) — a routine drift in the branch
+ * flow, since `stampPhaseBuilt` and the status write are separate operations (it is the very class the
+ * `healed_built_unstamped` reconciler exists to repair). Such a phase is picked as "next" on every pass;
+ * `queueNextChainedPhase`'s dedup then finds the build job that ALREADY carries its scoped instructions and
+ * returns null — so the chain never advances and every LATER phase is unreachable.
+ *
+ * Observed live on `swap-variant-self-heal-…` (PR #2438): P1 `planned` with `build_sha=89ad4077`, P2 the
+ * security Fix phase appended by `spawnPreMergeFix`. The chain returned null on every pass, the fix never
+ * built, and the PR sat 19h — with `spawnPreMergeFix` reporting `buildQueued:false` and nothing acting on it.
+ * That made the restored fixes-as-phases path (which appends the phase correctly) still unable to finish.
+ *
+ * Skipping a `build_sha`'d phase is correct by construction: its code is already on the branch. This is the
+ * SAME predicate [[isSpecAccumulationComplete]] and [[phasesToStampBuiltOnGoalMerge]] key on, so all three
+ * agree on "done building". Pure — no DB, no GitHub; testable in isolation.
+ */
+export function nextPhaseToBuild<T extends { status: string; build_sha?: string | null }>(
+  phases: readonly T[],
+): T | undefined {
+  return phases.find((p) => p.status === "planned" && !p.build_sha);
+}
+
 export function phasesToStampBuiltOnGoalMerge(
   phases: { position: number; status: string; build_sha: string | null }[],
 ): number[] {
@@ -3705,8 +3733,24 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
   // resolve the WRONG workspace and find no/incorrect phases.
   const spec = await getSpec(slug, workspaceId);
   if (!spec) return null;
-  const next = spec.card.phases.find((p) => p.status === "planned");
-  if (!next) return null; // no ⏳ phase left → the chain is complete (all phases ✅/built)
+  // ⭐ chain-advance-skips-built-but-unstamped-phases (2026-08-11) — the next phase to BUILD is the first
+  // that is `planned` AND carries NO `build_sha`. Selecting on `status === "planned"` ALONE wedges the chain
+  // permanently whenever a phase is BUILT-BUT-UNSTAMPED (build_sha set, status still `planned` — the
+  // `healed_built_unstamped` drift class the reconciler exists to repair, and which the branch flow produces
+  // routinely because `stampPhaseBuilt` and the status write are separate).
+  //
+  // The wedge: that phase is picked as "next" forever; the dedup below then finds the build job that ALREADY
+  // carries its scoped instructions and returns null — so the chain never advances, and every LATER phase
+  // (notably an appended `kind='fix'` phase) is unreachable. Observed live on
+  // swap-variant-self-heal-…(PR #2438): P1 `planned` with build_sha=89ad4077, P2 the security Fix phase
+  // appended by spawnPreMergeFix — `queueNextChainedPhase` returned null on every pass, the fix never built,
+  // and the PR sat 19h. `spawnPreMergeFix` reported `buildQueued:false` and nothing acted on it.
+  //
+  // `build_sha` is the branch flow's authoritative "this phase is done building" signal — the SAME predicate
+  // `isSpecAccumulationComplete` and `phasesToStampBuiltOnGoalMerge` key on — so skipping a build_sha'd phase
+  // is correct by construction: its code is already on the branch. This makes the three agree.
+  const next = nextPhaseToBuild(spec.card.phases);
+  if (!next) return null; // no un-built ⏳ phase left → the chain is complete (all phases built/terminal)
   const scoped = phaseScopedInstructions(next.title);
 
   const admin = createAdminClient();
