@@ -86,6 +86,18 @@ export interface EscalateFounderCardRow {
     raised_by_function: "cs";
     escalated_by_director: "cs";
     escalation_kind: "cs_director_escalate_founder";
+    /**
+     * ONE OPEN CARD PER TICKET. Keyed on the TICKET, not the job — the
+     * [[../inngest/founder-escalation-stale-recheck]] cron re-enqueues a fresh `cs-director-call`
+     * every `STALE_FOUNDER_ESCALATION_HOURS` for a founder-escalated ticket with no founder action,
+     * so a single unresolved ticket mints a NEW job id (and pre-fix, a new CEO card) every 48h. Two
+     * cards for the same settled refund question on 2026-08-10 (16h + 18h old, same customer) is the
+     * ground-truth recurrence. With this key the DB's partial unique index
+     * (`dashboard_notifications_dedupe_key_open_uniq` — UNIQUE on ((metadata->>'dedupe_key')) WHERE
+     * dismissed=false) makes the second insert a benign 23505 the caller treats as "already
+     * surfaced", which is the correct STATE: the founder still owns exactly one open decision.
+     */
+    dedupe_key: string;
     /** buildApprovalsFeed reads this as the card summary — carries June's reasoning verbatim (trimmed). */
     escalation_reason: string;
     ticket_id: string;
@@ -195,6 +207,14 @@ export function summarizePartialRemedyForCard(outcome: PartialRemedyCardInput): 
  * `delivery_failed` outcome renders as "Attempted but…" so the founder is not misled that the
  * partial landed cleanly.
  */
+/**
+ * The one-open-card-per-ticket dedupe key for a founder escalation. Exported so the runner's
+ * insert site + the stale-clear pass agree on the key without re-deriving the string.
+ */
+export function escalateFounderDedupeKey(ticketId: string): string {
+  return `cs-director-founder:${ticketId}`;
+}
+
 export function buildEscalateFounderCard(input: EscalateFounderCardInput): EscalateFounderCardRow {
   const {
     ticketId,
@@ -243,6 +263,9 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
       raised_by_function: "cs",
       escalated_by_director: "cs",
       escalation_kind: "cs_director_escalate_founder",
+      // Keyed on the TICKET (see the field doc on EscalateFounderCardRow) — a 48h stale-recheck
+      // re-run of the SAME unresolved ticket must bump/no-op, never mint a second founder decision.
+      dedupe_key: escalateFounderDedupeKey(ticketId),
       escalation_reason: normalizedReason.slice(0, 2000),
       ticket_id: ticketId,
       cs_director_call_job_id: jobId,

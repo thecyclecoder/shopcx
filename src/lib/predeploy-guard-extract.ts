@@ -33,6 +33,19 @@
  * pass at the wrong file, which is worse than admitting we don't know.
  */
 export function extractFailedPredeployGuards(out: string): string[] {
+  // (0) npm's PER-SCRIPT echo — `> shopcx-init@0.1.0 check:foo` — is AUTHORITATIVE when present, and
+  // takes precedence over the union below. Because `predeploy:static` chains its guards with `&&`,
+  // npm echoes each script as it starts and stops at the first failure: the LAST echoed `check:*` IS
+  // the one that broke.
+  //
+  // Without this, shape (b) matches the chain's own header line (`> npm run check:a && npm run
+  // check:b && …`) and returns ALL ~21 guards as "failing" — which lands in `agent_jobs.error`, is
+  // what the needs-attention classifier buckets on, and points a repair pass at 21 files instead of
+  // one. Verified against real `npm run predeploy:static` output 2026-08-11.
+  const echoes = [...out.matchAll(/^\s*>\s+\S+@\S*\s+(check:[a-z0-9-]+)\s*$/gim)];
+  const lastEcho = echoes.at(-1)?.[1];
+  if (lastEcho) return [lastEcho.replace(/^check:/, "check-")];
+
   const found: string[] = [];
   const push = (raw: string | undefined) => {
     const g = String(raw || "").trim().replace(/[.,:;]+$/, "");

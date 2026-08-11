@@ -33,7 +33,7 @@ import {
   escalateDiagnosisToCeo,
 } from "@/lib/agents/platform-director";
 import { loadAutonomyMap } from "@/lib/agents/approval-router";
-import { activeParkCardExistsForJob } from "@/lib/agents/approval-inbox";
+import { activeParkCardExistsForJob, openBuildStuckCardExistsForSpec } from "@/lib/agents/approval-inbox";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
@@ -403,7 +403,17 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
       // reconcileNeedsAttention, or a prior tick's backstop) already has an active card for this job — one
       // card per parked job. We still re-classified above (cheap + keeps the class fresh); we just don't
       // add a second CEO surface.
-      if (fresh.klass === "unknown" && !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id))) {
+      // one-card-per-park (DEDUP, job-scoped) AND one-card-per-stuck-build (DEDUP, spec-scoped).
+      // The job-scoped check alone let a RETRY of the same failing spec mint a duplicate card — a new
+      // `agent_jobs` row is a new `parkbackstop:<jobId>` key, so two byte-identical "Park needs eyes"
+      // cards for `scope-subscription-item-sync-by-workspace` sat in the CEO inbox on 2026-08-11. The
+      // spec-scoped check also catches the slug-keyed sibling watchdogs (initguard / groom-loopguard /
+      // escort-failed-repeat), which are all saying the same thing about the same spec.
+      if (
+        fresh.klass === "unknown" &&
+        !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id)) &&
+        !(await openBuildStuckCardExistsForSpec(admin, row.workspace_id, row.spec_slug, `parkbackstop:${row.id}`))
+      ) {
         await escalateDiagnosisToCeo(admin, {
           workspaceId: row.workspace_id,
           specSlug: row.spec_slug,
