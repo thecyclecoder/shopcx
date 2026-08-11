@@ -33,30 +33,62 @@ export function couponApplicableToSubStatus(status: string | null | undefined): 
   return status === "active";
 }
 
-/** Look up product title + variant title from our catalog by variant ID */
+/**
+ * Look up product title + variant title + sku from our catalog by variant ID.
+ *
+ * Reads `product_variants` (the first-class variant table) rather than the
+ * legacy `products.variants` jsonb blob, and matches BOTH rails: Appstle rows
+ * carry the Shopify numeric variant id, internal rows carry our variant UUID.
+ * Returns `sku` so a line the caller could not otherwise identify by SKU still
+ * lands with one — see [[docs/brain/libraries/subscription-items]] § Lossless
+ * item sync.
+ */
 export async function resolveVariantTitles(
   workspaceId: string,
   variantIds: string[],
-): Promise<Map<string, { title: string; variant_title: string; product_id: string }>> {
+): Promise<Map<string, { title: string; variant_title: string; product_id: string; sku: string | null; image_url: string | null }>> {
+  const map = new Map<string, { title: string; variant_title: string; product_id: string; sku: string | null; image_url: string | null }>();
+  const ids = [...new Set(variantIds.map((v) => String(v || "")).filter(Boolean))];
+  if (!ids.length) return map;
+
   const admin = createAdminClient();
-  const { data: products } = await admin.from("products").select("id, shopify_product_id, title, variants").eq("workspace_id", workspaceId);
-  const map = new Map<string, { title: string; variant_title: string; product_id: string }>();
-  for (const p of products || []) {
-    for (const v of (p.variants as { id?: string | number; title?: string }[]) || []) {
-      const vid = String(v.id || "");
-      if (variantIds.includes(vid)) {
-        map.set(vid, {
-          title: p.title || "",
-          variant_title: v.title === "Default Title" ? "" : (v.title || ""),
-          product_id: String(p.id || ""),
-        });
-      }
-    }
+  // Match on the Shopify variant id (Appstle rail) or our own UUID (internal
+  // rail). UUID-shaped ids only go in the `id` predicate — feeding a non-UUID
+  // to a uuid column errors the whole query (22P02) instead of missing a row.
+  const uuidIds = ids.filter((v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v));
+  const query = admin
+    .from("product_variants")
+    .select("id, product_id, shopify_variant_id, sku, title, image_url, products(title)")
+    .eq("workspace_id", workspaceId);
+  const { data: variants } = uuidIds.length
+    ? await query.or(`shopify_variant_id.in.(${ids.join(",")}),id.in.(${uuidIds.join(",")})`)
+    : await query.in("shopify_variant_id", ids);
+
+  for (const v of variants || []) {
+    const productTitle = (v.products as { title?: string } | null)?.title || "";
+    const entry = {
+      title: productTitle,
+      variant_title: v.title === "Default Title" ? "" : (v.title || ""),
+      product_id: String(v.product_id || ""),
+      sku: v.sku ?? null,
+      image_url: v.image_url ?? null,
+    };
+    // Register under both keys so either rail's variant_id resolves.
+    if (v.shopify_variant_id) map.set(String(v.shopify_variant_id), entry);
+    if (v.id) map.set(String(v.id), entry);
   }
   return map;
 }
 
-/** Enrich subscription items array with titles from our product catalog */
+/**
+ * Enrich subscription items with titles + sku + our product UUID from the
+ * catalog. Catalog IDs are the source of truth over payload titles.
+ *
+ * `sku` is only FILLED IN, never overwritten — a caller that already mapped a
+ * sku off the Appstle payload keeps it, and an unresolvable variant (one
+ * missing from `product_variants`) keeps whatever it arrived with instead of
+ * being blanked.
+ */
 export async function enrichItemTitles(
   workspaceId: string,
   items: Record<string, unknown>[],
@@ -68,7 +100,14 @@ export async function enrichItemTitles(
     const vid = String(i.variant_id || "");
     const resolved = titleMap.get(vid);
     if (resolved) {
-      return { ...i, title: resolved.title, variant_title: resolved.variant_title, product_id: resolved.product_id };
+      return {
+        ...i,
+        title: resolved.title,
+        variant_title: resolved.variant_title,
+        product_id: resolved.product_id,
+        sku: i.sku ?? resolved.sku ?? null,
+        image_url: i.image_url ?? resolved.image_url ?? null,
+      };
     }
     return i;
   });
@@ -321,7 +360,73 @@ export async function appstleRemoveLineItem(
   }
 }
 
-/** Refresh local DB items from Appstle contract state */
+/**
+ * Merge a live Appstle `lines.nodes` snapshot over the stored items array.
+ *
+ * Appstle is authoritative for the fields it returns (which lines exist,
+ * quantity, price, sku, selling plan, image); our DB is authoritative for
+ * local-only enrichment it has never heard of (`is_gift`,
+ * `price_override_cents`, `one_time_next_renewal`). Prior items are keyed by
+ * `line_id`, never `variant_id` — a subscription can legitimately carry two
+ * lines of the SAME variant, and a variant key would collapse them and copy
+ * one line's local fields onto the other.
+ *
+ * Pure — unit-tested. See [[docs/brain/libraries/subscription-items]].
+ */
+export function mergeContractLineItems(
+  priorItems: Record<string, unknown>[],
+  lines: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const priorByLineId = new Map<string, Record<string, unknown>>();
+  for (const p of priorItems || []) {
+    const lid = String(p?.line_id || "");
+    if (lid) priorByLineId.set(lid, p);
+  }
+  return (lines || []).map((node) => {
+    const lineId = String(node.id || "").split("/").pop() || "";
+    const appstleOwned = {
+      variant_id: String(node.variantId || "").split("/").pop() || "",
+      title: node.title || "",
+      quantity: node.quantity || 1,
+      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown>)?.amount || "0")) * 100),
+      variant_title: node.variantTitle || "",
+      product_id: String(node.productId || "").split("/").pop() || "",
+      line_id: lineId,
+      sku: (node.sku as string) || null,
+      selling_plan: (node.sellingPlanName as string) || null,
+      image_url: ((node.variantImage as Record<string, unknown> | null)?.url as string) || null,
+    };
+    // Local-only keys survive; Appstle-owned keys win.
+    return { ...(lineId ? priorByLineId.get(lineId) || {} : {}), ...appstleOwned };
+  });
+}
+
+/**
+ * Refresh local DB items from Appstle contract state — MERGE, never replace.
+ *
+ * This function runs after every Appstle line mutation, so anything it fails
+ * to carry forward is destroyed on the customer's subscription. Three rules:
+ *
+ * 1. **Map everything Appstle actually returns.** The contract-external line
+ *    node carries `sku`, `sellingPlanName` and `variantImage.url` alongside the
+ *    fields already mapped. Dropping `sku` here is what made a SKU-keyed sweep
+ *    of ACV Gummies find 8 subscriptions instead of 307 (2026-08-11) — every
+ *    sub touched by a prior mutation had silently lost its skus.
+ * 2. **Preserve local-only fields.** `is_gift`, `price_override_cents` and
+ *    `one_time_next_renewal` exist only in our DB; Appstle has never heard of
+ *    them. Two of those decide what the customer is charged. Prior items are
+ *    keyed by `line_id` (NOT variant_id — a sub can legitimately hold two
+ *    lines of the same variant) and merged UNDER the Appstle-owned fields, so
+ *    Appstle wins on what it owns and any local key survives by default.
+ * 3. **Never write an empty item list over a non-empty one.** A 200 carrying
+ *    zero lines is indistinguishable here from a contract Appstle has moved or
+ *    dropped, and blanking `items` produces a subscription that renews billing
+ *    shipping + protection with no product to ship (the SHOPCX171 empty-cart
+ *    renewal, 2026-08-07). Bail instead and leave the last good snapshot.
+ *
+ * Scoped to `workspace_id` on the write — `shopify_contract_id` alone is not a
+ * tenant-safe predicate in a multi-tenant table.
+ */
 async function syncContractItems(workspaceId: string, contractId: string, apiKey: string) {
   try {
     const res = await fetch(
@@ -329,20 +434,32 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
     );
     if (!res.ok) return;
     const contract = await res.json();
-    const lines = contract.lines?.nodes || [];
-    const rawItems = lines.map((node: Record<string, unknown>) => ({
-      variant_id: String(node.variantId || "").split("/").pop() || "",
-      title: node.title || "",
-      quantity: node.quantity || 1,
-      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown>)?.amount || "0")) * 100),
-      variant_title: node.variantTitle || "",
-      product_id: String(node.productId || "").split("/").pop() || "",
-      line_id: String(node.id || "").split("/").pop() || "",
-    }));
-    const items = await enrichItemTitles(workspaceId, rawItems);
+    const lines = (contract.lines?.nodes || []) as Record<string, unknown>[];
     const admin = createAdminClient();
-    await admin.from("subscriptions")
+
+    const { data: existing } = await admin
+      .from("subscriptions")
+      .select("id, items")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!existing) return;
+
+    const priorItems = (existing.items as Record<string, unknown>[] | null) || [];
+    if (!lines.length) {
+      if (priorItems.length) {
+        console.warn(
+          `[syncContractItems] contract ${contractId} returned 0 lines but local items has ${priorItems.length} — refusing to blank items`,
+        );
+      }
+      return;
+    }
+
+    const items = await enrichItemTitles(workspaceId, mergeContractLineItems(priorItems, lines));
+    await admin
+      .from("subscriptions")
       .update({ items, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch { /* non-fatal */ }
 }
