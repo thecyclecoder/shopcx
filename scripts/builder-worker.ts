@@ -28,6 +28,7 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
 // ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
 import { errText } from "../src/lib/error-text";
+import { RERUNNABLE_JOB_KINDS } from "../src/lib/agents/park-retry"; // shared with the needs-attention re-drive rung — one list, no drift
 import { extractFailedPredeployGuards } from "../src/lib/predeploy-guard-extract"; // predeploy-gate-repairs-in-session — names the failing guard(s) so a park/repair carries real remediation (pure module: importing builder-worker.ts boots the worker, so this cannot live here)
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
@@ -3869,7 +3870,10 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review", "mario"]);
+// SINGLE SOURCE OF TRUTH: the set lives in the pure `src/lib/agents/park-retry` module so the
+// needs-attention re-drive rung can consult the SAME list without importing this file (importing
+// builder-worker.ts boots the worker). Re-narrowed to Job["kind"] here for the local call sites.
+const RERUNNABLE_KINDS = RERUNNABLE_JOB_KINDS as ReadonlySet<Job["kind"]>;
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/

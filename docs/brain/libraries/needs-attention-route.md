@@ -38,7 +38,8 @@ Per row, in order (bounded by `PLATFORM_DIRECTOR_ROUTE_CAP`, ledger-deduped per 
 
 **(a) Re-classify at `NEEDS_ATTENTION_STALE_MS` (60 min).** A row still `null`/`unknown` gets one fresh classification pass. If it *still* lands `unknown`:
 
-- **PLATFORM-OWNER RUNG first.** For a `BUILD_STYLE_KINDS` row with a `spec_slug`, call `routeAuthorBlocker(admin, row, "unclassified")` — Ada's fix-phase lane takes its own work. On success the function **returns immediately** so branch (b)'s age alarm cannot also fire this pass, and `markRouted` stamps `routed_unclassified` so the next sweep clears the row terminal.
+- **⭐ RE-DRIVE FIRST — the cheapest rung of all** ([[park-retry]]). A park caused by a **code-side validation rejection** is fixed by a deploy, not by a human reading a card. `decideParkRetry` gates on a re-runnable kind + a known rejection signature; on a yes, the row is compare-and-set back to `queued` and the pass returns. Bounded by `PARK_RETRY_MAX` attempts spaced `PARK_RETRY_MIN_INTERVAL_MS` apart (the spacing straddles a deploy), counted off the `director_activity` ledger. **This is the rung that would have saved June's dropped finding** — see [[park-retry]] for the 4-minute-35-second ground truth.
+- **PLATFORM-OWNER RUNG next.** For a `BUILD_STYLE_KINDS` row with a `spec_slug`, call `routeAuthorBlocker(admin, row, "unclassified")` — Ada's fix-phase lane takes its own work. On success the function **returns immediately** so branch (b)'s age alarm cannot also fire this pass, and `markRouted` stamps `routed_unclassified` so the next sweep clears the row terminal.
 - **CEO fail-safe otherwise.** Mints the `Park needs eyes` card (`escalation_kind=park_backstop`), gated by both the job-scoped `activeParkCardExistsForJob` and the spec-scoped `openBuildStuckCardExistsForSpec` ([[approval-inbox]]).
 
 **(b) Age alarm at `NEEDS_ATTENTION_ALARM_MS` (70 min)** — the "zero rows >70 min" invariant, and only when no other card already covers the job.
@@ -66,6 +67,15 @@ A parked **`cs-director-call`** or **`security-review`** stays on the CEO fail-s
 `routeAuthorBlocker` takes a `BlockerRoute` = `real_blocker` | `tooling_failure` | **`unclassified`**. The third is the rung's honest "we could not classify it, but it is still ours" — deliberately a distinct value from `tooling_failure`, which asserts a diagnosis we do not have (and the box snapshot groups parks by this string). Its fix-session prompt names the uncertainty and instructs *diagnose first*, explicitly telling the session to leave it failing and say so rather than guess at a code change when the cause turns out to be a product decision, an outage, or a wrong spec — which routes it back to the founder.
 
 Marker: `routed_unclassified`. `needs_attention_class` is plain `text` (no enum), and every `routed_*` marker participates in `clearRoutedZombie` via a prefix check, so no extra wiring is needed.
+
+## The card a park produces must be READABLE and HONEST
+
+The pre-2026-08-11 backstop card titled itself `Park needs eyes: {spec_slug}` and bodied itself with `no_route_match` + the raw park error + 400 chars of raw JSON `log_tail`. The founder's verdict on it: *"a card with no action available and a hard-to-understand word wall. I literally can't do anything about this."* Both halves were fair:
+
+- **`spec_slug` is overloaded.** For a `cs-director-call` it holds a **ticket UUID**, so the card announced itself as `Park needs eyes: 1eddd352-ad99-4173-95fa-89b9dff49712`. `parkCardLabel` resolves the real name — the spec's title, else the ticket's **subject**, else the bare kind. Best-effort; a lookup miss degrades to the slug rather than blocking the escalation.
+- **The body led with machine detail and implied a decision that did not exist.** `parkCardDiagnosis` now leads with what happened in plain language, gives ONE sentence of cause, and states plainly what the founder can actually do (decide whether the work is still wanted — dismissing clears the job). The raw `log_tail` is no longer inlined; it stays one click away behind the card's deep link.
+
+**A park card is a notice, not an approval, and it should read like one.** The structural reason it carries no Approve/Decline is that `approveRoadmapAction` requires `needs_approval` and a park is `needs_attention` — so the honest fix is to make fewer parks reach the founder at all (the two rungs above), and to make the ones that do say something true and useful.
 
 ## Related
 
