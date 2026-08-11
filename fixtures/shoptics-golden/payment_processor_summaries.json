@@ -1,0 +1,322 @@
+[
+  {
+    "id": "01023ea5-1579-4674-b4a7-d9d079f8d8bf",
+    "closing_month": "2026-06",
+    "processor": "paypal",
+    "gross_sales": 36602.83,
+    "processing_fees": 1175.38,
+    "refunds": 680.42,
+    "chargebacks": 0,
+    "adjustments": 0,
+    "net_deposits": 35619.15,
+    "raw_payload": {
+      "refunds": 680.42,
+      "chargebacks": 0,
+      "gross_sales": 36602.830000000016,
+      "dispute_fees": 0,
+      "net_deposits": 35619.15,
+      "processing_fees": 1175.3799999999999,
+      "transaction_count": 405
+    },
+    "synced_at": "2026-07-07T16:45:06.753+00:00"
+  },
+  {
+    "id": "33e9b2b0-b1cb-4ddf-b1a4-4ee80a9e1f6a",
+    "closing_month": "2026-06",
+    "processor": "shopify_payments",
+    "gross_sales": 175163.29,
+    "processing_fees": 4531.44,
+    "refunds": 4716.21,
+    "chargebacks": 892.4,
+    "adjustments": 0,
+    "net_deposits": 165542.54,
+    "raw_payload": {
+      "refunds": 4716.21,
+      "adjustments": 0,
+      "chargebacks": 892.4,
+      "gross_sales": 175163.28999999998,
+      "net_deposits": 165542.53999999998,
+      "payout_count": 25,
+      "processing_fees": 4531.44
+    },
+    "synced_at": "2026-07-07T16:45:05.802+00:00"
+  },
+  {
+    "id": "5209b7a7-cf02-413b-9ed1-63b6f0816da6",
+    "closing_month": "2026-07",
+    "processor": "paypal",
+    "gross_sales": 7492.15,
+    "processing_fees": 240.19,
+    "refunds": 147.65,
+    "chargebacks": 0,
+    "adjustments": 0,
+    "net_deposits": 7988.99,
+    "raw_payload": {
+      "refunds": 147.65,
+      "chargebacks": 0,
+      "gross_sales": 7492.150000000001,
+      "dispute_fees": 0,
+      "net_deposits": 7988.99,
+      "processing_fees": 240.1899999999999,
+      "transaction_count": 82
+    },
+    "synced_at": "2026-07-10T08:01:07.981+00:00"
+  },
+  {
+    "id": "6d79bbbf-ea4f-41ba-ad30-b771bfbd30c7",
+    "closing_month": "2026-06",
+    "processor": "braintree",
+    "gross_sales": 18743.32,
+    "processing_fees": 827.94,
+    "refunds": 656.42,
+    "chargebacks": 101.1,
+    "adjustments": 0,
+    "net_deposits": 17703.07,
+    "raw_payload": {
+      "refunds": 656.4199999999998,
+      "total_fees": 383.83,
+      "chargebacks": 101.1,
+      "gross_sales": 18743.319999999996,
+      "net_deposits": 17703.069999999996,
+      "estimated_fees": 148.65,
+      "interchange_fees": 230.83,
+      "transaction_count": 196
+    },
+    "synced_at": "2026-07-07T16:45:20.412+00:00"
+  },
+  {
+    "id": "7b581b77-8f7d-4871-af50-33a8a4c61180",
+    "closing_month": "2026-07",
+    "processor": "shopify_payments",
+    "gross_sales": 50257.19,
+    "processing_fees": 1425.8,
+    "refunds": 1267.34,
+    "chargebacks": 1964.54,
+    "adjustments": 0,
+    "net_deposits": 45809.85,
+    "raw_payload": {
+      "refunds": 1267.34,
+      "adjustments": 0,
+      "chargebacks": 1964.5399999999997,
+      "gross_sales": 50257.19,
+      "net_deposits": 45809.84999999999,
+      "payout_count": 8,
+      "processing_fees": 1425.8
+    },
+    "synced_at": "2026-07-10T08:01:07.267+00:00"
+  },
+  {
+    "id": "7bca38fa-3b70-4a09-b2a7-b3e1c8603ec3",
+    "closing_month": "2026-03",
+    "processor": "paypal",
+    "gross_sales": 46229.84,
+    "processing_fees": 1518.94,
+    "refunds": 889.47,
+    "chargebacks": 305.89,
+    "adjustments": 0,
+    "net_deposits": 43814.42,
+    "raw_payload": {
+      "refunds": 889.4700000000001,
+      "chargebacks": 305.89,
+      "gross_sales": 46229.83999999999,
+      "dispute_fees": 30,
+      "net_deposits": 43814.420000000006,
+      "processing_fees": 1518.9399999999991,
+      "transaction_count": 523
+    },
+    "synced_at": "2026-04-06T18:34:43.677+00:00"
+  },
+  {
+    "id": "86b45b33-67ce-47b4-acbf-2b45c7efdeb9",
+    "closing_month": "2026-03",
+    "processor": "shopify_payments",
+    "gross_sales": 227857.26,
+    "processing_fees": 5967.68,
+    "refunds": 3205.17,
+    "chargebacks": 2551.01,
+    "adjustments": 0,
+    "net_deposits": 217818.32,
+    "raw_payload": {
+      "refunds": 3205.1699999999996,
+      "adjustments": 0,
+      "chargebacks": 2551.0099999999998,
+      "gross_sales": 227857.26000000004,
+      "net_deposits": 217818.31999999998,
+      "payout_count": 25,
+      "processing_fees": 5967.679999999999
+    },
+    "synced_at": "2026-04-06T18:34:42.1+00:00"
+  },
+  {
+    "id": "b2bc88da-6e3a-4994-b832-caa04e86e06e",
+    "closing_month": "2026-04",
+    "processor": "shopify_payments",
+    "gross_sales": 192437.27,
+    "processing_fees": 5093.93,
+    "refunds": 9894.47,
+    "chargebacks": 3575.62,
+    "adjustments": 0,
+    "net_deposits": 175418.97,
+    "raw_payload": {
+      "refunds": 9894.470000000001,
+      "adjustments": 0,
+      "chargebacks": 3575.62,
+      "gross_sales": 192437.27000000002,
+      "net_deposits": 175418.97000000003,
+      "payout_count": 25,
+      "processing_fees": 5093.93
+    },
+    "synced_at": "2026-05-05T18:57:46.678+00:00"
+  },
+  {
+    "id": "bc74567c-39a5-4f91-a29a-66afb6443ff2",
+    "closing_month": "2026-05",
+    "processor": "shopify_payments",
+    "gross_sales": 171750.4,
+    "processing_fees": 4413.69,
+    "refunds": 4145.32,
+    "chargebacks": 2068.37,
+    "adjustments": 0,
+    "net_deposits": 163836.92,
+    "raw_payload": {
+      "refunds": 4145.320000000001,
+      "adjustments": 0,
+      "chargebacks": 2068.37,
+      "gross_sales": 171750.40000000002,
+      "net_deposits": 163836.92,
+      "payout_count": 25,
+      "processing_fees": 4413.69
+    },
+    "synced_at": "2026-06-09T15:57:59.014+00:00"
+  },
+  {
+    "id": "c13d3fde-c02d-40e6-9cda-f2ddb89bb173",
+    "closing_month": "2026-04",
+    "processor": "paypal",
+    "gross_sales": 40368.29,
+    "processing_fees": 1327.97,
+    "refunds": 1332.7,
+    "chargebacks": 113.41,
+    "adjustments": 0,
+    "net_deposits": 38541.12,
+    "raw_payload": {
+      "refunds": 1332.7,
+      "chargebacks": 113.41,
+      "gross_sales": 40368.29000000003,
+      "dispute_fees": 30,
+      "net_deposits": 38541.119999999995,
+      "processing_fees": 1327.9700000000016,
+      "transaction_count": 451
+    },
+    "synced_at": "2026-05-05T18:57:47.922+00:00"
+  },
+  {
+    "id": "cbf61af1-fd29-4e29-8737-209c429bccdd",
+    "closing_month": "2026-04",
+    "processor": "braintree",
+    "gross_sales": 19830.89,
+    "processing_fees": 815.38,
+    "refunds": 826.11,
+    "chargebacks": 0,
+    "adjustments": 0,
+    "net_deposits": 18601.29,
+    "raw_payload": {
+      "refunds": 826.11,
+      "total_fees": 403.49,
+      "chargebacks": 0,
+      "gross_sales": 19830.890000000003,
+      "net_deposits": 18601.29,
+      "estimated_fees": 161.8,
+      "interchange_fees": 238.55,
+      "transaction_count": 211
+    },
+    "synced_at": "2026-05-05T18:57:58.375+00:00"
+  },
+  {
+    "id": "cef3284c-70d6-436c-afdd-cc8236e0d8c2",
+    "closing_month": "2026-05",
+    "processor": "paypal",
+    "gross_sales": 40492.6,
+    "processing_fees": 1331.69,
+    "refunds": 765.34,
+    "chargebacks": 223.6,
+    "adjustments": 0,
+    "net_deposits": 37488.29,
+    "raw_payload": {
+      "refunds": 765.34,
+      "chargebacks": 223.60000000000002,
+      "gross_sales": 40492.600000000006,
+      "dispute_fees": 30,
+      "net_deposits": 37488.29,
+      "processing_fees": 1331.6899999999998,
+      "transaction_count": 452
+    },
+    "synced_at": "2026-06-09T15:58:00.037+00:00"
+  },
+  {
+    "id": "e2503036-37a0-4d0a-a4a8-cf3f27bf28f5",
+    "closing_month": "2026-07",
+    "processor": "braintree",
+    "gross_sales": 5048.05,
+    "processing_fees": 27.52,
+    "refunds": 368.07,
+    "chargebacks": 0,
+    "adjustments": 0,
+    "net_deposits": 4652.46,
+    "raw_payload": {
+      "refunds": 368.07,
+      "total_fees": 27.52,
+      "chargebacks": 0,
+      "gross_sales": 5048.05,
+      "net_deposits": 4652.46,
+      "estimated_fees": 15.48,
+      "interchange_fees": 12.04,
+      "transaction_count": 55
+    },
+    "synced_at": "2026-07-10T08:01:17.368+00:00"
+  },
+  {
+    "id": "eedc2e11-9d0e-40f7-9e99-6c99359b992a",
+    "closing_month": "2026-03",
+    "processor": "braintree",
+    "gross_sales": 22472.98,
+    "processing_fees": 917.09,
+    "refunds": 229.53,
+    "chargebacks": 0,
+    "adjustments": 0,
+    "net_deposits": 21741.02,
+    "raw_payload": {
+      "refunds": 229.53,
+      "total_fees": 502.43,
+      "chargebacks": 0,
+      "gross_sales": 22472.98,
+      "net_deposits": 21741.02,
+      "estimated_fees": 192.81,
+      "interchange_fees": 305.71,
+      "transaction_count": 239
+    },
+    "synced_at": "2026-04-06T18:34:56.038+00:00"
+  },
+  {
+    "id": "ef131d74-b68b-40c8-8428-5701da8f4a96",
+    "closing_month": "2026-05",
+    "processor": "braintree",
+    "gross_sales": 16948.27,
+    "processing_fees": 754.27,
+    "refunds": 864.04,
+    "chargebacks": 126.93,
+    "adjustments": 0,
+    "net_deposits": 15702.06,
+    "raw_payload": {
+      "refunds": 864.04,
+      "total_fees": 382.17,
+      "chargebacks": 126.93,
+      "gross_sales": 16948.27,
+      "net_deposits": 15702.06,
+      "estimated_fees": 149.19,
+      "interchange_fees": 230.25,
+      "transaction_count": 184
+    },
+    "synced_at": "2026-06-09T15:58:15.038+00:00"
+  }
+]

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "332cecfd-17a7-4060-ba07-76b665527d05",
+    "asin": "B07N5LSWHV",
+    "amplifier_kit_sku": "FBA-X002KINLYN",
+    "transparency_enrolled": true,
+    "notes": null,
+    "active": true,
+    "created_at": "2026-03-23T00:30:30.232916+00:00",
+    "updated_at": "2026-03-23T00:30:30.232916+00:00"
+  },
+  {
+    "id": "d1e16e76-ed6f-450f-b216-daa55783ca52",
+    "asin": "B08C1R4HG3",
+    "amplifier_kit_sku": "AMZ-TABS-2S",
+    "transparency_enrolled": true,
+    "notes": null,
+    "active": true,
+    "created_at": "2026-03-23T00:14:29.530554+00:00",
+    "updated_at": "2026-03-23T00:28:38.108+00:00"
+  }
+]

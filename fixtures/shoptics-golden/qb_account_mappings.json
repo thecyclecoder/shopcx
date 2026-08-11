@@ -1,0 +1,128 @@
+[
+  {
+    "key": "amazon_customer",
+    "qb_id": "40",
+    "qb_name": "Amazon Customer",
+    "updated_at": "2026-03-22T15:01:23.367+00:00"
+  },
+  {
+    "key": "amazon_deposit_account",
+    "qb_id": "117",
+    "qb_name": "Clearing:Amazon Carried Balances",
+    "updated_at": "2026-03-22T15:01:38.474+00:00"
+  },
+  {
+    "key": "braintree_clearing",
+    "qb_id": "195",
+    "qb_name": "Clearing:Braintree",
+    "updated_at": "2026-03-22T16:47:29.917+00:00"
+  },
+  {
+    "key": "braintree_txn_fees",
+    "qb_id": "64",
+    "qb_name": "General Business Expenses:Platform Transaction Fees:Braintree CC Transaction Fees",
+    "updated_at": "2026-03-22T16:48:27.284+00:00"
+  },
+  {
+    "key": "chargebacks_account",
+    "qb_id": "58",
+    "qb_name": "Contra Income:Chargebacks",
+    "updated_at": "2026-03-22T16:46:42.22+00:00"
+  },
+  {
+    "key": "discounts_account",
+    "qb_id": "140",
+    "qb_name": "Contra Income:Discounts & Coupons",
+    "updated_at": "2026-03-22T16:46:21.943+00:00"
+  },
+  {
+    "key": "gift_card_liability",
+    "qb_id": "1150040020",
+    "qb_name": "Gift Card Liability",
+    "updated_at": "2026-03-22T16:46:49.073+00:00"
+  },
+  {
+    "key": "internal_customer",
+    "qb_id": "30525",
+    "qb_name": "Internal Customer",
+    "updated_at": "2026-07-07T15:52:34.88+00:00"
+  },
+  {
+    "key": "internal_deposit_account",
+    "qb_id": "195",
+    "qb_name": "Clearing:Braintree",
+    "updated_at": "2026-07-07T15:52:35.025+00:00"
+  },
+  {
+    "key": "paypal_clearing",
+    "qb_id": "121",
+    "qb_name": "Clearing:PayPal",
+    "updated_at": "2026-03-22T16:47:19.307+00:00"
+  },
+  {
+    "key": "paypal_txn_fees",
+    "qb_id": "122",
+    "qb_name": "General Business Expenses:Platform Transaction Fees:PayPal Transaction Fees",
+    "updated_at": "2026-03-22T16:47:26.55+00:00"
+  },
+  {
+    "key": "refunds_account",
+    "qb_id": "146",
+    "qb_name": "Contra Income:Refunds",
+    "updated_at": "2026-03-22T16:46:46.016+00:00"
+  },
+  {
+    "key": "sales_tax_payable",
+    "qb_id": "181",
+    "qb_name": "Sales Tax Payable",
+    "updated_at": "2026-03-22T16:46:26.827+00:00"
+  },
+  {
+    "key": "shipping_income",
+    "qb_id": "141",
+    "qb_name": "Other Income:Shipping Income",
+    "updated_at": "2026-03-22T16:46:30.774+00:00"
+  },
+  {
+    "key": "shopify_clearing",
+    "qb_id": "589",
+    "qb_name": "Clearing:Shopify",
+    "updated_at": "2026-03-22T16:47:05.279+00:00"
+  },
+  {
+    "key": "shopify_customer",
+    "qb_id": "30410",
+    "qb_name": "Shopify Customer",
+    "updated_at": "2026-03-22T15:01:26.2+00:00"
+  },
+  {
+    "key": "shopify_deposit_account",
+    "qb_id": "589",
+    "qb_name": "Clearing:Shopify",
+    "updated_at": "2026-03-22T15:01:44.545+00:00"
+  },
+  {
+    "key": "shopify_other_adjustments",
+    "qb_id": "613",
+    "qb_name": "Shopify Other Adjustments",
+    "updated_at": "2026-03-22T17:07:53.267+00:00"
+  },
+  {
+    "key": "shopify_txn_fees",
+    "qb_id": "595",
+    "qb_name": "General Business Expenses:Platform Transaction Fees:Shopify Transaction Fees",
+    "updated_at": "2026-03-22T16:47:15.002+00:00"
+  },
+  {
+    "key": "shrinkage_account",
+    "qb_id": "175",
+    "qb_name": "Product Costs:Inventory Shrinkage",
+    "updated_at": "2026-03-22T15:01:19.538+00:00"
+  },
+  {
+    "key": "walmart_clearing",
+    "qb_id": "387",
+    "qb_name": "Clearing:Walmart Carried Balances",
+    "updated_at": "2026-03-22T16:48:34.084+00:00"
+  }
+]
