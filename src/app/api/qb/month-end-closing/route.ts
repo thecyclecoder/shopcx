@@ -20,6 +20,7 @@ import { qboFetch } from "@/lib/quickbooks";
 import { runMonthEndClose } from "@/lib/qb-close/run-close";
 import { assertPostable } from "@/lib/qb-close/close-guard";
 import type { ShopifyOrder } from "@/lib/qb-close/journal-entry";
+import { annotateGatewayAmounts } from "@/lib/qb-close/gateway-amounts";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 
 export const dynamic = "force-dynamic";
@@ -43,7 +44,7 @@ function lastDayOf(month: string): number {
 async function fetchShopifyOrders(
   workspaceId: string,
   month: string,
-): Promise<{ orders: ShopifyOrder[]; earliest: string | null; staleWindow: boolean }> {
+): Promise<{ orders: ShopifyOrder[]; earliest: string | null; staleWindow: boolean; split: { resolved: number; failed: number; correction: number } }> {
   const creds = await getShopifyCredentials(workspaceId);
   if (!creds?.shop || !creds?.accessToken) throw new Error("Shopify is not connected for this workspace");
   const last = String(lastDayOf(month)).padStart(2, "0");
@@ -65,8 +66,17 @@ async function fetchShopifyOrders(
     const m = (res.headers.get("link") ?? "").match(/<([^>]+)>;\s*rel="next"/);
     url = m ? m[1] : null;
   }
+  // Resolve the ACTUAL captured amount per gateway on split-payment orders. Without it the JE
+  // divides the total equally among every gateway ATTEMPTED, crediting clearing accounts that
+  // received nothing — $1,540.23 of misallocation across July's 12 split-payment orders.
+  const split = await annotateGatewayAmounts(
+    orders as (ShopifyOrder & { id?: number | string })[],
+    creds.shop,
+    creds.accessToken,
+  );
+
   // If the earliest order we can see is after the 1st, the window has clipped the month.
-  return { orders, earliest, staleWindow: !!earliest && earliest > `${month}-01` };
+  return { orders, earliest, staleWindow: !!earliest && earliest > `${month}-01`, split };
 }
 
 /**
@@ -274,6 +284,12 @@ export async function POST(request: NextRequest) {
     });
 
     const warnings: string[] = [];
+    if (shopify.split.failed) {
+      warnings.push(
+        `${shopify.split.failed} split-payment order(s) fell back to an EQUAL gateway split because their ` +
+          `transactions could not be read — their clearing debits are approximate.`,
+      );
+    }
     if (shopify.staleWindow) {
       warnings.push(
         `Shopify returned no orders before ${shopify.earliest} for ${month}. The Admin API caps at ~60 trailing days ` +
@@ -301,6 +317,8 @@ export async function POST(request: NextRequest) {
             internal: result.artifacts.receipts.internal.reduce((a, l) => a + l.qty, 0),
           },
           shopify_orders: shopify.orders.length,
+          split_payment_orders_resolved: shopify.split.resolved,
+          gateway_reallocation: shopify.split.correction,
         },
         warnings,
       },

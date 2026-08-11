@@ -15,6 +15,7 @@ import { qboFetch } from "../src/lib/quickbooks";
 import { buildMonthEndArtifacts } from "../src/lib/qb-close/month-end";
 import { assessDryRun, recordDryRun } from "../src/lib/qb-close/close-guard";
 import type { ShopifyOrder } from "../src/lib/qb-close/journal-entry";
+import { annotateGatewayAmounts } from "../src/lib/qb-close/gateway-amounts";
 import * as fs from "fs";
 
 const MONTH = process.argv[2] || "2026-06";
@@ -53,6 +54,12 @@ async function fetchShopifyOrders(): Promise<ShopifyOrder[]> {
     const m = (res.headers.get("link") || "").match(/<([^>]+)>;\s*rel="next"/);
     url = m ? m[1] : null;
   }
+  // Resolve the ACTUAL per-gateway capture on split-payment orders. `payment_gateway_names` lists
+  // every gateway ATTEMPTED, so an equal split credits clearing accounts that received nothing.
+  const split = await annotateGatewayAmounts(all as (ShopifyOrder & { id?: number | string })[], tk.shop_domain, tk.access_token);
+  console.log(
+    C.d(`\n  split-payment orders resolved: ${split.resolved} (${split.failed} fell back) · reallocated $${split.correction.toFixed(2)}`),
+  );
   return all;
 }
 

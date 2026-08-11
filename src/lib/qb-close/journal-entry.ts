@@ -96,6 +96,16 @@ export interface ShopifyOrder {
   total_discounts?: string | number;
   total_price?: string | number;
   payment_gateway_names?: string[];
+  /**
+   * ACTUAL captured amount per gateway, from `/orders/{id}/transactions.json`. Supply it for
+   * split-payment orders; when absent the builder falls back to dividing the total equally.
+   *
+   * ⭐ `payment_gateway_names` lists every gateway ATTEMPTED, not those that captured money, so
+   * the equal split credits clearing accounts that received nothing. Measured across July 2026's
+   * 12 split-payment orders: $1,540.23 of absolute misallocation — Braintree was credited $214.63
+   * having captured $0.00, while Shopify Payments was short $311.98.
+   */
+  gateway_amounts?: Record<string, number>;
   line_items?: ShopifyOrderLine[];
   financial_status?: string;
 }
@@ -143,10 +153,21 @@ export function buildJournalEntryLines(inp: JournalEntryInputs): JournalEntryRes
     totalDiscounts += Number(order.total_discounts || 0);
     const gateways = (order.payment_gateway_names || []) as string[];
     const orderTotal = Number(order.total_price || 0);
-    const perGateway = gateways.length > 0 ? orderTotal / gateways.length : 0;
-    for (const gw of gateways) {
-      const processor = gatewayLookup.get(gw) || "other";
-      grossByProcessor.set(processor, (grossByProcessor.get(processor) || 0) + perGateway);
+    // Prefer the ACTUAL captured split when the caller supplied it; only fall back to dividing
+    // equally when it is absent. The fallback is materially wrong on multi-gateway orders — see
+    // `gateway_amounts` above — but is correct for the single-gateway case, which is >99% of orders.
+    const actual = order.gateway_amounts;
+    if (actual && Object.keys(actual).length) {
+      for (const [gw, amt] of Object.entries(actual)) {
+        const processor = gatewayLookup.get(gw) || "other";
+        grossByProcessor.set(processor, (grossByProcessor.get(processor) || 0) + Number(amt || 0));
+      }
+    } else {
+      const perGateway = gateways.length > 0 ? orderTotal / gateways.length : 0;
+      for (const gw of gateways) {
+        const processor = gatewayLookup.get(gw) || "other";
+        grossByProcessor.set(processor, (grossByProcessor.get(processor) || 0) + perGateway);
+      }
     }
     for (const item of order.line_items || []) {
       const lineRevenue = Number(item.price || 0) * (item.quantity || 1);

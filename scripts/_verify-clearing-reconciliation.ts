@@ -22,6 +22,7 @@ loadEnv();
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { buildMonthEndArtifacts } from "../src/lib/qb-close/month-end";
 import type { ShopifyOrder } from "../src/lib/qb-close/journal-entry";
+import { annotateGatewayAmounts } from "../src/lib/qb-close/gateway-amounts";
 import * as fs from "fs";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
@@ -54,6 +55,10 @@ async function fetchShopifyOrders(): Promise<ShopifyOrder[]> {
     const m = (r.headers.get("link") ?? "").match(/<([^>]+)>;\s*rel="next"/);
     url = m ? m[1] : null;
   }
+  // Must annotate here too, or this check measures the equal-split fallback rather than what the
+  // close actually builds.
+  const split = await annotateGatewayAmounts(all as (ShopifyOrder & { id?: number | string })[], tk.shop_domain, tk.access_token);
+  console.log(`  split-payment orders resolved: ${split.resolved} (${split.failed} fell back) · reallocated $${split.correction.toFixed(2)}`);
   return all;
 }
 
@@ -86,6 +91,11 @@ async function main() {
   };
 
   console.log(`\nCLEARING RECONCILIATION — ${MONTH}\n`);
+  console.log(
+    `  ⚠ 'processor gross' is whatever is STORED. If a row was written by a mid-month snapshot it\n` +
+      `    understates the month and every delta below reads high. Check synced_at, and re-run\n` +
+      `    scripts/_verify-processor-sync.ts for the fresh figure.\n`,
+  );
   console.log(`${"processor".padEnd(18)}${"JE clearing debit".padStart(20)}${"processor gross".padStart(18)}${"delta".padStart(14)}`);
   for (const p of procs ?? []) {
     const acct = NAME[String(p.processor)];
