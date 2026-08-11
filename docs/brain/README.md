@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 290 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 298 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 118 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 545 |
@@ -220,6 +220,19 @@ Five seconds of probing beats an hour of "why is my filter empty."
 - [[tables/product_seo_keywords]] — Per-product SEO keyword targets for ad/landing-page copy.
 - [[tables/product_variants]] — First-class variant rows (UUID PK). Source of truth for variants; `products.variants` JSONB is a legacy mirror.
 - [[tables/products]] — Synced from Shopify Online Store channel. `variants` JSONB is legacy — real source is `product_variants`.
+
+### Month-end close (QuickBooks)
+
+The source-data layer the month-end close consumes — see [[lifecycles/shoptics-migration]] + [[libraries/qb-close-month-end]]. All `qb_`-prefixed; `qb_book_inventory_snapshots` is deliberately NOT `inventory_snapshots` (book value vs ShopCX's physical/logistics view).
+
+- [[tables/qb_amazon_sales_snapshots]] — Per-ASIN per-day Amazon sales. `units_shipped` is the burn/COGS quantity; resolution is ASIN-first then seller-SKU (two-hop via `qb_external_skus`).
+- [[tables/qb_shopify_sales_snapshots]] — Per-variant per-day Shopify sales, keyed by the composite `${product_id}-${variant_id}`. **Burn must use `units_sold + refund_units`** — `units_sold` excludes fully-refunded orders.
+- [[tables/qb_internal_sales_snapshots]] — Per-line record of ShopCX-native orders (storefront / renewals / comps). Order-level money sits only on `line_index = 0`; a dropped line unbalances the journal entry.
+- [[tables/qb_amazon_inventory_snapshots]] — Daily FBA inventory. Physical = `fulfillable + transit` ONLY; `transit` already contains `reserved + inbound`.
+- [[tables/qb_tpl_inventory_snapshots]] — Daily Amplifier 3PL inventory. Use `quantity_on_hand`, not `quantity_available` (which nets off committed stock still on the shelf).
+- [[tables/qb_book_inventory_snapshots]] — What QuickBooks itself held, pre/post close. The `month_end_post` row is the next month's opening book; missing it reads as zero, not an error.
+- [[tables/qb_payment_processor_summaries]] — Per-processor per-month fees / refunds / chargebacks / clearing. The window-immune half of the JE.
+- [[tables/qb_month_end_closings]] — The close ledger. `(workspace_id, closing_month)` UNIQUE = the run-once guard; receipts and adjustments are NOT idempotent.
 
 ### Ad tool
 
