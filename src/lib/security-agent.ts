@@ -328,6 +328,20 @@ export interface EnqueueSecurityReviewBranchInput {
   prNumber?: number | null;
   /** override the workspace; else resolved from the latest job / first workspace. */
   workspaceId?: string;
+  /**
+   * ⭐ security-real-vuln-deadlock-breaker Phase 2 — bypass the "unchanged branch" dedup (2) ONLY.
+   *
+   * Dedup (2) refuses to re-review a branch that already has a `completed` review unless a NEWER BUILD PUSH
+   * landed on that same branch. That is right for the loop it was written to stop (re-reviewing an identical
+   * clean diff every standing pass) but it also makes a `real-vuln` verdict PERMANENT: the fix for the
+   * finding lands on its OWN branch, so the origin branch never advances, so it is never re-reviewed, so
+   * `completedClean` stays false and the promote gate never opens. `force` has exactly one caller —
+   * [[agent-jobs]] `retestOriginBranchSecurityIfFixMerged`, fired when the linked fix spec's build MERGES,
+   * i.e. only when the vulnerability genuinely may be closed. Dedup (0) (merged branch gone) and dedup (1)
+   * (one OPEN review per branch) STILL APPLY under force, so this can neither stack concurrent reviews nor
+   * review a deleted ref.
+   */
+  force?: boolean;
 }
 
 export type EnqueueSecurityReviewInput = EnqueueSecurityReviewDiffInput | EnqueueSecurityReviewBranchInput;
@@ -603,7 +617,11 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     .limit(1)
     .maybeSingle();
   const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
-  if (lastCleanAt) {
+  // ⭐ security-real-vuln-deadlock-breaker Phase 2 — a FORCED re-review skips this "branch unchanged" test.
+  // The caller (retestOriginBranchSecurityIfFixMerged) only forces when the linked fix spec's build MERGED,
+  // so the diff this branch is measured against (origin/main) HAS changed even though the branch tip did
+  // not — precisely the case this dedup cannot see. Guards (0) and (1) above still applied.
+  if (lastCleanAt && !input.force) {
     const lastBuildAt = (lastBuildJob as { status?: string; updated_at?: string } | null)?.status === "merged"
       ? null // a merged flip's bump is not a push (already returned above, but keep the comparison honest)
       : (lastBuildJob as { updated_at?: string } | null)?.updated_at;

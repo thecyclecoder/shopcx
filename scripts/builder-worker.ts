@@ -28,6 +28,7 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
 // ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
 import { errText } from "../src/lib/error-text";
+import { extractFailedPredeployGuards } from "../src/lib/predeploy-guard-extract"; // predeploy-gate-repairs-in-session — names the failing guard(s) so a park/repair carries real remediation (pure module: importing builder-worker.ts boots the worker, so this cannot live here)
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
@@ -6701,6 +6702,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`pre-merge backstop failed: ${errText(e)}`);
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // ⭐ stalled-promote-eligibility-escalates Phase 1 — the pre-merge backstop above re-fires the pre-merge
+    // SIGNALS; this makes their permanent ABSENCE loud. Every promote leg fails closed, so a spec whose gate
+    // can never open (the stale `real-vuln` deadlock, an accumulation that will never complete) sat silently
+    // forever. One CEO card per stuck spec, naming the exact failing leg. Detector only — never merges or
+    // flips a gate. No new node: it runs inside THIS standing pass, inheriting the platform-director node's
+    // owner + kill-switch + heartbeat.
+    const { escalateStalledPromoteEligibility } = await import("../src/lib/agent-jobs");
+    const stalls = await escalateStalledPromoteEligibility(db);
+    if (stalls.escalated.length) {
+      notes.push(
+        `promote-stall escalation → ${stalls.escalated.length} stuck spec(s) surfaced of ${stalls.scanned} scanned: ` +
+          stalls.escalated.map((s) => `${s.slug} (${s.ageHours}h — ${s.reason})`).join("; "),
+      );
+    }
+  } catch (e) {
+    notes.push(`promote-stall escalation failed: ${errText(e)}`);
+    console.error(`${tag} standing promote-stall escalation failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // POST-MERGE `diff` SECURITY backstop (fix-vault-post-merge-diff-backstop-7fbde0). Symmetric with
@@ -24699,7 +24719,23 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
           ],
         },
         "planned",
-        { intendedStatusSetBy: "security-agent", parentKind: "mandate", parentRef: "platform#security" },
+        {
+          intendedStatusSetBy: "security-agent",
+          parentKind: "mandate",
+          parentRef: "platform#security",
+          // ⭐ security-real-vuln-deadlock-breaker Phase 1 — stamp the TYPED origin linkage. Without it a
+          // `real-vuln` on an UNMERGED branch was a permanent deadlock: the branch's security-review row
+          // carries `verdict='real-vuln'` forever (isRealVulnVerdict ⇒ completedClean=false ⇒ the M4
+          // promote gate never goes green), and NOTHING could ever re-review it —
+          // `enqueueSecurityReviewBranch`'s dedup (2) only re-reviews when a NEWER BUILD PUSH lands on that
+          // same branch, but the fix lives on its OWN branch and never touches the origin's. So the origin
+          // PR sat open indefinitely (observed live on #2427 / #2438 — 17–24h, both green on spec-test AND
+          // accumulation, blocked solely on this). `regression_of_slug` is the SAME typed provenance column
+          // `retestOriginIfFixMerged` already reads for spec-test regressions — reusing it lets the
+          // post-merge hook find the origin and force a fresh review. See [[../src/lib/agent-jobs]]
+          // `retestOriginBranchSecurityIfFixMerged`.
+          regressionOfSlug: parentSlug || null,
+        },
       );
       if (!ok) {
         const authorError = `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (soft-halt: runaway circuit-breaker or silent no-op)`;
@@ -26279,6 +26315,25 @@ async function preCommitSelfVerify(input: {
 // so the existing fix-phase path still backstops — no safety regression, just a faster path when
 // the miss is a positive-absence that Bo can fix in-session.
 const SELF_VERIFY_REPAIR_MAX = 2;
+
+/**
+ * ⭐ predeploy-gate-repairs-in-session — bounded in-session repair cap for the `predeploy:static` guard
+ * chain, mirroring SELF_VERIFY_REPAIR_MAX above.
+ *
+ * WHY. The predeploy gate was the ONLY gate in the build lane that parked with ZERO repair passes: the tsc
+ * gate fails hard into the fix-phase self-heal and the self-verify gate resumes Bo up to
+ * SELF_VERIFY_REPAIR_MAX times, but a `predeploy:static` violation went straight to `needs_attention` and
+ * waited for a human — while Bo's session was still alive with full context, and the violation is almost
+ * always a one-line mechanical fix (an RLS policy on a new table, a missing node-registry row, a lossy
+ * `String(e)`). Live effect on 2026-08-10: 6 of that day's builds parked here, including BOTH auto-authored
+ * security fix specs — which in turn deadlocked the two origin PRs waiting on them (see
+ * [[../src/lib/agent-jobs]] `retestOriginBranchSecurityIfFixMerged`). One un-repaired mechanical guard
+ * failure stalled the whole pipeline for half a day.
+ *
+ * Exhausting the cap preserves the ORIGINAL behavior exactly (park `needs_attention` with the guard output
+ * on `log_tail`) — this only adds attempts before that, never removes the human backstop.
+ */
+const PREDEPLOY_REPAIR_MAX = 2;
 
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
@@ -27915,21 +27970,82 @@ async function dispatchJob(job: Job) {
     // guards (`check:policy-contradictions` — imports `createAdminClient` via dynamic import
     // in the live-scan path). A DB blip in the build lane must not block a commit. Only the
     // hermetic, repo-reading guards belong here.
-    const staticCheck = await shAsync(
-      "npm",
-      ["run", "predeploy:static"],
-      { timeout: 5 * 60 * 1000, cwd: wt },
-    );
-    if (staticCheck.code !== 0) {
-      const out = `${staticCheck.out}\n${staticCheck.err}`;
-      const failed = /❌\s*(check-[^\s—]+)/.exec(out)?.[1] ?? "unknown check";
-      await update(job.id, {
-        status: "needs_attention",
-        error: `predeploy:static failed — ${failed} — see log_tail for the exact guard's remediation`,
-        log_tail: out.slice(-2000),
-      });
-      console.error(`${tag} build-lane predeploy:static FAIL (${failed}) — see log_tail`);
-      return;
+    // ⭐ predeploy-gate-repairs-in-session — the gate now REPAIRS before it parks. Same loop shape as the
+    // pre-commit self-verify gate directly below (resume Bo's live session with the concrete failure,
+    // re-run, re-gate on tsc, bounded by a cap). On cap exhaustion the behavior is IDENTICAL to before this
+    // change: park `needs_attention` with the guard output on `log_tail`.
+    {
+      let predeploySession: string | null = session ?? null;
+      let predeployRepairs = 0;
+      for (let repairPass = 0; repairPass <= PREDEPLOY_REPAIR_MAX; repairPass++) {
+        const staticCheck = await shAsync(
+          "npm",
+          ["run", "predeploy:static"],
+          { timeout: 5 * 60 * 1000, cwd: wt },
+        );
+        if (staticCheck.code === 0) {
+          if (predeployRepairs > 0) {
+            console.log(`${tag} build-lane predeploy:static PASS after ${predeployRepairs} in-session repair pass(es)`);
+            // Legible outcome for Ada — the gate fired and Bo cleared it with no human. Mirrors the
+            // self-verify gate's `build_self_verify_caught` row. Best-effort; never throws.
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_predeploy_guard_repaired",
+                specSlug: slug,
+                reason: `predeploy:static guard violation repaired in-session after ${predeployRepairs} pass(es)`,
+                metadata: { job_id: job.id, spec_slug: slug, repair_passes: predeployRepairs, autonomous: true },
+              });
+            } catch {
+              /* audit is best-effort — the pass already succeeded */
+            }
+          }
+          break;
+        }
+        const out = `${staticCheck.out}\n${staticCheck.err}`;
+        const guards = extractFailedPredeployGuards(out);
+        const failed = guards.length ? guards.join(", ") : "unattributable guard (see log_tail)";
+        if (repairPass === PREDEPLOY_REPAIR_MAX) {
+          // Cap exhausted → the ORIGINAL park, unchanged. A human (or Mario) takes it from here.
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              `predeploy:static failed — ${failed} — unresolved after ${predeployRepairs} in-session repair pass(es); see log_tail for the exact guard's remediation`,
+            log_tail: out.slice(-2000),
+          });
+          console.error(`${tag} build-lane predeploy:static FAIL (${failed}) after ${predeployRepairs} repair(s) — see log_tail`);
+          return;
+        }
+        // Budget remains → hand Bo the ACTUAL guard output. Every guard prints a human-readable
+        // remediation next to its ❌, so the tail is genuinely actionable.
+        const repairPrompt = [
+          `⛔ PREDEPLOY GUARD BLOCK (repair pass ${repairPass + 1} of ${PREDEPLOY_REPAIR_MAX}) — your change passed tsc and the table-refs rail, but the repo-wide \`npm run predeploy:static\` guard chain REJECTED it.`,
+          `Failing guard(s): ${failed}`,
+          `These are the project's hard invariants (RLS on new tables, node-registry ownership, PM-SDK compliance, no lossy error stringify, migration safety, …). Each guard prints its own remediation next to its ❌ line. Raw output:`,
+          "```\n" + out.slice(-4000) + "\n```",
+          `Fix the VIOLATION, not the guard: never edit, weaken, skip, or remove a \`scripts/_check-*.ts\` guard or its \`predeploy\` wiring to get past this — that is the one thing you must not do here. If a guard looks genuinely wrong, leave it failing and say so in your summary; the worker will park it for a human. Do NOT touch git — the worker still owns commit/push. When done, return the same {"status":"completed","summary":"…"} envelope; the worker re-runs the chain.`,
+        ].join("\n\n");
+        const repair = await runClaude(repairPrompt, predeploySession, wt, configDir, job.id);
+        await meterAgentJob(job, configDir, repair.usage, repair.model);
+        predeployRepairs++;
+        if (repair.session) {
+          predeploySession = repair.session;
+          await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
+        }
+        // A repair that broke tsc must not slip through — same shape as the self-verify loop's re-gate.
+        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        if (tscAfter.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "tsc failed after a predeploy-guard repair pass",
+            log_tail: (tscAfter.out + tscAfter.err).slice(-2000),
+          });
+          console.error(`${tag} predeploy-guard repair broke tsc — see log_tail`);
+          return;
+        }
+      }
     }
 
     // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1) —
