@@ -23,7 +23,10 @@ import type { ShopifyOrder } from "@/lib/qb-close/journal-entry";
 import { annotateGatewayAmounts } from "@/lib/qb-close/gateway-amounts";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 
-export const dynamic = "force-dynamic";
+// No `export const dynamic` — this repo runs Next 16 with `cacheComponents: true`
+// (next.config.ts), which REJECTS the route-segment `dynamic` config at build time. It is
+// unnecessary here anyway: both handlers read the request body / searchParams, so they are
+// dynamic by definition. This route was the only one in src/app/api using it.
 export const maxDuration = 300;
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
