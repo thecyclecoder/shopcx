@@ -1,0 +1,1 @@
+- **Create return direct action must honor a store-credit resolution, not force a cash refund** · verified 2026-08-11 · → [[../lifecycles/return-pipeline]]
