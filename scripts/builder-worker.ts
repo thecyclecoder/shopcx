@@ -25217,6 +25217,78 @@ async function applySecurityVerdictToJob(
     console.log(`${tag} needs-human → surfaced, no spec`);
     return;
   }
+  // ⭐ security-findings-as-fix-phases — RESTORED (regressed 2026-07-17 by `610790798` "graduate-vera
+  // follow-ups: remove dead Vera code", which deleted this block's only caller along with the genuinely-dead
+  // fused-session code; `buildSecurityFailingChecks` was left orphaned and uncalled ever since).
+  //
+  // A real-vuln on an IN-FLIGHT build branch appends a security Fix PHASE to the ORIGIN spec and resumes its
+  // build (mirroring the RED spec-test path, src/lib/pre-merge-fix.ts) — it does NOT author a standalone fix
+  // spec. WE DO NOT DO FIX SPECS for a live branch: that model was retired (see the pre-merge-fix module
+  // header — "the 2026-07-02 mess"), because a standalone fix spec on a fresh branch races the origin's own
+  // merge and produces superseded duplicate PRs (#1070/#1071), AND — the failure this regression caused —
+  // it can NEVER clear the origin: the fix lands on its own branch, the origin's branch never advances, so
+  // `enqueueSecurityReviewBranch`'s unchanged-branch dedup never re-reviews it and the `real-vuln` verdict
+  // is PERMANENT. That is the #2427/#2438 deadlock (17–24h, both otherwise-green PRs unpromotable).
+  //
+  // Appending the fix as a PHASE is what makes the loop close on its own: the phase builds ON the origin's
+  // `claude/build-{slug}` branch, which IS a new build push, which is exactly the signal dedup (2) waits for
+  // — so the fresh re-review happens naturally, with no forcing. spawnPreMergeFix carries the per-check-key
+  // dedup + PRE_MERGE_FIX_LOOP_GUARD_MAX (no endless Fix N; it escalates instead).
+  //
+  // POST-MERGE (`diff` mode) findings are UNCHANGED — they still author a follow-up spec below, correctly:
+  // the origin already shipped, so there is no live branch build to append a phase to.
+  if (verdict === "real-vuln" && source.kind === "branch" && source.branch) {
+    const branch = source.branch;
+    const review = String(parsed?.review || "");
+    const failing = buildSecurityFailingChecks(parsed);
+    let originTitle = parentSlug;
+    try {
+      const { getSpec } = await import("../src/lib/specs-table");
+      const s = await getSpec(job.workspace_id, parentSlug);
+      if (s?.title) originTitle = s.title;
+    } catch {
+      /* best-effort — degrade to the slug */
+    }
+    const { spawnPreMergeFix } = await import("../src/lib/pre-merge-fix");
+    const out = await spawnPreMergeFix(db, {
+      workspaceId: job.workspace_id,
+      originSlug: parentSlug,
+      originTitle,
+      branch,
+      failing,
+    });
+    const outcome = out.spawned
+      ? `security Fix phase appended to [[${parentSlug}]] + build resumed (attempt ${out.attempts + 1})`
+      : out.escalated
+        ? `loop-guard escalated (${out.attempts} prior fix phase(s)) — held for the owner`
+        : `no fix phase spawned (${out.reason})`;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: SECURITY_DIRECTOR_FUNCTION,
+      actionKind: "authored_fix",
+      specSlug: parentSlug,
+      reason: `Pre-merge security review of ${specLabel}: real-vuln → ${outcome} (fixes-as-phases; no standalone fix spec).`.slice(0, 4000),
+      metadata: {
+        ...activityMetadata,
+        branch,
+        routed: "fixes-as-phases",
+        fix_check_keys: failing.map((f) => f.check_key),
+        spawn_escalated: out.escalated ?? false,
+      },
+    });
+    // Terminal but NOT security-green: the verdict stays 'real-vuln' so `isSecurityGreenForBranch` holds the
+    // PR until the fix phase ships on this branch and the resulting new push earns a fresh review that clears
+    // it. A loop-guard escalation likewise stays red — correctly held for the owner.
+    await update(job.id, {
+      status: "completed",
+      error: null,
+      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases" }),
+      log_tail: `real-vuln → ${outcome}\n\n${review}`.slice(-2000),
+    });
+    await emitVerdict();
+    console.log(`${tag} real-vuln on in-flight branch → ${outcome}`);
+    return;
+  }
   if (verdict === "real-vuln") {
     const review = String(parsed?.review || "");
     const authored = await authorSecurityFixSpec(parsed?.spec, parentSlug, source, job.workspace_id);
