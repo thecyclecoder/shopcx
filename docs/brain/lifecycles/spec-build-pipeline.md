@@ -33,6 +33,8 @@ authored → `in_review` → Vale (`pass`｜`needs_fix`) → Ada disposition (`s
 
 **Fail-open vs fail-closed:** accumulation fails OPEN (a PM blip won't wedge a green spec); spec-test-green and security-green fail CLOSED (an absent run is NOT green).
 
+> **⚠️ A fail-closed gate needs a way to CLEAR and a way to SHOUT.** Three legs failing closed is right individually, but the *composition* had neither. The 2026-08-11 incident — half a day of ticket-derived fix specs stuck, PRs green + mergeable + unpromotable — was two fail-closed gates with no escape: a `real-vuln` verdict nothing could supersede (row 6b), and a `predeploy:static` park with zero repair passes that stopped the very fix specs that would have cleared it. Each was individually defensible; together they were a deadlock, and it was **silent**. When you add a fail-closed gate, ship the path that clears it and the card that says it's stuck ([[../libraries/agent-jobs]] `escalateStalledPromoteEligibility`).
+
 ## State → failure mode → how to investigate
 
 Every row's investigation entry point is a [[../libraries/spec-investigation]] call (fast, slug-scoped) and/or the underlying columns.
@@ -47,6 +49,8 @@ Every row's investigation entry point is a [[../libraries/spec-investigation]] c
 | 4b | **fix loop-guard / depth-guard** | `PRE_MERGE_FIX_LOOP_GUARD_MAX=2` fix phases already → `director_activity` `escalated` | timeline: `escalated` (signature `fixes-as-phases-loop-guard`) |
 | 5 | **spec-test `needs_human`/`error`/`inconclusive`** | not green → not promote-eligible (fails closed) | `investigateSpec().diagnosis.specTest` |
 | 6 | **security finding / `real-vuln`** | security-review job `surfaced`; a routed fix spec or fixes-as-phases (`check_key='sec:…'`) | `investigateSpec().diagnosis.security` |
+| 6b | **`real-vuln` on an UNMERGED branch → was a PERMANENT deadlock** (fixed) | branch `security-review` row `status='completed'` + `instructions.verdict='real-vuln'`; `isSpecPromoteEligible` → `securityGreen:false`, `reason:"security not green on branch"` while accumulation + spec-test are BOTH green; PR open indefinitely | `isSpecPromoteEligible(ws, slug, branch)`. **Was unrecoverable:** `enqueueSecurityReviewBranch` dedup (2) only re-reviews on a newer push to *that* branch, but the fix lands on its own branch → the verdict could never be superseded. Closed by [[../libraries/agent-jobs]] `retestOriginBranchSecurityIfFixMerged` (fix-merge forces a fresh review of the origin branch) + the `regression_of_slug` linkage stamped by `authorSecurityFixSpec` |
+| 6c | **promote-eligibility never opens (any leg) — now LOUD** | a CEO card with `metadata.escalation_kind='promote_stall'` naming the failing leg, raised once per spec after 6h | [[../libraries/agent-jobs]] `escalateStalledPromoteEligibility` (runs in the platform-director standing pass; detector only, never merges) |
 | 7 | **chained-phase never advanced** | a `planned` phase but no build job with its scoped instructions — `queueNextChainedPhase` returned null (dedup / in-flight ACTIVE_STATUSES / resume-candidate) | `whyIsSpecNotBuilding(slug)` → `reason:"no_build_job"` |
 | 8 | **goal-member serialized** | a queued build held because a goal-mate is in-flight; future `claimed_at` cooldown | `whyIsSpecNotBuilding` → `reason:"goal_member_serialized"` |
 | 9 | **blocked_by DAG** | uncleared `blocked_by` slug → no build job ever enqueued | `whatIsSpecWaitingOn` → `kind:"blocked_by"` |
