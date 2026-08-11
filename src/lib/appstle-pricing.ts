@@ -99,10 +99,11 @@ export interface HealResult {
 }
 
 /** Catalog MSRP + product_id for a Shopify variant id. */
-async function catalogForVariant(admin: Admin, shopifyVariantId: string): Promise<{ productId: string | null; msrpCents: number } | null> {
+async function catalogForVariant(admin: Admin, workspaceId: string, shopifyVariantId: string): Promise<{ productId: string | null; msrpCents: number } | null> {
   const { data: v } = await admin
     .from("product_variants")
     .select("product_id, price_cents")
+    .eq("workspace_id", workspaceId)
     .eq("shopify_variant_id", shopifyVariantId)
     .maybeSingle();
   if (!v) return null;
@@ -135,7 +136,7 @@ export async function healAppstleContract(workspaceId: string, contractId: strin
     if (line.pricingPolicy?.basePrice?.amount != null) { result.alreadyStructured++; continue; }
     if (!line.id) { result.failed++; continue; }
     const shopifyVariantId = String(line.variantId || "").split("/").pop() || "";
-    const cat = shopifyVariantId ? await catalogForVariant(admin, shopifyVariantId) : null;
+    const cat = shopifyVariantId ? await catalogForVariant(admin, workspaceId, shopifyVariantId) : null;
     if (!cat) { result.skippedNoCatalog++; continue; }
     const snsPct = await resolveLineSnsPct(admin, workspaceId, cat.productId);
     const { trueBaseCents } = inferAppstleLineBase(line, cat.msrpCents, snsPct);

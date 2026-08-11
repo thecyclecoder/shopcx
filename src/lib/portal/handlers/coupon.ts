@@ -91,6 +91,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
         // Check grandfathered pricing floor for sale coupons
         const { data: sub } = await admin.from("subscriptions")
           .select("items")
+          .eq("workspace_id", auth.workspaceId)
           .eq("shopify_contract_id", String(contractId))
           .single();
 
@@ -167,7 +168,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
 
       // Remove existing discounts first, then apply new one (only 1 coupon per subscription)
       const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-      const result = await applyDiscountWithReplace(apiKey, String(contractId), discountCode);
+      const result = await applyDiscountWithReplace(auth.workspaceId, apiKey, String(contractId), discountCode);
       if (!result.success) {
         const isExpected = result.status && [400, 404, 409, 422].includes(result.status);
         if (isExpected) {
@@ -181,6 +182,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
       if (!resolvedDiscountId && discountCode) {
         const { data: sub } = await admin.from("subscriptions")
           .select("applied_discounts")
+          .eq("workspace_id", auth.workspaceId)
           .eq("shopify_contract_id", String(contractId))
           .single();
         const discounts = (sub?.applied_discounts as { id: string; title: string }[]) || [];
@@ -202,11 +204,13 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
       // Update local DB to remove that specific discount
       const { data: subAfter } = await admin.from("subscriptions")
         .select("applied_discounts")
+        .eq("workspace_id", auth.workspaceId)
         .eq("shopify_contract_id", String(contractId))
         .single();
       const remaining = ((subAfter?.applied_discounts as { id: string }[]) || []).filter(d => d.id !== resolvedDiscountId);
       await admin.from("subscriptions")
         .update({ applied_discounts: remaining, updated_at: new Date().toISOString() })
+        .eq("workspace_id", auth.workspaceId)
         .eq("shopify_contract_id", String(contractId));
     }
     } catch (e) {

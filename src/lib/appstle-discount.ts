@@ -35,6 +35,7 @@ interface StoredDiscount {
  * Reads discount IDs from local DB (not Appstle API).
  */
 export async function removeExistingDiscounts(
+  workspaceId: string,
   apiKey: string,
   contractId: string,
 ): Promise<{
@@ -50,6 +51,7 @@ export async function removeExistingDiscounts(
 
   const { data: sub } = await admin.from("subscriptions")
     .select("applied_discounts")
+    .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .single();
 
@@ -83,6 +85,7 @@ export async function removeExistingDiscounts(
   if (removed.length > 0) {
     await admin.from("subscriptions")
       .update({ applied_discounts: preserved, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   }
 
@@ -95,6 +98,7 @@ export async function removeExistingDiscounts(
  * Updates local DB immediately after successful apply.
  */
 export async function applyDiscountWithReplace(
+  workspaceId: string,
   apiKey: string,
   contractId: string,
   discountCode: string,
@@ -115,6 +119,7 @@ export async function applyDiscountWithReplace(
     const { data: sub } = await admin
       .from("subscriptions")
       .select("workspace_id, is_internal")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .maybeSingle();
     if (sub?.is_internal && sub.workspace_id) {
@@ -124,6 +129,7 @@ export async function applyDiscountWithReplace(
       const { data: existingSub } = await admin
         .from("subscriptions")
         .select("applied_discounts")
+        .eq("workspace_id", workspaceId)
         .eq("shopify_contract_id", contractId)
         .single();
       const existing = (existingSub?.applied_discounts as StoredDiscount[]) || [];
@@ -132,6 +138,7 @@ export async function applyDiscountWithReplace(
         await admin
           .from("subscriptions")
           .update({ applied_discounts: preserved, updated_at: new Date().toISOString() })
+          .eq("workspace_id", workspaceId)
           .eq("shopify_contract_id", contractId);
       }
       const r = await internalSubApplyDiscount(sub.workspace_id, contractId, discountCode);
@@ -142,7 +149,7 @@ export async function applyDiscountWithReplace(
   // Step 1: Remove existing CODE_DISCOUNT rows. `snapshot` is the exact
   // pre-call applied_discounts array; `removedRows` are the CODE rows the
   // remove PUT was issued for. Both feed the failure-branch rollback below.
-  const { removed, removedRows, snapshot } = await removeExistingDiscounts(apiKey, contractId);
+  const { removed, removedRows, snapshot } = await removeExistingDiscounts(workspaceId, apiKey, contractId);
 
   // Step 2: Apply new discount
   const applyUrl = `${APPSTLE_BASE}/api/external/v2/subscription-contracts-apply-discount?contractId=${contractId}&discountCode=${encodeURIComponent(discountCode)}&api_key=${apiKey}`;
@@ -198,6 +205,7 @@ export async function applyDiscountWithReplace(
           const admin = createAdminClient();
           await admin.from("subscriptions")
             .update({ applied_discounts: snapshot, updated_at: new Date().toISOString() })
+            .eq("workspace_id", workspaceId)
             .eq("shopify_contract_id", contractId);
         } catch {
           rolledBack = false;
@@ -239,6 +247,7 @@ export async function applyDiscountWithReplace(
 
   await admin.from("subscriptions")
     .update({ applied_discounts: appliedDiscounts, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId);
 
   return { success: true, removed };

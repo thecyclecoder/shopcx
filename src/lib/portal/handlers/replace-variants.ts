@@ -174,7 +174,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     } else {
       const adminDb = createAdminClient();
       const { data: subData } = await adminDb.from("subscriptions")
-        .select("items").eq("shopify_contract_id", String(contractId)).single();
+        .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
       const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
       const li = items.find(i => i.line_id === oldLineId || String(i.variant_id) === oldLineId);
       const resolvedVariant = Number(li?.variant_id);
@@ -222,7 +222,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       let oldVariantId: string | null = oldVariants.length === 1 ? String(oldVariants[0]) : null;
       if (!oldVariantId && oldLineId) {
         const { data: subData } = await adminDb.from("subscriptions")
-          .select("items").eq("shopify_contract_id", String(contractId)).single();
+          .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
         const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
         const rawLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
         const lineItem = items.find(i => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
@@ -232,7 +232,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       if (oldVariantId) {
         // Get the sub's current item pricing (BEFORE swap)
         const { data: subData } = await adminDb.from("subscriptions")
-          .select("items").eq("shopify_contract_id", String(contractId)).single();
+          .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
         const items = (subData?.items as { variant_id?: string; price_cents?: number }[]) || [];
         const oldItem = items.find(i => String(i.variant_id) === oldVariantId);
 
@@ -273,7 +273,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       // line_id or variant_id. (Appstle items match line_id; internal match
       // variant_id.)
       const adminDb = createAdminClient();
-      const { data: subData } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+      const { data: subData } = await adminDb.from("subscriptions").select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
       const items = (subData?.items as { variant_id?: string; line_id?: string }[]) || [];
       const rawLineId = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
       const li = items.find((i) => i.line_id === rawLineId || i.line_id === oldLineId || String(i.variant_id) === rawLineId || String(i.variant_id) === oldLineId);
@@ -283,7 +283,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     const oneTimeEntries: Array<[string, number]> = newOneTimeVariants ? Object.entries(newOneTimeVariants).map(([k, v]) => [String(k), Number(v)]) : [];
 
     const adminDb = createAdminClient();
-    const { data: cur } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+    const { data: cur } = await adminDb.from("subscriptions").select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
     const curVars = new Set(((cur?.items as { variant_id?: string }[]) || []).map((i) => String(i.variant_id)));
 
     let r: { success: boolean; error?: string; priceGuardRefusal?: PriceGuardRefusal } = { success: true };
@@ -384,7 +384,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     try {
       const adminDb = createAdminClient();
       const { data: subData } = await adminDb.from("subscriptions")
-        .select("items").eq("shopify_contract_id", String(contractId)).single();
+        .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
       const items = (subData?.items as Array<{ variant_id?: string; line_id?: string; sku?: string; title?: string; variant_title?: string; quantity?: number }>) || [];
 
       if (oldVariants.length) {
@@ -438,12 +438,13 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       const dbItems = await enrichItemTitles(auth.workspaceId, rawDbItems);
       await adminDb.from("subscriptions")
         .update({ items: dbItems, updated_at: new Date().toISOString() })
+        .eq("workspace_id", auth.workspaceId)
         .eq("shopify_contract_id", String(contractId));
     }
   } else if (isInternal) {
     // Internal mutations already wrote subscriptions.items — surface the fresh lines.
     const adminDb = createAdminClient();
-    const { data: fresh } = await adminDb.from("subscriptions").select("items").eq("shopify_contract_id", String(contractId)).single();
+    const { data: fresh } = await adminDb.from("subscriptions").select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
     patch.lines = (fresh?.items as unknown[]) || [];
   }
 

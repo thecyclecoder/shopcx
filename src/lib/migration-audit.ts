@@ -194,6 +194,7 @@ async function autoHealMigration(
       if (isProt || UUID_RE.test(String(i.variant_id || ""))) return i;
       const { data: byShopId } = await admin
         .from("product_variants").select("id, product_id, title, sku")
+        .eq("workspace_id", audit.workspace_id as string)
         .eq("shopify_variant_id", String(i.variant_id || "")).maybeSingle();
       // Fall back to SKU (workspace-scoped) when the Shopify variant id isn't on
       // our catalog — a migrated line can carry a Shopify id we never synced, but
