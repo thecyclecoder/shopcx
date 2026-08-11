@@ -7384,6 +7384,13 @@ async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<s
         // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
         // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
         if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          // ONE OPEN CARD PER STUCK BUILD: the park watchdogs and the escort/init lanes reach this
+          // same conclusion about this spec from their own sweeps. Stop resubmitting either way —
+          // just don't mint a SECOND founder card for an incident already on the founder's desk.
+          if (await lib.openBuildStuckCardExistsForSpec(db, job.workspace_id, c.slug, `groom-loopguard:${c.slug}`)) {
+            console.log(`${tag} groom ${c.slug} → continue but loop-guard; build-stuck card already open — no second card`);
+            continue;
+          }
           const diagnosis = `Grooming ${c.slug}: its next phase is needed now, but the build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
           const r = await lib.escalateDiagnosisToCeo(db, {
             workspaceId: job.workspace_id,
@@ -7752,6 +7759,12 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
         // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
         if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          // ONE OPEN CARD PER STUCK BUILD — see the groom lane's twin above. Same incident, same
+          // founder decision; whichever lane noticed first owns the card.
+          if (await lib.openBuildStuckCardExistsForSpec(db, job.workspace_id, c.slug, `initguard:${c.slug}`)) {
+            console.log(`${tag} init ${c.slug} → initiate but loop-guard; build-stuck card already open — no second card`);
+            return;
+          }
           const diagnosis = `Initiating ${c.slug}: I confirmed it's sound, but its build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
           const r = await lib.escalateDiagnosisToCeo(db, {
             workspaceId: job.workspace_id,
@@ -15713,7 +15726,14 @@ async function runCsDirectorCallJob(job: Job) {
           read: false,
           dismissed: false,
         });
-        if (notifErr) {
+        if (notifErr && notifErr.code === "23505") {
+          // ONE OPEN CARD PER TICKET — the DB's partial unique index on the dedupe_key rejected a
+          // second OPEN card for this same ticket. This is the 48h stale-recheck re-running June on
+          // a ticket the founder hasn't actioned yet: the decision is ALREADY on the founder's desk,
+          // so the correct STATE is one card, not two. Benign — NOT the "escalation reached no one"
+          // regression (that is a card reaching nobody; here the card is up and waiting).
+          console.log(`${tag} escalate_founder CEO card already open for ticket ${ticketId} — left as-is (one-open-card-per-ticket)`);
+        } else if (notifErr) {
           console.error(`${tag} CEO card insert failed — escalation reached no one: ${notifErr.message}`);
         } else {
           const suffix = cls.isBlackSwan ? ` · black_swan=${cls.class_key ?? "unspecified"}` : "";

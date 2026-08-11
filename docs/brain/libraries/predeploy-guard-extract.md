@@ -14,13 +14,16 @@ The predecessor was a single regex, `/❌\s*(check-[^\s—]+)/`, run against the
 
 - `extractFailedPredeployGuards(out: string): string[]` — every distinct guard named anywhere in the output, deduped, in first-seen order.
 
-Tries three shapes and returns the union:
+Shape **(0)** is authoritative when present and **short-circuits**; otherwise shapes (a)/(b)/(c) are tried and their union returned:
 
 | # | Shape | Example |
 |---|---|---|
+| **0** | **npm's PER-SCRIPT echo — the last one is the failure** | `> shopcx-init@0.1.0 check:node-registry-drift` |
 | a | the guard's own failure line | `❌ check-rls-on-new-tables — table "public.foo" has no RLS policy` |
 | b | npm's lifecycle frame for the failing script in the `&&` chain | ``npm error Lifecycle script `check:node-registry-drift` failed`` |
 | c | a `scripts/_check-*.ts` path in a stack trace / exec echo | `at main (/repo/scripts/_check-tests-registered.ts:88:11)` |
+
+**Why (0) has to win** (the CEO-inbox signal-to-noise hot fix, 2026-08-11). `predeploy:static` chains its guards with `&&`, so npm's FIRST output line is the whole chain — `> npm run check:a && npm run check:b && …` — which shape (b)'s `npm run` pattern happily matched, returning **all ~21 guards** as failing. That string lands in `agent_jobs.error`, which is exactly what the needs-attention classifier buckets on to route a park, and it would point a repair pass at 21 files instead of one. Because npm echoes each script as it starts and an `&&`-chain **stops at the first failure**, the LAST per-script echo *is* the guard that broke — so (0) returns that single guard and skips the union entirely. Verified against real `npm run predeploy:static` output.
 
 Names are normalized onto the guards' own `check-foo` form (npm's `check:foo` maps onto it), so one guard surfacing through two shapes counts once. Trailing punctuation is stripped.
 
