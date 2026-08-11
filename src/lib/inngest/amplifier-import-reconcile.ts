@@ -3,8 +3,10 @@
  * 3PL never received.
  *
  * Every 15 min. Selects `public.orders` rows with `financial_status='paid'`,
- * `amplifier_order_id IS NULL`, older than 10 minutes, and under the retry
- * cap (5). Skips any order held by a non-dismissed `fraud_cases` row (the
+ * `amplifier_order_id IS NULL`, `shopify_order_id IS NULL` (internal `SHOPCX*`
+ * orders only — Shopify-origin `SC*` rows are NEVER this rail's business and
+ * match the un-imported shape forever; see `isShopifyOriginOrder`), older than
+ * 10 minutes, and under the retry cap (5). Skips any order held by a non-dismissed `fraud_cases` row (the
  * `checkout` fraud-held state — the fraud-dismiss handler is the retry
  * surface, not us). For each remaining candidate, rebuilds the
  * `createAmplifierOrder` input exactly as the fraud-dismiss retry path does
@@ -60,6 +62,30 @@ export function isReconcileEligibleSourceName(sourceName: string | null | undefi
 }
 
 /**
+ * True when an order is Shopify-origin (`SC*`) and therefore NEVER this rail's
+ * business. Shopify orders were fulfilled through Shopify's own pipeline; they
+ * carry `amplifier_order_id IS NULL` forever by design, so they match the
+ * "paid but un-imported" shape without being un-imported in any real sense.
+ *
+ * This is the head-of-line guard. Without it the candidate selections below
+ * match ~125k legacy rows, and because the per-row skip returns WITHOUT
+ * stamping an attempt those rows never drain out of the set. The sweep then
+ * re-fetches the same oldest BATCH_LIMIT rows from 2024 every 15 minutes,
+ * skips all of them, emits a green heartbeat, and never reaches a genuinely
+ * stuck internal order (SHOPCX171 / 2026-08-07 sat at queue position 3,084 —
+ * unreachable, so neither the retry nor the exhaustion escalation ever fired).
+ *
+ * The discriminator is `shopify_order_id IS NULL`, which splits the table
+ * exactly: every `SHOPCX*` order has it null, every `SC*` order has it set.
+ * Same signal `src/lib/refund.ts` uses to route internal orders to Braintree.
+ * Applied as a QUERY predicate at every selection site so the batch window is
+ * spent on reachable work, not as a post-fetch filter. Pure — unit-tested.
+ */
+export function isShopifyOriginOrder(order: { shopify_order_id?: unknown }): boolean {
+  return order.shopify_order_id !== null && order.shopify_order_id !== undefined;
+}
+
+/**
  * Pick the recipient's first name off a stored order shipping address. Internal
  * renewals write camelCase (`firstName` — matches the portal + checkout on
  * orders.shipping_address), while storefront legacy rows and Shopify webhook
@@ -89,6 +115,7 @@ interface CandidateRow {
   total_cents: number | null;
   created_at: string;
   amplifier_import_attempts: number | null;
+  shopify_order_id: string | null;
 }
 
 interface Line {
@@ -123,7 +150,11 @@ async function isFraudHeld(admin: AdminClient, workspaceId: string, orderId: str
 async function reconcileOne(
   admin: AdminClient,
   row: CandidateRow,
-): Promise<"imported" | "failed" | "skipped-fraud" | "skipped-no-skus" | "skipped-non-storefront"> {
+): Promise<"imported" | "failed" | "skipped-fraud" | "skipped-no-skus" | "skipped-non-storefront" | "skipped-shopify-origin"> {
+  // Defensive — the candidate query already excludes Shopify-origin rows. A
+  // non-zero count here means a selection site lost its predicate, which is
+  // exactly the silent regression that stalled this rail before.
+  if (isShopifyOriginOrder(row)) return "skipped-shopify-origin";
   if (!isReconcileEligibleSourceName(row.source_name)) return "skipped-non-storefront";
   if (await isFraudHeld(admin, row.workspace_id, row.id)) return "skipped-fraud";
 
@@ -212,6 +243,7 @@ async function escalateExhaustedOrders(admin: AdminClient): Promise<{ scanned: n
     .from("orders")
     .select("id, workspace_id, order_number, amplifier_last_error, amplifier_import_attempts")
     .is("amplifier_order_id", null)
+    .is("shopify_order_id", null)
     .gte("amplifier_import_attempts", RETRY_CAP)
     .order("created_at", { ascending: true })
     .limit(BATCH_LIMIT);
@@ -290,6 +322,7 @@ async function escalateStaleErroredOrders(admin: AdminClient): Promise<{ scanned
     .select("id, workspace_id, order_number, source_name, amplifier_last_error, amplifier_import_attempts, created_at")
     .eq("financial_status", "paid")
     .is("amplifier_order_id", null)
+    .is("shopify_order_id", null)
     .not("amplifier_last_error", "is", null)
     .lt("created_at", staleCutoffIso)
     .order("created_at", { ascending: true })
@@ -372,9 +405,10 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       // cap + past the grace window narrows to the active-work slice.
       const { data: rows } = await admin
         .from("orders")
-        .select("id, workspace_id, order_number, customer_id, source_name, email, shipping_address, billing_address, line_items, total_cents, created_at, amplifier_import_attempts")
+        .select("id, workspace_id, order_number, customer_id, source_name, email, shipping_address, billing_address, line_items, total_cents, created_at, amplifier_import_attempts, shopify_order_id")
         .eq("financial_status", "paid")
         .is("amplifier_order_id", null)
+        .is("shopify_order_id", null)
         .lt("created_at", graceCutoffIso)
         .lt("amplifier_import_attempts", RETRY_CAP)
         .order("created_at", { ascending: true })
@@ -386,6 +420,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       let skippedFraud = 0;
       let skippedNoSkus = 0;
       let skippedNonStorefront = 0;
+      let skippedShopifyOrigin = 0;
       for (const row of (rows || []) as CandidateRow[]) {
         scanned++;
         try {
@@ -394,6 +429,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
           else if (outcome === "failed") failed++;
           else if (outcome === "skipped-fraud") skippedFraud++;
           else if (outcome === "skipped-no-skus") skippedNoSkus++;
+          else if (outcome === "skipped-shopify-origin") skippedShopifyOrigin++;
           else skippedNonStorefront++;
         } catch (e) {
           console.warn(`[amplifier-import-reconcile] threw for order ${row.id}: ${errText(e)}`);
@@ -409,6 +445,9 @@ export const amplifierImportReconcileCron = inngest.createFunction(
         skipped_fraud: skippedFraud,
         skipped_no_skus: skippedNoSkus,
         skipped_non_storefront: skippedNonStorefront,
+        // Expected to stay 0 — the query excludes Shopify-origin rows. A
+        // non-zero value on the beat means a selection lost its predicate.
+        skipped_shopify_origin: skippedShopifyOrigin,
         grace_cutoff: graceCutoffIso,
       };
     });
@@ -435,7 +474,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       await emitCronHeartbeat("amplifier-import-reconcile", {
         ok: true,
         produced: { ...result, escalation, stale_escalation: staleEscalation },
-        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
+        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront + result.skipped_shopify_origin} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
         durationMs: Date.now() - startedAt,
       });
     });
