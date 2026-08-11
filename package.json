@@ -135,6 +135,7 @@
     "test:approval-inbox-workspace-scope": "tsx --test src/lib/agents/approval-inbox.workspace-scope.test.ts",
     "test:platform-owner-rung": "tsx --test src/lib/agents/needs-attention-route.platform-owner-rung.test.ts",
     "test:park-retry": "tsx --test src/lib/agents/park-retry.test.ts",
+    "test:escalation-card-metadata": "tsx --test src/lib/agents/platform-director.escalation-metadata.test.ts",
     "test:escalate-founder-dedupe": "tsx --test src/lib/cs-director-escalate-founder-card.dedupe.test.ts",
     "test:assisted-purchase-failure-card": "tsx --test src/lib/assisted-purchase-failure-card.test.ts",
     "test:founder-escalation-stale-recheck-selection": "tsx --test src/lib/inngest/founder-escalation-stale-recheck.selection.test.ts",
