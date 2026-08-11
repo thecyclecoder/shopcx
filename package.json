@@ -231,7 +231,7 @@
     "html-to-text": "^9.0.5",
     "inngest": "^4.0.5",
     "marked": "^18.0.5",
-    "next": "16.2.11",
+    "next": "16.3.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "remotion": "4.0.497",
@@ -253,14 +253,23 @@
     "eslint-config-next": "16.2.9",
     "pg": "^8.21.0",
     "playwright": "^1.50.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.3",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5"
   },
   "overrides": {
     "ws": "8.21.0",
-    "postcss": "^8.5.10",
-    "@opentelemetry/propagator-jaeger": "^2.9.0"
+    "postcss": "^8.5.23",
+    "@opentelemetry/propagator-jaeger": "^2.9.0",
+    "brace-expansion@<1.1.18": "^1.1.18",
+    "brace-expansion@>=2.0.0 <2.1.4": "^2.1.4",
+    "brace-expansion@>=4.0.0 <5.0.9": "^5.0.9",
+    "fast-uri@>=3.0.0 <3.1.5": "^3.1.5",
+    "ip-address": "^10.5.0",
+    "js-yaml@>=4.0.0 <4.3.1": "^4.3.1",
+    "nanoid@<3.3.17": "^3.3.17",
+    "@hono/node-server": "^2.0.11",
+    "hono": "^4.12.34"
   }
 }
