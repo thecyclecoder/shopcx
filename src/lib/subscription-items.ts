@@ -755,16 +755,37 @@ async function syncItemsAfterMutation(
 ): Promise<void> {
   try {
     const admin = createAdminClient();
+    // ⭐ TENANT SCOPE (security). Both the read AND the write MUST filter on `workspace_id`.
+    // `shopify_contract_id` is NOT globally unique — it is an identifier minted by an external system,
+    // and two workspaces can legitimately hold rows carrying the same value (a shared/duplicated
+    // storefront, a re-imported contract, a test tenant seeded from prod data). Filtering on it alone
+    // meant this read could load ANOTHER tenant's items and the update could OVERWRITE another
+    // tenant's `items` array with them — a cross-tenant write, from a path an AI agent reaches on an
+    // ordinary swap/add/remove. `workspaceId` was already a parameter and used on the very next line
+    // (`enrichItemTitles`), so the scope was available and simply not applied.
+    //
+    // Found by the pre-merge security review of `swap-variant-self-heal-…` (2026-08-10) and then LOST:
+    // the finding was routed into a standalone fix spec (`scope-subscription-item-sync-by-workspace`)
+    // by the retired fix-spec model, and that spec was deferred as a model artifact — which discarded
+    // the finding with it. Re-verified present on main 2026-08-11 and fixed here.
     const { data: sub } = await admin.from("subscriptions")
       .select("items")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
-      .single();
-    const currentItems = (sub?.items as Record<string, unknown>[] | null) || [];
+      .maybeSingle(); // maybeSingle: a miss is a normal no-op here, not an exception
+    if (!sub) {
+      console.warn(
+        `[subscription-items] syncItemsAfterMutation: no subscription for contract ${contractId} in workspace ${workspaceId} — skipping sync`,
+      );
+      return;
+    }
+    const currentItems = (sub.items as Record<string, unknown>[] | null) || [];
     const mutatedItems = mutate(currentItems);
     // Enrich with titles from our product catalog
     const updatedItems = await enrichItemTitles(workspaceId, mutatedItems);
     await admin.from("subscriptions")
       .update({ items: updatedItems, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch (err) {
     console.error("Failed to sync subscription items after mutation:", err);
