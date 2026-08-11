@@ -209,6 +209,47 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
     // keeps the PR held in_testing on red, so escalate-without-append never promotes a red build.
     if (existingFixPhases.length >= PRE_MERGE_FIX_LOOP_GUARD_MAX) {
       const reason = `Loop-guard: ${existingFixPhases.length} fix phase(s) already on ${originSlug} and the pre-merge spec-test is STILL red — a deeper issue than another Fix N can solve. Escalated to the owner; the PR stays held in_testing.`;
+      // ⭐ THE LAST RESORT MUST ACTUALLY REACH SOMEONE (2026-08-11).
+      //
+      // This branch is where the autonomous fix loop ADMITS DEFEAT — the one moment it is guaranteed
+      // to need a human. Pre-fix it wrote the `escalated` activity row below and nothing else: no CEO
+      // card, and no `dedupe_key` in the metadata, which is the exact field the swallowed-escalation
+      // reconciler (`reconcileSwallowedEscalations` in [[./agents/platform-director]]) filters on —
+      // so this escalation was invisible on BOTH surfaces. It reached nobody.
+      //
+      // It didn't bite while nothing routed into this lane on an undiagnosed park. The PLATFORM-OWNER
+      // RUNG in [[./agents/needs-attention-route]] `routeBackstop` makes this lane the destination for
+      // undiagnosed build parks, which makes this the rung's terminal failure mode — so it has to
+      // page. Minting the card here (rather than relying on the reconciler) also means the founder
+      // sees it on the FIRST pass instead of whenever the backstop next sweeps.
+      //
+      // North star: hitting a rail = escalate, not execute. A silent rail is the degenerate state.
+      const dedupeKey = `premerge-fix-loopguard:${originSlug}`;
+      try {
+        const { escalateDiagnosisToCeo } = await import("@/lib/agents/platform-director");
+        await escalateDiagnosisToCeo(admin, {
+          workspaceId,
+          specSlug: originSlug,
+          title: `Fixes not converging: ${originSlug}`,
+          diagnosis:
+            `${reason} Failing check(s): ${cleanFailing.map((f) => f.check_key).join(", ") || "(none recorded)"}.` +
+            ` Branch \`${branch}\`. The build will NOT be promoted while red, so nothing ships on a bad fix —` +
+            ` it needs a decision: change the approach, amend the spec, or drop it.`,
+          dedupeKey,
+          deepLink: `/dashboard/roadmap/${originSlug}`,
+          escalationKind: "premerge_fix_loop_guard",
+          metadata: {
+            branch,
+            fix_phases: existingFixPhases.length,
+            loop_guard_max: PRE_MERGE_FIX_LOOP_GUARD_MAX,
+            failing_check_keys: cleanFailing.map((f) => f.check_key),
+          },
+        });
+      } catch (e) {
+        // Never let a surfacing failure swallow the loop-guard itself — the activity row below is
+        // still written, and it now carries the dedupe_key so the reconciler can re-emit the card.
+        console.error(`[pre-merge-fix] LOOP-GUARD CEO card failed to mint for ${originSlug}:`, e instanceof Error ? e.message : e);
+      }
       await recordDirectorActivity(admin, {
         workspaceId,
         directorFunction: "platform",
@@ -217,6 +258,10 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
         reason,
         metadata: {
           signature: "fixes-as-phases-loop-guard",
+          // The reconciler filters the escalation ledger to rows carrying a `dedupe_key`; without it
+          // this row was unreconcilable. Must match the key used above so the two agree.
+          dedupe_key: dedupeKey,
+          escalation_kind: "premerge_fix_loop_guard",
           branch,
           fix_phases: existingFixPhases.length,
           loop_guard_max: PRE_MERGE_FIX_LOOP_GUARD_MAX,

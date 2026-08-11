@@ -37,7 +37,7 @@ import { activeParkCardExistsForJob, openBuildStuckCardExistsForSpec } from "@/l
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
-import { classifyAndStamp, type NeedsAttentionClass } from "@/lib/agents/needs-attention-classify";
+import { classifyAndStamp, BUILD_STYLE_KINDS, type NeedsAttentionClass } from "@/lib/agents/needs-attention-classify";
 import {
   decideCsOwnerRoute,
   applyCsOwnerRoute,
@@ -54,13 +54,24 @@ export const NEEDS_ATTENTION_STALE_MS = 60 * 60 * 1000; // 60 min — spec invar
 export const NEEDS_ATTENTION_ALARM_MS = 70 * 60 * 1000; // 70 min — alarm threshold (zero target after Phase 4)
 
 /** Marker class written back onto a routed row so subsequent passes leave it alone. */
-const ROUTED_MARKER: Record<NeedsAttentionClass, string | null> = {
+const ROUTED_MARKER: Record<BlockerRoute | NeedsAttentionClass, string | null> = {
   already_shipped: "routed_already_shipped",
   real_blocker: "routed_real_blocker",
   tooling_failure: "routed_tooling_failure",
   design_change: "routed_design_change",
   unknown: null, // never routed by a class router — the backstop sweep handles it
+  // The PLATFORM-OWNER RUNG's disposition (see `routeAuthorBlocker`): the class stayed `unknown`,
+  // but the park is Platform's OWN build work, so Ada's fix-phase lane took it instead of the CEO.
+  // Distinct from `routed_tooling_failure` on purpose — that marker asserts a diagnosis we do not
+  // have here, and the box snapshot groups parks by this string.
+  unclassified: "routed_unclassified",
 };
+
+/**
+ * The dispositions `routeAuthorBlocker` can act on. The first two are classifier verdicts; the
+ * third is the PLATFORM-OWNER RUNG's honest "we could not classify it, but it is still ours".
+ */
+export type BlockerRoute = "real_blocker" | "tooling_failure" | "unclassified";
 
 /**
  * Classes the auto-router NEVER re-processes — a dismiss-park action ([[../specs/director-dismiss-park-and-short-circuit-spec]] Phase 1)
@@ -149,7 +160,7 @@ async function loadLedger(admin: Admin): Promise<RoutedLedger> {
 /**
  * Stamp the routed marker class back on the job so the next sweep skips it. Best-effort.
  */
-async function markRouted(admin: Admin, jobId: string, klass: NeedsAttentionClass): Promise<void> {
+async function markRouted(admin: Admin, jobId: string, klass: BlockerRoute | NeedsAttentionClass): Promise<void> {
   const marker = ROUTED_MARKER[klass];
   if (!marker) return;
   try {
@@ -268,7 +279,7 @@ async function routeAlreadyShipped(admin: Admin, row: ParkedRow): Promise<boolea
  * Best-effort: a row whose spec is missing falls back to a CEO escalation (the spec a `real_blocker`
  * named couldn't be found → human triage is the right answer).
  */
-async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: "real_blocker" | "tooling_failure"): Promise<boolean> {
+async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: BlockerRoute): Promise<boolean> {
   if (!row.spec_slug) return false;
   const originSpec = await getSpec(row.spec_slug, row.workspace_id);
   if (!originSpec) return false; // backstop will surface to CEO
@@ -276,7 +287,13 @@ async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: "real_blo
   const intent =
     klass === "real_blocker"
       ? `The build of [[../specs/${row.spec_slug}]] parked with a real blocker the spec didn't declare. Build the missing prerequisite (API surface, schema change, dependency) INLINE on this branch so the origin can resume.`
-      : `The build of [[../specs/${row.spec_slug}]] parked because the ${row.kind} agent's tooling failed to produce a verdict (the pipeline's tooling, not the origin's content). Fix the tool so the origin's build can run cleanly.`;
+      : klass === "tooling_failure"
+        ? `The build of [[../specs/${row.spec_slug}]] parked because the ${row.kind} agent's tooling failed to produce a verdict (the pipeline's tooling, not the origin's content). Fix the tool so the origin's build can run cleanly.`
+        : // PLATFORM-OWNER RUNG — be explicit that the cause is UNDIAGNOSED. Asserting a cause we
+          // don't have would send the fix session down a guessed path; naming the uncertainty makes
+          // "diagnose first" the actual instruction, and the park reason + log tail below are the
+          // evidence to start from.
+          `The build of [[../specs/${row.spec_slug}]] parked and the classifier could NOT determine why (class stayed 'unknown' past the stale window). Diagnose it from the evidence below FIRST, then fix it inline on this branch so the origin can resume. If the cause turns out to be something this lane cannot fix — a genuine product/design decision, an external outage, or a spec that is simply wrong — do NOT guess at a code change: say so plainly in your summary and leave it failing, and it will escalate to the founder instead.`;
   const evidence = `Park reason: ${(row.error ?? "(none recorded)").slice(0, 300)}\nLog tail: ${(row.log_tail ?? "(none)").slice(-400)}`;
 
   // security-review-spec-avalanche fix (2026-07-03) — a build blocker now appends a Fix PHASE to the ORIGIN
@@ -409,6 +426,48 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
       // cards for `scope-subscription-item-sync-by-workspace` sat in the CEO inbox on 2026-08-11. The
       // spec-scoped check also catches the slug-keyed sibling watchdogs (initguard / groom-loopguard /
       // escort-failed-repeat), which are all saying the same thing about the same spec.
+      // ⭐ PLATFORM-OWNER RUNG (2026-08-11) — the symmetric twin of the CS-owner rung in
+      // `routeNeedsAttention` above: the owner function rules on its OWN park, and only what the
+      // owner cannot resolve falls through to the CEO fail-safe.
+      //
+      // A `build` / `regression` / `repair` park is Platform's own work. Pre-fix, an undiagnosed one
+      // went STRAIGHT to the founder as "Park needs eyes" — a bug report wearing an approval's
+      // clothes. Measured 2026-08-11: build-pipeline failures were 8 of the 14 real incidents in the
+      // CEO inbox, and one (`security-dep-watch`) had been parked 204h with nobody fixing it,
+      // because a card in the founder's inbox is not a work queue.
+      //
+      // So: try Ada's fix-phase lane FIRST. `routeAuthorBlocker` appends a Fix phase to the origin
+      // spec and resumes its build — the same lane a classified `real_blocker` / `tooling_failure`
+      // already uses. It is BOUNDED by `spawnPreMergeFix`'s loop-guard + per-check-key dedup
+      // (check_key `blocker:unclassified`, so repeated undiagnosed parks on one spec cannot stack
+      // fix phases), and its terminal failure mode NOW pages the founder (see the loop-guard branch
+      // in [[../pre-merge-fix]], which pre-2026-08-11 escalated to nobody at all).
+      //
+      // Every path still ends at a human when the machine can't finish:
+      //   - lane declines to spawn (no spec row / not spawned) → returns false → CEO card below, as before
+      //   - lane spawns, fix works                            → nothing to escalate; the build resumes
+      //   - lane spawns, fixes stop converging                → loop-guard mints a CEO card
+      // Non-build kinds are deliberately untouched: a parked `cs-director-call` or `security-review`
+      // is NOT a code bug this lane can fix, and routing it here would bury a real decision.
+      if (fresh.klass === "unknown" && BUILD_STYLE_KINDS.has(row.kind) && row.spec_slug) {
+        const routedToOwner = await routeAuthorBlocker(admin, row, "unclassified");
+        if (routedToOwner) {
+          await recordDirectorActivity(admin, {
+            workspaceId: row.workspace_id,
+            directorFunction: PLATFORM,
+            actionKind: "routed_needs_attention",
+            specSlug: row.spec_slug,
+            reason: `Backstop: parked ${row.kind} ${row.id.slice(0, 8)} stayed unknown >60 min — routed to Platform's fix-phase lane (owner rules on its own park) instead of the CEO.`,
+            metadata: { job_id: row.id, action: "platform_owner_rung", target_kind: row.kind, autonomous: true },
+          });
+          // Return immediately so the >70-min age alarm in (b) cannot ALSO fire this pass — the row
+          // is routed, and `markRouted` stamped `routed_unclassified` so the next sweep clears it
+          // terminal via `clearRoutedZombie` rather than re-reporting it.
+          return { backstopped: false, alarmed: false };
+        }
+        // Lane declined (no spec row, or the fix phase couldn't spawn) → fall through to the CEO
+        // fail-safe below, exactly as before this rung existed.
+      }
       if (
         fresh.klass === "unknown" &&
         !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id)) &&
