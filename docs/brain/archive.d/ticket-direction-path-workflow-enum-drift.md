@@ -1,0 +1,1 @@
+- **Sol's workflow Direction can't persist — ticket_direction_path enum missing value guard** · verified 2026-08-11 · → [[../libraries/ticket-directions]]
