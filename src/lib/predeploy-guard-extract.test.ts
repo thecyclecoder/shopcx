@@ -92,3 +92,39 @@ npm error Lifecycle script \`check:ticket-direction-path-drift\` failed with err
 `;
   assert.deepEqual(extractFailedPredeployGuards(out), ["check-ticket-direction-path-drift"]);
 });
+
+// ── shape (0): npm's per-script echo wins, so the chain HEADER can't name all 21 guards ──
+// The CEO-inbox signal-to-noise hot fix (2026-08-11). `predeploy:static` chains its guards with
+// `&&`, so npm first echoes the whole chain as one header line — which shape (b)'s `npm run` pattern
+// matched, returning EVERY guard in the chain as "failing". That string lands in `agent_jobs.error`
+// (what the needs-attention classifier buckets on) and would point a repair pass at 21 files.
+
+test("shape (0) — the &&-chain HEADER does not turn every chained guard into a failure", () => {
+  const out = `
+> shopcx-init@0.1.0 predeploy:static
+> npm run check:worker-lanes && npm run check:pm-sdk-compliance && npm run check:node-registry-drift
+
+> shopcx-init@0.1.0 check:worker-lanes
+> tsx scripts/_check-worker-lanes.ts
+
+all lanes accounted for
+
+> shopcx-init@0.1.0 check:node-registry-drift
+> tsx scripts/_check-node-registry-drift.ts
+
+drift: 'foo' has no OwnerFunction
+npm error code 1
+`;
+  // npm stops at the first failure, so the LAST echoed script is the one that broke.
+  assert.deepEqual(extractFailedPredeployGuards(out), ["check-node-registry-drift"]);
+});
+
+test("shape (0) — the per-script echo is normalized onto the `check-foo` form", () => {
+  const out = "> shopcx-init@0.1.0 check:rls-on-new-tables\n> tsx scripts/_check-rls-on-new-tables.ts\n\nboom\n";
+  assert.deepEqual(extractFailedPredeployGuards(out), ["check-rls-on-new-tables"]);
+});
+
+test("shape (0) — absent the echo, the (a)/(b)/(c) union is unchanged", () => {
+  const out = "❌ check-box-types — tsc failed on the box entrypoint\n";
+  assert.deepEqual(extractFailedPredeployGuards(out), ["check-box-types"]);
+});

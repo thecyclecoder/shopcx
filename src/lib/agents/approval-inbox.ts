@@ -614,12 +614,128 @@ export async function activeParkCardExistsForJob(admin: Admin, workspaceId: stri
 }
 
 /**
+ * The dedupe-key namespaces that all mean the SAME underlying fact: "this spec's build is stuck."
+ * Each is emitted by a DIFFERENT watchdog into its OWN namespace, so each dedupes perfectly within
+ * itself and not at all against its siblings:
+ *
+ *   parkbackstop:<jobId>         needs-attention-route.ts   "Park needs eyes" (classifier gave up)
+ *   needsattn:<jobId>            needs-attention-route.ts   "Parked {kind}" triage card
+ *   initguard:<slug>             builder-worker.ts          init lane: "failed 2x, likely deeper"
+ *   groom-loopguard:<slug>       builder-worker.ts          groom lane: same conclusion
+ *   escort-failed-repeat:<slug>  platform-director.ts       escort lane: same conclusion
+ *   loopguard:<slug>             platform-director.ts       generic build loop guard
+ *
+ * On 2026-08-11 one failing spec (`scope-subscription-item-sync-by-workspace`) held FOUR open CEO
+ * cards this way, and two of them were byte-identical because `parkbackstop` keys on the JOB id — a
+ * retry is a new `agent_jobs` row, so the same failure minted a second card. 27 open cards resolved
+ * to 14 real incidents (1.93x fan-out).
+ */
+export const BUILD_STUCK_ESCALATION_NAMESPACES: ReadonlySet<string> = new Set([
+  "parkbackstop",
+  "needsattn",
+  "initguard",
+  "groom-loopguard",
+  "escort-failed-repeat",
+  "loopguard",
+]);
+
+/** The namespace half of a `<ns>:<id>` dedupe key (the whole key when it carries no colon). */
+export function dedupeNamespace(key: string): string {
+  const i = key.indexOf(":");
+  return i === -1 ? key : key.slice(0, i);
+}
+
+/**
+ * ONE OPEN CARD PER STUCK BUILD (DEDUP, spec-scoped). Is there already an active CEO card saying
+ * "this spec's build is stuck", raised by ANY of the sibling watchdogs in
+ * `BUILD_STUCK_ESCALATION_NAMESPACES`?
+ *
+ * This is the spec-scoped counterpart to `activeParkCardExistsForJob`, which can only see cards
+ * about the SAME `agent_jobs` row and therefore cannot collapse either (a) sibling watchdogs that
+ * key on the slug, or (b) a retry that produced a new job row. Every build-stuck emitter calls this
+ * BEFORE minting, so a stuck spec surfaces AT MOST ONE card: whichever watchdog fires first wins and
+ * the rest gate off. The founder gets an incident, not a fan-out.
+ *
+ * `selfDedupeKey` is excluded from the scan so the caller's own bump/re-mint path (the
+ * one-open-escalation-per-thing counter in `escalateDiagnosisToCeo`) still works normally.
+ *
+ * Best-effort and FAIL-OPEN — a read error returns false, because a rare duplicate card is strictly
+ * better than a suppressed escalation.
+ */
+export async function openBuildStuckCardExistsForSpec(
+  admin: Admin,
+  workspaceId: string,
+  specSlug: string | null,
+  selfDedupeKey: string,
+): Promise<boolean> {
+  if (!specSlug) return false; // no incident key to group on — fall back to the job-scoped dedup
+  const { data, error } = await admin
+    .from("dashboard_notifications")
+    .select("metadata")
+    .eq("workspace_id", workspaceId)
+    .eq("type", APPROVAL_REQUEST_TYPE)
+    .eq("dismissed", false)
+    .limit(500);
+  if (error) return false; // fail-open
+  for (const row of data ?? []) {
+    const meta = (row as { metadata: Record<string, unknown> | null }).metadata ?? {};
+    const key = typeof meta["dedupe_key"] === "string" ? (meta["dedupe_key"] as string) : null;
+    if (!key || key === selfDedupeKey) continue;
+    if (!BUILD_STUCK_ESCALATION_NAMESPACES.has(dedupeNamespace(key))) continue;
+    // Match on the card's own spec_slug when it has one; otherwise on a `<ns>:<slug>` key shape.
+    const cardSlug = typeof meta["spec_slug"] === "string" ? (meta["spec_slug"] as string) : null;
+    if (cardSlug === specSlug || key.endsWith(`:${specSlug}`)) return true;
+  }
+  return false;
+}
+
+/**
  * The director-emitted PARK escalation_kinds (every surface `escalateDiagnosisToCeo` raises for a
- * needs_attention park) whose card auto-clears once its reason is gone. NON-park escalations
- * (loop_guard / groom_unsure / init-unsure / new_goal / external_blocker / deploy_rollback …) are
- * deliberately EXCLUDED — those answer to a different condition and must not be auto-dropped here.
+ * needs_attention park) whose card auto-clears on the Family 1/1b reason-gone test.
+ *
+ * Other escalation kinds are excluded from THIS set because they answer to a different condition —
+ * not because they should live forever. Each family below owns the test that matches its own
+ * trigger: `BUILD_STUCK_ESCALATION_KINDS` → Family 1c, `CS_FOUNDER_ESCALATION_KIND` → Family 1d,
+ * `deploy_unsure` → Family 2. Anything still outside all four (groom_unsure / init_unsure / new_goal
+ * / external_blocker / deploy_rollback …) is genuinely never auto-dropped, and adding a kind here
+ * without giving it a matching reason-gone test would clear live escalations.
  */
 const PARK_ESCALATION_KINDS: ReadonlySet<string> = new Set(["needs_attention", "park_backstop", "park_design_change"]);
+
+/**
+ * The BUILD-STUCK escalation kinds — a director/lane loop-guard saying "this spec's build failed
+ * repeatedly and I've stopped resubmitting; your call." Handled by Family 1c below.
+ *
+ * These were previously excluded from every auto-clear family (see the note on
+ * PARK_ESCALATION_KINDS), which made them IMMORTAL: the card outlived the failure and could only be
+ * cleared by the founder clicking it. That is why 9 of the 27 open CEO cards on 2026-08-11 were
+ * already stale. They are excluded from Families 1/1b for a REAL reason and must not simply be added
+ * there — a loop-guard fires on `failed` builds, not `needs_attention` ones, so Family 1b's
+ * "no needs_attention job remains for this slug" test would read as reason-gone while the spec is
+ * still genuinely stuck. Family 1c gives them the test that actually matches their trigger.
+ */
+const BUILD_STUCK_ESCALATION_KINDS: ReadonlySet<string> = new Set([
+  "init_loop_guard",
+  "groom_loop_guard",
+  "escort_failed_repeat",
+  "escort_loop_guard",
+  "loop_guard",
+]);
+
+/** Build job statuses that mean a build LANDED — the recovery signal Family 1c clears on. */
+const BUILD_LANDED_STATUSES: readonly string[] = ["completed", "merged"];
+
+/**
+ * June's founder escalation (`escalate_founder`) — Family 1d. Its reason-gone test is the TICKET,
+ * not the job: the `cs-director-call` job completing just means June finished deciding, so the
+ * card's own linked job is terminal from the moment it is raised (which is why the triage lister
+ * flags these ⚠️ STALE while they are in fact live founder decisions). The decision is genuinely
+ * gone only once the ticket is closed/archived — by the founder acting, or by the customer
+ * resolving it some other way.
+ */
+const CS_FOUNDER_ESCALATION_KIND = "cs_director_escalate_founder";
+/** `TicketStatus` values that mean the customer conversation is over. See [[../tickets-mutate]]. */
+const TICKET_DONE_STATUSES: readonly string[] = ["closed", "archived"];
 /** The system age-alarm marker (`metadata.kind`) — the "Parked >70 min" no-parked-specs invariant card. */
 const PARK_AGE_ALARM_KIND = "no_parked_specs_invariant";
 /** Spec statuses that mean "the work is done / superseded" — a park on one of these is obsolete. */
@@ -630,6 +746,8 @@ interface ParkCardRow {
   id: string;
   workspace_id: string;
   metadata: Record<string, unknown> | null;
+  /** Family 1c compares build-landed timestamps against the moment the card was raised. */
+  created_at?: string | null;
 }
 
 /** Live GitHub PR state as observed by `getPr` — `{ok:false}` folded in as the read-failure case.
@@ -674,7 +792,8 @@ async function dismissParkCard(admin: Admin, id: string, reason: string): Promis
  * definitively-resolved reason, never on a still-valid escalation (a real failing spec-test or a
  * genuine needs_human stays put).
  *
- * Two card families, each with its own "reason gone" test:
+ * Card families, each with its own "reason gone" test (the test MUST match how that family's card
+ * is triggered — a mismatched test either strands a card forever or clears a live decision):
  *
  *  1. Job-backed park cards (triage "Parked {kind}", backstop "Park needs eyes", design-change chat,
  *     and the system "Parked >70 min" age alarm — all carry `metadata.job_id`):
@@ -693,6 +812,18 @@ async function dismissParkCard(admin: Admin, id: string, reason: string): Promis
  *         GitHub read failure (`{ok:false}`) leave the card alone (never clear on a null read); a
  *         still-open+dirty PR keeps its card (the human still has to look).
  *
+ *  1c. BUILD-STUCK loop-guard cards (`BUILD_STUCK_ESCALATION_KINDS` — escort/groom/init lanes saying
+ *     "failed N×, I stopped resubmitting"; keyed on `spec_slug`, usually no agent_job). These fire on
+ *     `failed` builds, NOT `needs_attention` ones, so Family 1b's "no needs_attention job remains"
+ *     test is WRONG for them (it would read reason-gone while the spec is still stuck). Their test:
+ *     the spec folded / no longer exists, OR a build for the spec LANDED (completed|merged) after the
+ *     card was raised. A spec still on failed builds with nothing landed since keeps its card.
+ *
+ *  1d. June's founder escalations (`cs_director_escalate_founder`, keyed on `metadata.ticket_id`):
+ *     the linked `cs-director-call` job is terminal the moment the card is raised (the job completing
+ *     just means June finished deciding), so any job-based test would clear a LIVE founder decision.
+ *     Their test is the TICKET: closed/archived → the decision no longer needs making.
+ *
  *  2. Reva "Ambiguous post-deploy signal" cards (escalation_kind `deploy_unsure`, no agent_job — keyed
  *     on `metadata.spec_slug` + `deploy_watch_id`): the ambiguous signal has RESOLVED when the spec has
  *     since shipped/folded clean AND no NEW (non-baseline) error_events landed in the deploy's canary
@@ -703,7 +834,7 @@ async function dismissParkCard(admin: Admin, id: string, reason: string): Promis
 export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
   const { data: notifData, error } = await admin
     .from("dashboard_notifications")
-    .select("id, workspace_id, metadata")
+    .select("id, workspace_id, metadata, created_at")
     .in("type", [APPROVAL_REQUEST_TYPE, "system"])
     .eq("dismissed", false)
     .limit(2000);
@@ -870,6 +1001,104 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
               ? `spec ${specSlug} folded — park superseded`
               : `no needs_attention job remains for ${specSlug} — park resolved`;
         if (await dismissParkCard(admin, card.id, reason)) cleared++;
+      }
+    }
+  }
+
+  // ── Family 1c: BUILD-STUCK loop-guard cards ──────────────────────────────────
+  // "Build keeps failing / Build stuck (grooming|initiation) / Escort stuck" — raised by the escort,
+  // groom, and init lanes when a spec's build failed repeatedly and the lane stopped resubmitting.
+  // Pre-fix these belonged to NO auto-clear family and so were immortal: the card survived the
+  // failure and only a founder click could remove it.
+  //
+  // REASON-GONE test, matched to how these actually fire (on `failed` builds, NOT `needs_attention`,
+  // which is why they cannot reuse Family 1b's test):
+  //   - the spec is FOLDED / no longer exists → the work is done or superseded → clear.
+  //   - a build for this spec LANDED (completed/merged) AFTER the card was raised → the thing the
+  //     card was complaining about resolved itself → clear.
+  //   - otherwise KEEP. A spec still sitting on failed builds with nothing landed since keeps its
+  //     card, because that escalation is still true.
+  const buildStuckCards: Array<{ card: ParkCardRow; specSlug: string }> = [];
+  for (const n of notifs) {
+    const m = n.metadata ?? {};
+    const escKind = typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : null;
+    if (escKind === null || !BUILD_STUCK_ESCALATION_KINDS.has(escKind)) continue;
+    const slug = typeof m["spec_slug"] === "string" && m["spec_slug"] ? (m["spec_slug"] as string) : null;
+    if (slug) buildStuckCards.push({ card: n, specSlug: slug });
+  }
+  if (buildStuckCards.length) {
+    const slugs = new Set(buildStuckCards.map((c) => c.specSlug));
+    const { data: landedData, error: landedErr } = await admin
+      .from("agent_jobs")
+      .select("spec_slug, status, created_at")
+      .in("spec_slug", Array.from(slugs))
+      .in("status", BUILD_LANDED_STATUSES);
+    if (landedErr) {
+      // SAFETY: a failed read must never look like "nothing landed" AND must never look like
+      // "everything landed" — we simply skip the family this tick. Next pass retries.
+      console.warn(`[approval-inbox] Family 1c landed-build read failed — skipping build-stuck auto-clear this tick: ${landedErr.message}`);
+    } else {
+      // Latest landed build per slug, so the comparison against the card's age is a single lookup.
+      const latestLanded = new Map<string, number>();
+      for (const j of (landedData ?? []) as Array<{ spec_slug: string | null; created_at: string | null }>) {
+        if (!j.spec_slug || !j.created_at) continue;
+        const t = new Date(j.created_at).getTime();
+        if (!Number.isFinite(t)) continue;
+        latestLanded.set(j.spec_slug, Math.max(latestLanded.get(j.spec_slug) ?? 0, t));
+      }
+      const specStatus = await loadSpecStatuses(admin, slugs);
+      for (const { card, specSlug } of buildStuckCards) {
+        const status = specStatus.get(specSlug);
+        if (status === undefined) {
+          if (await dismissParkCard(admin, card.id, `spec ${specSlug} no longer exists — build-stuck escalation superseded`)) cleared++;
+          continue;
+        }
+        if (status === "folded") {
+          if (await dismissParkCard(admin, card.id, `spec ${specSlug} folded — build-stuck escalation superseded`)) cleared++;
+          continue;
+        }
+        // CONSERVATIVE: with no readable card timestamp we cannot prove the landing came AFTER the
+        // complaint, so we keep the card rather than clear on an unprovable comparison.
+        const raisedAt = card.created_at ? new Date(card.created_at).getTime() : NaN;
+        if (!Number.isFinite(raisedAt)) continue;
+        const landedAt = latestLanded.get(specSlug);
+        if (landedAt !== undefined && landedAt > raisedAt) {
+          if (await dismissParkCard(admin, card.id, `spec ${specSlug} had a build land after this escalation — build recovered`)) cleared++;
+        }
+      }
+    }
+  }
+
+  // ── Family 1d: June's founder escalations ────────────────────────────────────
+  // REASON-GONE on the TICKET (see CS_FOUNDER_ESCALATION_KIND) — the linked cs-director-call job is
+  // terminal the moment the card is raised, so a job-based test would clear a live founder decision
+  // instantly. A closed/archived ticket is the only signal that the decision no longer needs making.
+  const founderCards: Array<{ card: ParkCardRow; ticketId: string }> = [];
+  for (const n of notifs) {
+    const m = n.metadata ?? {};
+    if (m["escalation_kind"] !== CS_FOUNDER_ESCALATION_KIND) continue;
+    const ticketId = typeof m["ticket_id"] === "string" && m["ticket_id"] ? (m["ticket_id"] as string) : null;
+    if (ticketId) founderCards.push({ card: n, ticketId });
+  }
+  if (founderCards.length) {
+    const ticketIds = Array.from(new Set(founderCards.map((c) => c.ticketId)));
+    const { data: ticketData, error: ticketErr } = await admin
+      .from("tickets")
+      .select("id, status")
+      .in("id", ticketIds);
+    if (ticketErr) {
+      console.warn(`[approval-inbox] Family 1d ticket read failed — skipping founder-escalation auto-clear this tick: ${ticketErr.message}`);
+    } else {
+      const ticketStatus = new Map<string, string>();
+      for (const t of (ticketData ?? []) as Array<{ id: string; status: string | null }>) {
+        if (t.status) ticketStatus.set(t.id, t.status);
+      }
+      for (const { card, ticketId } of founderCards) {
+        const status = ticketStatus.get(ticketId);
+        // CONSERVATIVE: an unreadable/absent ticket keeps the card — never clear a founder decision
+        // on a missing row (that is the "escalation reached no one" failure mode in reverse).
+        if (!status || !TICKET_DONE_STATUSES.includes(status)) continue;
+        if (await dismissParkCard(admin, card.id, `ticket ${ticketId.slice(0, 8)} is ${status} — founder escalation resolved`)) cleared++;
       }
     }
   }
