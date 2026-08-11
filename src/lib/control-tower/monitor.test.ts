@@ -15,6 +15,7 @@ import { resolve } from "node:path";
 import {
   classifyShaDirectionLocal,
   countRenewalIntegrityOverdueSubs,
+  countStuckDunningCycles,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
@@ -1500,4 +1501,141 @@ test("evalCron keeps a FRESH box-emitted beat green even while the worker is una
   } finally {
     Date.now = realNow;
   }
+});
+
+// ── countStuckDunningCycles — scoped to the payday-retry cron's owned population ──
+// (build-control-tower-stuck-dunning-scope-to-payday-cron Phase 1) — a `retrying` cycle on an
+// internal-* contract is Braintree-billed work handled by handleInternalDunningFailure / the
+// internal renewal cron, NEVER by dunning-payday-retry-cron. Blaming that Appstle tile for a
+// stuck internal-* cycle produced a noisy Control Tower false page, so the monitor query now
+// mirrors the cron's find-retryable-cycles filter (`.not("shopify_contract_id","ilike","internal-%")`).
+
+interface FakeStuckDunningRow {
+  status: string;
+  next_retry_at: string | null;
+  shopify_contract_id: string | null;
+  workspace_id: string;
+}
+
+/**
+ * Tiny fake admin that models only the shape `countStuckDunningCycles` uses:
+ *   `.from("dunning_cycles").select("id",{count:"exact",head:true}).eq(...).lt(...)
+ *    .not("shopify_contract_id","ilike","internal-%").neq("workspace_id", sandbox)` → { count }
+ * The chain resolves with `{ count, error: null }` — matching the head-only count contract.
+ */
+function fakeStuckDunningAdmin(rows: FakeStuckDunningRow[]): ReturnType<typeof createAdminClient> {
+  const build = () => {
+    let filtered: FakeStuckDunningRow[] = rows.map((r) => ({ ...r }));
+    let head = false;
+    const chain = {
+      select: (_cols?: string, opts?: { count?: string; head?: boolean }) => {
+        if (opts?.head) head = true;
+        return chain;
+      },
+      eq: (col: keyof FakeStuckDunningRow, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] === val);
+        return chain;
+      },
+      lt: (col: keyof FakeStuckDunningRow, val: string) => {
+        filtered = filtered.filter((r) => {
+          const cell = r[col] as string | null;
+          if (cell == null) return false; // null-safe: null next_retry_at is excluded
+          return cell < val;
+        });
+        return chain;
+      },
+      neq: (col: keyof FakeStuckDunningRow, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] !== val);
+        return chain;
+      },
+      not: (col: keyof FakeStuckDunningRow, op: string, val: string) => {
+        if (op !== "ilike") throw new Error(`fake only models ilike, got ${op}`);
+        // SQL `%` → prefix match, case-insensitive; keep rows that do NOT match.
+        const prefix = val.replace(/%$/, "").toLowerCase();
+        filtered = filtered.filter((r) => {
+          const cell = (r[col] as string | null)?.toLowerCase() ?? "";
+          return !cell.startsWith(prefix);
+        });
+        return chain;
+      },
+      then: (onFulfilled: (v: { count: number; data: null; error: null }) => unknown) =>
+        Promise.resolve(onFulfilled({ count: head ? filtered.length : filtered.length, data: null, error: null })),
+    } as unknown as Record<string, unknown>;
+    return chain;
+  };
+  return { from: (_t: string) => build() } as unknown as ReturnType<typeof createAdminClient>;
+}
+
+// Fixed clock so `stuckBeforeIso` is deterministic in the fixtures below.
+const STUCK_BEFORE_ISO = "2026-07-14T00:00:00.000Z"; // "now - grace" for the fixtures
+const OVERDUE_RETRY_ISO = "2026-07-13T00:00:00.000Z"; // strictly before → stuck
+const FRESH_RETRY_ISO = "2026-07-14T06:00:00.000Z"; // strictly after → not yet stuck
+
+test("countStuckDunningCycles: overdue internal-* retrying cycle yields ZERO — it's Braintree work, not payday-retry-cron's", async () => {
+  const admin = fakeStuckDunningAdmin([
+    // Overdue, retrying, but on an internal-* contract → the payday retry cron never selects it
+    // (see dunning-payday-retry-cron find-retryable-cycles), so it must not page that tile.
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "internal-abc-123", workspace_id: WS },
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "INTERNAL-DEF-456", workspace_id: WS }, // ilike is case-insensitive
+  ]);
+  const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
+  assert.equal(n, 0);
+});
+
+test("countStuckDunningCycles: overdue non-internal retrying cycle still counts as one", async () => {
+  const admin = fakeStuckDunningAdmin([
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/789", workspace_id: WS },
+  ]);
+  const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
+  assert.equal(n, 1);
+});
+
+test("countStuckDunningCycles: mix of internal + Appstle overdue rows returns ONLY the Appstle count (mirrors payday-retry-cron scope)", async () => {
+  const admin = fakeStuckDunningAdmin([
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "internal-11111111", workspace_id: WS },
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "internal-22222222", workspace_id: WS },
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/333", workspace_id: WS },
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/444", workspace_id: WS },
+  ]);
+  const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
+  assert.equal(n, 2);
+});
+
+test("countStuckDunningCycles: non-retrying, fresh-retry, or null-retry rows are excluded regardless of contract type", async () => {
+  const admin = fakeStuckDunningAdmin([
+    // Not retrying — outside the assertion's scope entirely.
+    { status: "recovered", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/1", workspace_id: WS },
+    // Retrying but next_retry_at hasn't passed yet — not stuck.
+    { status: "retrying", next_retry_at: FRESH_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/2", workspace_id: WS },
+    // Retrying but no next_retry_at yet — awaiting scheduling, null-safe exclusion.
+    { status: "retrying", next_retry_at: null, shopify_contract_id: "gid://shopify/SubscriptionContract/3", workspace_id: WS },
+  ]);
+  const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
+  assert.equal(n, 0);
+});
+
+test("countStuckDunningCycles: spec-test sandbox stuck-dunning fixture is always excluded", async () => {
+  const admin = fakeStuckDunningAdmin([
+    { status: "retrying", next_retry_at: OVERDUE_RETRY_ISO, shopify_contract_id: "gid://shopify/SubscriptionContract/999", workspace_id: SANDBOX_WS },
+  ]);
+  const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
+  assert.equal(n, 0);
+});
+
+// Fingerprint guard: the monitor query MUST carry the same internal-* exclusion the payday
+// retry cron uses. If either side drifts, the tile becomes a false page again — that's the
+// exact incident this spec fixes.
+test("monitor.ts stuck-dunning helper mirrors dunning-payday-retry-cron's find-retryable-cycles internal-* filter", () => {
+  const monitorSrc = readFileSync(resolve(__dirname, "./monitor.ts"), "utf8");
+  const cronSrc = readFileSync(resolve(__dirname, "../inngest/dunning.ts"), "utf8");
+  const FINGERPRINT = '.not("shopify_contract_id", "ilike", "internal-%")';
+  assert.ok(
+    monitorSrc.includes(FINGERPRINT),
+    "src/lib/control-tower/monitor.ts must exclude internal-% shopify_contract_id from the stuck-dunning count " +
+      "(build-control-tower-stuck-dunning-scope-to-payday-cron Phase 1)",
+  );
+  assert.ok(
+    cronSrc.includes(FINGERPRINT),
+    "src/lib/inngest/dunning.ts find-retryable-cycles must still carry the internal-% exclusion the monitor mirrors",
+  );
 });
