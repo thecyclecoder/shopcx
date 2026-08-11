@@ -12,6 +12,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **change_quantity self-swap false-fails the identity verdict — spurious escalation + silently reset grandfathered price** · verified 2026-08-10 · → [[../libraries/subscription-items]], [[../libraries/action-executor]]
+- **Claim-guard backs a truthful restatement of an already-completed cancellation** · verified 2026-08-10 · → [[../lifecycles/ticket-lifecycle]]
+- **create_subscription can never create an in-house subscription — the fallback that would save it runs after the insert that fails** · verified 2026-08-10 · → [[lifecycles/subscription-billing]]
+- **June's author_spec verb has never once worked — it builds phases with no machine-runnable checks** · verified 2026-08-10 · → [[../libraries/cs-director]]
+- **Skip stale internal dunning failures when the subscription has already recovered** · verified 2026-08-10 · → [[../inngest/internal-dunning]]
+- **Renewal shipping address carries the customer's name so the warehouse can fulfill the order** · verified 2026-08-10 · → [[../inngest/internal-subscription-renewals]] · also [[../inngest/amplifier-import-reconcile]]
+- **Internal subscription coupon removal now removes and reports truthfully** · verified 2026-08-10 · → [[../libraries/internal-subscription]]
 - **Skip stale internal renewal attempts before they reopen dunning** · verified 2026-08-09 · → [[../inngest/internal-subscription-renewals]]
 - **Scope internal renewal stale guard to the event workspace** · verified 2026-08-09 · → [[../inngest/internal-subscription-renewals]]
 - **The CVE watcher can't author its own fix spec — 10 patchable advisories have sat unfixed since July** · verified 2026-08-07 · → [[../libraries/security-agent]]
