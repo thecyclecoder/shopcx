@@ -21,6 +21,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   checkContractSatisfiesExpectation,
   identityExpectationForSwap,
@@ -72,4 +74,43 @@ test("partial-apply — both new AND old on contract → verdict FAILS (short-ci
   );
   assert.equal(verdict.ok, false);
   assert.match(verdict.reason!, /OLD-1 absent/);
+});
+
+test("syncItemsAfterMutation — read AND write are scoped by BOTH workspace_id and shopify_contract_id (tenant-boundary regression guard)", () => {
+  // The new already-landed early-return in subSwapVariant calls syncItemsAfterMutation BEFORE any
+  // Appstle mutation. That helper uses createAdminClient() (service-role, bypasses RLS), so scoping
+  // by shopify_contract_id alone can cross tenants — the same Shopify contract number can exist in
+  // more than one workspace. Both the SELECT and the UPDATE must include workspace_id, and the
+  // read must be maybeSingle so a zero-row result is a bail (not an error that silently skips the
+  // update). This is a static-source assertion because the helper is not exported and the seam
+  // isn't mockable without a networked Supabase client.
+  const src = readFileSync(join(__dirname, "subscription-items.ts"), "utf8");
+  const startIdx = src.indexOf("async function syncItemsAfterMutation(");
+  assert.ok(startIdx >= 0, "syncItemsAfterMutation must exist in subscription-items.ts");
+  // Body extends until the closing `}` before the next top-level declaration.
+  const bodyEnd = src.indexOf("\n}\n", startIdx);
+  assert.ok(bodyEnd > startIdx, "must locate syncItemsAfterMutation body");
+  const body = src.slice(startIdx, bodyEnd);
+
+  const wsEqs = body.match(/\.eq\("workspace_id",\s*workspaceId\)/g) ?? [];
+  const contractEqs = body.match(/\.eq\("shopify_contract_id",\s*contractId\)/g) ?? [];
+  assert.equal(
+    wsEqs.length,
+    2,
+    `syncItemsAfterMutation must scope BOTH the select AND the update by workspace_id (found ${wsEqs.length}, need 2)`,
+  );
+  assert.equal(
+    contractEqs.length,
+    2,
+    `syncItemsAfterMutation must scope BOTH the select AND the update by shopify_contract_id (found ${contractEqs.length}, need 2)`,
+  );
+  assert.ok(
+    /\.maybeSingle\(\)/.test(body),
+    "syncItemsAfterMutation select must use maybeSingle() so a no-row result is a bail, not a throw",
+  );
+  // A single() call would break the no-row bail — leave it out.
+  assert.ok(
+    !/\.single\(\)/.test(body),
+    "syncItemsAfterMutation select must NOT use single() — a duplicate/cross-workspace hit would throw and skip the update",
+  );
 });

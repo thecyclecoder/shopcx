@@ -755,16 +755,24 @@ async function syncItemsAfterMutation(
 ): Promise<void> {
   try {
     const admin = createAdminClient();
+    // Tenant boundary: `shopify_contract_id` is Shopify-owned and NOT unique across
+    // workspaces — a service-role write keyed only by that column can cross tenants.
+    // Every read AND write here must also be scoped by `workspace_id` (CLAUDE.md:
+    // "Internal joins use UUIDs, never shopify_*_id"). `maybeSingle` returns null on
+    // no-row so a cross-workspace contract id becomes an explicit no-op instead of
+    // throwing and skipping the enrich/update entirely.
     const { data: sub } = await admin.from("subscriptions")
       .select("items")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
-      .single();
-    const currentItems = (sub?.items as Record<string, unknown>[] | null) || [];
+      .maybeSingle();
+    if (!sub) return;
+    const currentItems = (sub.items as Record<string, unknown>[] | null) || [];
     const mutatedItems = mutate(currentItems);
-    // Enrich with titles from our product catalog
     const updatedItems = await enrichItemTitles(workspaceId, mutatedItems);
     await admin.from("subscriptions")
       .update({ items: updatedItems, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch (err) {
     console.error("Failed to sync subscription items after mutation:", err);
