@@ -380,8 +380,21 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
     "A platform tool you supervise raised an Approval Request that routed to YOU (Platform is live + autonomous).",
     "Your job: investigate the cause + the proposed action(s) READ-ONLY, then decide — AUTO-APPROVE only if it is",
-    "SOUND, LOW-RISK, and WITHIN THE LEASH; otherwise ESCALATE to the CEO. NEVER rubber-stamp: if you cannot",
-    "confirm it is sound and in-leash, escalate.",
+    "SOUND, LOW-RISK, and WITHIN THE LEASH; DECLINE it yourself if it simply should not run; ESCALATE to the CEO",
+    "only when the call is genuinely his. NEVER rubber-stamp: if you cannot confirm it is sound and in-leash,",
+    "do NOT approve.",
+    "",
+    "⭐ DECLINE IS YOURS TO MAKE — it is not an escalation. If the request is IN YOUR LEASH and you conclude it",
+    "should NOT run, choose `decline`. You may auto-approve these classes, so you may equally auto-decline them:",
+    "declining executes NOTHING, so it is strictly the safer direction of the same authority. Decline when the",
+    "proposal is REDUNDANT (the same fix already shipped — check whether prior specs on this signature already",
+    "landed), a NO-OP that will build nothing and park at needs_attention, based on a premise the code",
+    "contradicts, or simply the wrong lever for the diagnosed cause. Say WHY in `reasoning` — it becomes the",
+    "record of your call.",
+    "Do NOT escalate a request just to have the CEO click Decline on a conclusion you already reached. Writing",
+    "several hundred words explaining why something shouldn't be approved and then escalating it IS that",
+    "mistake — if you know the answer, act on it. Escalate only for a decision that is genuinely the CEO's:",
+    "high-stakes, irreversible, out of leash, a non-binary CHOICE, or something you cannot confirm either way.",
     "",
     "The leash — you MAY auto-approve ONLY these classes:",
     "- error_fix: a repair-agent fix for a real bug — the authored fix spec is sound + scoped.",
@@ -408,7 +421,8 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     brief.kind === "repair"
       ? '{"verdict":"bounce","reasoning":"<the bug is real but the authored fix is unsound — your concrete explanation of WHY, which is handed back to the Repair agent to re-author>"}'
       : "",
-    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice (NOT a repair fix-quality issue — bounce those)>"}',
+    '{"verdict":"decline","reasoning":"<why this in-leash request should NOT run — redundant / already shipped / a no-op that will park / wrong lever. YOUR call, not the CEO\'s.>"}',
+    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice (NOT a repair fix-quality issue — bounce those; NOT a decision you already reached — decline those)>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -447,6 +461,59 @@ export async function applyDirectorApproval(
     routedToFunction: PLATFORM,
     decidedBy: "director",
     decision: "approved",
+    reasoning,
+    autonomous: true,
+  });
+  return { ok: true };
+}
+
+/**
+ * ⭐ a-director-who-can-approve-can-decline (2026-08-11) — the missing half of the leash.
+ *
+ * THE GAP. `directorInvestigationPrompt` gave Ada exactly three verdicts: `auto-approve`, `bounce`
+ * (repair only), and `escalate`. There was no way to say NO. So when she investigated an in-leash
+ * request and concluded it should NOT run — a duplicate of already-shipped work, a no-op that will
+ * build nothing and park — her only legal move was `escalate`, which dumps a fully-reasoned "don't do
+ * this" onto the CEO as a decision he still has to make. Observed live: the `db_health` slow-query
+ * signature `-1756037457588317045` produced FIVE CEO cards (four already dismissed), each carrying
+ * Ada's own several-hundred-word explanation of why the proposal was the 5th duplicate of four
+ * already-shipped fixes. The CEO's job was to click Decline on a call Ada had already made.
+ *
+ * THE PRINCIPLE. Declining is the SAFE direction of the same authority: approving EXECUTES something,
+ * declining executes nothing. A director trusted to auto-approve a leash class is, a fortiori, trusted
+ * to auto-decline it. Escalation is for decisions that are genuinely the CEO's — high-stakes,
+ * irreversible, a real choice — not for "no". ([[../operational-rules]] § North star: a supervisor
+ * owns the layer below it; hitting a rail means escalate, but reaching a CONCLUSION means act.)
+ *
+ * Mirrors `applyDirectorApproval` exactly, inverted: marks the listed actions `declined`, records a
+ * `declined` [[approval_decisions]] ledger row (so the grader scores the call like any other), and
+ * flips the target to `dismissed` once nothing stays pending — the terminal state a human Decline
+ * produces, so the downstream surfaces need no new case. The CEO card is never minted.
+ */
+export async function applyDirectorDecline(
+  admin: Admin,
+  target: DirectorTargetJob,
+  actionIds: string | string[],
+  reasoning: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const ids = new Set(Array.isArray(actionIds) ? actionIds : [actionIds]);
+  const actions = (target.pending_actions || []).map((a) => (a.id && ids.has(a.id) ? { ...a, status: "declined" } : a));
+  const stillPending = actions.some((a) => (a.status ?? "pending") === "pending");
+  const patch: Record<string, unknown> = { pending_actions: actions, updated_at: new Date().toISOString() };
+  // A declined request is DONE — nothing will execute. `dismissed` is the same terminal state the human
+  // Decline path produces, so the board / inbox / reconcilers need no new status to understand.
+  if (!stillPending) patch.status = "dismissed";
+  const { error } = await admin.from("agent_jobs").update(patch).eq("id", target.id);
+  if (error) return { ok: false, error: error.message };
+
+  await recordApprovalDecision(admin, {
+    workspaceId: target.workspace_id,
+    agentJobId: target.id,
+    pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
+    raisedByFunction: resolveNodeOwner(target.kind) ?? CEO,
+    routedToFunction: PLATFORM,
+    decidedBy: "director",
+    decision: "declined",
     reasoning,
     autonomous: true,
   });

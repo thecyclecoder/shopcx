@@ -8286,6 +8286,46 @@ async function runPlatformDirectorJob(job: Job) {
       return;
     }
 
+    // ⭐ DECLINE (a-director-who-can-approve-can-decline) — Ada investigated an IN-LEASH request and concluded
+    // it should not run (redundant / already shipped / a no-op that would build nothing and park). That is HER
+    // call: she may auto-approve these classes, so she may auto-decline them, and declining executes nothing —
+    // strictly the safer direction of the same authority. The CEO card is never minted.
+    //
+    // Before this existed her only "no" was `escalate`, so a fully-reasoned "don't do this" landed in the CEO
+    // inbox as a decision he still had to make. Live case: db_health signature -1756037457588317045 produced
+    // FIVE CEO cards, each carrying Ada's own several-hundred-word explanation of why the proposal duplicated
+    // four already-shipped fixes. The founder's job was to click Decline on a call Ada had already made.
+    if (verdict === "decline") {
+      const res = await lib.applyDirectorDecline(db, t, leashActions.map((a) => a.actionId), reasoning || `declined (${bundleLabel}) — in-leash and should not run`);
+      if (!res.ok) {
+        await update(job.id, { status: "needs_attention", error: `director decline failed: ${res.error}`, log_tail: `decline FAILED: ${res.error}`.slice(-2000) });
+        console.warn(`${tag} decline FAILED: ${res.error}`);
+        return;
+      }
+      await recordDirectorActivity(db, {
+        workspaceId: t.workspace_id,
+        directorFunction: "platform",
+        actionKind: "declined_approval",
+        specSlug: t.spec_slug,
+        reason: reasoning || `declined within the leash (${bundleLabel})`,
+        metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true },
+      });
+      try {
+        const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+        await postDirectorMessage({
+          workspaceId: t.workspace_id,
+          author: "director",
+          authorFunction: "platform",
+          body: `🚫 Declined the ${t.kind} request for ${t.spec_slug ?? bundleLabel} — my call, not escalating:\n${reasoning.slice(0, 400)}`,
+          kind: "update",
+          metadata: { director_declined: true, target_kind: t.kind },
+        });
+      } catch { /* board best-effort */ }
+      await update(job.id, { status: "completed", log_tail: `declined ${t.kind} (${bundleLabel}) — target dismissed, NOT escalated.\n${reasoning}`.slice(-2000) });
+      console.log(`${tag} declined ${t.kind} (${bundleLabel}) — not escalated`);
+      return;
+    }
+
     // BOUNCE (repair only) — the bug is real but the AUTHORED FIX is unsound. Send it BACK to the Repair agent
     // with Ada's explanation to re-do its work, instead of escalating to the CEO (director-supervises-repair).
     if (verdict === "bounce" && t.kind === "repair") {
