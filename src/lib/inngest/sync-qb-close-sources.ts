@@ -26,10 +26,31 @@ import {
   syncTplInventoryForClose,
   type SyncResult,
 } from "@/lib/qb-close/sync-sources";
+import { syncProcessorSummaries } from "@/lib/qb-close/sync-processors";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /** Re-sync this many trailing days of sales so late refunds/edits are picked up. */
 const SALES_LOOKBACK_DAYS = 35;
+
+function priorMonthOf(month: string): string {
+  const d = new Date(`${month}-01T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() - 1);
+  return d.toISOString().slice(0, 7);
+}
+
+/** Roll up every processor for one month, flattened into the shared SyncResult shape. */
+async function syncProcessorMonth(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  month: string,
+): Promise<SyncResult> {
+  const rows = await syncProcessorSummaries(admin, workspaceId, month);
+  return {
+    table: `qb_payment_processor_summaries[${month}]`,
+    rows: rows.filter((r) => r.status === "success").length,
+    note: rows.map((r) => `${r.processor}:${r.status}`).join(" · "),
+  };
+}
 
 export const syncQbCloseSources = inngest.createFunction(
   {
@@ -64,6 +85,12 @@ export const syncQbCloseSources = inngest.createFunction(
         ["internal-sales", () => syncInternalSalesForClose(admin, ws, start, end)],
         ["fba-inventory", () => syncFbaInventoryForClose(admin, ws, today)],
         ["tpl-inventory", () => syncTplInventoryForClose(admin, ws, today)],
+        // Processor rollups for BOTH the current month and the previous one. Transactions keep
+        // settling for days after the sale, so last month's figures move well into the first week
+        // of the next — Shoptics' equivalent snapshot froze 16h before month-end and understated
+        // July gross by ~$618. A failure leaves the existing row alone rather than zeroing it.
+        ["processors-current", () => syncProcessorMonth(admin, ws, today.slice(0, 7))],
+        ["processors-prior", () => syncProcessorMonth(admin, ws, priorMonthOf(today.slice(0, 7)))],
       ] as const) {
         const outcome = await step.run(`${name}-${ws}`, async () => {
           try {

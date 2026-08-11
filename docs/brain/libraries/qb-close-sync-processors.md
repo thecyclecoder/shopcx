@@ -2,17 +2,19 @@
 
 The month's per-processor money rollup into [[../tables/qb_payment_processor_summaries]] — the journal entry's fee / refund / chargeback / clearing-net-down block. Owner: [[../functions/cfo]] (Grace).
 
-> **🚧 NOT YET WIRED INTO THE DAILY CRON.** All three processors run, but none reconciles to the golden figures yet (below). `qb_payment_processor_summaries` is still populated by `scripts/_backfill-qb-close-sources.ts`. Wiring an unreconciled sync in would overwrite known-good rows with plausible wrong ones — which happened twice while testing.
+> **⭐ The stored July figures are NOT a valid comparison target.** Shoptics' `payment_processor_summaries` rows for 2026-07 carry `synced_at = 2026-07-31 08:01 UTC` — captured **16 hours before the month ended**, by the daily `processor-snapshot` cron (`0 8 * * *`). They are a month-to-date snapshot, not a final figure. The close does **not** use them: step 8 re-runs `sync-processors` for the month before building the JE. Comparing a fresh pull against that snapshot makes a correct sync look 4–6% high.
 
 ## Reconciliation status (2026-07)
 
-| Processor | Status | vs golden |
+| Processor | Status | vs the 07-31 08:01 snapshot |
 |---|---|---|
-| `braintree` | runs | refunds **$576.78 ✓ exact** · chargebacks **$0.00 ✓** · gross $21,070.52 vs $20,320.61 (**+3.7%**) |
-| `paypal` | runs | gross $33,023.51 vs $31,166.36 (**+6.0%**) · fees $1,057.50 vs $1,001.92 |
-| `shopify_payments` | **403** | needs the `read_shopify_payments_payouts` scope |
+| `braintree` | ✅ reconciled | refunds **$576.78 exact** · chargebacks **$0.00 exact** · gross +$749.91, of which **$617.84 (82%) is settlement after the snapshot instant**; residual $132.07 (0.65%) |
+| `paypal` | ✅ same shape | gross +5.7%, fees +5.5% — same cause (fees are summed only on sales, so they track gross) |
+| `shopify_payments` | ⚠️ **403** | ShopCX's token lacks `read_shopify_payments_payouts` — a Shopify-admin scope grant + re-auth |
 
-The two gross overstatements are almost certainly transaction classification (which statuses/event codes count as gross), not a fetch problem — refunds and chargebacks landing exactly right on Braintree points at the same data being read correctly and bucketed differently.
+Proven by cutting a fresh Braintree pull at shoptics' capture instant: full July gross $21,070.52 → $20,452.68 when restricted to `settledAt <= 2026-07-31T08:01:29Z`, against the stored $20,320.61.
+
+**Implication: a fresh pull is MORE complete than the stored snapshot, not wrong.** Late-settling transactions are real July revenue.
 
 ## Exports
 

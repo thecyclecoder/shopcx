@@ -152,11 +152,16 @@ export async function syncBraintreeSummary(
     }) as unknown as SearchStream,
   );
 
+  // ⭐ ONLY `sale` counts as gross and ONLY `credit` as refunds. Everything else — voided,
+  // processor_declined, settlement_declined — is IGNORED, because it never moved money. An
+  // `else gross += amt` catch-all overstated July gross by 3.7% ($21,070.52 vs $20,320.61).
+  // Note a refunded SALE stays in gross; the offsetting `credit` transaction is what books the
+  // refund, so netting it here too would double-count.
   let gross = 0, refunds = 0;
   for (const t of txns) {
     const amt = Number(t.amount ?? 0);
-    if (t.type === "credit" || t.status === "refunded") refunds += Math.abs(amt);
-    else gross += amt;
+    if (t.type === "sale") gross += amt;
+    else if (t.type === "credit") refunds += Math.abs(amt);
   }
 
   interface BtDispute { amountDisputed?: string; status?: string }
@@ -257,16 +262,34 @@ export async function syncPaypalSummary(
     if (!r.ok) throw new Error(`PayPal reporting ${r.status}`);
     const d = await r.json();
     const txns = (d.transaction_details ?? []) as { transaction_info?: Record<string, { value?: string } | string> }[];
+    // ⭐ An explicit ALLOW-LIST of event codes, never prefix matching. PayPal's T-codes are not
+    // hierarchical in a way that makes `startsWith` safe — prefixes swept in transfers, holds and
+    // currency conversions and overstated July gross by 6% ($33,023.51 vs $31,166.36). Fees are
+    // summed ONLY on sales, for the same reason.
     for (const t of txns) {
       const info = (t.transaction_info ?? {}) as Record<string, unknown>;
       const code = String(info.transaction_event_code ?? "");
       const amt = Number((info.transaction_amount as { value?: string })?.value ?? 0);
       const fee = Number((info.fee_amount as { value?: string })?.value ?? 0);
       count++;
-      fees += Math.abs(fee);
-      if (code.startsWith("T11")) refunds += Math.abs(amt);
-      else if (code.startsWith("T12")) chargebacks += Math.abs(amt);
-      else if (amt > 0) gross += amt;
+      switch (code) {
+        case "T0003": // website payment
+        case "T0006": // recurring payment
+          gross += amt;
+          fees += Math.abs(fee);
+          break;
+        case "T1106": // payment reversal
+        case "T1201": // chargeback
+          chargebacks += Math.abs(amt);
+          break;
+        case "T1107": // payment refund
+          refunds += Math.abs(amt);
+          break;
+        // T0114 dispute fee / T0401 bank withdrawal are tracked by Shoptics but do not enter
+        // the JE blocks, so they are intentionally not accumulated here.
+        default:
+          break;
+      }
     }
     if (txns.length < 500 || page >= Number(d.total_pages ?? 1)) break;
   }
