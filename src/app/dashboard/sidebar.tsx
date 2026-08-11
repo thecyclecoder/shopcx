@@ -131,6 +131,10 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/logistics/lead-times", label: "Lead Times", icon: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" },
       { href: "/dashboard/logistics/suppliers", label: "Suppliers", icon: "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" },
       { href: "/dashboard/logistics/mappings", label: "Mappings", icon: "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" },
+      // Month-end close is CFO-OWNED (docs/brain/functions/cfo.md — it's the books), but it lives
+      // here because it is mostly an inventory true-up and reads the Mappings + Inventory pages
+      // directly above it. Cross-listed rather than given its own section for one page.
+      { href: "/dashboard/month-end", label: "Month-End Close", icon: "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" },
       // Crisis is Logistics-owned but cross-departmental (Logistics sets allocation policy, CS
       // executes) — cross-listed here + under Customers. See docs/brain/functions/logistics.md.
       { href: "/dashboard/crisis", label: "Crisis", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },

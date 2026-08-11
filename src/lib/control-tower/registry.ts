@@ -737,6 +737,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   },
   // ─ Daily crons (window ~26h) ─
   { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "sync-qb-close-sources", kind: "cron", owner: "cfo", label: "Month-end close source sync", description: "Daily 09:30 sync of the close's qb_* source tables from ShopCX's own integrations (Shopify + internal sales over a 35d trailing window; FBA + 3PL inventory dated today). A dated inventory snapshot cannot be reconstructed later, so a missed day is a permanently missing period-end physical count.", expectedCadence: "daily (30 9 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   {
     id: "acquisition-research-cadence-cron",

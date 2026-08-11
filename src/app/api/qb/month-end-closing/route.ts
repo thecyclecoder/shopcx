@@ -143,6 +143,101 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ month, eligibility, latest_dry_run: latest ?? null, closing: closing ?? null });
 }
 
+/**
+ * PATCH — override a processor's fees for the month, then rebuild the JournalEntry.
+ *
+ * Braintree's API only ever reports an ESTIMATE (~58%); card-network assessments post around the
+ * 5th, so the real figure is known only from the statement and has to be entered by hand. Writing
+ * it here updates `qb_payment_processor_summaries.processing_fees`, which changes both the
+ * txn-fee debit and the clearing net-down credit on the next computation.
+ *
+ * If the month's JournalEntry is already posted, it is UPDATED IN PLACE (Id + SyncToken). That is
+ * safe precisely because the JE is the one idempotent artifact — the InventoryAdjustment and the
+ * SalesReceipts are not, and are deliberately untouched here.
+ */
+export async function PATCH(request: NextRequest) {
+  let body: { month?: string; workspace_id?: string; processor?: string; processing_fees?: number };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "JSON body required" }, { status: 400 });
+  }
+  const { month, workspace_id: workspaceId, processor = "braintree", processing_fees: fees } = body;
+  if (!month || !MONTH_RE.test(month)) return NextResponse.json({ error: "month (YYYY-MM) required" }, { status: 400 });
+  if (!workspaceId) return NextResponse.json({ error: "workspace_id required" }, { status: 400 });
+  if (typeof fees !== "number" || !Number.isFinite(fees) || fees < 0) {
+    return NextResponse.json({ error: "processing_fees must be a non-negative number" }, { status: 400 });
+  }
+
+  const admin = createAdminClient();
+  const { error: upErr } = await admin
+    .from("qb_payment_processor_summaries")
+    .update({ processing_fees: fees, synced_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId).eq("closing_month", month).eq("processor", processor);
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+
+  // Rebuild the JE off the new figure so the caller sees the effect immediately.
+  const { data: closing } = await admin
+    .from("qb_month_end_closings")
+    .select("shopify_journal_entry_id, shopify_journal_entry_doc, status")
+    .eq("workspace_id", workspaceId).eq("closing_month", month).maybeSingle();
+
+  let rebuilt: { debits: number; credits: number; balanced: boolean } | null = null;
+  let reposted: string | null = null;
+  try {
+    const [shopify, received] = await Promise.all([
+      fetchShopifyOrders(workspaceId, month),
+      fetchReceived(workspaceId, month, admin),
+    ]);
+    const { buildMonthEndArtifacts } = await import("@/lib/qb-close/month-end");
+    const art = await buildMonthEndArtifacts({
+      workspaceId, month, admin, orders: shopify.orders, receivedByProduct: received.byProduct,
+    });
+    const diff = Math.round(Math.abs(art.journalEntry.totalDebits - art.journalEntry.totalCredits) * 100) / 100;
+    rebuilt = { debits: art.journalEntry.totalDebits, credits: art.journalEntry.totalCredits, balanced: diff <= 0.01 };
+
+    if (closing?.shopify_journal_entry_id && rebuilt.balanced) {
+      // Update in place — QBO needs the CURRENT SyncToken, so read it back first.
+      const existing = await qboFetch(workspaceId, `journalentry/${closing.shopify_journal_entry_id}`, { admin });
+      const sync = existing?.JournalEntry?.SyncToken;
+      if (sync !== undefined) {
+        const res = await qboFetch(workspaceId, "journalentry", {
+          method: "POST", admin,
+          body: {
+            Id: closing.shopify_journal_entry_id,
+            SyncToken: sync,
+            sparse: false,
+            TxnDate: `${month}-${String(lastDayOf(month)).padStart(2, "0")}`,
+            DocNumber: closing.shopify_journal_entry_doc,
+            Line: art.journalEntry.lines.map((l) => ({
+              DetailType: "JournalEntryLineDetail",
+              Amount: Math.round(l.amount * 100) / 100,
+              Description: l.description,
+              JournalEntryLineDetail: { PostingType: l.posting, AccountRef: { value: l.accountId } },
+            })),
+          },
+        });
+        reposted = res?.JournalEntry?.Id ?? null;
+      }
+    }
+  } catch (e) {
+    return NextResponse.json(
+      { ok: true, processor, processing_fees: fees, rebuilt, repost_error: (e as Error).message.slice(0, 300) },
+      { status: 200 },
+    );
+  }
+
+  return NextResponse.json({
+    ok: true, month, processor, processing_fees: fees, rebuilt,
+    journal_entry_updated: reposted,
+    note: reposted
+      ? "Posted JournalEntry updated in place."
+      : closing?.shopify_journal_entry_id
+        ? "Fee saved; the posted JE was NOT updated (it does not currently balance)."
+        : "Fee saved. Re-run the dry run to see it reflected.",
+  });
+}
+
 export async function POST(request: NextRequest) {
   let body: { month?: string; workspace_id?: string; post?: boolean };
   try {
